@@ -1,0 +1,29 @@
+[package]
+name = "praxis-proxy-tls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "TLS configuration types and validation for Praxis"
+license.workspace = true
+repository.workspace = true
+readme = "../README.md"
+publish = true
+
+[lib]
+name = "praxis_tls"
+
+[lints]
+workspace = true
+
+[dependencies]
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+serde = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rcgen = { workspace = true }
+serde_yaml = { workspace = true }
+tempfile = { workspace = true }
