@@ -1,0 +1,31 @@
+[package]
+name = "praxis-filter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Filter pipeline engine for the Praxis proxy"
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["ai-agentic", "ai-inference"]
+ai-agentic = []
+ai-inference = []
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+praxis-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
