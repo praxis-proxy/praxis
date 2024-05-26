@@ -140,8 +140,9 @@ fn validate_sni(sni: &str, cluster_name: &str) -> Result<(), ProxyError> {
                 "cluster '{cluster_name}': upstream_sni has invalid label length"
             )));
         }
-        // RFC 6125: wildcard `*` is only valid as the complete
-        // leftmost label (e.g. `*.example.com`).
+        // RFC 6125 (https://datatracker.ietf.org/doc/html/rfc6125):
+        // wildcard `*` is only valid as the complete leftmost label
+        // (e.g. `*.example.com`).
         if label.contains('*') {
             if *label != "*" || i != 0 {
                 return Err(ProxyError::Config(format!(
