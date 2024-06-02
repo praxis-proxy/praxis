@@ -1,0 +1,41 @@
+[package]
+name = "praxis-proxy-protocol"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "HTTP, TCP, and protocol adapters for Praxis"
+license.workspace = true
+repository.workspace = true
+readme = "../README.md"
+publish = true
+
+[lib]
+name = "praxis_protocol"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
+pingora-core = { workspace = true }
+pingora-http = { workspace = true }
+pingora-proxy = { workspace = true }
+praxis-core = { workspace = true }
+praxis-filter = { workspace = true }
+praxis-tls = { workspace = true }
+rustls = { workspace = true }
+rustls-pemfile = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+rcgen = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true }
