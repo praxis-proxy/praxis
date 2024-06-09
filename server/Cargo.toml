@@ -1,0 +1,43 @@
+[package]
+name = "praxis-proxy-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Cloud and AI-native proxy server"
+license.workspace = true
+repository.workspace = true
+readme = "../README.md"
+publish = false
+
+[lib]
+name = "praxis"
+path = "src/lib.rs"
+
+[[bin]]
+name = "praxis"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+clap = { workspace = true }
+praxis-core = { workspace = true }
+praxis-filter = { workspace = true }
+praxis-protocol = { workspace = true }
+tokio = { workspace = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+nix = { workspace = true }
+tikv-jemallocator = { workspace = true }
+
+[features]
+default = ["ai-agentic", "ai-inference"]
+ai-agentic = ["praxis-filter/ai-agentic"]
+ai-inference = ["praxis-filter/ai-inference"]
+
+[dev-dependencies]
+tokio = { workspace = true }
