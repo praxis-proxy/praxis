@@ -1,9 +1,7 @@
 //! `cargo xtask echo` — quick HTTP test server.
-//!
-//! Returns a configurable static response to every request.
 
 use clap::Parser;
-use praxis_core::config::{Config, FilterChainConfig, Listener, PipelineEntry, RuntimeConfig};
+use praxis_core::config::{Config, FilterChainConfig, FilterEntry, Listener, RuntimeConfig};
 
 // -----------------------------------------------------------------------------
 // CLI Arguments
@@ -11,7 +9,7 @@ use praxis_core::config::{Config, FilterChainConfig, Listener, PipelineEntry, Ru
 
 /// CLI arguments for `cargo xtask echo`.
 #[derive(Parser)]
-pub struct Args {
+pub(crate) struct Args {
     /// Listen address.
     #[arg(long, default_value = "127.0.0.1:8080")]
     address: String,
@@ -39,7 +37,7 @@ pub struct Args {
 // -----------------------------------------------------------------------------
 
 /// Start a static-response HTTP server with the given args.
-pub fn run(mut args: Args) {
+pub(crate) fn run(mut args: Args) {
     crate::init_tracing("info");
     args.address = crate::port::resolve_available(&args.address);
 
@@ -68,8 +66,8 @@ fn build_config(args: &Args) -> Config {
     filter_config.insert("headers".into(), serde_yaml::Value::Sequence(headers));
     filter_config.insert("body".into(), args.body.clone().into());
 
-    let entry = PipelineEntry {
-        filter: "static_response".to_owned(),
+    let entry = FilterEntry {
+        filter_type: "static_response".to_owned(),
         conditions: vec![],
         response_conditions: vec![],
         config: serde_yaml::Value::Mapping(filter_config),
@@ -90,6 +88,7 @@ fn build_config(args: &Args) -> Config {
             upstream: None,
             filter_chains: vec!["echo".to_owned()],
             tcp_idle_timeout_ms: None,
+            downstream_read_timeout_ms: None,
         }],
         pipeline: vec![],
         routes: vec![],
@@ -109,7 +108,6 @@ fn header_value(name: &str, value: &str) -> serde_yaml::Value {
 }
 
 /// Split a `"Name: value"` string into its trimmed parts.
-#[allow(clippy::print_stderr)]
 fn parse_header(s: &str) -> (&str, &str) {
     let (name, value) = s.split_once(':').unwrap_or_else(|| {
         eprintln!(
@@ -119,4 +117,77 @@ fn parse_header(s: &str) -> (&str, &str) {
         std::process::exit(1);
     });
     (name.trim(), value.trim())
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_value_builds_mapping() {
+        let val = header_value("Content-Type", "text/html");
+        let map = val.as_mapping().expect("should be a YAML mapping");
+        assert_eq!(
+            map.get("name").and_then(|v| v.as_str()),
+            Some("Content-Type"),
+            "name key should match"
+        );
+        assert_eq!(
+            map.get("value").and_then(|v| v.as_str()),
+            Some("text/html"),
+            "value key should match"
+        );
+    }
+
+    #[test]
+    fn parse_header_splits_name_and_value() {
+        let (name, value) = parse_header("X-Custom: hello world");
+        assert_eq!(name, "X-Custom", "header name should be trimmed");
+        assert_eq!(value, "hello world", "header value should be trimmed");
+    }
+
+    #[test]
+    fn parse_header_trims_whitespace() {
+        let (name, value) = parse_header("  Key  :  Value  ");
+        assert_eq!(name, "Key", "name should be trimmed");
+        assert_eq!(value, "Value", "value should be trimmed");
+    }
+
+    #[test]
+    fn build_config_has_one_listener() {
+        let args = Args {
+            address: "127.0.0.1:8080".into(),
+            status: 200,
+            content_type: "application/json".into(),
+            body: r#"{"ok":true}"#.into(),
+            headers: vec![],
+        };
+        let config = build_config(&args);
+        assert_eq!(config.listeners.len(), 1, "should have exactly one listener");
+        assert_eq!(
+            config.listeners[0].address, "127.0.0.1:8080",
+            "listener address should match"
+        );
+    }
+
+    #[test]
+    fn build_config_includes_custom_headers() {
+        let args = Args {
+            address: "127.0.0.1:8080".into(),
+            status: 201,
+            content_type: "text/plain".into(),
+            body: "hello".into(),
+            headers: vec!["X-Foo: bar".into()],
+        };
+        let config = build_config(&args);
+        assert_eq!(config.filter_chains.len(), 1, "should have one filter chain");
+        assert_eq!(
+            config.filter_chains[0].name, "echo",
+            "filter chain should be named 'echo'"
+        );
+    }
 }

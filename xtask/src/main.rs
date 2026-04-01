@@ -1,8 +1,7 @@
 //! Development tasks for the Praxis proxy.
-//!
-//! Usage: `cargo xtask <command>`
 
 #![deny(unsafe_code)]
+#![allow(clippy::print_stdout, clippy::print_stderr)]
 
 mod benchmark;
 mod debug;
@@ -15,7 +14,7 @@ use clap::{Parser, Subcommand};
 // Main
 // -----------------------------------------------------------------------------
 
-// Dispatch the CLI subcommand to its handler.
+/// Dispatch the CLI subcommand to its handler.
 fn main() {
     let cli = Cli::parse();
     match cli.command {
@@ -29,9 +28,9 @@ fn main() {
 // CLI Definition
 // -----------------------------------------------------------------------------
 
+/// Top-level CLI for xtask development commands.
 #[derive(Parser)]
 #[command(name = "xtask", about = "Praxis development tasks")]
-/// Top-level CLI for xtask development commands.
 struct Cli {
     /// The subcommand to run.
     #[command(subcommand)]

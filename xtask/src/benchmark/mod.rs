@@ -1,21 +1,18 @@
-//! `cargo xtask benchmark` — proxy benchmark runner.
-//!
-//! Orchestrates benchmark scenarios against one or more
-//! proxies and emits structured report files.
+//! `cargo xtask benchmark` proxy benchmark runner.
 
 pub(crate) mod flamegraph;
 pub(crate) mod visualize;
 
 use std::time::Duration;
 
-use clap::{Parser, Subcommand};
-use praxis_benchmarks::{
+use benchmarks::{
     proxy::{EnvoyConfig, HaproxyConfig, NginxConfig, PraxisConfig, ProxyConfig},
     report::BenchmarkReport,
     result::ScenarioResults,
     runner::Runner,
     scenario::{Scenario, Workload},
 };
+use clap::{Parser, Subcommand};
 
 // -----------------------------------------------------------------------------
 // CLI Arguments
@@ -24,7 +21,7 @@ use praxis_benchmarks::{
 /// CLI arguments for `cargo xtask benchmark`.
 #[derive(Parser)]
 #[command(about = "Run proxy benchmarks and generate reports")]
-pub struct Args {
+pub(crate) struct Args {
     /// Subcommand (visualize). Omit to run benchmarks.
     #[command(subcommand)]
     pub command: Option<BenchmarkCommand>,
@@ -34,8 +31,7 @@ pub struct Args {
     #[arg(long = "proxy", default_value = "praxis")]
     pub proxies: Vec<String>,
 
-    /// Praxis Docker image override. Default: build from
-    /// local source.
+    /// Praxis Docker image override. Default: build from local source.
     #[arg(long)]
     pub image: Option<String>,
 
@@ -53,22 +49,24 @@ pub struct Args {
 
     /// Workloads to run (repeatable). Default: all.
     /// Values: high-concurrency-small-requests, large-payloads,
-    /// mixed-payloads, multiplex, sustained, ramp, tcp-throughput,
-    /// tcp-connection-rate.
+    /// large-payloads-high-concurrency, high-connection-count,
+    /// sustained, ramp, tcp-throughput, tcp-connection-rate.
     #[arg(long = "workload")]
     pub workloads: Vec<String>,
 
-    /// Concurrency for high-concurrency-small-requests/mixed-payloads.
+    /// Concurrency for high-concurrency-small-requests and
+    /// large-payloads-high-concurrency.
     #[arg(long, default_value_t = 100)]
     pub concurrency: u32,
 
-    /// Payload size in bytes for large-payloads/mixed-payloads.
+    /// Payload size in bytes for large-payloads and
+    /// large-payloads-high-concurrency.
     #[arg(long, default_value_t = 65536)]
     pub body_size: usize,
 
-    /// Stream count for multiplex.
+    /// Connection count for high-connection-count.
     #[arg(long, default_value_t = 100)]
-    pub streams: u32,
+    pub connections: u32,
 
     /// Starting QPS for ramp workload.
     #[arg(long, default_value_t = 100)]
@@ -117,7 +115,7 @@ pub struct Args {
 
 /// CLI arguments for `cargo xtask benchmark compare`.
 #[derive(Parser)]
-pub struct CompareArgs {
+pub(crate) struct CompareArgs {
     /// Path to the baseline report file.
     pub baseline: String,
 
@@ -131,7 +129,7 @@ pub struct CompareArgs {
 
 /// Benchmark subcommands.
 #[derive(Subcommand)]
-pub enum BenchmarkCommand {
+pub(crate) enum BenchmarkCommand {
     /// Generate an SVG chart from a benchmark report file.
     Visualize(visualize::Args),
 
@@ -147,8 +145,7 @@ pub enum BenchmarkCommand {
 // -----------------------------------------------------------------------------
 
 /// Run the benchmark command.
-#[allow(clippy::print_stdout)]
-pub fn run(args: Args) {
+pub(crate) fn run(args: Args) {
     match args.command {
         Some(BenchmarkCommand::Visualize(viz_args)) => {
             visualize::run(&viz_args);
@@ -176,14 +173,11 @@ pub fn run(args: Args) {
 // -----------------------------------------------------------------------------
 
 /// Run all selected benchmarks and emit the report.
-#[allow(clippy::print_stdout)]
 async fn run_benchmarks(args: Args) {
     let proxy_names = resolve_proxy_names(&args.proxies);
     let workloads = resolve_workloads(&args);
     let scenarios = build_scenarios(&args, &workloads);
 
-    // In comparison mode, build the Praxis Docker image so
-    // all proxies run under identical constraints.
     let is_comparison = proxy_names.len() > 1;
     let praxis_image = if is_comparison && args.image.is_none() {
         tracing::info!("comparison mode: building praxis docker image");
@@ -217,17 +211,17 @@ async fn run_benchmarks(args: Args) {
         }
     }
 
-    // Compute comparisons against praxis baseline.
     let comparisons = compute_comparisons(&all_results, &proxy_names, args.threshold);
-    let settings = praxis_benchmarks::scenario::settings_map(&scenarios);
+    let settings = benchmarks::scenario::settings_map(&scenarios);
     let report = BenchmarkReport {
         timestamp: chrono::Utc::now().to_rfc3339(),
-        commit: detect_commit(),
+        commit: benchmarks::runner::detect_commit(),
         proxies: proxy_names,
         settings,
         results: all_results,
         comparisons,
     };
+
     let output_path = args.output.unwrap_or_else(|| {
         let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
         let dir = "target/criterion";
@@ -239,7 +233,7 @@ async fn run_benchmarks(args: Args) {
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Resolution
 // -----------------------------------------------------------------------------
 
 /// Ensure praxis is always included and deduplicate.
@@ -258,8 +252,8 @@ fn resolve_proxy_names(proxies: &[String]) -> Vec<String> {
 const ALL_WORKLOADS: &[&str] = &[
     "high-concurrency-small-requests",
     "large-payloads",
-    "mixed-payloads",
-    "multiplex",
+    "large-payloads-high-concurrency",
+    "high-connection-count",
     "sustained",
     "ramp",
     "tcp-throughput",
@@ -277,8 +271,7 @@ fn resolve_workloads(args: &Args) -> Vec<String> {
 
 /// Build [`Scenario`] list from CLI args and workload names.
 ///
-/// [`Scenario`]: praxis_benchmarks::scenario::Scenario
-#[allow(clippy::print_stderr)]
+/// [`Scenario`]: benchmarks::scenario::Scenario
 fn build_scenarios(args: &Args, workload_names: &[String]) -> Vec<Scenario> {
     workload_names
         .iter()
@@ -290,11 +283,13 @@ fn build_scenarios(args: &Args, workload_names: &[String]) -> Vec<Scenario> {
                 "large-payloads" => Workload::LargePayload {
                     body_size: args.body_size,
                 },
-                "mixed-payloads" => Workload::Mixed {
+                "large-payloads-high-concurrency" => Workload::LargePayloadHighConcurrency {
                     concurrency: args.concurrency,
                     body_size: args.body_size,
                 },
-                "multiplex" => Workload::Http2Multiplex { streams: args.streams },
+                "high-connection-count" => Workload::HighConnectionCount {
+                    connections: args.connections,
+                },
                 "sustained" => Workload::Sustained,
                 "ramp" => Workload::Ramp {
                     start_qps: args.start_qps,
@@ -327,13 +322,11 @@ fn build_scenarios(args: &Args, workload_names: &[String]) -> Vec<Scenario> {
         .collect()
 }
 
-/// Docker image tag used when building Praxis for
-/// comparison benchmarks.
+/// Docker image tag used when building Praxis for comparison benchmarks.
 const PRAXIS_BENCH_IMAGE: &str = "praxis-bench:latest";
 
 /// Build the Praxis Docker image from the repo root
 /// Containerfile. Returns the image tag.
-#[allow(clippy::print_stderr)]
 fn build_praxis_image() -> String {
     let status = std::process::Command::new("docker")
         .args(["build", "-t", PRAXIS_BENCH_IMAGE, "-f", "Containerfile", "."])
@@ -353,10 +346,9 @@ fn build_praxis_image() -> String {
 }
 
 /// Embedded local Praxis benchmark config content.
-const LOCAL_PRAXIS_CONFIG: &str = include_str!("../../../praxis-benchmarks/comparison/configs/praxis-local.yaml");
+const LOCAL_PRAXIS_CONFIG: &str = include_str!("../../../benchmarks/comparison/configs/praxis-local.yaml");
 
-/// Write the embedded local config to a temp file and return
-/// its path. Praxis requires a file path, not stdin.
+/// Write the embedded local config to a temp file and return its path.
 fn local_praxis_config_path() -> std::path::PathBuf {
     let dir = std::env::temp_dir().join("praxis-bench");
     std::fs::create_dir_all(&dir).ok();
@@ -367,15 +359,12 @@ fn local_praxis_config_path() -> std::path::PathBuf {
 
 /// Build a boxed [`ProxyConfig`] for the named proxy.
 ///
-/// In comparison mode `praxis_image` is set automatically;
-/// in solo mode Praxis runs locally via `cargo run`.
-///
-/// [`ProxyConfig`]: praxis_benchmarks::proxy::ProxyConfig
+/// [`ProxyConfig`]: benchmarks::proxy::ProxyConfig
 fn build_proxy_config(name: &str, args: &Args, praxis_image: &Option<String>) -> Box<dyn ProxyConfig> {
     match name {
         "praxis" => {
             let config: std::path::PathBuf = if praxis_image.is_some() {
-                "praxis-benchmarks/comparison/configs/praxis.yaml".into()
+                "benchmarks/comparison/configs/praxis.yaml".into()
             } else {
                 local_praxis_config_path()
             };
@@ -410,7 +399,7 @@ fn compute_comparisons(
     results: &[ScenarioResults],
     proxy_names: &[String],
     threshold: f64,
-) -> Vec<praxis_benchmarks::result::ComparativeResults> {
+) -> Vec<benchmarks::result::ComparativeResults> {
     let mut comparisons = Vec::new();
     if proxy_names.len() <= 1 {
         return comparisons;
@@ -429,24 +418,7 @@ fn compute_comparisons(
     comparisons
 }
 
-/// Detect the current git commit SHA.
-fn detect_commit() -> String {
-    std::process::Command::new("git")
-        .args(["rev-parse", "--short", "HEAD"])
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_owned())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "unknown".into())
-}
-
-/// Write the report to a file in the specified format.
-#[allow(clippy::print_stderr)]
+/// Serialize and write the report to `path` in the given format (`yaml` or `json`).
 fn write_report(report: &BenchmarkReport, path: &str, format: &str) {
     let content = match format {
         "json" => serde_json::to_string_pretty(report).expect("failed to serialize report to JSON"),
@@ -462,11 +434,10 @@ fn write_report(report: &BenchmarkReport, path: &str, format: &str) {
 // Compare
 // -----------------------------------------------------------------------------
 
-/// Load a [`BenchmarkReport`] from YAML or JSON by file extension.
+/// Load a [`BenchmarkReport`] from a file, detecting format from the extension.
 ///
-/// [`BenchmarkReport`]: praxis_benchmarks::report::BenchmarkReport
-#[allow(clippy::print_stderr)]
-fn load_report(path: &str) -> BenchmarkReport {
+/// [`BenchmarkReport`]: benchmarks::report::BenchmarkReport
+pub(crate) fn load_report(path: &str) -> BenchmarkReport {
     let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("failed to read {path}: {e}");
         std::process::exit(1);
@@ -489,7 +460,6 @@ fn load_report(path: &str) -> BenchmarkReport {
 ///
 /// Exits with code 1 if any scenario regressed beyond the
 /// configured threshold.
-#[allow(clippy::print_stdout, clippy::print_stderr)]
 fn run_compare(args: &CompareArgs) {
     let baseline = load_report(&args.baseline);
     let current = load_report(&args.current);

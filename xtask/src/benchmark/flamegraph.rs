@@ -23,7 +23,7 @@ const BACKEND_PORT: u16 = 18080;
 const PRAXIS_ADDR: &str = "127.0.0.1:18090";
 
 /// Embedded local Praxis config.
-const LOCAL_CONFIG: &str = include_str!("../../../praxis-benchmarks/comparison/configs/praxis-local.yaml");
+const LOCAL_CONFIG: &str = include_str!("../../../benchmarks/comparison/configs/praxis-local.yaml");
 
 // -----------------------------------------------------------------------------
 // CLI Arguments
@@ -31,7 +31,7 @@ const LOCAL_CONFIG: &str = include_str!("../../../praxis-benchmarks/comparison/c
 
 /// CLI arguments for `cargo xtask benchmark flamegraph`.
 #[derive(Parser)]
-pub struct Args {
+pub(crate) struct Args {
     /// Workload to run during profiling.
     #[arg(long, default_value = "high-concurrency-small-requests")]
     pub workload: String,
@@ -50,8 +50,7 @@ pub struct Args {
 // -----------------------------------------------------------------------------
 
 /// Run CPU profiling and generate a flamegraph.
-#[allow(clippy::print_stdout, clippy::print_stderr)]
-pub fn run(args: &Args) {
+pub(crate) fn run(args: &Args) {
     require_tool(
         "perf",
         "install: apt-get install linux-tools-generic (Debian/Ubuntu) or perf (Fedora)",
@@ -72,9 +71,7 @@ pub fn run(args: &Args) {
 // Prerequisite Checks
 // -----------------------------------------------------------------------------
 
-/// Check that a tool is on PATH, exit with install hint
-/// if not.
-#[allow(clippy::print_stderr)]
+/// Check that a tool is on PATH, exit with install hint if not.
 fn require_tool(name: &str, hint: &str) {
     let status = Command::new("which")
         .arg(name)
@@ -94,10 +91,10 @@ fn require_tool(name: &str, hint: &str) {
 // -----------------------------------------------------------------------------
 
 /// Build the profiling binary and return its path.
-#[allow(clippy::print_stderr)]
 fn build_profiling_binary() -> PathBuf {
     let status = Command::new("cargo")
         .args(["build", "--profile", "profiling", "-p", "praxis"])
+        .env("RUSTFLAGS", "-C force-frame-pointers=yes")
         .status()
         .expect("failed to run cargo build");
 
@@ -122,9 +119,8 @@ fn build_profiling_binary() -> PathBuf {
 // Orchestration
 // -----------------------------------------------------------------------------
 
-/// Run profiling workflow: start backend, start perf,
-/// run workload, generate flamegraph.
-#[allow(clippy::print_stdout)]
+/// Run profiling workflow: start backend, start Praxis,
+/// warmup, attach perf, run measurement, generate flamegraph.
 async fn run_profiling(args: &Args, binary: PathBuf) {
     let tmpdir = tempfile::TempDir::new().expect("failed to create tempdir");
     let config_path = tmpdir.path().join("praxis.yaml");
@@ -148,19 +144,32 @@ async fn run_profiling(args: &Args, binary: PathBuf) {
 
     wait_for_tcp(BACKEND_PORT).await;
 
-    println!("Starting Praxis under perf...");
+    println!("Starting Praxis...");
+    let mut praxis = Command::new(binary.as_os_str())
+        .args(["-c", config_path.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start praxis");
+
+    let praxis_pid = praxis.id();
+
+    wait_for_tcp(18090).await;
+
+    println!("Warmup: 2s...");
+    run_vegeta_load(args, &tmpdir, 2).await;
+
+    println!("Starting perf (recording)...");
     let mut perf = Command::new("perf")
         .args([
             "record",
             "-g",
             "--call-graph",
-            "dwarf",
+            "fp",
+            "-p",
+            &praxis_pid.to_string(),
             "-o",
             perf_data.to_str().unwrap(),
-            "--",
-            binary.to_str().unwrap(),
-            "-c",
-            config_path.to_str().unwrap(),
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -169,10 +178,7 @@ async fn run_profiling(args: &Args, binary: PathBuf) {
 
     let perf_pid = perf.id() as i32;
 
-    wait_for_tcp(18090).await;
-
-    println!("Warmup: 2s...");
-    run_vegeta_load(args, &tmpdir, 2).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     println!("Measurement: {}s...", args.duration);
     run_vegeta_load(args, &tmpdir, args.duration).await;
@@ -182,6 +188,10 @@ async fn run_profiling(args: &Args, binary: PathBuf) {
         .expect("failed to send SIGINT to perf");
 
     let _ = perf.wait();
+
+    println!("Stopping Praxis...");
+    let _ = praxis.kill();
+    let _ = praxis.wait();
 
     println!("Stopping backend...");
     let _ = backend.kill();
@@ -200,9 +210,11 @@ async fn run_profiling(args: &Args, binary: PathBuf) {
 // -----------------------------------------------------------------------------
 
 /// Run vegeta load for the specified duration.
-#[allow(clippy::print_stderr)]
 async fn run_vegeta_load(args: &Args, tmpdir: &tempfile::TempDir, duration_secs: u64) {
-    let needs_body = matches!(args.workload.as_str(), "large-payloads" | "mixed-payloads");
+    let needs_body = matches!(
+        args.workload.as_str(),
+        "large-payloads" | "large-payloads-high-concurrency"
+    );
 
     let targets_file = tmpdir.path().join("vegeta-targets.txt");
     let body_file = tmpdir.path().join("body.bin");
@@ -244,10 +256,10 @@ async fn run_vegeta_load(args: &Args, tmpdir: &tempfile::TempDir, duration_secs:
 // Flamegraph Generation
 // -----------------------------------------------------------------------------
 
-/// Generate flamegraph SVG and perf data
-#[allow(clippy::print_stderr)]
+/// Generate a flamegraph SVG from perf data.
+///
+/// Writes collapsed stacks to `collapsed_output` and the final SVG to `svg_output`.
 fn generate_flamegraph(perf_data: &Path, svg_output: &str, collapsed_output: &str) {
-    // Step 1: perf script | inferno-collapse-perf → collapsed stacks.
     let mut perf_script = Command::new("perf")
         .args(["script", "-i", perf_data.to_str().unwrap()])
         .stdout(Stdio::piped())
@@ -273,7 +285,6 @@ fn generate_flamegraph(perf_data: &Path, svg_output: &str, collapsed_output: &st
 
     std::fs::write(collapsed_output, &collapsed.stdout).expect("failed to write collapsed stacks");
 
-    // Step 2: collapsed stacks → inferno-flamegraph → SVG.
     let mut fg = Command::new("inferno-flamegraph")
         .args(["--title", "Praxis CPU Profile"])
         .stdin(Stdio::piped())
@@ -299,11 +310,10 @@ fn generate_flamegraph(perf_data: &Path, svg_output: &str, collapsed_output: &st
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Utilities
 // -----------------------------------------------------------------------------
 
 /// Wait for a TCP port to become available, up to 30s timeout.
-#[allow(clippy::print_stderr)]
 async fn wait_for_tcp(port: u16) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {

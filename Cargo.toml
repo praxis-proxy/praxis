@@ -1,0 +1,151 @@
+[workspace]
+resolver = "3"
+members = [
+    # Praxis Main
+    "server",
+
+    # Praxis Proxy Framework
+    "core",
+    "filter",
+    "protocol",
+    "tls",
+
+    # Praxis Developer Tooling
+    "benchmarks",
+    "xtask",
+
+    # Praxis Testing
+    "tests/config",
+    "tests/conformance",
+    "tests/fuzzing",
+    "tests/integration",
+    "tests/performance",
+    "tests/resilience",
+    "tests/security",
+    "tests/smoke",
+    "tests/utils",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Shane Utt <shaneutt@linux.com>"]
+license = "LGPL-3.0-only"
+repository = "https://github.com/shaneutt/praxis"
+
+[workspace.dependencies]
+async-trait = "0.1.89"
+benchmarks = { path = "benchmarks" }
+bytes = "1.11.1"
+chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
+dashmap = "6.1.0"
+clap = { version = "4.6.0", features = ["derive"] }
+criterion = { version = "0.8.2", features = ["async_tokio"] }
+futures = "0.3.32"
+h2 = "0.4.13"
+http = "1.4.0"
+nix = "0.24.3"
+pingora-core = { version = "0.8.0", features = ["rustls"] }
+pingora-http = "0.8.0"
+pingora-proxy = { version = "0.8.0", features = ["rustls"] }
+plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
+praxis = { path = "server", package = "praxis-proxy-server" }
+praxis-core = { path = "core", package = "praxis-proxy-core" }
+praxis-filter = { path = "filter", package = "praxis-proxy-filter" }
+praxis-protocol = { path = "protocol", package = "praxis-proxy-protocol" }
+praxis-tls = { path = "tls", package = "praxis-proxy-tls" }
+praxis-test-utils = { path = "tests/utils" }
+serde = { version = "1.0.228", features = ["derive", "rc"] }
+serde_json = "1.0.149"
+rcgen = "0.13.2"
+regex = "1.12.3"
+rustls = "0.23.37"
+serde_yaml = "0.9.34"
+tempfile = "3.27.0"
+tokio-rustls = "0.26.4"
+webpki-roots = "0.26.11"
+thiserror = "2.0.18"
+tikv-jemallocator = "0.6.1"
+tokio = { version = "1.51.1", features = ["macros", "rt"] }
+tokio-util = "0.7.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = false
+lto = false
+
+[workspace.lints.rust]
+dead_code = "deny"
+missing_docs = "deny"
+unreachable_pub = "deny"
+unused_imports = "deny"
+unused_variables = "deny"
+
+[workspace.lints.clippy]
+# Async and concurrency safety
+await_holding_lock = "deny"
+future_not_send = "deny"
+large_futures = "deny"
+# Memory and allocation efficiency
+implicit_clone = "deny"
+inefficient_to_string = "deny"
+large_enum_variant = "deny"
+large_types_passed_by_value = "deny"
+needless_pass_by_value = "deny"
+rc_buffer = "deny"
+str_to_string = "deny"
+trivially_copy_pass_by_ref = "deny"
+vec_init_then_push = "deny"
+# API design
+return_self_not_must_use = "deny"
+# Documentation
+doc_markdown = "deny"
+missing_docs_in_private_items = "deny"
+# Allowed: blank line after attributes is intentional style
+empty_line_after_outer_attr = "allow"
+# Idiomatic Rust
+checked_conversions = "deny"
+cloned_instead_of_copied = "deny"
+explicit_into_iter_loop = "deny"
+explicit_iter_loop = "deny"
+flat_map_option = "deny"
+from_iter_instead_of_collect = "deny"
+manual_assert = "deny"
+manual_instant_elapsed = "deny"
+manual_let_else = "deny"
+manual_ok_or = "deny"
+manual_string_new = "deny"
+map_unwrap_or = "deny"
+redundant_closure_for_method_calls = "deny"
+unnested_or_patterns = "deny"
+# Code clarity
+if_not_else = "deny"
+match_bool = "deny"
+match_same_arms = "deny"
+mut_mut = "deny"
+needless_for_each = "deny"
+range_plus_one = "deny"
+redundant_else = "deny"
+semicolon_if_nothing_returned = "deny"
+uninlined_format_args = "deny"
+unreadable_literal = "deny"
+unused_self = "deny"
+# Import hygiene
+enum_glob_use = "deny"
+wildcard_imports = "deny"
+# String handling
+string_add_assign = "deny"
+# Dev hygiene
+dbg_macro = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
