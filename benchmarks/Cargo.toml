@@ -1,0 +1,53 @@
+[package]
+name = "benchmarks"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Benchmark tool and library for the Praxis proxy"
+license.workspace = true
+repository.workspace = true
+publish = false
+autobenches = false
+
+[lints]
+workspace = true
+
+[dependencies]
+chrono = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["process", "fs", "io-util", "net", "time"] }
+tracing = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+http = { workspace = true }
+praxis-core = { workspace = true }
+praxis-filter = { workspace = true }
+
+[[bench]]
+name = "condition_eval"
+harness = false
+
+[[bench]]
+name = "config_parsing"
+harness = false
+
+[[bench]]
+name = "filter_pipeline"
+harness = false
+
+[[bench]]
+name = "headers"
+harness = false
+
+[[bench]]
+name = "load_balancer"
+harness = false
+
+[[bench]]
+name = "router_lookup"
+harness = false

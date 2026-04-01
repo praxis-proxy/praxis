@@ -1,0 +1,85 @@
+# Comparison benchmark environment.
+#
+# All proxies share the same Fortio echo backend and identical
+# resource constraints (4 CPUs, 2GB RAM). Run one proxy at
+# a time to avoid contention.
+#
+# Uses host networking for simplicity and ease of use.
+#
+# Usage:
+#   docker compose up -d backend
+#   docker compose up -d praxis   # or envoy, nginx, haproxy
+#
+# Normally called via xtask:
+#   cargo xtask benchmark --proxy praxis --proxy envoy --proxy nginx --proxy haproxy
+
+services:
+  backend:
+    image: fortio/fortio:latest
+    command: server
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2G
+    ports:
+      - "18080:8080"
+
+  praxis:
+    build:
+      context: ../..
+      dockerfile: Containerfile
+    volumes:
+      - ./configs/praxis.yaml:/etc/praxis/config.yaml:ro
+    command: ["-c", "/etc/praxis/config.yaml"]
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2G
+    ports:
+      - "18090:8080"
+    depends_on:
+      - backend
+
+  envoy:
+    image: envoyproxy/envoy:v1.31-latest
+    volumes:
+      - ./configs/envoy.yaml:/etc/envoy/envoy.yaml:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2G
+    ports:
+      - "18091:8080"
+    depends_on:
+      - backend
+
+  nginx:
+    image: nginx:alpine
+    volumes:
+      - ./configs/nginx.conf:/etc/nginx/nginx.conf:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2G
+    ports:
+      - "18092:8080"
+    depends_on:
+      - backend
+
+  haproxy:
+    image: haproxy:latest
+    volumes:
+      - ./configs/haproxy.cfg:/usr/local/etc/haproxy/haproxy.cfg:ro
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 2G
+    ports:
+      - "18093:8080"
+    depends_on:
+      - backend
