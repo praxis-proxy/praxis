@@ -3,8 +3,8 @@
 //! Reads a benchmark report file (YAML or JSON) and produces
 //! a grouped bar chart SVG comparing proxy performance.
 
+use benchmarks::report::BenchmarkReport;
 use clap::Parser;
-use praxis_benchmarks::report::BenchmarkReport;
 
 // -----------------------------------------------------------------------------
 // CLI Arguments
@@ -48,7 +48,7 @@ pub fn run(args: &Args) {
 
 /// Load a [`BenchmarkReport`] from YAML or JSON.
 ///
-/// [`BenchmarkReport`]: praxis_benchmarks::report::BenchmarkReport
+/// [`BenchmarkReport`]: benchmarks::report::BenchmarkReport
 #[allow(clippy::print_stderr)]
 fn load_report(path: &str) -> BenchmarkReport {
     let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
@@ -93,7 +93,7 @@ fn unique_scenarios(report: &BenchmarkReport) -> Vec<String> {
 #[allow(clippy::cast_precision_loss)]
 fn extract_matrix<F>(report: &BenchmarkReport, scenarios: &[String], metric: F) -> Vec<Vec<f64>>
 where
-    F: Fn(&praxis_benchmarks::result::BenchmarkResult) -> f64,
+    F: Fn(&benchmarks::result::BenchmarkResult) -> f64,
 {
     report
         .proxies
@@ -150,7 +150,7 @@ struct ChartDef {
     /// Y-axis label.
     y_label: &'static str,
     /// Metric extractor.
-    extract: fn(&praxis_benchmarks::result::BenchmarkResult) -> f64,
+    extract: fn(&benchmarks::result::BenchmarkResult) -> f64,
 }
 
 /// All charts to render.
@@ -315,7 +315,8 @@ fn shorten_scenario(name: &str) -> String {
     match name {
         "high-concurrency-small-requests" => "small-req".into(),
         "large-payloads" => "large".into(),
-        "mixed-payloads" => "mixed".into(),
+        "large-payloads-high-concurrency" => "large-hc".into(),
+        "high-connection-count" => "high-conn".into(),
         "tcp-throughput" => "tcp-thru".into(),
         "tcp-connection-rate" => "tcp-conn".into(),
         other => other.into(),

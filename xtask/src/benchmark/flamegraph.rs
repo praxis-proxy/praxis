@@ -23,7 +23,7 @@ const BACKEND_PORT: u16 = 18080;
 const PRAXIS_ADDR: &str = "127.0.0.1:18090";
 
 /// Embedded local Praxis config.
-const LOCAL_CONFIG: &str = include_str!("../../../praxis-benchmarks/comparison/configs/praxis-local.yaml");
+const LOCAL_CONFIG: &str = include_str!("../../../benchmarks/comparison/configs/praxis-local.yaml");
 
 // -----------------------------------------------------------------------------
 // CLI Arguments
@@ -98,6 +98,7 @@ fn require_tool(name: &str, hint: &str) {
 fn build_profiling_binary() -> PathBuf {
     let status = Command::new("cargo")
         .args(["build", "--profile", "profiling", "-p", "praxis"])
+        .env("RUSTFLAGS", "-C force-frame-pointers=yes")
         .status()
         .expect("failed to run cargo build");
 
@@ -122,8 +123,12 @@ fn build_profiling_binary() -> PathBuf {
 // Orchestration
 // -----------------------------------------------------------------------------
 
-/// Run profiling workflow: start backend, start perf,
-/// run workload, generate flamegraph.
+/// Run profiling workflow: start backend, start Praxis,
+/// warmup, attach perf, run measurement, generate
+/// flamegraph.
+///
+/// Perf attaches via `-p <pid>` after warmup so the
+/// flamegraph captures only steady-state behavior.
 #[allow(clippy::print_stdout)]
 async fn run_profiling(args: &Args, binary: PathBuf) {
     let tmpdir = tempfile::TempDir::new().expect("failed to create tempdir");
@@ -148,19 +153,32 @@ async fn run_profiling(args: &Args, binary: PathBuf) {
 
     wait_for_tcp(BACKEND_PORT).await;
 
-    println!("Starting Praxis under perf...");
+    println!("Starting Praxis...");
+    let mut praxis = Command::new(binary.as_os_str())
+        .args(["-c", config_path.to_str().unwrap()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("failed to start praxis");
+
+    let praxis_pid = praxis.id();
+
+    wait_for_tcp(18090).await;
+
+    println!("Warmup: 2s...");
+    run_vegeta_load(args, &tmpdir, 2).await;
+
+    println!("Starting perf (recording)...");
     let mut perf = Command::new("perf")
         .args([
             "record",
             "-g",
             "--call-graph",
-            "dwarf",
+            "fp",
+            "-p",
+            &praxis_pid.to_string(),
             "-o",
             perf_data.to_str().unwrap(),
-            "--",
-            binary.to_str().unwrap(),
-            "-c",
-            config_path.to_str().unwrap(),
         ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -169,10 +187,7 @@ async fn run_profiling(args: &Args, binary: PathBuf) {
 
     let perf_pid = perf.id() as i32;
 
-    wait_for_tcp(18090).await;
-
-    println!("Warmup: 2s...");
-    run_vegeta_load(args, &tmpdir, 2).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
 
     println!("Measurement: {}s...", args.duration);
     run_vegeta_load(args, &tmpdir, args.duration).await;
@@ -182,6 +197,10 @@ async fn run_profiling(args: &Args, binary: PathBuf) {
         .expect("failed to send SIGINT to perf");
 
     let _ = perf.wait();
+
+    println!("Stopping Praxis...");
+    let _ = praxis.kill();
+    let _ = praxis.wait();
 
     println!("Stopping backend...");
     let _ = backend.kill();
@@ -202,7 +221,10 @@ async fn run_profiling(args: &Args, binary: PathBuf) {
 /// Run vegeta load for the specified duration.
 #[allow(clippy::print_stderr)]
 async fn run_vegeta_load(args: &Args, tmpdir: &tempfile::TempDir, duration_secs: u64) {
-    let needs_body = matches!(args.workload.as_str(), "large-payloads" | "mixed-payloads");
+    let needs_body = matches!(
+        args.workload.as_str(),
+        "large-payloads" | "large-payloads-high-concurrency"
+    );
 
     let targets_file = tmpdir.path().join("vegeta-targets.txt");
     let body_file = tmpdir.path().join("body.bin");

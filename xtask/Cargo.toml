@@ -10,12 +10,12 @@ publish = false
 workspace = true
 
 [dependencies]
+benchmarks = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 nix = { workspace = true }
 plotters = { workspace = true }
 praxis = { workspace = true }
-praxis-benchmarks = { workspace = true }
 praxis-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

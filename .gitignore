@@ -1,0 +1,28 @@
+# Cargo build output
+target
+
+# Rustfmt backup files
+**/*.rs.bk
+
+# MSVC debugging symbols
+*.pdb
+
+# Cargo mutants output
+**/mutants.out*/
+
+# LLVM coverage artifacts
+coverage/
+*.profraw
+*.profdata
+
+# IDEs
+.idea/
+
+# Dotdirs (allow .github/)
+.*/
+!.cargo/
+!.github/
+
+# Docs are markdown only
+docs/**/
+!docs/
