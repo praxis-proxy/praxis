@@ -1,0 +1,34 @@
+# Weighted Load Balancing
+#
+# Traffic split proportional to per-endpoint weights. Weights are
+# relative integers — (1, 3) and (2, 6) produce the same distribution.
+# Useful for canary rollouts and heterogeneous hardware.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/traffic-management/weighted-load-balancing.yaml
+#   for i in $(seq 1 8); do curl -s http://localhost:8080/; echo; done
+#   # port 3002 receives ~3x more requests than port 3001
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            load_balancer_strategy: round_robin
+            endpoints:
+              - address: "127.0.0.1:3001"
+                weight: 1          # receives 1/4 of requests
+              - address: "127.0.0.1:3002"
+                weight: 3          # receives 3/4 of requests

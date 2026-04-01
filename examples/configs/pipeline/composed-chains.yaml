@@ -1,0 +1,54 @@
+# Composed Filter Chains
+#
+# Multiple named chains are composed per listener. The public
+# listener gets security + observability + routing. The
+# internal listener skips security.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/pipeline/composed-chains.yaml
+
+listeners:
+  - name: public
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - security
+      - observability
+      - routing
+
+  - name: internal
+    address: "127.0.0.1:9090"
+    filter_chains:
+      - observability
+      - routing
+
+filter_chains:
+  - name: security
+    filters:
+      - filter: headers
+        response_set:
+          - name: X-Content-Type-Options
+            value: nosniff
+          - name: X-Frame-Options
+            value: DENY
+
+  - name: observability
+    filters:
+      - filter: request_id
+      - filter: access_log
+
+  - name: routing
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/api/"
+            cluster: api
+          - path_prefix: "/"
+            cluster: web
+      - filter: load_balancer
+        clusters:
+          - name: api
+            endpoints:
+              - "10.0.0.1:8080"
+          - name: web
+            endpoints:
+              - "10.0.0.2:8080"

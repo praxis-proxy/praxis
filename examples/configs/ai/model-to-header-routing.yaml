@@ -1,0 +1,66 @@
+# AI Inference Model Routing
+#
+# Requires the ai-inference feature:
+#   cargo build -p praxis --features ai-inference
+#
+# Routes LLM API requests to different backends based on the
+# "model" field in the JSON request body. Uses the model_to_header
+# filter to extract the model name into an X-Model header, then
+# the router matches on that header to select the correct cluster.
+#
+# The model_to_header filter is a convenience wrapper around
+# json_body_field that hardcodes the "model" field extraction.
+#
+# Example request:
+#
+#   curl -X POST http://localhost:8080/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"model": "mistral-7b-instruct", "messages": [...]}'
+#
+# This request is routed to the mistral cluster. A request with
+# "model": "granite-3.1-8b" goes to the granite cluster. Unknown
+# models fall through to the default cluster.
+
+listeners:
+  - name: inference-gateway
+    address: "0.0.0.0:8080"
+    filter_chains:
+      - extract-model
+      - routing
+
+filter_chains:
+  # Extract the model field from the JSON body and promote it
+  # to the X-Model request header.
+  - name: extract-model
+    filters:
+      - filter: model_to_header
+        # header: X-Model  # optional, defaults to X-Model
+
+  # Route based on the promoted X-Model header.
+  - name: routing
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            headers:
+              x-model: "mistral-7b-instruct"
+            cluster: mistral
+          - path_prefix: "/"
+            headers:
+              x-model: "granite-3.1-8b"
+            cluster: granite
+          - path_prefix: "/"
+            cluster: default
+      - filter: load_balancer
+        clusters:
+          - name: mistral
+            endpoints:
+              - "10.0.1.1:8080"
+              - "10.0.1.2:8080"
+          - name: granite
+            endpoints:
+              - "10.0.2.1:8080"
+              - "10.0.2.2:8080"
+          - name: default
+            endpoints:
+              - "10.0.3.1:8080"

@@ -1,0 +1,51 @@
+# Canary Routing
+#
+# Sends ~10% of traffic to a canary backend while the stable
+# backend handles the remaining ~90%. Weighted round-robin
+# controls the split.
+#
+#   ┌────────┐
+#   │ client │
+#   └───┬────┘
+#       │
+#   ┌───▼────┐
+#   │ proxy  │  :8080
+#   └───┬────┘
+#       │ round_robin (weights 9:1)
+#       ├──────────────────────┐
+#   ┌───▼────┐            ┌───▼────┐
+#   │ stable │  :3001     │ canary │  :3002
+#   └────────┘ ~90%       └────────┘ ~10%
+#
+# Usage:
+#   cargo run -p praxis -- \
+#     -c examples/configs/traffic-management/canary-routing.yaml
+#   for i in $(seq 1 10); do
+#     curl -s http://localhost:8080/
+#     echo
+#   done
+#   # ~9 responses from :3001, ~1 from :3002
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            load_balancer_strategy: round_robin
+            endpoints:
+              - address: "127.0.0.1:3001"
+                weight: 9          # stable — ~90% of requests
+              - address: "127.0.0.1:3002"
+                weight: 1          # canary — ~10% of requests

@@ -1,0 +1,38 @@
+# Access Logging
+#
+# Structured JSON logging with sampling; logs ~10% of
+# requests.
+# request_id ensures each log line has a correlation ID.
+# access_log emits method, path, status, and timing.
+#
+# Enable with RUST_LOG=info to see log output.
+#
+# Usage:
+#   RUST_LOG=info cargo run -p praxis -- -c examples/configs/observability/access-logging.yaml
+#   curl http://localhost:8080/
+#   curl http://localhost:8080/api/users
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+
+      - filter: access_log
+        sample_rate: 0.1
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

@@ -1,0 +1,40 @@
+# Logging: Request IDs and Access Logs
+#
+# request_id — ensures every request has a correlation ID (X-Request-ID).
+#   Forwards client-supplied IDs; generates one when absent. Echoed in
+#   the response.
+#
+# access_log — structured log line per request (method, path) and
+#   response (status). Enable with RUST_LOG=info.
+#
+# Both placed before the router so they run on every request.
+#
+# Usage:
+#   RUST_LOG=info cargo run -p praxis -- -c examples/configs/observability/logging.yaml
+#   curl -v http://localhost:8080/api/users
+#   curl -H "X-Request-ID: my-trace-42" -v http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+        # header_name defaults to X-Request-ID; override here if desired:
+        # header_name: X-Correlation-ID
+
+      - filter: access_log
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

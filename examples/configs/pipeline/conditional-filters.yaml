@@ -1,0 +1,72 @@
+# Conditional Filter Execution
+#
+# Filters support `conditions` (request phase) and `response_conditions`
+# (response phase) to gate execution. Two operators:
+#
+#   when:   run ONLY IF all predicates match
+#   unless: SKIP IF any predicate matches
+#
+# Request predicates: path, path_prefix, methods, headers.
+# Response predicates: status, headers.
+# Multiple conditions are ANDed.
+#
+# Three patterns demonstrated here:
+#   1. timeout on /api/ only; health checks exempt
+#   2. request header injected on mutations only
+#   3. Cache-Control set only on successful responses
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/pipeline/conditional-filters.yaml
+#
+# Exercise:
+#   curl http://localhost:8080/api/users        # timeout enforced
+#   curl http://localhost:8080/healthz           # timeout skipped
+#   curl -X POST http://localhost:8080/api/items # X-Internal-Source added
+#   curl http://localhost:8080/api/items         # X-Internal-Source absent
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      # 5 s SLA on API calls; health checks exempt.
+      - filter: timeout
+        timeout_ms: 5000
+        conditions:
+          - when:
+              path_prefix: "/api/"
+          - unless:
+              path_prefix: "/healthz"
+
+      # Tag mutations so backends can distinguish gateway traffic.
+      - filter: headers
+        request_add:
+          - name: "X-Internal-Source"
+            value: "gateway"
+        conditions:
+          - when:
+              methods: ["POST", "PUT", "PATCH", "DELETE"]
+
+      # Cache-Control only on successful responses.
+      - filter: headers
+        response_set:
+          - name: "Cache-Control"
+            value: "public, max-age=60"
+        response_conditions:
+          - when:
+              status: [200]
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

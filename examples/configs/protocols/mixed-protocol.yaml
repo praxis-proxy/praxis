@@ -1,0 +1,37 @@
+# Mixed HTTP + TCP on the Same Server
+#
+# HTTP and TCP listeners run on a single server instance.
+# Each protocol gets its own filter chains.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/protocols/mixed-protocol.yaml
+
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - observability
+      - routing
+
+  - name: db
+    address: "127.0.0.1:5432"
+    protocol: tcp
+    upstream: "10.0.0.1:5432"
+
+filter_chains:
+  - name: observability
+    filters:
+      - filter: request_id
+      - filter: access_log
+
+  - name: routing
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "10.0.0.1:8080"

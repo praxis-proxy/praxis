@@ -1,0 +1,23 @@
+# TCP Access Log
+#
+# Structured JSON logging of TCP connection events (connect
+# and disconnect). Works on TCP listeners.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/observability/tcp-access-log.yaml
+#
+# Exercise:
+#   nc localhost 5432   # observe connect/disconnect log lines
+
+listeners:
+  - name: db
+    address: "127.0.0.1:5432"
+    protocol: tcp
+    upstream: "127.0.0.1:15432"
+    filter_chains:
+      - logging
+
+filter_chains:
+  - name: logging
+    filters:
+      - filter: tcp_access_log

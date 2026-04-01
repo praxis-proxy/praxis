@@ -1,0 +1,25 @@
+# Static Response
+#
+# Returns a fixed response without contacting any upstream.
+# Useful for health checks, welcome pages, or maintenance
+# mode.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/traffic-management/static-response.yaml
+#   curl http://localhost:8080/
+
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - welcome
+
+filter_chains:
+  - name: welcome
+    filters:
+      - filter: static_response
+        status: 200
+        headers:
+          - name: Content-Type
+            value: application/json
+        body: '{"message": "Welcome to Praxis"}'

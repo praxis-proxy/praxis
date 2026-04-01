@@ -1,0 +1,31 @@
+# Timeout Enforcement
+#
+# Returns 504 if the upstream takes longer than timeout_ms to respond.
+# Measures elapsed time from request receipt to response headers.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/traffic-management/timeout.yaml
+#   curl -v http://localhost:8080/slow   # 504 if backend > 5 s
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: timeout
+        timeout_ms: 5000   # 5 seconds; adjust to match your upstream SLA
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

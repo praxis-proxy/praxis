@@ -1,0 +1,37 @@
+# Default Configuration
+#
+# Built-in fallback used when no config file is provided.
+# Compiled into the binary at build time. Responds with
+# a JSON status on "/" and 404 on all other paths.
+#
+# Usage:
+#   cargo run -p praxis
+#   curl http://localhost:8080/
+
+admin_address: "0.0.0.0:9901"
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - default-response
+
+filter_chains:
+  - name: default-response
+    filters:
+      - filter: static_response
+        status: 200
+        headers:
+          - name: Content-Type
+            value: application/json
+        body: '{"status": "ok", "server": "praxis"}'
+        conditions:
+          - when:
+              path: "/"
+
+      - filter: static_response
+        status: 404
+        headers:
+          - name: Content-Type
+            value: application/json
+        body: '{"error": "not found"}'

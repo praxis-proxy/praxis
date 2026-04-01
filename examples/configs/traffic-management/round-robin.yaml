@@ -1,0 +1,32 @@
+# Round-Robin Load Balancing
+#
+# Default strategy. Cycles through endpoints in order; each backend
+# receives an equal share of requests.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/traffic-management/round-robin.yaml
+#   for i in $(seq 1 9); do curl -s http://localhost:8080/; echo; done
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            # load_balancer_strategy defaults to round_robin — listed here for clarity.
+            load_balancer_strategy: round_robin
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"
+              - "127.0.0.1:3003"

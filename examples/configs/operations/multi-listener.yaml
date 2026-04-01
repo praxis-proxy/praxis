@@ -1,0 +1,57 @@
+# Multi-Listener
+#
+# Three listeners sharing the same pipeline and upstream pool.
+# Useful when different ports serve different protocols or
+# network interfaces.
+#
+#   Port 8080 — HTTP (public)
+#   Port 8443 — HTTPS (public, requires TLS certs)
+#   Port 9090 — HTTP (internal/admin)
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/operations/multi-listener.yaml
+#   curl http://localhost:8080/
+#   curl http://localhost:9090/
+
+listeners:
+  - name: http
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+  - name: https
+    address: "127.0.0.1:8443"
+    filter_chains:
+      - main
+    tls:
+      cert_path: /etc/praxis/tls/cert.pem
+      key_path: /etc/praxis/tls/key.pem
+
+  - name: admin
+    address: "127.0.0.1:9090"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+      - filter: access_log
+
+      - filter: router
+        routes:
+          - path_prefix: "/api/"
+            cluster: api
+          - path_prefix: "/"
+            cluster: web
+
+      - filter: load_balancer
+        clusters:
+          - name: api
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"
+
+          - name: web
+            endpoints:
+              - "127.0.0.1:4000"

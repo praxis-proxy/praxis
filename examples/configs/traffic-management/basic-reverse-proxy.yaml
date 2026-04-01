@@ -1,0 +1,26 @@
+# Basic HTTP Reverse Proxy
+#
+# Minimal config: one listener, one upstream, default filter chain.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/traffic-management/basic-reverse-proxy.yaml
+#   curl http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

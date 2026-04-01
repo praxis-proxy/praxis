@@ -1,0 +1,45 @@
+# Header Manipulation
+#
+# Add, overwrite, and remove headers on requests and responses.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/transformation/header-manipulation.yaml
+#   curl -v http://localhost:8080/
+#
+# Request to upstream gains: X-Forwarded-By, X-Request-Source.
+# Response to client gains: X-Powered-By, X-Frame-Options.
+# Server header is stripped from responses.
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: headers
+        request_add:
+          - name: "X-Forwarded-By"
+            value: "praxis"
+          - name: "X-Request-Source"
+            value: "gateway"
+        response_set:
+          - name: "X-Powered-By"
+            value: "praxis"
+          - name: "X-Frame-Options"
+            value: "DENY"
+        response_remove:
+          - "Server"
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

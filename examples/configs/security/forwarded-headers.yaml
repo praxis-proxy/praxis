@@ -1,0 +1,31 @@
+# Forwarded Headers
+#
+# Injects X-Forwarded-For, X-Forwarded-Proto, and
+# X-Forwarded-Host into upstream requests.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/security/forwarded-headers.yaml
+#   curl -v http://localhost:8080/
+
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: forwarded_headers
+        trusted_proxies:
+          - "10.0.0.0/8"
+          - "172.16.0.0/12"
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

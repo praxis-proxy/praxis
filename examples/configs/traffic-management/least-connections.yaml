@@ -1,0 +1,34 @@
+# Least-Connections Load Balancing
+#
+# Routes each request to the backend with the fewest in-flight
+# requests. Useful when request cost or latency varies.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/traffic-management/least-connections.yaml
+#   curl http://localhost:8080/ &
+#   curl http://localhost:8080/ &
+#   curl http://localhost:8080/ &
+#   wait
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            load_balancer_strategy: least_connections
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"
+              - "127.0.0.1:3003"

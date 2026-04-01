@@ -1,0 +1,17 @@
+# TCP Proxy (L4 Forwarding)
+#
+# Bidirectional TCP forwarding. No filter chains are configured
+# here, so bytes flow between client and upstream unmodified.
+# (TCP listeners can use filter chains; see tcp-access-log.yaml.)
+# Useful for databases, message brokers, or any non-HTTP protocol.
+#
+#   Client ──TCP──► Praxis :5432 ──TCP──► PostgreSQL :5432
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/protocols/tcp-proxy.yaml
+
+listeners:
+  - name: postgres
+    address: "127.0.0.1:5432"
+    protocol: tcp
+    upstream: "127.0.0.1:15432"

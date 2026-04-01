@@ -1,0 +1,33 @@
+# Upstream TLS
+#
+# Plain HTTP on the listener; TLS to the upstream. Set upstream_sni
+# when the upstream expects a specific hostname for certificate
+# validation (defaults to the request's Host header).
+#
+#   Client ──HTTP──► Praxis :8080 ──TLS──► Backend :8443
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/protocols/upstream-tls.yaml
+#   curl http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            upstream_tls: true
+            upstream_sni: "api.example.com"
+            endpoints:
+              - "127.0.0.1:8443"

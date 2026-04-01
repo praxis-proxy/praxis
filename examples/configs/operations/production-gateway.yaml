@@ -1,0 +1,102 @@
+# Production API Gateway
+#
+# Combines TLS, logging, timeouts, security headers, path
+# routing, and load balancing. Demonstrates composed filter chains:
+# observability, security, and routing are split into separate chains
+# for modularity. Adapt addresses, cert paths, and endpoints to your
+# environment.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/operations/production-gateway.yaml
+#   curl https://localhost/api/v1/users
+#   curl https://localhost/
+
+listeners:
+  - name: https
+    address: "127.0.0.1:443"
+    filter_chains:
+      - observability
+      - security
+      - routing
+    tls:
+      cert_path: /etc/praxis/tls/cert.pem
+      key_path: /etc/praxis/tls/key.pem
+
+  # Plain HTTP — health checks / internal traffic.
+  - name: http
+    address: "127.0.0.1:80"
+    filter_chains:
+      - observability
+      - security
+      - routing
+
+filter_chains:
+  # ── Observability ─────────────────────────────────────────────
+  - name: observability
+    filters:
+      - filter: request_id
+      - filter: access_log
+
+  # ── Security ──────────────────────────────────────────────────
+  - name: security
+    filters:
+      # Timeout here as defense-in-depth: prevents slow-loris
+      # style resource exhaustion.
+      - filter: timeout
+        timeout_ms: 10000
+
+      - filter: headers
+        request_add:
+          - name: "X-Forwarded-By"
+            value: "praxis"
+
+        response_set:
+          - name: "X-Frame-Options"
+            value: "DENY"
+          - name: "X-Content-Type-Options"
+            value: "nosniff"
+          - name: "Referrer-Policy"
+            value: "strict-origin-when-cross-origin"
+
+        response_remove:
+          - "Server"
+          - "X-Powered-By"
+
+  # ── Routing ───────────────────────────────────────────────────
+  - name: routing
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/api/"
+            cluster: api
+
+          - path_prefix: "/"
+            cluster: web
+
+      - filter: load_balancer
+        clusters:
+          - name: api
+            load_balancer_strategy: least_connections
+            connection_timeout_ms: 2000
+            read_timeout_ms: 10000
+            idle_timeout_ms: 60000
+            endpoints:
+              - "10.0.1.10:8080"
+              - "10.0.1.11:8080"
+              - "10.0.1.12:8080"
+
+          - name: web
+            load_balancer_strategy: round_robin
+            connection_timeout_ms: 2000
+            read_timeout_ms: 10000
+            idle_timeout_ms: 60000
+            endpoints:
+              - "10.0.2.10:8080"
+              - "10.0.2.11:8080"
+
+# ── Runtime ────────────────────────────────────────────────────
+runtime:
+  threads: 0          # 0 = one thread per logical CPU
+  work_stealing: true
+
+shutdown_timeout_secs: 30

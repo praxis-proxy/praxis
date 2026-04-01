@@ -1,0 +1,48 @@
+# Path-Based Routing
+#
+# Routes by URL path prefix. Longest prefix wins.
+#   /api/*    → api cluster
+#   /static/* → static cluster
+#   /*        → default cluster
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/traffic-management/path-based-routing.yaml
+#   curl http://localhost:8080/api/users
+#   curl http://localhost:8080/static/index.html
+#   curl http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/api/"
+            cluster: api
+
+          - path_prefix: "/static/"
+            cluster: static
+
+          - path_prefix: "/"
+            cluster: default
+
+      - filter: load_balancer
+        clusters:
+          - name: api
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"
+              - "127.0.0.1:3003"
+
+          - name: static
+            endpoints:
+              - "127.0.0.1:4000"
+
+          - name: default
+            endpoints:
+              - "127.0.0.1:5000"

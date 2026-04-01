@@ -1,0 +1,41 @@
+# Stream-Buffer Body Inspection
+#
+# json_body_field inspects request body chunks as they arrive and
+# defers upstream forwarding until the field is extracted (or
+# end-of-stream). Useful for AI inference, agentic networks,
+# content scanning, and body-based routing.
+#
+# Set max_request_body_bytes to cap request body size across all
+# body modes. Requests exceeding the limit receive 413.
+
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains:
+      - body-inspection
+      - routing
+
+filter_chains:
+  # Extract the "action" field from the JSON body and promote it
+  # to the X-Action request header. StreamBuffer mode accumulates
+  # chunks and defers forwarding until extraction completes.
+  - name: body-inspection
+    filters:
+      - filter: json_body_field
+        field: action
+        header: X-Action
+
+  - name: routing
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+# Global body size ceiling (10 MB).
+max_request_body_bytes: 10485760

@@ -1,0 +1,33 @@
+# TLS Termination
+#
+# HTTPS on the listener; plain HTTP to the backend.
+#
+#   Client ──TLS──► Praxis :8443 ──HTTP──► Backend :3000
+#
+# Usage:
+#   mkcert -install && mkcert localhost 127.0.0.1
+#   cargo run -p praxis -- -c examples/configs/protocols/tls-termination.yaml
+#   curl https://localhost:8443/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8443"
+    filter_chains:
+      - main
+    tls:
+      cert_path: ./localhost+1.pem
+      key_path: ./localhost+1-key.pem
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

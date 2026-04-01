@@ -1,0 +1,39 @@
+# IP Access Control List (ACL)
+#
+# Allow or deny requests by source IP/CIDR. When `allow` is set,
+# only matching IPs are permitted. `allow` takes precedence over
+# `deny`.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/security/ip-acl.yaml
+#
+# Exercise:
+#   curl http://localhost:8080/       # allowed (loopback)
+#   curl http://localhost:8080/admin   # allowed (loopback)
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: ip_acl
+        allow:
+          - "127.0.0.0/8"
+          - "10.0.0.0/8"
+        deny:
+          - "0.0.0.0/0"
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

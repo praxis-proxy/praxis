@@ -1,0 +1,56 @@
+# Virtual Host Routing (Host-Based Routing)
+#
+# One listener serves multiple domains. The router matches on both the
+# Host header and URL path prefix. Longest prefix wins; among equal-length
+# prefixes, declaration order breaks ties. Place host-specific routes
+# before catch-all routes.
+#
+#   api.example.com  →  api cluster
+#   www.example.com  →  web cluster
+#   (any other host) →  default cluster
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/traffic-management/hosts.yaml
+#
+# Exercise:
+#   curl -H "Host: api.example.com" http://localhost:8080/users
+#   curl -H "Host: www.example.com" http://localhost:8080/
+#   curl -H "Host: unknown.example.com" http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            host: "api.example.com"
+            cluster: api
+
+          - path_prefix: "/"
+            host: "www.example.com"
+            cluster: web
+
+          # Catch-all
+          - path_prefix: "/"
+            cluster: default
+
+      - filter: load_balancer
+        clusters:
+          - name: api
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"
+
+          - name: web
+            endpoints:
+              - "127.0.0.1:4000"
+
+          - name: default
+            endpoints:
+              - "127.0.0.1:5000"
