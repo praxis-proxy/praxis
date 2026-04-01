@@ -1,0 +1,258 @@
+[workspace]
+resolver = "3"
+members = [
+    # Praxis Main
+    "server",
+
+    # Praxis Proxy Framework
+    "core",
+    "filter",
+    "protocol",
+    "tls",
+
+    # Praxis Developer Tooling
+    "benchmarks",
+    "xtask",
+
+    # Praxis Testing
+    "tests/configuration",
+    "tests/conformance",
+    "tests/integration",
+    "tests/resilience",
+    "tests/security",
+    "tests/smoke",
+    "tests/utils",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.94"
+authors = ["Shane Utt <shaneutt@linux.com>"]
+license = "LGPL-3.0-only"
+repository = "https://github.com/praxis-proxy/praxis"
+
+[workspace.dependencies]
+async-trait = "0.1.89"
+benchmarks = { path = "benchmarks" }
+bytes = "1.11.1"
+chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
+dashmap = "6.1.0"
+clap = { version = "4.6.0", features = ["derive"] }
+criterion = { version = "0.8.2", features = ["async_tokio"] }
+futures = "0.3.32"
+h2 = "0.4.13"
+http = "1.4.0"
+# Pinned to match Pingora's dependency.
+nix = "0.24.3"
+# Temporary fork: custom ServerConfig (PR #726) + public WrappedX509 for per-cluster CA.
+pingora-core = { git = "https://github.com/praxis-proxy/pingora.git", rev = "b2fa2c9a8d4074e2a2a42e70ab4c17f8c61a566d", features = ["rustls"] }
+pingora-http = { git = "https://github.com/praxis-proxy/pingora.git", rev = "b2fa2c9a8d4074e2a2a42e70ab4c17f8c61a566d" }
+pingora-proxy = { git = "https://github.com/praxis-proxy/pingora.git", rev = "b2fa2c9a8d4074e2a2a42e70ab4c17f8c61a566d", features = ["rustls"] }
+percent-encoding = "2.3.2"
+plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
+praxis = { path = "server", package = "praxis-proxy-server" }
+praxis-core = { path = "core", package = "praxis-proxy-core" }
+praxis-filter = { path = "filter", package = "praxis-proxy-filter" }
+praxis-protocol = { path = "protocol", package = "praxis-proxy-protocol" }
+praxis-tls = { path = "tls", package = "praxis-proxy-tls" }
+praxis-test-utils = { path = "tests/utils" }
+serde = { version = "1.0.228", features = ["derive", "rc"] }
+serde_json = "1.0.149"
+rcgen = "0.13.2"
+regex = "1.12.3"
+rustls = "0.23.38"
+rustls-pemfile = "2.2.0"
+# NOTE: serde_yaml is deprecated upstream. Migration to serde_yml is tracked.
+serde_yaml = "0.9.34"
+tempfile = "3.27.0"
+tokio-rustls = "0.26.4"
+thiserror = "2.0.18"
+tikv-jemallocator = "0.6.1"
+tokio = { version = "1.51.1", features = ["macros", "rt"] }
+tokio-util = "0.7.18"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+overflow-checks = true
+
+[profile.profiling]
+inherits = "release"
+debug = 2
+strip = false
+lto = false
+
+[profile.dev.package."*"]
+opt-level = 2
+
+[workspace.lints.rust]
+dead_code = "deny"
+missing_docs = "deny"
+unreachable_pub = "deny"
+unused_imports = "deny"
+unused_variables = "deny"
+# Cast safety
+trivial_casts = "deny"
+trivial_numeric_casts = "deny"
+# Import hygiene
+macro_use_extern_crate = "deny"
+unused_extern_crates = "deny"
+# Lifetime clarity
+elided_lifetimes_in_paths = "deny"
+single_use_lifetimes = "deny"
+# Qualification hygiene
+unused_qualifications = "deny"
+# Macro hygiene
+unused_macro_rules = "deny"
+meta_variable_misuse = "deny"
+# Drop safety
+let_underscore_drop = "deny"
+# Identifier safety
+non_ascii_idents = "deny"
+# Method call correctness
+noop_method_call = "deny"
+# Lifetime clarity (extended)
+redundant_lifetimes = "deny"
+# Debug trait coverage
+# missing_debug_implementations: many types contain Box<dyn Trait> without Debug bounds
+missing_debug_implementations = "allow"
+
+[workspace.lints.clippy]
+# Async and concurrency safety
+await_holding_lock = "deny"
+future_not_send = "deny"
+large_futures = "deny"
+# Memory and allocation efficiency
+implicit_clone = "deny"
+inefficient_to_string = "deny"
+large_enum_variant = "deny"
+large_types_passed_by_value = "deny"
+needless_pass_by_value = "deny"
+rc_buffer = "deny"
+str_to_string = "deny"
+trivially_copy_pass_by_ref = "deny"
+vec_init_then_push = "deny"
+# API design
+return_self_not_must_use = "deny"
+# Documentation
+doc_markdown = "deny"
+missing_docs_in_private_items = "deny"
+# Allowed: blank line after attributes is intentional style
+empty_line_after_outer_attr = "allow"
+# Idiomatic Rust
+checked_conversions = "deny"
+cloned_instead_of_copied = "deny"
+explicit_into_iter_loop = "deny"
+explicit_iter_loop = "deny"
+flat_map_option = "deny"
+from_iter_instead_of_collect = "deny"
+manual_assert = "deny"
+manual_instant_elapsed = "deny"
+manual_let_else = "deny"
+manual_ok_or = "deny"
+manual_string_new = "deny"
+map_unwrap_or = "deny"
+redundant_closure_for_method_calls = "deny"
+unnested_or_patterns = "deny"
+# Borrow hygiene
+needless_borrow = "deny"
+# Code clarity
+if_not_else = "deny"
+match_bool = "deny"
+match_same_arms = "deny"
+mut_mut = "deny"
+needless_for_each = "deny"
+range_plus_one = "deny"
+redundant_else = "deny"
+semicolon_if_nothing_returned = "deny"
+uninlined_format_args = "deny"
+unreadable_literal = "deny"
+unused_self = "deny"
+# Import hygiene
+enum_glob_use = "deny"
+wildcard_imports = "deny"
+# String handling
+string_add_assign = "deny"
+# Function size
+too_many_lines = "deny"
+# Dev hygiene
+dbg_macro = "deny"
+print_stderr = "deny"
+print_stdout = "deny"
+# Cast safety
+cast_lossless = "deny"
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_sign_loss = "deny"
+cast_precision_loss = "deny"
+ptr_as_ptr = "deny"
+# Documentation completeness
+missing_errors_doc = "deny"
+missing_panics_doc = "deny"
+# Dead code detection
+unused_async = "deny"
+unnecessary_wraps = "deny"
+needless_pass_by_ref_mut = "deny"
+no_effect_underscore_binding = "deny"
+used_underscore_binding = "deny"
+# API hygiene
+option_option = "deny"
+ref_option_ref = "deny"
+default_trait_access = "deny"
+expl_impl_clone_on_copy = "deny"
+# Code clarity
+items_after_statements = "deny"
+macro_use_imports = "deny"
+needless_continue = "deny"
+rest_pat_in_fully_bound_structs = "deny"
+same_functions_in_if_condition = "deny"
+stable_sort_primitive = "deny"
+string_add = "deny"
+string_lit_as_bytes = "deny"
+trait_duplication_in_bounds = "deny"
+type_repetition_in_bounds = "deny"
+verbose_bit_mask = "deny"
+zero_sized_map_values = "deny"
+# Boolean hygiene
+fn_params_excessive_bools = "deny"
+struct_excessive_bools = "deny"
+# Complexity (thresholds in clippy.toml)
+cognitive_complexity = "deny"
+too_many_arguments = "deny"
+# Safety and correctness
+unwrap_used = "deny"
+missing_assert_message = "deny"
+map_err_ignore = "deny"
+or_fun_call = "deny"
+clone_on_ref_ptr = "deny"
+debug_assert_with_mut_call = "deny"
+collection_is_never_read = "deny"
+significant_drop_in_scrutinee = "deny"
+mutex_integer = "deny"
+mutex_atomic = "deny"
+allow_attributes_without_reason = "deny"
+significant_drop_tightening = "warn"
+# Diagnostic hygiene
+expect_used = "warn"
+panic = "warn"
+indexing_slicing = "warn"
+# String handling (extended)
+# string_to_string removed in recent clippy (covered by implicit_clone)
+# Redundancy
+redundant_type_annotations = "deny"
+needless_raw_strings = "deny"
+needless_raw_string_hashes = "deny"
+# Idiomatic Rust (extended)
+inconsistent_struct_constructor = "deny"
+match_wildcard_for_single_variants = "deny"
+single_match_else = "deny"
+empty_drop = "deny"
+manual_clamp = "deny"
+# Safety documentation
+undocumented_unsafe_blocks = "deny"
+missing_safety_doc = "deny"

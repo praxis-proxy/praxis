@@ -1,0 +1,16 @@
+edition = "2024"
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"
+match_block_trailing_comma = true
+max_width = 120
+normalize_comments = true
+format_code_in_doc_comments = true
+format_macro_matchers = true
+use_field_init_shorthand = true
+use_try_shorthand = true
+wrap_comments = true
+comment_width = 120
+newline_style = "Unix"
+condense_wildcard_suffixes = true
+reorder_impl_items = true
+hex_literal_case = "Upper"

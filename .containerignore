@@ -1,0 +1,19 @@
+# Ignore build artifacts and generated files
+target/
+
+# Ignore documentation
+.*
+docs/
+*.md
+LICENSE*
+
+# Ignore fmt, lint and deny configs
+rustfmt.toml
+deny.toml
+
+# Ignore devtools and test crates
+Makefile
+tests/
+xtask/
+examples/
+benchmarks/

@@ -1,8 +1,17 @@
+// SPDX-License-Identifier: LGPL-3.0-only
+// Copyright (c) 2024 Shane Utt
+
 //! Development tasks for the Praxis proxy.
-//!
-//! Usage: `cargo xtask <command>`
 
 #![deny(unsafe_code)]
+#![allow(
+    clippy::print_stdout,
+    clippy::print_stderr,
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "development tooling"
+)]
+#![allow(let_underscore_drop, reason = "development tooling")]
 
 mod benchmark;
 mod debug;
@@ -12,26 +21,12 @@ mod port;
 use clap::{Parser, Subcommand};
 
 // -----------------------------------------------------------------------------
-// Main
-// -----------------------------------------------------------------------------
-
-// Dispatch the CLI subcommand to its handler.
-fn main() {
-    let cli = Cli::parse();
-    match cli.command {
-        Command::Echo(args) => echo::run(args),
-        Command::Debug(args) => debug::run(&args),
-        Command::Benchmark(args) => benchmark::run(*args),
-    }
-}
-
-// -----------------------------------------------------------------------------
 // CLI Definition
 // -----------------------------------------------------------------------------
 
+/// Top-level CLI for xtask development commands.
 #[derive(Parser)]
 #[command(name = "xtask", about = "Praxis development tasks")]
-/// Top-level CLI for xtask development commands.
 struct Cli {
     /// The subcommand to run.
     #[command(subcommand)]
@@ -54,6 +49,20 @@ enum Command {
 }
 
 // -----------------------------------------------------------------------------
+// Main
+// -----------------------------------------------------------------------------
+
+/// Dispatch the CLI subcommand to its handler.
+fn main() {
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Echo(args) => echo::run(args),
+        Command::Debug(args) => debug::run(&args),
+        Command::Benchmark(args) => benchmark::run(*args),
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Tracing Setup
 // -----------------------------------------------------------------------------
 
@@ -66,7 +75,7 @@ pub(crate) fn init_tracing(default_level: &str) {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
 
-    let json = std::env::var("PRAXIS_LOG_FORMAT").map(|v| v == "json").unwrap_or(false);
+    let json = std::env::var("PRAXIS_LOG_FORMAT").is_ok_and(|v| v == "json");
 
     if json {
         tracing_subscriber::fmt().json().with_env_filter(env_filter).init();

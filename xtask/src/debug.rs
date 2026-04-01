@@ -1,7 +1,7 @@
+// SPDX-License-Identifier: LGPL-3.0-only
+// Copyright (c) 2024 Shane Utt
+
 //! `cargo xtask debug` — run praxis with dev settings.
-//!
-//! Enables debug logging, single-threaded runtime (by default),
-//! a fast shutdown timeout, and the admin endpoint.
 
 use clap::Parser;
 
@@ -18,7 +18,7 @@ use clap::Parser;
                   Runs single-threaded by default for easier \
                   debugging. Pass --multi-threaded to use the \
                   config's thread setting instead.")]
-pub struct Args {
+pub(crate) struct Args {
     /// Path to a YAML config file. Falls back to praxis.yaml
     /// in the current directory, then the built-in default.
     config: Option<String>,
@@ -33,21 +33,22 @@ pub struct Args {
 // -----------------------------------------------------------------------------
 
 /// Load config and start the server with dev-friendly defaults.
-pub fn run(args: &Args) {
+pub(crate) fn run(args: &Args) {
     crate::init_tracing("debug");
 
-    let mut config = praxis::load_config(args.config.as_deref());
-
+    let config_path = args.config.as_deref().unwrap_or("<default>");
+    let mut config = praxis::load_config(args.config.as_deref()).unwrap_or_else(|e| {
+        eprintln!("fatal: failed to load config from {config_path}: {e}");
+        std::process::exit(1);
+    });
     config.runtime.threads = if args.multi_threaded { config.runtime.threads } else { 1 };
-
     config.shutdown_timeout_secs = 3;
-
     for listener in &mut config.listeners {
         listener.address = crate::port::resolve_available(&listener.address);
     }
 
-    if config.admin_address.is_none() {
-        config.admin_address = Some("127.0.0.1:9090".to_owned());
+    if config.admin.address.is_none() {
+        config.admin.address = Some("127.0.0.1:9090".to_owned());
     }
 
     praxis::run_server(config)

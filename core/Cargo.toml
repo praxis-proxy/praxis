@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 pingora-core = { workspace = true }
+praxis-tls = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }

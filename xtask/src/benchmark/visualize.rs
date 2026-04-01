@@ -1,10 +1,29 @@
-//! `cargo xtask benchmark visualize` — SVG chart generator.
-//!
-//! Reads a benchmark report file (YAML or JSON) and produces
-//! a grouped bar chart SVG comparing proxy performance.
+// SPDX-License-Identifier: LGPL-3.0-only
+// Copyright (c) 2024 Shane Utt
 
+//! `cargo xtask benchmark visualize` SVG chart generator.
+
+use benchmarks::report::BenchmarkReport;
 use clap::Parser;
-use praxis_benchmarks::report::BenchmarkReport;
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// SVG dimensions.
+const SVG_WIDTH: u32 = 1400;
+
+/// Height per panel.
+const PANEL_HEIGHT: u32 = 420;
+
+/// Left margin for y-axis labels.
+const LEFT_MARGIN: i32 = 90;
+
+/// Top margin per panel (for title).
+const TOP_MARGIN: i32 = 35;
+
+/// Bottom margin per panel (for x-axis labels).
+const BOTTOM_MARGIN: i32 = 80;
 
 // -----------------------------------------------------------------------------
 // CLI Arguments
@@ -12,7 +31,7 @@ use praxis_benchmarks::report::BenchmarkReport;
 
 /// CLI arguments for `cargo xtask benchmark visualize`.
 #[derive(Parser)]
-pub struct Args {
+pub(crate) struct Args {
     /// Path to the benchmark report file (YAML or JSON).
     pub file: String,
 
@@ -29,44 +48,18 @@ pub struct Args {
 /// Generate SVG charts from a benchmark report.
 ///
 /// Produces one SVG per metric in the output directory.
-#[allow(clippy::print_stdout)]
-pub fn run(args: &Args) {
-    let report = load_report(&args.file);
+pub(crate) fn run(args: &Args) {
+    let report = super::report::load_report(&args.file);
+
     let stem = std::path::Path::new(&args.file)
         .file_stem()
         .map_or("benchmark", |s| s.to_str().unwrap_or("benchmark"));
 
     let dir = args.output.clone().unwrap_or_else(|| "target/criterion".into());
+
     std::fs::create_dir_all(&dir).ok();
 
     render_charts(&report, stem, &dir);
-}
-
-// -----------------------------------------------------------------------------
-// Report Loading
-// -----------------------------------------------------------------------------
-
-/// Load a [`BenchmarkReport`] from YAML or JSON.
-///
-/// [`BenchmarkReport`]: praxis_benchmarks::report::BenchmarkReport
-#[allow(clippy::print_stderr)]
-fn load_report(path: &str) -> BenchmarkReport {
-    let content = std::fs::read_to_string(path).unwrap_or_else(|e| {
-        eprintln!("failed to read {path}: {e}");
-        std::process::exit(1);
-    });
-
-    if path.ends_with(".json") {
-        serde_json::from_str(&content).unwrap_or_else(|e| {
-            eprintln!("failed to parse JSON: {e}");
-            std::process::exit(1);
-        })
-    } else {
-        serde_yaml::from_str(&content).unwrap_or_else(|e| {
-            eprintln!("failed to parse YAML: {e}");
-            std::process::exit(1);
-        })
-    }
 }
 
 // -----------------------------------------------------------------------------
@@ -76,6 +69,7 @@ fn load_report(path: &str) -> BenchmarkReport {
 /// Unique scenario names from a report (first-seen order).
 fn unique_scenarios(report: &BenchmarkReport) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
+
     report
         .results
         .iter()
@@ -90,10 +84,10 @@ fn unique_scenarios(report: &BenchmarkReport) -> Vec<String> {
 }
 
 /// Extract a per-proxy, per-scenario metric matrix.
-#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss, reason = "chart indices")]
 fn extract_matrix<F>(report: &BenchmarkReport, scenarios: &[String], metric: F) -> Vec<Vec<f64>>
 where
-    F: Fn(&praxis_benchmarks::result::BenchmarkResult) -> f64,
+    F: Fn(&benchmarks::result::BenchmarkResult) -> f64,
 {
     report
         .proxies
@@ -118,39 +112,20 @@ where
 // SVG Rendering
 // -----------------------------------------------------------------------------
 
-/// Proxy color assignment.
-fn proxy_color(name: &str) -> plotters::style::RGBColor {
-    match name {
-        "praxis" => plotters::style::RGBColor(76, 175, 80),
-        "envoy" => plotters::style::RGBColor(33, 150, 243),
-        "nginx" => plotters::style::RGBColor(244, 67, 54),
-        "haproxy" => plotters::style::RGBColor(156, 39, 176),
-        _ => plotters::style::RGBColor(158, 158, 158),
-    }
-}
-
-/// SVG dimensions.
-const SVG_WIDTH: u32 = 1400;
-/// Height per panel.
-const PANEL_HEIGHT: u32 = 420;
-/// Left margin for y-axis labels.
-const LEFT_MARGIN: i32 = 90;
-/// Top margin per panel (for title).
-const TOP_MARGIN: i32 = 35;
-/// Bottom margin per panel (for x-axis labels).
-const BOTTOM_MARGIN: i32 = 80;
-
 /// Chart definition: metric name, file suffix, title,
 /// y-axis label, and extraction function.
 struct ChartDef {
     /// File name suffix (e.g. "p99-latency").
     suffix: &'static str,
+
     /// Chart title.
     title: &'static str,
+
     /// Y-axis label.
     y_label: &'static str,
+
     /// Metric extractor.
-    extract: fn(&praxis_benchmarks::result::BenchmarkResult) -> f64,
+    extract: fn(&benchmarks::result::BenchmarkResult) -> f64,
 }
 
 /// All charts to render.
@@ -193,22 +168,35 @@ const CHARTS: &[ChartDef] = &[
     },
 ];
 
+/// Map a proxy name to its chart bar color.
+fn proxy_color(name: &str) -> plotters::style::RGBColor {
+    match name {
+        "praxis" => plotters::style::RGBColor(76, 175, 80),
+        "envoy" => plotters::style::RGBColor(33, 150, 243),
+        "nginx" => plotters::style::RGBColor(244, 67, 54),
+        "haproxy" => plotters::style::RGBColor(156, 39, 176),
+        _ => plotters::style::RGBColor(158, 158, 158),
+    }
+}
+
 /// Render one SVG per metric into the output directory.
-#[allow(clippy::print_stdout, clippy::print_stderr)]
 fn render_charts(report: &BenchmarkReport, stem: &str, dir: &str) {
     use plotters::prelude::{IntoDrawingArea, SVGBackend, WHITE};
 
     let scenarios = unique_scenarios(report);
+
     if scenarios.is_empty() {
         eprintln!("no scenario data to visualize");
         return;
     }
 
     for chart in CHARTS {
-        let path = format!("{dir}/{stem}-{}.svg", chart.suffix);
+        let path = format!("{dir}/{stem}-{suffix}.svg", suffix = chart.suffix);
+
         let data = extract_matrix(report, &scenarios, chart.extract);
 
         let root = SVGBackend::new(&path, (SVG_WIDTH, PANEL_HEIGHT)).into_drawing_area();
+
         root.fill(&WHITE).unwrap();
 
         render_panel(&root, chart.title, chart.y_label, &report.proxies, &scenarios, &data);
@@ -221,20 +209,27 @@ fn render_charts(report: &BenchmarkReport, stem: &str, dir: &str) {
     }
 }
 
+/// Type alias for the 2D chart context produced by [`render_panel`].
+///
+/// Concrete over [`plotters::prelude::SVGBackend`] to avoid generic
+/// lifetime invariance issues in plotters' `DrawingArea`.
+type PanelChart<'a, 'b> = plotters::prelude::ChartContext<
+    'a,
+    plotters::prelude::SVGBackend<'b>,
+    plotters::prelude::Cartesian2d<plotters::coord::types::RangedCoordf64, plotters::coord::types::RangedCoordf64>,
+>;
+
 /// Render a single grouped bar chart panel.
-#[allow(clippy::cast_precision_loss)]
+#[allow(clippy::cast_precision_loss, clippy::too_many_arguments, reason = "chart rendering")]
 fn render_panel(
-    area: &plotters::prelude::DrawingArea<plotters::prelude::SVGBackend, plotters::coord::Shift>,
+    area: &plotters::prelude::DrawingArea<plotters::prelude::SVGBackend<'_>, plotters::coord::Shift>,
     title: &str,
     y_label: &str,
     proxies: &[String],
     scenarios: &[String],
     bars: &[Vec<f64>],
 ) {
-    use plotters::{
-        prelude::{BLACK, ChartBuilder, Rectangle, SeriesLabelPosition, WHITE},
-        style::{Color, IntoFont, TextStyle},
-    };
+    use plotters::{prelude::ChartBuilder, style::IntoFont};
 
     let n_proxies = proxies.len();
     let n_scenarios = scenarios.len();
@@ -254,8 +249,16 @@ fn render_panel(
         .build_cartesian_2d(0.0..x_max, 0.0..max_val)
         .unwrap();
 
-    // Y-axis grid only, no x-axis ticks (we draw labels
-    // manually).
+    configure_mesh(&mut chart, y_label);
+    draw_bars(&mut chart, proxies, n_scenarios, group_width, bars);
+    draw_scenario_labels(&mut chart, scenarios, n_proxies, group_width, max_val);
+    draw_legend(&mut chart);
+}
+
+/// Configure the y-axis mesh, hiding the x-axis grid.
+fn configure_mesh(chart: &mut PanelChart<'_, '_>, y_label: &str) {
+    use plotters::style::IntoFont;
+
     chart
         .configure_mesh()
         .disable_x_mesh()
@@ -264,10 +267,22 @@ fn render_panel(
         .y_label_style(("sans-serif", 12).into_font())
         .draw()
         .unwrap();
+}
 
-    // Draw bars.
+/// Draw grouped bars for each proxy across all scenarios.
+#[allow(clippy::cast_precision_loss, clippy::indexing_slicing, reason = "chart coordinates")]
+fn draw_bars(
+    chart: &mut PanelChart<'_, '_>,
+    proxies: &[String],
+    n_scenarios: usize,
+    group_width: f64,
+    bars: &[Vec<f64>],
+) {
+    use plotters::{prelude::Rectangle, style::Color};
+
     for (pi, proxy) in proxies.iter().enumerate() {
         let color = proxy_color(proxy);
+
         let rects: Vec<_> = (0..n_scenarios)
             .map(|si| {
                 let x0 = si as f64 * group_width + pi as f64 + 0.5;
@@ -283,14 +298,28 @@ fn render_panel(
             .label(proxy.as_str())
             .legend(move |(x, y)| Rectangle::new([(x, y - 5), (x + 15, y + 5)], color.filled()));
     }
+}
 
-    // Draw x-axis labels centered under each bar group.
+/// Draw scenario name labels along the x-axis.
+#[allow(clippy::cast_precision_loss, reason = "chart coordinates")]
+fn draw_scenario_labels(
+    chart: &mut PanelChart<'_, '_>,
+    scenarios: &[String],
+    n_proxies: usize,
+    group_width: f64,
+    max_val: f64,
+) {
+    use plotters::{
+        prelude::BLACK,
+        style::{IntoFont, TextStyle},
+    };
+
     let label_style = TextStyle::from(("sans-serif", 10).into_font()).color(&BLACK);
 
     for (si, name) in scenarios.iter().enumerate() {
         let center_x = si as f64 * group_width + n_proxies as f64 / 2.0 + 0.5;
-        // Shorten long names for readability.
         let short = shorten_scenario(name);
+
         chart
             .draw_series(std::iter::once(plotters::element::Text::new(
                 short,
@@ -299,6 +328,14 @@ fn render_panel(
             )))
             .unwrap();
     }
+}
+
+/// Draw the series legend in the upper-right corner.
+fn draw_legend<'a>(chart: &mut PanelChart<'a, 'a>) {
+    use plotters::{
+        prelude::{BLACK, SeriesLabelPosition, WHITE},
+        style::{Color, IntoFont},
+    };
 
     chart
         .configure_series_labels()
@@ -315,7 +352,8 @@ fn shorten_scenario(name: &str) -> String {
     match name {
         "high-concurrency-small-requests" => "small-req".into(),
         "large-payloads" => "large".into(),
-        "mixed-payloads" => "mixed".into(),
+        "large-payloads-high-concurrency" => "large-hc".into(),
+        "high-connection-count" => "high-conn".into(),
         "tcp-throughput" => "tcp-thru".into(),
         "tcp-connection-rate" => "tcp-conn".into(),
         other => other.into(),

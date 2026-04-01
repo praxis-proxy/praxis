@@ -1,0 +1,11 @@
+too-many-lines-threshold = 30
+cognitive-complexity-threshold = 10
+too-many-arguments-threshold = 5
+max-fn-params-bools = 2
+max-struct-bools = 2
+enum-variant-size-threshold = 128
+future-size-threshold = 4096
+type-complexity-threshold = 200
+msrv = "1.94"
+avoid-breaking-exported-api = false
+doc-valid-idents = ["Praxis", "Pingora", "gRPC", "OpenTelemetry", "NGINX", "HAProxy", "Envoy", "Rustls", "XDP", "eBPF", "IPv4", "IPv6", "MiB"]

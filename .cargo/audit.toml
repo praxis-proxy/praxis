@@ -1,0 +1,16 @@
+# cargo-audit configuration
+#
+# Advisories listed here are from Pingora transitive
+# dependencies that we cannot control.
+
+[advisories]
+ignore = [
+    # protobuf 2.28.0: uncontrolled recursion crash
+    "RUSTSEC-2024-0437",
+    # daemonize 0.5.0: unmaintained
+    "RUSTSEC-2025-0069",
+    # derivative 2.2.0: unmaintained
+    "RUSTSEC-2024-0388",
+    # rustls-pemfile 2.2.0: unmaintained (via pingora-rustls)
+    "RUSTSEC-2025-0134",
+]

@@ -1,0 +1,8 @@
+*.yaml linguist-detectable=false
+*.yml linguist-detectable=false
+*.toml linguist-detectable=false
+*.md linguist-detectable=false
+*.cfg linguist-detectable=false
+Makefile linguist-detectable=false
+Containerfile linguist-detectable=false
+Dockerfile linguist-detectable=false

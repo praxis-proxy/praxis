@@ -3,19 +3,23 @@ name = "xtask"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
+authors.workspace = true
+description = "Development task runner for Praxis"
 license.workspace = true
+repository.workspace = true
+readme = "../README.md"
 publish = false
 
 [lints]
 workspace = true
 
 [dependencies]
+benchmarks = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }
 nix = { workspace = true }
 plotters = { workspace = true }
 praxis = { workspace = true }
-praxis-benchmarks = { workspace = true }
 praxis-core = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
