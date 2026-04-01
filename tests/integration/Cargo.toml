@@ -1,0 +1,30 @@
+[package]
+name = "praxis-tests-integration"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[features]
+default = ["ai-agentic", "ai-inference"]
+ai-agentic = ["praxis-filter/ai-agentic"]
+ai-inference = ["praxis-filter/ai-inference"]
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+praxis-core = { workspace = true }
+praxis-filter = { workspace = true }
+praxis-protocol = { workspace = true }
+praxis-test-utils = { workspace = true }
+rustls = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_yaml = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
+tokio-rustls = { workspace = true }

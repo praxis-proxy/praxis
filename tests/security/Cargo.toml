@@ -1,0 +1,16 @@
+[package]
+name = "praxis-tests-security"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+praxis-core = { workspace = true }
+praxis-filter = { workspace = true }
+praxis-test-utils = { workspace = true }
+serde_yaml = { workspace = true }

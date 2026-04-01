@@ -1,0 +1,25 @@
+[package]
+name = "praxis-test-utils"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+praxis = { workspace = true }
+praxis-core = { workspace = true }
+praxis-filter = { workspace = true }
+praxis-protocol = { workspace = true }
+h2 = { workspace = true }
+http = { workspace = true }
+rcgen = { workspace = true }
+rustls = { workspace = true }
+serde_yaml = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "io-util", "time"] }
+tracing = { workspace = true }
+tokio-rustls = { workspace = true }

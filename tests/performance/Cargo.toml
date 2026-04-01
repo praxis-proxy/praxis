@@ -1,0 +1,20 @@
+[package]
+name = "praxis-tests-performance"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+async-trait = { workspace = true }
+benchmarks = { workspace = true }
+bytes = { workspace = true }
+praxis = { workspace = true }
+praxis-core = { workspace = true }
+praxis-filter = { workspace = true }
+praxis-test-utils = { workspace = true }
+tokio = { workspace = true }
