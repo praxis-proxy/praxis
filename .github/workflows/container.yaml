@@ -1,0 +1,62 @@
+name: Container
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  # -----------------------------------------------------------------
+  # Build & Run Container
+  # -----------------------------------------------------------------
+
+  build-and-run:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Build container image
+        run: docker build -t praxis:ci -f Containerfile .
+
+      - name: Run container
+        run: docker run -d --name praxis -p 9901:9901 praxis:ci
+
+      - name: Wait for healthy
+        run: |
+          for i in $(seq 1 30); do
+            if curl -sf http://127.0.0.1:9901/healthy; then
+              echo ""
+              echo "Container is healthy"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Container failed to become healthy"
+          docker logs praxis
+          exit 1
+
+      - name: Verify health response
+        run: |
+          status=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:9901/healthy)
+          body=$(curl -sf http://127.0.0.1:9901/healthy)
+          echo "Status: ${status}"
+          echo "Body: ${body}"
+          [ "$status" = "200" ] || { echo "Expected 200, got ${status}"; exit 1; }
+          echo "$body" | grep -q '"status":"ok"' || { echo "Unexpected body"; exit 1; }
+
+      - name: Stop container
+        if: always()
+        run: docker rm -f praxis

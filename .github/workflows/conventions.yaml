@@ -1,0 +1,81 @@
+name: Coding Conventions
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # PR Size Check
+  # ----------------------------------------------------------------------------
+
+  pr-size-check:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          fetch-depth: 0
+
+      - name: Check PR size
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          MAX_ADDITIONS: "250"
+        run: |
+          labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
+          if echo "$labels" | grep -q '^conventions/bypass$'; then
+            echo "conventions/bypass label present — skipping size check"
+            exit 0
+          fi
+
+          if [ "${{ github.event.action }}" = "reopened" ]; then
+            perm=$(gh api repos/${{ github.repository }}/collaborators/${{ github.event.sender.login }}/permission -q .permission)
+            if [ "$perm" = "admin" ] || [ "$perm" = "maintain" ]; then
+              gh pr edit "$PR_NUMBER" --repo "${{ github.repository }}" --add-label "conventions/bypass"
+              echo "Maintainer reopened — added conventions/bypass label"
+              exit 0
+            fi
+          fi
+
+          stats=$(git diff --stat origin/${{ github.base_ref }}...HEAD -- ':!Cargo.lock' ':!examples/' | tail -1)
+          added=$(echo "$stats" | grep -oP '\d+(?= insertion)' || echo 0)
+
+          if [ "$added" -gt "$MAX_ADDITIONS" ]; then
+            gh pr close "$PR_NUMBER" --comment "This PR adds $added lines (limit: $MAX_ADDITIONS). Deletions are unlimited. Please check our coding conventions (docs/conventions.md), and break your contribution down into smaller PRs. Thank you!"
+          fi
+
+  # ----------------------------------------------------------------------------
+  # PR Description Check
+  # ----------------------------------------------------------------------------
+
+  pr-description-check:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Check for description
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          word_count=$(echo "$PR_BODY" | wc -w)
+          if [ "$word_count" -lt 2 ]; then # minimum "fixes <issue_number>"
+            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+              --body "Please add a description to this PR explaining what it does and why. See our [coding conventions](docs/conventions.md)."
+          fi
