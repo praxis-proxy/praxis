@@ -17,7 +17,7 @@ use crate::errors::ProxyError;
 ///     praxis_core::config::Config::from_yaml(praxis_core::config::DEFAULT_CONFIG).unwrap();
 /// assert!(!config.listeners.is_empty());
 /// ```
-pub const DEFAULT_CONFIG: &str = include_str!("../../../examples/configs/pipeline/default.yaml");
+pub const DEFAULT_CONFIG: &str = include_str!("default.yaml");
 
 // -----------------------------------------------------------------------------
 // Configuration Loading

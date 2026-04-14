@@ -100,7 +100,7 @@ page.
 
 | File | Description |
 | ------ | ------------- |
-| [default.yaml](configs/pipeline/default.yaml) | Built-in default config (static JSON on /) |
+| [default.yaml](../core/src/config/default.yaml) | Built-in default config (static JSON on /) |
 | [composed-chains.yaml](configs/pipeline/composed-chains.yaml) | Multiple named chains composed per listener |
 | [conditional-filters.yaml](configs/pipeline/conditional-filters.yaml) | when/unless conditions on request and response phase |
 

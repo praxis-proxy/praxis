@@ -53,12 +53,8 @@ container:
 	docker build -t $(IMAGE):$(VERSION) -f Containerfile .
 
 container-run:
-	podman run --rm --network=host \
-		-v $(CURDIR)/examples:/etc/praxis/examples:ro \
-		$(IMAGE):$(VERSION) -c examples/configs/pipeline/default.yaml 2>&1 || \
-	docker run --rm --network=host \
-		-v $(CURDIR)/examples:/etc/praxis/examples:ro \
-		$(IMAGE):$(VERSION) -c examples/configs/pipeline/default.yaml 2>&1
+	podman run --rm --network=host $(IMAGE):$(VERSION) 2>&1 || \
+	docker run --rm --network=host $(IMAGE):$(VERSION) 2>&1
 
 # -------------------------------------------------------------------
 # Test

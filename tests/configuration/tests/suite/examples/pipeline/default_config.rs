@@ -12,10 +12,7 @@ use serde_json::Value;
 // -----------------------------------------------------------------------------
 
 /// Default example config loaded at compile time.
-const DEFAULT_CONFIG: &str = include_str!(concat!(
-    env!("CARGO_MANIFEST_DIR"),
-    "/../../examples/configs/pipeline/default.yaml"
-));
+const DEFAULT_CONFIG: &str = praxis_core::config::DEFAULT_CONFIG;
 
 // -----------------------------------------------------------------------------
 // Tests

@@ -772,7 +772,7 @@ config startup for testing. The source lives in
 [default.yaml]. For a realistic starting point, see
 [basic-reverse-proxy.yaml].
 
-[default.yaml]: ../examples/configs/pipeline/default.yaml
+[default.yaml]: ../core/src/config/default.yaml
 [basic-reverse-proxy.yaml]: ../examples/configs/traffic-management/basic-reverse-proxy.yaml
 
 ## Example Configs

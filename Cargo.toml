@@ -46,16 +46,16 @@ http = "1.4.0"
 # Pinned to match Pingora's dependency.
 nix = "0.24.3"
 # Temporary fork: custom ServerConfig (PR #726) + public WrappedX509 for per-cluster CA.
-pingora-core = { git = "https://github.com/praxis-proxy/pingora.git", rev = "b2fa2c9a8d4074e2a2a42e70ab4c17f8c61a566d", features = ["rustls"] }
-pingora-http = { git = "https://github.com/praxis-proxy/pingora.git", rev = "b2fa2c9a8d4074e2a2a42e70ab4c17f8c61a566d" }
-pingora-proxy = { git = "https://github.com/praxis-proxy/pingora.git", rev = "b2fa2c9a8d4074e2a2a42e70ab4c17f8c61a566d", features = ["rustls"] }
+pingora-core = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "b2fa2c9a8d4074e2a2a42e70ab4c17f8c61a566d", features = ["rustls"] }
+pingora-http = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "b2fa2c9a8d4074e2a2a42e70ab4c17f8c61a566d" }
+pingora-proxy = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "b2fa2c9a8d4074e2a2a42e70ab4c17f8c61a566d", features = ["rustls"] }
 percent-encoding = "2.3.2"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
 praxis = { path = "server", package = "praxis-proxy-server" }
-praxis-core = { path = "core", package = "praxis-proxy-core" }
-praxis-filter = { path = "filter", package = "praxis-proxy-filter" }
-praxis-protocol = { path = "protocol", package = "praxis-proxy-protocol" }
-praxis-tls = { path = "tls", package = "praxis-proxy-tls" }
+praxis-core = { version = "0.1.0", path = "core", package = "praxis-proxy-core" }
+praxis-filter = { version = "0.1.0", path = "filter", package = "praxis-proxy-filter" }
+praxis-protocol = { version = "0.1.0", path = "protocol", package = "praxis-proxy-protocol" }
+praxis-tls = { version = "0.1.0", path = "tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.149"
