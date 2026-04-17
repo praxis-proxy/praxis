@@ -129,6 +129,7 @@ struct ChartDef {
 }
 
 /// All charts to render.
+#[allow(clippy::cast_precision_loss, reason = "chart values")]
 const CHARTS: &[ChartDef] = &[
     ChartDef {
         suffix: "p99-latency",
@@ -176,7 +177,11 @@ const CHARTS: &[ChartDef] = &[
         suffix: "memory-peak",
         title: "Peak Memory RSS (MiB)  \u{2193} lower is better",
         y_label: "MiB",
-        extract: |m| m.resource.as_ref().map_or(0.0, |r| r.memory_rss_bytes_peak as f64 / 1_048_576.0),
+        extract: |m| {
+            m.resource
+                .as_ref()
+                .map_or(0.0, |r| r.memory_rss_bytes_peak as f64 / 1_048_576.0)
+        },
     },
 ];
 
