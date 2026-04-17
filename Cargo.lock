@@ -1671,6 +1671,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "praxis"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "nix",
+ "praxis-proxy-core",
+ "praxis-proxy-filter",
+ "praxis-proxy-protocol",
+ "tikv-jemallocator",
+ "tokio",
+ "tokio-util",
+ "tracing",
+]
+
+[[package]]
 name = "praxis-proxy-core"
 version = "0.1.0"
 dependencies = [
@@ -1728,21 +1743,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "praxis-proxy-server"
-version = "0.1.0"
-dependencies = [
- "clap",
- "nix",
- "praxis-proxy-core",
- "praxis-proxy-filter",
- "praxis-proxy-protocol",
- "tikv-jemallocator",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "praxis-proxy-tls"
 version = "0.1.0"
 dependencies = [
@@ -1762,10 +1762,10 @@ version = "0.1.0"
 dependencies = [
  "h2",
  "http",
+ "praxis",
  "praxis-proxy-core",
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
- "praxis-proxy-server",
  "rcgen",
  "rustls",
  "rustls-pemfile",
@@ -1831,10 +1831,10 @@ dependencies = [
  "async-trait",
  "benchmarks",
  "bytes",
+ "praxis",
  "praxis-proxy-core",
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
- "praxis-proxy-server",
  "praxis-test-utils",
  "serde_yaml",
  "tokio",
@@ -1854,8 +1854,8 @@ dependencies = [
 name = "praxis-tests-smoke"
 version = "0.1.0"
 dependencies = [
+ "praxis",
  "praxis-proxy-core",
- "praxis-proxy-server",
  "praxis-test-utils",
 ]
 
@@ -3150,8 +3150,8 @@ dependencies = [
  "clap",
  "nix",
  "plotters",
+ "praxis",
  "praxis-proxy-core",
- "praxis-proxy-server",
  "serde",
  "serde_json",
  "serde_yaml",

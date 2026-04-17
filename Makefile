@@ -67,7 +67,7 @@ test-unit:
 	cargo test -p praxis-proxy-core $(_NOCAPTURE)
 	cargo test -p praxis-proxy-filter $(_NOCAPTURE)
 	cargo test -p praxis-proxy-protocol $(_NOCAPTURE)
-	cargo test -p praxis-proxy-server $(_NOCAPTURE)
+	cargo test -p praxis $(_NOCAPTURE)
 
 test-configuration:
 	cargo test -p praxis-tests-configuration $(_NOCAPTURE)

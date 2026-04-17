@@ -51,7 +51,7 @@ pingora-http = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingo
 pingora-proxy = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "b2fa2c9a8d4074e2a2a42e70ab4c17f8c61a566d", features = ["rustls"] }
 percent-encoding = "2.3.2"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
-praxis = { path = "server", package = "praxis-proxy-server" }
+praxis = { path = "server" }
 praxis-core = { version = "0.1.0", path = "core", package = "praxis-proxy-core" }
 praxis-filter = { version = "0.1.0", path = "filter", package = "praxis-proxy-filter" }
 praxis-protocol = { version = "0.1.0", path = "protocol", package = "praxis-proxy-protocol" }

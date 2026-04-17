@@ -93,7 +93,7 @@ fn require_tool(name: &str, hint: &str) {
 /// Build the profiling binary and return its path.
 fn build_profiling_binary() -> PathBuf {
     let status = Command::new("cargo")
-        .args(["build", "--profile", "profiling", "-p", "praxis-proxy-server"])
+        .args(["build", "--profile", "profiling", "-p", "praxis"])
         .env("RUSTFLAGS", "-C force-frame-pointers=yes")
         .status()
         .expect("failed to run cargo build");
