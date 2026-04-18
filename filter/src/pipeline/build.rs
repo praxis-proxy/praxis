@@ -39,6 +39,7 @@ impl FilterPipeline {
                 mem::take(&mut entry.conditions),
                 mem::take(&mut entry.response_conditions),
             );
+            pf.failure_mode = entry.failure_mode;
             pf.name = entry.name.as_ref().map(|n| Arc::from(n.as_str()));
             filters.push(pf);
         }
@@ -86,7 +87,7 @@ impl FilterPipeline {
     /// cluster mismatches).
     ///
     /// ```
-    /// use praxis_filter::{FilterEntry, FilterPipeline, FilterRegistry};
+    /// use praxis_filter::{FailureMode, FilterEntry, FilterPipeline, FilterRegistry};
     ///
     /// let registry = FilterRegistry::with_builtins();
     /// let mut entries = vec![FilterEntry {
@@ -96,6 +97,7 @@ impl FilterPipeline {
     ///     conditions: vec![],
     ///     name: None,
     ///     response_conditions: vec![],
+    ///     failure_mode: FailureMode::default(),
     /// }];
     /// let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
     /// let errors = pipeline.ordering_errors(&entries);
@@ -128,7 +130,7 @@ impl FilterPipeline {
     /// Currently detects: all routers conditional with no fallback.
     ///
     /// ```
-    /// use praxis_filter::{FilterEntry, FilterPipeline, FilterRegistry};
+    /// use praxis_filter::{FailureMode, FilterEntry, FilterPipeline, FilterRegistry};
     ///
     /// let registry = FilterRegistry::with_builtins();
     /// let mut entries = vec![FilterEntry {
@@ -145,6 +147,7 @@ impl FilterPipeline {
     ///     )],
     ///     name: None,
     ///     response_conditions: vec![],
+    ///     failure_mode: FailureMode::default(),
     /// }];
     /// let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
     /// let warnings = pipeline.ordering_warnings();

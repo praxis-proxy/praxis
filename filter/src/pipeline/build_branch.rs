@@ -92,6 +92,7 @@ fn build_filters(
             mem::take(&mut entry.conditions),
             mem::take(&mut entry.response_conditions),
         );
+        pf.failure_mode = entry.failure_mode;
         pf.name = entry.name.as_ref().map(|n| Arc::from(n.as_str()));
         branch_configs.push(entry.branch_chains.take());
         filters.push(pf);
@@ -672,6 +673,7 @@ mod tests {
             branch_chains: None,
             conditions: vec![],
             config: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            failure_mode: Default::default(),
             filter_type: filter_type.to_owned(),
             name: name.map(|n| n.to_owned()),
             response_conditions: vec![],

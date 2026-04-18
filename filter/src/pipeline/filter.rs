@@ -5,7 +5,7 @@
 
 use std::{fmt, sync::Arc};
 
-use praxis_core::config::{Condition, ResponseCondition};
+use praxis_core::config::{Condition, FailureMode, ResponseCondition};
 
 use super::branch::ResolvedBranch;
 use crate::any_filter::AnyFilter;
@@ -25,6 +25,9 @@ pub(crate) struct PipelineFilter {
 
     /// Request-phase conditions.
     pub conditions: Vec<Condition>,
+
+    /// Per-filter failure mode (open or closed).
+    pub failure_mode: FailureMode,
 
     /// The filter implementation.
     pub filter: AnyFilter,
@@ -57,6 +60,7 @@ impl PipelineFilter {
         Self {
             branches: Vec::new(),
             conditions,
+            failure_mode: FailureMode::default(),
             filter,
             name: None,
             response_conditions,

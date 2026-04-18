@@ -395,6 +395,7 @@ mod tests {
         let outer_filter = PipelineFilter {
             branches: vec![inner_branch],
             conditions: vec![],
+            failure_mode: Default::default(),
             filter: AnyFilter::Http(Box::new(NoopFilter)),
             name: None,
             response_conditions: vec![],
@@ -567,6 +568,7 @@ mod tests {
         PipelineFilter {
             branches: vec![],
             conditions: vec![],
+            failure_mode: Default::default(),
             filter: AnyFilter::Http(Box::new(CountFilter { counter })),
             name: None,
             response_conditions: vec![],
@@ -578,6 +580,7 @@ mod tests {
         PipelineFilter {
             branches: vec![],
             conditions: vec![],
+            failure_mode: Default::default(),
             filter: AnyFilter::Http(Box::new(RejectFilter { status })),
             name: None,
             response_conditions: vec![],

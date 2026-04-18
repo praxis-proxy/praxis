@@ -120,6 +120,7 @@ fn filter_entry(filter_type: &str, yaml: &str) -> FilterEntry {
         conditions: vec![],
         name: None,
         response_conditions: vec![],
+        failure_mode: Default::default(),
     }
 }
 

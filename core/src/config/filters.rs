@@ -10,6 +10,24 @@ use serde::Deserialize;
 use super::{Condition, ResponseCondition};
 
 // -----------------------------------------------------------------------------
+// FailureMode
+// -----------------------------------------------------------------------------
+
+/// Per-filter failure behaviour.
+///
+/// Controls what happens when a filter returns an error during execution.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum FailureMode {
+    /// The request is aborted on filter error (default, current behaviour).
+    #[default]
+    Closed,
+
+    /// The filter error is logged and the request continues to the next filter.
+    Open,
+}
+
+// -----------------------------------------------------------------------------
 // FilterChainConfig
 // -----------------------------------------------------------------------------
 
@@ -89,6 +107,10 @@ pub struct FilterEntry {
     /// Empty means the filter always runs on responses.
     #[serde(default)]
     pub response_conditions: Vec<ResponseCondition>,
+
+    /// Per-filter failure behaviour (`open` or `closed`).
+    #[serde(default)]
+    pub failure_mode: FailureMode,
 
     /// Arbitrary YAML config passed to the filter's factory function.
     #[serde(flatten)]
@@ -215,6 +237,45 @@ routes: []
             entry.response_conditions.is_empty(),
             "response_conditions should be empty when omitted"
         );
+    }
+
+    #[test]
+    fn parse_failure_mode_defaults_to_closed() {
+        let yaml = "filter: router\nroutes: []\n";
+        let entry: FilterEntry = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(entry.failure_mode, FailureMode::Closed, "default should be Closed");
+    }
+
+    #[test]
+    fn parse_failure_mode_open() {
+        let yaml = "filter: access_log\nfailure_mode: open\n";
+        let entry: FilterEntry = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(entry.failure_mode, FailureMode::Open, "should parse 'open'");
+    }
+
+    #[test]
+    fn parse_failure_mode_closed_explicit() {
+        let yaml = "filter: ext_auth\nfailure_mode: closed\n";
+        let entry: FilterEntry = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(entry.failure_mode, FailureMode::Closed, "should parse 'closed'");
+    }
+
+    #[test]
+    fn parse_chain_with_failure_modes() {
+        let yaml = r#"
+name: mixed
+filters:
+  - filter: access_log
+    failure_mode: open
+  - filter: ext_auth
+    failure_mode: closed
+  - filter: router
+    routes: []
+"#;
+        let chain: FilterChainConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(chain.filters[0].failure_mode, FailureMode::Open);
+        assert_eq!(chain.filters[1].failure_mode, FailureMode::Closed);
+        assert_eq!(chain.filters[2].failure_mode, FailureMode::Closed);
     }
 
     #[test]

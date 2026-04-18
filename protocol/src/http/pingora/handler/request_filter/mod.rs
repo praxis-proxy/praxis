@@ -348,6 +348,7 @@ mod tests {
             conditions: vec![],
             name: None,
             response_conditions: vec![],
+            failure_mode: Default::default(),
         }];
         FilterPipeline::build(&mut entries, &registry).unwrap()
     }

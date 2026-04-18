@@ -32,7 +32,7 @@ pub use cluster::{
     ParameterisedStrategy, SimpleStrategy,
 };
 pub use condition::{Condition, ConditionMatch, ResponseCondition, ResponseConditionMatch};
-pub use filters::{FilterChainConfig, FilterEntry};
+pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
 pub use insecure_options::InsecureOptions;
 pub use listener::{Listener, ListenerTls, ProtocolKind};
 use parse::check_yaml_safety;

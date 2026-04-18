@@ -116,6 +116,7 @@ fn build_static_response_entry(args: &Args) -> FilterEntry {
         filter_type: "static_response".into(),
         conditions: vec![],
         config: serde_yaml::Value::Mapping(filter_config),
+        failure_mode: Default::default(),
         name: None,
         response_conditions: vec![],
     }

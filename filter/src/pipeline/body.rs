@@ -394,6 +394,7 @@ mod tests {
         let branch_filter = PipelineFilter {
             branches: vec![],
             conditions: vec![],
+            failure_mode: Default::default(),
             filter: AnyFilter::Http(Box::new(BranchBodyFilter)),
             name: None,
             response_conditions: vec![],
@@ -408,6 +409,7 @@ mod tests {
         let parent = PipelineFilter {
             branches: vec![branch],
             conditions: vec![],
+            failure_mode: Default::default(),
             filter: AnyFilter::Http(Box::new(NoopHttpFilter)),
             name: None,
             response_conditions: vec![],
@@ -448,6 +450,7 @@ mod tests {
         let parent = PipelineFilter {
             branches: vec![branch],
             conditions: vec![],
+            failure_mode: Default::default(),
             filter: AnyFilter::Http(Box::new(NoopHttpFilter)),
             name: None,
             response_conditions: vec![],
