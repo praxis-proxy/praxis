@@ -6,6 +6,9 @@ VERSION ?= $(shell perl -ne 'print $$1 if /^version\s*=\s*"(.+)"/' Cargo.toml)
 IMAGE   ?= praxis
 V       ?=
 
+UNAME_S := $(shell uname -s | tr A-Z a-z)
+UNAME_M := $(shell uname -m)
+
 ifneq ($(V),)
   _NOCAPTURE := -- --nocapture
 endif
@@ -195,14 +198,11 @@ H2SPEC := $(BINUTILS_DIR)/h2spec
 VEGETA := $(BINUTILS_DIR)/vegeta
 FORTIO := $(BINUTILS_DIR)/fortio
 
-UNAME_S := $(shell uname -s | tr A-Z a-z)
-UNAME_M := $(shell uname -m)
-
 # The MacOS / OSX sha256 command does not support the needed options.
 # On the Mac, do `brew install coreutils` to install gsha256sum, a GNU-compatible sha256sum
 SHA256SUM := sha256sum
 ifeq ($(UNAME_S),darwin)
-  SHA256SUM :=gsha256sum
+  SHA256SUM := gsha256sum
   ifeq (, $(shell which gsha256sum))
     $(error "No gsha256sum in $(PATH), consider doing 'brew install coreutils'")
   endif
