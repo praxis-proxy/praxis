@@ -18,6 +18,7 @@ endif
 	lint fmt audit coverage coverage-check \
 	fuzz fuzz-build \
 	container container-run \
+	test-container test-container-run \
 	run-echo run-debug \
 	tools clean-tools \
 	help
@@ -56,6 +57,21 @@ container:
 container-run:
 	podman run --rm --network=host $(IMAGE):$(VERSION) 2>&1 || \
 	docker run --rm --network=host $(IMAGE):$(VERSION) 2>&1
+
+# -------------------------------------------------------------------
+# Test Container
+# -------------------------------------------------------------------
+
+test-container:
+	podman build --ignorefile Containerfile.test.dockerignore \
+		-t $(IMAGE)-test:$(VERSION) -f Containerfile.test . || \
+	docker build -t $(IMAGE)-test:$(VERSION) -f Containerfile.test .
+
+test-container-run: test-container
+	podman run --rm -v $(CURDIR):/src -v praxis-test-cache:/cache \
+		$(IMAGE)-test:$(VERSION) 2>&1 || \
+	docker run --rm -v $(CURDIR):/src -v praxis-test-cache:/cache \
+		$(IMAGE)-test:$(VERSION) 2>&1
 
 # -------------------------------------------------------------------
 # Test
@@ -157,8 +173,8 @@ run-debug:
 # Binutils
 # -------------------------------------------------------------------
 
-BINUTILS_DIR   := target/praxis-binutils
-BINUTILS_PATH  := $(CURDIR)/$(BINUTILS_DIR)
+BINUTILS_DIR   ?= target/praxis-binutils
+BINUTILS_PATH  := $(abspath $(BINUTILS_DIR))
 
 H2SPEC_VERSION := 2.6.0
 VEGETA_VERSION := 12.13.0
@@ -186,8 +202,8 @@ $(BINUTILS_DIR):
 H2SPEC_SHA256_linux_amd64  := 157ee0de702e01ad40e752dbf074b366027e550c8e7504f9450da2809e279318
 H2SPEC_SHA256_darwin_amd64 := 981cb9f90a6f5e36300063022bd4eb7438d3dcf66d63a146a8541359697d1601
 
-# h2spec has no arm64 builds; fall back to amd64 (runs under Rosetta on macOS).
-ifeq ($(UNAME_S)_$(ARCH_GO),darwin_arm64)
+# h2spec has no arm64 builds; fall back to amd64.
+ifeq ($(ARCH_GO),arm64)
   H2SPEC_ARCH := amd64
 else
   H2SPEC_ARCH := $(ARCH_GO)
@@ -198,28 +214,30 @@ H2SPEC_SHA256 := $(H2SPEC_SHA256_$(UNAME_S)_$(H2SPEC_ARCH))
 $(H2SPEC): | $(BINUTILS_DIR)
 	curl -sSfL -o $(BINUTILS_DIR)/h2spec.tar.gz \
 		https://github.com/summerwind/h2spec/releases/download/v$(H2SPEC_VERSION)/h2spec_$(UNAME_S)_$(H2SPEC_ARCH).tar.gz
-	$(if $(H2SPEC_SHA256),echo "$(H2SPEC_SHA256)  $(BINUTILS_DIR)/h2spec.tar.gz" | sha256sum --check --status,)
+	$(if $(H2SPEC_SHA256),echo "$(H2SPEC_SHA256)  $(BINUTILS_DIR)/h2spec.tar.gz" | sha256sum -c,)
 	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/h2spec.tar.gz h2spec
 	rm -f $(BINUTILS_DIR)/h2spec.tar.gz
 
 VEGETA_SHA256_linux_amd64  := e8759ce45c14e18374bdccd3ba6068197bc3a9f9b7e484db3837f701b9d12e61
+VEGETA_SHA256_linux_arm64  := 950381173a5575e25e8e086f36fc03bf65d61a2433329b48e41e1cb5e4133bba
 VEGETA_SHA256_darwin_amd64 := 4e912c83ce07db4e1e394e1cbb657f2396dff2f7ed90f03869a184cc17d0f994
 VEGETA_SHA256 := $(VEGETA_SHA256_$(UNAME_S)_$(ARCH_GO))
 
 $(VEGETA): | $(BINUTILS_DIR)
 	curl -sSfL -o $(BINUTILS_DIR)/vegeta.tar.gz \
 		https://github.com/tsenart/vegeta/releases/download/v$(VEGETA_VERSION)/vegeta_$(VEGETA_VERSION)_$(UNAME_S)_$(ARCH_GO).tar.gz
-	echo "$(VEGETA_SHA256)  $(BINUTILS_DIR)/vegeta.tar.gz" | sha256sum --check --status
+	$(if $(VEGETA_SHA256),echo "$(VEGETA_SHA256)  $(BINUTILS_DIR)/vegeta.tar.gz" | sha256sum -c,)
 	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/vegeta.tar.gz vegeta
 	rm -f $(BINUTILS_DIR)/vegeta.tar.gz
 
-FORTIO_SHA256_linux_amd64 := 92da34238dee258191a9dc6691c8bc75305b308951e934e2c3b4e658db0d77d1
+FORTIO_SHA256_linux_amd64  := 92da34238dee258191a9dc6691c8bc75305b308951e934e2c3b4e658db0d77d1
+FORTIO_SHA256_linux_arm64  := f66275a56ef41e9a5afb2ea8181eb53ca36b34c6d19a201b58aec17dbe95a853
 FORTIO_SHA256 := $(FORTIO_SHA256_$(UNAME_S)_$(ARCH_GO))
 
 $(FORTIO): | $(BINUTILS_DIR)
 	curl -sSfL -o $(BINUTILS_DIR)/fortio.tgz \
 		https://github.com/fortio/fortio/releases/download/v$(FORTIO_VERSION)/fortio-$(UNAME_S)_$(ARCH_GO)-$(FORTIO_VERSION).tgz
-	$(if $(FORTIO_SHA256),echo "$(FORTIO_SHA256)  $(BINUTILS_DIR)/fortio.tgz" | sha256sum --check --status,)
+	$(if $(FORTIO_SHA256),echo "$(FORTIO_SHA256)  $(BINUTILS_DIR)/fortio.tgz" | sha256sum -c,)
 	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/fortio.tgz usr/bin/fortio --strip-components=2
 	rm -f $(BINUTILS_DIR)/fortio.tgz
 
@@ -275,6 +293,8 @@ help:
 	@echo "Container:"
 	@echo "  container            build container image"
 	@echo "  container-run        run container in foreground (host network)"
+	@echo "  test-container       build test container image"
+	@echo "  test-container-run   build and run test suite in container"
 	@echo ""
 	@echo "Binutils (target/praxis-binutils/):"
 	@echo "  tools                download all external CLI tools"

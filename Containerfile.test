@@ -1,0 +1,53 @@
+# syntax=docker/dockerfile:1
+
+# -------------------------------------------------------------------
+# Test Container
+# -------------------------------------------------------------------
+#
+# Build environment for running the test suite in a container. The
+# project directory is bind-mounted at runtime so tests always run
+# against the current working tree. A named volume at /cache persists
+# compiled dependencies and downloaded tools between runs.
+#
+# Build:  make test-container
+# Run:    make test-container-run
+
+FROM rust:1.94-alpine
+
+ENV OPENSSL_STATIC=1
+
+# The full project directory is bind-mounted at /src. This includes
+# the host's target/ directory, but CARGO_TARGET_DIR redirects all
+# compilation to /cache/target (a named volume), so cargo never
+# reads or writes the host's target/. BINUTILS_DIR is similarly
+# redirected to /cache/praxis-binutils so `make tools` downloads
+# Linux binaries there instead of into the host's target/.
+ENV CARGO_TARGET_DIR=/cache/target
+ENV BINUTILS_DIR=/cache/praxis-binutils
+
+# -------------------------------------------------------------------
+# Tool Layer
+# -------------------------------------------------------------------
+
+RUN apk add --no-cache \
+    musl-dev \
+    openssl-dev \
+    openssl-libs-static \
+    pkgconf \
+    cmake \
+    make \
+    g++ \
+    curl
+
+# -------------------------------------------------------------------
+# Non-root user
+# -------------------------------------------------------------------
+
+# Praxis refuses to run as UID 0.
+RUN addgroup -S tester && adduser -S -G tester -h /home/tester tester \
+    && mkdir -p /cache && chown tester:tester /cache
+
+USER tester
+WORKDIR /src
+
+CMD ["sh", "-c", "make tools && make test"]
