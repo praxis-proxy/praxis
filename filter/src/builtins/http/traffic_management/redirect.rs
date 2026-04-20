@@ -25,6 +25,7 @@ const VALID_STATUSES: [u16; 4] = [301, 302, 307, 308];
 
 /// Deserialized YAML config for the redirect filter.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RedirectConfig {
     /// HTTP redirect status code (301, 302, 307, or 308).
     #[serde(default = "default_status")]

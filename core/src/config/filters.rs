@@ -31,6 +31,7 @@ use super::{Condition, ResponseCondition};
 /// assert_eq!(chain.filters.len(), 2);
 /// ```
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct FilterChainConfig {
     /// Unique name for this filter chain.
     pub name: String,

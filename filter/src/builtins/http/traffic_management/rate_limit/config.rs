@@ -11,6 +11,7 @@ use serde::Deserialize;
 
 /// Deserialized YAML config for the rate limit filter.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct RateLimitConfig {
     /// `"per_ip"` or `"global"`.
     pub mode: String,

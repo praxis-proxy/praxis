@@ -61,6 +61,7 @@ impl_condition_deserialize!(ResponseCondition, ResponseConditionMatch, "response
 /// assert_eq!(m.status.as_ref().unwrap(), &[200, 201]);
 /// ```
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ResponseConditionMatch {
     /// Response status code must be one of these.
     #[serde(default)]

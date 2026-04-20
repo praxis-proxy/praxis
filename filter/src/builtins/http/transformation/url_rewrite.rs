@@ -52,6 +52,7 @@ const QUERY_VALUE_ENCODE_SET: &AsciiSet = &CONTROLS.add(b' ').add(b'"').add(b'#'
 /// assert_eq!(filter.name(), "url_rewrite");
 /// ```
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct UrlRewriteConfig {
     /// Ordered list of rewrite operations to apply.
     #[serde(default)]

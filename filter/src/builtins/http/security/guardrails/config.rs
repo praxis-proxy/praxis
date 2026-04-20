@@ -55,6 +55,7 @@ pub enum GuardrailsAction {
 
 /// Deserialized YAML config for a single guardrail rule.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct RuleConfig {
     /// Header name (required when `target` is `"header"`).
     pub name: Option<String>,
@@ -81,6 +82,7 @@ pub(super) struct RuleConfig {
 
 /// Deserialized YAML config for the guardrails filter.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct GuardrailsConfig {
     /// What to do when a rule matches (default: reject).
     #[serde(default)]

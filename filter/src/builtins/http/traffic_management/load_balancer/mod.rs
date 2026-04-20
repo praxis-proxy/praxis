@@ -82,6 +82,7 @@ pub struct LoadBalancerFilter {
 
 /// Deserialization wrapper for the load balancer's YAML config.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LoadBalancerConfig {
     /// Cluster definitions.
     #[serde(default)]

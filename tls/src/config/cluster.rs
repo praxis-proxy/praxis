@@ -48,6 +48,7 @@ pub struct ClusterTls {
 
 /// Raw deserialization helper for [`ClusterTls`].
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ClusterTlsRaw {
     /// Custom CA.
     #[serde(default)]

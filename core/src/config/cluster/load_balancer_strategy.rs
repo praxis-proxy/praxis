@@ -48,6 +48,7 @@ pub enum ParameterisedStrategy {
 
 /// Options for the `consistent_hash` load-balancing strategy.
 #[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConsistentHashOpts {
     /// Name of the request header to use as the hash key.
     ///

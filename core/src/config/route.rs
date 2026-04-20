@@ -29,6 +29,7 @@ use serde::{Deserialize, Serialize};
 /// assert!(route.headers.is_none());
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Route {
     /// Path prefix to match. The longest matching prefix wins.
     pub path_prefix: String,

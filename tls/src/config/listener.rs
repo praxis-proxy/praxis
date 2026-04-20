@@ -64,6 +64,7 @@ pub struct ListenerTls {
 
 /// Raw deserialization helper for [`ListenerTls`].
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ListenerTlsRaw {
     /// Server certificates.
     certificates: Vec<CertKeyPair>,

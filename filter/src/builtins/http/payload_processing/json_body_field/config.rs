@@ -20,6 +20,7 @@ pub(super) const DEFAULT_MAX_BODY_BYTES: usize = 10_485_760;
 
 /// A single field-to-header mapping used in the `fields` list.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct JsonBodyFieldMapping {
     /// Top-level JSON field name to extract.
     pub field: String,
@@ -39,6 +40,7 @@ pub(super) struct JsonBodyFieldMapping {
 ///
 /// [`JsonBodyFieldFilter`]: super::JsonBodyFieldFilter
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct JsonBodyFieldConfig {
     /// Single-field: top-level JSON field name to extract.
     pub field: Option<String>,

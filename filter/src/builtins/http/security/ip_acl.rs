@@ -21,6 +21,7 @@ use crate::{
 // -----------------------------------------------------------------------------
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// Deserialized YAML config for the IP ACL filter.
 struct IpAclConfig {
     /// IPs/CIDRs to allow. If non-empty, only these are permitted.

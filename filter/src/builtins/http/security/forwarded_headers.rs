@@ -21,6 +21,7 @@ use crate::{
 
 /// Deserialized YAML config for the forwarded headers filter.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ForwardedHeadersConfig {
     /// CIDR ranges of trusted proxies whose existing
     /// X-Forwarded-For values are preserved (appended to).

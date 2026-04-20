@@ -156,6 +156,7 @@ struct WildcardRoute {
 
 /// YAML configuration for the SNI router filter.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SniRouterConfig {
     /// Fallback upstream when no route matches.
     #[serde(default)]
@@ -167,6 +168,7 @@ struct SniRouterConfig {
 
 /// A single SNI route entry.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SniRouteEntry {
     /// Server name patterns (exact or wildcard like `*.example.com`).
     server_names: Vec<String>,

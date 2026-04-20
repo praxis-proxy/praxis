@@ -27,6 +27,7 @@ pub use response::{ResponseCondition, ResponseConditionMatch};
 macro_rules! impl_condition_deserialize {
     ($cond:ident, $match_:ty, $label:expr) => {
         #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
         struct ConditionDeserHelper {
             /// The `when` predicate, if present.
             #[serde(default)]

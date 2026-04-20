@@ -25,7 +25,7 @@ use serde::Deserialize;
 /// assert_eq!(limits.max_response_bytes, Some(5_242_880));
 /// ```
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct BodyLimitsConfig {
     /// Maximum request body size in bytes.
     pub max_request_bytes: Option<usize>,

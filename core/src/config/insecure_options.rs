@@ -42,7 +42,7 @@ use serde::Deserialize;
 /// ```
 #[allow(clippy::struct_excessive_bools, reason = "security override flags")]
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct InsecureOptions {
     /// Allow running as root (UID 0).
     pub allow_root: bool,

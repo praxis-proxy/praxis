@@ -75,6 +75,7 @@ impl fmt::Display for HealthCheckType {
 /// assert_eq!(hc.interval_ms, 5000);
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct HealthCheckConfig {
     /// Probe type: [`Http`], [`Tcp`], or [`Grpc`].
     ///

@@ -12,6 +12,7 @@ use serde::Deserialize;
 /// Deserialized YAML config for the CORS filter.
 #[allow(clippy::struct_excessive_bools, reason = "CORS spec flags")]
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct CorsConfig {
     /// Allowed origins. Use `["*"]` for any origin.
     pub allow_origins: Vec<String>,

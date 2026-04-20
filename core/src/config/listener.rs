@@ -27,6 +27,7 @@ use serde::Deserialize;
 /// assert!(listener.tls.is_none());
 /// ```
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Listener {
     /// Unique name for this listener.
     pub name: String,

@@ -32,6 +32,7 @@ use crate::TlsError;
 /// assert!(pair.validate().is_ok());
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CertKeyPair {
     /// Path to the PEM certificate file.
     pub cert_path: String,
@@ -86,6 +87,7 @@ impl CertKeyPair {
 /// assert_eq!(ca.ca_path, "/etc/ssl/ca.pem");
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct CaConfig {
     /// Path to the PEM CA certificate file.
     pub ca_path: String,

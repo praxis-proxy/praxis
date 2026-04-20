@@ -35,6 +35,7 @@ const DEFAULT_HEADER_NAME: &str = "X-Request-ID";
 
 /// Configuration for the request ID propagation filter.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RequestIdFilterConfig {
     /// Name of the header to read, generate, and forward. Defaults to `X-Request-ID`.
     #[serde(default)]

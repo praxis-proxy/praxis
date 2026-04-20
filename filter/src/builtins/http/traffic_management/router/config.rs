@@ -12,6 +12,7 @@ use serde::Deserialize;
 
 /// Deserialization wrapper for the router's YAML config.
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct RouterConfig {
     /// Route table entries.
     #[serde(default)]

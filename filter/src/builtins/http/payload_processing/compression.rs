@@ -21,6 +21,7 @@ use crate::{
 
 /// Per-algorithm YAML configuration.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AlgorithmConfig {
     /// Whether this algorithm is enabled.
     #[serde(default = "default_true")]
@@ -32,6 +33,7 @@ struct AlgorithmConfig {
 
 /// YAML configuration for the compression filter.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct CompressionFilterConfig {
     /// Default compression level for all algorithms (1..=12).
     #[serde(default = "default_level")]

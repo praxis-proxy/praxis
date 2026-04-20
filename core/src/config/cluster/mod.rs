@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 /// assert!(cluster.tls.is_none());
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct Cluster {
     /// Unique name for the cluster.
     pub name: Arc<str>,

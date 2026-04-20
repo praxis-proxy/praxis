@@ -36,6 +36,7 @@ use crate::{
 
 /// Configuration for the header manipulation filter.
 #[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct HeaderFilterConfig {
     /// Headers to append to the upstream request.
     #[serde(default)]
@@ -56,6 +57,7 @@ pub(crate) struct HeaderFilterConfig {
 
 /// A name/value pair used in header add/set/remove config.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(crate) struct HeaderPair {
     /// Header field name.
     pub(crate) name: String,

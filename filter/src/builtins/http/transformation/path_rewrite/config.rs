@@ -13,6 +13,7 @@ use serde::Deserialize;
 ///
 /// Exactly one operation must be specified.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct PathRewriteConfig {
     /// Remove this prefix from the request path.
     #[serde(default)]
@@ -41,6 +42,7 @@ pub(super) struct PathRewriteConfig {
 
 /// Regex find/replace configuration.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(super) struct ReplaceConfig {
     /// Regex pattern to match.
     pub pattern: String,

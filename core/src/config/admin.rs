@@ -25,7 +25,7 @@ use serde::Deserialize;
 /// assert!(admin.verbose);
 /// ```
 #[derive(Debug, Clone, Default, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub struct AdminConfig {
     /// Admin endpoint bind address.
     pub address: Option<String>,

@@ -60,6 +60,7 @@ impl_condition_deserialize!(Condition, ConditionMatch, "condition");
 /// assert_eq!(m.methods.as_ref().unwrap().len(), 2);
 /// ```
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConditionMatch {
     /// Request URI must match this exact path.
     #[serde(default)]

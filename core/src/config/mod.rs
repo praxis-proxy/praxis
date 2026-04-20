@@ -67,6 +67,7 @@ pub use validate::{MAX_BRANCH_DEPTH, MAX_ITERATIONS_CEILING};
 /// assert_eq!(config.listeners[0].address, "127.0.0.1:8080");
 /// ```
 #[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Config {
     /// Admin endpoint settings (address and verbosity).
     #[serde(default)]
@@ -563,6 +564,16 @@ filter_chains:
         let config = Config::from_yaml(VALID_YAML).unwrap();
         assert!(config.admin.address.is_none(), "admin address should default to None");
         assert!(!config.admin.verbose, "admin verbose should default to false");
+    }
+
+    #[test]
+    fn reject_unrecognized_top_level_key() {
+        let yaml = format!("{VALID_YAML}\nunrecognized_key: true\n");
+        let err = Config::from_yaml(&yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("unrecognized_key"),
+            "error should name the unknown field"
+        );
     }
 
     // -------------------------------------------------------------------------
