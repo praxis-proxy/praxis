@@ -115,7 +115,18 @@ test-smoke:
 # Bench
 # -------------------------------------------------------------------
 
-bench: $(VEGETA) $(FORTIO)
+# Fortio builds are not available on GitHub for Darwin (Mac OSX)
+# To install Fortio on the Mac, use `brew install fortio`.
+ifeq ($(UNAME_S),darwin)
+  FORTIO_DEP :=
+  ifeq (, $(shell which fortio))
+    $(error "No fortio in $(PATH), consider doing 'brew install fortio'")
+  endif
+else
+  FORTIO_DEP := $(FORTIO)
+endif
+
+bench: $(VEGETA) $(FORTIO_DEP)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo bench -p benchmarks
 
 # -------------------------------------------------------------------
@@ -187,6 +198,17 @@ FORTIO := $(BINUTILS_DIR)/fortio
 UNAME_S := $(shell uname -s | tr A-Z a-z)
 UNAME_M := $(shell uname -m)
 
+# The MacOS / OSX sha256 command does not support the needed options.
+# On the Mac, do `brew install coreutils` to install gsha256sum, a GNU-compatible sha256sum
+SHA256SUM := sha256sum
+ifeq ($(UNAME_S),darwin)
+  SHA256SUM :=gsha256sum
+  ifeq (, $(shell which gsha256sum))
+    $(error "No gsha256sum in $(PATH), consider doing 'brew install coreutils'")
+  endif
+endif
+
+
 # Map architecture names
 ifeq ($(UNAME_M),x86_64)
   ARCH_GO := amd64
@@ -214,7 +236,7 @@ H2SPEC_SHA256 := $(H2SPEC_SHA256_$(UNAME_S)_$(H2SPEC_ARCH))
 $(H2SPEC): | $(BINUTILS_DIR)
 	curl -sSfL -o $(BINUTILS_DIR)/h2spec.tar.gz \
 		https://github.com/summerwind/h2spec/releases/download/v$(H2SPEC_VERSION)/h2spec_$(UNAME_S)_$(H2SPEC_ARCH).tar.gz
-	$(if $(H2SPEC_SHA256),echo "$(H2SPEC_SHA256)  $(BINUTILS_DIR)/h2spec.tar.gz" | sha256sum -c,)
+	$(if $(H2SPEC_SHA256),echo "$(H2SPEC_SHA256)  $(BINUTILS_DIR)/h2spec.tar.gz" | $(SHA256SUM) -c,)
 	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/h2spec.tar.gz h2spec
 	rm -f $(BINUTILS_DIR)/h2spec.tar.gz
 
@@ -226,7 +248,7 @@ VEGETA_SHA256 := $(VEGETA_SHA256_$(UNAME_S)_$(ARCH_GO))
 $(VEGETA): | $(BINUTILS_DIR)
 	curl -sSfL -o $(BINUTILS_DIR)/vegeta.tar.gz \
 		https://github.com/tsenart/vegeta/releases/download/v$(VEGETA_VERSION)/vegeta_$(VEGETA_VERSION)_$(UNAME_S)_$(ARCH_GO).tar.gz
-	$(if $(VEGETA_SHA256),echo "$(VEGETA_SHA256)  $(BINUTILS_DIR)/vegeta.tar.gz" | sha256sum -c,)
+	$(if $(VEGETA_SHA256),echo "$(VEGETA_SHA256)  $(BINUTILS_DIR)/vegeta.tar.gz" | $(SHA256SUM) -c,)
 	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/vegeta.tar.gz vegeta
 	rm -f $(BINUTILS_DIR)/vegeta.tar.gz
 
@@ -237,11 +259,11 @@ FORTIO_SHA256 := $(FORTIO_SHA256_$(UNAME_S)_$(ARCH_GO))
 $(FORTIO): | $(BINUTILS_DIR)
 	curl -sSfL -o $(BINUTILS_DIR)/fortio.tgz \
 		https://github.com/fortio/fortio/releases/download/v$(FORTIO_VERSION)/fortio-$(UNAME_S)_$(ARCH_GO)-$(FORTIO_VERSION).tgz
-	$(if $(FORTIO_SHA256),echo "$(FORTIO_SHA256)  $(BINUTILS_DIR)/fortio.tgz" | sha256sum -c,)
+	$(if $(FORTIO_SHA256),echo "$(FORTIO_SHA256)  $(BINUTILS_DIR)/fortio.tgz" | $(SHA256SUM) -c,)
 	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/fortio.tgz usr/bin/fortio --strip-components=2
 	rm -f $(BINUTILS_DIR)/fortio.tgz
 
-tools: $(H2SPEC) $(VEGETA) $(FORTIO)
+tools: $(H2SPEC) $(VEGETA) $(FORTIO_DEP)
 
 clean-tools:
 	rm -rf $(BINUTILS_DIR)
