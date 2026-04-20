@@ -10,8 +10,8 @@ use std::{
 };
 
 use praxis_core::config::{
-    AdminConfig, BodyLimitsConfig, Cluster, Config, Endpoint, FilterChainConfig, FilterEntry, InsecureOptions,
-    Listener, ProtocolKind, RuntimeConfig,
+    AdminConfig, BodyLimitsConfig, Cluster, Config, Endpoint, FilterChainConfig, FilterEntry,
+    InsecureOptions, Listener, ProtocolKind, RuntimeConfig,
 };
 
 use super::specialized::{BackendGuard, read_until_headers_complete, spawn_tcp_server, spawn_tcp_server_with_shutdown};

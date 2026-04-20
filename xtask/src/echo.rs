@@ -5,8 +5,8 @@
 
 use clap::Parser;
 use praxis_core::config::{
-    AdminConfig, BodyLimitsConfig, Config, FilterChainConfig, FilterEntry, InsecureOptions, Listener, ProtocolKind,
-    RuntimeConfig,
+    AdminConfig, BodyLimitsConfig, Config, FilterChainConfig, FilterEntry, InsecureOptions, Listener,
+    ProtocolKind, RuntimeConfig,
 };
 
 // -----------------------------------------------------------------------------
