@@ -10,8 +10,6 @@ ignore = [
     "RUSTSEC-2025-0134",
     # instant 0.1.13: unmaintained (via notify -> notify-types)
     "RUSTSEC-2024-0384",
-    # rand 0.8.5: unsound with custom logger (via pingora)
-    "RUSTSEC-2026-0097",
 ]
 
 [licenses]
