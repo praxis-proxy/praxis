@@ -95,7 +95,7 @@ impl Backend {
     ///
     /// # Panics
     ///
-    /// Panics if the server fails to bind or accept connections.
+    /// Panics if the server fails to bind.
     pub fn start_with_shutdown(self) -> BackendGuard {
         let status = self.status;
         let reason = reason_phrase(status);

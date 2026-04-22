@@ -3,7 +3,7 @@
 
 //! Proxy startup and configuration test utilities for integration tests.
 
-use std::{collections::HashMap, fmt, sync::Arc};
+use std::{collections::HashMap, fmt, sync::Arc, thread::JoinHandle, time::Duration};
 
 use pingora_core::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
 use praxis_core::{
@@ -86,12 +86,18 @@ impl ShutdownSignalWatch for NotifyShutdownWatch {
     }
 }
 
+/// Maximum time to wait for the server thread to finish
+/// during [`ProxyGuard::drop`].
+const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// RAII guard that shuts down a Pingora proxy server when
 /// dropped. Returned by [`start_proxy_with_registry`] and
 /// related helpers so that test threads do not leak.
 pub struct ProxyGuard {
     /// The address the proxy is listening on.
     addr: String,
+    /// Handle to the spawned server thread, joined on drop.
+    handle: Option<JoinHandle<()>>,
     /// Fires the shutdown signal on drop.
     notify: Arc<Notify>,
 }
@@ -112,18 +118,29 @@ impl fmt::Display for ProxyGuard {
 impl Drop for ProxyGuard {
     fn drop(&mut self) {
         self.notify.notify_one();
+        if let Some(handle) = self.handle.take() {
+            let start = std::time::Instant::now();
+            while !handle.is_finished() {
+                if start.elapsed() >= JOIN_TIMEOUT {
+                    tracing::warn!(
+                        addr = %self.addr,
+                        timeout_secs = JOIN_TIMEOUT.as_secs(),
+                        "server thread did not exit within timeout",
+                    );
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let _ = handle.join();
+        }
     }
 }
 
-/// Build a [`ProxyGuard`] by spawning a Pingora server that
-/// shuts down when the guard is dropped.
-fn spawn_proxy_server(config: &Config, registry: &FilterRegistry) -> ProxyGuard {
-    let addr = config
-        .listeners
-        .first()
-        .expect("config must have at least one listener")
-        .address
-        .clone();
+/// Build a Pingora [`Server`] configured with all listeners
+/// and the optional admin endpoint.
+///
+/// [`Server`]: pingora_core::server::Server
+fn build_pingora_server(config: &Config, registry: &FilterRegistry) -> pingora_core::server::Server {
     let mut server = praxis_core::server::build_http_server(config.shutdown_timeout_secs, &RuntimeOptions::default());
 
     for listener in &config.listeners {
@@ -140,16 +157,34 @@ fn spawn_proxy_server(config: &Config, registry: &FilterRegistry) -> ProxyGuard 
         );
     }
 
+    server
+}
+
+/// Build a [`ProxyGuard`] by spawning a Pingora server that
+/// shuts down when the guard is dropped.
+fn spawn_proxy_server(config: &Config, registry: &FilterRegistry) -> ProxyGuard {
+    let addr = config
+        .listeners
+        .first()
+        .expect("config must have at least one listener")
+        .address
+        .clone();
+    let server = build_pingora_server(config, registry);
+
     let notify = Arc::new(Notify::new());
     let watch_notify = Arc::clone(&notify);
 
-    std::thread::spawn(move || {
+    let handle = std::thread::spawn(move || {
         server.run(RunArgs {
             shutdown_signal: Box::new(NotifyShutdownWatch { notify: watch_notify }),
         });
     });
 
-    ProxyGuard { addr, notify }
+    ProxyGuard {
+        addr,
+        handle: Some(handle),
+        notify,
+    }
 }
 
 // -----------------------------------------------------------------------------
