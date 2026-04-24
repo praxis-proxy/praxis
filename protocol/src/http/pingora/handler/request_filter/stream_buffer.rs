@@ -89,6 +89,17 @@ pub(super) async fn pre_read_body(
         _ => return Ok(Vec::new()),
     };
 
+    // Enable retry buffering so Pingora's body forwarding loop can
+    // replay the consumed body via `get_retry_buffer()`. Without this,
+    // `is_body_done()` returns true after pre-read and Pingora never
+    // calls `request_body_filter`, leaving the pre-read body stranded.
+    //
+    // Limitation: Pingora's retry buffer is capped at 64 KiB
+    // (`BODY_BUF_LIMIT` in pingora-core). Bodies exceeding that limit
+    // are silently truncated and will not be forwarded to upstream.
+    // Tracked for an upstream fix: https://github.com/praxis-proxy/praxis/issues/75
+    session.downstream_session.enable_retry_buffering();
+
     let mut buffer = BodyBuffer::new(max_bytes);
     let mut all_extra_headers = Vec::new();
     let mut released = false;
