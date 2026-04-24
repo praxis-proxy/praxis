@@ -46,8 +46,8 @@ futures = "0.3.32"
 h2 = "0.4.13"
 http = "1.4.0"
 # Pinned to match Pingora's dependency.
-nix = "0.24.3"
-notify = "7.0.0"
+nix = "0.31.2"
+notify = "8.2.0"
 # Temporary fork: custom ServerConfig (PR #726) + public WrappedX509 for per-cluster CA.
 pingora-core = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "b2fa2c9a8d4074e2a2a42e70ab4c17f8c61a566d", features = ["rustls"] }
 pingora-http = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "b2fa2c9a8d4074e2a2a42e70ab4c17f8c61a566d" }
@@ -62,9 +62,9 @@ praxis-tls = { version = "0.1.0", path = "tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.149"
-rcgen = "0.13.2"
+rcgen = "0.14.7"
 regex = "1.12.3"
-rustls = "0.23.38"
+rustls = "0.23.39"
 rustls-pemfile = "2.2.0"
 # NOTE: serde_yaml is deprecated upstream. Migration to serde_yml is tracked.
 serde_yaml = "0.9.34"
