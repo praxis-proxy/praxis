@@ -9,10 +9,13 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
+http = "1.4.0"
 libfuzzer-sys = "0.4.9"
 praxis-tls = { path = "../../tls", package = "praxis-proxy-tls" }
 praxis-core = { path = "../../core", package = "praxis-proxy-core" }
 praxis-filter = { path = "../../filter", package = "praxis-proxy-filter" }
+serde_yaml = "0.9.34"
+tokio = { version = "1.51.1", features = ["rt"] }
 
 [[bin]]
 name = "fuzz_sni"
@@ -27,4 +30,9 @@ doc = false
 [[bin]]
 name = "fuzz_config_parse"
 path = "fuzz_targets/fuzz_config_parse.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_filter_pipeline"
+path = "fuzz_targets/fuzz_filter_pipeline.rs"
 doc = false

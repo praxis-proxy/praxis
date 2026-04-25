@@ -142,6 +142,7 @@ fuzz:
 	cargo +nightly fuzz run --fuzz-dir tests/fuzz fuzz_sni -- -max_total_time=$(FUZZ_DURATION)
 	cargo +nightly fuzz run --fuzz-dir tests/fuzz fuzz_path_sanitize -- -max_total_time=$(FUZZ_DURATION)
 	cargo +nightly fuzz run --fuzz-dir tests/fuzz fuzz_config_parse -- -max_total_time=$(FUZZ_DURATION)
+	cargo +nightly fuzz run --fuzz-dir tests/fuzz fuzz_filter_pipeline -- -max_total_time=$(FUZZ_DURATION)
 
 fuzz-build:
 	cargo +nightly fuzz build --fuzz-dir tests/fuzz
