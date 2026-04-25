@@ -45,7 +45,12 @@ jobs:
                     pullRequest { isDraft }
                   }
                 }"
-              gh pr comment "$number" --body "Converted to draft: required checks failing."
+
+              already_commented=$(gh api "repos/${GH_REPO}/issues/${number}/comments" \
+                --jq '[.[] | select(.body == "Converted to draft: required checks failing.")] | length')
+              if [ "$already_commented" -eq 0 ]; then
+                gh pr comment "$number" --body "Converted to draft: required checks failing."
+              fi
             fi
           done
 
