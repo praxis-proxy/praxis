@@ -5,7 +5,7 @@
 //!
 //! [`Upstream`]: praxis_core::connectivity::Upstream
 
-use std::sync::Arc;
+use std::{net::ToSocketAddrs, sync::Arc};
 
 use pingora_core::{Result, upstreams::peer::HttpPeer};
 use praxis_core::connectivity::Upstream;
@@ -49,13 +49,7 @@ pub(super) fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>> {
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 /// [`CachedClusterTls`]: praxis_tls::CachedClusterTls
 fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
-    let addr: std::net::SocketAddr = upstream.address.parse().map_err(|e| {
-        tracing::warn!(address = %upstream.address, error = %e, "failed to parse upstream address");
-        pingora_core::Error::explain(
-            pingora_core::ErrorType::InternalError,
-            "upstream address resolution failed".to_owned(),
-        )
-    })?;
+    let addr: std::net::SocketAddr = resolve_address(&upstream.address)?;
 
     let tls_enabled = upstream.tls.is_some();
     let sni = upstream
@@ -133,6 +127,57 @@ fn derive_sni(address: &str) -> String {
     host.to_owned()
 }
 
+/// Resolve an upstream address to a [`SocketAddr`].
+///
+/// Tries direct [`SocketAddr`] parsing first. If that fails (e.g. the
+/// address contains a hostname like `api.openai.com:443`), falls back
+/// to [`ToSocketAddrs`] which performs DNS resolution.
+///
+/// When DNS returns multiple records, prefers IPv4 addresses to avoid
+/// connectivity issues in dual-stack environments where IPv6 may be
+/// unreachable.
+///
+/// Note: DNS resolution is synchronous and runs on the request path.
+/// A future iteration may move resolution to config/load-balancer
+/// time or integrate an async cached resolver.
+///
+/// [`SocketAddr`]: std::net::SocketAddr
+/// [`ToSocketAddrs`]: std::net::ToSocketAddrs
+fn resolve_address(address: &str) -> Result<std::net::SocketAddr> {
+    if let Ok(addr) = address.parse::<std::net::SocketAddr>() {
+        return Ok(addr);
+    }
+
+    let addrs: Vec<std::net::SocketAddr> = address
+        .to_socket_addrs()
+        .map_err(|e| {
+            tracing::warn!(address, error = %e, "failed to resolve upstream address");
+            pingora_core::Error::explain(
+                pingora_core::ErrorType::InternalError,
+                format!("upstream address resolution failed for '{address}': {e}"),
+            )
+        })?
+        .collect();
+
+    select_preferred_address(&addrs, address)
+}
+
+/// Select the preferred address from resolved results, favoring IPv4.
+fn select_preferred_address(addrs: &[std::net::SocketAddr], address: &str) -> Result<std::net::SocketAddr> {
+    addrs
+        .iter()
+        .find(|a| a.is_ipv4())
+        .or_else(|| addrs.first())
+        .copied()
+        .ok_or_else(|| {
+            tracing::warn!(address, "DNS resolved but returned no addresses");
+            pingora_core::Error::explain(
+                pingora_core::ErrorType::InternalError,
+                format!("upstream address '{address}' resolved to zero addresses"),
+            )
+        })
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -145,6 +190,7 @@ fn derive_sni(address: &str) -> String {
     clippy::field_reassign_with_default,
     clippy::too_many_lines,
     clippy::significant_drop_tightening,
+    clippy::print_stderr,
     reason = "tests"
 )]
 mod tests {
@@ -251,10 +297,72 @@ mod tests {
     }
 
     #[test]
+    fn resolve_address_parses_socket_addr() {
+        let addr = resolve_address("127.0.0.1:8080").expect("socket addr should parse");
+        assert_eq!(addr.port(), 8080, "port should match");
+    }
+
+    #[test]
+    fn resolve_address_resolves_localhost() {
+        if !localhost_resolution_available() {
+            eprintln!("skipping: localhost did not resolve in this environment");
+            return;
+        }
+        let addr = resolve_address("localhost:8080").expect("localhost should resolve");
+        assert_eq!(addr.port(), 8080, "port should match");
+    }
+
+    #[test]
+    fn resolve_address_fails_for_no_port() {
+        assert!(
+            resolve_address("127.0.0.1").is_err(),
+            "address without port should return error"
+        );
+    }
+
+    #[test]
+    fn hostname_address_builds_peer() {
+        if !localhost_resolution_available() {
+            eprintln!("skipping: localhost did not resolve in this environment");
+            return;
+        }
+        assert!(
+            build_peer(&make_upstream("localhost:8080")).is_ok(),
+            "hostname address should build peer via DNS resolution"
+        );
+    }
+
+    #[test]
+    fn select_preferred_address_prefers_ipv4_from_mixed_results() {
+        let ipv6: std::net::SocketAddr = "[::1]:8080".parse().unwrap();
+        let ipv4: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let selected =
+            select_preferred_address(&[ipv6, ipv4], "mixed.example:8080").expect("mixed results should select address");
+        assert_eq!(selected, ipv4, "IPv4 should be preferred over IPv6");
+    }
+
+    #[test]
+    fn select_preferred_address_returns_ipv6_when_ipv6_only() {
+        let ipv6: std::net::SocketAddr = "[::1]:8080".parse().unwrap();
+        let selected =
+            select_preferred_address(&[ipv6], "ipv6.example:8080").expect("IPv6-only results should select IPv6");
+        assert_eq!(selected, ipv6, "IPv6 should be used when it is the only result");
+    }
+
+    #[test]
+    fn select_preferred_address_errors_on_empty_results() {
+        let err = select_preferred_address(&[], "empty.example:8080").expect_err("empty DNS result should fail");
+        assert!(
+            err.to_string().contains("resolved to zero addresses"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
     fn invalid_address_returns_error() {
         assert!(
-            build_peer(&make_upstream("not-an-address")).is_err(),
-            "invalid address should return error"
+            build_peer(&make_upstream("invalid host:8080")).is_err(),
+            "syntactically invalid address should return error"
         );
     }
 
@@ -366,6 +474,13 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Check whether `localhost` DNS resolution is available in this environment.
+    fn localhost_resolution_available() -> bool {
+        "localhost:8080"
+            .to_socket_addrs()
+            .is_ok_and(|mut addrs| addrs.next().is_some())
+    }
 
     /// Create a test upstream with the given address (no TLS).
     fn make_upstream(address: &str) -> Upstream {

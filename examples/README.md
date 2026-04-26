@@ -35,6 +35,7 @@ page.
 | [rate-limiting.yaml](configs/traffic-management/rate-limiting.yaml) | Token bucket rate limiter with per-IP and global modes |
 | [static-response.yaml](configs/traffic-management/static-response.yaml) | Fixed response without upstream |
 | [redirect.yaml](configs/traffic-management/redirect.yaml) | 3xx redirects with path/query template substitution |
+| [hostname-upstream.yaml](configs/traffic-management/hostname-upstream.yaml) | Resolve hostname upstream endpoints such as `localhost:9000` |
 
 ### Payload Processing
 
