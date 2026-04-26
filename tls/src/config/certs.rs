@@ -55,6 +55,9 @@ pub struct CertKeyPair {
 impl CertKeyPair {
     /// Validate paths: reject `..` traversal.
     ///
+    /// Absolute paths are allowed because operators commonly use
+    /// paths like `/etc/ssl/certs/server.pem` in production.
+    ///
     /// # Errors
     ///
     /// Returns [`TlsError::PathTraversal`] if any path contains `..`.

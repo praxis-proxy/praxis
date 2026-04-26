@@ -99,6 +99,12 @@ fn validate_upstream_ca_file(ca_file: Option<&str>) -> Result<(), ProxyError> {
         )));
     }
 
+    if Path::new(path).is_absolute() {
+        return Err(ProxyError::Config(format!(
+            "upstream_ca_file must be a relative path, not absolute: {path}"
+        )));
+    }
+
     if !Path::new(path).exists() {
         return Err(ProxyError::Config(format!("upstream_ca_file does not exist: {path}")));
     }
@@ -231,6 +237,28 @@ filter_chains:
     }
 
     #[test]
+    fn reject_upstream_ca_file_absolute_path() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  upstream_ca_file: /etc/ssl/certs/ca.pem
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("relative path"),
+            "should reject absolute path: {err}"
+        );
+    }
+
+    #[test]
     fn reject_upstream_ca_file_missing() {
         let yaml = r#"
 listeners:
@@ -238,7 +266,7 @@ listeners:
     address: "0.0.0.0:8080"
     filter_chains: [main]
 runtime:
-  upstream_ca_file: /nonexistent/ca.pem
+  upstream_ca_file: nonexistent/ca.pem
 filter_chains:
   - name: main
     filters:
@@ -253,10 +281,10 @@ filter_chains:
     }
 
     #[test]
-    fn accept_upstream_ca_file_when_file_exists() {
-        let dir = std::env::temp_dir().join("praxis-ca-test");
-        std::fs::create_dir_all(&dir).unwrap();
-        let ca_path = dir.join("test-ca.pem");
+    fn accept_upstream_ca_file_when_relative_file_exists() {
+        let dir = "test-ca-validate";
+        std::fs::create_dir_all(dir).unwrap();
+        let ca_path = format!("{dir}/test-ca.pem");
         std::fs::write(
             &ca_path,
             "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----\n",
@@ -270,23 +298,22 @@ listeners:
     address: "0.0.0.0:8080"
     filter_chains: [main]
 runtime:
-  upstream_ca_file: {path}
+  upstream_ca_file: {ca_path}
 filter_chains:
   - name: main
     filters:
       - filter: static_response
         status: 200
-"#,
-            path = ca_path.display()
+"#
         );
         let config = Config::from_yaml(&yaml).unwrap();
         assert_eq!(
             config.runtime.upstream_ca_file.as_deref(),
-            Some(ca_path.to_str().unwrap()),
-            "upstream_ca_file should be preserved"
+            Some(ca_path.as_str()),
+            "relative upstream_ca_file should be accepted"
         );
 
-        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

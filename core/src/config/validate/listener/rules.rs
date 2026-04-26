@@ -270,7 +270,7 @@ listeners:
     address: "0.0.0.0:443"
     tls:
       certificates:
-        - cert_path: "/etc/ssl/cert.pem"
+        - cert_path: "certs/cert.pem"
           key_path: "../secret/key.pem"
     filter_chains: [main]
 filter_chains:
