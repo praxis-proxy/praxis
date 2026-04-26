@@ -15,7 +15,7 @@ use praxis_core::config::Cluster;
 ///
 /// ```ignore
 /// let ep = WeightedEndpoint { address: "10.0.0.1:80".into(), weight: 3, index: 0 };
-/// assert_eq!(ep.address.as_str(), "10.0.0.1:80");
+/// assert_eq!(ep.address.as_ref(), "10.0.0.1:80");
 /// assert_eq!(ep.weight, 3);
 /// assert_eq!(ep.index, 0);
 /// ```
@@ -32,7 +32,7 @@ pub(crate) struct WeightedEndpoint {
 }
 
 /// Build a [`WeightedEndpoint`] list from a cluster's endpoints.
-pub(super) fn build_weighted_endpoints(cluster: &Cluster) -> Vec<WeightedEndpoint> {
+pub(crate) fn build_weighted_endpoints(cluster: &Cluster) -> Vec<WeightedEndpoint> {
     cluster
         .endpoints
         .iter()

@@ -474,6 +474,7 @@ A filter can have both `conditions` (request phase) and
 | `request_id` | Observability | HTTP | Propagates/generates `X-Request-ID` |
 | `access_log` | Observability | HTTP | Structured JSON logging; optional `sample_rate` |
 | `sni_router` | Traffic Management | TCP | `routes[].server_names`, `.upstream`, `default_upstream` |
+| `tcp_load_balancer` | Traffic Management | TCP | Cluster-backed TCP endpoint selection (round-robin, least-connections, consistent-hash) |
 | `tcp_access_log` | Observability | TCP | Structured JSON connection logging |
 | `forwarded_headers` | Security | HTTP | `trusted_proxies` (CIDR list) |
 | `guardrails` | Security | HTTP | Reject requests matching header/body string or regex rules |

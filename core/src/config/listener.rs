@@ -71,10 +71,19 @@ pub struct Listener {
 
     /// Upstream address for TCP listeners (e.g. "10.0.0.1:5432").
     ///
-    /// Required for `protocol: tcp` unless filter chains provide
-    /// routing (e.g. via `sni_router`). Ignored for HTTP listeners.
+    /// Required for `protocol: tcp` unless `cluster` is set or filter
+    /// chains provide routing. Ignored for HTTP listeners. Mutually
+    /// exclusive with `cluster`.
     #[serde(default)]
     pub upstream: Option<String>,
+
+    /// Cluster name for TCP load balancing.
+    ///
+    /// When set, the TCP listener routes connections via a load
+    /// balancer strategy across the named cluster's endpoints.
+    /// Mutually exclusive with `upstream`.
+    #[serde(default)]
+    pub cluster: Option<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -304,5 +313,29 @@ downstream_read_timeout_ms: 5000
             listener.downstream_read_timeout_ms.is_none(),
             "downstream read timeout should default to None"
         );
+    }
+
+    #[test]
+    fn parse_tcp_listener_with_cluster() {
+        let yaml = r#"
+name: db
+address: "0.0.0.0:5432"
+protocol: tcp
+cluster: db_pool
+"#;
+        let listener: Listener = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(listener.protocol, ProtocolKind::Tcp, "protocol should be Tcp");
+        assert_eq!(listener.cluster.as_deref(), Some("db_pool"), "cluster name mismatch");
+        assert!(
+            listener.upstream.is_none(),
+            "upstream should be None when cluster is set"
+        );
+    }
+
+    #[test]
+    fn cluster_defaults_to_none() {
+        let yaml = "name: test\naddress: \"0.0.0.0:8080\"";
+        let listener: Listener = serde_yaml::from_str(yaml).unwrap();
+        assert!(listener.cluster.is_none(), "cluster should default to None");
     }
 }

@@ -326,6 +326,136 @@ filter_chains:
     assert_eq!(config.filter_chains[1].name, "routing", "second chain name mismatch");
 }
 
+#[test]
+fn tcp_round_robin_config() {
+    let config = Config::from_yaml(
+        r#"
+listeners:
+  - name: postgres
+    address: "127.0.0.1:5432"
+    protocol: tcp
+    cluster: db_pool
+    filter_chains: [tcp_lb]
+
+clusters:
+  - name: db_pool
+    endpoints:
+      - "127.0.0.1:15432"
+      - "127.0.0.1:15433"
+
+filter_chains:
+  - name: tcp_lb
+    filters:
+      - filter: tcp_load_balancer
+        clusters:
+          - name: db_pool
+            endpoints:
+              - "127.0.0.1:15432"
+              - "127.0.0.1:15433"
+"#,
+    )
+    .unwrap();
+
+    let listener = &config.listeners[0];
+    assert_eq!(listener.protocol, ProtocolKind::Tcp, "protocol should be TCP");
+    assert_eq!(
+        listener.cluster.as_deref(),
+        Some("db_pool"),
+        "cluster should be db_pool"
+    );
+    assert!(
+        listener.upstream.is_none(),
+        "upstream should be None for cluster-backed listener"
+    );
+    assert_eq!(listener.filter_chains, vec!["tcp_lb"], "filter chain mismatch");
+}
+
+#[test]
+fn tcp_least_connections_config() {
+    let config = Config::from_yaml(
+        r#"
+listeners:
+  - name: postgres
+    address: "127.0.0.1:5432"
+    protocol: tcp
+    cluster: db_pool
+    filter_chains: [tcp_lb]
+
+clusters:
+  - name: db_pool
+    endpoints:
+      - "127.0.0.1:15432"
+      - "127.0.0.1:15433"
+      - "127.0.0.1:15434"
+    load_balancer_strategy:
+      least_connections: ~
+
+filter_chains:
+  - name: tcp_lb
+    filters:
+      - filter: tcp_load_balancer
+        clusters:
+          - name: db_pool
+            endpoints:
+              - "127.0.0.1:15432"
+              - "127.0.0.1:15433"
+              - "127.0.0.1:15434"
+            load_balancer_strategy:
+              least_connections: ~
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.listeners[0].cluster.as_deref(),
+        Some("db_pool"),
+        "cluster should be db_pool"
+    );
+}
+
+#[test]
+fn tcp_consistent_hash_config() {
+    let config = Config::from_yaml(
+        r#"
+listeners:
+  - name: cache
+    address: "127.0.0.1:6379"
+    protocol: tcp
+    cluster: cache_pool
+    filter_chains: [tcp_lb]
+
+clusters:
+  - name: cache_pool
+    endpoints:
+      - "127.0.0.1:16379"
+      - "127.0.0.1:16380"
+      - "127.0.0.1:16381"
+    load_balancer_strategy:
+      consistent_hash: {}
+
+filter_chains:
+  - name: tcp_lb
+    filters:
+      - filter: tcp_load_balancer
+        clusters:
+          - name: cache_pool
+            endpoints:
+              - "127.0.0.1:16379"
+              - "127.0.0.1:16380"
+              - "127.0.0.1:16381"
+            load_balancer_strategy:
+              consistent_hash: {}
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        config.listeners[0].cluster.as_deref(),
+        Some("cache_pool"),
+        "cluster should be cache_pool"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

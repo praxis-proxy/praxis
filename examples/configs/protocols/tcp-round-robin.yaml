@@ -1,0 +1,25 @@
+# TCP round-robin load balancing across database replicas.
+listeners:
+  - name: postgres
+    address: "127.0.0.1:5432"
+    protocol: tcp
+    cluster: db_pool
+    filter_chains: [tcp_lb]
+
+clusters:
+  - name: db_pool
+    endpoints:
+      - "127.0.0.1:15432"
+      - "127.0.0.1:15433"
+      - "127.0.0.1:15434"
+
+filter_chains:
+  - name: tcp_lb
+    filters:
+      - filter: tcp_load_balancer
+        clusters:
+          - name: db_pool
+            endpoints:
+              - "127.0.0.1:15432"
+              - "127.0.0.1:15433"
+              - "127.0.0.1:15434"

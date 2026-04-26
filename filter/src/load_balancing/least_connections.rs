@@ -24,17 +24,17 @@ use super::endpoint::WeightedEndpoint;
 /// Uses an optimistic CAS loop for lock-free selection. Weight
 /// influences tie-breaking: when two endpoints have equal
 /// connection counts, the one with the higher weight wins.
-pub(super) struct LeastConnections {
+pub(crate) struct LeastConnections {
     /// Deduplicated endpoint list with weights and original indices.
     endpoints: Vec<WeightedEndpoint>,
 
     /// Per-endpoint active-request counter.
-    pub(super) counters: HashMap<Arc<str>, AtomicUsize>,
+    pub(crate) counters: HashMap<Arc<str>, AtomicUsize>,
 }
 
 impl LeastConnections {
     /// Create a least-connections selector from a weighted endpoint list.
-    pub(super) fn new(endpoints: Vec<WeightedEndpoint>) -> Self {
+    pub(crate) fn new(endpoints: Vec<WeightedEndpoint>) -> Self {
         let counters = endpoints
             .iter()
             .map(|ep| (Arc::clone(&ep.address), AtomicUsize::new(0)))
@@ -49,7 +49,7 @@ impl LeastConnections {
     /// optimistic CAS loop: scans for the minimum, then atomically
     /// increments. On CAS failure, rescans and retries.
     #[allow(clippy::indexing_slicing, reason = "keyed by endpoints")]
-    pub(super) fn select(&self, health: Option<&ClusterHealthState>) -> Arc<str> {
+    pub(crate) fn select(&self, health: Option<&ClusterHealthState>) -> Arc<str> {
         loop {
             let (addr, load) = self.find_best(health);
             let counter = &self.counters[&*addr];
@@ -64,7 +64,7 @@ impl LeastConnections {
     }
 
     /// Decrement the in-flight counter for `addr` after a response.
-    pub(super) fn release(&self, addr: &str) {
+    pub(crate) fn release(&self, addr: &str) {
         if let Some(counter) = self.counters.get(addr) {
             let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
         }

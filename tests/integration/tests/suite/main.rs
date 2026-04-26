@@ -56,6 +56,7 @@ mod routing;
 mod security;
 mod sni_router;
 mod tcp_access_log;
+mod tcp_load_balancer;
 mod tls;
 mod url_rewrite;
 mod websocket;

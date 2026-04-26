@@ -652,6 +652,8 @@ default_upstream: "10.0.0.1:443"
             local_addr: "0.0.0.0:443",
             sni,
             upstream_addr: None,
+            cluster: None,
+            health_registry: None,
             connect_time: Instant::now(),
             bytes_in: 0,
             bytes_out: 0,

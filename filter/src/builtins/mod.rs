@@ -12,4 +12,4 @@ pub use http::{
     RateLimitFilter, RedirectFilter, RequestIdFilter, RouterFilter, StaticResponseFilter, TimeoutFilter,
     UrlRewriteFilter, normalize_mapped_ipv4, normalize_rewritten_path,
 };
-pub use tcp::{SniRouterFilter, TcpAccessLogFilter};
+pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};

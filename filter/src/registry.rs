@@ -156,6 +156,11 @@ fn register_tcp_builtins(factories: &mut HashMap<String, FilterFactory>) {
         "tcp_access_log",
         crate::builtins::TcpAccessLogFilter::from_config,
     );
+    register_tcp(
+        factories,
+        "tcp_load_balancer",
+        crate::builtins::TcpLoadBalancerFilter::from_config,
+    );
 }
 
 /// Register a single TCP filter factory by name.
@@ -214,6 +219,10 @@ mod tests {
             "static_response should be registered"
         );
         assert!(names.contains(&"tcp_access_log"), "tcp_access_log should be registered");
+        assert!(
+            names.contains(&"tcp_load_balancer"),
+            "tcp_load_balancer should be registered"
+        );
         assert!(names.contains(&"timeout"), "timeout should be registered");
         assert!(names.contains(&"url_rewrite"), "url_rewrite should be registered");
         assert!(

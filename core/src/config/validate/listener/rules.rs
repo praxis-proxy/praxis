@@ -44,17 +44,8 @@ pub(in crate::config::validate) fn validate_listeners(listeners: &mut [Listener]
 fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
     super::address::validate_address(&listener.address, &listener.name)?;
 
-    if listener.protocol == ProtocolKind::Tcp && listener.upstream.is_none() && listener.filter_chains.is_empty() {
-        return Err(ProxyError::Config(format!(
-            "TCP listener '{}' requires an upstream address or filter chains",
-            listener.name
-        )));
-    }
-
-    if listener.protocol == ProtocolKind::Tcp
-        && let Some(ref upstream) = listener.upstream
-    {
-        super::address::validate_tcp_upstream(upstream, &listener.name)?;
+    if listener.protocol == ProtocolKind::Tcp {
+        validate_tcp_routing(listener)?;
     }
 
     super::timeouts::apply_tcp_defaults(listener);
@@ -68,6 +59,29 @@ fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
 
     if listener.protocol == ProtocolKind::Tcp {
         super::timeouts::validate_tcp_max_duration(listener)?;
+    }
+
+    Ok(())
+}
+
+/// Validate TCP listener routing: upstream, cluster, and filter chain constraints.
+fn validate_tcp_routing(listener: &Listener) -> Result<(), ProxyError> {
+    if listener.upstream.is_some() && listener.cluster.is_some() {
+        return Err(ProxyError::Config(format!(
+            "TCP listener '{}' cannot have both 'upstream' and 'cluster'",
+            listener.name
+        )));
+    }
+
+    if listener.upstream.is_none() && listener.cluster.is_none() && listener.filter_chains.is_empty() {
+        return Err(ProxyError::Config(format!(
+            "TCP listener '{}' requires an upstream address, cluster, or filter chains",
+            listener.name
+        )));
+    }
+
+    if let Some(ref upstream) = listener.upstream {
+        super::address::validate_tcp_upstream(upstream, &listener.name)?;
     }
 
     Ok(())
@@ -132,8 +146,58 @@ listeners:
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(
             err.to_string()
-                .contains("requires an upstream address or filter chains"),
-            "error should mention upstream or filter chains: {err}"
+                .contains("requires an upstream address, cluster, or filter chains"),
+            "error should mention upstream, cluster, or filter chains: {err}"
+        );
+    }
+
+    #[test]
+    fn tcp_listener_with_both_upstream_and_cluster_is_rejected() {
+        let yaml = r#"
+listeners:
+  - name: db
+    address: "0.0.0.0:5432"
+    protocol: tcp
+    upstream: "10.0.0.1:5432"
+    cluster: db_pool
+    filter_chains: [tcp_lb]
+filter_chains:
+  - name: tcp_lb
+    filters:
+      - filter: tcp_load_balancer
+        clusters:
+          - name: db_pool
+            endpoints: ["10.0.0.1:5432"]
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("cannot have both 'upstream' and 'cluster'"),
+            "error should mention both upstream and cluster: {err}"
+        );
+    }
+
+    #[test]
+    fn tcp_listener_with_cluster_and_chains_is_accepted() {
+        let yaml = r#"
+listeners:
+  - name: db
+    address: "127.0.0.1:5432"
+    protocol: tcp
+    cluster: db_pool
+    filter_chains: [tcp_lb]
+filter_chains:
+  - name: tcp_lb
+    filters:
+      - filter: tcp_load_balancer
+        clusters:
+          - name: db_pool
+            endpoints: ["10.0.0.1:5432"]
+"#;
+        let config = Config::from_yaml(yaml).unwrap();
+        assert_eq!(
+            config.listeners[0].cluster.as_deref(),
+            Some("db_pool"),
+            "cluster should be preserved"
         );
     }
 
@@ -162,6 +226,7 @@ filter_chains:
         let mut listeners: Vec<Listener> = (0..1_001)
             .map(|i| Listener {
                 address: format!("127.0.0.1:{}", 10_000 + i),
+                cluster: None,
                 downstream_read_timeout_ms: None,
                 filter_chains: vec![],
                 name: format!("l{i}"),

@@ -1,66 +1,67 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Shane Utt
 
-//! Load-balancing strategy selection and dispatch.
+//! HTTP-specific strategy wrapper that extracts the hash key from request context.
 
 use std::sync::Arc;
 
-use praxis_core::{
-    config::{LoadBalancerStrategy, ParameterisedStrategy, SimpleStrategy},
-    health::ClusterHealthState,
-};
+use praxis_core::{config::LoadBalancerStrategy, health::ClusterHealthState};
 
-use super::{
-    consistent_hash::ConsistentHash, endpoint::WeightedEndpoint, least_connections::LeastConnections,
-    round_robin::RoundRobin,
+use crate::{
+    filter::HttpFilterContext,
+    load_balancing::{endpoint::WeightedEndpoint, strategy as shared},
 };
-use crate::filter::HttpFilterContext;
 
 // -----------------------------------------------------------------------------
 // Strategy
 // -----------------------------------------------------------------------------
 
-/// Load-balancing strategy variant for a cluster.
-pub(super) enum Strategy {
-    /// Cycle through endpoints in order, respecting weights.
-    RoundRobin(RoundRobin),
-
-    /// Pick the endpoint with the fewest active requests.
-    LeastConnections(LeastConnections),
-
-    /// Hash a request attribute to a stable endpoint.
-    ConsistentHash(ConsistentHash),
+/// HTTP load-balancing strategy that delegates to shared strategies.
+///
+/// Extracts the consistent-hash key from the HTTP request (header or
+/// URI path) before delegating to the protocol-agnostic implementation.
+pub(super) struct Strategy {
+    /// The protocol-agnostic strategy implementation.
+    inner: shared::Strategy,
 }
 
 impl Strategy {
-    /// Pick the next endpoint address, skipping unhealthy
-    /// endpoints when health state is available.
+    /// Pick the next endpoint address, skipping unhealthy endpoints.
     pub(super) fn select(&self, ctx: &HttpFilterContext<'_>, health: Option<&ClusterHealthState>) -> Arc<str> {
-        match self {
-            Self::RoundRobin(rr) => rr.select(health),
-            Self::LeastConnections(lc) => lc.select(health),
-            Self::ConsistentHash(ch) => ch.select(ctx, health),
-        }
+        let hash_key = self.extract_hash_key(ctx);
+        self.inner.select(hash_key, health)
     }
 
     /// Called after a response arrives so that strategies that track in-flight
     /// request counts (e.g. `LeastConnections`) can decrement their counter.
     pub(super) fn release(&self, addr: &str) {
-        if let Self::LeastConnections(lc) = self {
-            lc.release(addr);
+        self.inner.release(addr);
+    }
+
+    /// Returns a reference to the inner shared strategy for testing.
+    #[cfg(test)]
+    pub(super) fn inner(&self) -> &shared::Strategy {
+        &self.inner
+    }
+
+    /// Extract the hash key from the HTTP context for consistent-hash.
+    fn extract_hash_key<'a>(&self, ctx: &'a HttpFilterContext<'_>) -> Option<&'a str> {
+        if let shared::Strategy::ConsistentHash(ref ch) = self.inner {
+            let key: &str = ch
+                .header()
+                .and_then(|h| ctx.request.headers.get(h))
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or_else(|| ctx.request.uri.path());
+            Some(key)
+        } else {
+            None
         }
     }
 }
 
 /// Create the appropriate strategy variant from the config.
 pub(super) fn build_strategy(lb_strategy: &LoadBalancerStrategy, endpoints: Vec<WeightedEndpoint>) -> Strategy {
-    match lb_strategy {
-        LoadBalancerStrategy::Simple(SimpleStrategy::RoundRobin) => Strategy::RoundRobin(RoundRobin::new(endpoints)),
-        LoadBalancerStrategy::Simple(SimpleStrategy::LeastConnections) => {
-            Strategy::LeastConnections(LeastConnections::new(endpoints))
-        },
-        LoadBalancerStrategy::Parameterised(ParameterisedStrategy::ConsistentHash(opts)) => {
-            Strategy::ConsistentHash(ConsistentHash::new(endpoints, opts.header.clone()))
-        },
+    Strategy {
+        inner: shared::build_strategy(lb_strategy, endpoints),
     }
 }

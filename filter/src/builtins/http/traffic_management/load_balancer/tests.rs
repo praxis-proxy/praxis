@@ -13,13 +13,12 @@ use praxis_core::config::{
     Cluster, ConsistentHashOpts, Endpoint, LoadBalancerStrategy, ParameterisedStrategy, SimpleStrategy,
 };
 
-use super::{
-    LoadBalancerFilter,
-    endpoint::WeightedEndpoint,
-    entry::build_cluster_entry,
-    strategy::{Strategy, build_strategy},
+use super::{LoadBalancerFilter, entry::build_cluster_entry, strategy::build_strategy};
+use crate::{
+    FilterAction,
+    filter::HttpFilter,
+    load_balancing::{endpoint::WeightedEndpoint, strategy::Strategy as SharedStrategy},
 };
-use crate::{FilterAction, filter::HttpFilter};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -113,7 +112,7 @@ async fn on_response_releases_least_connections_counter() {
     drop(lb.on_request(&mut ctx).await.unwrap());
 
     let entry = lb.clusters.get("web").unwrap();
-    if let Strategy::LeastConnections(lc) = &entry.strategy {
+    if let SharedStrategy::LeastConnections(lc) = entry.strategy.inner() {
         assert_eq!(
             lc.counters["127.0.0.1:8080"].load(Ordering::Relaxed),
             1,
@@ -123,7 +122,7 @@ async fn on_response_releases_least_connections_counter() {
 
     drop(lb.on_response(&mut ctx).await.unwrap());
 
-    if let Strategy::LeastConnections(lc) = &entry.strategy {
+    if let SharedStrategy::LeastConnections(lc) = entry.strategy.inner() {
         assert_eq!(
             lc.counters["127.0.0.1:8080"].load(Ordering::Relaxed),
             0,
@@ -409,7 +408,7 @@ fn build_strategy_round_robin() {
     }];
     let strategy = build_strategy(&LoadBalancerStrategy::Simple(SimpleStrategy::RoundRobin), endpoints);
     assert!(
-        matches!(strategy, Strategy::RoundRobin(_)),
+        matches!(strategy.inner(), SharedStrategy::RoundRobin(_)),
         "RoundRobin config should produce RoundRobin strategy"
     );
 }
@@ -426,7 +425,7 @@ fn build_strategy_least_connections() {
         endpoints,
     );
     assert!(
-        matches!(strategy, Strategy::LeastConnections(_)),
+        matches!(strategy.inner(), SharedStrategy::LeastConnections(_)),
         "LeastConnections config should produce LeastConnections strategy"
     );
 }
@@ -445,7 +444,7 @@ fn build_strategy_consistent_hash() {
         endpoints,
     );
     assert!(
-        matches!(strategy, Strategy::ConsistentHash(_)),
+        matches!(strategy.inner(), SharedStrategy::ConsistentHash(_)),
         "ConsistentHash config should produce ConsistentHash strategy"
     );
 }

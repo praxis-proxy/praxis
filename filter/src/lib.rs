@@ -15,6 +15,7 @@ mod condition;
 mod context;
 mod factory;
 mod filter;
+pub(crate) mod load_balancing;
 mod pipeline;
 mod registry;
 mod results;

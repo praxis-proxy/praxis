@@ -1,0 +1,29 @@
+# TCP consistent-hash load balancing (client IP affinity).
+listeners:
+  - name: cache
+    address: "127.0.0.1:6379"
+    protocol: tcp
+    cluster: cache_pool
+    filter_chains: [tcp_lb]
+
+clusters:
+  - name: cache_pool
+    endpoints:
+      - "127.0.0.1:16379"
+      - "127.0.0.1:16380"
+      - "127.0.0.1:16381"
+    load_balancer_strategy:
+      consistent_hash: {}
+
+filter_chains:
+  - name: tcp_lb
+    filters:
+      - filter: tcp_load_balancer
+        clusters:
+          - name: cache_pool
+            endpoints:
+              - "127.0.0.1:16379"
+              - "127.0.0.1:16380"
+              - "127.0.0.1:16381"
+            load_balancer_strategy:
+              consistent_hash: {}

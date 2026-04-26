@@ -711,3 +711,45 @@ fn handle_echo(mut stream: TcpStream) {
         }
     }
 }
+
+/// Start a raw TCP backend that reads one message and responds with
+/// `tag` followed by the received data. Used to identify which
+/// backend handled a connection in load balancing tests.
+///
+/// # Panics
+///
+/// Panics if binding to the loopback address fails.
+pub fn start_tcp_tagged_backend(tag: &str) -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind tagged backend");
+    let port = listener.local_addr().expect("tagged backend port").port();
+    let tag = tag.to_owned();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let tag = tag.clone();
+            std::thread::spawn(move || {
+                handle_tagged(stream, &tag);
+            });
+        }
+    });
+
+    port
+}
+
+/// Tagged handler: read one chunk, respond with `tag:data`.
+fn handle_tagged(mut stream: TcpStream, tag: &str) {
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    let mut buf = [0u8; 4096];
+    match stream.read(&mut buf) {
+        Ok(0) | Err(_) => {},
+        Ok(n) => {
+            let mut resp = Vec::with_capacity(tag.len() + 1 + n);
+            resp.extend_from_slice(tag.as_bytes());
+            resp.push(b':');
+            resp.extend_from_slice(&buf[..n]);
+            let _ = stream.write_all(&resp);
+        },
+    }
+}

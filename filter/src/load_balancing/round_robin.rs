@@ -17,7 +17,7 @@ use super::endpoint::WeightedEndpoint;
 // -----------------------------------------------------------------------------
 
 /// Weighted round-robin selector using cumulative weight buckets.
-pub(super) struct RoundRobin {
+pub(crate) struct RoundRobin {
     /// Deduplicated endpoint list with weights and original indices.
     endpoints: Vec<WeightedEndpoint>,
 
@@ -30,7 +30,7 @@ pub(super) struct RoundRobin {
 
 impl RoundRobin {
     /// Create a round-robin selector from a deduplicated weighted endpoint list.
-    pub(super) fn new(endpoints: Vec<WeightedEndpoint>) -> Self {
+    pub(crate) fn new(endpoints: Vec<WeightedEndpoint>) -> Self {
         let total_weight: usize = endpoints.iter().map(|ep| ep.weight as usize).sum();
         Self {
             endpoints,
@@ -45,7 +45,7 @@ impl RoundRobin {
     /// endpoint list to find the matching weight bucket. Falls back to
     /// all endpoints (panic mode) when every endpoint is unhealthy.
     #[inline]
-    pub(super) fn select(&self, health: Option<&ClusterHealthState>) -> Arc<str> {
+    pub(crate) fn select(&self, health: Option<&ClusterHealthState>) -> Arc<str> {
         debug_assert!(!self.endpoints.is_empty(), "round-robin requires at least one endpoint");
         let tick = self.counter.fetch_add(1, Ordering::Relaxed);
 
