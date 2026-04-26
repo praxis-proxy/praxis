@@ -129,6 +129,12 @@ pub(super) fn validate_health_check_ssrf(
 // -----------------------------------------------------------------------------
 
 /// Returns `true` for IP addresses that are SSRF-sensitive.
+///
+/// Note: [RFC 1918] private ranges (10/8, 172.16/12, 192.168/16)
+/// are intentionally not flagged; only loopback and cloud metadata
+/// addresses are considered sensitive.
+///
+/// [RFC 1918]: https://datatracker.ietf.org/doc/html/rfc1918
 fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback() || *v4 == std::net::Ipv4Addr::new(169, 254, 169, 254),

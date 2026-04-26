@@ -120,7 +120,9 @@ fn client_cert_from_cached(cached: &praxis_tls::CachedClientCert) -> pingora_cor
 /// Derive an SNI hostname from an `address` string in `host:port` form.
 ///
 /// Returns the host portion if it is a DNS name. Returns an empty string
-/// if the host is an IP address (IP-based SNI is not standard per RFC 6066).
+/// if the host is an IP address (IP-based SNI is not standard per [RFC 6066]).
+///
+/// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066
 fn derive_sni(address: &str) -> String {
     let host = address.rsplit_once(':').map_or(address, |(h, _)| h);
     if host.parse::<std::net::IpAddr>().is_ok() {

@@ -41,7 +41,9 @@ const CONTENT_TYPE_HANDSHAKE: u8 = 22;
 /// TLS `HandshakeType` for `ClientHello`.
 const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 1;
 
-/// TLS extension type for Server Name Indication (RFC 6066).
+/// TLS extension type for Server Name Indication ([RFC 6066]).
+///
+/// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066
 const EXTENSION_TYPE_SNI: u16 = 0;
 
 /// SNI `NameType` for DNS hostnames.
@@ -111,11 +113,15 @@ pub enum SniParseError {
     #[error("malformed TLS extension")]
     MalformedExtension,
 
-    /// The SNI hostname is empty (RFC 6066 requires a valid DNS name).
+    /// The SNI hostname is empty ([RFC 6066] requires a valid DNS name).
+    ///
+    /// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066
     #[error("SNI hostname must not be empty (RFC 6066)")]
     EmptyHostname,
 
-    /// The SNI hostname is an IP literal (rejected per RFC 6066 section 3).
+    /// The SNI hostname is an IP literal (rejected per [RFC 6066 Section 3]).
+    ///
+    /// [RFC 6066 Section 3]: https://datatracker.ietf.org/doc/html/rfc6066#section-3
     #[error("SNI must not be an IP address (RFC 6066)")]
     InvalidHostname,
 }
@@ -338,7 +344,9 @@ fn read_u24(data: &[u8], offset: usize) -> Result<u32, SniParseError> {
 // Validation
 // ---------------------------------------------------------------------------------
 
-/// Reject IP address literals per RFC 6066 section 3.
+/// Reject IP address literals per [RFC 6066 Section 3].
+///
+/// [RFC 6066 Section 3]: https://datatracker.ietf.org/doc/html/rfc6066#section-3
 fn reject_ip_literal(hostname: &str) -> Result<(), SniParseError> {
     if hostname.parse::<std::net::IpAddr>().is_ok() {
         return Err(SniParseError::InvalidHostname);

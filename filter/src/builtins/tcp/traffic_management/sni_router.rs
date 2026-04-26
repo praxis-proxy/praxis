@@ -44,7 +44,9 @@ use crate::{
 /// Routes TCP connections by SNI hostname.
 ///
 /// Performs exact-match lookup first, then longest-suffix
-/// wildcard match. Case-insensitive per RFC 4343.
+/// wildcard match. Case-insensitive per [RFC 4343].
+///
+/// [RFC 4343]: https://datatracker.ietf.org/doc/html/rfc4343
 ///
 /// # Example
 ///

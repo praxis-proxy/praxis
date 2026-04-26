@@ -80,6 +80,11 @@ fn validate_sni_length(sni: &str, cluster_name: &str) -> Result<(), ProxyError> 
 }
 
 /// Validate each DNS label in the SNI hostname.
+///
+/// Wildcard validation follows [RFC 6125]: `*` is only valid as
+/// the complete leftmost label (e.g. `*.example.com`).
+///
+/// [RFC 6125]: https://datatracker.ietf.org/doc/html/rfc6125
 fn validate_sni_labels(sni: &str, cluster_name: &str) -> Result<(), ProxyError> {
     for (i, label) in sni.split('.').enumerate() {
         if label.is_empty() || label.len() > 63 {
@@ -87,9 +92,6 @@ fn validate_sni_labels(sni: &str, cluster_name: &str) -> Result<(), ProxyError> 
                 "cluster '{cluster_name}': sni has invalid label length"
             )));
         }
-        // RFC 6125 (https://datatracker.ietf.org/doc/html/rfc6125):
-        // wildcard `*` is only valid as the complete leftmost label
-        // (e.g. `*.example.com`).
         if label.contains('*') {
             if label != "*" || i != 0 {
                 return Err(ProxyError::Config(format!(

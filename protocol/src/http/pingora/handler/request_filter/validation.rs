@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Shane Utt
 
-//! Host header validation and Max-Forwards handling per RFC 9110/9112.
+//! Host header validation and Max-Forwards handling per [RFC 9110]/[RFC 9112].
+//!
+//! [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
+//! [RFC 9112]: https://datatracker.ietf.org/doc/html/rfc9112
 
 use pingora_proxy::Session;
 use praxis_filter::Rejection;
