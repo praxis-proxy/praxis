@@ -420,7 +420,7 @@ fn assert_result(results: &std::collections::HashMap<&'static str, FilterResultS
 fn header_contains(name: &str, needle: &str) -> CompiledRule {
     CompiledRule {
         target: RuleTarget::Header(name.to_owned()),
-        matcher: RuleMatcher::Contains(needle.to_owned()),
+        matcher: RuleMatcher::Contains(needle.to_lowercase()),
         negate: false,
     }
 }
@@ -429,7 +429,7 @@ fn header_contains(name: &str, needle: &str) -> CompiledRule {
 fn header_not_contains(name: &str, needle: &str) -> CompiledRule {
     CompiledRule {
         target: RuleTarget::Header(name.to_owned()),
-        matcher: RuleMatcher::Contains(needle.to_owned()),
+        matcher: RuleMatcher::Contains(needle.to_lowercase()),
         negate: true,
     }
 }
@@ -447,7 +447,7 @@ fn header_pattern(name: &str, re: &str) -> CompiledRule {
 fn body_contains(needle: &str) -> CompiledRule {
     CompiledRule {
         target: RuleTarget::Body,
-        matcher: RuleMatcher::Contains(needle.to_owned()),
+        matcher: RuleMatcher::Contains(needle.to_lowercase()),
         negate: false,
     }
 }
@@ -456,7 +456,7 @@ fn body_contains(needle: &str) -> CompiledRule {
 fn body_not_contains(needle: &str) -> CompiledRule {
     CompiledRule {
         target: RuleTarget::Body,
-        matcher: RuleMatcher::Contains(needle.to_owned()),
+        matcher: RuleMatcher::Contains(needle.to_lowercase()),
         negate: true,
     }
 }

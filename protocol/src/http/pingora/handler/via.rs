@@ -48,13 +48,13 @@ fn via_value(version: Version) -> String {
 
 /// Append a Via entry to a Pingora request header.
 ///
-/// If a `Via` header already exists, appends comma-separated.
-/// Otherwise inserts a new header.
+/// If a valid UTF-8 `Via` header already exists, appends
+/// comma-separated. Non-UTF-8 values are replaced outright
+/// to avoid producing a malformed header.
 pub(crate) fn append_request_via(req: &mut pingora_http::RequestHeader, upstream_version: Version) {
     let entry = via_value(upstream_version);
-    let combined = match req.headers.get("via") {
+    let combined = match req.headers.get("via").and_then(|v| v.to_str().ok()) {
         Some(existing) if !existing.is_empty() => {
-            let existing = existing.to_str().unwrap_or("");
             debug!(existing, new = %entry, "appending to existing request Via");
             format!("{existing}, {entry}")
         },
@@ -68,13 +68,13 @@ pub(crate) fn append_request_via(req: &mut pingora_http::RequestHeader, upstream
 
 /// Append a Via entry to a Pingora response header.
 ///
-/// If a `Via` header already exists, appends comma-separated.
-/// Otherwise inserts a new header.
+/// If a valid UTF-8 `Via` header already exists, appends
+/// comma-separated. Non-UTF-8 values are replaced outright
+/// to avoid producing a malformed header.
 pub(crate) fn append_response_via(resp: &mut pingora_http::ResponseHeader, client_version: Version) {
     let entry = via_value(client_version);
-    let combined = match resp.headers.get("via") {
+    let combined = match resp.headers.get("via").and_then(|v| v.to_str().ok()) {
         Some(existing) if !existing.is_empty() => {
-            let existing = existing.to_str().unwrap_or("");
             debug!(existing, new = %entry, "appending to existing response Via");
             format!("{existing}, {entry}")
         },
@@ -99,6 +99,8 @@ pub(crate) fn append_response_via(resp: &mut pingora_http::ResponseHeader, clien
     reason = "tests"
 )]
 mod tests {
+    use http::HeaderValue;
+
     use super::*;
 
     #[test]
@@ -185,6 +187,30 @@ mod tests {
             resp.headers.get("via").unwrap(),
             "1.1 upstream-proxy, 1.1 praxis",
             "Via should be appended to existing response value"
+        );
+    }
+
+    #[test]
+    fn append_request_via_replaces_non_utf8() {
+        let mut req = pingora_http::RequestHeader::build("GET", b"/", None).unwrap();
+        let _insert = req.insert_header("via", HeaderValue::from_bytes(&[0x80, 0xFF]).unwrap());
+        append_request_via(&mut req, Version::HTTP_11);
+        assert_eq!(
+            req.headers.get("via").unwrap(),
+            "1.1 praxis",
+            "non-UTF8 Via should be replaced, not appended to"
+        );
+    }
+
+    #[test]
+    fn append_response_via_replaces_non_utf8() {
+        let mut resp = pingora_http::ResponseHeader::build(200, None).unwrap();
+        let _insert = resp.insert_header("via", HeaderValue::from_bytes(&[0x80, 0xFF]).unwrap());
+        append_response_via(&mut resp, Version::HTTP_11);
+        assert_eq!(
+            resp.headers.get("via").unwrap(),
+            "1.1 praxis",
+            "non-UTF8 Via should be replaced, not appended to"
         );
     }
 

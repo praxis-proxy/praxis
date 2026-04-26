@@ -282,6 +282,20 @@ mod tests {
     }
 
     #[test]
+    fn is_websocket_101_with_whitespace() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::UPGRADE, "  websocket  ".parse().unwrap());
+        headers.insert(
+            "sec-websocket-accept".parse::<http::header::HeaderName>().unwrap(),
+            "x".parse().unwrap(),
+        );
+        assert!(
+            is_websocket_101(&headers),
+            "padded websocket value should be recognized after trimming"
+        );
+    }
+
+    #[test]
     fn is_websocket_101_wrong_protocol() {
         let mut headers = http::HeaderMap::new();
         headers.insert(http::header::UPGRADE, "h2c".parse().unwrap());

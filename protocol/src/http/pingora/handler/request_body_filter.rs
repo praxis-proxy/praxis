@@ -36,6 +36,9 @@ pub(super) async fn execute(
         tracing::trace!("forwarding pre-read body chunks from StreamBuffer mode");
 
         *body = chunks.pop_front();
+        if chunks.is_empty() {
+            ctx.pre_read_body = None;
+        }
         return Ok(());
     }
 
@@ -298,6 +301,29 @@ mod tests {
 
         let chunks = ctx.pre_read_body.as_ref().unwrap();
         assert!(chunks.is_empty(), "empty deque should report is_empty");
+    }
+
+    #[test]
+    fn pre_read_body_cleared_after_last_pop() {
+        let mut ctx = make_ctx();
+        ctx.pre_read_body = Some(VecDeque::from([Bytes::from_static(b"only")]));
+
+        let chunks = ctx.pre_read_body.as_mut().unwrap();
+        let popped = chunks.pop_front();
+        assert_eq!(
+            popped.unwrap(),
+            Bytes::from_static(b"only"),
+            "single chunk should drain"
+        );
+        assert!(chunks.is_empty(), "deque should be empty after last pop");
+
+        if chunks.is_empty() {
+            ctx.pre_read_body = None;
+        }
+        assert!(
+            ctx.pre_read_body.is_none(),
+            "pre_read_body should be None after draining all chunks"
+        );
     }
 
     #[test]

@@ -434,6 +434,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reenter_does_not_carry_stale_results_into_conditional_branch() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let branches = vec![make_branch(
+            "cond_reenter",
+            Some(("tracker", "status", "stale")),
+            RejoinTarget::ReEnter(0),
+            Some(3),
+            vec![counting_pf(Arc::clone(&counter))],
+        )];
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let mut rs = FilterResultSet::new();
+        rs.set("status", "stale").unwrap();
+        ctx.filter_results.insert("tracker", rs);
+
+        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        assert!(
+            matches!(outcome, BranchOutcome::ReEnter(0)),
+            "first call should fire and produce ReEnter"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "branch should execute once on first evaluation"
+        );
+
+        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        assert!(
+            matches!(outcome, BranchOutcome::Continue),
+            "second call should not fire because stale results were cleared"
+        );
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "branch should not execute again when stale result is gone"
+        );
+    }
+
+    #[tokio::test]
     async fn reenter_max_iterations_at_ceiling_fires_exactly_100_times() {
         let counter = Arc::new(AtomicUsize::new(0));
         let branches = vec![make_branch(

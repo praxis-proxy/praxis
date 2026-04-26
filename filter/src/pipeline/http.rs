@@ -55,7 +55,11 @@ impl FilterPipeline {
             match branch_outcome {
                 BranchOutcome::Continue => idx += 1,
                 BranchOutcome::Terminal => return Ok(FilterAction::Continue),
-                BranchOutcome::SkipTo(t) | BranchOutcome::ReEnter(t) => idx = t,
+                BranchOutcome::SkipTo(t) => idx = t,
+                BranchOutcome::ReEnter(t) => {
+                    ctx.filter_results.clear();
+                    idx = t;
+                },
                 BranchOutcome::Reject(r) => return Ok(FilterAction::Reject(r)),
             }
         }

@@ -25,7 +25,7 @@ pub(super) enum RuleTarget {
 /// How a rule matches content.
 #[derive(Debug, Clone)]
 pub(super) enum RuleMatcher {
-    /// Literal substring match (case-sensitive).
+    /// Literal substring match (case-insensitive).
     Contains(String),
 
     /// Pre-compiled regex.
@@ -49,7 +49,7 @@ impl CompiledRule {
     /// Check whether `haystack` matches this rule.
     pub(super) fn matches(&self, haystack: &str) -> bool {
         match &self.matcher {
-            RuleMatcher::Contains(needle) => haystack.contains(needle.as_str()),
+            RuleMatcher::Contains(needle) => haystack.to_lowercase().contains(needle.as_str()),
             RuleMatcher::Pattern(re) => re.is_match(haystack),
         }
     }
@@ -87,7 +87,7 @@ pub(super) fn parse_matcher(rule: &RuleConfig) -> Result<RuleMatcher, FilterErro
             if s.is_empty() {
                 return Err("guardrails: 'contains' must not be empty".into());
             }
-            Ok(RuleMatcher::Contains(s.clone()))
+            Ok(RuleMatcher::Contains(s.to_lowercase()))
         },
         (None, Some(p)) => {
             if p.is_empty() {
@@ -141,9 +141,30 @@ mod tests {
     }
 
     #[test]
-    fn contains_matcher_is_case_sensitive() {
+    fn contains_matcher_is_case_insensitive() {
         let rule = body_contains("DROP TABLE");
-        assert!(!rule.matches("drop table users"), "contains should be case-sensitive");
+        assert!(
+            rule.matches("drop table users"),
+            "contains should match lowercase input"
+        );
+        assert!(
+            rule.matches("Drop Table users"),
+            "contains should match mixed-case input"
+        );
+        assert!(
+            rule.matches("DROP TABLE users"),
+            "contains should match uppercase input"
+        );
+    }
+
+    #[test]
+    fn contains_matcher_case_insensitive_mixed_needle() {
+        let rule = body_contains("xSs");
+        assert!(
+            rule.matches("has XSS injection"),
+            "case-insensitive needle should match"
+        );
+        assert!(rule.matches("has xss injection"), "lowercase needle should match");
     }
 
     #[test]
@@ -172,7 +193,7 @@ mod tests {
     fn body_contains(needle: &str) -> CompiledRule {
         CompiledRule {
             target: RuleTarget::Body,
-            matcher: RuleMatcher::Contains(needle.to_owned()),
+            matcher: RuleMatcher::Contains(needle.to_lowercase()),
             negate: false,
         }
     }

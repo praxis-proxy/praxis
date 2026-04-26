@@ -12,20 +12,16 @@ use rustls::{
 
 use crate::{ClientCertMode, TlsError};
 
-// -----------------------------------------------------------------------------
+// -------------------------------------------------------------------------------
 // Verifier Builder
-// -----------------------------------------------------------------------------
+// -------------------------------------------------------------------------------
 
 /// Build a [`ClientCertVerifier`] from a CA PEM file and verification mode.
 ///
 /// # Errors
 ///
-/// Returns [`TlsError`] if the CA file cannot be read or parsed.
-///
-/// # Panics
-///
-/// Panics if `mode` is [`ClientCertMode::None`]; callers must not
-/// invoke this function in that case.
+/// Returns [`TlsError`] if the CA file cannot be read or parsed, or
+/// if `mode` is [`ClientCertMode::None`].
 ///
 /// ```ignore
 /// use std::sync::Arc;
@@ -59,7 +55,7 @@ pub(crate) fn build_client_verifier(
         ClientCertMode::Require => builder
             .build()
             .map_err(|e| verifier_err(format!("failed to build verifier: {e}"))),
-        ClientCertMode::None => unreachable!("build_client_verifier must not be called with mode=None"),
+        ClientCertMode::None => Err(TlsError::ClientVerifierNotRequired),
     }
 }
 
@@ -97,9 +93,9 @@ fn load_ca_root_store(ca_path: &str) -> Result<RootCertStore, TlsError> {
     Ok(root_store)
 }
 
-// -----------------------------------------------------------------------------
+// -------------------------------------------------------------------------------
 // Tests
-// -----------------------------------------------------------------------------
+// -------------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
@@ -129,6 +125,18 @@ mod tests {
         assert!(
             !verifier.client_auth_mandatory(),
             "request mode should not mandate client auth"
+        );
+    }
+
+    #[test]
+    fn build_client_verifier_none_mode_returns_error() {
+        let certs = gen_ca_file();
+        let ca_path = certs.ca_path.to_str().expect("ca path should be valid UTF-8");
+
+        let err = build_client_verifier(ca_path, &ClientCertMode::None).expect_err("mode=None should return error");
+        assert!(
+            matches!(err, TlsError::ClientVerifierNotRequired),
+            "error should be ClientVerifierNotRequired, got: {err}"
         );
     }
 
@@ -174,9 +182,9 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
     // Test Utilities
-    // ---------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
 
     /// Generated CA certificate file with temp dir lifetime.
     struct TestCa {

@@ -41,6 +41,10 @@ pub enum TlsError {
     #[error("hot_reload requires exactly one certificate; multi-cert SNI configs are not supported")]
     HotReloadMultipleCerts,
 
+    /// `build_client_verifier` was called with `ClientCertMode::None`.
+    #[error("build_client_verifier must not be called with client_cert_mode=None")]
+    ClientVerifierNotRequired,
+
     /// Failed to load or parse a TLS file (certificate, key, or CA).
     #[error("failed to load TLS file {path}: {detail}")]
     FileLoadError {
@@ -123,6 +127,16 @@ mod tests {
     fn error_display_hot_reload_multiple_certs() {
         let e = TlsError::HotReloadMultipleCerts;
         assert!(e.to_string().contains("hot_reload"), "should mention hot_reload: {e}");
+    }
+
+    #[test]
+    fn error_display_client_verifier_not_required() {
+        let e = TlsError::ClientVerifierNotRequired;
+        let msg = e.to_string();
+        assert!(
+            msg.contains("client_cert_mode=None"),
+            "should mention client_cert_mode=None: {msg}"
+        );
     }
 
     #[test]

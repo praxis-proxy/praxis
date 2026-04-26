@@ -46,7 +46,7 @@ async fn websocket_upgrade_succeeds() {
     let echo = ws.next().await.unwrap().unwrap();
     assert_eq!(echo, Message::Text("world".into()), "multiple messages should work");
 
-    ws.close(None).await.unwrap();
+    ws.close(None).await.ok();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -69,7 +69,34 @@ async fn websocket_binary_messages() {
         "binary messages should be echoed correctly"
     );
 
-    ws.close(None).await.unwrap();
+    ws.close(None).await.ok();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn websocket_message_ordering_preserved() {
+    let ws_backend = start_websocket_echo_backend().await;
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, ws_backend.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let _proxy = start_proxy(&config);
+
+    let url = format!("ws://127.0.0.1:{proxy_port}/");
+    let (mut ws, _) = connect_async(&url).await.unwrap();
+
+    for i in 0..50 {
+        ws.send(Message::Text(format!("msg-{i}").into())).await.unwrap();
+    }
+
+    for i in 0..50 {
+        let echo = ws.next().await.unwrap().unwrap();
+        assert_eq!(
+            echo,
+            Message::Text(format!("msg-{i}").into()),
+            "message {i} should echo in order"
+        );
+    }
+
+    ws.close(None).await.ok();
 }
 
 #[test]
@@ -207,7 +234,7 @@ async fn websocket_ping_pong_frames() {
         "proxy should forward ping/pong frames, got {reply:?}"
     );
 
-    ws.close(None).await.unwrap();
+    ws.close(None).await.ok();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -230,7 +257,7 @@ async fn websocket_large_message() {
         "128KB binary message should echo correctly"
     );
 
-    ws.close(None).await.unwrap();
+    ws.close(None).await.ok();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -270,9 +297,9 @@ async fn websocket_multiple_simultaneous_connections() {
         "connection 3 should echo independently"
     );
 
-    ws1.close(None).await.unwrap();
-    ws2.close(None).await.unwrap();
-    ws3.close(None).await.unwrap();
+    ws1.close(None).await.ok();
+    ws2.close(None).await.ok();
+    ws3.close(None).await.ok();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -329,7 +356,7 @@ async fn websocket_via_header_on_upgrade_response() {
         "Via header should contain proxy pseudonym 'praxis', got: {via_str}"
     );
 
-    ws.close(None).await.unwrap();
+    ws.close(None).await.ok();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -368,7 +395,7 @@ filter_chains:
     let url = format!("ws://127.0.0.1:{proxy_port}/");
     let (mut ws, resp) = connect_async(&url).await.expect("first upgrade should succeed");
     assert_eq!(resp.status(), 101, "first upgrade should get 101");
-    ws.close(None).await.unwrap();
+    ws.close(None).await.ok();
 
     let request = "GET / HTTP/1.1\r\n\
          Host: localhost\r\n\

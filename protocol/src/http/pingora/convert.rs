@@ -3,13 +3,11 @@
 
 //! Conversions between Pingora types and Praxis transport-agnostic types.
 
-use std::time::Duration;
-
 use pingora_core::upstreams::peer::HttpPeer;
 use pingora_proxy::Session;
 use praxis_core::connectivity::ConnectionOptions;
 use praxis_filter::{Rejection, Request, Response};
-use tracing::{debug, warn};
+use tracing::debug;
 
 // -----------------------------------------------------------------------------
 // Pingora - Request / Response Conversion
@@ -129,16 +127,6 @@ pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) 
 // Hot path: called per upstream_peer, cross-crate boundary.
 #[inline]
 pub(crate) fn apply_connection_options(peer: &mut HttpPeer, opts: &ConnectionOptions) {
-    if opts.connection_timeout == Some(Duration::ZERO) {
-        warn!("connection_timeout is zero, upstream connections will fail immediately");
-    }
-    if opts.read_timeout == Some(Duration::ZERO) {
-        warn!("read_timeout is zero, upstream reads will fail immediately");
-    }
-    if opts.write_timeout == Some(Duration::ZERO) {
-        warn!("write_timeout is zero, upstream writes will fail immediately");
-    }
-
     peer.options.connection_timeout = opts.connection_timeout;
     peer.options.total_connection_timeout = opts.total_connection_timeout;
     peer.options.idle_timeout = opts.idle_timeout;

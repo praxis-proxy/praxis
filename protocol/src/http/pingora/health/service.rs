@@ -17,22 +17,35 @@ use crate::http::pingora::json::json_response;
 // JSON Escaping
 // -----------------------------------------------------------------------------
 
-/// Escape `\` and `"` for safe inclusion in a JSON string value.
+/// Escape a string for safe inclusion in a JSON string value
+/// per [RFC 8259 Section 7].
+///
+/// Escapes `\`, `"`, and all control characters (U+0000 through
+/// U+001F). Uses short escapes for `\n`, `\r`, and `\t`; all other
+/// control characters use `\uXXXX` format.
 ///
 /// ```ignore
 /// use praxis_protocol::http::pingora::health::escape_json_string;
 ///
 /// assert_eq!(escape_json_string("simple"), "simple");
 /// assert_eq!(escape_json_string(r#"a"b"#), r#"a\"b"#);
-/// assert_eq!(escape_json_string(r"a\b"), r"a\\b");
+/// assert_eq!(escape_json_string("a\nb"), r"a\nb");
 /// ```
+///
+/// [RFC 8259 Section 7]: https://datatracker.ietf.org/doc/html/rfc8259#section-7
 pub(crate) fn escape_json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
             '"' => out.push_str("\\\""),
-            _ => out.push(ch),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if c.is_control() && (c as u32) <= 0x1F => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            },
+            c => out.push(c),
         }
     }
     out
@@ -420,6 +433,26 @@ mod tests {
     #[test]
     fn escape_json_string_handles_quote() {
         assert_eq!(escape_json_string(r#"a"b"#), r#"a\"b"#, "quote should be escaped");
+    }
+
+    #[test]
+    fn escape_json_string_handles_newline_cr_tab() {
+        assert_eq!(
+            escape_json_string("a\nb\rc\td"),
+            "a\\nb\\rc\\td",
+            "newline, carriage return, tab should use short escapes"
+        );
+    }
+
+    #[test]
+    fn escape_json_string_handles_other_control_chars() {
+        let input = String::from_utf8(vec![0x00, 0x01, 0x1F]).unwrap();
+        let expected = ["\\u0000", "\\u0001", "\\u001f"].concat();
+        assert_eq!(
+            escape_json_string(&input),
+            expected,
+            "other control chars should use \\uXXXX format"
+        );
     }
 
     #[test]

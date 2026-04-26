@@ -89,8 +89,10 @@ impl ShutdownSignalWatch for NotifyShutdownWatch {
     }
 }
 
-/// Maximum time to wait for the server thread to finish
-/// during [`ProxyGuard::drop`].
+/// Maximum time to wait for the proxy server thread to join on
+/// [`ProxyGuard`] shutdown before giving up.
+///
+/// [`ProxyGuard`]: ProxyGuard
 const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// RAII guard that shuts down a Pingora proxy server when

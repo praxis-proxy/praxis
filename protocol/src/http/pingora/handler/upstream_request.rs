@@ -8,7 +8,7 @@
 
 use http::Uri;
 use pingora_http::RequestHeader;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::{
     super::context::PingoraRequestCtx,
@@ -60,34 +60,52 @@ fn is_websocket_request(headers: &http::HeaderMap) -> bool {
 
 /// Apply a rewritten path from the filter pipeline to the upstream request.
 ///
-/// Validates that the path starts with `/` and contains no scheme or
-/// authority components before applying. Rejects absolute URIs that
-/// could redirect traffic to unintended hosts.
+/// Validates that the path starts with `/`, contains no scheme or
+/// authority components, and has no `..` traversal segments before
+/// applying. Returns an error on invalid paths rather than silently
+/// ignoring them, because a filter producing an invalid path is a
+/// pipeline configuration bug.
 ///
-/// If `ctx.rewritten_path` is set, replaces the URI path (and query)
-/// on the upstream request header.
-pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &mut PingoraRequestCtx) {
+/// # Errors
+///
+/// Returns a Pingora error if the rewritten path is malformed,
+/// contains traversal, or includes a scheme/authority.
+pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &mut PingoraRequestCtx) -> pingora_core::Result<()> {
     let Some(new_path) = ctx.rewritten_path.take() else {
-        return;
+        return Ok(());
     };
 
     if !new_path.starts_with('/') || new_path.starts_with("//") {
-        warn!(path = %new_path, "rewritten path must be an absolute path (start with / but not //); ignoring");
-        return;
+        return Err(pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("rewritten path must start with / but not //: {new_path}"),
+        ));
     }
 
-    let Ok(uri) = new_path.parse::<Uri>() else {
-        warn!(path = %new_path, "invalid rewritten path; keeping original");
-        return;
-    };
+    let uri = new_path.parse::<Uri>().map_err(|e| {
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("invalid rewritten path: {new_path}: {e}"),
+        )
+    })?;
 
     if uri.scheme().is_some() || uri.authority().is_some() {
-        warn!(path = %new_path, "rewritten path contains scheme or authority; ignoring");
-        return;
+        return Err(pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("rewritten path contains scheme or authority: {new_path}"),
+        ));
+    }
+
+    if uri.path().split('/').any(|seg| seg == "..") {
+        return Err(pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("rewritten path contains '..' traversal: {new_path}"),
+        ));
     }
 
     debug!(rewritten_path = %new_path, "applying path rewrite to upstream request");
     req.set_uri(uri);
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -403,7 +421,7 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.rewritten_path = Some("/rewritten".to_owned());
 
-        apply_rewritten_path(&mut req, &mut ctx);
+        apply_rewritten_path(&mut req, &mut ctx).unwrap();
 
         assert_eq!(req.uri.path(), "/rewritten", "URI should be rewritten");
         assert!(ctx.rewritten_path.is_none(), "rewritten_path should be taken");
@@ -415,7 +433,7 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.rewritten_path = Some("/new?x=1".to_owned());
 
-        apply_rewritten_path(&mut req, &mut ctx);
+        apply_rewritten_path(&mut req, &mut ctx).unwrap();
 
         assert_eq!(req.uri.path(), "/new", "path should be rewritten");
         assert_eq!(req.uri.query(), Some("x=1"), "query should be preserved");
@@ -426,7 +444,7 @@ mod tests {
         let mut req = RequestHeader::build("GET", b"/keep", None).unwrap();
         let mut ctx = PingoraRequestCtx::default();
 
-        apply_rewritten_path(&mut req, &mut ctx);
+        apply_rewritten_path(&mut req, &mut ctx).unwrap();
 
         assert_eq!(req.uri.path(), "/keep", "URI should be unchanged when no rewrite");
     }
@@ -437,12 +455,9 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.rewritten_path = Some("http://evil.com/path".to_owned());
 
-        apply_rewritten_path(&mut req, &mut ctx);
-
-        assert_eq!(
-            req.uri.path(),
-            "/original",
-            "absolute URI should be rejected, keeping original path"
+        assert!(
+            apply_rewritten_path(&mut req, &mut ctx).is_err(),
+            "absolute URI should be rejected"
         );
     }
 
@@ -452,11 +467,8 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.rewritten_path = Some("relative/path".to_owned());
 
-        apply_rewritten_path(&mut req, &mut ctx);
-
-        assert_eq!(
-            req.uri.path(),
-            "/original",
+        assert!(
+            apply_rewritten_path(&mut req, &mut ctx).is_err(),
             "path without leading slash should be rejected"
         );
     }
@@ -467,9 +479,10 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.rewritten_path = Some("https:///path".to_owned());
 
-        apply_rewritten_path(&mut req, &mut ctx);
-
-        assert_eq!(req.uri.path(), "/original", "scheme-only URI should be rejected");
+        assert!(
+            apply_rewritten_path(&mut req, &mut ctx).is_err(),
+            "scheme-only URI should be rejected"
+        );
     }
 
     #[test]
@@ -478,9 +491,10 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.rewritten_path = Some("//evil.com/path".to_owned());
 
-        apply_rewritten_path(&mut req, &mut ctx);
-
-        assert_eq!(req.uri.path(), "/original", "authority-only URI should be rejected");
+        assert!(
+            apply_rewritten_path(&mut req, &mut ctx).is_err(),
+            "authority-only URI should be rejected"
+        );
     }
 
     #[test]
@@ -489,9 +503,48 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.rewritten_path = Some("/valid/path".to_owned());
 
-        apply_rewritten_path(&mut req, &mut ctx);
+        apply_rewritten_path(&mut req, &mut ctx).unwrap();
 
         assert_eq!(req.uri.path(), "/valid/path", "valid absolute path should be accepted");
+    }
+
+    #[test]
+    fn apply_rewritten_path_rejects_dot_dot_traversal() {
+        let mut req = RequestHeader::build("GET", b"/original", None).unwrap();
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.rewritten_path = Some("/api/../admin".to_owned());
+
+        assert!(
+            apply_rewritten_path(&mut req, &mut ctx).is_err(),
+            "path with '..' traversal should be rejected"
+        );
+    }
+
+    #[test]
+    fn apply_rewritten_path_rejects_trailing_dot_dot() {
+        let mut req = RequestHeader::build("GET", b"/original", None).unwrap();
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.rewritten_path = Some("/api/..".to_owned());
+
+        assert!(
+            apply_rewritten_path(&mut req, &mut ctx).is_err(),
+            "path ending with '..' should be rejected"
+        );
+    }
+
+    #[test]
+    fn apply_rewritten_path_allows_dot_dot_in_segment_name() {
+        let mut req = RequestHeader::build("GET", b"/original", None).unwrap();
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.rewritten_path = Some("/api/..config".to_owned());
+
+        apply_rewritten_path(&mut req, &mut ctx).unwrap();
+
+        assert_eq!(
+            req.uri.path(),
+            "/api/..config",
+            "segment containing '..' as prefix should be allowed"
+        );
     }
 
     #[test]
@@ -500,7 +553,7 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.rewritten_path = Some("/".to_owned());
 
-        apply_rewritten_path(&mut req, &mut ctx);
+        apply_rewritten_path(&mut req, &mut ctx).unwrap();
 
         assert_eq!(req.uri.path(), "/", "root path should be accepted");
     }

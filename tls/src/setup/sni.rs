@@ -49,7 +49,7 @@ impl std::fmt::Debug for SniCertResolver {
 impl ResolvesServerCert for SniCertResolver {
     fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
         let sni = client_hello.server_name();
-        sni.and_then(|name| self.certs.get(&name.to_lowercase()))
+        sni.and_then(|name| self.certs.get(&name.to_ascii_lowercase()))
             .cloned()
             .or_else(|| self.default.as_ref().map(Arc::clone))
     }
@@ -73,7 +73,7 @@ pub(super) fn build_sni_resolver(certificates: &[CertKeyPair]) -> Result<SniCert
         }
 
         for name in &pair.server_names {
-            let lower = name.to_lowercase();
+            let lower = name.to_ascii_lowercase();
             if certs.contains_key(&lower) {
                 return Err(TlsError::FileLoadError {
                     path: pair.cert_path.clone(),

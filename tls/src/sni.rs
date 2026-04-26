@@ -31,9 +31,9 @@
 
 use thiserror::Error;
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 // Constants
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 
 /// TLS `ContentType` for Handshake records.
 const CONTENT_TYPE_HANDSHAKE: u8 = 22;
@@ -57,9 +57,9 @@ const HANDSHAKE_HEADER_LEN: usize = 4;
 /// Version(2) + Random(32).
 const CLIENT_HELLO_FIXED_LEN: usize = 34;
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 // ClientHelloInfo
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 
 /// Information extracted from a TLS `ClientHello` message.
 ///
@@ -77,9 +77,9 @@ pub struct ClientHelloInfo {
     pub sni: Option<String>,
 }
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 // SniParseError
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 
 /// Errors from parsing TLS `ClientHello` SNI.
 ///
@@ -111,14 +111,18 @@ pub enum SniParseError {
     #[error("malformed TLS extension")]
     MalformedExtension,
 
+    /// The SNI hostname is empty (RFC 6066 requires a valid DNS name).
+    #[error("SNI hostname must not be empty (RFC 6066)")]
+    EmptyHostname,
+
     /// The SNI hostname is an IP literal (rejected per RFC 6066 section 3).
     #[error("SNI must not be an IP address (RFC 6066)")]
     InvalidHostname,
 }
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 // Public API
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 
 /// Parse the SNI hostname from a TLS `ClientHello` in `buf`.
 ///
@@ -144,9 +148,9 @@ pub fn parse_sni(buf: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
     parse_client_hello(hello_body)
 }
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 // Record Layer
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 
 /// Parse the TLS record header, returning the fragment payload.
 #[allow(clippy::indexing_slicing, reason = "bounds checked before access")]
@@ -190,9 +194,9 @@ fn parse_handshake_header(fragment: &[u8]) -> Result<&[u8], SniParseError> {
     Ok(&fragment[HANDSHAKE_HEADER_LEN..end])
 }
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 // ClientHello Parsing Utilities
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 
 /// Parse a `ClientHello` body and extract the SNI hostname.
 fn parse_client_hello(data: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
@@ -246,9 +250,9 @@ fn read_variable_u16(data: &[u8], pos: usize) -> Result<&[u8], SniParseError> {
     data.get(start..end).ok_or(SniParseError::MalformedExtension)
 }
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 // SNI Extension Parsing Utilities
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 
 /// Walk extensions looking for the SNI extension (type 0).
 fn parse_extensions(mut ext: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
@@ -291,6 +295,11 @@ fn parse_sni_extension(data: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
 
         if name_type == SNI_NAME_TYPE_HOST {
             let name_bytes = list.get(3..3 + name_len).ok_or(SniParseError::MalformedExtension)?;
+
+            if name_bytes.is_empty() {
+                return Err(SniParseError::EmptyHostname);
+            }
+
             let hostname = std::str::from_utf8(name_bytes).map_err(|_utf8| SniParseError::InvalidHostname)?;
 
             reject_ip_literal(hostname)?;
@@ -306,9 +315,9 @@ fn parse_sni_extension(data: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
     Ok(ClientHelloInfo { sni: None })
 }
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 // Binary Utilities
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 
 /// Read a big-endian `u16` from `data` at `offset`.
 fn read_u16(data: &[u8], offset: usize) -> Result<u16, SniParseError> {
@@ -325,9 +334,9 @@ fn read_u24(data: &[u8], offset: usize) -> Result<u32, SniParseError> {
     Ok(u32::from_be_bytes([0, a, b, c]))
 }
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 // Validation
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 
 /// Reject IP address literals per RFC 6066 section 3.
 fn reject_ip_literal(hostname: &str) -> Result<(), SniParseError> {
@@ -347,9 +356,9 @@ fn reject_ip_literal(hostname: &str) -> Result<(), SniParseError> {
     Ok(())
 }
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 // Tests
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(
@@ -497,6 +506,20 @@ mod tests {
         assert_ne!(a, c, "different SNI should not be equal");
     }
 
+    /// RFC 6066 section 3: SNI hostname must not be empty.
+    #[test]
+    fn empty_hostname_rejected() {
+        let sni_ext = build_sni_extension("");
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &sni_ext);
+        let record = wrap_in_record(&hello);
+
+        assert_eq!(
+            parse_sni(&record),
+            Err(SniParseError::EmptyHostname),
+            "zero-length SNI hostname should be rejected per RFC 6066"
+        );
+    }
+
     #[test]
     fn error_display_messages() {
         assert!(SniParseError::TooShort.to_string().contains("too short"));
@@ -504,6 +527,7 @@ mod tests {
         assert!(SniParseError::NotClientHello.to_string().contains("not a ClientHello"));
         assert!(SniParseError::NeedMoreData.to_string().contains("need more data"));
         assert!(SniParseError::MalformedExtension.to_string().contains("malformed"));
+        assert!(SniParseError::EmptyHostname.to_string().contains("must not be empty"));
         assert!(SniParseError::InvalidHostname.to_string().contains("IP address"));
     }
 
@@ -594,9 +618,9 @@ mod tests {
         );
     }
 
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
     // Test Utilities
-    // -------------------------------------------------------------------------
+    // -----------------------------------------------------------------------------
 
     /// Build an SNI extension payload (type 0x0000).
     fn build_sni_extension(hostname: &str) -> Vec<u8> {

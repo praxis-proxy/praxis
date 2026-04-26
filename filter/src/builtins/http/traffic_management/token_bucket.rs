@@ -60,8 +60,7 @@ impl TokenBucket {
 
             let elapsed_nanos = now_nanos.saturating_sub(old_refill);
             if elapsed_nanos > 0 {
-                #[allow(clippy::cast_precision_loss, reason = "nanos to f64")]
-                let elapsed_secs = elapsed_nanos as f64 / 1_000_000_000.0;
+                let elapsed_secs = nanos_to_secs(elapsed_nanos);
                 tokens = (tokens + elapsed_secs * rate).min(burst);
             }
 
@@ -92,8 +91,7 @@ impl TokenBucket {
     pub(crate) fn current_tokens(&self, rate: f64, burst: f64, now_nanos: u64) -> f64 {
         let tokens = f64::from_bits(self.tokens.load(Ordering::Acquire));
         let last = self.last_refill.load(Ordering::Acquire);
-        #[allow(clippy::cast_precision_loss, reason = "nanos to f64")]
-        let elapsed_secs = now_nanos.saturating_sub(last) as f64 / 1_000_000_000.0;
+        let elapsed_secs = nanos_to_secs(now_nanos.saturating_sub(last));
         (tokens + elapsed_secs * rate).min(burst)
     }
 }
@@ -105,6 +103,31 @@ impl fmt::Debug for TokenBucket {
             .field("last_refill", &self.last_refill.load(Ordering::Relaxed))
             .finish()
     }
+}
+
+// -----------------------------------------------------------------------------
+// Utilities
+// -----------------------------------------------------------------------------
+
+/// Convert nanoseconds to seconds without `u64`-to-`f64` precision loss.
+///
+/// Splits the value into whole seconds (exact integer division) and a
+/// sub-second remainder that fits within `f64`'s 53-bit mantissa,
+/// avoiding the precision loss that occurs when casting large `u64`
+/// nanosecond counts (>2^53, roughly 104 days) directly to `f64`.
+///
+/// ```ignore
+/// let secs = nanos_to_secs(9_000_000_001_000_000_000); // ~285 years
+/// assert!((secs - 9_000_000_001.0).abs() < 1e-9);
+/// ```
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "whole_secs loses precision only beyond ~570 years; remainder < 1e9 is exact"
+)]
+fn nanos_to_secs(nanos: u64) -> f64 {
+    let whole_secs = nanos / 1_000_000_000;
+    let remainder = nanos % 1_000_000_000;
+    whole_secs as f64 + remainder as f64 / 1_000_000_000.0
 }
 
 // -----------------------------------------------------------------------------
@@ -283,6 +306,39 @@ mod tests {
             remaining.is_some_and(|r| r <= 5.0),
             "tokens after refill should not exceed burst, got {:?}",
             remaining
+        );
+    }
+
+    #[test]
+    fn nanos_to_secs_precision_at_104_days() {
+        let nanos_104_days: u64 = 104 * 24 * 3600 * 1_000_000_000;
+        let secs = nanos_to_secs(nanos_104_days);
+        let expected = 104.0 * 24.0 * 3600.0;
+        assert!(
+            (secs - expected).abs() < 1e-6,
+            "nanos_to_secs should be precise at 104 days: got {secs}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn nanos_to_secs_precision_with_fractional_part() {
+        let nanos: u64 = 104 * 24 * 3600 * 1_000_000_000 + 500_000_000;
+        let secs = nanos_to_secs(nanos);
+        let expected = 104.0 * 24.0 * 3600.0 + 0.5;
+        assert!(
+            (secs - expected).abs() < 1e-6,
+            "nanos_to_secs should preserve sub-second precision: got {secs}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn refill_precise_after_104_days() {
+        let bucket = TokenBucket::new(0.0);
+        let nanos_104_days: u64 = 104 * 24 * 3600 * 1_000_000_000;
+        let result = bucket.try_acquire(1.0, 100.0, nanos_104_days);
+        assert!(
+            result.is_some(),
+            "bucket should refill correctly after 104 days of uptime"
         );
     }
 
