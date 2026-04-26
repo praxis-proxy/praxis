@@ -146,10 +146,12 @@ impl Drop for ProxyGuard {
 fn build_pingora_server(config: &Config, registry: &FilterRegistry) -> pingora_core::server::Server {
     let mut server = praxis_core::server::build_http_server(config.shutdown_timeout_secs, &RuntimeOptions::default());
 
+    let mut cert_shutdowns = Vec::new();
     for listener in &config.listeners {
         let pipeline = resolve_listener_pipeline(config, listener, registry);
-        load_http_handler(&mut server, listener, pipeline).unwrap();
+        load_http_handler(&mut server, listener, pipeline, &mut cert_shutdowns).unwrap();
     }
+    drop(cert_shutdowns);
 
     if let Some(admin_addr) = &config.admin.address {
         praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server(

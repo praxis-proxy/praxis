@@ -53,7 +53,7 @@ filter_chains:
     let pipeline = std::sync::Arc::new(build_pipeline(&config));
     let mut server = praxis_core::server::build_http_server(config.shutdown_timeout_secs, &Default::default());
     for listener in &config.listeners {
-        load_http_handler(&mut server, listener, pipeline.clone()).unwrap();
+        load_http_handler(&mut server, listener, pipeline.clone(), &mut Vec::new()).unwrap();
     }
     let server = server;
     std::thread::spawn(move || {

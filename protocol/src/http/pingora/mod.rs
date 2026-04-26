@@ -45,12 +45,19 @@ impl Protocol for PingoraHttp {
             return Ok(());
         }
 
+        let mut cert_watcher_shutdowns = Vec::new();
         for listener in &http_listeners {
             let pipeline = pipelines.get(&listener.name).cloned().ok_or_else(|| {
                 ProxyError::Config(format!("no pipeline for listener '{name}'", name = listener.name))
             })?;
 
-            handler::load_http_handler(server.server_mut(), listener, pipeline)?;
+            handler::load_http_handler(server.server_mut(), listener, pipeline, &mut cert_watcher_shutdowns)?;
+        }
+
+        // Keep shutdown senders alive for the process lifetime so
+        // CertWatcher tasks are only cancelled on process exit.
+        if !cert_watcher_shutdowns.is_empty() {
+            let _leaked = Box::leak(cert_watcher_shutdowns.into_boxed_slice());
         }
 
         if let Some(admin_addr) = &config.admin.address {

@@ -53,6 +53,11 @@ const MAX_RETRIES: usize = 3;
 
 /// Load an HTTP handler for a single listener.
 ///
+/// Any TLS certificate watcher shutdown senders are appended to
+/// `cert_watcher_shutdowns`. The caller must keep this `Vec` alive
+/// until server shutdown; dropping the senders signals the watcher
+/// tasks to stop.
+///
 /// ```ignore
 /// use std::sync::Arc;
 ///
@@ -77,7 +82,8 @@ const MAX_RETRIES: usize = 3;
 ///     downstream_read_timeout_ms: None,
 ///     tcp_max_duration_secs: None,
 /// };
-/// load_http_handler(&mut server, &listener, pipeline).unwrap();
+/// let mut shutdowns = Vec::new();
+/// load_http_handler(&mut server, &listener, pipeline, &mut shutdowns).unwrap();
 /// ```
 ///
 /// # Errors
@@ -89,6 +95,7 @@ pub fn load_http_handler(
     server: &mut Server,
     listener: &praxis_core::config::Listener,
     pipeline: Arc<FilterPipeline>,
+    cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
 ) -> Result<(), praxis_core::ProxyError> {
     let service_name = format!("http-proxy:{name}", name = listener.name);
     let downstream_read_timeout = listener.downstream_read_timeout_ms.map(Duration::from_millis);
@@ -99,7 +106,9 @@ pub fn load_http_handler(
         let mut proxy = http_proxy(&server.configuration, handler);
         proxy.server_options = Some(h2c_server_options());
         let mut service = Service::new(service_name, proxy);
-        super::listener::add_listener(&mut service, listener)?;
+        if let Some(tx) = super::listener::add_listener(&mut service, listener)? {
+            cert_watcher_shutdowns.push(tx);
+        }
         server.add_service(service);
     } else {
         debug!(listener = %listener.name, "loading HTTP handler (no body filters)");
@@ -107,7 +116,9 @@ pub fn load_http_handler(
         let mut proxy = http_proxy(&server.configuration, handler);
         proxy.server_options = Some(h2c_server_options());
         let mut service = Service::new(service_name, proxy);
-        super::listener::add_listener(&mut service, listener)?;
+        if let Some(tx) = super::listener::add_listener(&mut service, listener)? {
+            cert_watcher_shutdowns.push(tx);
+        }
         server.add_service(service);
     }
     Ok(())

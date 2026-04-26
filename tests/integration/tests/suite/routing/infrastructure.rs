@@ -47,7 +47,7 @@ filter_chains:
     let pipeline = std::sync::Arc::new(build_pipeline(&config));
     let mut server = praxis_core::server::build_http_server(config.shutdown_timeout_secs, &Default::default());
     for listener in &config.listeners {
-        load_http_handler(&mut server, listener, pipeline.clone()).unwrap();
+        load_http_handler(&mut server, listener, pipeline.clone(), &mut Vec::new()).unwrap();
     }
     praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server(
         &mut server,
@@ -118,7 +118,7 @@ filter_chains:
     let pipeline = std::sync::Arc::new(build_pipeline(&config));
     let mut server = praxis_core::server::build_http_server(config.shutdown_timeout_secs, &runtime);
     for listener in &config.listeners {
-        load_http_handler(&mut server, listener, pipeline.clone()).unwrap();
+        load_http_handler(&mut server, listener, pipeline.clone(), &mut Vec::new()).unwrap();
     }
     std::thread::spawn(move || {
         server.run_forever();
