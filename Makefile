@@ -118,13 +118,10 @@ test-smoke:
 # Bench
 # -------------------------------------------------------------------
 
-# Fortio builds are not available on GitHub for Darwin (Mac OSX)
-# To install Fortio on the Mac, use `brew install fortio`.
+# Fortio builds are not available on GitHub for Darwin (Mac OSX).
+# On Mac, use `brew install fortio` so it is on $PATH at bench time.
 ifeq ($(UNAME_S),darwin)
   FORTIO_DEP :=
-  ifeq (, $(shell which fortio))
-    $(error "No fortio in $(PATH), consider doing 'brew install fortio'")
-  endif
 else
   FORTIO_DEP := $(FORTIO)
 endif
@@ -203,13 +200,10 @@ VEGETA := $(BINUTILS_DIR)/vegeta
 FORTIO := $(BINUTILS_DIR)/fortio
 
 # The MacOS / OSX sha256 command does not support the needed options.
-# On the Mac, do `brew install coreutils` to install gsha256sum, a GNU-compatible sha256sum
+# On Mac, `brew install coreutils` provides gsha256sum.
 SHA256SUM := sha256sum
 ifeq ($(UNAME_S),darwin)
   SHA256SUM := gsha256sum
-  ifeq (, $(shell which gsha256sum))
-    $(error "No gsha256sum in $(PATH), consider doing 'brew install coreutils'")
-  endif
 endif
 
 
