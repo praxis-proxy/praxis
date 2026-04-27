@@ -207,14 +207,8 @@ async fn run_request_filter(
             Ok(RequestFilterResult::Reject(rejection))
         },
         Err(e) => {
-            warn!(filter = http_filter.name(), error = %e, "filter error during request");
-            match pf.failure_mode {
-                FailureMode::Open => {
-                    warn!(filter = http_filter.name(), "failure_mode=open, continuing after error");
-                    Ok(RequestFilterResult::Continue)
-                },
-                FailureMode::Closed => Err(e),
-            }
+            check_failure_mode(http_filter.name(), e, "request", pf.failure_mode)?;
+            Ok(RequestFilterResult::Continue)
         },
     }
 }

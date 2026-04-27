@@ -44,9 +44,9 @@ filter_chains:
     );
     let config = Config::from_yaml(&yaml).unwrap();
     let registry = registry_with("always_error", || Box::new(AlwaysErrorFilter));
-    let addr = start_proxy_with_registry(&config, &registry);
+    let proxy = start_proxy_with_registry(&config, &registry);
 
-    let (status, _) = http_post(&addr, "/anything", "hello");
+    let (status, _) = http_post(proxy.addr(), "/anything", "hello");
 
     assert_eq!(
         status, 500,
@@ -82,9 +82,9 @@ filter_chains:
     );
     let config = Config::from_yaml(&yaml).unwrap();
     let registry = registry_with("always_error", || Box::new(AlwaysErrorFilter));
-    let addr = start_proxy_with_registry(&config, &registry);
+    let proxy = start_proxy_with_registry(&config, &registry);
 
-    let (status, body) = http_post(&addr, "/anything", "hello from client");
+    let (status, body) = http_post(proxy.addr(), "/anything", "hello from client");
 
     assert_eq!(
         status, 200,
@@ -120,9 +120,9 @@ filter_chains:
     );
     let config = Config::from_yaml(&yaml).unwrap();
     let registry = registry_with("always_error", || Box::new(AlwaysErrorFilter));
-    let addr = start_proxy_with_registry(&config, &registry);
+    let proxy = start_proxy_with_registry(&config, &registry);
 
-    let (status, _) = http_post(&addr, "/anything", "hello");
+    let (status, _) = http_post(proxy.addr(), "/anything", "hello");
 
     assert_eq!(
         status, 500,
@@ -137,9 +137,9 @@ fn failure_mode_open_on_response_error_still_returns_200() {
     let yaml = make_yaml(proxy_port, backend_port, "response_error", "open");
     let config = Config::from_yaml(&yaml).unwrap();
     let registry = registry_with("response_error", || Box::new(ResponseErrorFilter));
-    let addr = start_proxy_with_registry(&config, &registry);
+    let proxy = start_proxy_with_registry(&config, &registry);
 
-    let (status, body) = http_post(&addr, "/", "hello");
+    let (status, body) = http_post(proxy.addr(), "/", "hello");
 
     assert_eq!(
         status, 200,
@@ -180,9 +180,9 @@ filter_chains:
     let mut registry = FilterRegistry::with_builtins();
     register_test_filter(&mut registry, "open_error", || Box::new(AlwaysErrorFilter));
     register_test_filter(&mut registry, "closed_error", || Box::new(AlwaysErrorFilter));
-    let addr = start_proxy_with_registry(&config, &registry);
+    let proxy = start_proxy_with_registry(&config, &registry);
 
-    let (status, _) = http_post(&addr, "/", "hello");
+    let (status, _) = http_post(proxy.addr(), "/", "hello");
 
     assert_eq!(
         status, 500,
@@ -197,9 +197,9 @@ fn failure_mode_open_on_request_body_error_still_succeeds() {
     let yaml = make_yaml(proxy_port, backend_port, "body_error", "open");
     let config = Config::from_yaml(&yaml).unwrap();
     let registry = registry_with("body_error", || Box::new(RequestBodyErrorFilter));
-    let addr = start_proxy_with_registry(&config, &registry);
+    let proxy = start_proxy_with_registry(&config, &registry);
 
-    let (status, body) = http_post(&addr, "/", "hello");
+    let (status, body) = http_post(proxy.addr(), "/", "hello");
 
     assert_eq!(
         status, 200,
