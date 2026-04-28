@@ -32,7 +32,7 @@ use crate::{CertKeyPair, TlsError};
 /// [`CertifiedKey`]: rustls::sign::CertifiedKey
 pub(crate) struct SniCertResolver {
     /// Hostname-to-certificate mapping.
-    pub(super) certs: HashMap<String, Arc<CertifiedKey>>,
+    certs: HashMap<String, Arc<CertifiedKey>>,
 
     /// Fallback certificate when SNI does not match any entry.
     default: Option<Arc<CertifiedKey>>,
@@ -43,6 +43,24 @@ impl std::fmt::Debug for SniCertResolver {
         f.debug_struct("SniCertResolver")
             .field("hostnames", &self.certs.keys().collect::<Vec<_>>())
             .finish()
+    }
+}
+
+#[cfg(test)]
+impl SniCertResolver {
+    /// Number of hostname-to-certificate mappings.
+    fn hostname_count(&self) -> usize {
+        self.certs.len()
+    }
+
+    /// Whether the resolver contains a mapping for `hostname`.
+    fn has_hostname(&self, hostname: &str) -> bool {
+        self.certs.contains_key(hostname)
+    }
+
+    /// Whether a default (fallback) certificate is configured.
+    fn has_default(&self) -> bool {
+        self.default.is_some()
     }
 }
 
@@ -100,7 +118,8 @@ pub(super) fn build_sni_resolver(certificates: &[CertKeyPair]) -> Result<SniCert
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
-    use super::{super::tests::gen_test_certs, *};
+    use super::*;
+    use crate::test_utils::gen_test_certs;
 
     #[test]
     fn sni_resolver_returns_matching_cert() {
@@ -123,13 +142,13 @@ mod tests {
 
         let resolver = build_sni_resolver(&certificates).expect("SNI resolver build should succeed");
         assert!(
-            resolver.certs.contains_key("known.example.com"),
+            resolver.has_hostname("known.example.com"),
             "resolver should contain the registered hostname"
         );
-        assert!(
-            resolver.certs.len() == 1,
-            "resolver should have exactly one SNI entry, got {}",
-            resolver.certs.len()
+        assert_eq!(
+            resolver.hostname_count(),
+            1,
+            "resolver should have exactly one SNI entry"
         );
     }
 
@@ -180,11 +199,11 @@ mod tests {
 
         let resolver = build_sni_resolver(&certificates).expect("SNI resolver build should succeed");
         assert!(
-            !resolver.certs.contains_key("unknown.example.com"),
+            !resolver.has_hostname("unknown.example.com"),
             "unknown hostname should not be in resolver map"
         );
         assert!(
-            resolver.certs.contains_key("known.example.com"),
+            resolver.has_hostname("known.example.com"),
             "known hostname should be in resolver map"
         );
     }
@@ -209,9 +228,13 @@ mod tests {
         ];
 
         let resolver = build_sni_resolver(&certificates).expect("SNI resolver build should succeed");
-        assert_eq!(resolver.certs.len(), 1, "resolver should have exactly one SNI entry");
+        assert_eq!(
+            resolver.hostname_count(),
+            1,
+            "resolver should have exactly one SNI entry"
+        );
         assert!(
-            resolver.certs.contains_key("api.example.com"),
+            resolver.has_hostname("api.example.com"),
             "resolver should contain api.example.com"
         );
     }
@@ -236,9 +259,9 @@ mod tests {
         ];
 
         let resolver = build_sni_resolver(&certificates).expect("SNI resolver build should succeed");
-        assert_eq!(resolver.certs.len(), 2, "resolver should have two SNI entries");
+        assert_eq!(resolver.hostname_count(), 2, "resolver should have two SNI entries");
         assert!(
-            resolver.default.is_none(),
+            !resolver.has_default(),
             "no default should be set when no entry has default: true"
         );
     }

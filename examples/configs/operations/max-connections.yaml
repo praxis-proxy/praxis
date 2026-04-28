@@ -1,0 +1,23 @@
+# Max connections: reject new connections when the
+# per-listener limit is reached.
+#
+# HTTP listeners return 503 with Retry-After: 1.
+# TCP listeners close the socket immediately.
+listeners:
+  - name: http
+    address: "0.0.0.0:8080"
+    max_connections: 100
+    filter_chains:
+      - main
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3001"

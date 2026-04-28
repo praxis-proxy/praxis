@@ -348,6 +348,7 @@ fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>
             cluster: None,
             downstream_read_timeout_ms: None,
             filter_chains: vec!["backend".to_owned()],
+            max_connections: None,
             name: "backend".to_owned(),
             protocol: ProtocolKind::default(),
             tcp_idle_timeout_ms: None,

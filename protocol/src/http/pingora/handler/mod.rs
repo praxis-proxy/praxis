@@ -8,6 +8,7 @@ use std::{sync::Arc, time::Duration};
 use pingora_core::{Result, apps::HttpServerOptions, server::Server, services::listening::Service};
 use pingora_proxy::{Session, http_proxy};
 use praxis_filter::{CompressionConfig, FilterPipeline};
+use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
 use super::context::PingoraRequestCtx;
@@ -74,13 +75,14 @@ const MAX_RETRIES: usize = 3;
 ///     name: "http".into(),
 ///     address: "127.0.0.1:8080".into(),
 ///     cluster: None,
+///     downstream_read_timeout_ms: None,
+///     filter_chains: vec![],
+///     max_connections: None,
 ///     protocol: Default::default(),
+///     tcp_idle_timeout_ms: None,
+///     tcp_max_duration_secs: None,
 ///     tls: None,
 ///     upstream: None,
-///     filter_chains: vec![],
-///     tcp_idle_timeout_ms: None,
-///     downstream_read_timeout_ms: None,
-///     tcp_max_duration_secs: None,
 /// };
 /// let mut shutdowns = Vec::new();
 /// load_http_handler(&mut server, &listener, pipeline, &mut shutdowns).unwrap();
@@ -97,30 +99,42 @@ pub fn load_http_handler(
     pipeline: Arc<FilterPipeline>,
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
 ) -> Result<(), praxis_core::ProxyError> {
-    let service_name = format!("http-proxy:{name}", name = listener.name);
     let downstream_read_timeout = listener.downstream_read_timeout_ms.map(Duration::from_millis);
+    let connection_semaphore = listener
+        .max_connections
+        .map(|max| Arc::new(Semaphore::new(max as usize)));
 
     if pipeline.needs_body_filters() {
         debug!(listener = %listener.name, "loading HTTP handler with body filters");
-        let handler = PingoraHttpHandler::new(pipeline, downstream_read_timeout);
-        let mut proxy = http_proxy(&server.configuration, handler);
-        proxy.server_options = Some(h2c_server_options());
-        let mut service = Service::new(service_name, proxy);
-        if let Some(tx) = super::listener::add_listener(&mut service, listener)? {
-            cert_watcher_shutdowns.push(tx);
-        }
-        server.add_service(service);
+        let handler = PingoraHttpHandler::new(pipeline, downstream_read_timeout, connection_semaphore);
+        wire_service(server, listener, handler, cert_watcher_shutdowns)?;
     } else {
         debug!(listener = %listener.name, "loading HTTP handler (no body filters)");
-        let handler = PingoraHttpHandlerNoBody::new(pipeline, downstream_read_timeout);
-        let mut proxy = http_proxy(&server.configuration, handler);
-        proxy.server_options = Some(h2c_server_options());
-        let mut service = Service::new(service_name, proxy);
-        if let Some(tx) = super::listener::add_listener(&mut service, listener)? {
-            cert_watcher_shutdowns.push(tx);
-        }
-        server.add_service(service);
+        let handler = PingoraHttpHandlerNoBody::new(pipeline, downstream_read_timeout, connection_semaphore);
+        wire_service(server, listener, handler, cert_watcher_shutdowns)?;
     }
+    Ok(())
+}
+
+/// Create a Pingora HTTP proxy service, bind the listener, and add it to the server.
+fn wire_service<H>(
+    server: &mut Server,
+    listener: &praxis_core::config::Listener,
+    handler: H,
+    cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
+) -> Result<(), praxis_core::ProxyError>
+where
+    H: pingora_proxy::ProxyHttp + Send + Sync + 'static,
+    H::CTX: Send + Sync,
+{
+    let service_name = format!("http-proxy:{name}", name = listener.name);
+    let mut proxy = http_proxy(&server.configuration, handler);
+    proxy.server_options = Some(h2c_server_options());
+    let mut service = Service::new(service_name, proxy);
+    if let Some(tx) = super::listener::add_listener(&mut service, listener)? {
+        cert_watcher_shutdowns.push(tx);
+    }
+    server.add_service(service);
     Ok(())
 }
 
@@ -152,22 +166,16 @@ fn adjust_compression(
         return;
     }
 
-    if !cfg.gzip_enabled {
-        module.adjust_algorithm_level(Algorithm::Gzip, 0);
-    } else if let Some(level) = cfg.gzip_level {
-        module.adjust_algorithm_level(Algorithm::Gzip, level);
-    }
-
-    if !cfg.brotli_enabled {
-        module.adjust_algorithm_level(Algorithm::Brotli, 0);
-    } else if let Some(level) = cfg.brotli_level {
-        module.adjust_algorithm_level(Algorithm::Brotli, level);
-    }
-
-    if !cfg.zstd_enabled {
-        module.adjust_algorithm_level(Algorithm::Zstd, 0);
-    } else if let Some(level) = cfg.zstd_level {
-        module.adjust_algorithm_level(Algorithm::Zstd, level);
+    for (enabled, level, algo) in [
+        (cfg.gzip_enabled, cfg.gzip_level, Algorithm::Gzip),
+        (cfg.brotli_enabled, cfg.brotli_level, Algorithm::Brotli),
+        (cfg.zstd_enabled, cfg.zstd_level, Algorithm::Zstd),
+    ] {
+        if !enabled {
+            module.adjust_algorithm_level(algo, 0);
+        } else if let Some(lvl) = level {
+            module.adjust_algorithm_level(algo, lvl);
+        }
     }
 }
 
@@ -226,6 +234,7 @@ fn h2c_server_options() -> HttpServerOptions {
     clippy::field_reassign_with_default,
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
+    clippy::significant_drop_tightening,
     reason = "tests"
 )]
 mod tests {

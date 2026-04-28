@@ -10,7 +10,11 @@ use pingora_core::{apps::ServerApp, protocols::Stream, server::ShutdownWatch};
 use praxis_core::health::HealthRegistry;
 use praxis_filter::{FilterAction, FilterPipeline, TcpFilterContext};
 use praxis_tls::sni;
-use tokio::{io::AsyncReadExt, net::TcpStream, sync::watch};
+use tokio::{
+    io::AsyncReadExt,
+    net::TcpStream,
+    sync::{Semaphore, watch},
+};
 use tracing::{debug, trace, warn};
 
 // -----------------------------------------------------------------------------
@@ -22,6 +26,9 @@ const PEEK_INITIAL: usize = 1024;
 
 /// Maximum peek buffer size before giving up on SNI extraction.
 const PEEK_MAX: usize = 16384; // 16 KiB
+
+/// Timeout for upstream TCP connect (including DNS resolution).
+const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
 // -----------------------------------------------------------------------------
 // PingoraTcpProxy
@@ -43,6 +50,9 @@ pub(crate) struct PingoraTcpProxy {
     /// Cluster name for load-balanced TCP connections.
     cluster: Option<Arc<str>>,
 
+    /// Per-listener connection semaphore for max connections.
+    connection_semaphore: Option<Arc<Semaphore>>,
+
     /// Shared health registry for endpoint health lookups.
     health_registry: Option<HealthRegistry>,
 
@@ -61,16 +71,19 @@ pub(crate) struct PingoraTcpProxy {
 
 impl PingoraTcpProxy {
     /// Create a TCP proxy, optionally targeting a fixed upstream address.
+    #[allow(clippy::too_many_arguments, reason = "per-listener configuration")]
     pub(super) fn new(
         upstream_addr: Option<String>,
         cluster: Option<Arc<str>>,
         pipeline: Arc<FilterPipeline>,
         idle_timeout: Option<Duration>,
         max_duration: Option<Duration>,
+        connection_semaphore: Option<Arc<Semaphore>>,
     ) -> Self {
         let health_registry = pipeline.health_registry().cloned();
         Self {
             cluster,
+            connection_semaphore,
             health_registry,
             idle_timeout,
             max_duration,
@@ -187,6 +200,17 @@ impl PingoraTcpProxy {
 impl ServerApp for PingoraTcpProxy {
     #[allow(clippy::too_many_lines, reason = "linear connection lifecycle")]
     async fn process_new(self: &Arc<Self>, mut session: Stream, shutdown: &ShutdownWatch) -> Option<Stream> {
+        let _permit = if let Some(ref sem) = self.connection_semaphore {
+            if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
+                Some(permit)
+            } else {
+                warn!("max TCP connections reached, closing connection");
+                return None;
+            }
+        } else {
+            None
+        };
+
         let connect_time = std::time::Instant::now();
         let (remote_addr, local_addr) = extract_addrs(&session);
 
@@ -343,8 +367,9 @@ fn handle_sni_read(buf: &mut Vec<u8>, filled: usize) -> PeekAction {
 }
 
 /// Attempt to parse SNI from the filled portion of the buffer.
+#[allow(clippy::indexing_slicing, reason = "filled <= buf.len() maintained by caller")]
 fn try_parse_sni(buf: &[u8], filled: usize) -> SniPeekResult {
-    let data = buf.get(..filled).unwrap_or(buf);
+    let data = &buf[..filled];
     match sni::parse_sni(data) {
         Ok(info) => SniPeekResult::Parsed(info),
         Err(sni::SniParseError::TooShort | sni::SniParseError::NeedMoreData) => SniPeekResult::NeedMore,
@@ -406,12 +431,20 @@ async fn forward_no_timeout(
     }
 }
 
-/// Connect to the upstream TCP address.
+/// Connect to the upstream TCP address with a timeout.
 async fn connect_upstream(upstream_addr: &str) -> Option<TcpStream> {
-    match TcpStream::connect(upstream_addr).await {
-        Ok(s) => Some(s),
-        Err(e) => {
+    match tokio::time::timeout(UPSTREAM_CONNECT_TIMEOUT, TcpStream::connect(upstream_addr)).await {
+        Ok(Ok(s)) => Some(s),
+        Ok(Err(e)) => {
             warn!(upstream = %upstream_addr, error = %e, "failed to connect to TCP upstream");
+            None
+        },
+        Err(_) => {
+            warn!(
+                upstream = %upstream_addr,
+                timeout_secs = UPSTREAM_CONNECT_TIMEOUT.as_secs(),
+                "TCP upstream connect timed out"
+            );
             None
         },
     }

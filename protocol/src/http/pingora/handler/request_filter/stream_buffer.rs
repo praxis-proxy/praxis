@@ -3,7 +3,7 @@
 
 //! StreamBuffer pre-read logic and TRACE response construction.
 
-use std::{borrow::Cow, collections::VecDeque};
+use std::{borrow::Cow, collections::VecDeque, fmt::Write};
 
 use pingora_proxy::Session;
 use praxis_filter::{BodyBuffer, BodyMode, FilterAction, FilterError, FilterPipeline, Rejection, Request};
@@ -42,8 +42,8 @@ pub(super) fn build_trace_response(session: &Session) -> Rejection {
             tracing::debug!(header = %name, "redacting sensitive header from TRACE response");
             continue;
         }
-        let val = value.to_str().unwrap_or("<binary>");
-        body.push_str(&format!("{name}: {val}\r\n"));
+        let val = value.to_str().unwrap_or("[binary]");
+        let _infallible = write!(body, "{name}: {val}\r\n");
     }
 
     let mut rejection = Rejection::status(200);
@@ -84,6 +84,9 @@ pub(super) async fn pre_read_body(
     request: &Request,
 ) -> Result<Vec<(Cow<'static, str>, String)>, PreReadError> {
     let caps = pipeline.body_capabilities();
+    // Config validation enforces reasonable limits on `max_bytes`.
+    // `usize::MAX` here means "no limit at this layer"; the
+    // configured cap (or its absence) was already validated.
     let max_bytes = match caps.request_body_mode {
         BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(usize::MAX),
         _ => return Ok(Vec::new()),

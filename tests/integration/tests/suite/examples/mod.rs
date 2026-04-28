@@ -18,6 +18,7 @@ mod health_checks;
 mod least_connections;
 mod logging;
 mod max_body_guard;
+mod max_connections;
 #[cfg(feature = "ai-inference")]
 mod model_to_header;
 mod multi_listener;

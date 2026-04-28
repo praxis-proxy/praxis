@@ -13,7 +13,8 @@ use pingora_core::{
 };
 use pingora_proxy::{ProxyHttp, Session};
 use praxis_filter::{CompressionConfig, FilterPipeline};
-use tracing::debug;
+use tokio::sync::Semaphore;
+use tracing::{debug, warn};
 
 use super::{
     adjust_compression, handle_connect_failure, logging_cleanup, request_filter, response_filter, upstream_peer,
@@ -37,6 +38,9 @@ pub struct PingoraHttpHandlerNoBody {
     /// Compression configuration, if enabled.
     compression: Option<CompressionConfig>,
 
+    /// Per-listener connection semaphore for max connections.
+    connection_semaphore: Option<Arc<Semaphore>>,
+
     /// Per-listener downstream read timeout.
     downstream_read_timeout: Option<Duration>,
 
@@ -46,10 +50,15 @@ pub struct PingoraHttpHandlerNoBody {
 
 impl PingoraHttpHandlerNoBody {
     /// Create a handler without body filter support.
-    pub(super) fn new(pipeline: Arc<FilterPipeline>, downstream_read_timeout: Option<Duration>) -> Self {
+    pub(super) fn new(
+        pipeline: Arc<FilterPipeline>,
+        downstream_read_timeout: Option<Duration>,
+        connection_semaphore: Option<Arc<Semaphore>>,
+    ) -> Self {
         let compression = pipeline.compression_config().cloned();
         Self {
             compression,
+            connection_semaphore,
             downstream_read_timeout,
             pipeline,
         }
@@ -74,10 +83,25 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
     }
 
     #[allow(clippy::cast_possible_truncation, reason = "millis fit u64")]
-    async fn early_request_filter(&self, session: &mut Session, _ctx: &mut Self::CTX) -> Result<()>
+    async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()>
     where
         Self::CTX: Send + Sync,
     {
+        if let Some(ref sem) = self.connection_semaphore {
+            if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
+                ctx._connection_permit = Some(permit);
+            } else {
+                warn!("max connections reached, rejecting request");
+                let mut header = pingora_http::ResponseHeader::build(503, None)?;
+                header.append_header("Retry-After", "1")?;
+                session.write_response_header(Box::new(header), true).await?;
+                return Err(pingora_core::Error::explain(
+                    pingora_core::ErrorType::HTTPStatus(503),
+                    "max connections exceeded",
+                ));
+            }
+        }
+
         if let Some(timeout) = self.downstream_read_timeout {
             debug!(
                 timeout_ms = timeout.as_millis() as u64,

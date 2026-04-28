@@ -24,16 +24,16 @@ use tokio::sync::mpsc;
 
 use crate::{CertKeyPair, setup::loader};
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Debounce window for filesystem events.
 const DEBOUNCE_MS: u64 = 500;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // CertWatcher
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Watches cert and key files for changes, reloading on modification.
 ///
@@ -134,7 +134,9 @@ async fn watch_loop(
 fn setup_watcher(tx: mpsc::Sender<()>, cert_dir: &Path, key_dir: &Path) -> Result<RecommendedWatcher, notify::Error> {
     let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| match res {
         Ok(event) if is_relevant_event(event.kind) => {
-            let _sent = tx.blocking_send(());
+            if tx.try_send(()).is_err() {
+                tracing::trace!("cert watcher channel full, event coalesced by debounce");
+            }
         },
         Err(e) => {
             tracing::warn!(error = %e, "file watcher error");
@@ -151,6 +153,9 @@ fn setup_watcher(tx: mpsc::Sender<()>, cert_dir: &Path, key_dir: &Path) -> Resul
 }
 
 /// Drain pending events and sleep for the debounce window.
+///
+/// Shutdown is not serviced during the debounce sleep, so graceful
+/// shutdown may be delayed up to `DEBOUNCE_MS` (acceptable latency).
 async fn drain_and_debounce(rx: &mut mpsc::Receiver<()>) {
     tokio::time::sleep(Duration::from_millis(DEBOUNCE_MS)).await;
     while rx.try_recv().is_ok() {}
@@ -176,9 +181,9 @@ fn reload_cert(current: &Arc<ArcSwap<CertifiedKey>>, pair: &CertKeyPair) {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Utility Functions
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Whether a notify event kind is relevant for cert reload.
 fn is_relevant_event(kind: EventKind) -> bool {
@@ -190,9 +195,9 @@ fn parent_dir(path: &str) -> PathBuf {
     Path::new(path).parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(
@@ -204,6 +209,7 @@ fn parent_dir(path: &str) -> PathBuf {
 )]
 mod tests {
     use super::*;
+    use crate::test_utils::{gen_test_certs, gen_test_certs_in};
 
     #[test]
     fn parent_dir_extracts_directory() {
@@ -268,6 +274,7 @@ mod tests {
     #[test]
     fn watcher_reloads_on_file_change() {
         let certs = gen_test_certs();
+        let temp_dir = certs._temp_dir.as_ref().expect("temp dir");
         let pair = CertKeyPair {
             cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
             default: false,
@@ -283,10 +290,10 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(100));
 
-        let new_certs = gen_test_certs_in(&certs._temp_dir);
+        let new_certs = gen_test_certs_in(temp_dir.path());
         drop(new_certs);
 
-        std::thread::sleep(Duration::from_millis(1500));
+        std::thread::sleep(Duration::from_millis(2000));
 
         let after_der = current.load_full().cert[0].as_ref().to_vec();
 
@@ -296,82 +303,5 @@ mod tests {
             before_der, after_der,
             "certificate should change after file modification"
         );
-    }
-
-    // ---------------------------------------------------------------------------
-    // Test Utilities
-    // ---------------------------------------------------------------------------
-
-    /// Generated test certificate bundle with temp dir lifetime.
-    struct TestCerts {
-        /// Path to the server certificate PEM.
-        cert_path: PathBuf,
-
-        /// Path to the server private key PEM.
-        key_path: PathBuf,
-
-        /// Temp directory holding the cert files.
-        _temp_dir: tempfile::TempDir,
-    }
-
-    /// Generate a self-signed CA and server certificate for testing.
-    fn gen_test_certs() -> TestCerts {
-        use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
-
-        let ca_key = KeyPair::generate().expect("CA key generation");
-        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
-        ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        ca_params.distinguished_name.push(DnType::CommonName, "Test CA");
-        let ca_cert = ca_params.self_signed(&ca_key).expect("CA self-sign");
-
-        let server_key = KeyPair::generate().expect("server key generation");
-        let mut server_params = CertificateParams::new(vec!["localhost".to_owned()]).expect("server params");
-        server_params.distinguished_name.push(DnType::CommonName, "localhost");
-        let server_cert = server_params
-            .signed_by(&server_key, &ca_cert, &ca_key)
-            .expect("server cert sign");
-
-        let temp_dir = tempfile::TempDir::new().expect("tempdir");
-        let cert_path = temp_dir.path().join("server.pem");
-        let key_path = temp_dir.path().join("server-key.pem");
-
-        std::fs::write(&cert_path, server_cert.pem()).expect("write cert PEM");
-        std::fs::write(&key_path, server_key.serialize_pem()).expect("write key PEM");
-
-        TestCerts {
-            cert_path,
-            key_path,
-            _temp_dir: temp_dir,
-        }
-    }
-
-    /// Generate new certs in an existing temp dir, overwriting the files.
-    fn gen_test_certs_in(dir: &tempfile::TempDir) -> TestCerts {
-        use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
-
-        let ca_key = KeyPair::generate().expect("CA key generation");
-        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
-        ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        ca_params.distinguished_name.push(DnType::CommonName, "Test CA 2");
-        let ca_cert = ca_params.self_signed(&ca_key).expect("CA self-sign");
-
-        let server_key = KeyPair::generate().expect("server key generation");
-        let mut server_params = CertificateParams::new(vec!["localhost".to_owned()]).expect("server params");
-        server_params.distinguished_name.push(DnType::CommonName, "localhost");
-        let server_cert = server_params
-            .signed_by(&server_key, &ca_cert, &ca_key)
-            .expect("server cert sign");
-
-        let cert_path = dir.path().join("server.pem");
-        let key_path = dir.path().join("server-key.pem");
-
-        std::fs::write(&cert_path, server_cert.pem()).expect("write cert PEM");
-        std::fs::write(&key_path, server_key.serialize_pem()).expect("write key PEM");
-
-        TestCerts {
-            cert_path,
-            key_path,
-            _temp_dir: tempfile::TempDir::new().expect("dummy dir"),
-        }
     }
 }

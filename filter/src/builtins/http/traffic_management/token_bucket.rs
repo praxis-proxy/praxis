@@ -51,6 +51,13 @@ impl TokenBucket {
     ///
     /// Returns `Some(remaining)` on success, `None` when the bucket
     /// is empty.
+    ///
+    /// # Precision
+    ///
+    /// There is a brief over-issue window between the `tokens` CAS
+    /// and the `last_refill` update under contention. This is a
+    /// known limitation of the lock-free design. Rate limiting is
+    /// approximate by nature, and the burst cap bounds the impact.
     pub(crate) fn try_acquire(&self, rate: f64, burst: f64, now_nanos: u64) -> Option<f64> {
         loop {
             let old_tokens_bits = self.tokens.load(Ordering::Acquire);
@@ -122,7 +129,7 @@ impl fmt::Debug for TokenBucket {
 /// ```
 #[allow(
     clippy::cast_precision_loss,
-    reason = "whole_secs loses precision only beyond ~570 years; remainder < 1e9 is exact"
+    reason = "whole_secs max ~1.8e10 (u64::MAX nanos); well within f64's 2^53 mantissa. remainder < 1e9 is exact"
 )]
 fn nanos_to_secs(nanos: u64) -> f64 {
     let whole_secs = nanos / 1_000_000_000;
@@ -143,7 +150,6 @@ fn nanos_to_secs(nanos: u64) -> f64 {
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
-    clippy::uninlined_format_args,
     reason = "tests"
 )]
 mod tests {
@@ -304,8 +310,7 @@ mod tests {
         let remaining = bucket.try_acquire(1000.0, 5.0, 1_000_000_000);
         assert!(
             remaining.is_some_and(|r| r <= 5.0),
-            "tokens after refill should not exceed burst, got {:?}",
-            remaining
+            "tokens after refill should not exceed burst, got {remaining:?}"
         );
     }
 

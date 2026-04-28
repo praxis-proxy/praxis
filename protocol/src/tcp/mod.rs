@@ -8,6 +8,7 @@ use std::{sync::Arc, time::Duration};
 use pingora_core::services::listening::Service;
 use praxis_core::{ProxyError, config::Config};
 use praxis_filter::{FilterPipeline, FilterRegistry};
+use tokio::sync::{Semaphore, watch};
 
 use crate::{ListenerPipelines, Protocol};
 
@@ -28,18 +29,21 @@ mod tls_setup;
 /// [`Protocol`]: crate::Protocol
 pub struct PingoraTcp;
 
-#[allow(clippy::expect_used, reason = "infallible")]
+#[allow(clippy::too_many_lines, reason = "linear registration with shutdown collection")]
 impl Protocol for PingoraTcp {
     fn register(
         self: Box<Self>,
         server: &mut praxis_core::PingoraServerRuntime,
         config: &Config,
         pipelines: &ListenerPipelines,
-    ) -> Result<(), ProxyError> {
+    ) -> Result<Vec<watch::Sender<bool>>, ProxyError> {
         let groups = tls_setup::group_tcp_listeners(config);
+        #[allow(clippy::expect_used, reason = "empty pipeline is infallible")]
         let fallback_pipeline = Arc::new(
             FilterPipeline::build(&mut [], &FilterRegistry::with_builtins()).expect("empty pipeline is valid"),
         );
+
+        let mut cert_watcher_shutdowns = Vec::new();
 
         for ((upstream_opt, cluster_opt, timeout_ms, max_dur_secs), listeners) in groups {
             let pipeline = listeners
@@ -55,19 +59,28 @@ impl Protocol for PingoraTcp {
                 (_, Some(cluster)) => format!("tcp-proxy:cluster:{cluster}"),
                 _ => "tcp-proxy:filter-routed".to_owned(),
             };
+            let connection_semaphore = listeners
+                .first()
+                .and_then(|l| l.max_connections)
+                .map(|max| Arc::new(Semaphore::new(max as usize)));
             let app = proxy::PingoraTcpProxy::new(
                 upstream_opt.clone(),
                 cluster_opt.map(Arc::from),
                 pipeline,
                 idle_timeout,
                 max_duration,
+                connection_semaphore,
             );
             let mut service = Service::new(service_name, app);
 
-            tls_setup::register_tcp_listeners(&mut service, &listeners, upstream_opt.as_deref())?;
+            cert_watcher_shutdowns.extend(tls_setup::register_tcp_listeners(
+                &mut service,
+                &listeners,
+                upstream_opt.as_deref(),
+            )?);
             server.server_mut().add_service(service);
         }
 
-        Ok(())
+        Ok(cert_watcher_shutdowns)
     }
 }

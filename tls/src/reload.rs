@@ -21,9 +21,9 @@ use rustls::{
 
 use crate::{CertKeyPair, TlsError, setup::loader};
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // ReloadableCertResolver
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Atomically swappable certificate resolver for hot-reload.
 ///
@@ -107,14 +107,15 @@ impl ResolvesServerCert for ReloadableCertResolver {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
+    use crate::test_utils::gen_test_certs;
 
     #[test]
     fn new_and_resolve_returns_cert() {
@@ -208,52 +209,5 @@ mod tests {
             dbg.contains("ReloadableCertResolver"),
             "Debug output should contain struct name"
         );
-    }
-
-    // ---------------------------------------------------------------------------
-    // Test Utilities
-    // ---------------------------------------------------------------------------
-
-    /// Generated test certificate bundle with temp dir lifetime.
-    struct TestCerts {
-        /// Path to the server certificate PEM.
-        cert_path: std::path::PathBuf,
-
-        /// Path to the server private key PEM.
-        key_path: std::path::PathBuf,
-
-        /// Temp directory holding the cert files.
-        _temp_dir: tempfile::TempDir,
-    }
-
-    /// Generate a self-signed CA and server certificate for testing.
-    fn gen_test_certs() -> TestCerts {
-        use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
-
-        let ca_key = KeyPair::generate().expect("CA key generation");
-        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
-        ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        ca_params.distinguished_name.push(DnType::CommonName, "Test CA");
-        let ca_cert = ca_params.self_signed(&ca_key).expect("CA self-sign");
-
-        let server_key = KeyPair::generate().expect("server key generation");
-        let mut server_params = CertificateParams::new(vec!["localhost".to_owned()]).expect("server params");
-        server_params.distinguished_name.push(DnType::CommonName, "localhost");
-        let server_cert = server_params
-            .signed_by(&server_key, &ca_cert, &ca_key)
-            .expect("server cert sign");
-
-        let temp_dir = tempfile::TempDir::new().expect("tempdir");
-        let cert_path = temp_dir.path().join("server.pem");
-        let key_path = temp_dir.path().join("server-key.pem");
-
-        std::fs::write(&cert_path, server_cert.pem()).expect("write cert PEM");
-        std::fs::write(&key_path, server_key.serialize_pem()).expect("write key PEM");
-
-        TestCerts {
-            cert_path,
-            key_path,
-            _temp_dir: temp_dir,
-        }
     }
 }

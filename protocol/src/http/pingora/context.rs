@@ -8,6 +8,7 @@ use std::{collections::VecDeque, net::IpAddr, sync::Arc, time::Instant};
 use bytes::Bytes;
 use praxis_core::connectivity::Upstream;
 use praxis_filter::{BodyBuffer, FilterPipeline, Request};
+use tokio::sync::OwnedSemaphorePermit;
 
 // -----------------------------------------------------------------------------
 // PingoraRequestCtx
@@ -26,6 +27,13 @@ use praxis_filter::{BodyBuffer, FilterPipeline, Request};
 /// ```
 #[allow(clippy::struct_excessive_bools, reason = "lifecycle flags")]
 pub struct PingoraRequestCtx {
+    /// Connection permit from the per-listener semaphore.
+    ///
+    /// Held for the lifetime of the request. RAII drop
+    /// releases the permit when the context is dropped,
+    /// including error and timeout paths.
+    pub _connection_permit: Option<OwnedSemaphorePermit>,
+
     /// Downstream client IP address.
     pub client_addr: Option<IpAddr>,
 
@@ -37,6 +45,13 @@ pub struct PingoraRequestCtx {
 
     /// Name of the cluster selected by the router filter.
     pub cluster: Option<Arc<str>>,
+
+    /// Whether the connection was upgraded via 101 Switching Protocols.
+    ///
+    /// Set during `response_filter` when the upstream returns 101.
+    /// Body filter hooks skip processing when true, since post-upgrade
+    /// bytes are raw protocol frames (e.g. `WebSocket`), not HTTP bodies.
+    pub connection_upgraded: bool,
 
     /// Pre-read body chunks (`StreamBuffer` mode). When `StreamBuffer` is
     /// active, the body is read during `request_filter` (before upstream
@@ -75,13 +90,6 @@ pub struct PingoraRequestCtx {
     /// Whether the response body has been released (`StreamBuffer` mode).
     pub response_body_released: bool,
 
-    /// Whether the connection was upgraded via 101 Switching Protocols.
-    ///
-    /// Set during `response_filter` when the upstream returns 101.
-    /// Body filter hooks skip processing when true, since post-upgrade
-    /// bytes are raw protocol frames (e.g. `WebSocket`), not HTTP bodies.
-    pub connection_upgraded: bool,
-
     /// Whether the response phase has been executed. Used to ensure
     /// cleanup (e.g. least-connections counter release) in the
     /// `logging()` hook when errors bypass `response_filter`.
@@ -103,6 +111,37 @@ pub struct PingoraRequestCtx {
 
     /// Saved upstream for retry (cloned before first use).
     pub upstream_for_retry: Option<Upstream>,
+}
+
+/// Build an [`HttpFilterContext`] from a `PingoraRequestCtx`.
+///
+/// Macro (not a function) so Rust's disjoint field borrowing
+/// works: `filter_context_for` borrows `self.request_snapshot`
+/// immutably while `cluster`, `upstream`, and `rewritten_path`
+/// are taken mutably. A function call with `&mut self` would
+/// collapse these into a single mutable borrow.
+///
+/// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+macro_rules! filter_context {
+    ($ctx:expr, $pipeline:expr, $request:expr, $response_header:expr) => {
+        praxis_filter::HttpFilterContext {
+            branch_iterations: std::collections::HashMap::new(),
+            client_addr: $ctx.client_addr,
+            cluster: $ctx.cluster.take(),
+            executed_filter_indices: Vec::new(),
+            extra_request_headers: Vec::new(),
+            filter_results: std::collections::HashMap::new(),
+            health_registry: $pipeline.health_registry(),
+            request: $request,
+            request_body_bytes: $ctx.request_body_bytes,
+            request_start: $ctx.request_start,
+            response_body_bytes: $ctx.response_body_bytes,
+            response_header: $response_header,
+            response_headers_modified: false,
+            rewritten_path: $ctx.rewritten_path.take(),
+            upstream: $ctx.upstream.take(),
+        }
+    };
 }
 
 impl PingoraRequestCtx {
@@ -135,23 +174,7 @@ impl PingoraRequestCtx {
         request: &'a Request,
         response_header: Option<&'a mut praxis_filter::Response>,
     ) -> praxis_filter::HttpFilterContext<'a> {
-        praxis_filter::HttpFilterContext {
-            branch_iterations: std::collections::HashMap::new(),
-            client_addr: self.client_addr,
-            cluster: self.cluster.take(),
-            executed_filter_indices: Vec::new(),
-            extra_request_headers: Vec::new(),
-            filter_results: std::collections::HashMap::new(),
-            health_registry: pipeline.health_registry(),
-            request,
-            request_body_bytes: self.request_body_bytes,
-            request_start: self.request_start,
-            response_body_bytes: self.response_body_bytes,
-            response_header,
-            response_headers_modified: false,
-            rewritten_path: self.rewritten_path.take(),
-            upstream: self.upstream.take(),
-        }
+        filter_context!(self, pipeline, request, response_header)
     }
 
     /// Build an [`HttpFilterContext`] from the stored [`request_snapshot`].
@@ -186,29 +209,14 @@ impl PingoraRequestCtx {
         response_header: Option<&'a mut praxis_filter::Response>,
     ) -> Option<praxis_filter::HttpFilterContext<'a>> {
         let request = self.request_snapshot.as_ref()?;
-        Some(praxis_filter::HttpFilterContext {
-            branch_iterations: std::collections::HashMap::new(),
-            client_addr: self.client_addr,
-            cluster: self.cluster.take(),
-            executed_filter_indices: Vec::new(),
-            extra_request_headers: Vec::new(),
-            filter_results: std::collections::HashMap::new(),
-            health_registry: pipeline.health_registry(),
-            request,
-            request_body_bytes: self.request_body_bytes,
-            request_start: self.request_start,
-            response_body_bytes: self.response_body_bytes,
-            response_header,
-            response_headers_modified: false,
-            rewritten_path: self.rewritten_path.take(),
-            upstream: self.upstream.take(),
-        })
+        Some(filter_context!(self, pipeline, request, response_header))
     }
 }
 
 impl Default for PingoraRequestCtx {
     fn default() -> Self {
         Self {
+            _connection_permit: None,
             client_addr: None,
             client_http_version: None,
             cluster: None,
@@ -237,7 +245,13 @@ impl Default for PingoraRequestCtx {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::significant_drop_tightening,
+    reason = "tests"
+)]
 mod tests {
     use std::{
         collections::VecDeque,

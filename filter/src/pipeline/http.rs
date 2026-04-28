@@ -52,15 +52,11 @@ impl FilterPipeline {
 
             ctx.executed_filter_indices[idx] = true;
 
-            let branch_outcome = super::evaluate::evaluate_branches(&pf.branches, ctx, idx).await?;
+            let branch_outcome = super::evaluate::evaluate_branches(&pf.branches, ctx).await?;
             match branch_outcome {
                 BranchOutcome::Continue => idx += 1,
                 BranchOutcome::Terminal => return Ok(FilterAction::Continue),
-                BranchOutcome::SkipTo(t) => idx = t,
-                BranchOutcome::ReEnter(t) => {
-                    ctx.filter_results.clear();
-                    idx = t;
-                },
+                BranchOutcome::SkipTo(t) | BranchOutcome::ReEnter(t) => idx = t,
                 BranchOutcome::Reject(r) => return Ok(FilterAction::Reject(r)),
             }
         }

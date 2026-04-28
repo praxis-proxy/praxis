@@ -159,7 +159,13 @@ pub(super) fn execute(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::significant_drop_tightening,
+    reason = "tests"
+)]
 mod tests {
     use bytes::Bytes;
     use praxis_filter::{FilterPipeline, FilterRegistry};

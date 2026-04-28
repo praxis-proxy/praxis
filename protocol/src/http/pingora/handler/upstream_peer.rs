@@ -144,6 +144,7 @@ fn derive_sni(address: &str) -> String {
     clippy::indexing_slicing,
     clippy::field_reassign_with_default,
     clippy::too_many_lines,
+    clippy::significant_drop_tightening,
     reason = "tests"
 )]
 mod tests {

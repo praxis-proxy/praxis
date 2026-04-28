@@ -1932,6 +1932,113 @@ filter_chains:
     assert_eq!(body, "hot-reload-invalid-ok", "response body should match backend");
 }
 
+#[test]
+fn listener_cipher_suite_restriction_accepts_matching_client() {
+    let certs = TestCertificates::generate();
+    let client_config = certs.client_config();
+
+    let backend_port_guard = start_backend_with_shutdown("cipher-suite-ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: secure
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: "{cert}"
+          key_path: "{key}"
+      cipher_suites:
+        - tls13_aes_256_gcm_sha384
+        - tls13_aes_128_gcm_sha256
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#,
+        cert = certs.cert_path.display(),
+        key = certs.key_path.display(),
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_tls_proxy(&config, &client_config);
+
+    let (status, body) = https_get(proxy.addr(), "/", &client_config);
+    assert_eq!(
+        status, 200,
+        "cipher-suite-restricted proxy should accept TLS 1.3 client"
+    );
+    assert_eq!(
+        body, "cipher-suite-ok",
+        "cipher-suite-restricted proxy should forward backend body"
+    );
+}
+
+#[test]
+fn listener_cipher_suite_restriction_rejects_excluded_suite() {
+    let certs = TestCertificates::generate();
+    let client_config = certs.client_config();
+
+    let backend_port_guard = start_backend_with_shutdown("cipher-rejected");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: secure
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: "{cert}"
+          key_path: "{key}"
+      cipher_suites:
+        - tls13_aes_256_gcm_sha384
+        - tls13_aes_128_gcm_sha256
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#,
+        cert = certs.cert_path.display(),
+        key = certs.key_path.display(),
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_tls_proxy(&config, &client_config);
+
+    let tls12_only = build_tls12_only_client(&certs);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        https_get(proxy.addr(), "/", &tls12_only)
+    }));
+    assert!(
+        result.is_err(),
+        "TLS 1.2-only client should be rejected when only TLS 1.3 suites are configured"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

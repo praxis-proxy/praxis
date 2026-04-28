@@ -11,7 +11,7 @@ use praxis_core::{
     health::{HealthRegistry, build_health_registry},
 };
 use praxis_filter::FilterRegistry;
-use praxis_protocol::{Protocol, http::PingoraHttp, tcp::PingoraTcp};
+use praxis_protocol::{CertWatcherShutdowns, Protocol, http::PingoraHttp, tcp::PingoraTcp};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -56,27 +56,30 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry) -> ! {
     info!("initializing server");
     let mut server = PingoraServerRuntime::new(&config);
 
-    let (has_http, has_tcp) = config.listeners.iter().fold((false, false), |(h, t), l| {
-        (
-            h || l.protocol == ProtocolKind::Http,
-            t || l.protocol == ProtocolKind::Tcp,
-        )
-    });
+    let has_http = config.listeners.iter().any(|l| l.protocol == ProtocolKind::Http);
+    let has_tcp = config.listeners.iter().any(|l| l.protocol == ProtocolKind::Tcp);
+
+    let mut all_shutdowns = Vec::new();
 
     if has_http {
-        Box::new(PingoraHttp)
+        let shutdowns = Box::new(PingoraHttp)
             .register(&mut server, &config, &pipelines)
             .unwrap_or_else(|e| fatal(&e));
+        all_shutdowns.extend(shutdowns);
     }
 
     if has_tcp {
-        Box::new(PingoraTcp)
+        let shutdowns = Box::new(PingoraTcp)
             .register(&mut server, &config, &pipelines)
             .unwrap_or_else(|e| fatal(&e));
+        all_shutdowns.extend(shutdowns);
     }
 
-    let shutdown = CancellationToken::new();
-    spawn_health_check_tasks(&config, &health_registry, shutdown);
+    // Dropping senders signals CertWatcher tasks to stop, so the
+    // server must own them for its entire lifetime.
+    let _cert_shutdowns = CertWatcherShutdowns::new(all_shutdowns);
+
+    spawn_health_check_tasks(&config, &health_registry);
 
     info!("starting server");
     server.run()
@@ -150,17 +153,25 @@ fn warn_insecure_key_permissions(config: &Config) {
     use std::os::unix::fs::PermissionsExt;
 
     for listener in &config.listeners {
-        if let Some(ref tls) = listener.tls {
-            let (_cert_path, key_path) = tls.primary_cert_paths();
-            if let Ok(meta) = std::fs::metadata(key_path) {
-                let mode = meta.permissions().mode();
-                if mode & 0o077 != 0 {
-                    tracing::warn!(
+        if let Some(tls) = &listener.tls {
+            for cert in &tls.certificates {
+                let key_path = &cert.key_path;
+                if let Ok(meta) = std::fs::metadata(key_path) {
+                    let mode = meta.permissions().mode();
+                    if mode & 0o077 != 0 {
+                        tracing::warn!(
+                            listener = %listener.name,
+                            path = %key_path,
+                            mode = format!("{:04o}", mode & 0o7777),
+                            "TLS private key file has overly permissive \
+                             permissions; recommend chmod 0600"
+                        );
+                    }
+                } else {
+                    tracing::trace!(
                         listener = %listener.name,
                         path = %key_path,
-                        mode = format!("{:04o}", mode & 0o7777),
-                        "TLS private key file has overly permissive \
-                         permissions; recommend chmod 0600"
+                        "skipped permission check: could not read file metadata"
                     );
                 }
             }
@@ -182,13 +193,19 @@ fn warn_insecure_key_permissions(_config: &Config) {}
 /// [`CancellationToken`] so that every health check loop exits
 /// cleanly via `shutdown.cancelled()` before the thread returns.
 ///
+/// Pingora's `server.run()` installs its own signal handlers and may
+/// terminate the process before this thread receives `ctrl_c`. This is
+/// acceptable: the OS reaps the thread on process exit, so the graceful
+/// shutdown path here is best-effort.
+///
 /// [`CancellationToken`]: tokio_util::sync::CancellationToken
 #[allow(clippy::expect_used, reason = "fatal")]
-fn spawn_health_check_tasks(config: &Config, registry: &HealthRegistry, shutdown: CancellationToken) {
+fn spawn_health_check_tasks(config: &Config, registry: &HealthRegistry) {
     if registry.is_empty() {
         return;
     }
 
+    let shutdown = CancellationToken::new();
     let clusters = config.clusters.clone();
     let registry = Arc::clone(registry);
 
@@ -222,6 +239,13 @@ pub fn fatal(err: &dyn std::fmt::Display) -> ! {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::too_many_lines,
+    reason = "tests"
+)]
 mod tests {
     use super::check_root_privilege;
 
@@ -229,7 +253,7 @@ mod tests {
     fn root_uid_without_override_returns_error() {
         let result = check_root_privilege(false, 0);
         assert!(result.is_some(), "UID 0 without allow_root should return an error");
-        let msg = result.unwrap_or_default();
+        let msg = result.unwrap();
         assert!(
             msg.contains("refuses to run as root"),
             "error message should explain the refusal"
@@ -256,7 +280,7 @@ mod tests {
 
     #[test]
     fn error_message_suggests_alternatives() {
-        let msg = check_root_privilege(false, 0).unwrap_or_default();
+        let msg = check_root_privilege(false, 0).unwrap();
         assert!(
             msg.contains("CAP_NET_BIND_SERVICE"),
             "should suggest CAP_NET_BIND_SERVICE"

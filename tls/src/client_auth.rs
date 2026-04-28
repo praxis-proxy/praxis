@@ -12,9 +12,9 @@ use rustls::{
 
 use crate::{ClientCertMode, TlsError};
 
-// -------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Verifier Builder
-// -------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Build a [`ClientCertVerifier`] from a CA PEM file and verification mode.
 ///
@@ -93,19 +93,20 @@ fn load_ca_root_store(ca_path: &str) -> Result<RootCertStore, TlsError> {
     Ok(root_store)
 }
 
-// -------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// -------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
+    use crate::test_utils::gen_ca_file;
 
     #[test]
     fn build_client_verifier_require_with_valid_ca() {
-        let certs = gen_ca_file();
-        let ca_path = certs.ca_path.to_str().expect("ca path should be valid UTF-8");
+        let ca = gen_ca_file();
+        let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
         let verifier = build_client_verifier(ca_path, &ClientCertMode::Require)
             .expect("require mode with valid CA should succeed");
@@ -117,8 +118,8 @@ mod tests {
 
     #[test]
     fn build_client_verifier_request_with_valid_ca() {
-        let certs = gen_ca_file();
-        let ca_path = certs.ca_path.to_str().expect("ca path should be valid UTF-8");
+        let ca = gen_ca_file();
+        let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
         let verifier = build_client_verifier(ca_path, &ClientCertMode::Request)
             .expect("request mode with valid CA should succeed");
@@ -130,8 +131,8 @@ mod tests {
 
     #[test]
     fn build_client_verifier_none_mode_returns_error() {
-        let certs = gen_ca_file();
-        let ca_path = certs.ca_path.to_str().expect("ca path should be valid UTF-8");
+        let ca = gen_ca_file();
+        let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
         let err = build_client_verifier(ca_path, &ClientCertMode::None).expect_err("mode=None should return error");
         assert!(
@@ -152,8 +153,8 @@ mod tests {
 
     #[test]
     fn load_ca_root_store_with_valid_ca() {
-        let certs = gen_ca_file();
-        let ca_path = certs.ca_path.to_str().expect("ca path should be valid UTF-8");
+        let ca = gen_ca_file();
+        let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
         let store = load_ca_root_store(ca_path).expect("valid CA file should load");
         assert!(!store.is_empty(), "root store should contain at least one certificate");
@@ -180,38 +181,5 @@ mod tests {
             matches!(err, TlsError::FileLoadError { .. }),
             "error should be FileLoadError, got: {err}"
         );
-    }
-
-    // -----------------------------------------------------------------------------
-    // Test Utilities
-    // -----------------------------------------------------------------------------
-
-    /// Generated CA certificate file with temp dir lifetime.
-    struct TestCa {
-        /// Path to the CA certificate PEM file.
-        ca_path: std::path::PathBuf,
-
-        /// Temp directory holding the cert file.
-        _temp_dir: tempfile::TempDir,
-    }
-
-    /// Generate a self-signed CA certificate file for testing.
-    fn gen_ca_file() -> TestCa {
-        use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
-
-        let ca_key = KeyPair::generate().expect("CA key generation should succeed");
-        let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params should be valid");
-        ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        ca_params.distinguished_name.push(DnType::CommonName, "Test CA");
-        let ca_cert = ca_params.self_signed(&ca_key).expect("CA self-sign should succeed");
-
-        let temp_dir = tempfile::TempDir::new().expect("tempdir creation should succeed");
-        let ca_path = temp_dir.path().join("ca.pem");
-        std::fs::write(&ca_path, ca_cert.pem()).expect("write CA PEM should succeed");
-
-        TestCa {
-            ca_path,
-            _temp_dir: temp_dir,
-        }
     }
 }

@@ -10,9 +10,9 @@ use crate::{
     errors::ProxyError,
 };
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Maximum allowed branch nesting depth (inline chains within
 /// inline chains). Limits config complexity and prevents
@@ -28,9 +28,9 @@ pub const MAX_BRANCH_DEPTH: usize = 10;
 /// ceiling caps what users can configure.
 pub const MAX_ITERATIONS_CEILING: u32 = 100;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Branch Chain Validation
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Validate all branch chains across all filter chains.
 pub(crate) fn validate_branch_chains(chains: &[FilterChainConfig]) -> Result<(), ProxyError> {
@@ -84,11 +84,12 @@ fn collect_branch_names(
     chain_names: &HashSet<&str>,
     depth: usize,
 ) -> Result<(), ProxyError> {
-    if depth > MAX_BRANCH_DEPTH {
-        return Err(ProxyError::Config(format!(
-            "branch nesting depth exceeds maximum ({MAX_BRANCH_DEPTH})"
-        )));
-    }
+    // `validate_chain_ref` checks depth before recursing here,
+    // so this should never fire. Keep as a safety net.
+    debug_assert!(
+        depth <= MAX_BRANCH_DEPTH,
+        "collect_branch_names entered at depth {depth} > {MAX_BRANCH_DEPTH}"
+    );
 
     for entry in filters {
         let Some(branches) = &entry.branch_chains else {
@@ -204,9 +205,9 @@ fn validate_chain_ref(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(

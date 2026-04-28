@@ -62,10 +62,16 @@ mod tests {
     }
 
     #[test]
-    fn validate_clusters_rejects_empty_endpoints() {
-        let clusters = vec![Cluster::with_defaults("empty", vec![])];
+    fn reject_too_many_endpoints() {
+        let endpoints: Vec<_> = (0..10_001)
+            .map(|i| format!("10.0.{}.{}:80", i / 256, i % 256).into())
+            .collect();
+        let clusters = vec![Cluster::with_defaults("big", endpoints)];
         let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
-        assert!(err.to_string().contains("has no endpoints"));
+        assert!(
+            err.to_string().contains("too many endpoints"),
+            "should reject cluster exceeding MAX_ENDPOINTS: {err}"
+        );
     }
 
     #[test]

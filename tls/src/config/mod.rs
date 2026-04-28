@@ -11,7 +11,7 @@ use std::path::{Component, Path};
 
 pub use certs::{CaConfig, CertKeyPair};
 pub use cluster::ClusterTls;
-pub use listener::{ClientCertMode, ListenerTls, TlsVersion};
+pub use listener::{CipherSuiteId, ClientCertMode, ListenerTls, TlsVersion};
 
 // -----------------------------------------------------------------------------
 // Path Validation

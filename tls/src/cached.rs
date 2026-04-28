@@ -12,9 +12,9 @@ use std::sync::Arc;
 
 use crate::TlsError;
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // CachedCaCerts
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// DER-encoded CA certificates loaded and parsed at config time.
 ///
@@ -66,9 +66,9 @@ impl CachedCaCerts {
     }
 }
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // CachedClientCert
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// DER-encoded client certificate and private key loaded at config time.
 ///
@@ -123,9 +123,9 @@ impl CachedClientCert {
     }
 }
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // CachedClusterTls
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Pre-parsed TLS material for a cluster, ready for per-connection use.
 ///
@@ -217,9 +217,9 @@ impl CachedClusterTls {
     }
 }
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Utilities
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Read a PEM certificate file and return DER-encoded certificate bytes.
 fn parse_cert_pem(cert_path: &str) -> Result<Vec<Vec<u8>>, TlsError> {
@@ -228,7 +228,7 @@ fn parse_cert_pem(cert_path: &str) -> Result<Vec<Vec<u8>>, TlsError> {
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| TlsError::FileLoadError {
             path: cert_path.to_owned(),
-            detail: format!("{e}"),
+            detail: e.to_string(),
         })
         .map(|certs| certs.into_iter().map(|c| c.to_vec()).collect())
 }
@@ -239,7 +239,7 @@ fn parse_key_pem(key_path: &str) -> Result<Vec<u8>, TlsError> {
     rustls_pemfile::private_key(&mut &pem[..])
         .map_err(|e| TlsError::FileLoadError {
             path: key_path.to_owned(),
-            detail: format!("{e}"),
+            detail: e.to_string(),
         })?
         .ok_or_else(|| TlsError::FileLoadError {
             path: key_path.to_owned(),
@@ -254,13 +254,13 @@ fn parse_key_pem(key_path: &str) -> Result<Vec<u8>, TlsError> {
 fn read_pem_file(path: &str) -> Result<Vec<u8>, TlsError> {
     std::fs::read(path).map_err(|e| TlsError::FileLoadError {
         path: path.to_owned(),
-        detail: format!("{e}"),
+        detail: e.to_string(),
     })
 }
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
@@ -268,6 +268,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
+    use crate::test_utils::{gen_ca_file, gen_test_certs};
 
     #[test]
     fn cached_ca_certs_stores_der() {
@@ -304,8 +305,8 @@ mod tests {
 
     #[test]
     fn cached_ca_from_pem_file_valid() {
-        let ca = gen_ca_pem();
-        let cached = CachedCaCerts::from_pem_file(ca.path.to_str().unwrap()).expect("valid CA PEM should parse");
+        let ca = gen_ca_file();
+        let cached = CachedCaCerts::from_pem_file(ca.ca_path.to_str().unwrap()).expect("valid CA PEM should parse");
         assert_eq!(cached.der_certs().len(), 1, "should parse one CA cert");
     }
 
@@ -329,7 +330,7 @@ mod tests {
 
     #[test]
     fn cached_client_cert_from_pem_valid() {
-        let pair = gen_cert_key_pem();
+        let pair = gen_test_certs();
         let cached =
             CachedClientCert::from_pem_files(pair.cert_path.to_str().unwrap(), pair.key_path.to_str().unwrap())
                 .expect("valid cert+key PEM should parse");
@@ -348,10 +349,10 @@ mod tests {
 
     #[test]
     fn cached_cluster_tls_with_ca() {
-        let ca = gen_ca_pem();
+        let ca = gen_ca_file();
         let tls = crate::ClusterTls {
             ca: Some(crate::CaConfig {
-                ca_path: ca.path.to_str().unwrap().to_owned(),
+                ca_path: ca.ca_path.to_str().unwrap().to_owned(),
             }),
             ..crate::ClusterTls::default()
         };
@@ -362,7 +363,7 @@ mod tests {
 
     #[test]
     fn cached_cluster_tls_with_client_cert() {
-        let pair = gen_cert_key_pem();
+        let pair = gen_test_certs();
         let tls = crate::ClusterTls {
             client_cert: Some(crate::CertKeyPair {
                 cert_path: pair.cert_path.to_str().unwrap().to_owned(),
@@ -453,10 +454,10 @@ mod tests {
 
     #[test]
     fn cached_cluster_tls_clone_preserves_arc() {
-        let ca = gen_ca_pem();
+        let ca = gen_ca_file();
         let tls = crate::ClusterTls {
             ca: Some(crate::CaConfig {
-                ca_path: ca.path.to_str().unwrap().to_owned(),
+                ca_path: ca.ca_path.to_str().unwrap().to_owned(),
             }),
             ..crate::ClusterTls::default()
         };
@@ -466,66 +467,5 @@ mod tests {
             Arc::ptr_eq(cached.ca().unwrap(), cloned.ca().unwrap()),
             "cloned CachedClusterTls should share CA Arc"
         );
-    }
-
-    // -----------------------------------------------------------------------------
-    // Test Utilities
-    // -----------------------------------------------------------------------------
-
-    /// Generated CA PEM file with temp dir lifetime.
-    struct TestCaPem {
-        /// Path to the CA PEM file.
-        path: std::path::PathBuf,
-        /// Temp directory keeping the file alive.
-        _dir: tempfile::TempDir,
-    }
-
-    /// Generated cert + key PEM files with temp dir lifetime.
-    struct TestCertKeyPem {
-        /// Path to the certificate PEM file.
-        cert_path: std::path::PathBuf,
-        /// Path to the private key PEM file.
-        key_path: std::path::PathBuf,
-        /// Temp directory keeping the files alive.
-        _dir: tempfile::TempDir,
-    }
-
-    /// Generate a self-signed CA certificate PEM for testing.
-    fn gen_ca_pem() -> TestCaPem {
-        use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
-
-        let key = KeyPair::generate().expect("CA key generation should succeed");
-        let mut params = CertificateParams::new(Vec::<String>::new()).expect("CA params should be valid");
-        params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        params.distinguished_name.push(DnType::CommonName, "Test CA");
-        let cert = params.self_signed(&key).expect("CA self-sign should succeed");
-
-        let dir = tempfile::TempDir::new().expect("tempdir should succeed");
-        let path = dir.path().join("ca.pem");
-        std::fs::write(&path, cert.pem()).expect("write CA PEM should succeed");
-
-        TestCaPem { path, _dir: dir }
-    }
-
-    /// Generate a self-signed certificate and key PEM pair for testing.
-    fn gen_cert_key_pem() -> TestCertKeyPem {
-        use rcgen::{CertificateParams, DnType, KeyPair};
-
-        let key = KeyPair::generate().expect("key generation should succeed");
-        let mut params = CertificateParams::new(Vec::<String>::new()).expect("params should be valid");
-        params.distinguished_name.push(DnType::CommonName, "Test Cert");
-        let cert = params.self_signed(&key).expect("self-sign should succeed");
-
-        let dir = tempfile::TempDir::new().expect("tempdir should succeed");
-        let cert_path = dir.path().join("cert.pem");
-        let key_path = dir.path().join("key.pem");
-        std::fs::write(&cert_path, cert.pem()).expect("write cert PEM should succeed");
-        std::fs::write(&key_path, key.serialize_pem()).expect("write key PEM should succeed");
-
-        TestCertKeyPem {
-            cert_path,
-            key_path,
-            _dir: dir,
-        }
     }
 }

@@ -34,7 +34,7 @@ impl Protocol for PingoraHttp {
         server: &mut PingoraServerRuntime,
         config: &Config,
         pipelines: &ListenerPipelines,
-    ) -> Result<(), ProxyError> {
+    ) -> Result<Vec<tokio::sync::watch::Sender<bool>>, ProxyError> {
         let http_listeners: Vec<_> = config
             .listeners
             .iter()
@@ -42,7 +42,7 @@ impl Protocol for PingoraHttp {
             .collect();
 
         if http_listeners.is_empty() {
-            return Ok(());
+            return Ok(Vec::new());
         }
 
         let mut cert_watcher_shutdowns = Vec::new();
@@ -54,16 +54,10 @@ impl Protocol for PingoraHttp {
             handler::load_http_handler(server.server_mut(), listener, pipeline, &mut cert_watcher_shutdowns)?;
         }
 
-        // Keep shutdown senders alive for the process lifetime so
-        // CertWatcher tasks are only cancelled on process exit.
-        if !cert_watcher_shutdowns.is_empty() {
-            let _leaked = Box::leak(cert_watcher_shutdowns.into_boxed_slice());
-        }
-
         if let Some(admin_addr) = &config.admin.address {
             health::add_health_endpoint_to_pingora_server(server.server_mut(), admin_addr, None, config.admin.verbose);
         }
 
-        Ok(())
+        Ok(cert_watcher_shutdowns)
     }
 }

@@ -38,5 +38,3 @@ tikv-jemallocator = { workspace = true }
 default = ["ai-inference"]
 ai-inference = ["praxis-filter/ai-inference"]
 
-[dev-dependencies]
-tokio = { workspace = true }

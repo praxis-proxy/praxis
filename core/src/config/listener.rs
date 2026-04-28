@@ -45,6 +45,28 @@ pub struct Listener {
     #[serde(default)]
     pub filter_chains: Vec<String>,
 
+    /// Maximum concurrent connections for this listener.
+    ///
+    /// When set, new connections beyond this limit are
+    /// rejected: HTTP returns 503, TCP closes the socket.
+    /// `None` means unlimited.
+    ///
+    /// ```
+    /// use praxis_core::config::Listener;
+    ///
+    /// let listener: Listener = serde_yaml::from_str(
+    ///     r#"
+    /// name: web
+    /// address: "0.0.0.0:8080"
+    /// max_connections: 10000
+    /// "#,
+    /// )
+    /// .unwrap();
+    /// assert_eq!(listener.max_connections, Some(10000));
+    /// ```
+    #[serde(default)]
+    pub max_connections: Option<u32>,
+
     /// Protocol this listener handles. Default: `http`.
     #[serde(default)]
     pub protocol: ProtocolKind,
@@ -255,6 +277,27 @@ upstream: "10.0.0.1:5432"
         assert!(
             ProtocolKind::Http.supports(&ProtocolKind::Http),
             "HTTP should support HTTP filters"
+        );
+    }
+
+    #[test]
+    fn parse_listener_with_max_connections() {
+        let yaml = r#"
+name: web
+address: "0.0.0.0:8080"
+max_connections: 10000
+"#;
+        let listener: Listener = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(listener.max_connections, Some(10000), "max_connections should be 10000");
+    }
+
+    #[test]
+    fn max_connections_defaults_to_none() {
+        let yaml = "name: test\naddress: \"0.0.0.0:8080\"";
+        let listener: Listener = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            listener.max_connections.is_none(),
+            "max_connections should default to None"
         );
     }
 

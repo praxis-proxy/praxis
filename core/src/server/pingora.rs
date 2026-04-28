@@ -97,7 +97,7 @@ fn build_server_conf(shutdown_timeout_secs: u64, threads: usize, runtime: &Runti
         conf.ca_file = Some(ca_file.clone());
     }
 
-    if runtime.global_queue_interval.is_some() {
+    if runtime.global_queue_interval.is_some_and(|v| v != 61) {
         tracing::warn!(
             interval = ?runtime.global_queue_interval,
             "global_queue_interval is configured but not yet supported by Pingora's ServerConf"

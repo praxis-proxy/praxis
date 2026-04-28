@@ -97,7 +97,6 @@ fn validate_listener_references(chains: &[FilterChainConfig], listeners: &[Liste
     clippy::indexing_slicing,
     clippy::needless_raw_strings,
     clippy::needless_raw_string_hashes,
-    clippy::uninlined_format_args,
     reason = "tests use unwrap/expect/indexing/raw strings for brevity"
 )]
 mod tests {
@@ -154,7 +153,37 @@ filter_chains:
       - filter: request_id
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
-        assert!(err.to_string().contains("unknown filter chain"), "got: {}", err);
+        assert!(err.to_string().contains("unknown filter chain"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_too_many_chains() {
+        let mut yaml = String::from(
+            "listeners:\n  - name: web\n    address: \"0.0.0.0:8080\"\n    filter_chains: [c0]\nfilter_chains:\n",
+        );
+        for i in 0..1_001 {
+            yaml.push_str(&format!("  - name: c{i}\n    filters:\n      - filter: headers\n"));
+        }
+        let err = Config::from_yaml(&yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("too many filter chains"),
+            "should reject exceeding MAX_CHAINS: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_too_many_filters_per_chain() {
+        let mut yaml = String::from(
+            "listeners:\n  - name: web\n    address: \"0.0.0.0:8080\"\n    filter_chains: [main]\nfilter_chains:\n  - name: main\n    filters:\n",
+        );
+        for _ in 0..101 {
+            yaml.push_str("      - filter: headers\n");
+        }
+        let err = Config::from_yaml(&yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("too many filters"),
+            "should reject exceeding MAX_FILTERS_PER_CHAIN: {err}"
+        );
     }
 
     #[test]

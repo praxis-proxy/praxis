@@ -133,6 +133,7 @@ fn is_websocket_101(headers: &http::HeaderMap) -> bool {
     clippy::expect_used,
     clippy::field_reassign_with_default,
     clippy::indexing_slicing,
+    clippy::significant_drop_tightening,
     reason = "tests"
 )]
 mod tests {

@@ -45,6 +45,10 @@ pub enum TlsError {
     #[error("build_client_verifier must not be called with client_cert_mode=None")]
     ClientVerifierNotRequired,
 
+    /// `cipher_suites` was set to an empty list.
+    #[error("cipher_suites must not be empty; omit the field to accept all suites")]
+    EmptyCipherSuites,
+
     /// Failed to load or parse a TLS file (certificate, key, or CA).
     #[error("failed to load TLS file {path}: {detail}")]
     FileLoadError {
@@ -70,6 +74,14 @@ pub enum TlsError {
     #[error("at least one certificate is required in listener TLS config")]
     NoCertificates,
 
+    /// TLS server configuration construction failed (e.g. cert/key
+    /// mismatch, unsupported protocol version).
+    #[error("TLS server config error: {detail}")]
+    ServerConfigError {
+        /// Underlying error description.
+        detail: String,
+    },
+
     /// A TLS path contains `..` (directory traversal).
     #[error("TLS {field} must not contain path traversal (..): {path}")]
     PathTraversal {
@@ -79,6 +91,10 @@ pub enum TlsError {
         /// The offending path value.
         path: String,
     },
+
+    /// `cipher_suites` contains TLS 1.2 suites but `min_version` is `tls13`.
+    #[error("cipher_suites contains TLS 1.2 suites but min_version is tls13; use only TLS 1.3 suites")]
+    Tls12SuiteWithTls13Only,
 }
 
 // -----------------------------------------------------------------------------
@@ -158,5 +174,36 @@ mod tests {
             msg.contains("only one default"),
             "should mention only one default: {msg}"
         );
+    }
+
+    #[test]
+    fn error_display_empty_cipher_suites() {
+        let e = TlsError::EmptyCipherSuites;
+        let msg = e.to_string();
+        assert!(
+            msg.contains("cipher_suites must not be empty"),
+            "should mention empty cipher_suites: {msg}"
+        );
+    }
+
+    #[test]
+    fn error_display_server_config_error() {
+        let e = TlsError::ServerConfigError {
+            detail: "cert/key mismatch".to_owned(),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("TLS server config error"),
+            "should mention server config error: {msg}"
+        );
+        assert!(msg.contains("cert/key mismatch"), "should contain detail: {msg}");
+    }
+
+    #[test]
+    fn error_display_tls12_suite_with_tls13_only() {
+        let e = TlsError::Tls12SuiteWithTls13Only;
+        let msg = e.to_string();
+        assert!(msg.contains("TLS 1.2 suites"), "should mention TLS 1.2 suites: {msg}");
+        assert!(msg.contains("tls13"), "should mention tls13: {msg}");
     }
 }

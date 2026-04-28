@@ -15,24 +15,22 @@ use crate::{
     FilterError, actions::FilterAction, any_filter::AnyFilter, condition::should_execute, context::HttpFilterContext,
 };
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Branch Evaluation
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Evaluate all branches on a filter, executing matching ones.
 pub(crate) fn evaluate_branches<'a>(
     branches: &'a [ResolvedBranch],
     ctx: &'a mut HttpFilterContext<'_>,
-    current_idx: usize,
 ) -> Pin<Box<dyn Future<Output = Result<BranchOutcome, FilterError>> + Send + 'a>> {
-    Box::pin(evaluate_branches_inner(branches, ctx, current_idx))
+    Box::pin(evaluate_branches_inner(branches, ctx))
 }
 
 /// Inner implementation of branch evaluation.
 async fn evaluate_branches_inner(
     branches: &[ResolvedBranch],
     ctx: &mut HttpFilterContext<'_>,
-    _current_idx: usize,
 ) -> Result<BranchOutcome, FilterError> {
     for branch in branches {
         if !should_branch_fire(branch, ctx) {
@@ -59,7 +57,10 @@ async fn evaluate_branches_inner(
             RejoinTarget::Next => {},
             RejoinTarget::Terminal => return Ok(BranchOutcome::Terminal),
             RejoinTarget::SkipTo(target) => return Ok(BranchOutcome::SkipTo(*target)),
-            RejoinTarget::ReEnter(target) => return Ok(BranchOutcome::ReEnter(*target)),
+            RejoinTarget::ReEnter(target) => {
+                ctx.filter_results.clear();
+                return Ok(BranchOutcome::ReEnter(*target));
+            },
         }
     }
 
@@ -116,20 +117,46 @@ async fn execute_branch_filters(
             Ok(FilterAction::Reject(r)) => return Ok(FilterAction::Reject(r)),
             Err(e) => return Err(e),
         }
-
-        let outcome = evaluate_branches(&pf.branches, ctx, 0).await?;
-        match outcome {
-            BranchOutcome::Continue | BranchOutcome::SkipTo(_) | BranchOutcome::ReEnter(_) => {},
-            BranchOutcome::Terminal => return Ok(FilterAction::Continue),
-            BranchOutcome::Reject(r) => return Ok(FilterAction::Reject(r)),
+        if let Some(action) = dispatch_nested_outcome(&pf.branches, ctx).await? {
+            return Ok(action);
         }
     }
     Ok(FilterAction::Continue)
 }
 
-// ---------------------------------------------------------------------------
+/// Evaluate nested branches and convert their outcome for the parent.
+///
+/// Returns `Some(action)` when the parent should stop iteration
+/// (terminal or reject), `None` to continue.
+async fn dispatch_nested_outcome(
+    branches: &[ResolvedBranch],
+    ctx: &mut HttpFilterContext<'_>,
+) -> Result<Option<FilterAction>, FilterError> {
+    let outcome = evaluate_branches(branches, ctx).await?;
+    match outcome {
+        BranchOutcome::Continue => Ok(None),
+        BranchOutcome::SkipTo(target) => {
+            debug!(
+                target,
+                "discarding SkipTo from nested branch; nested control flow does not propagate"
+            );
+            Ok(None)
+        },
+        BranchOutcome::ReEnter(target) => {
+            debug!(
+                target,
+                "discarding ReEnter from nested branch; nested control flow does not propagate"
+            );
+            Ok(None)
+        },
+        BranchOutcome::Terminal => Ok(Some(FilterAction::Continue)),
+        BranchOutcome::Reject(r) => Ok(Some(FilterAction::Reject(r))),
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(
@@ -168,7 +195,7 @@ mod tests {
         )];
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::Continue),
             "unconditional branch with Next rejoin should continue"
@@ -195,7 +222,7 @@ mod tests {
         let mut rs = FilterResultSet::new();
         rs.set("status", "hit").unwrap();
         ctx.filter_results.insert("cache", rs);
-        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::Continue),
             "matching conditional branch should continue"
@@ -222,7 +249,7 @@ mod tests {
         let mut rs = FilterResultSet::new();
         rs.set("status", "miss").unwrap();
         ctx.filter_results.insert("cache", rs);
-        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::Continue),
             "mismatched branch should continue"
@@ -239,7 +266,7 @@ mod tests {
         let branches = vec![make_branch("term", None, RejoinTarget::Terminal, None, vec![])];
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::Terminal),
             "terminal branch should stop parent"
@@ -251,7 +278,7 @@ mod tests {
         let branches = vec![make_branch("skip", None, RejoinTarget::SkipTo(5), None, vec![])];
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::SkipTo(5)),
             "SkipTo branch should advance to target index 5"
@@ -270,7 +297,7 @@ mod tests {
         )];
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::ReEnter(1)),
             "ReEnter branch should loop back to target index"
@@ -295,10 +322,10 @@ mod tests {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
 
-        evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
-        evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        evaluate_branches(&branches, &mut ctx).await.unwrap();
+        evaluate_branches(&branches, &mut ctx).await.unwrap();
 
-        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::Continue),
             "exceeded max_iterations should fall through to Continue"
@@ -321,7 +348,7 @@ mod tests {
         )];
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::Reject(r) if r.status == 403),
             "branch filter rejection should propagate"
@@ -340,7 +367,7 @@ mod tests {
             !ctx.filter_results.is_empty(),
             "results should be present before evaluation"
         );
-        evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             ctx.filter_results.is_empty(),
             "results should be cleared after evaluation"
@@ -369,7 +396,7 @@ mod tests {
         ];
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::Terminal),
             "first matching branch should win"
@@ -383,7 +410,7 @@ mod tests {
         let branches: Vec<ResolvedBranch> = vec![];
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::Continue),
             "empty branches should continue"
@@ -404,7 +431,7 @@ mod tests {
         let outer_branches = vec![make_branch("outer", None, RejoinTarget::Next, None, vec![outer_filter])];
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        let outcome = evaluate_branches(&outer_branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&outer_branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::Continue),
             "nested terminal should stop the branch but outer continues with Next rejoin"
@@ -423,7 +450,7 @@ mod tests {
         )];
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::Continue),
             "branch should not fire when referenced filter has no results"
@@ -452,7 +479,7 @@ mod tests {
         rs.set("status", "stale").unwrap();
         ctx.filter_results.insert("tracker", rs);
 
-        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::ReEnter(0)),
             "first call should fire and produce ReEnter"
@@ -463,7 +490,7 @@ mod tests {
             "branch should execute once on first evaluation"
         );
 
-        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::Continue),
             "second call should not fire because stale results were cleared"
@@ -489,7 +516,7 @@ mod tests {
         let mut ctx = crate::test_utils::make_filter_context(&req);
 
         for i in 1..=100 {
-            let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+            let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
             assert!(
                 matches!(outcome, BranchOutcome::ReEnter(0)),
                 "iteration {i} should re-enter"
@@ -501,7 +528,7 @@ mod tests {
             "branch should fire exactly 100 times"
         );
 
-        let outcome = evaluate_branches(&branches, &mut ctx, 0).await.unwrap();
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
         assert!(
             matches!(outcome, BranchOutcome::Continue),
             "iteration 101 should fall through"

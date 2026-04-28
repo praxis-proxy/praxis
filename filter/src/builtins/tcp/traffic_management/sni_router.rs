@@ -100,7 +100,7 @@ impl SniRouterFilter {
         }
 
         for wc in &self.wildcards {
-            if lower.ends_with(&wc.suffix) && lower.len() > wc.suffix.len() {
+            if lower.len() > wc.suffix.len() && lower.ends_with(wc.suffix.as_str()) {
                 return Some(wc.upstream.as_str());
             }
         }

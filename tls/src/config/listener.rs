@@ -3,6 +3,7 @@
 
 //! Listener TLS configuration: `ListenerTls`, `ClientCertMode`, and `TlsVersion`.
 
+use rustls::{SupportedCipherSuite, crypto::aws_lc_rs::cipher_suite};
 use serde::{Deserialize, Deserializer, Serialize, de};
 
 use super::{CaConfig, CertKeyPair, is_default_cert_mode};
@@ -41,6 +42,12 @@ pub struct ListenerTls {
     /// Multiple entries enable SNI-based cert selection.
     pub certificates: Vec<CertKeyPair>,
 
+    /// Restrict accepted cipher suites to this list.
+    ///
+    /// When `None`, all provider cipher suites are accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cipher_suites: Option<Vec<CipherSuiteId>>,
+
     /// CA for client certificate verification (mTLS).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub client_ca: Option<CaConfig>,
@@ -69,6 +76,10 @@ struct ListenerTlsRaw {
     /// Server certificates.
     certificates: Vec<CertKeyPair>,
 
+    /// Restrict accepted cipher suites.
+    #[serde(default)]
+    cipher_suites: Option<Vec<CipherSuiteId>>,
+
     /// CA for client certificate verification.
     #[serde(default)]
     client_ca: Option<CaConfig>,
@@ -92,6 +103,7 @@ impl<'de> Deserialize<'de> for ListenerTls {
         let raw = ListenerTlsRaw::deserialize(deserializer)?;
         let config = Self {
             certificates: raw.certificates,
+            cipher_suites: raw.cipher_suites,
             client_ca: raw.client_ca,
             client_cert_mode: raw.client_cert_mode,
             hot_reload: raw.hot_reload,
@@ -136,6 +148,7 @@ impl ListenerTls {
                 key_path: key_path.into(),
                 server_names: Vec::new(),
             }],
+            cipher_suites: None,
             client_ca: None,
             client_cert_mode: ClientCertMode::None,
             hot_reload: None,
@@ -201,6 +214,15 @@ impl ListenerTls {
 
         if self.hot_reload == Some(true) && self.certificates.len() > 1 {
             return Err(TlsError::HotReloadMultipleCerts);
+        }
+
+        if let Some(ref suites) = self.cipher_suites {
+            if suites.is_empty() {
+                return Err(TlsError::EmptyCipherSuites);
+            }
+            if self.min_version == Some(TlsVersion::Tls13) && suites.iter().any(CipherSuiteId::is_tls12) {
+                return Err(TlsError::Tls12SuiteWithTls13Only);
+            }
         }
 
         Ok(())
@@ -302,6 +324,123 @@ pub enum TlsVersion {
 
     /// TLS 1.3 only.
     Tls13,
+}
+
+// -----------------------------------------------------------------------------
+// CipherSuiteId
+// -----------------------------------------------------------------------------
+
+/// Cipher suite identifier for restricting accepted TLS cipher suites.
+///
+/// Maps to `aws_lc_rs` [`SupportedCipherSuite`] variants. TLS 1.3
+/// suites begin with `tls13_`; TLS 1.2 suites begin with `tls12_`.
+///
+/// ```
+/// use praxis_tls::CipherSuiteId;
+///
+/// let suite: CipherSuiteId = serde_yaml::from_str("tls13_aes_256_gcm_sha384").unwrap();
+/// assert!(matches!(suite, CipherSuiteId::Tls13Aes256GcmSha384));
+///
+/// let suite: CipherSuiteId =
+///     serde_yaml::from_str("tls12_ecdhe_rsa_with_aes_128_gcm_sha256").unwrap();
+/// assert!(matches!(
+///     suite,
+///     CipherSuiteId::Tls12EcdheRsaWithAes128GcmSha256
+/// ));
+/// ```
+///
+/// [`SupportedCipherSuite`]: rustls::SupportedCipherSuite
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
+pub enum CipherSuiteId {
+    // TLS 1.3 suites
+    /// TLS 1.3 AES-128-GCM with SHA-256.
+    #[serde(rename = "tls13_aes_128_gcm_sha256")]
+    Tls13Aes128GcmSha256,
+
+    /// TLS 1.3 AES-256-GCM with SHA-384.
+    #[serde(rename = "tls13_aes_256_gcm_sha384")]
+    Tls13Aes256GcmSha384,
+
+    /// TLS 1.3 ChaCha20-Poly1305 with SHA-256.
+    #[serde(rename = "tls13_chacha20_poly1305_sha256")]
+    Tls13Chacha20Poly1305Sha256,
+
+    // TLS 1.2 suites
+    /// TLS 1.2 ECDHE-ECDSA with AES-128-GCM SHA-256.
+    #[serde(rename = "tls12_ecdhe_ecdsa_with_aes_128_gcm_sha256")]
+    Tls12EcdheEcdsaWithAes128GcmSha256,
+
+    /// TLS 1.2 ECDHE-ECDSA with AES-256-GCM SHA-384.
+    #[serde(rename = "tls12_ecdhe_ecdsa_with_aes_256_gcm_sha384")]
+    Tls12EcdheEcdsaWithAes256GcmSha384,
+
+    /// TLS 1.2 ECDHE-ECDSA with ChaCha20-Poly1305 SHA-256.
+    #[serde(rename = "tls12_ecdhe_ecdsa_with_chacha20_poly1305_sha256")]
+    Tls12EcdheEcdsaWithChacha20Poly1305Sha256,
+
+    /// TLS 1.2 ECDHE-RSA with AES-128-GCM SHA-256.
+    #[serde(rename = "tls12_ecdhe_rsa_with_aes_128_gcm_sha256")]
+    Tls12EcdheRsaWithAes128GcmSha256,
+
+    /// TLS 1.2 ECDHE-RSA with AES-256-GCM SHA-384.
+    #[serde(rename = "tls12_ecdhe_rsa_with_aes_256_gcm_sha384")]
+    Tls12EcdheRsaWithAes256GcmSha384,
+
+    /// TLS 1.2 ECDHE-RSA with ChaCha20-Poly1305 SHA-256.
+    #[serde(rename = "tls12_ecdhe_rsa_with_chacha20_poly1305_sha256")]
+    Tls12EcdheRsaWithChacha20Poly1305Sha256,
+}
+
+impl CipherSuiteId {
+    /// Convert to the corresponding rustls [`SupportedCipherSuite`].
+    ///
+    /// ```
+    /// use praxis_tls::CipherSuiteId;
+    ///
+    /// let suite = CipherSuiteId::Tls13Aes256GcmSha384;
+    /// let rustls_suite = suite.to_rustls();
+    /// assert_eq!(
+    ///     format!("{:?}", rustls_suite.suite()),
+    ///     "TLS13_AES_256_GCM_SHA384"
+    /// );
+    /// ```
+    ///
+    /// [`SupportedCipherSuite`]: rustls::SupportedCipherSuite
+    pub fn to_rustls(&self) -> SupportedCipherSuite {
+        match self {
+            Self::Tls13Aes128GcmSha256 => cipher_suite::TLS13_AES_128_GCM_SHA256,
+            Self::Tls13Aes256GcmSha384 => cipher_suite::TLS13_AES_256_GCM_SHA384,
+            Self::Tls13Chacha20Poly1305Sha256 => cipher_suite::TLS13_CHACHA20_POLY1305_SHA256,
+            Self::Tls12EcdheEcdsaWithAes128GcmSha256 => cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+            Self::Tls12EcdheEcdsaWithAes256GcmSha384 => cipher_suite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+            Self::Tls12EcdheEcdsaWithChacha20Poly1305Sha256 => {
+                cipher_suite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256
+            },
+            Self::Tls12EcdheRsaWithAes128GcmSha256 => cipher_suite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+            Self::Tls12EcdheRsaWithAes256GcmSha384 => cipher_suite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+            Self::Tls12EcdheRsaWithChacha20Poly1305Sha256 => cipher_suite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+        }
+    }
+
+    /// Whether this cipher suite belongs to TLS 1.2.
+    ///
+    /// ```
+    /// use praxis_tls::CipherSuiteId;
+    ///
+    /// assert!(CipherSuiteId::Tls12EcdheRsaWithAes128GcmSha256.is_tls12());
+    /// assert!(!CipherSuiteId::Tls13Aes256GcmSha384.is_tls12());
+    /// ```
+    pub fn is_tls12(&self) -> bool {
+        matches!(
+            self,
+            Self::Tls12EcdheEcdsaWithAes128GcmSha256
+                | Self::Tls12EcdheEcdsaWithAes256GcmSha384
+                | Self::Tls12EcdheEcdsaWithChacha20Poly1305Sha256
+                | Self::Tls12EcdheRsaWithAes128GcmSha256
+                | Self::Tls12EcdheRsaWithAes256GcmSha384
+                | Self::Tls12EcdheRsaWithChacha20Poly1305Sha256
+        )
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -681,6 +820,132 @@ certificates:
             !tls.is_hot_reload(),
             "is_hot_reload should be false when explicitly false"
         );
+    }
+
+    #[test]
+    fn cipher_suites_deserialized() {
+        let tmp = temp_cert_key();
+        let yaml = format!(
+            "certificates:\n  - cert_path: {cert}\n    key_path: {key}\ncipher_suites:\n  - tls13_aes_256_gcm_sha384\n  - tls13_aes_128_gcm_sha256\n",
+            cert = tmp.cert,
+            key = tmp.key,
+        );
+        let tls: ListenerTls = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            tls.cipher_suites.as_ref().unwrap().len(),
+            2,
+            "should parse two cipher suites"
+        );
+        assert_eq!(
+            tls.cipher_suites.as_ref().unwrap()[0],
+            CipherSuiteId::Tls13Aes256GcmSha384,
+            "first suite should be AES-256-GCM"
+        );
+    }
+
+    #[test]
+    fn cipher_suites_defaults_to_none() {
+        let tmp = temp_cert_key();
+        let yaml = format!(
+            "certificates:\n  - cert_path: {cert}\n    key_path: {key}\n",
+            cert = tmp.cert,
+            key = tmp.key,
+        );
+        let tls: ListenerTls = serde_yaml::from_str(&yaml).unwrap();
+        assert!(tls.cipher_suites.is_none(), "cipher_suites should default to None");
+    }
+
+    #[test]
+    fn empty_cipher_suites_rejected() {
+        let tmp = temp_cert_key();
+        let yaml = format!(
+            "certificates:\n  - cert_path: {cert}\n    key_path: {key}\ncipher_suites: []\n",
+            cert = tmp.cert,
+            key = tmp.key,
+        );
+        let result = serde_yaml::from_str::<ListenerTls>(&yaml);
+        assert!(result.is_err(), "empty cipher_suites should be rejected");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("cipher_suites must not be empty"),
+            "error should mention empty cipher_suites: {msg}"
+        );
+    }
+
+    #[test]
+    fn tls12_cipher_suite_with_tls13_min_version_rejected() {
+        let tmp = temp_cert_key();
+        let yaml = format!(
+            "certificates:\n  - cert_path: {cert}\n    key_path: {key}\nmin_version: tls13\ncipher_suites:\n  - tls12_ecdhe_rsa_with_aes_128_gcm_sha256\n",
+            cert = tmp.cert,
+            key = tmp.key,
+        );
+        let result = serde_yaml::from_str::<ListenerTls>(&yaml);
+        assert!(
+            result.is_err(),
+            "TLS 1.2 cipher suite with min_version tls13 should be rejected"
+        );
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("TLS 1.2 suites"),
+            "error should mention TLS 1.2 suites: {msg}"
+        );
+    }
+
+    #[test]
+    fn tls13_cipher_suite_with_tls13_min_version_accepted() {
+        let tmp = temp_cert_key();
+        let yaml = format!(
+            "certificates:\n  - cert_path: {cert}\n    key_path: {key}\nmin_version: tls13\ncipher_suites:\n  - tls13_aes_256_gcm_sha384\n",
+            cert = tmp.cert,
+            key = tmp.key,
+        );
+        let tls: ListenerTls = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(
+            tls.cipher_suites.as_ref().unwrap().len(),
+            1,
+            "TLS 1.3 suite with tls13 min_version should be accepted"
+        );
+    }
+
+    #[test]
+    fn cipher_suite_id_is_tls12() {
+        assert!(CipherSuiteId::Tls12EcdheRsaWithAes128GcmSha256.is_tls12());
+        assert!(CipherSuiteId::Tls12EcdheEcdsaWithAes256GcmSha384.is_tls12());
+        assert!(
+            !CipherSuiteId::Tls13Aes256GcmSha384.is_tls12(),
+            "TLS 1.3 suite should not be TLS 1.2"
+        );
+    }
+
+    #[test]
+    fn cipher_suite_id_to_rustls_round_trip() {
+        let suite = CipherSuiteId::Tls13Aes256GcmSha384;
+        let rustls_suite = suite.to_rustls();
+        assert_eq!(
+            format!("{:?}", rustls_suite.suite()),
+            "TLS13_AES_256_GCM_SHA384",
+            "should map to the correct rustls suite"
+        );
+    }
+
+    #[test]
+    fn all_cipher_suite_ids_deserialize() {
+        let names = [
+            "tls13_aes_128_gcm_sha256",
+            "tls13_aes_256_gcm_sha384",
+            "tls13_chacha20_poly1305_sha256",
+            "tls12_ecdhe_ecdsa_with_aes_128_gcm_sha256",
+            "tls12_ecdhe_ecdsa_with_aes_256_gcm_sha384",
+            "tls12_ecdhe_ecdsa_with_chacha20_poly1305_sha256",
+            "tls12_ecdhe_rsa_with_aes_128_gcm_sha256",
+            "tls12_ecdhe_rsa_with_aes_256_gcm_sha384",
+            "tls12_ecdhe_rsa_with_chacha20_poly1305_sha256",
+        ];
+        for name in names {
+            let result: Result<CipherSuiteId, _> = serde_yaml::from_str(name);
+            assert!(result.is_ok(), "cipher suite '{name}' should deserialize");
+        }
     }
 
     // ---------------------------------------------------------------------------

@@ -40,9 +40,10 @@ pub(in crate::config::validate) fn validate_listeners(listeners: &mut [Listener]
     Ok(())
 }
 
-/// Validate a single listener: address, protocol constraints, TLS, and timeouts.
+/// Validate a single listener: address, protocol constraints, TLS, timeouts, and limits.
 fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
     super::address::validate_address(&listener.address, &listener.name)?;
+    validate_max_connections(listener)?;
 
     if listener.protocol == ProtocolKind::Tcp {
         validate_tcp_routing(listener)?;
@@ -61,6 +62,17 @@ fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
         super::timeouts::validate_tcp_max_duration(listener)?;
     }
 
+    Ok(())
+}
+
+/// Validate `max_connections` is at least 1 when set.
+fn validate_max_connections(listener: &Listener) -> Result<(), ProxyError> {
+    if listener.max_connections == Some(0) {
+        return Err(ProxyError::Config(format!(
+            "listener '{name}': max_connections must be >= 1",
+            name = listener.name,
+        )));
+    }
     Ok(())
 }
 
@@ -229,6 +241,7 @@ filter_chains:
                 cluster: None,
                 downstream_read_timeout_ms: None,
                 filter_chains: vec![],
+                max_connections: None,
                 name: format!("l{i}"),
                 protocol: Default::default(),
                 tcp_idle_timeout_ms: None,
@@ -239,6 +252,41 @@ filter_chains:
             .collect();
         let err = validate_listeners(&mut listeners).unwrap_err();
         assert!(err.to_string().contains("too many listeners"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_zero_max_connections() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    max_connections: 0
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("max_connections must be >= 1"), "got: {err}");
+    }
+
+    #[test]
+    fn accept_valid_max_connections() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    max_connections: 1
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
     }
 
     #[test]

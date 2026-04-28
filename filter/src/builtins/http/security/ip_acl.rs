@@ -81,9 +81,11 @@ pub struct IpAclFilter {
 impl IpAclFilter {
     /// Create an IP ACL filter from parsed YAML config.
     ///
+    /// When both lists are empty, all traffic is allowed.
+    ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if a CIDR range is invalid or both lists are empty.
+    /// Returns [`FilterError`] if a CIDR range is invalid.
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
@@ -109,17 +111,9 @@ impl IpAclFilter {
     /// Check `ip` against allow/deny lists. Allow takes precedence.
     fn is_allowed(&self, ip: &IpAddr) -> bool {
         if !self.allow.is_empty() {
-            if self.allow.iter().any(|r| r.contains(ip)) {
-                return true;
-            }
-            return false;
+            return self.allow.iter().any(|r| r.contains(ip));
         }
-
-        if self.deny.iter().any(|r| r.contains(ip)) {
-            return false;
-        }
-
-        true
+        !self.deny.iter().any(|r| r.contains(ip))
     }
 }
 

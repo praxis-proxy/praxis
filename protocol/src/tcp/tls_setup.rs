@@ -48,15 +48,23 @@ pub(super) fn group_tcp_listeners(config: &Config) -> HashMap<TcpGroupKey, Vec<&
 // -----------------------------------------------------------------------------
 
 /// Add TCP or TLS listeners to a service.
+///
+/// Returns any TLS certificate watcher shutdown senders. The
+/// caller must keep these alive; dropping them signals the
+/// watcher tasks to stop.
 pub(super) fn register_tcp_listeners(
     service: &mut Service<PingoraTcpProxy>,
     listeners: &[&praxis_core::config::Listener],
     upstream: Option<&str>,
-) -> Result<(), ProxyError> {
+) -> Result<Vec<tokio::sync::watch::Sender<bool>>, ProxyError> {
     let display_upstream = upstream.unwrap_or("filter-routed");
+    let mut shutdown_senders = Vec::new();
     for listener in listeners {
         if let Some(ref tls) = listener.tls {
-            let tls_settings = build_tcp_tls_settings(tls, &listener.address)?;
+            let (tls_settings, watcher_shutdown) = build_tcp_tls_settings(tls, &listener.address)?;
+            if let Some(tx) = watcher_shutdown {
+                shutdown_senders.push(tx);
+            }
             service.add_tls_with_settings(&listener.address, None, tls_settings);
         } else {
             service.add_tcp(&listener.address);
@@ -68,7 +76,7 @@ pub(super) fn register_tcp_listeners(
             "TCP listener registered"
         );
     }
-    Ok(())
+    Ok(shutdown_senders)
 }
 
 // -----------------------------------------------------------------------------
@@ -77,40 +85,22 @@ pub(super) fn register_tcp_listeners(
 
 /// Build [`TlsSettings`] for a TCP listener.
 ///
-/// When `hot_reload` is enabled, uses a [`ReloadableCertResolver`]
-/// and spawns a [`CertWatcher`] background task. Otherwise builds
-/// a static [`ServerConfig`] via [`build_server_config`].
+/// Delegates to the shared [`build_tls_settings`] with a `"TCP"`
+/// context label.
 ///
 /// [`TlsSettings`]: pingora_core::listeners::tls::TlsSettings
-/// [`ServerConfig`]: rustls::ServerConfig
-/// [`build_server_config`]: praxis_tls::setup::build_server_config
-/// [`ReloadableCertResolver`]: praxis_tls::reload::ReloadableCertResolver
-/// [`CertWatcher`]: praxis_tls::watcher::CertWatcher
+/// [`build_tls_settings`]: crate::tls_setup::build_tls_settings
 fn build_tcp_tls_settings(
     tls: &praxis_tls::ListenerTls,
     address: &str,
-) -> Result<pingora_core::listeners::tls::TlsSettings, ProxyError> {
-    if tls.is_hot_reload() {
-        tracing::debug!(address, "building TLS ServerConfig with hot-reload (TCP)");
-        let (server_config, swap_handle) = praxis_tls::setup::build_reloadable_server_config(tls)
-            .map_err(|e| ProxyError::Config(format!("TLS hot-reload for {address}: {e}")))?;
-
-        let pair =
-            tls.certificates.first().cloned().ok_or_else(|| {
-                ProxyError::Config(format!("TLS hot-reload for {address}: no certificate configured"))
-            })?;
-        let (_shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        praxis_tls::watcher::CertWatcher::spawn(swap_handle, pair, shutdown_rx);
-
-        return pingora_core::listeners::tls::TlsSettings::with_server_config(server_config)
-            .map_err(|e| ProxyError::Config(format!("TLS for {address}: {e}")));
-    }
-
-    tracing::debug!(address, "building TLS ServerConfig (TCP)");
-    let server_config = praxis_tls::setup::build_server_config(tls)
-        .map_err(|e| ProxyError::Config(format!("TLS for {address}: {e}")))?;
-    pingora_core::listeners::tls::TlsSettings::with_server_config(server_config)
-        .map_err(|e| ProxyError::Config(format!("TLS for {address}: {e}")))
+) -> Result<
+    (
+        pingora_core::listeners::tls::TlsSettings,
+        Option<tokio::sync::watch::Sender<bool>>,
+    ),
+    ProxyError,
+> {
+    crate::tls_setup::build_tls_settings(tls, address, "TCP")
 }
 
 // -----------------------------------------------------------------------------
@@ -142,7 +132,8 @@ listeners:
         .unwrap();
         let groups = group_tcp_listeners(&config);
         assert_eq!(groups.len(), 1, "same upstream + timeout should produce one group");
-        let key = (Some("10.0.0.1:5432".to_owned()), None, Some(300_000), None);
+        let default_timeout = config.listeners[0].tcp_idle_timeout_ms;
+        let key = (Some("10.0.0.1:5432".to_owned()), None, default_timeout, None);
         assert_eq!(groups[&key].len(), 2, "both listeners should be in the same group");
     }
 
@@ -193,7 +184,49 @@ listeners:
 
     #[test]
     fn group_tcp_listeners_skips_http_listeners() {
-        let config = Config::from_yaml(
+        let config = config_with_http_and_tcp();
+        let groups = group_tcp_listeners(&config);
+        assert_eq!(groups.len(), 1, "HTTP listeners should be excluded");
+        let timeout = config
+            .listeners
+            .iter()
+            .find(|l| l.protocol == ProtocolKind::Tcp)
+            .unwrap()
+            .tcp_idle_timeout_ms;
+        let key = (Some("10.0.0.1:5432".to_owned()), None, timeout, None);
+        assert!(groups.contains_key(&key), "only TCP listener should be grouped");
+    }
+
+    #[test]
+    fn group_tcp_listeners_includes_tcp_without_upstream() {
+        let config = config_with_tcp_no_upstream();
+        let groups = group_tcp_listeners(&config);
+        assert_eq!(
+            groups.len(),
+            1,
+            "TCP listener without upstream should be grouped with None key"
+        );
+        let key = (None, None, None, None);
+        assert!(groups.contains_key(&key), "group key should have None upstream");
+    }
+
+    #[test]
+    fn group_tcp_listeners_http_only_yields_empty() {
+        let config = config_http_only();
+        let groups = group_tcp_listeners(&config);
+        assert!(
+            groups.is_empty(),
+            "config with only HTTP listeners should yield empty groups"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// Build a Config with one HTTP and one TCP listener.
+    fn config_with_http_and_tcp() -> Config {
+        Config::from_yaml(
             r#"
 listeners:
   - name: web
@@ -216,29 +249,12 @@ filter_chains:
             endpoints: ["127.0.0.1:9090"]
 "#,
         )
-        .unwrap();
-        let groups = group_tcp_listeners(&config);
-        assert_eq!(groups.len(), 1, "HTTP listeners should be excluded");
-        let key = (Some("10.0.0.1:5432".to_owned()), None, Some(300_000), None);
-        assert!(groups.contains_key(&key), "only TCP listener should be grouped");
+        .unwrap()
     }
 
-    #[test]
-    fn group_tcp_listeners_includes_tcp_without_upstream() {
-        let config = config_with_tcp_no_upstream();
-        let groups = group_tcp_listeners(&config);
-        assert_eq!(
-            groups.len(),
-            1,
-            "TCP listener without upstream should be grouped with None key"
-        );
-        let key = (None, None, None, None);
-        assert!(groups.contains_key(&key), "group key should have None upstream");
-    }
-
-    #[test]
-    fn group_tcp_listeners_http_only_yields_empty() {
-        let config = Config::from_yaml(
+    /// Build a Config with only HTTP listeners.
+    fn config_http_only() -> Config {
+        Config::from_yaml(
             r#"
 listeners:
   - name: web
@@ -257,17 +273,8 @@ filter_chains:
             endpoints: ["127.0.0.1:9090"]
 "#,
         )
-        .unwrap();
-        let groups = group_tcp_listeners(&config);
-        assert!(
-            groups.is_empty(),
-            "config with only HTTP listeners should yield empty groups"
-        );
+        .unwrap()
     }
-
-    // -------------------------------------------------------------------------
-    // Test Utilities
-    // -------------------------------------------------------------------------
 
     /// Build a Config with a TCP listener lacking an upstream address.
     ///
@@ -285,13 +292,14 @@ filter_chains:
                 name: "orphan".to_owned(),
                 address: "0.0.0.0:9999".to_owned(),
                 cluster: None,
+                downstream_read_timeout_ms: None,
+                filter_chains: vec![],
+                max_connections: None,
                 protocol: ProtocolKind::Tcp,
+                tcp_idle_timeout_ms: None,
+                tcp_max_duration_secs: None,
                 tls: None,
                 upstream: None,
-                filter_chains: vec![],
-                tcp_idle_timeout_ms: None,
-                downstream_read_timeout_ms: None,
-                tcp_max_duration_secs: None,
             }],
             runtime: RuntimeConfig::default(),
             shutdown_timeout_secs: 10,

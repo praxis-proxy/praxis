@@ -84,7 +84,7 @@ impl RequestIdFilter {
         let cfg: RequestIdFilterConfig = parse_filter_config("request_id", config)?;
 
         Ok(Box::new(Self {
-            counter: AtomicU64::default(),
+            counter: AtomicU64::new(0),
             header_name: Arc::from(cfg.header_name.as_deref().unwrap_or(DEFAULT_HEADER_NAME)),
         }))
     }
@@ -106,6 +106,49 @@ impl RequestIdFilter {
 
         format!("{micros:016x}{seq:016x}")
     }
+
+    /// Resolve the request ID to echo on the response.
+    ///
+    /// Prefers the original client-supplied header value; falls back
+    /// to the ID injected during the request phase.
+    fn resolve_response_id(&self, ctx: &HttpFilterContext<'_>) -> Option<String> {
+        if let Some(client_id) = ctx
+            .request
+            .headers
+            .get(&*self.header_name)
+            .and_then(|v| v.to_str().ok())
+        {
+            tracing::trace!("using client-supplied request ID for response header");
+            return Some(client_id.to_owned());
+        }
+        ctx.extra_request_headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(&self.header_name))
+            .map(|(_, value)| {
+                tracing::trace!("using injected request ID for response header");
+                value.clone()
+            })
+    }
+
+    /// Insert the request ID header into the response.
+    fn insert_response_header(&self, resp: &mut crate::Response, id: &str) {
+        match (
+            http::header::HeaderName::from_bytes(self.header_name.as_bytes()),
+            http::header::HeaderValue::from_str(id),
+        ) {
+            (Ok(header_name), Ok(header_value)) => {
+                resp.headers.insert(header_name, header_value);
+            },
+            (name_result, value_result) => {
+                debug!(
+                    header = %self.header_name,
+                    name_err = ?name_result.err(),
+                    value_err = ?value_result.err(),
+                    "failed to set request ID on response header"
+                );
+            },
+        }
+    }
 }
 
 #[async_trait]
@@ -125,37 +168,21 @@ impl HttpFilter for RequestIdFilter {
         debug!(request_id = %id, header = %self.header_name, "forwarding request ID");
 
         ctx.extra_request_headers
-            .push((Cow::Owned(self.header_name.to_string()), id));
+            .push((Cow::Owned((*self.header_name).to_owned()), id));
 
         Ok(FilterAction::Continue)
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let Some(resp) = ctx.response_header.as_mut() else {
+        if ctx.response_header.is_none() {
             return Ok(FilterAction::Continue);
-        };
+        }
 
-        tracing::trace!("preferring original client-supplied value; falling back to injected request header");
-        let id = ctx
-            .request
-            .headers
-            .get(&*self.header_name)
-            .and_then(|v| v.to_str().ok())
-            .map(str::to_owned)
-            .or_else(|| {
-                ctx.extra_request_headers
-                    .iter()
-                    .find(|(name, _)| name.eq_ignore_ascii_case(&self.header_name))
-                    .map(|(_, value)| value.clone())
-            });
-
+        let id = self.resolve_response_id(ctx);
         if let Some(id) = id
-            && let (Ok(header_name), Ok(header_value)) = (
-                http::header::HeaderName::from_bytes(self.header_name.as_bytes()),
-                http::header::HeaderValue::from_str(&id),
-            )
+            && let Some(resp) = ctx.response_header.as_mut()
         {
-            resp.headers.insert(header_name, header_value);
+            self.insert_response_header(resp, &id);
         }
 
         Ok(FilterAction::Continue)
@@ -290,10 +317,9 @@ mod tests {
     /// Build a [`RequestIdFilter`] from a YAML config string.
     fn make_filter(yaml: &str) -> RequestIdFilter {
         let config: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
-        drop(RequestIdFilter::from_config(&config).unwrap());
-        let cfg: RequestIdFilterConfig = serde_yaml::from_value(config).unwrap();
+        let cfg: RequestIdFilterConfig = parse_filter_config("request_id", &config).unwrap();
         RequestIdFilter {
-            counter: AtomicU64::default(),
+            counter: AtomicU64::new(0),
             header_name: Arc::from(cfg.header_name.as_deref().unwrap_or(DEFAULT_HEADER_NAME)),
         }
     }
