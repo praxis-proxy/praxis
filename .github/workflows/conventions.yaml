@@ -55,7 +55,23 @@ jobs:
           added=$(echo "$stats" | grep -oP '\d+(?= insertion)' || echo 0)
 
           if [ "$added" -gt "$MAX_ADDITIONS" ]; then
-            gh pr close "$PR_NUMBER" --comment "This PR adds $added lines (limit: $MAX_ADDITIONS). Please check our coding conventions (docs/conventions.md), and break your contribution down into multiple smaller PRs. Thank you!"
+            marker="<!-- praxis:pr-size-check -->"
+            already=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
+            if [ "$already" -eq 0 ]; then
+              body="${marker}
+          ### PR too large
+
+          This PR adds **${added} lines** (limit: **${MAX_ADDITIONS}**).
+
+          Large PRs are difficult to review and more likely to introduce subtle bugs. Please break this contribution into smaller, focused PRs that each address a single concern.
+
+          See our [coding conventions](docs/conventions.md) for guidance.
+
+          > If this PR legitimately requires a large change, a maintainer can add the \`conventions/bypass\` label to skip this check."
+              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$body"
+            fi
+            gh pr close "$PR_NUMBER" --repo "${{ github.repository }}"
           fi
 
   # ----------------------------------------------------------------------------
