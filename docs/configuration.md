@@ -20,15 +20,22 @@ insecure_options:      # Optional. Dev/test overrides. See development.md.
 ## Admin
 
 `admin.address` binds a separate HTTP listener that serves
-`/ready` and `/healthy`. `/healthy` returns `200 OK` with
-`{"status":"ok"}` once the server is accepting
-connections (liveness). `/ready` returns per-cluster
-health status with healthy/unhealthy/total counts when
-active health checks are configured; it returns 503
-when any cluster has zero healthy endpoints. Without
-health checks, `/ready` returns `{"status":"ok"}`. Any
-other path returns 404. Useful for orchestrator health
-checks without exposing them on the main listeners.
+`/healthy`, `/ready`, and `/metrics`.
+
+- `/healthy` returns `200 OK` with `{"status":"ok"}`
+  once the server is accepting connections (liveness).
+- `/ready` returns per-cluster health status with
+  healthy/unhealthy/total counts when active health
+  checks are configured; it returns 503 when any
+  cluster has zero healthy endpoints. Without health
+  checks, `/ready` returns `{"status":"ok"}`.
+- `/metrics` returns Prometheus text exposition format
+  with HTTP request metrics (`praxis_http_requests_total`,
+  `praxis_http_request_duration_seconds`).
+
+Any other path returns 404. Useful for orchestrator
+health checks and monitoring without exposing them on
+the main listeners.
 
 ```yaml
 admin:
