@@ -159,11 +159,7 @@ pub fn decode_chunked(body: &str) -> String {
     let mut result = String::new();
     let mut remaining = body;
 
-    loop {
-        let Some(crlf) = remaining.find("\r\n") else {
-            break;
-        };
-
+    while let Some(crlf) = remaining.find("\r\n") {
         let size_hex = remaining[..crlf].trim();
         let size = usize::from_str_radix(size_hex, 16).unwrap_or(0);
         remaining = &remaining[crlf + 2..];

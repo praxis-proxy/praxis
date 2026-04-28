@@ -193,7 +193,7 @@ fn build_filter(cfg: SniRouterConfig) -> Result<Box<dyn TcpFilter>, FilterError>
     for entry in &cfg.routes {
         validate_route_entry(entry, &mut tables)?;
     }
-    tables.wildcards.sort_by(|a, b| b.suffix.len().cmp(&a.suffix.len()));
+    tables.wildcards.sort_by_key(|b| std::cmp::Reverse(b.suffix.len()));
 
     Ok(Box::new(SniRouterFilter {
         default_upstream: cfg.default_upstream,
@@ -638,7 +638,7 @@ default_upstream: "10.0.0.1:443"
             });
         }
 
-        wildcards.sort_by(|a, b| b.suffix.len().cmp(&a.suffix.len()));
+        wildcards.sort_by_key(|b| std::cmp::Reverse(b.suffix.len()));
 
         SniRouterFilter {
             default_upstream: default.map(|s| s.to_owned()),

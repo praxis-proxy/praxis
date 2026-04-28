@@ -168,6 +168,7 @@ mod tests {
     use std::net::IpAddr;
 
     use http::{HeaderMap, Method, Uri};
+    use praxis_core::config::FailureMode;
     use praxis_filter::{FilterAction, FilterPipeline, FilterRegistry, Request};
 
     use super::*;
@@ -348,7 +349,7 @@ mod tests {
             conditions: vec![],
             name: None,
             response_conditions: vec![],
-            failure_mode: Default::default(),
+            failure_mode: FailureMode::default(),
         }];
         FilterPipeline::build(&mut entries, &registry).unwrap()
     }

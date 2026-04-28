@@ -10,7 +10,7 @@ use std::{
 };
 
 use praxis_core::config::{
-    AdminConfig, BodyLimitsConfig, Cluster, Config, Endpoint, FilterChainConfig, FilterEntry,
+    AdminConfig, BodyLimitsConfig, Cluster, Config, Endpoint, FailureMode, FilterChainConfig, FilterEntry,
     InsecureOptions, Listener, ProtocolKind, RuntimeConfig,
 };
 
@@ -326,7 +326,7 @@ fn build_static_response_filter(entry: &RoutedEntry) -> FilterEntry {
         filter_type: "static_response".to_owned(),
         conditions,
         config: serde_yaml::Value::Mapping(filter_config),
-        failure_mode: Default::default(),
+        failure_mode: FailureMode::default(),
         name: None,
         response_conditions: vec![],
     }

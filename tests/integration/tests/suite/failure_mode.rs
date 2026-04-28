@@ -208,6 +208,23 @@ fn failure_mode_open_on_request_body_error_still_succeeds() {
     assert_eq!(body, "hello", "backend should echo the request body");
 }
 
+#[test]
+fn failure_mode_open_on_response_body_error_still_succeeds() {
+    let backend_port = start_echo_backend();
+    let proxy_port = free_port();
+    let yaml = make_yaml(proxy_port, backend_port, "resp_body_error", "open");
+    let config = Config::from_yaml(&yaml).unwrap();
+    let registry = registry_with("resp_body_error", || Box::new(ResponseBodyErrorFilter));
+    let proxy = start_proxy_with_registry(&config, &registry);
+
+    let (status, _body) = http_post(proxy.addr(), "/", "hello");
+
+    assert_eq!(
+        status, 200,
+        "failure_mode: open on_response_body error should still return 200"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
@@ -239,11 +256,7 @@ filter_chains:
 }
 
 /// Register a custom test filter in the given registry.
-fn register_test_filter(
-    registry: &mut FilterRegistry,
-    name: &str,
-    make: fn() -> Box<dyn HttpFilter>,
-) {
+fn register_test_filter(registry: &mut FilterRegistry, name: &str, make: fn() -> Box<dyn HttpFilter>) {
     registry
         .register(name, FilterFactory::Http(Arc::new(move |_| Ok(make()))))
         .unwrap();
@@ -293,6 +306,33 @@ impl HttpFilter for RequestBodyErrorFilter {
         _end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         Err("deliberate on_request_body error".into())
+    }
+}
+
+/// A filter that passes request/response but errors in `on_response_body`.
+struct ResponseBodyErrorFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for ResponseBodyErrorFilter {
+    fn name(&self) -> &'static str {
+        "resp_body_error"
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_response_body(
+        &self,
+        _ctx: &mut HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        Err("deliberate on_response_body error".into())
     }
 }
 

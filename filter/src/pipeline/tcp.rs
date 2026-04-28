@@ -73,6 +73,7 @@ mod tests {
     };
 
     use async_trait::async_trait;
+    use praxis_core::config::FailureMode;
 
     use super::*;
     use crate::{FilterError, FilterRegistry, Rejection, body::BodyCapabilities, tcp_filter::TcpFilter};
@@ -216,7 +217,7 @@ mod tests {
             conditions: vec![],
             name: None,
             response_conditions: vec![],
-            failure_mode: Default::default(),
+            failure_mode: FailureMode::default(),
         }];
         let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
         let mut ctx = make_ctx();

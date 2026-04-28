@@ -137,7 +137,7 @@ impl RouterFilter {
     /// [`FilterError`]: crate::FilterError
     pub fn new(routes: Vec<Route>) -> Result<Self, FilterError> {
         let mut routes = routes;
-        routes.sort_by(|a, b| b.path_prefix.len().cmp(&a.path_prefix.len()));
+        routes.sort_by_key(|b| std::cmp::Reverse(b.path_prefix.len()));
         for route in &routes {
             if route.path_prefix != "/" && !route.path_prefix.ends_with('/') {
                 return Err(format!(

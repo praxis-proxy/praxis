@@ -140,7 +140,7 @@ fn resp_conditions_use_headers(conditions: &[ResponseCondition]) -> bool {
 mod tests {
     use std::collections::HashMap;
 
-    use praxis_core::config::ResponseConditionMatch;
+    use praxis_core::config::{FailureMode, ResponseConditionMatch};
 
     use super::*;
 
@@ -394,7 +394,7 @@ mod tests {
         let branch_filter = PipelineFilter {
             branches: vec![],
             conditions: vec![],
-            failure_mode: Default::default(),
+            failure_mode: FailureMode::default(),
             filter: AnyFilter::Http(Box::new(BranchBodyFilter)),
             name: None,
             response_conditions: vec![],
@@ -409,7 +409,7 @@ mod tests {
         let parent = PipelineFilter {
             branches: vec![branch],
             conditions: vec![],
-            failure_mode: Default::default(),
+            failure_mode: FailureMode::default(),
             filter: AnyFilter::Http(Box::new(NoopHttpFilter)),
             name: None,
             response_conditions: vec![],
@@ -450,7 +450,7 @@ mod tests {
         let parent = PipelineFilter {
             branches: vec![branch],
             conditions: vec![],
-            failure_mode: Default::default(),
+            failure_mode: FailureMode::default(),
             filter: AnyFilter::Http(Box::new(NoopHttpFilter)),
             name: None,
             response_conditions: vec![],

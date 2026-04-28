@@ -300,7 +300,7 @@ fn resolve_named_rejoin(
 mod tests {
     use std::collections::HashMap;
 
-    use praxis_core::config::{BranchChainConfig, BranchCondition, ChainRef, FilterEntry};
+    use praxis_core::config::{BranchChainConfig, BranchCondition, ChainRef, FailureMode, FilterEntry};
 
     use super::*;
     use crate::FilterRegistry;
@@ -673,7 +673,7 @@ mod tests {
             branch_chains: None,
             conditions: vec![],
             config: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-            failure_mode: Default::default(),
+            failure_mode: FailureMode::default(),
             filter_type: filter_type.to_owned(),
             name: name.map(|n| n.to_owned()),
             response_conditions: vec![],

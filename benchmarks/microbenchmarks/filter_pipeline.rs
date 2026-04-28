@@ -18,7 +18,7 @@ use std::hint::black_box;
 use common::{bench_runtime, make_ctx, make_request};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use praxis_core::config::Route;
-use praxis_filter::{FilterEntry, FilterPipeline, FilterRegistry, HttpFilter, RouterFilter};
+use praxis_filter::{FailureMode, FilterEntry, FilterPipeline, FilterRegistry, HttpFilter, RouterFilter};
 
 // -----------------------------------------------------------------------------
 // Benchmarks
@@ -120,7 +120,7 @@ fn filter_entry(filter_type: &str, yaml: &str) -> FilterEntry {
         conditions: vec![],
         name: None,
         response_conditions: vec![],
-        failure_mode: Default::default(),
+        failure_mode: FailureMode::default(),
     }
 }
 

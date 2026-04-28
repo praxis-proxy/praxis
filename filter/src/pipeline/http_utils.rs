@@ -93,7 +93,7 @@ pub(super) fn check_failure_mode(
                 "filter error during {phase}, continuing (failure_mode=open)"
             );
             Ok(())
-        }
+        },
         FailureMode::Closed => {
             warn!(
                 filter = filter_name,
@@ -101,7 +101,7 @@ pub(super) fn check_failure_mode(
                 "filter error during {phase}, aborting"
             );
             Err(error)
-        }
+        },
     }
 }
 

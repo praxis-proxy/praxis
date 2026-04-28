@@ -114,9 +114,7 @@ fn build_server_conf(shutdown_timeout_secs: u64, threads: usize, runtime: &Runti
 /// Resolve the number of worker threads: auto-detect if zero.
 fn resolve_thread_count(configured: usize) -> usize {
     if configured == 0 {
-        std::thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(1)
+        std::thread::available_parallelism().map_or(1, std::num::NonZero::get)
     } else {
         configured
     }
