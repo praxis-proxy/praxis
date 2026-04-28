@@ -5,12 +5,12 @@ name: Coding Conventions
 # ------------------------------------------------------------------------------
 
 on:
-  pull_request:
+  pull_request_target:
     branches: [main]
     types: [opened, synchronize, reopened]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
 permissions: {}
@@ -23,16 +23,10 @@ jobs:
   pr-size-check:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
-    permissions:
-      pull-requests: write
     steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-
       - name: Check PR size
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           MAX_ADDITIONS: "250"
         run: |
@@ -51,8 +45,8 @@ jobs:
             fi
           fi
 
-          stats=$(git diff --stat origin/${{ github.base_ref }}...HEAD -- ':!Cargo.lock' ':!examples/' | tail -1)
-          added=$(echo "$stats" | grep -oP '\d+(?= insertion)' || echo 0)
+          added=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/files" --paginate \
+            --jq '[.[] | select(.filename | test("^(Cargo\\.lock|examples/)") | not) | .additions] | add // 0')
 
           if [ "$added" -gt "$MAX_ADDITIONS" ]; then
             marker="<!-- praxis:pr-size-check -->"
@@ -81,12 +75,10 @@ jobs:
   pr-description-check:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
-    permissions:
-      pull-requests: write
     steps:
       - name: Check for description
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
