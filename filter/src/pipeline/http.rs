@@ -9,9 +9,10 @@ use tracing::{debug, trace};
 use super::{
     FilterPipeline,
     branch::BranchOutcome,
+    check_failure_mode,
     filter::PipelineFilter,
     http_utils::{
-        BodyFilterOutcome, accumulate_body_bytes, as_request_body_filter, as_response_body_filter, check_failure_mode,
+        BodyFilterOutcome, accumulate_body_bytes, as_request_body_filter, as_response_body_filter,
         dispatch_body_result, released_or_continue, run_response_filter, skip_by_response_conditions,
     },
 };

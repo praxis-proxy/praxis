@@ -3,7 +3,7 @@
 
 //! TCP pipeline execution: connect and disconnect filter phases.
 
-use super::{FilterPipeline, http_utils::check_failure_mode};
+use super::{FilterPipeline, check_failure_mode};
 use crate::{FilterError, actions::FilterAction, any_filter::AnyFilter, tcp_filter::TcpFilterContext};
 
 // -----------------------------------------------------------------------------

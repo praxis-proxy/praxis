@@ -7,6 +7,7 @@ use bytes::Bytes;
 use praxis_core::config::FailureMode;
 use tracing::{debug, trace, warn};
 
+use super::check_failure_mode;
 use crate::{
     FilterError,
     actions::{FilterAction, Rejection},
@@ -73,36 +74,6 @@ pub(super) fn as_response_body_filter<'a>(
         return None;
     }
     Some(http_filter)
-}
-
-/// Check failure mode and either swallow or propagate a filter error.
-///
-/// When `failure_mode` is [`FailureMode::Open`], the error is logged as a
-/// warning and `Ok(())` is returned so the caller can continue.
-pub(super) fn check_failure_mode(
-    filter_name: &str,
-    error: FilterError,
-    phase: &str,
-    failure_mode: FailureMode,
-) -> Result<(), FilterError> {
-    match failure_mode {
-        FailureMode::Open => {
-            warn!(
-                filter = filter_name,
-                error = %error,
-                "filter error during {phase}, continuing (failure_mode=open)"
-            );
-            Ok(())
-        },
-        FailureMode::Closed => {
-            warn!(
-                filter = filter_name,
-                error = %error,
-                "filter error during {phase}, aborting"
-            );
-            Err(error)
-        },
-    }
 }
 
 // -----------------------------------------------------------------------------

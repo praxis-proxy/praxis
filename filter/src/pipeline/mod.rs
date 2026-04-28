@@ -30,7 +30,7 @@ mod tcp;
 )]
 mod tests;
 
-use praxis_core::health::HealthRegistry;
+use praxis_core::{config::FailureMode, health::HealthRegistry};
 use tracing::warn;
 
 use self::filter::PipelineFilter;
@@ -192,4 +192,38 @@ fn check_unbounded_stream_buffer(direction: &str, mode: BodyMode, allow_unbounde
         }
     }
     Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Failure Mode
+// -----------------------------------------------------------------------------
+
+/// Check failure mode and either swallow or propagate a filter error.
+///
+/// When `failure_mode` is [`FailureMode::Open`], the error is logged as a
+/// warning and `Ok(())` is returned so the caller can continue.
+pub(crate) fn check_failure_mode(
+    filter_name: &str,
+    error: FilterError,
+    phase: &str,
+    failure_mode: FailureMode,
+) -> Result<(), FilterError> {
+    match failure_mode {
+        FailureMode::Open => {
+            warn!(
+                filter = filter_name,
+                error = %error,
+                "filter error during {phase}, continuing (failure_mode=open)"
+            );
+            Ok(())
+        },
+        FailureMode::Closed => {
+            warn!(
+                filter = filter_name,
+                error = %error,
+                "filter error during {phase}, aborting"
+            );
+            Err(error)
+        },
+    }
 }
