@@ -49,7 +49,8 @@ pub(crate) fn resolve_pipelines(
         }
 
         let skip = config.insecure_options.skip_pipeline_validation;
-        validate_pipeline(&pipeline, &entries, &listener.name, skip)?;
+        let allow_open_security = config.insecure_options.allow_open_security_filters;
+        validate_pipeline(&pipeline, &entries, &listener.name, skip, allow_open_security)?;
 
         pipelines.insert(listener.name.clone(), Arc::new(pipeline));
     }
@@ -68,8 +69,9 @@ fn validate_pipeline(
     entries: &[praxis_core::config::FilterEntry],
     listener_name: &str,
     skip: bool,
+    allow_open_security: bool,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let errors = pipeline.ordering_errors(entries);
+    let errors = pipeline.ordering_errors(entries, allow_open_security);
 
     if skip {
         for msg in &errors {

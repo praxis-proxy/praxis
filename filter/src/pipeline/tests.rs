@@ -763,7 +763,7 @@ fn errors_load_balancer_without_router() {
         failure_mode: FailureMode::default(),
     }];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         errors
             .iter()
@@ -796,7 +796,7 @@ fn no_error_when_router_precedes_load_balancer() {
         },
     ];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         errors.is_empty(),
         "router before load_balancer should produce no errors: {errors:?}"
@@ -827,7 +827,7 @@ fn errors_unconditional_static_response_followed_by_filters() {
         },
     ];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         errors.iter().any(|e| e.contains("unreachable")),
         "should error on unreachable filters: {errors:?}"
@@ -867,7 +867,7 @@ fn no_error_for_conditional_static_response() {
         },
     ];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         errors.is_empty(),
         "conditional static_response should not error: {errors:?}"
@@ -907,7 +907,7 @@ fn errors_duplicate_router() {
         },
     ];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         errors.iter().any(|e| e.contains("multiple router")),
         "should error on duplicate router filters: {errors:?}"
@@ -947,7 +947,7 @@ fn errors_duplicate_load_balancer() {
         },
     ];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         errors.iter().any(|e| e.contains("multiple load_balancer")),
         "should error on duplicate load_balancer filters: {errors:?}"
@@ -967,7 +967,7 @@ fn errors_conditional_security_filter() {
         failure_mode: FailureMode::default(),
     }];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         errors
             .iter()
@@ -989,10 +989,52 @@ fn no_error_for_unconditional_security_filter() {
         failure_mode: FailureMode::default(),
     }];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         !errors.iter().any(|e| e.contains("security filter")),
         "unconditional security filter should not error: {errors:?}"
+    );
+}
+
+#[test]
+fn errors_open_security_filter() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![FilterEntry {
+        branch_chains: None,
+        conditions: vec![],
+        filter_type: "ip_acl".into(),
+        config: serde_yaml::from_str("allow: [\"10.0.0.0/8\"]").unwrap(),
+        name: None,
+        response_conditions: vec![],
+        failure_mode: FailureMode::Open,
+    }];
+    let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+    let errors = pipeline.ordering_errors(&entries, false);
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("failure_mode: open") && e.contains("ip_acl")),
+        "should error on open security filter: {errors:?}"
+    );
+}
+
+#[test]
+fn allow_open_security_filter_with_insecure_flag() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![FilterEntry {
+        branch_chains: None,
+        conditions: vec![],
+        filter_type: "ip_acl".into(),
+        config: serde_yaml::from_str("allow: [\"10.0.0.0/8\"]").unwrap(),
+        name: None,
+        response_conditions: vec![],
+        failure_mode: FailureMode::Open,
+    }];
+    let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+    let errors = pipeline.ordering_errors(&entries, true);
+    assert!(
+        !errors.iter().any(|e| e.contains("failure_mode: open")),
+        "insecure flag should suppress open security filter error: {errors:?}"
     );
 }
 
@@ -1001,7 +1043,7 @@ fn empty_pipeline_no_errors() {
     let registry = FilterRegistry::with_builtins();
     let mut entries: Vec<FilterEntry> = vec![];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(errors.is_empty(), "empty pipeline should produce no errors");
 }
 
@@ -1060,7 +1102,7 @@ fn errors_misaligned_clusters() {
         },
     ];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         errors
             .iter()
@@ -1093,7 +1135,7 @@ fn no_error_for_aligned_clusters() {
         },
     ];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         errors.is_empty(),
         "aligned clusters should produce no errors: {errors:?}"
@@ -1308,7 +1350,7 @@ fn errors_duplicate_path_rewrite_filters() {
         },
     ];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         errors
             .iter()
@@ -1344,7 +1386,7 @@ fn errors_mixed_path_and_url_rewrite_filters() {
         },
     ];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         errors
             .iter()
@@ -1366,7 +1408,7 @@ fn no_error_single_path_rewrite_filter() {
         failure_mode: FailureMode::default(),
     }];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         !errors.iter().any(|e| e.contains("rewriting filters")),
         "single rewrite filter should not error: {errors:?}"
@@ -1400,7 +1442,7 @@ fn no_error_duplicate_rewrite_with_allow_override() {
         },
     ];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         !errors.iter().any(|e| e.contains("rewriting filters")),
         "allow_rewrite_override should suppress error: {errors:?}"
@@ -1434,7 +1476,7 @@ fn error_when_allow_override_on_first_not_last() {
         },
     ];
     let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    let errors = pipeline.ordering_errors(&entries);
+    let errors = pipeline.ordering_errors(&entries, false);
     assert!(
         errors.iter().any(|e| e.contains("rewriting filters")),
         "override on first filter should not suppress error: {errors:?}"

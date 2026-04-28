@@ -29,6 +29,7 @@ use serde::Deserialize;
 /// assert!(!opts.skip_pipeline_validation);
 /// assert!(!opts.allow_tls_without_sni);
 /// assert!(!opts.allow_private_health_checks);
+/// assert!(!opts.allow_open_security_filters);
 /// ```
 ///
 /// ```
@@ -61,6 +62,9 @@ pub struct InsecureOptions {
 
     /// Allow health checks to loopback/metadata addresses.
     pub allow_private_health_checks: bool,
+
+    /// Allow security-critical filters to use `failure_mode: open`.
+    pub allow_open_security_filters: bool,
 }
 
 // -----------------------------------------------------------------------------
@@ -99,6 +103,10 @@ mod tests {
         assert!(
             !opts.allow_private_health_checks,
             "allow_private_health_checks should default to false"
+        );
+        assert!(
+            !opts.allow_open_security_filters,
+            "allow_open_security_filters should default to false"
         );
     }
 
