@@ -33,9 +33,8 @@ with the following documentation first:
 - [Development](docs/development.md)
 - [Benchmarks](docs/benchmarks.md)
 
-For larger changes open a [discussion] with a detailed description
-of what the change is so it can be discussed prior to a pull
-request.
+For larger changes and proposals open a [discussion] with a detailed
+description of what the change is so it can be discussed.
 
 [Issues]:https://github.com/praxis-proxy/praxis/issues/new
 [pull requests]:https://github.com/praxis-proxy/praxis/compare
