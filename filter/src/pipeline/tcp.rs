@@ -3,7 +3,7 @@
 
 //! TCP pipeline execution: connect and disconnect filter phases.
 
-use super::FilterPipeline;
+use super::{FilterPipeline, http_utils::check_failure_mode};
 use crate::{FilterError, actions::FilterAction, any_filter::AnyFilter, tcp_filter::TcpFilterContext};
 
 // -----------------------------------------------------------------------------
@@ -29,7 +29,9 @@ impl FilterPipeline {
             match tcp_filter.on_connect(ctx).await {
                 Ok(FilterAction::Continue | FilterAction::Release) => {},
                 Ok(FilterAction::Reject(r)) => return Ok(FilterAction::Reject(r)),
-                Err(e) => return Err(e),
+                Err(e) => {
+                    check_failure_mode(tcp_filter.name(), e, "tcp connect", pf.failure_mode)?;
+                },
             }
         }
 
@@ -47,7 +49,9 @@ impl FilterPipeline {
                 AnyFilter::Tcp(f) => f.as_ref(),
                 AnyFilter::Http(_) => continue,
             };
-            tcp_filter.on_disconnect(ctx).await?;
+            if let Err(e) = tcp_filter.on_disconnect(ctx).await {
+                check_failure_mode(tcp_filter.name(), e, "tcp disconnect", pf.failure_mode)?;
+            }
         }
 
         Ok(())
@@ -208,6 +212,66 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn connect_failure_mode_open_continues() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let disconnects = Arc::new(AtomicUsize::new(0));
+        let mut pipeline = make_tcp_pipeline(vec![
+            Box::new(ErrorTcpFilter),
+            Box::new(CountingTcpFilter {
+                connects: Arc::clone(&connects),
+                disconnects: Arc::clone(&disconnects),
+            }),
+        ]);
+        pipeline.filters[0].failure_mode = FailureMode::Open;
+        let mut ctx = make_ctx();
+
+        let action = pipeline.execute_tcp_connect(&mut ctx).await.unwrap();
+
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "open failure_mode should continue past error"
+        );
+        assert_eq!(
+            connects.load(Ordering::SeqCst),
+            1,
+            "second filter should still run after open error"
+        );
+    }
+
+    #[tokio::test]
+    async fn connect_failure_mode_closed_propagates() {
+        let pipeline = make_tcp_pipeline(vec![Box::new(ErrorTcpFilter)]);
+        let mut ctx = make_ctx();
+
+        let result = pipeline.execute_tcp_connect(&mut ctx).await;
+
+        assert!(result.is_err(), "closed (default) failure_mode should propagate error");
+    }
+
+    #[tokio::test]
+    async fn disconnect_failure_mode_open_continues() {
+        let connects = Arc::new(AtomicUsize::new(0));
+        let disconnects = Arc::new(AtomicUsize::new(0));
+        let mut pipeline = make_tcp_pipeline(vec![
+            Box::new(CountingTcpFilter {
+                connects: Arc::clone(&connects),
+                disconnects: Arc::clone(&disconnects),
+            }),
+            Box::new(ErrorDisconnectTcpFilter),
+        ]);
+        pipeline.filters[1].failure_mode = FailureMode::Open;
+        let mut ctx = make_ctx();
+
+        pipeline.execute_tcp_disconnect(&mut ctx).await.unwrap();
+
+        assert_eq!(
+            disconnects.load(Ordering::SeqCst),
+            1,
+            "first filter disconnect should still run"
+        );
+    }
+
+    #[tokio::test]
     async fn http_filters_skipped_in_tcp_execution() {
         let registry = FilterRegistry::with_builtins();
         let mut entries = vec![crate::FilterEntry {
@@ -284,6 +348,20 @@ mod tests {
 
         async fn on_connect(&self, _ctx: &mut TcpFilterContext<'_>) -> Result<FilterAction, FilterError> {
             Err("tcp filter error".into())
+        }
+    }
+
+    /// TCP filter that always errors on disconnect.
+    struct ErrorDisconnectTcpFilter;
+
+    #[async_trait]
+    impl TcpFilter for ErrorDisconnectTcpFilter {
+        fn name(&self) -> &'static str {
+            "error_disconnect_tcp"
+        }
+
+        async fn on_disconnect(&self, _ctx: &mut TcpFilterContext<'_>) -> Result<(), FilterError> {
+            Err("tcp disconnect error".into())
         }
     }
 
