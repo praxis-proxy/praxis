@@ -3,6 +3,8 @@
 
 //! TCP pipeline execution: connect and disconnect filter phases.
 
+use tracing::trace;
+
 use super::{FilterPipeline, check_failure_mode};
 use crate::{FilterError, actions::FilterAction, any_filter::AnyFilter, tcp_filter::TcpFilterContext};
 
@@ -26,6 +28,7 @@ impl FilterPipeline {
                 AnyFilter::Tcp(f) => f.as_ref(),
                 AnyFilter::Http(_) => continue,
             };
+            trace!(filter = tcp_filter.name(), "on_connect");
             match tcp_filter.on_connect(ctx).await {
                 Ok(FilterAction::Continue | FilterAction::Release) => {},
                 Ok(FilterAction::Reject(r)) => return Ok(FilterAction::Reject(r)),
@@ -49,6 +52,7 @@ impl FilterPipeline {
                 AnyFilter::Tcp(f) => f.as_ref(),
                 AnyFilter::Http(_) => continue,
             };
+            trace!(filter = tcp_filter.name(), "on_disconnect");
             if let Err(e) = tcp_filter.on_disconnect(ctx).await {
                 check_failure_mode(tcp_filter.name(), e, "tcp disconnect", pf.failure_mode)?;
             }
