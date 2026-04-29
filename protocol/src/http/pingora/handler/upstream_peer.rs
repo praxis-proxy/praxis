@@ -106,7 +106,7 @@ fn ca_from_cached(cached: &praxis_tls::CachedCaCerts) -> Vec<pingora_core::utils
     cached
         .der_certs()
         .iter()
-        .map(|der| pingora_core::utils::tls::WrappedX509::new(der.clone(), pingora_core::utils::tls::parse_x509))
+        .map(|der| pingora_core::utils::tls::WrappedX509::parse(der.clone()))
         .collect()
 }
 
