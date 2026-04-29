@@ -20,6 +20,8 @@ pub mod health;
 pub(crate) mod json;
 /// Listener configuration and TLS setup.
 pub mod listener;
+/// Prometheus metrics: recorder, HTTP request counters, and scrape endpoint.
+pub mod metrics;
 
 // -----------------------------------------------------------------------------
 // PingoraHttp

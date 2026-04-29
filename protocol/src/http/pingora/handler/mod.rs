@@ -11,7 +11,7 @@ use praxis_filter::{CompressionConfig, FilterPipeline};
 use tokio::sync::Semaphore;
 use tracing::{debug, warn};
 
-use super::context::PingoraRequestCtx;
+use super::{context::PingoraRequestCtx, metrics};
 
 /// Shared hop-by-hop header stripping logic.
 mod hop_by_hop;
@@ -211,6 +211,27 @@ async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx)
     {
         let _result = pipeline.execute_http_response(&mut filter_ctx).await;
     }
+}
+
+/// Emit Prometheus metrics for a completed HTTP request.
+fn emit_request_metrics(session: &Session, ctx: &PingoraRequestCtx) {
+    let status_code = session.response_written().map_or(0, |resp| resp.status.as_u16());
+    let status_class = metrics::status_class(status_code);
+
+    let raw_method = ctx.request_snapshot.as_ref().map_or("UNKNOWN", |r| r.method.as_str());
+    let method = metrics::method_label(raw_method);
+
+    let cluster_name: &str = ctx.metrics_cluster.as_deref().unwrap_or("none");
+
+    let labels = metrics::RequestMetricLabels {
+        method,
+        status_class,
+        route: "unknown",
+        cluster: cluster_name,
+    };
+
+    let duration_secs = ctx.request_start.elapsed().as_secs_f64();
+    metrics::record_request_metrics(&labels, duration_secs);
 }
 
 /// Build [`HttpServerOptions`] with h2c enabled.

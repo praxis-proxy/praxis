@@ -1,19 +1,21 @@
 # Admin Interface
 #
-# Exposes an admin endpoint for operational health checks
-# and readiness probes. The admin listener is separate from
-# data-plane traffic and serves:
+# Exposes an admin endpoint for operational health checks,
+# readiness probes, and Prometheus metrics. The admin listener
+# is separate from data-plane traffic and serves:
 #
-#   GET /health   liveness probe (always 200)
+#   GET /healthy  liveness probe (always 200)
 #   GET /ready    readiness probe (checks upstream clusters)
+#   GET /metrics  Prometheus text exposition format
 #
 # With `verbose: true`, the /ready response includes
 # per-cluster health detail in the body.
 #
 # Usage:
 #   cargo run -p praxis -- -c examples/configs/operations/admin-interface.yaml
-#   curl http://localhost:9901/health     # liveness
+#   curl http://localhost:9901/healthy    # liveness
 #   curl http://localhost:9901/ready      # readiness (verbose)
+#   curl http://localhost:9901/metrics    # prometheus scrape
 
 admin:
   address: "127.0.0.1:9901"
