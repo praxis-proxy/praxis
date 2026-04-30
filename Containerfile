@@ -24,20 +24,29 @@ WORKDIR /src
 COPY Cargo.toml Cargo.lock ./
 COPY core/Cargo.toml core/Cargo.toml
 COPY filter/Cargo.toml filter/Cargo.toml
+COPY proto/Cargo.toml proto/Cargo.toml
 COPY protocol/Cargo.toml protocol/Cargo.toml
 COPY tls/Cargo.toml tls/Cargo.toml
 COPY server/Cargo.toml server/Cargo.toml
+
+# The proto crate has a build.rs that compiles vendored .proto files,
+# so we need the full proto/ directory (not just a stub) for the
+# cache-build stage to succeed.
+COPY proto/build.rs proto/build.rs
+COPY proto/proto proto/proto
 
 # Strip workspace members not needed for the praxis binary
 # so we don't need their Cargo.toml files.
 RUN sed -i '/xtask/d; /benchmarks/d; /tests\//d' Cargo.toml
 RUN mkdir -p core/src \
     filter/src \
+    proto/src \
     protocol/src \
     tls/src \
     server/src \
     && echo '//! stub' > core/src/lib.rs \
     && echo '//! stub' > filter/src/lib.rs \
+    && echo '//! stub' > proto/src/lib.rs \
     && echo '//! stub' > protocol/src/lib.rs \
     && echo '//! stub' > tls/src/lib.rs \
     && echo '//! stub' > server/src/lib.rs \
@@ -55,6 +64,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # project crates recompile; all dependencies are cached.
 COPY core/src core/src
 COPY filter/src filter/src
+COPY proto/src proto/src
 COPY protocol/src protocol/src
 COPY tls/src tls/src
 COPY server/src server/src
@@ -62,7 +72,7 @@ COPY examples examples
 
 # Touch the lib/main files so cargo sees them as newer than
 # the cached stub artifacts.
-RUN find core/src filter/src \
+RUN find core/src filter/src proto/src \
     protocol/src tls/src server/src \
     -name '*.rs' -exec touch {} +
 

@@ -14,8 +14,9 @@ publish = true
 name = "praxis_filter"
 
 [features]
-default = ["ai-inference"]
+default = ["ai-inference", "ext-proc"]
 ai-inference = []
+ext-proc = ["dep:praxis-proto", "dep:tonic", "dep:prost-wkt-types"]
 
 [lints]
 workspace = true
@@ -27,11 +28,14 @@ dashmap = { workspace = true }
 http = { workspace = true }
 percent-encoding = { workspace = true }
 praxis-core = { workspace = true }
+praxis-proto = { workspace = true, optional = true }
+prost-wkt-types = { workspace = true, optional = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
+tonic = { workspace = true, optional = true }
 tracing = { workspace = true }
 
 [dev-dependencies]

@@ -1,0 +1,573 @@
+// Copyright 2025 Envoy Project Authors
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+syntax = "proto3";
+
+package envoy.service.ext_proc.v3;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/wrappers.proto";
+import "envoy_common.proto";
+
+option go_package = "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3;ext_procv3";
+
+// [#protodoc-title: External processing service]
+
+// A service that can access and modify HTTP requests and responses
+// as part of a filter chain.
+// The overall external processing protocol works like this:
+//
+// 1. Envoy sends to the service information about the HTTP request.
+// 2. The service sends back a ProcessingResponse message that directs Envoy
+//    to either stop processing, continue without it, or send it the
+//    next chunk of the message body.
+// 3. If so requested, Envoy sends the server the message body in chunks,
+//    or the entire body at once. In either case, the server may send back
+//    a ProcessingResponse for each message it receives, or wait for certain amount
+//    of body chunks received before streams back the ProcessingResponse messages.
+// 4. If so requested, Envoy sends the server the HTTP trailers,
+//    and the server sends back a ProcessingResponse.
+// 5. At this point, request processing is done, and we pick up again
+//    at step 1 when Envoy receives a response from the upstream server.
+// 6. At any point above, if the server closes the gRPC stream cleanly,
+//    then Envoy proceeds without consulting the server.
+// 7. At any point above, if the server closes the gRPC stream with an error,
+//    then Envoy returns a 500 error to the client, unless the filter
+//    was configured to ignore errors.
+//
+// In other words, the process is a request/response conversation, but
+// using a gRPC stream to make it easier for the server to
+// maintain state.
+service ExternalProcessor {
+  // This begins the bidirectional stream that Envoy will use to
+  // give the server control over what the filter does. The actual
+  // protocol is described by the ProcessingRequest and ProcessingResponse
+  // messages below.
+  rpc Process(stream ProcessingRequest) returns (stream ProcessingResponse) {}
+}
+
+// This message specifies the filter protocol configurations which will be sent to the ext_proc
+// server in a :ref:`ProcessingRequest <envoy_v3_api_msg_service.ext_proc.v3.ProcessingRequest>`.
+// If the server does not support these protocol configurations, it may choose to close the gRPC stream.
+// If the server supports these protocol configurations, it should respond based on the API specifications.
+message ProtocolConfiguration {
+  // Specify the filter configuration :ref:`request_body_mode
+  // <envoy_v3_api_field_extensions.filters.http.ext_proc.v3.ProcessingMode.request_body_mode>`
+  BodySendMode request_body_mode = 1;
+
+  // Specify the filter configuration :ref:`response_body_mode
+  // <envoy_v3_api_field_extensions.filters.http.ext_proc.v3.ProcessingMode.response_body_mode>`
+  BodySendMode response_body_mode = 2;
+
+  // Specify the filter configuration :ref:`send_body_without_waiting_for_header_response
+  // <envoy_v3_api_field_extensions.filters.http.ext_proc.v3.ExternalProcessor.send_body_without_waiting_for_header_response>`
+  // If the client is waiting for a header response from the server, setting ``true`` means the client will send body to the server
+  // as they arrive. Setting ``false`` means the client will buffer the arrived data and not send it to the server immediately.
+  bool send_body_without_waiting_for_header_response = 3;
+}
+
+// This represents the different types of messages that Envoy can send
+// to an external processing server.
+// [#next-free-field: 12]
+message ProcessingRequest {
+  reserved 1;
+
+  reserved "async_mode";
+
+  // Each request message will include one of the following sub-messages. Which
+  // ones are set for a particular HTTP request/response depend on the
+  // processing mode.
+  oneof request {
+    // Information about the HTTP request headers, as well as peer info and additional
+    // properties. Unless ``observability_mode`` is ``true``, the server must send back a
+    // HeaderResponse message, an ImmediateResponse message, or close the stream.
+    HttpHeaders request_headers = 2;
+
+    // Information about the HTTP response headers, as well as peer info and additional
+    // properties. Unless ``observability_mode`` is ``true``, the server must send back a
+    // HeaderResponse message or close the stream.
+    HttpHeaders response_headers = 3;
+
+    // A chunk of the HTTP request body. Unless ``observability_mode`` is true, the server must send back
+    // a BodyResponse message, an ImmediateResponse message, or close the stream.
+    HttpBody request_body = 4;
+
+    // A chunk of the HTTP response body. Unless ``observability_mode`` is ``true``, the server must send back
+    // a BodyResponse message or close the stream.
+    HttpBody response_body = 5;
+
+    // The HTTP trailers for the request path. Unless ``observability_mode`` is ``true``, the server
+    // must send back a TrailerResponse message or close the stream.
+    //
+    // This message is only sent if the trailers processing mode is set to ``SEND`` and
+    // the original downstream request has trailers.
+    HttpTrailers request_trailers = 6;
+
+    // The HTTP trailers for the response path. Unless ``observability_mode`` is ``true``, the server
+    // must send back a TrailerResponse message or close the stream.
+    //
+    // This message is only sent if the trailers processing mode is set to ``SEND`` and
+    // the original upstream response has trailers.
+    HttpTrailers response_trailers = 7;
+  }
+
+  // Dynamic metadata associated with the request.
+  envoy.service.common.v3.Metadata metadata_context = 8;
+
+  // The values of properties selected by the ``request_attributes``
+  // or ``response_attributes`` list in the configuration. Each entry
+  // in the list is populated from the standard
+  // :ref:`attributes <arch_overview_attributes>` supported across Envoy.
+  map<string, google.protobuf.Struct> attributes = 9;
+
+  // Specify whether the filter that sent this request is running in :ref:`observability_mode
+  // <envoy_v3_api_field_extensions.filters.http.ext_proc.v3.ExternalProcessor.observability_mode>`
+  // and defaults to false.
+  //
+  // * A value of ``false`` indicates that the server must respond
+  //   to this message by either sending back a matching ProcessingResponse message,
+  //   or by closing the stream.
+  // * A value of ``true`` indicates that the server should not respond to this message, as any
+  //   responses will be ignored. However, it may still close the stream to indicate that no more messages
+  //   are needed.
+  //
+  bool observability_mode = 10;
+
+  // Specify the filter protocol configurations to be sent to the server.
+  // ``protocol_config`` is only encoded in the first ``ProcessingRequest`` message from the client to the server.
+  ProtocolConfiguration protocol_config = 11;
+}
+
+// This represents the different types of messages the server may send back to Envoy
+// when the ``observability_mode`` field in the received ProcessingRequest is set to false.
+//
+// * If the corresponding ``BodySendMode`` in the
+//   :ref:`processing_mode <envoy_v3_api_field_extensions.filters.http.ext_proc.v3.ExternalProcessor.processing_mode>`
+//   is not set to ``FULL_DUPLEX_STREAMED``, then for every received ProcessingRequest,
+//   the server must send back exactly one ProcessingResponse message.
+// * If it is set to ``FULL_DUPLEX_STREAMED``, the server must follow the API defined
+//   for this mode to send the ProcessingResponse messages.
+// [#next-free-field: 11]
+message ProcessingResponse {
+  // The response type that is sent by the server.
+  oneof response {
+    // The server must send back this message in response to a message with the
+    // ``request_headers`` field set.
+    HeadersResponse request_headers = 1;
+
+    // The server must send back this message in response to a message with the
+    // ``response_headers`` field set.
+    HeadersResponse response_headers = 2;
+
+    // The server must send back this message in response to a message with
+    // the ``request_body`` field set.
+    BodyResponse request_body = 3;
+
+    // The server must send back this message in response to a message with
+    // the ``response_body`` field set.
+    BodyResponse response_body = 4;
+
+    // The server must send back this message in response to a message with
+    // the ``request_trailers`` field set.
+    TrailersResponse request_trailers = 5;
+
+    // The server must send back this message in response to a message with
+    // the ``response_trailers`` field set.
+    TrailersResponse response_trailers = 6;
+
+    // If specified, attempt to create a locally generated response, send it
+    // downstream, and stop processing additional filters and ignore any
+    // additional messages received from the remote server for this request or
+    // response. If a response has already started -- for example, if this
+    // message is sent response to a ``response_body`` message -- then
+    // this will either ship the reply directly to the downstream codec,
+    // or reset the stream.
+    ImmediateResponse immediate_response = 7;
+  }
+
+  // Optional metadata that will be emitted as dynamic metadata to be consumed by
+  // following filters. This metadata will be placed in the namespace(s) specified by the top-level
+  // field name(s) of the struct.
+  google.protobuf.Struct dynamic_metadata = 8;
+
+  // Override how parts of the HTTP request and response are processed
+  // for the duration of this particular request/response only. Servers
+  // may use this to intelligently control how requests are processed
+  // based on the headers and other metadata that they see.
+  // This field is only applicable when servers responding to the header requests.
+  // If it is set in the response to the body or trailer requests, it will be ignored by Envoy.
+  // It is also ignored by Envoy when the ext_proc filter config
+  // :ref:`allow_mode_override
+  // <envoy_v3_api_field_extensions.filters.http.ext_proc.v3.ExternalProcessor.allow_mode_override>`
+  // is set to false, or
+  // :ref:`send_body_without_waiting_for_header_response
+  // <envoy_v3_api_field_extensions.filters.http.ext_proc.v3.ExternalProcessor.send_body_without_waiting_for_header_response>`
+  // is set to true.
+  ProcessingMode mode_override = 9;
+
+  // When ext_proc server receives a request message, in case it needs more
+  // time to process the message, it sends back a ProcessingResponse message
+  // with a new timeout value. When Envoy receives this response message,
+  // it ignores other fields in the response, just stop the original timer,
+  // which has the timeout value specified in
+  // :ref:`message_timeout
+  // <envoy_v3_api_field_extensions.filters.http.ext_proc.v3.ExternalProcessor.message_timeout>`
+  // and start a new timer with this ``override_message_timeout`` value and keep the
+  // Envoy ext_proc filter state machine intact.
+  // Has to be >= 1ms and <=
+  // :ref:`max_message_timeout <envoy_v3_api_field_extensions.filters.http.ext_proc.v3.ExternalProcessor.max_message_timeout>`
+  // Such message can be sent at most once in a particular Envoy ext_proc filter processing state.
+  // To enable this API, one has to set ``max_message_timeout`` to a number >= 1ms.
+  google.protobuf.Duration override_message_timeout = 10;
+}
+
+// The following are messages that are sent to the server.
+
+// This message is sent to the external server when the HTTP request and responses
+// are first received.
+message HttpHeaders {
+  // The HTTP request headers. All header keys will be
+  // lower-cased, because HTTP header keys are case-insensitive.
+  HeaderMap headers = 1;
+
+  // HttpHeaders.attributes removed in favour of ProcessingRequest attributes
+  reserved 2;
+  reserved "attributes";
+
+  // If true, then there is no message body associated with this
+  // request or response.
+  bool end_of_stream = 3;
+}
+
+// This message contains the message body that Envoy sends to the external server.
+message HttpBody {
+  bytes body = 1;
+
+  bool end_of_stream = 2;
+}
+
+// This message contains the trailers.
+message HttpTrailers {
+  HeaderMap trailers = 1;
+}
+
+// The following are messages that may be sent back by the server.
+
+// This message must be sent in response to an HttpHeaders message.
+message HeadersResponse {
+  CommonResponse response = 1;
+}
+
+// This message must be sent in response to an HttpTrailers message.
+message TrailersResponse {
+  // Instructions on how to manipulate the trailers
+  HeaderMutation header_mutation = 1;
+}
+
+// This message must be sent in response to an HttpBody message.
+message BodyResponse {
+  CommonResponse response = 1;
+}
+
+// This message contains common fields between header and body responses.
+// [#next-free-field: 6]
+message CommonResponse {
+  enum ResponseStatus {
+    // Apply the mutation instructions in this message to the
+    // request or response, and then continue processing the filter
+    // stream as normal. This is the default.
+    CONTINUE = 0;
+
+    // Apply the specified header mutation, replace the body with the body
+    // specified in the body mutation (if present), and do not send any
+    // further messages for this request or response even if the processing
+    // mode is configured to do so.
+    //
+    // When used in response to a request_headers or response_headers message,
+    // this status makes it possible to either completely replace the body
+    // while discarding the original body, or to add a body to a message that
+    // formerly did not have one.
+    //
+    // In other words, this response makes it possible to turn an HTTP GET
+    // into a POST, PUT, or PATCH.
+    CONTINUE_AND_REPLACE = 1;
+  }
+
+  // If set, provide additional direction on how the Envoy proxy should
+  // handle the rest of the HTTP filter chain.
+  ResponseStatus status = 1;
+
+  // Instructions on how to manipulate the headers. When responding to an
+  // HttpBody request, header mutations will only take effect if
+  // the current processing mode for the body is BUFFERED.
+  HeaderMutation header_mutation = 2;
+
+  // Replace the body of the last message sent to the remote server on this
+  // stream. If responding to an HttpBody request, simply replace or clear
+  // the body chunk that was sent with that request. Body mutations only take
+  // effect in response to ``body`` messages and are ignored otherwise.
+  BodyMutation body_mutation = 3;
+
+  // [#not-implemented-hide:]
+  // Add new trailers to the message. This may be used when responding to either a
+  // HttpHeaders or HttpBody message, but only if this message is returned
+  // along with the CONTINUE_AND_REPLACE status.
+  HeaderMap trailers = 4;
+
+  // Clear the route cache for the current request.
+  // This is necessary if the remote server
+  // modified headers that are used to calculate the route.
+  bool clear_route_cache = 5;
+}
+
+// This message causes the filter to attempt to create a locally
+// generated response, send it  downstream, stop processing
+// additional filters, and ignore any additional messages received
+// from the remote server for this request or response. If a response
+// has already started, then  this will either ship the reply directly
+// to the downstream codec, or reset the stream.
+// [#next-free-field: 6]
+message ImmediateResponse {
+  // The response code to return
+  envoy.service.common.v3.HttpStatus status = 1;
+
+  // Apply changes to the default headers, which will include content-type.
+  HeaderMutation headers = 2;
+
+  // The message body to return with the response which is sent using the
+  // text/plain content type, or encoded in the grpc-message header.
+  string body = 3;
+
+  // If set, then include a gRPC status trailer.
+  GrpcStatus grpc_status = 4;
+
+  // A string detailing why this local reply was sent, which may be included
+  // in log and debug output (e.g. this populates the %RESPONSE_CODE_DETAILS%
+  // command operator field for use in access logging).
+  string details = 5;
+}
+
+// This message specifies a gRPC status for an ImmediateResponse message.
+message GrpcStatus {
+  // The actual gRPC status
+  uint32 status = 1;
+}
+
+// Change HTTP headers or trailers by appending, replacing, or removing
+// headers.
+message HeaderMutation {
+  // Add or replace HTTP headers. Attempts to set the value of
+  // any ``x-envoy`` header, and attempts to set the ``:method``,
+  // ``:authority``, ``:scheme``, or ``host`` headers will be ignored.
+  repeated envoy.service.common.v3.HeaderValueOption set_headers = 1;
+
+  // Remove these HTTP headers. Attempts to remove system headers --
+  // any header starting with ``:``, plus ``host`` -- will be ignored.
+  repeated string remove_headers = 2;
+}
+
+// Replace the entire message body chunk received in the corresponding
+// HttpBody message with this new body, or clear the body.
+message BodyMutation {
+  oneof mutation {
+    // The entire body to replace
+    bytes body = 1;
+
+    // Clear the corresponding body chunk
+    bool clear_body = 2;
+
+    // Must be used when the corresponding ``BodySendMode`` in the
+    // :ref:`processing_mode <envoy_v3_api_field_extensions.filters.http.ext_proc.v3.ExternalProcessor.processing_mode>`
+    // is set to ``FULL_DUPLEX_STREAMED``.
+    StreamedBodyResponse streamed_response = 3;
+  }
+}
+
+// The body response message corresponding to FULL_DUPLEX_STREAMED body mode.
+message StreamedBodyResponse {
+  // The body response chunk that will be passed to the upstream/downstream by Envoy.
+  bytes body = 1;
+
+  // The server sets this flag to true if it has received a body request with
+  // :ref:`end_of_stream <envoy_v3_api_field_service.ext_proc.v3.HttpBody.end_of_stream>` set to true,
+  // and this is the last chunk of body responses.
+  bool end_of_stream = 2;
+}
+
+message HeaderMap {
+  repeated envoy.service.common.v3.HeaderValue headers = 1;
+}
+
+enum BodySendMode {
+  // Do not send the body at all. This is the default.
+  NONE = 0;
+
+  // Stream the body to the server in pieces as they arrive at the
+  // proxy.
+  STREAMED = 1;
+
+  // Buffer the message body in memory and send the entire body at once.
+  // If the body exceeds the configured buffer limit, then the
+  // downstream system will receive an error.
+  BUFFERED = 2;
+
+  // Buffer the message body in memory and send the entire body in one
+  // chunk. If the body exceeds the configured buffer limit, then the body contents
+  // up to the buffer limit will be sent.
+  BUFFERED_PARTIAL = 3;
+
+  // Envoy streams the body to the server in pieces as they arrive.
+  //
+  // 1) The server may choose to buffer any number chunks of data before processing them.
+  // After it finishes buffering, the server processes the buffered data. Then it splits the processed
+  // data into any number of chunks, and streams them back to Envoy one by one.
+  // The server may continuously do so until the complete body is processed.
+  // The individual response chunk size is recommended to be no greater than 64K bytes, or
+  // :ref:`max_receive_message_length <envoy_v3_api_field_config.core.v3.GrpcService.EnvoyGrpc.max_receive_message_length>`
+  // if EnvoyGrpc is used.
+  //
+  // 2) The server may also choose to buffer the entire message, including the headers (if header mode is
+  // ``SEND``), the entire body, and the trailers (if present), before sending back any response.
+  // The server response has to maintain the headers-body-trailers ordering.
+  //
+  // 3) Note that the server might also choose not to buffer data. That is, upon receiving a
+  // body request, it could process the data and send back a body response immediately.
+  //
+  // In this body mode:
+  // * The corresponding trailer mode has to be set to ``SEND``.
+  // * Envoy will send body and trailers (if present) to the server as they arrive.
+  //   Sending the trailers (if present) is to inform the server the complete body arrives.
+  //   In case there are no trailers, then Envoy will set
+  //   :ref:`end_of_stream <envoy_v3_api_field_service.ext_proc.v3.HttpBody.end_of_stream>`
+  //   to true as part of the last body chunk request to notify the server that no other data is to be sent.
+  // * The server needs to send
+  //   :ref:`StreamedBodyResponse <envoy_v3_api_msg_service.ext_proc.v3.StreamedBodyResponse>`
+  //   to Envoy in the body response.
+  // * Envoy will stream the body chunks in the responses from the server to the upstream/downstream as they arrive.
+  FULL_DUPLEX_STREAMED = 4;
+}
+
+message ProcessingMode {
+  // Control how headers and trailers are handled
+  enum HeaderSendMode {
+    // When used to configure the ext_proc filter :ref:`processing_mode
+    // <envoy_v3_api_field_extensions.filters.http.ext_proc.v3.ExternalProcessor.processing_mode>`,
+    // the default HeaderSendMode depends on which part of the message is being processed. By
+    // default, request and response headers are sent, while trailers are skipped.
+    //
+    // When used in :ref:`mode_override
+    // <envoy_v3_api_field_service.ext_proc.v3.ProcessingResponse.mode_override>` or
+    // :ref:`allowed_override_modes
+    // <envoy_v3_api_field_extensions.filters.http.ext_proc.v3.ExternalProcessor.allowed_override_modes>`,
+    // a value of DEFAULT indicates that there is no change from the behavior that is configured for
+    // the filter in :ref:`processing_mode
+    // <envoy_v3_api_field_extensions.filters.http.ext_proc.v3.ExternalProcessor.processing_mode>`.
+    DEFAULT = 0;
+
+    // Send the header or trailer.
+    SEND = 1;
+
+    // Do not send the header or trailer.
+    SKIP = 2;
+  }
+
+  // Control how the request and response bodies are handled
+  // When body mutation by external processor is enabled, ext_proc filter will always remove
+  // the content length header in four cases below because content length can not be guaranteed
+  // to be set correctly:
+  // 1) STREAMED BodySendMode: header processing completes before body mutation comes back.
+  // 2) BUFFERED_PARTIAL BodySendMode: body is buffered and could be injected in different phases.
+  // 3) BUFFERED BodySendMode + SKIP HeaderSendMode: header processing (e.g., update content-length) is skipped.
+  // 4) FULL_DUPLEX_STREAMED BodySendMode: header processing completes before body mutation comes back.
+  //
+  // In Envoy's http1 codec implementation, removing content length will enable chunked transfer
+  // encoding whenever feasible. The recipient (either client or server) must be able
+  // to parse and decode the chunked transfer coding.
+  // (see `details in RFC9112 <https://tools.ietf.org/html/rfc9112#section-7.1>`_).
+  //
+  // In BUFFERED BodySendMode + SEND HeaderSendMode, content length header is allowed but it is
+  // external processor's responsibility to set the content length correctly matched to the length
+  // of mutated body. If they don't match, the corresponding body mutation will be rejected and
+  // local reply will be sent with an error message.
+  enum BodySendMode {
+    // Do not send the body at all. This is the default.
+    NONE = 0;
+
+    // Stream the body to the server in pieces as they arrive at the
+    // proxy.
+    STREAMED = 1;
+
+    // Buffer the message body in memory and send the entire body at once.
+    // If the body exceeds the configured buffer limit, then the
+    // downstream system will receive an error.
+    BUFFERED = 2;
+
+    // Buffer the message body in memory and send the entire body in one
+    // chunk. If the body exceeds the configured buffer limit, then the body contents
+    // up to the buffer limit will be sent.
+    BUFFERED_PARTIAL = 3;
+
+    // Envoy streams the body to the server in pieces as they arrive.
+    //
+    // 1) The server may choose to buffer any number chunks of data before processing them.
+    // After it finishes buffering, the server processes the buffered data. Then it splits the processed
+    // data into any number of chunks, and streams them back to Envoy one by one.
+    // The server may continuously do so until the complete body is processed.
+    // The individual response chunk size is recommended to be no greater than 64K bytes, or
+    // :ref:`max_receive_message_length <envoy_v3_api_field_config.core.v3.GrpcService.EnvoyGrpc.max_receive_message_length>`
+    // if EnvoyGrpc is used.
+    //
+    // 2) The server may also choose to buffer the entire message, including the headers (if header mode is
+    // ``SEND``), the entire body, and the trailers (if present), before sending back any response.
+    // The server response has to maintain the headers-body-trailers ordering.
+    //
+    // 3) Note that the server might also choose not to buffer data. That is, upon receiving a
+    // body request, it could process the data and send back a body response immediately.
+    //
+    // In this body mode:
+    // * The corresponding trailer mode has to be set to ``SEND``.
+    // * Envoy will send body and trailers (if present) to the server as they arrive.
+    //   Sending the trailers (if present) is to inform the server the complete body arrives.
+    //   In case there are no trailers, then Envoy will set
+    //   :ref:`end_of_stream <envoy_v3_api_field_service.ext_proc.v3.HttpBody.end_of_stream>`
+    //   to true as part of the last body chunk request to notify the server that no other data is to be sent.
+    // * The server needs to send
+    //   :ref:`StreamedBodyResponse <envoy_v3_api_msg_service.ext_proc.v3.StreamedBodyResponse>`
+    //   to Envoy in the body response.
+    // * Envoy will stream the body chunks in the responses from the server to the upstream/downstream as they arrive.
+    FULL_DUPLEX_STREAMED = 4;
+  }
+
+  // How to handle the request header. Default is "SEND".
+  // Note this field is ignored in :ref:`mode_override
+  // <envoy_v3_api_field_service.ext_proc.v3.ProcessingResponse.mode_override>`, since mode
+  // overrides can only affect messages exchanged after the request header is processed.
+  HeaderSendMode request_header_mode = 1;
+
+  // How to handle the response header. Default is "SEND".
+  HeaderSendMode response_header_mode = 2;
+
+  // How to handle the request body. Default is "NONE".
+  BodySendMode request_body_mode = 3;
+
+  // How do handle the response body. Default is "NONE".
+  BodySendMode response_body_mode = 4;
+
+  // How to handle the request trailers. Default is "SKIP".
+  HeaderSendMode request_trailer_mode = 5;
+
+  // How to handle the response trailers. Default is "SKIP".
+  HeaderSendMode response_trailer_mode = 6;
+}

@@ -7,6 +7,7 @@ members = [
     # Praxis Proxy Framework
     "core",
     "filter",
+    "proto",
     "protocol",
     "tls",
 
@@ -53,6 +54,13 @@ pingora-core = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingo
 pingora-http = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "514d06b852e731848fd36574da9fcdaee101ccb4" }
 pingora-proxy = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "514d06b852e731848fd36574da9fcdaee101ccb4", features = ["rustls"] }
 percent-encoding = "2.3.2"
+praxis-proto = { version = "0.1.0", path = "proto", package = "praxis-proxy-proto" }
+prost = "0.14"
+prost-build = "0.14"
+prost-types = "0.14"
+prost-wkt-build = "0.7"
+prost-wkt-types = { version = "0.7", features = ["vendored-protox"] }
+protox = "0.9"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
 praxis = { path = "server" }
 praxis-core = { version = "0.1.0", path = "core", package = "praxis-proxy-core" }
@@ -73,6 +81,9 @@ tokio-rustls = "0.26.4"
 tokio-tungstenite = "0.29.0"
 thiserror = "2.0.18"
 tikv-jemallocator = "0.6.1"
+tonic = "0.14"
+tonic-prost = "0.14"
+tonic-prost-build = { version = "0.14", features = ["transport"] }
 tokio = { version = "1.51.1", features = ["macros", "rt"] }
 tokio-util = "0.7.18"
 tracing = "0.1.44"
