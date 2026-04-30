@@ -15,6 +15,7 @@ mod conditional_filters;
 mod default_config;
 mod header_manipulation;
 mod health_checks;
+mod hostname_upstream;
 mod least_connections;
 mod logging;
 mod max_body_guard;
