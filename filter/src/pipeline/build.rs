@@ -100,7 +100,7 @@ impl FilterPipeline {
     ///     failure_mode: FailureMode::default(),
     /// }];
     /// let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    /// let errors = pipeline.ordering_errors(&entries);
+    /// let errors = pipeline.ordering_errors(&entries, false);
     /// assert!(
     ///     errors
     ///         .iter()
@@ -109,7 +109,7 @@ impl FilterPipeline {
     /// ```
     ///
     /// [`build`]: FilterPipeline::build
-    pub fn ordering_errors(&self, entries: &[FilterEntry]) -> Vec<String> {
+    pub fn ordering_errors(&self, entries: &[FilterEntry], allow_open_security: bool) -> Vec<String> {
         let names: Vec<&str> = self.filters.iter().map(|pf| pf.filter.name()).collect();
 
         let mut errors = Vec::new();
@@ -117,6 +117,9 @@ impl FilterPipeline {
         super::checks::check_lb_without_router(&names, &mut errors);
         super::checks::check_unconditional_static_response(&names, &self.filters, &mut errors);
         super::checks::check_conditional_security(&names, &self.filters, &mut errors);
+        if !allow_open_security {
+            super::checks::check_open_security_filters(&names, &self.filters, &mut errors);
+        }
         super::checks::check_duplicate_routers(&names, &mut errors);
         super::checks::check_duplicate_load_balancers(&names, &mut errors);
         super::checks::check_misaligned_clusters(entries, &mut errors);

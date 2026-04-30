@@ -23,12 +23,13 @@ use serde::Deserialize;
 /// use praxis_core::config::InsecureOptions;
 ///
 /// let opts = InsecureOptions::default();
-/// assert!(!opts.allow_root);
+/// assert!(!opts.allow_open_security_filters);
+/// assert!(!opts.allow_private_health_checks);
 /// assert!(!opts.allow_public_admin);
+/// assert!(!opts.allow_root);
+/// assert!(!opts.allow_tls_without_sni);
 /// assert!(!opts.allow_unbounded_body);
 /// assert!(!opts.skip_pipeline_validation);
-/// assert!(!opts.allow_tls_without_sni);
-/// assert!(!opts.allow_private_health_checks);
 /// ```
 ///
 /// ```
@@ -44,23 +45,26 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InsecureOptions {
-    /// Allow running as root (UID 0).
-    pub allow_root: bool,
+    /// Allow security-critical filters to use `failure_mode: open`.
+    pub allow_open_security_filters: bool,
+
+    /// Allow health checks to loopback/metadata addresses.
+    pub allow_private_health_checks: bool,
 
     /// Allow admin endpoint on `0.0.0.0` / `[::]`.
     pub allow_public_admin: bool,
+
+    /// Allow running as root (UID 0).
+    pub allow_root: bool,
+
+    /// Allow TLS without SNI hostname verification.
+    pub allow_tls_without_sni: bool,
 
     /// Allow stream-buffered body mode with no size limit.
     pub allow_unbounded_body: bool,
 
     /// Skip pipeline ordering validation.
     pub skip_pipeline_validation: bool,
-
-    /// Allow TLS without SNI hostname verification.
-    pub allow_tls_without_sni: bool,
-
-    /// Allow health checks to loopback/metadata addresses.
-    pub allow_private_health_checks: bool,
 }
 
 // -----------------------------------------------------------------------------
@@ -82,8 +86,20 @@ mod tests {
     #[test]
     fn all_flags_default_to_false() {
         let opts = InsecureOptions::default();
-        assert!(!opts.allow_root, "allow_root should default to false");
+        assert!(
+            !opts.allow_open_security_filters,
+            "allow_open_security_filters should default to false"
+        );
+        assert!(
+            !opts.allow_private_health_checks,
+            "allow_private_health_checks should default to false"
+        );
         assert!(!opts.allow_public_admin, "allow_public_admin should default to false");
+        assert!(!opts.allow_root, "allow_root should default to false");
+        assert!(
+            !opts.allow_tls_without_sni,
+            "allow_tls_without_sni should default to false"
+        );
         assert!(
             !opts.allow_unbounded_body,
             "allow_unbounded_body should default to false"
@@ -91,14 +107,6 @@ mod tests {
         assert!(
             !opts.skip_pipeline_validation,
             "skip_pipeline_validation should default to false"
-        );
-        assert!(
-            !opts.allow_tls_without_sni,
-            "allow_tls_without_sni should default to false"
-        );
-        assert!(
-            !opts.allow_private_health_checks,
-            "allow_private_health_checks should default to false"
         );
     }
 

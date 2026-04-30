@@ -102,22 +102,24 @@ All flags live under `insecure_options` in the YAML config and default to `false
 
 ```yaml
 insecure_options:
-  allow_root: false
+  allow_open_security_filters: false
+  allow_private_health_checks: false
   allow_public_admin: false
+  allow_root: false
+  allow_tls_without_sni: false
   allow_unbounded_body: false
   skip_pipeline_validation: false
-  allow_tls_without_sni: false
-  allow_private_health_checks: false
 ```
 
 | Flag | Effect |
 | ------ | -------- |
-| `allow_root` | Allow starting as root (UID 0). Praxis refuses to run as root by default. |
+| `allow_open_security_filters` | Allow security-critical filters (`ip_acl`, `forwarded_headers`) to use `failure_mode: open`. Without this flag, open security filters are rejected because a runtime error would bypass security enforcement. |
+| `allow_private_health_checks` | Allow health check endpoints that resolve to loopback (`127.0.0.0/8`) or cloud metadata addresses. Blocked by default as SSRF protection. |
 | `allow_public_admin` | Allow the admin health endpoint to bind to a public interface (`0.0.0.0` / `[::]`). By default this is a validation error. |
+| `allow_root` | Allow starting as root (UID 0). Praxis refuses to run as root by default. |
+| `allow_tls_without_sni` | Allow upstream TLS connections without an explicit SNI hostname. Most TLS servers require SNI; without this flag, missing SNI is a validation error. |
 | `allow_unbounded_body` | Allow `StreamBuffer` body mode without a size limit (`max_bytes: None`). Without this flag, unbounded stream buffering is rejected. |
 | `skip_pipeline_validation` | Demote pipeline ordering errors (e.g. filter placement issues) to warnings instead of failing startup. |
-| `allow_tls_without_sni` | Allow upstream TLS connections without an explicit SNI hostname. Most TLS servers require SNI; without this flag, missing SNI is a validation error. |
-| `allow_private_health_checks` | Allow health check endpoints that resolve to loopback (`127.0.0.0/8`) or cloud metadata addresses. Blocked by default as SSRF protection. |
 
 Example overriding two flags for local development:
 
