@@ -8,7 +8,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let config = {
         let mut c = prost_build::Config::new();
-        c.disable_comments(Some("."));
         c.extern_path(".google.protobuf.Value", "::prost_wkt_types::Value");
         c.extern_path(".google.protobuf.Struct", "::prost_wkt_types::Struct");
         c
