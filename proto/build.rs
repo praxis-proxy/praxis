@@ -18,12 +18,28 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .build_server(true)
         .compile_fds_with_config(fds, config)?;
 
-    for path in [proto_files, include_dirs.to_vec()].concat() {
+    println!("cargo:rerun-if-changed=build.rs");
+    for entry in walkdir(&cwd.join("proto"))? {
         println!(
             "cargo:rerun-if-changed={}",
-            path.to_str().expect("proto path is valid UTF-8")
+            entry.to_str().expect("proto path is valid UTF-8")
         );
     }
 
     Ok(())
+}
+
+/// Recursively collect all `.proto` files under `dir`.
+fn walkdir(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>, Box<dyn std::error::Error>> {
+    let mut protos = Vec::new();
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_dir() {
+            protos.extend(walkdir(&path)?);
+        } else if path.extension().is_some_and(|ext| ext == "proto") {
+            protos.push(path);
+        }
+    }
+    Ok(protos)
 }
