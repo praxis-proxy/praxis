@@ -14,7 +14,7 @@ publish = true
 name = "praxis_filter"
 
 [features]
-default = ["ai-inference", "ext-proc"]
+default = ["ai-inference"]
 ai-inference = []
 ext-proc = ["dep:praxis-proto", "dep:tonic", "dep:prost-wkt-types"]
 
