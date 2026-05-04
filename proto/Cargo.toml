@@ -5,7 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 description = "Protobuf and gRPC definitions for Praxis external processing"
-license.workspace = true
+# Composite: MIT for hand-written code, Apache-2.0 for vendored Envoy
+# protos, BSD-3-Clause for vendored Google well-known types.
+license = "MIT AND Apache-2.0 AND BSD-3-Clause"
 repository.workspace = true
 readme = "../README.md"
 publish = false
