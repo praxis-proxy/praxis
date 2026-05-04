@@ -140,6 +140,7 @@ page.
 | ------ | ------------- |
 | [production-gateway.yaml](configs/operations/production-gateway.yaml) | Full production setup with composed chains |
 | [multi-listener.yaml](configs/operations/multi-listener.yaml) | Multiple listeners sharing a filter chain |
+| [hot-reload.yaml](configs/operations/hot-reload.yaml) | Dynamic config reload without restart |
 | [admin-interface.yaml](configs/operations/admin-interface.yaml) | Admin interface with health endpoints |
 | [container-default.yaml](configs/operations/container-default.yaml) | Default containerized deployment with public binding |
 | [max-connections.yaml](configs/operations/max-connections.yaml) | Per-listener connection limit with 503 rejection |

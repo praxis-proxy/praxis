@@ -5,6 +5,13 @@
 
 use praxis_core::config::Config;
 use praxis_protocol::http::load_http_handler;
+
+/// Wrap a pipeline [`Arc`] in [`ArcSwap`] for handler registration.
+fn swappable(
+    pipeline: std::sync::Arc<praxis_filter::FilterPipeline>,
+) -> std::sync::Arc<arc_swap::ArcSwap<praxis_filter::FilterPipeline>> {
+    std::sync::Arc::new(arc_swap::ArcSwap::from(pipeline))
+}
 use praxis_test_utils::{
     build_pipeline, free_port, http_get, simple_proxy_yaml, start_backend_with_shutdown, start_proxy, wait_for_tcp,
 };
@@ -47,7 +54,7 @@ filter_chains:
     let pipeline = std::sync::Arc::new(build_pipeline(&config));
     let mut server = praxis_core::server::build_http_server(config.shutdown_timeout_secs, &Default::default());
     for listener in &config.listeners {
-        load_http_handler(&mut server, listener, pipeline.clone(), &mut Vec::new()).unwrap();
+        load_http_handler(&mut server, listener, swappable(pipeline.clone()), &mut Vec::new()).unwrap();
     }
     praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server(
         &mut server,
@@ -118,7 +125,7 @@ filter_chains:
     let pipeline = std::sync::Arc::new(build_pipeline(&config));
     let mut server = praxis_core::server::build_http_server(config.shutdown_timeout_secs, &runtime);
     for listener in &config.listeners {
-        load_http_handler(&mut server, listener, pipeline.clone(), &mut Vec::new()).unwrap();
+        load_http_handler(&mut server, listener, swappable(pipeline.clone()), &mut Vec::new()).unwrap();
     }
     std::thread::spawn(move || {
         server.run_forever();

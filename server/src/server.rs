@@ -3,7 +3,10 @@
 
 //! Server bootstrap: protocol registration and startup.
 
-use std::sync::Arc;
+use std::{
+    path::PathBuf,
+    sync::{Arc, Mutex},
+};
 
 use praxis_core::{
     PingoraServerRuntime,
@@ -11,11 +14,37 @@ use praxis_core::{
     health::{HealthRegistry, build_health_registry},
 };
 use praxis_filter::FilterRegistry;
-use praxis_protocol::{CertWatcherShutdowns, Protocol, http::PingoraHttp, tcp::PingoraTcp};
+use praxis_protocol::{CertWatcherShutdowns, ListenerPipelines, Protocol, http::PingoraHttp, tcp::PingoraTcp};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use crate::pipelines::resolve_pipelines;
+
+// -----------------------------------------------------------------------------
+// Config Path Resolution
+// -----------------------------------------------------------------------------
+
+/// Resolve the config file path without loading the config.
+///
+/// Returns `Some` if an explicit path was given or `praxis.yaml`
+/// exists in the working directory. Returns `None` when using the
+/// built-in default (no file to watch).
+///
+/// ```
+/// let path = praxis::resolve_config_path(None);
+/// // Returns None if ./praxis.yaml doesn't exist.
+/// ```
+pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
+    if let Some(path) = explicit {
+        return Some(PathBuf::from(path));
+    }
+    let default_path = PathBuf::from("praxis.yaml");
+    if default_path.exists() {
+        Some(default_path)
+    } else {
+        None
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Server
@@ -31,8 +60,8 @@ use crate::pipelines::resolve_pipelines;
 ///
 /// Config is owned for the server's lifetime (never returns).
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
-pub fn run_server(config: Config) -> ! {
-    run_server_with_registry(config, FilterRegistry::with_builtins())
+pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
+    run_server_with_registry(config, FilterRegistry::with_builtins(), config_path)
 }
 
 /// Build filter pipelines from the given registry, register protocols and run the server.
@@ -45,44 +74,70 @@ pub fn run_server(config: Config) -> ! {
 ///
 /// [`register_filters!`]: praxis_filter::register_filters
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
-pub fn run_server_with_registry(config: Config, registry: FilterRegistry) -> ! {
+pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config_path: Option<PathBuf>) -> ! {
     enforce_root_check(&config);
     info!("building filter pipelines");
     warn_insecure_key_permissions(&config);
 
     let health_registry = build_health_registry(&config.clusters);
     let pipelines = resolve_pipelines(&config, &registry, &health_registry).unwrap_or_else(|e| fatal(&e));
+    let pipelines = Arc::new(pipelines);
 
     info!("initializing server");
     let mut server = PingoraServerRuntime::new(&config);
+    let _cert_shutdowns = register_protocols(&mut server, &config, &pipelines);
 
-    let has_http = config.listeners.iter().any(|l| l.protocol == ProtocolKind::Http);
-    let has_tcp = config.listeners.iter().any(|l| l.protocol == ProtocolKind::Tcp);
-
-    let mut all_shutdowns = Vec::new();
-
-    if has_http {
-        let shutdowns = Box::new(PingoraHttp)
-            .register(&mut server, &config, &pipelines)
-            .unwrap_or_else(|e| fatal(&e));
-        all_shutdowns.extend(shutdowns);
-    }
-
-    if has_tcp {
-        let shutdowns = Box::new(PingoraTcp)
-            .register(&mut server, &config, &pipelines)
-            .unwrap_or_else(|e| fatal(&e));
-        all_shutdowns.extend(shutdowns);
-    }
-
-    // Dropping senders signals CertWatcher tasks to stop, so the
-    // server must own them for its entire lifetime.
-    let _cert_shutdowns = CertWatcherShutdowns::new(all_shutdowns);
-
-    spawn_health_check_tasks(&config, &health_registry);
+    let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+    spawn_health_check_tasks(&config, &health_registry, &health_shutdown);
+    let _watcher = spawn_watcher(config_path, config, registry, &pipelines, &health_shutdown);
 
     info!("starting server");
     server.run()
+}
+
+/// Register HTTP and TCP protocol handlers with the Pingora server.
+fn register_protocols(
+    server: &mut PingoraServerRuntime,
+    config: &Config,
+    pipelines: &Arc<ListenerPipelines>,
+) -> CertWatcherShutdowns {
+    let mut all_shutdowns = Vec::new();
+
+    if config.listeners.iter().any(|l| l.protocol == ProtocolKind::Http) {
+        let shutdowns = Box::new(PingoraHttp)
+            .register(server, config, pipelines)
+            .unwrap_or_else(|e| fatal(&e));
+        all_shutdowns.extend(shutdowns);
+    }
+
+    if config.listeners.iter().any(|l| l.protocol == ProtocolKind::Tcp) {
+        let shutdowns = Box::new(PingoraTcp)
+            .register(server, config, pipelines)
+            .unwrap_or_else(|e| fatal(&e));
+        all_shutdowns.extend(shutdowns);
+    }
+
+    CertWatcherShutdowns::new(all_shutdowns)
+}
+
+/// Spawn the config file watcher if a config path is available.
+fn spawn_watcher(
+    config_path: Option<PathBuf>,
+    config: Config,
+    registry: FilterRegistry,
+    pipelines: &Arc<ListenerPipelines>,
+    health_shutdown: &Arc<Mutex<CancellationToken>>,
+) -> Option<std::thread::JoinHandle<()>> {
+    let path = config_path?;
+    let handle = crate::watcher::spawn_config_watcher(crate::watcher::WatcherParams {
+        config_path: path,
+        health_shutdown: Arc::clone(health_shutdown),
+        initial_config: config,
+        pipelines: Arc::clone(pipelines),
+        registry: Arc::new(registry),
+        shutdown: CancellationToken::new(),
+    });
+    Some(handle)
 }
 
 // -----------------------------------------------------------------------------
@@ -200,12 +255,16 @@ fn warn_insecure_key_permissions(_config: &Config) {}
 ///
 /// [`CancellationToken`]: tokio_util::sync::CancellationToken
 #[allow(clippy::expect_used, reason = "fatal")]
-fn spawn_health_check_tasks(config: &Config, registry: &HealthRegistry) {
+fn spawn_health_check_tasks(
+    config: &Config,
+    registry: &HealthRegistry,
+    health_shutdown: &Arc<Mutex<CancellationToken>>,
+) {
     if registry.is_empty() {
         return;
     }
 
-    let shutdown = CancellationToken::new();
+    let shutdown = health_shutdown.lock().expect("health shutdown lock").clone();
     let clusters = config.clusters.clone();
     let registry = Arc::clone(registry);
 
@@ -289,5 +348,23 @@ mod tests {
             msg.contains("insecure_options.allow_root: true"),
             "should mention the config override"
         );
+    }
+
+    #[test]
+    fn resolve_config_path_explicit() {
+        let path = super::resolve_config_path(Some("/tmp/test.yaml"));
+        assert_eq!(
+            path,
+            Some(std::path::PathBuf::from("/tmp/test.yaml")),
+            "explicit path should be returned as-is"
+        );
+    }
+
+    #[test]
+    fn resolve_config_path_none_no_file() {
+        let path = super::resolve_config_path(None);
+        if !std::path::Path::new("praxis.yaml").exists() {
+            assert!(path.is_none(), "should return None when praxis.yaml does not exist");
+        }
     }
 }

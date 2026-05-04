@@ -17,6 +17,43 @@ shutdown_timeout_secs: # Optional. Graceful drain time (default: 30).
 insecure_options:      # Optional. Dev/test overrides. See development.md.
 ```
 
+## Dynamic Configuration Reload
+
+Praxis watches the config file for changes and
+automatically reloads filter pipelines without restart
+or disruption. When the file is modified, the server
+validates the new config, rebuilds pipelines, and swaps
+them atomically. In-flight requests complete on the old
+pipeline; new requests pick up the new config.
+
+If the new config is invalid (bad YAML, unknown filter,
+validation failure), the server logs the error and
+continues serving with the old config.
+
+**Dynamically reloadable:**
+
+- Filter pipeline configuration
+- Router routes and path mappings
+- Load balancer endpoints and weights
+- Rate limit and circuit breaker settings
+- Health check configuration
+
+**Requires restart (logged as warning):**
+
+- Listener add, remove, or address rebind
+- Protocol changes (HTTP to TCP)
+- Compression module addition
+- TLS enable/disable
+
+Stateful filters (rate limiter, circuit breaker) reset
+their state on reload. Operators should expect a brief
+burst window for rate limiters and a closed circuit for
+circuit breakers immediately after reload.
+
+See [hot-reload.yaml] for an example.
+
+[hot-reload.yaml]: ../examples/configs/operations/hot-reload.yaml
+
 ## Admin
 
 `admin.address` binds a separate HTTP listener that serves
@@ -268,6 +305,7 @@ supports TCP-level filters too.
 | `timeout` | Traffic Management | HTTP |
 | `static_response` | Traffic Management | HTTP |
 | `rate_limit` | Traffic Management | HTTP |
+| `circuit_breaker` | Traffic Management | HTTP |
 | `headers` | Transformation | HTTP |
 | `request_id` | Observability | HTTP |
 | `access_log` | Observability | HTTP |
@@ -275,6 +313,7 @@ supports TCP-level filters too.
 | `forwarded_headers` | Security | HTTP |
 | `guardrails` | Security | HTTP |
 | `ip_acl` | Security | HTTP |
+| `credential_injection` | Security | HTTP |
 | `json_body_field` | Payload Processing | HTTP |
 | `compression` | Payload Processing | HTTP |
 | `cors` | Security | HTTP |
@@ -347,11 +386,23 @@ recover. See [health-checks.yaml].
 | `timeout_ms` | integer | 2000 | Per-probe timeout in ms |
 | `healthy_threshold` | integer | 2 | Consecutive successes to mark healthy |
 | `unhealthy_threshold` | integer | 3 | Consecutive failures to mark unhealthy |
+| `passive_unhealthy_threshold` | integer | none | Consecutive upstream failures (5xx or connect error) to mark unhealthy without probes |
+| `passive_healthy_threshold` | integer | none | Consecutive upstream successes to recover a passively-marked endpoint |
 
 TCP health checks only verify a TCP connection can be
 established; `path` and `expected_status` are ignored.
 When active health checks are configured, the admin
 `/ready` endpoint reports per-cluster health counts.
+
+Passive health checking tracks upstream request
+outcomes inline. When `passive_unhealthy_threshold` is
+set, endpoints that return consecutive 5xx responses or
+connect errors are marked unhealthy without dedicated
+probe traffic. Set `passive_healthy_threshold` to
+control how many consecutive successes are required to
+recover. Passive and active checks can be used together;
+either mechanism can mark an endpoint unhealthy, and
+either can recover it.
 
 By default, health check endpoints that resolve to
 loopback or cloud metadata addresses are rejected
@@ -448,6 +499,36 @@ When `allow` is set, only matching IPs are permitted.
 `allow` takes precedence over `deny`. Denied requests
 receive a `403 Forbidden` response.
 
+### Credential Injection
+
+Injects per-cluster API credentials into upstream
+requests and strips client-provided credentials to
+prevent forwarding. Pair with a source discriminator
+(IP ACL, client authentication) to control which
+clients receive credential upgrades. See
+[credential-injection.yaml].
+
+```yaml
+- filter: credential_injection
+  clusters:
+    - name: openai
+      header: Authorization
+      value: "sk-example-key"
+      header_prefix: "Bearer "
+      strip_client_credential: true
+```
+
+| Field | Type | Required | Description |
+| ----- | ---- | -------- | ----------- |
+| `clusters[].name` | string | yes | Cluster to inject credentials for |
+| `clusters[].header` | string | yes | Header name to set |
+| `clusters[].value` | string | one of | Inline credential value |
+| `clusters[].env_var` | string | one of | Environment variable containing the credential |
+| `clusters[].header_prefix` | string | no | Prefix prepended to the value (e.g. `"Bearer "`) |
+| `clusters[].strip_client_credential` | bool | no | Remove client-sent value before injection (default: true) |
+
+[credential-injection.yaml]: ../examples/configs/ai/credential-injection.yaml
+
 ### TCP Access Log
 
 Structured JSON logging of TCP connections. Works on both
@@ -514,6 +595,31 @@ successful responses.
 | `mode` | string | yes | `"per_ip"` or `"global"` |
 | `rate` | float | yes | Tokens per second (must be > 0) |
 | `burst` | integer | yes | Max bucket capacity (must be >= rate) |
+
+### Circuit Breaker
+
+Per-cluster circuit breaker that prevents cascading
+failures. When consecutive upstream failures reach the
+threshold, the circuit opens and subsequent requests
+receive 503 immediately. After the recovery window, a
+single probe request is forwarded; if it succeeds the
+circuit closes. See [circuit-breaker.yaml].
+
+```yaml
+- filter: circuit_breaker
+  clusters:
+    - name: backend
+      consecutive_failures: 5
+      recovery_window_secs: 30
+```
+
+| Field | Type | Required | Description |
+| ----- | ---- | -------- | ----------- |
+| `clusters[].name` | string | yes | Cluster name to protect |
+| `clusters[].consecutive_failures` | integer | yes | Failures before opening |
+| `clusters[].recovery_window_secs` | integer | yes | Seconds before half-open probe |
+
+[circuit-breaker.yaml]: ../examples/configs/traffic-management/circuit-breaker.yaml
 
 ### Guardrails
 

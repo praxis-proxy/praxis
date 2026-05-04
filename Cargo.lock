@@ -2075,9 +2075,11 @@ version = "0.1.0"
 dependencies = [
  "clap",
  "nix",
+ "notify",
  "praxis-proxy-core",
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
+ "tempfile",
  "tikv-jemallocator",
  "tokio",
  "tokio-util",
@@ -2137,6 +2139,7 @@ dependencies = [
 name = "praxis-proxy-protocol"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "bytes",
  "futures",
@@ -2178,6 +2181,7 @@ dependencies = [
 name = "praxis-test-utils"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "futures",
  "h2",
@@ -2215,6 +2219,7 @@ dependencies = [
 name = "praxis-tests-integration"
 version = "0.1.0"
 dependencies = [
+ "arc-swap",
  "async-trait",
  "bytes",
  "futures",

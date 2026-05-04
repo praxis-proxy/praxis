@@ -30,6 +30,13 @@
 - **Active health checks** - HTTP and TCP health check
   probes with configurable thresholds; unhealthy hosts
   are automatically removed from load balancer rotation
+- **Passive health checks** - track upstream failures
+  inline; endpoints that exceed a consecutive failure
+  threshold are marked unhealthy without dedicated
+  probe traffic
+- **Circuit breaker** - per-cluster circuit breaker that
+  short-circuits requests to failing upstreams with 503,
+  then gradually recovers via a half-open probe window
 - **Redirect** - return 3xx redirects without upstream;
   supports `${path}` and `${query}` template placeholders
 - **Timeout enforcement** - 504 rejection when upstream
@@ -138,6 +145,14 @@ deployment guidance.
 
 ## Operations
 
+- **Dynamic configuration reload** - filter pipelines,
+  routes, endpoints, health checks, and rate limits
+  are swapped atomically at runtime when the config
+  file changes. In-flight requests complete on the old
+  pipeline; invalid configs are rejected and logged.
+  Changes that require a restart (listener topology,
+  TLS toggle, protocol type) are detected and logged
+  as warnings.
 - **Graceful shutdown** - configurable drain timeout
 - **Runtime tuning** - thread pool sizing and
   work-stealing toggle
@@ -182,6 +197,12 @@ rather than bolted-on external processors.
   header-based routing to provider-specific clusters.
   Uses StreamBuffer to inspect the body before upstream
   selection.
+- **Credential injection** (`credential_injection`):
+  per-cluster API key injection with client credential
+  stripping. Supports inline values and environment
+  variable sources. Pair with a source discriminator
+  (IP ACL, client auth) to control which clients get
+  credential upgrades.
 
 ### Planned
 
@@ -199,8 +220,6 @@ filter pipeline.
   with sliding window or token bucket
 - **Cost attribution**: token counting mapped to user,
   session, model, and endpoint
-- **Credential injection**: per-cluster API key
-  injection with credential stripping
 - **SSE streaming inspection**: per-event filter hooks
   for streaming responses
 - **Semantic caching**: prompt deduplication via vector

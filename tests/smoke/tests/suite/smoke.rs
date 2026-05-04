@@ -158,7 +158,7 @@ listeners:
 
     let config = Config::from_yaml(&yaml).unwrap();
     std::thread::spawn(move || {
-        praxis::run_server(config);
+        praxis::run_server(config, None);
     });
 
     let proxy_addr = format!("127.0.0.1:{proxy_port}");

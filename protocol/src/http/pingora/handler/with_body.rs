@@ -5,6 +5,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use bytes::Bytes;
 use pingora_core::{
@@ -32,18 +33,31 @@ use crate::http::pingora::context::PingoraRequestCtx;
 /// Used when the pipeline contains filters that declare
 /// body access via [`BodyAccess`].
 ///
+/// The pipeline is held behind [`ArcSwap`] so it can be
+/// atomically replaced by hot config reload without
+/// disrupting in-flight requests.
+///
 /// ```ignore
 /// // Requires a `FilterPipeline` and Pingora server runtime.
 /// use std::sync::Arc;
 ///
+/// use arc_swap::ArcSwap;
 /// use praxis_protocol::http::pingora::handler::PingoraHttpHandler;
 ///
-/// let handler = PingoraHttpHandler::new(Arc::new(pipeline), None);
+/// let handler = PingoraHttpHandler::new(
+///     Arc::new(ArcSwap::from_pointee(pipeline)),
+///     None,
+///     None,
+/// );
 /// ```
 ///
 /// [`BodyAccess`]: praxis_filter::BodyAccess
+/// [`ArcSwap`]: arc_swap::ArcSwap
 pub struct PingoraHttpHandler {
-    /// Compression configuration, if enabled.
+    /// Compression configuration, cached at construction.
+    ///
+    /// Compression module registration is one-shot in Pingora;
+    /// changing compression config requires a restart.
     compression: Option<CompressionConfig>,
 
     /// Per-listener connection semaphore for max connections.
@@ -52,18 +66,18 @@ pub struct PingoraHttpHandler {
     /// Per-listener downstream read timeout.
     downstream_read_timeout: Option<Duration>,
 
-    /// Shared filter pipeline.
-    pipeline: Arc<FilterPipeline>,
+    /// Swappable filter pipeline.
+    pipeline: Arc<ArcSwap<FilterPipeline>>,
 }
 
 impl PingoraHttpHandler {
     /// Create a handler with body filter support.
     pub(super) fn new(
-        pipeline: Arc<FilterPipeline>,
+        pipeline: Arc<ArcSwap<FilterPipeline>>,
         downstream_read_timeout: Option<Duration>,
         connection_semaphore: Option<Arc<Semaphore>>,
     ) -> Self {
-        let compression = pipeline.compression_config().cloned();
+        let compression = pipeline.load().compression_config().cloned();
         Self {
             compression,
             connection_semaphore,
@@ -122,7 +136,8 @@ impl ProxyHttp for PingoraHttpHandler {
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
-        request_filter::execute(&self.pipeline, session, ctx).await
+        let pipeline = self.pipeline.load();
+        request_filter::execute(&pipeline, session, ctx).await
     }
 
     async fn request_body_filter(
@@ -135,7 +150,8 @@ impl ProxyHttp for PingoraHttpHandler {
     where
         Self::CTX: Send + Sync,
     {
-        request_body_filter::execute(&self.pipeline, session, body, end_of_stream, ctx).await
+        let pipeline = self.pipeline.load();
+        request_body_filter::execute(&pipeline, session, body, end_of_stream, ctx).await
     }
 
     fn response_body_filter(
@@ -148,7 +164,8 @@ impl ProxyHttp for PingoraHttpHandler {
     where
         Self::CTX: Send + Sync,
     {
-        response_body_filter::execute(&self.pipeline, body, end_of_stream, ctx)
+        let pipeline = self.pipeline.load();
+        response_body_filter::execute(&pipeline, body, end_of_stream, ctx)
     }
 
     fn fail_to_connect(
@@ -186,7 +203,8 @@ impl ProxyHttp for PingoraHttpHandler {
     where
         Self::CTX: Send + Sync,
     {
-        let result = response_filter::execute(&self.pipeline, upstream_response, ctx).await;
+        let pipeline = self.pipeline.load();
+        let result = response_filter::execute(&pipeline, upstream_response, ctx).await;
         if result.is_ok() {
             let client_ver = ctx.client_http_version.unwrap_or(http::Version::HTTP_11);
             via::append_response_via(upstream_response, client_ver);
@@ -200,7 +218,8 @@ impl ProxyHttp for PingoraHttpHandler {
     }
 
     async fn logging(&self, _session: &mut Session, e: Option<&pingora_core::Error>, ctx: &mut Self::CTX) {
-        record_passive_health(&self.pipeline, e, ctx);
-        logging_cleanup(&self.pipeline, ctx).await;
+        let pipeline = self.pipeline.load();
+        record_passive_health(&pipeline, e, ctx);
+        logging_cleanup(&pipeline, ctx).await;
     }
 }

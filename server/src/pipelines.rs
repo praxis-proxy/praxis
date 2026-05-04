@@ -159,7 +159,7 @@ filter_chains:
         .unwrap();
         let registry = FilterRegistry::with_builtins();
         let pipelines = resolve_pipelines(&config, &registry, &empty_health_registry()).unwrap();
-        let pipeline = pipelines.get("web").unwrap();
+        let pipeline = pipelines.get("web").unwrap().load();
         assert!(
             pipeline.is_empty(),
             "pipeline with empty filter chain should have no filters"
@@ -193,7 +193,7 @@ filter_chains:
         .unwrap();
         let registry = FilterRegistry::with_builtins();
         let pipelines = resolve_pipelines(&config, &registry, &empty_health_registry()).unwrap();
-        let pipeline = pipelines.get("web").unwrap();
+        let pipeline = pipelines.get("web").unwrap().load();
         assert_eq!(pipeline.len(), 3, "two chains should produce 3 filters total");
     }
 
@@ -224,7 +224,7 @@ filter_chains:
         .unwrap();
         let registry = FilterRegistry::with_builtins();
         let pipelines = resolve_pipelines(&config, &registry, &empty_health_registry()).unwrap();
-        let pipeline = pipelines.get("web").unwrap();
+        let pipeline = pipelines.get("web").unwrap().load();
         let caps = pipeline.body_capabilities();
         assert!(caps.needs_request_body, "pipeline with router should need request body");
         assert!(

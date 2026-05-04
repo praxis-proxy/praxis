@@ -5,6 +5,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use pingora_core::{
     Result,
@@ -33,9 +34,13 @@ use crate::http::pingora::context::PingoraRequestCtx;
 /// bytes with zero overhead, avoiding the cost of
 /// building [`HttpFilterContext`] on every chunk.
 ///
+/// The pipeline is held behind [`ArcSwap`] so it can be
+/// atomically replaced by hot config reload.
+///
 /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+/// [`ArcSwap`]: arc_swap::ArcSwap
 pub struct PingoraHttpHandlerNoBody {
-    /// Compression configuration, if enabled.
+    /// Compression configuration, cached at construction.
     compression: Option<CompressionConfig>,
 
     /// Per-listener connection semaphore for max connections.
@@ -44,18 +49,19 @@ pub struct PingoraHttpHandlerNoBody {
     /// Per-listener downstream read timeout.
     downstream_read_timeout: Option<Duration>,
 
-    /// Shared filter pipeline.
-    pipeline: Arc<FilterPipeline>,
+    /// Swappable filter pipeline.
+    pipeline: Arc<ArcSwap<FilterPipeline>>,
 }
 
 impl PingoraHttpHandlerNoBody {
     /// Create a handler without body filter support.
+    #[allow(dead_code, reason = "reserved for non-reload paths")]
     pub(super) fn new(
-        pipeline: Arc<FilterPipeline>,
+        pipeline: Arc<ArcSwap<FilterPipeline>>,
         downstream_read_timeout: Option<Duration>,
         connection_semaphore: Option<Arc<Semaphore>>,
     ) -> Self {
-        let compression = pipeline.compression_config().cloned();
+        let compression = pipeline.load().compression_config().cloned();
         Self {
             compression,
             connection_semaphore,
@@ -113,7 +119,8 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
-        request_filter::execute(&self.pipeline, session, ctx).await
+        let pipeline = self.pipeline.load();
+        request_filter::execute(&pipeline, session, ctx).await
     }
 
     async fn response_filter(
@@ -125,7 +132,8 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
     where
         Self::CTX: Send + Sync,
     {
-        let result = response_filter::execute(&self.pipeline, upstream_response, ctx).await;
+        let pipeline = self.pipeline.load();
+        let result = response_filter::execute(&pipeline, upstream_response, ctx).await;
         if result.is_ok() {
             let client_ver = ctx.client_http_version.unwrap_or(http::Version::HTTP_11);
             via::append_response_via(upstream_response, client_ver);
@@ -165,7 +173,8 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
     }
 
     async fn logging(&self, _session: &mut Session, e: Option<&pingora_core::Error>, ctx: &mut Self::CTX) {
-        record_passive_health(&self.pipeline, e, ctx);
-        logging_cleanup(&self.pipeline, ctx).await;
+        let pipeline = self.pipeline.load();
+        record_passive_health(&pipeline, e, ctx);
+        logging_cleanup(&pipeline, ctx).await;
     }
 }

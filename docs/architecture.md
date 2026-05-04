@@ -305,6 +305,31 @@ Request conditions gate both `on_request` and body hooks.
 Response conditions gate only `on_response` and response
 body hooks.
 
+## Dynamic Configuration Reload
+
+Praxis swaps filter pipelines at runtime without
+restarting the server or disrupting in-flight requests.
+
+Each handler holds an `Arc<ArcSwap<FilterPipeline>>`
+instead of a plain `Arc<FilterPipeline>`. On every
+request, the handler calls `pipeline.load()` to get a
+snapshot pinned for that request's lifetime. A reload
+stores a new pipeline into the `ArcSwap`; the next
+request loads the new pointer while in-flight requests
+drain on the old one.
+
+A file watcher (`notify` crate, 500ms debounce) monitors
+the config file. On change it validates the new config,
+rebuilds all pipelines, and swaps them atomically. If
+validation fails, nothing changes. Health check tasks
+are cancelled and respawned with a fresh registry on
+each successful reload.
+
+Changes that cannot be applied dynamically (listener
+topology, protocol type, compression module, TLS toggle)
+are detected by diffing old and new configs and logged
+as warnings.
+
 ## Crate Layout
 
 ### Workspace Crates
@@ -357,7 +382,9 @@ benchmarks                      Benchmark tool and library
 
 praxis                          Binary entry point
 ├── pipelines                   Pipeline resolution from config
-└── server                      Protocol registration, startup
+├── reload                      Config reload orchestration (validate, swap, health lifecycle)
+├── server                      Protocol registration, startup
+└── watcher                     File watcher with debounce for config hot-reload
 
 praxis-core                     Configuration, errors, and server factory
 ├── config/                     YAML parsing, defaults, and validation
@@ -438,10 +465,12 @@ praxis-filter                   Filter pipeline engine
     │   │   └── json_body_field Extract JSON field, promote to header
     │   ├── security/
     │   │   ├── cors            CORS preflight handling, origin validation
+    │   │   ├── credential_injection  Per-cluster API key injection
     │   │   ├── forwarded_headers  X-Forwarded-For/Proto/Host injection
     │   │   ├── guardrails      Reject requests matching string/regex rules
     │   │   └── ip_acl          Allow/deny by source IP/CIDR
     │   ├── traffic_management/
+    │   │   ├── circuit_breaker Per-cluster circuit breaking (closed/open/half-open)
     │   │   ├── rate_limit      Token bucket rate limiting (per-IP, global)
     │   │   ├── router          Path-prefix + host routing to clusters
     │   │   ├── redirect         3xx redirect without upstream

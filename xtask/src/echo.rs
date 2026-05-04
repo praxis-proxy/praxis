@@ -48,7 +48,7 @@ pub(crate) fn run(mut args: Args) {
     args.address = crate::port::resolve_available(&args.address);
 
     let config = build_config(&args);
-    praxis::run_server(config)
+    praxis::run_server(config, None)
 }
 
 // -----------------------------------------------------------------------------

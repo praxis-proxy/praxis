@@ -5,6 +5,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use arc_swap::ArcSwap;
 use pingora_core::{Result, apps::HttpServerOptions, server::Server, services::listening::Service};
 use pingora_proxy::{Session, http_proxy};
 use praxis_filter::{CompressionConfig, FilterPipeline};
@@ -96,7 +97,7 @@ const MAX_RETRIES: usize = 3;
 pub fn load_http_handler(
     server: &mut Server,
     listener: &praxis_core::config::Listener,
-    pipeline: Arc<FilterPipeline>,
+    pipeline: Arc<ArcSwap<FilterPipeline>>,
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
 ) -> Result<(), praxis_core::ProxyError> {
     let downstream_read_timeout = listener.downstream_read_timeout_ms.map(Duration::from_millis);
@@ -104,15 +105,11 @@ pub fn load_http_handler(
         .max_connections
         .map(|max| Arc::new(Semaphore::new(max as usize)));
 
-    if pipeline.needs_body_filters() {
-        debug!(listener = %listener.name, "loading HTTP handler with body filters");
-        let handler = PingoraHttpHandler::new(pipeline, downstream_read_timeout, connection_semaphore);
-        wire_service(server, listener, handler, cert_watcher_shutdowns)?;
-    } else {
-        debug!(listener = %listener.name, "loading HTTP handler (no body filters)");
-        let handler = PingoraHttpHandlerNoBody::new(pipeline, downstream_read_timeout, connection_semaphore);
-        wire_service(server, listener, handler, cert_watcher_shutdowns)?;
-    }
+    // Always use the body-capable handler: a reload may add body
+    // filters, and compression init is one-shot in Pingora.
+    debug!(listener = %listener.name, "loading HTTP handler with body filters");
+    let handler = PingoraHttpHandler::new(pipeline, downstream_read_timeout, connection_semaphore);
+    wire_service(server, listener, handler, cert_watcher_shutdowns)?;
     Ok(())
 }
 

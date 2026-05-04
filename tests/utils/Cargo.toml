@@ -11,6 +11,7 @@ publish = false
 workspace = true
 
 [dependencies]
+arc-swap = { workspace = true }
 praxis = { workspace = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }

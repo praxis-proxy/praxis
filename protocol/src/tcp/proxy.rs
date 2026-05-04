@@ -5,9 +5,9 @@
 
 use std::{borrow::Cow, future::Future, io, sync::Arc, time::Duration};
 
+use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use pingora_core::{apps::ServerApp, protocols::Stream, server::ShutdownWatch};
-use praxis_core::health::HealthRegistry;
 use praxis_filter::{FilterAction, FilterPipeline, TcpFilterContext};
 use praxis_tls::sni;
 use tokio::{
@@ -45,7 +45,12 @@ const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// connection, extracts the TLS `ClientHello` SNI, and makes it available
 /// to filters before connecting upstream.
 ///
+/// The pipeline is held behind [`ArcSwap`] so it can be
+/// atomically replaced by hot config reload without
+/// disrupting in-flight connections.
+///
 /// [`TcpFilterContext::upstream_addr`]: praxis_filter::TcpFilterContext::upstream_addr
+/// [`ArcSwap`]: arc_swap::ArcSwap
 pub(crate) struct PingoraTcpProxy {
     /// Cluster name for load-balanced TCP connections.
     cluster: Option<Arc<str>>,
@@ -53,17 +58,14 @@ pub(crate) struct PingoraTcpProxy {
     /// Per-listener connection semaphore for max connections.
     connection_semaphore: Option<Arc<Semaphore>>,
 
-    /// Shared health registry for endpoint health lookups.
-    health_registry: Option<HealthRegistry>,
-
     /// Optional idle timeout for the bidirectional forwarding session.
     idle_timeout: Option<Duration>,
 
     /// Optional maximum total session duration.
     max_duration: Option<Duration>,
 
-    /// Shared filter pipeline for TCP filter hooks.
-    pipeline: Arc<FilterPipeline>,
+    /// Swappable filter pipeline for TCP filter hooks.
+    pipeline: Arc<ArcSwap<FilterPipeline>>,
 
     /// Static upstream address, if configured on the listener.
     upstream_addr: Option<String>,
@@ -75,16 +77,14 @@ impl PingoraTcpProxy {
     pub(super) fn new(
         upstream_addr: Option<String>,
         cluster: Option<Arc<str>>,
-        pipeline: Arc<FilterPipeline>,
+        pipeline: Arc<ArcSwap<FilterPipeline>>,
         idle_timeout: Option<Duration>,
         max_duration: Option<Duration>,
         connection_semaphore: Option<Arc<Semaphore>>,
     ) -> Self {
-        let health_registry = pipeline.health_registry().cloned();
         Self {
             cluster,
             connection_semaphore,
-            health_registry,
             idle_timeout,
             max_duration,
             pipeline,
@@ -152,7 +152,9 @@ impl PingoraTcpProxy {
         sni: Option<&str>,
         connect_time: std::time::Instant,
     ) -> Option<String> {
+        let pipeline = self.pipeline.load();
         let upstream_cow = self.upstream_addr.as_deref().map(Cow::Borrowed);
+        let health_registry = pipeline.health_registry().cloned();
 
         let mut ctx = TcpFilterContext {
             remote_addr,
@@ -160,13 +162,13 @@ impl PingoraTcpProxy {
             sni,
             upstream_addr: upstream_cow,
             cluster: self.cluster.clone(),
-            health_registry: self.health_registry.as_ref(),
+            health_registry: health_registry.as_ref(),
             connect_time,
             bytes_in: 0,
             bytes_out: 0,
         };
 
-        resolve_connect_result(&self.pipeline, &mut ctx, remote_addr).await
+        resolve_connect_result(&pipeline, &mut ctx, remote_addr).await
     }
 
     /// Run TCP disconnect filters for logging.
@@ -181,18 +183,20 @@ impl PingoraTcpProxy {
         bytes_in: u64,
         bytes_out: u64,
     ) {
+        let pipeline = self.pipeline.load();
+        let health_registry = pipeline.health_registry().cloned();
         let mut ctx = TcpFilterContext {
             remote_addr,
             local_addr,
             sni: sni_hostname,
             upstream_addr: Some(Cow::Borrowed(upstream_addr)),
             cluster: self.cluster.clone(),
-            health_registry: self.health_registry.as_ref(),
+            health_registry: health_registry.as_ref(),
             connect_time,
             bytes_in,
             bytes_out,
         };
-        let _result = self.pipeline.execute_tcp_disconnect(&mut ctx).await;
+        let _result = pipeline.execute_tcp_disconnect(&mut ctx).await;
     }
 }
 
