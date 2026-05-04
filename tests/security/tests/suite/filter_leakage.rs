@@ -240,7 +240,6 @@ fn response_has_header(raw: &str, name: &str) -> bool {
     let lower = name.to_lowercase();
     headers_part.lines().any(|line| {
         line.split_once(':')
-            .map(|(k, _)| k.trim().to_lowercase() == lower)
-            .unwrap_or(false)
+            .is_some_and(|(k, _)| k.trim().to_lowercase() == lower)
     })
 }

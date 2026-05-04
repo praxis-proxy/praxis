@@ -51,5 +51,5 @@ pub(crate) fn run(args: &Args) {
         config.admin.address = Some("127.0.0.1:9090".to_owned());
     }
 
-    praxis::run_server(config)
+    praxis::run_server(config, None)
 }

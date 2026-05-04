@@ -1884,6 +1884,269 @@ async fn empty_body_eos() {
     assert!(seen[0].is_none(), "recorded body should be None");
 }
 
+#[tokio::test]
+async fn body_done_skips_filter_on_subsequent_chunks() {
+    let chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = make_pipeline(vec![
+        Box::new(BodyDoneAfterFirstFilter {
+            chunks: Arc::clone(&chunks),
+        }),
+        Box::new(BodyInspectorFilter {
+            chunks: Arc::new(std::sync::Mutex::new(Vec::new())),
+        }),
+    ]);
+    let req = crate::test_utils::make_request(Method::POST, "/upload");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body1 = Some(Bytes::from_static(b"first"));
+    drop(
+        pipeline
+            .execute_http_request_body(&mut ctx, &mut body1, false)
+            .await
+            .unwrap(),
+    );
+
+    let mut body2 = Some(Bytes::from_static(b"second"));
+    drop(
+        pipeline
+            .execute_http_request_body(&mut ctx, &mut body2, false)
+            .await
+            .unwrap(),
+    );
+
+    let mut body3 = Some(Bytes::from_static(b"third"));
+    drop(
+        pipeline
+            .execute_http_request_body(&mut ctx, &mut body3, true)
+            .await
+            .unwrap(),
+    );
+
+    let seen = chunks.lock().unwrap();
+    assert_eq!(seen.len(), 1, "BodyDone filter should only see the first chunk");
+    assert_eq!(
+        seen[0],
+        Bytes::from_static(b"first"),
+        "BodyDone filter should have recorded the first chunk"
+    );
+}
+
+#[tokio::test]
+async fn body_done_other_filters_continue() {
+    let done_chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let inspector_chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = make_pipeline(vec![
+        Box::new(BodyDoneAfterFirstFilter {
+            chunks: Arc::clone(&done_chunks),
+        }),
+        Box::new(BodyInspectorFilter {
+            chunks: Arc::clone(&inspector_chunks),
+        }),
+    ]);
+    let req = crate::test_utils::make_request(Method::POST, "/upload");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body1 = Some(Bytes::from_static(b"chunk1"));
+    drop(
+        pipeline
+            .execute_http_request_body(&mut ctx, &mut body1, false)
+            .await
+            .unwrap(),
+    );
+    let mut body2 = Some(Bytes::from_static(b"chunk2"));
+    drop(
+        pipeline
+            .execute_http_request_body(&mut ctx, &mut body2, true)
+            .await
+            .unwrap(),
+    );
+
+    assert_eq!(
+        done_chunks.lock().unwrap().len(),
+        1,
+        "BodyDone filter should see only the first chunk"
+    );
+    assert_eq!(
+        inspector_chunks.lock().unwrap().len(),
+        2,
+        "inspector filter should see all chunks despite first filter's BodyDone"
+    );
+}
+
+#[tokio::test]
+async fn body_done_does_not_trigger_release() {
+    let chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = make_pipeline(vec![Box::new(BodyDoneAfterFirstFilter {
+        chunks: Arc::clone(&chunks),
+    })]);
+    let req = crate::test_utils::make_request(Method::POST, "/upload");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body = Some(Bytes::from_static(b"data"));
+    let action = pipeline
+        .execute_http_request_body(&mut ctx, &mut body, false)
+        .await
+        .unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "BodyDone should not cause the pipeline to return Release"
+    );
+}
+
+#[tokio::test]
+async fn multiple_filters_independently_signal_body_done() {
+    let chunks_a = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let chunks_b = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let inspector_chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = make_pipeline(vec![
+        Box::new(BodyDoneAfterFirstFilter {
+            chunks: Arc::clone(&chunks_a),
+        }),
+        Box::new(BodyInspectorFilter {
+            chunks: Arc::clone(&inspector_chunks),
+        }),
+        Box::new(BodyDoneAfterFirstFilter {
+            chunks: Arc::clone(&chunks_b),
+        }),
+    ]);
+    let req = crate::test_utils::make_request(Method::POST, "/upload");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body1 = Some(Bytes::from_static(b"one"));
+    drop(
+        pipeline
+            .execute_http_request_body(&mut ctx, &mut body1, false)
+            .await
+            .unwrap(),
+    );
+    let mut body2 = Some(Bytes::from_static(b"two"));
+    drop(
+        pipeline
+            .execute_http_request_body(&mut ctx, &mut body2, false)
+            .await
+            .unwrap(),
+    );
+    let mut body3 = Some(Bytes::from_static(b"three"));
+    drop(
+        pipeline
+            .execute_http_request_body(&mut ctx, &mut body3, true)
+            .await
+            .unwrap(),
+    );
+
+    assert_eq!(
+        chunks_a.lock().unwrap().len(),
+        1,
+        "first BodyDone filter should see only one chunk"
+    );
+    assert_eq!(
+        chunks_b.lock().unwrap().len(),
+        1,
+        "third BodyDone filter should see only one chunk"
+    );
+    assert_eq!(
+        inspector_chunks.lock().unwrap().len(),
+        3,
+        "middle inspector should see all three chunks"
+    );
+}
+
+#[test]
+fn body_done_response_body_skips_filter_on_subsequent_chunks() {
+    let chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = make_pipeline(vec![Box::new(ResponseBodyDoneAfterFirstFilter {
+        chunks: Arc::clone(&chunks),
+    })]);
+    let req = crate::test_utils::make_request(Method::GET, "/data");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body1 = Some(Bytes::from_static(b"resp1"));
+    drop(
+        pipeline
+            .execute_http_response_body(&mut ctx, &mut body1, false)
+            .unwrap(),
+    );
+
+    let mut body2 = Some(Bytes::from_static(b"resp2"));
+    drop(pipeline.execute_http_response_body(&mut ctx, &mut body2, true).unwrap());
+
+    let seen = chunks.lock().unwrap();
+    assert_eq!(
+        seen.len(),
+        1,
+        "response BodyDone filter should only see the first chunk"
+    );
+}
+
+#[tokio::test]
+async fn body_done_with_stream_buffer_mode() {
+    let done_chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let inspector_chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = make_pipeline(vec![
+        Box::new(StreamBufferBodyDoneFilter {
+            chunks: Arc::clone(&done_chunks),
+        }),
+        Box::new(BodyInspectorFilter {
+            chunks: Arc::clone(&inspector_chunks),
+        }),
+    ]);
+
+    assert_eq!(
+        pipeline.body_capabilities().request_body_mode,
+        BodyMode::StreamBuffer { max_bytes: None },
+        "pipeline should use StreamBuffer mode from first filter"
+    );
+
+    let req = crate::test_utils::make_request(Method::POST, "/upload");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut body1 = Some(Bytes::from_static(b"chunk1"));
+    let action1 = pipeline
+        .execute_http_request_body(&mut ctx, &mut body1, false)
+        .await
+        .unwrap();
+    assert!(
+        matches!(action1, FilterAction::Continue),
+        "BodyDone from StreamBuffer filter should not cause Release"
+    );
+
+    let mut body2 = Some(Bytes::from_static(b"chunk2"));
+    drop(
+        pipeline
+            .execute_http_request_body(&mut ctx, &mut body2, false)
+            .await
+            .unwrap(),
+    );
+
+    let mut body3 = Some(Bytes::from_static(b"chunk3"));
+    drop(
+        pipeline
+            .execute_http_request_body(&mut ctx, &mut body3, true)
+            .await
+            .unwrap(),
+    );
+
+    let done_seen = done_chunks.lock().unwrap();
+    assert_eq!(
+        done_seen.len(),
+        1,
+        "StreamBuffer+BodyDone filter should only see the first chunk"
+    );
+    assert_eq!(
+        done_seen[0],
+        Bytes::from_static(b"chunk1"),
+        "StreamBuffer+BodyDone filter should have recorded the first chunk"
+    );
+
+    let inspector_seen = inspector_chunks.lock().unwrap();
+    assert_eq!(
+        inspector_seen.len(),
+        3,
+        "inspector should see all three chunks despite first filter's BodyDone"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
@@ -2208,6 +2471,106 @@ impl HttpFilter for NullableBodyInspectorFilter {
     ) -> Result<FilterAction, FilterError> {
         self.chunks.lock().unwrap().push(body.clone());
         Ok(FilterAction::Continue)
+    }
+}
+
+/// A filter that returns `BodyDone` after recording the first chunk.
+struct BodyDoneAfterFirstFilter {
+    chunks: Arc<std::sync::Mutex<Vec<Bytes>>>,
+}
+
+#[async_trait]
+impl HttpFilter for BodyDoneAfterFirstFilter {
+    fn name(&self) -> &'static str {
+        "body_done_after_first"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    async fn on_request_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if let Some(b) = body {
+            self.chunks.lock().unwrap().push(b.clone());
+        }
+        Ok(FilterAction::BodyDone)
+    }
+}
+
+/// A response body filter that returns `BodyDone` after recording the first chunk.
+struct ResponseBodyDoneAfterFirstFilter {
+    chunks: Arc<std::sync::Mutex<Vec<Bytes>>>,
+}
+
+#[async_trait]
+impl HttpFilter for ResponseBodyDoneAfterFirstFilter {
+    fn name(&self) -> &'static str {
+        "resp_body_done_after_first"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn on_response_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if let Some(b) = body {
+            self.chunks.lock().unwrap().push(b.clone());
+        }
+        Ok(FilterAction::BodyDone)
+    }
+}
+
+/// A filter that uses StreamBuffer mode and returns BodyDone after the first chunk.
+struct StreamBufferBodyDoneFilter {
+    chunks: Arc<std::sync::Mutex<Vec<Bytes>>>,
+}
+
+#[async_trait]
+impl HttpFilter for StreamBufferBodyDoneFilter {
+    fn name(&self) -> &'static str {
+        "stream_buffer_body_done"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer { max_bytes: None }
+    }
+
+    async fn on_request_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if let Some(b) = body {
+            self.chunks.lock().unwrap().push(b.clone());
+        }
+        Ok(FilterAction::BodyDone)
     }
 }
 

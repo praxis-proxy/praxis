@@ -106,16 +106,23 @@ impl FilterRegistry {
 // -----------------------------------------------------------------------------
 
 /// Register all built-in HTTP filter factories.
+#[allow(clippy::too_many_lines, reason = "one line per filter, will grow")]
 fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     use crate::builtins::{
-        AccessLogFilter, CompressionFilter, CorsFilter, ForwardedHeadersFilter, HeaderFilter, IpAclFilter,
-        JsonBodyFieldFilter, JsonRpcFilter, PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter,
-        StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
+        AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter,
+        ForwardedHeadersFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter, PathRewriteFilter,
+        RateLimitFilter, RedirectFilter, RequestIdFilter, StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
     };
 
     register_http(factories, "access_log", AccessLogFilter::from_config);
+    register_http(factories, "circuit_breaker", CircuitBreakerFilter::from_config);
     register_http(factories, "compression", CompressionFilter::from_config);
     register_http(factories, "cors", CorsFilter::from_config);
+    register_http(
+        factories,
+        "credential_injection",
+        CredentialInjectionFilter::from_config,
+    );
     register_http(factories, "headers", HeaderFilter::from_config);
     register_http(factories, "forwarded_headers", ForwardedHeadersFilter::from_config);
     register_http(factories, "guardrails", crate::GuardrailsFilter::from_config);
@@ -199,8 +206,16 @@ mod tests {
         names.sort();
 
         assert!(names.contains(&"access_log"), "access_log should be registered");
+        assert!(
+            names.contains(&"circuit_breaker"),
+            "circuit_breaker should be registered"
+        );
         assert!(names.contains(&"compression"), "compression should be registered");
         assert!(names.contains(&"cors"), "cors should be registered");
+        assert!(
+            names.contains(&"credential_injection"),
+            "credential_injection should be registered"
+        );
         assert!(
             names.contains(&"forwarded_headers"),
             "forwarded_headers should be registered"

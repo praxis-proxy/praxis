@@ -3,6 +3,7 @@
 
 //! HTTP traffic management filters: routing, load balancing, timeout enforcement, redirects and static responses.
 
+mod circuit_breaker;
 mod load_balancer;
 mod rate_limit;
 mod redirect;
@@ -11,6 +12,7 @@ mod static_response;
 mod timeout;
 pub(crate) mod token_bucket;
 
+pub use circuit_breaker::CircuitBreakerFilter;
 pub use load_balancer::LoadBalancerFilter;
 pub use rate_limit::RateLimitFilter;
 pub use redirect::RedirectFilter;

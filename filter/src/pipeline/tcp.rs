@@ -30,7 +30,7 @@ impl FilterPipeline {
             };
             trace!(filter = tcp_filter.name(), "on_connect");
             match tcp_filter.on_connect(ctx).await {
-                Ok(FilterAction::Continue | FilterAction::Release) => {},
+                Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {},
                 Ok(FilterAction::Reject(r)) => return Ok(FilterAction::Reject(r)),
                 Err(e) => {
                     check_failure_mode(tcp_filter.name(), e, "tcp connect", pf.failure_mode)?;

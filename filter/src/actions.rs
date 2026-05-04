@@ -22,6 +22,9 @@ use bytes::Bytes;
 ///
 /// let release = FilterAction::Release;
 /// assert!(matches!(release, FilterAction::Release));
+///
+/// let body_done = FilterAction::BodyDone;
+/// assert!(matches!(body_done, FilterAction::BodyDone));
 /// ```
 #[derive(Debug)]
 #[must_use]
@@ -42,6 +45,18 @@ pub enum FilterAction {
     /// [`StreamBuffer`]: crate::BodyMode::StreamBuffer
     /// [`Continue`]: FilterAction::Continue
     Release,
+
+    /// Skip this filter for remaining body chunks.
+    ///
+    /// The filter has completed its body inspection and does
+    /// not need to see further chunks. The pipeline continues
+    /// calling other body filters; only this filter is skipped.
+    ///
+    /// In non-body contexts (request and response phases),
+    /// behaves as [`Continue`].
+    ///
+    /// [`Continue`]: FilterAction::Continue
+    BodyDone,
 }
 
 // -----------------------------------------------------------------------------
@@ -176,6 +191,14 @@ mod tests {
         assert!(
             matches!(FilterAction::Release, FilterAction::Release),
             "Release should match Release"
+        );
+    }
+
+    #[test]
+    fn filter_action_body_done_variant() {
+        assert!(
+            matches!(FilterAction::BodyDone, FilterAction::BodyDone),
+            "BodyDone should match BodyDone"
         );
     }
 }

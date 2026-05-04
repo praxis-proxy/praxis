@@ -248,13 +248,19 @@ filter_chains:
             }
         }
         let pipeline = Arc::new(praxis_filter::FilterPipeline::build(&mut entries, &registry).unwrap());
-        praxis_protocol::http::load_http_handler(&mut server, listener, pipeline, &mut Vec::new()).unwrap();
+        let swappable = Arc::new(arc_swap::ArcSwap::from(pipeline));
+        praxis_protocol::http::load_http_handler(&mut server, listener, swappable, &mut Vec::new()).unwrap();
     }
 
     let mut health_map = HashMap::new();
-    let endpoints = vec![EndpointHealth::new(), EndpointHealth::new()];
-    endpoints[1].mark_unhealthy();
-    health_map.insert(Arc::from("backend"), Arc::new(endpoints));
+    let entry = praxis_core::health::ClusterHealthEntry::new(
+        vec![EndpointHealth::new(), EndpointHealth::new()],
+        vec![Arc::from("10.0.0.1:80"), Arc::from("10.0.0.2:80")],
+        None,
+        None,
+    );
+    entry.endpoints()[1].mark_unhealthy();
+    health_map.insert(Arc::from("backend"), Arc::new(entry));
     let health_registry: HealthRegistry = Arc::new(health_map);
 
     praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server(
@@ -323,13 +329,19 @@ filter_chains:
             }
         }
         let pipeline = Arc::new(praxis_filter::FilterPipeline::build(&mut entries, &registry).unwrap());
-        praxis_protocol::http::load_http_handler(&mut server, listener, pipeline, &mut Vec::new()).unwrap();
+        let swappable = Arc::new(arc_swap::ArcSwap::from(pipeline));
+        praxis_protocol::http::load_http_handler(&mut server, listener, swappable, &mut Vec::new()).unwrap();
     }
 
     let mut health_map = HashMap::new();
-    let endpoints = vec![EndpointHealth::new()];
-    endpoints[0].mark_unhealthy();
-    health_map.insert(Arc::from("backend"), Arc::new(endpoints));
+    let entry = praxis_core::health::ClusterHealthEntry::new(
+        vec![EndpointHealth::new()],
+        vec![Arc::from("10.0.0.1:80")],
+        None,
+        None,
+    );
+    entry.endpoints()[0].mark_unhealthy();
+    health_map.insert(Arc::from("backend"), Arc::new(entry));
     let health_registry: HealthRegistry = Arc::new(health_map);
 
     praxis_protocol::http::pingora::health::add_health_endpoint_to_pingora_server(
@@ -357,11 +369,13 @@ fn health_check_builds_registry_for_checked_clusters() {
         praxis_core::config::Cluster {
             health_check: Some(praxis_core::config::HealthCheckConfig {
                 check_type: praxis_core::config::HealthCheckType::Http,
-                path: "/".to_owned(),
                 expected_status: 200,
-                interval_ms: 5000,
-                timeout_ms: 2000,
                 healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: None,
+                path: "/".to_owned(),
+                timeout_ms: 2000,
                 unhealthy_threshold: 3,
             }),
             ..praxis_core::config::Cluster::with_defaults("checked", vec!["10.0.0.1:80".into(), "10.0.0.2:80".into()])
@@ -377,9 +391,19 @@ fn health_check_builds_registry_for_checked_clusters() {
         !registry.contains_key("unchecked"),
         "unchecked cluster should not be in registry"
     );
-    assert_eq!(registry["checked"].len(), 2, "checked cluster should have 2 endpoints");
-    assert!(registry["checked"][0].is_healthy(), "endpoints should start healthy");
-    assert!(registry["checked"][1].is_healthy(), "endpoints should start healthy");
+    assert_eq!(
+        registry["checked"].endpoints().len(),
+        2,
+        "checked cluster should have 2 endpoints"
+    );
+    assert!(
+        registry["checked"].endpoints()[0].is_healthy(),
+        "endpoints should start healthy"
+    );
+    assert!(
+        registry["checked"].endpoints()[1].is_healthy(),
+        "endpoints should start healthy"
+    );
 }
 
 #[test]

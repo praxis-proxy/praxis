@@ -25,8 +25,8 @@ pub use actions::{FilterAction, Rejection};
 pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
 pub use builtins::{
-    GuardrailsAction, GuardrailsFilter, LoadBalancerFilter, RouterFilter,
-    http::payload_processing::compression_config::CompressionConfig, normalize_mapped_ipv4, normalize_rewritten_path,
+    CircuitBreakerFilter, CredentialInjectionFilter, GuardrailsAction, GuardrailsFilter, LoadBalancerFilter,
+    RouterFilter, http::payload_processing::compression_config::CompressionConfig, normalize_rewritten_path,
 };
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{HttpFilterContext, Request, Response};
@@ -226,6 +226,7 @@ pub(crate) mod test_utils {
 
     pub(crate) fn make_filter_context(req: &Request) -> HttpFilterContext<'_> {
         HttpFilterContext {
+            body_done_indices: Vec::new(),
             branch_iterations: std::collections::HashMap::new(),
             client_addr: None,
             cluster: None,
@@ -242,6 +243,7 @@ pub(crate) mod test_utils {
             response_header: None,
             response_headers_modified: false,
             rewritten_path: None,
+            selected_endpoint_index: None,
             upstream: None,
         }
     }

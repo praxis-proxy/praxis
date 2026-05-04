@@ -79,7 +79,7 @@ impl LeastConnections {
             && let Some((addr, load)) = self
                 .endpoints
                 .iter()
-                .filter(|ep| ep.index < state.len() && state[ep.index].is_healthy())
+                .filter(|ep| ep.index < state.endpoints().len() && state.endpoints()[ep.index].is_healthy())
                 .map(|ep| {
                     let load = self.counters[&*ep.address].load(Ordering::Acquire);
                     (ep, load)
@@ -123,7 +123,7 @@ mod tests {
         thread,
     };
 
-    use praxis_core::health::EndpointHealth;
+    use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
     use super::*;
 
@@ -206,8 +206,13 @@ mod tests {
                 index: 1,
             },
         ]);
-        let state: ClusterHealthState = Arc::new(vec![EndpointHealth::new(), EndpointHealth::new()]);
-        state[0].mark_unhealthy();
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new(), EndpointHealth::new()],
+            vec![Arc::from("10.0.0.1:80"), Arc::from("10.0.0.2:80")],
+            None,
+            None,
+        ));
+        state.endpoints()[0].mark_unhealthy();
 
         assert_eq!(
             &*lc.select(Some(&state)),
@@ -230,9 +235,14 @@ mod tests {
                 index: 1,
             },
         ]);
-        let state: ClusterHealthState = Arc::new(vec![EndpointHealth::new(), EndpointHealth::new()]);
-        state[0].mark_unhealthy();
-        state[1].mark_unhealthy();
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new(), EndpointHealth::new()],
+            vec![Arc::from("10.0.0.1:80"), Arc::from("10.0.0.2:80")],
+            None,
+            None,
+        ));
+        state.endpoints()[0].mark_unhealthy();
+        state.endpoints()[1].mark_unhealthy();
 
         let selected = lc.select(Some(&state));
         assert!(

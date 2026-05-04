@@ -147,7 +147,7 @@ pub(super) async fn pre_read_body(
         all_extra_headers.extend(filter_ctx.extra_request_headers);
 
         match action {
-            Ok(FilterAction::Continue) => {},
+            Ok(FilterAction::Continue | FilterAction::BodyDone) => {},
             Ok(FilterAction::Release) => {
                 if !released {
                     debug!("StreamBuffer released during pre-read");

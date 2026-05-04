@@ -23,7 +23,8 @@ pub(super) fn validate_health_check(
 ) -> Result<(), ProxyError> {
     validate_health_check_type(hc, cluster_name)?;
     validate_health_check_timing(hc, cluster_name)?;
-    validate_health_check_thresholds(hc, cluster_name)
+    validate_health_check_thresholds(hc, cluster_name)?;
+    validate_passive_thresholds(hc, cluster_name)
 }
 
 /// Reject unsupported health check types.
@@ -76,6 +77,21 @@ fn validate_health_check_thresholds(
     if hc.unhealthy_threshold == 0 {
         return Err(ProxyError::Config(format!(
             "cluster '{cluster_name}': health check unhealthy_threshold must be >= 1"
+        )));
+    }
+    Ok(())
+}
+
+/// Validate passive health check thresholds.
+fn validate_passive_thresholds(hc: &crate::config::HealthCheckConfig, cluster_name: &str) -> Result<(), ProxyError> {
+    if hc.passive_unhealthy_threshold == Some(0) {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': passive_unhealthy_threshold must be >= 1"
+        )));
+    }
+    if hc.passive_healthy_threshold == Some(0) {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': passive_healthy_threshold must be >= 1"
         )));
     }
     Ok(())
@@ -383,11 +399,13 @@ clusters:
         let clusters = vec![Cluster {
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
-                path: "/health\r\nEvil: header".to_owned(),
                 expected_status: 200,
-                interval_ms: 5000,
-                timeout_ms: 2000,
                 healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: None,
+                path: "/health\r\nEvil: header".to_owned(),
+                timeout_ms: 2000,
                 unhealthy_threshold: 3,
             }),
             ..Cluster::with_defaults("web", vec!["10.0.0.1:80".into()])
@@ -401,11 +419,13 @@ clusters:
         let clusters = vec![Cluster {
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
-                path: "/health\nEvil: header".to_owned(),
                 expected_status: 200,
-                interval_ms: 5000,
-                timeout_ms: 2000,
                 healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: None,
+                path: "/health\nEvil: header".to_owned(),
+                timeout_ms: 2000,
                 unhealthy_threshold: 3,
             }),
             ..Cluster::with_defaults("web", vec!["10.0.0.1:80".into()])
@@ -471,11 +491,13 @@ clusters:
         let clusters = vec![Cluster {
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
-                path: "/health".to_owned(),
                 expected_status: 200,
-                interval_ms: 5000,
-                timeout_ms: 2000,
                 healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: None,
+                path: "/health".to_owned(),
+                timeout_ms: 2000,
                 unhealthy_threshold: 3,
             }),
             ..Cluster::with_defaults("web", vec!["127.0.0.1:80".into()])
@@ -492,11 +514,13 @@ clusters:
         let clusters = vec![Cluster {
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
-                path: "/health".to_owned(),
                 expected_status: 200,
-                interval_ms: 5000,
-                timeout_ms: 2000,
                 healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: None,
+                path: "/health".to_owned(),
+                timeout_ms: 2000,
                 unhealthy_threshold: 3,
             }),
             ..Cluster::with_defaults("web", vec!["127.0.0.1:80".into()])
@@ -513,15 +537,86 @@ clusters:
         let clusters = vec![Cluster {
             health_check: Some(crate::config::HealthCheckConfig {
                 check_type: crate::config::HealthCheckType::Http,
-                path: "/health".to_owned(),
                 expected_status: 200,
-                interval_ms: 5000,
-                timeout_ms: 2000,
                 healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: None,
+                path: "/health".to_owned(),
+                timeout_ms: 2000,
                 unhealthy_threshold: 3,
             }),
             ..Cluster::with_defaults("web", vec!["10.0.0.1:80".into()])
         }];
         validate_clusters(&clusters, &InsecureOptions::default()).expect("RFC 1918 addresses should not be flagged");
+    }
+
+    #[test]
+    fn reject_zero_passive_unhealthy_threshold() {
+        let clusters = vec![Cluster {
+            health_check: Some(crate::config::HealthCheckConfig {
+                check_type: crate::config::HealthCheckType::Http,
+                expected_status: 200,
+                healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: Some(0),
+                path: "/".to_owned(),
+                timeout_ms: 2000,
+                unhealthy_threshold: 3,
+            }),
+            ..Cluster::with_defaults("web", vec!["10.0.0.1:80".into()])
+        }];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("passive_unhealthy_threshold must be >= 1"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_zero_passive_healthy_threshold() {
+        let clusters = vec![Cluster {
+            health_check: Some(crate::config::HealthCheckConfig {
+                check_type: crate::config::HealthCheckType::Http,
+                expected_status: 200,
+                healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: Some(0),
+                passive_unhealthy_threshold: None,
+                path: "/".to_owned(),
+                timeout_ms: 2000,
+                unhealthy_threshold: 3,
+            }),
+            ..Cluster::with_defaults("web", vec!["10.0.0.1:80".into()])
+        }];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("passive_healthy_threshold must be >= 1"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_valid_passive_thresholds() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:80"]
+    health_check:
+      type: http
+      passive_unhealthy_threshold: 5
+      passive_healthy_threshold: 3
+"#;
+        Config::from_yaml(yaml).unwrap();
     }
 }

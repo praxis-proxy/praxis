@@ -16,6 +16,7 @@ no-mac-cert-rotation-tests = [] # We use this to disable testing cert rotation o
 workspace = true
 
 [dev-dependencies]
+arc-swap = { workspace = true }
 async-trait = { workspace = true }
 futures = { workspace = true }
 bytes = { workspace = true }

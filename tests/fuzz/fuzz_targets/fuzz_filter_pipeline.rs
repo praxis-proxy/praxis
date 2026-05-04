@@ -48,6 +48,7 @@ fuzz_target!(|data: &str| {
         };
 
         let mut ctx = praxis_filter::HttpFilterContext {
+            body_done_indices: Vec::new(),
             branch_iterations: std::collections::HashMap::new(),
             client_addr: None,
             cluster: None,
@@ -64,6 +65,7 @@ fuzz_target!(|data: &str| {
             response_header: None,
             response_headers_modified: false,
             rewritten_path: None,
+            selected_endpoint_index: None,
             upstream: None,
         };
 

@@ -64,7 +64,7 @@ impl RoundRobin {
         let healthy_weight: usize = self
             .endpoints
             .iter()
-            .filter(|ep| ep.index < state.len() && state[ep.index].is_healthy())
+            .filter(|ep| ep.index < state.endpoints().len() && state.endpoints()[ep.index].is_healthy())
             .map(|ep| ep.weight as usize)
             .sum();
 
@@ -75,7 +75,7 @@ impl RoundRobin {
         let slot = tick % healthy_weight;
         let mut cumulative = 0usize;
         for ep in &self.endpoints {
-            if ep.index < state.len() && state[ep.index].is_healthy() {
+            if ep.index < state.endpoints().len() && state.endpoints()[ep.index].is_healthy() {
                 cumulative += ep.weight as usize;
                 if slot < cumulative {
                     return Some(Arc::clone(&ep.address));
@@ -117,7 +117,7 @@ fn select_by_weight(endpoints: &[WeightedEndpoint], tick: usize, total_weight: u
 mod tests {
     use std::sync::Arc;
 
-    use praxis_core::health::EndpointHealth;
+    use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
     use super::*;
 
@@ -208,12 +208,17 @@ mod tests {
                 index: 2,
             },
         ]);
-        let state: ClusterHealthState = Arc::new(vec![
-            EndpointHealth::new(),
-            EndpointHealth::new(),
-            EndpointHealth::new(),
-        ]);
-        state[0].mark_unhealthy();
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new(), EndpointHealth::new(), EndpointHealth::new()],
+            vec![
+                Arc::from("10.0.0.1:80"),
+                Arc::from("10.0.0.2:80"),
+                Arc::from("10.0.0.3:80"),
+            ],
+            None,
+            None,
+        ));
+        state.endpoints()[0].mark_unhealthy();
 
         assert_eq!(
             &*rr.select(Some(&state)),
@@ -241,12 +246,17 @@ mod tests {
                 index: 2,
             },
         ]);
-        let state: ClusterHealthState = Arc::new(vec![
-            EndpointHealth::new(),
-            EndpointHealth::new(),
-            EndpointHealth::new(),
-        ]);
-        state[1].mark_unhealthy();
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new(), EndpointHealth::new(), EndpointHealth::new()],
+            vec![
+                Arc::from("10.0.0.1:80"),
+                Arc::from("10.0.0.2:80"),
+                Arc::from("10.0.0.3:80"),
+            ],
+            None,
+            None,
+        ));
+        state.endpoints()[1].mark_unhealthy();
 
         let mut counts = std::collections::HashMap::new();
         for _ in 0..20 {
@@ -280,9 +290,14 @@ mod tests {
                 index: 1,
             },
         ]);
-        let state: ClusterHealthState = Arc::new(vec![EndpointHealth::new(), EndpointHealth::new()]);
-        state[0].mark_unhealthy();
-        state[1].mark_unhealthy();
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new(), EndpointHealth::new()],
+            vec![Arc::from("10.0.0.1:80"), Arc::from("10.0.0.2:80")],
+            None,
+            None,
+        ));
+        state.endpoints()[0].mark_unhealthy();
+        state.endpoints()[1].mark_unhealthy();
 
         let selected = rr.select(Some(&state));
         assert!(

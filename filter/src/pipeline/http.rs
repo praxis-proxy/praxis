@@ -37,6 +37,7 @@ impl FilterPipeline {
     #[allow(clippy::indexing_slicing, reason = "while loop bounds idx")]
     pub async fn execute_http_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         ctx.executed_filter_indices = vec![false; self.filters.len()];
+        ctx.body_done_indices = vec![false; self.filters.len()];
         let mut idx = 0;
         while idx < self.filters.len() {
             let pf = &self.filters[idx];
@@ -100,18 +101,28 @@ impl FilterPipeline {
 
     /// Run all HTTP request body filters in order.
     ///
+    /// Filters that previously returned [`BodyDone`] are skipped.
+    ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any body filter fails.
+    ///
+    /// [`BodyDone`]: FilterAction::BodyDone
+    #[allow(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
     pub async fn execute_http_request_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
+        ensure_body_done_indices(ctx, self.filters.len());
         accumulate_body_bytes(&mut ctx.request_body_bytes, body);
         let mut released = false;
-        for pf in &self.filters {
+        for (idx, pf) in self.filters.iter().enumerate() {
+            if ctx.body_done_indices.get(idx) == Some(&true) {
+                trace!(filter = pf.filter.name(), "skipped body (body_done)");
+                continue;
+            }
             let Some(http_filter) = as_request_body_filter(&pf.filter, &pf.conditions, ctx.request) else {
                 continue;
             };
@@ -124,6 +135,9 @@ impl FilterPipeline {
             )? {
                 BodyFilterOutcome::Continue => {},
                 BodyFilterOutcome::Released => released = true,
+                BodyFilterOutcome::BodyDone => {
+                    ctx.body_done_indices[idx] = true;
+                },
                 BodyFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
             }
         }
@@ -132,18 +146,28 @@ impl FilterPipeline {
 
     /// Run all HTTP response body filters in reverse order.
     ///
+    /// Filters that previously returned [`BodyDone`] are skipped.
+    ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any body filter fails.
+    ///
+    /// [`BodyDone`]: FilterAction::BodyDone
+    #[allow(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
     pub fn execute_http_response_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
+        ensure_body_done_indices(ctx, self.filters.len());
         accumulate_body_bytes(&mut ctx.response_body_bytes, body);
         let mut released = false;
-        for pf in self.filters.iter().rev() {
+        for (idx, pf) in self.filters.iter().enumerate().rev() {
+            if ctx.body_done_indices.get(idx) == Some(&true) {
+                trace!(filter = pf.filter.name(), "skipped body (body_done)");
+                continue;
+            }
             let Some(http_filter) = as_response_body_filter(&pf.filter, &pf.response_conditions, ctx) else {
                 continue;
             };
@@ -156,10 +180,24 @@ impl FilterPipeline {
             )? {
                 BodyFilterOutcome::Continue => {},
                 BodyFilterOutcome::Released => released = true,
+                BodyFilterOutcome::BodyDone => {
+                    ctx.body_done_indices[idx] = true;
+                },
                 BodyFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
             }
         }
         Ok(released_or_continue(released))
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Body Done Utilities
+// -----------------------------------------------------------------------------
+
+/// Ensure `body_done_indices` is sized to match the filter count.
+fn ensure_body_done_indices(ctx: &mut HttpFilterContext<'_>, filter_count: usize) {
+    if ctx.body_done_indices.len() != filter_count {
+        ctx.body_done_indices.resize(filter_count, false);
     }
 }
 
@@ -194,7 +232,9 @@ async fn run_request_filter(
     }
     trace!(filter = http_filter.name(), "on_request");
     match http_filter.on_request(ctx).await {
-        Ok(FilterAction::Continue | FilterAction::Release) => Ok(RequestFilterResult::Continue),
+        Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
+            Ok(RequestFilterResult::Continue)
+        },
         Ok(FilterAction::Reject(rejection)) => {
             debug!(
                 filter = http_filter.name(),
@@ -383,6 +423,16 @@ mod tests {
         assert!(
             matches!(outcome, super::super::http_utils::BodyFilterOutcome::Rejected(r) if r.status == 403),
             "Reject action should produce Rejected outcome with correct status"
+        );
+    }
+
+    #[test]
+    fn dispatch_body_result_body_done() {
+        let outcome =
+            dispatch_body_result(Ok(FilterAction::BodyDone), "test", "request body", FailureMode::Closed).unwrap();
+        assert!(
+            matches!(outcome, super::super::http_utils::BodyFilterOutcome::BodyDone),
+            "BodyDone action should produce BodyDone outcome"
         );
     }
 

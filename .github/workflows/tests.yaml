@@ -1,4 +1,4 @@
-name: Tests
+name: Tests (Unit)
 
 # ------------------------------------------------------------------------------
 # Workflow Settings
@@ -97,15 +97,3 @@ jobs:
 
       - name: Unit tests
         run: make test-unit
-
-      - name: Schema tests
-        run: make test-schema
-
-      - name: Security tests
-        run: make test-security
-
-      - name: Resilience tests
-        run: make test-resilience
-
-      - name: Integration tests
-        run: make test-integration

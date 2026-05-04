@@ -110,7 +110,7 @@ pub(super) async fn execute(
     ctx.upstream = upstream;
 
     match result {
-        Ok(FilterAction::Continue) => {
+        Ok(FilterAction::Continue | FilterAction::BodyDone) => {
             if is_stream_buffer && !ctx.request_body_released && !end_of_stream {
                 *body = None;
             }

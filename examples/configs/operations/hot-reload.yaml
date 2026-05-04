@@ -1,0 +1,61 @@
+# Hot Reload
+#
+# Filter pipelines are swapped atomically at runtime when the
+# config file changes. In-flight requests complete on the old
+# pipeline; new requests pick up the updated config.
+#
+# Try it:
+#
+#   1. Start the proxy:
+#      cargo run -p praxis -- -c examples/configs/operations/hot-reload.yaml
+#
+#   2. Send a request:
+#      curl http://localhost:8080/api/hello
+#
+#   3. Edit this file (e.g. change the static_response body)
+#      and save. The next request reflects the change.
+#
+# What reloads dynamically:
+#   - Filter pipeline configuration
+#   - Router routes and path mappings
+#   - Load balancer endpoints and weights
+#   - Rate limit and circuit breaker settings
+#   - Health check configuration
+#
+# What requires a restart:
+#   - Listener add/remove/rebind
+#   - Protocol changes (HTTP to TCP)
+#   - Compression module addition
+#   - TLS enable/disable
+
+listeners:
+  - name: gateway
+    address: "0.0.0.0:8080"
+    filter_chains:
+      - routing
+      - api
+
+filter_chains:
+  - name: routing
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/api/"
+            cluster: backend
+          - path_prefix: "/health"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+              - "127.0.0.1:3001"
+
+  - name: api
+    filters:
+      - filter: request_id
+      - filter: static_response
+        status: 200
+        body: '{"message": "hello from praxis"}'
+        headers:
+          content-type: "application/json"

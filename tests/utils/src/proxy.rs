@@ -3,8 +3,9 @@
 
 //! Proxy startup and configuration test utilities for integration tests.
 
-use std::{collections::HashMap, fmt, sync::Arc, thread::JoinHandle, time::Duration};
+use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc, thread::JoinHandle, time::Duration};
 
+use arc_swap::ArcSwap;
 use pingora_core::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
 use praxis_core::{
     config::{Config, Listener},
@@ -150,7 +151,7 @@ fn build_pingora_server(config: &Config, registry: &FilterRegistry) -> pingora_c
 
     let mut cert_shutdowns = Vec::new();
     for listener in &config.listeners {
-        let pipeline = resolve_listener_pipeline(config, listener, registry);
+        let pipeline = Arc::new(ArcSwap::from(resolve_listener_pipeline(config, listener, registry)));
         load_http_handler(&mut server, listener, pipeline, &mut cert_shutdowns).unwrap();
     }
     drop(cert_shutdowns);
@@ -228,8 +229,99 @@ pub fn start_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> 
 /// Start a full proxy server (HTTP + TCP protocols) in a background thread.
 pub fn start_full_proxy(config: Config) {
     std::thread::spawn(move || {
-        praxis::run_server(config);
+        praxis::run_server(config, None);
     });
+}
+
+// -----------------------------------------------------------------------------
+// Reloadable Proxy Guard
+// -----------------------------------------------------------------------------
+
+/// RAII guard for a proxy server with hot reload enabled.
+///
+/// Holds the temp config file so the watcher can detect
+/// changes. The server thread runs until the process exits
+/// (no clean shutdown; tests rely on process teardown).
+pub struct ReloadableProxyGuard {
+    /// The address the proxy is listening on.
+    addr: String,
+
+    /// Path to the config file (for mutation by tests).
+    config_path: PathBuf,
+
+    /// Keeps the temp file alive for the server's lifetime.
+    _temp_file: tempfile::NamedTempFile,
+}
+
+impl ReloadableProxyGuard {
+    /// The proxy's listen address.
+    pub fn addr(&self) -> &str {
+        &self.addr
+    }
+
+    /// Path to the config file for in-test mutation.
+    pub fn config_path(&self) -> &std::path::Path {
+        &self.config_path
+    }
+
+    /// Rewrite the config file with new YAML content.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the file cannot be written.
+    pub fn write_config(&self, yaml: &str) {
+        std::fs::write(&self.config_path, yaml).expect("failed to write config file");
+    }
+
+    /// Rewrite config and wait for the debounce window.
+    pub fn reload(&self, yaml: &str) {
+        self.write_config(yaml);
+        std::thread::sleep(RELOAD_SETTLE);
+    }
+}
+
+/// Time to wait after writing a config file for the watcher
+/// to debounce (500ms) and apply the reload.
+const RELOAD_SETTLE: Duration = Duration::from_millis(1500);
+
+/// Start a proxy with hot reload enabled by writing config
+/// to a temp file and passing the path to the server.
+///
+/// Returns a guard with the listen address and config path.
+/// Use [`ReloadableProxyGuard::reload`] to mutate the config
+/// and wait for the change to take effect.
+///
+/// # Panics
+///
+/// Panics if the config cannot be parsed or the server fails
+/// to start.
+///
+/// [`ReloadableProxyGuard::reload`]: ReloadableProxyGuard::reload
+pub fn start_reloadable_proxy(yaml: &str) -> ReloadableProxyGuard {
+    let config = Config::from_yaml(yaml).expect("test config should parse");
+    let addr = config
+        .listeners
+        .first()
+        .expect("config must have at least one listener")
+        .address
+        .clone();
+
+    let mut temp_file = tempfile::NamedTempFile::new().expect("failed to create temp config file");
+    std::io::Write::write_all(&mut temp_file, yaml.as_bytes()).expect("failed to write temp config");
+    let config_path = temp_file.path().to_path_buf();
+
+    let path_for_server = config_path.clone();
+    std::thread::spawn(move || {
+        praxis::run_server(config, Some(path_for_server));
+    });
+
+    crate::net::wait::wait_for_http(&addr);
+
+    ReloadableProxyGuard {
+        addr,
+        config_path,
+        _temp_file: temp_file,
+    }
 }
 
 /// Start an HTTP proxy with a TLS listener, waiting for HTTPS readiness before returning.

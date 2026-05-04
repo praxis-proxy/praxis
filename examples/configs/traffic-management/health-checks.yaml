@@ -33,6 +33,8 @@ clusters:
       timeout_ms: 2000
       healthy_threshold: 2
       unhealthy_threshold: 3
+      passive_unhealthy_threshold: 5
+      passive_healthy_threshold: 3
 
   - name: database
     endpoints:

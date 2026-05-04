@@ -10,6 +10,13 @@ use praxis_test_utils::{
     wait_for_tcp,
 };
 
+/// Wrap a pipeline [`Arc`] in [`ArcSwap`] for handler registration.
+fn swappable(
+    pipeline: std::sync::Arc<praxis_filter::FilterPipeline>,
+) -> std::sync::Arc<arc_swap::ArcSwap<praxis_filter::FilterPipeline>> {
+    std::sync::Arc::new(arc_swap::ArcSwap::from(pipeline))
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -53,7 +60,7 @@ filter_chains:
     let pipeline = std::sync::Arc::new(build_pipeline(&config));
     let mut server = praxis_core::server::build_http_server(config.shutdown_timeout_secs, &Default::default());
     for listener in &config.listeners {
-        load_http_handler(&mut server, listener, pipeline.clone(), &mut Vec::new()).unwrap();
+        load_http_handler(&mut server, listener, swappable(pipeline.clone()), &mut Vec::new()).unwrap();
     }
     let server = server;
     std::thread::spawn(move || {

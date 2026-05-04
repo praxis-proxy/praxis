@@ -83,6 +83,9 @@ pub(super) fn as_response_body_filter<'a>(
 /// Outcome of a single body filter invocation.
 #[derive(Debug)]
 pub(super) enum BodyFilterOutcome {
+    /// Filter completed body inspection; skip on remaining chunks.
+    BodyDone,
+
     /// Filter passed; continue to next.
     Continue,
 
@@ -116,6 +119,10 @@ pub(super) fn dispatch_body_result(
                 "filter rejected {phase}"
             );
             Ok(BodyFilterOutcome::Rejected(rejection))
+        },
+        Ok(FilterAction::BodyDone) => {
+            debug!(filter = filter_name, "filter signaled body done");
+            Ok(BodyFilterOutcome::BodyDone)
         },
         Err(e) => {
             check_failure_mode(filter_name, e, phase, failure_mode)?;
@@ -152,7 +159,7 @@ pub(super) async fn run_response_filter(
 ) -> Result<Option<Rejection>, FilterError> {
     let pre_len = ctx.response_header.as_ref().map_or(0, |r| r.headers.len());
     match http_filter.on_response(ctx).await {
-        Ok(FilterAction::Continue | FilterAction::Release) => {
+        Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
             if !ctx.response_headers_modified {
                 let post_len = ctx.response_header.as_ref().map_or(0, |r| r.headers.len());
                 if pre_len != post_len {

@@ -134,13 +134,17 @@ impl HttpFilter for LoadBalancerFilter {
         let health = Self::cluster_health(ctx.health_registry, cluster_name);
 
         if let Some(h) = health
-            && h.iter().all(|ep| !ep.is_healthy())
+            && h.endpoints().iter().all(|ep| !ep.is_healthy())
         {
             warn!(cluster = %cluster_name, "all endpoints unhealthy, routing to all (panic mode)");
         }
 
         let addr = entry.strategy.select(ctx, health);
         debug!(cluster = %cluster_name, upstream = %addr, "upstream selected");
+
+        if let Some(h) = health {
+            ctx.selected_endpoint_index = h.endpoint_index(&addr);
+        }
 
         ctx.upstream = Some(entry.build_upstream(addr, ctx));
 

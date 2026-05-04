@@ -206,7 +206,8 @@ fn aggregate_health(registry: &HealthRegistry, verbose: bool) -> HealthAggregate
     };
     let mut first = true;
     for (name, state) in registry.iter() {
-        let h = state.iter().filter(|ep| ep.is_healthy()).count();
+        let eps = state.endpoints();
+        let h = eps.iter().filter(|ep| ep.is_healthy()).count();
         agg.total += 1;
         if h == 0 {
             agg.any_down = true;
@@ -214,7 +215,7 @@ fn aggregate_health(registry: &HealthRegistry, verbose: bool) -> HealthAggregate
         } else {
             agg.healthy += 1;
         }
-        append_verbose_detail(&mut agg.verbose_detail, &mut first, name, h, state.len());
+        append_verbose_detail(&mut agg.verbose_detail, &mut first, name, h, eps.len());
     }
     if let Some(ref mut vj) = agg.verbose_detail {
         vj.push('}');
@@ -259,7 +260,7 @@ fn format_ready_body(status_str: &str, agg: &HealthAggregate) -> String {
 mod tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use praxis_core::health::EndpointHealth;
+    use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
     use super::*;
 
@@ -313,10 +314,7 @@ mod tests {
     #[test]
     fn ready_all_healthy_returns_200_aggregate() {
         let mut map = HashMap::new();
-        map.insert(
-            Arc::from("backend"),
-            Arc::new(vec![EndpointHealth::new(), EndpointHealth::new()]),
-        );
+        map.insert(Arc::from("backend"), make_health_entry(2));
         let registry: HealthRegistry = Arc::new(map);
         let svc = PingoraHealthService::new(Some(registry), false);
         let (status, body) = svc.ready_response();
@@ -336,10 +334,7 @@ mod tests {
     #[test]
     fn ready_all_healthy_verbose_returns_detail() {
         let mut map = HashMap::new();
-        map.insert(
-            Arc::from("backend"),
-            Arc::new(vec![EndpointHealth::new(), EndpointHealth::new()]),
-        );
+        map.insert(Arc::from("backend"), make_health_entry(2));
         let registry: HealthRegistry = Arc::new(map);
         let svc = PingoraHealthService::new(Some(registry), true);
         let (status, body) = svc.ready_response();
@@ -353,9 +348,9 @@ mod tests {
     #[test]
     fn ready_some_unhealthy_returns_200() {
         let mut map = HashMap::new();
-        let eps = vec![EndpointHealth::new(), EndpointHealth::new()];
-        eps[1].mark_unhealthy();
-        map.insert(Arc::from("backend"), Arc::new(eps));
+        let entry = make_health_entry(2);
+        entry.endpoints()[1].mark_unhealthy();
+        map.insert(Arc::from("backend"), entry);
         let registry: HealthRegistry = Arc::new(map);
         let svc = PingoraHealthService::new(Some(registry), false);
         let (status, body) = svc.ready_response();
@@ -373,9 +368,9 @@ mod tests {
     #[test]
     fn ready_all_unhealthy_returns_503() {
         let mut map = HashMap::new();
-        let eps = vec![EndpointHealth::new()];
-        eps[0].mark_unhealthy();
-        map.insert(Arc::from("backend"), Arc::new(eps));
+        let entry = make_health_entry(1);
+        entry.endpoints()[0].mark_unhealthy();
+        map.insert(Arc::from("backend"), entry);
         let registry: HealthRegistry = Arc::new(map);
         let svc = PingoraHealthService::new(Some(registry), false);
         let (status, body) = svc.ready_response();
@@ -391,10 +386,10 @@ mod tests {
     #[test]
     fn ready_multiple_clusters_one_down_returns_503() {
         let mut map = HashMap::new();
-        map.insert(Arc::from("good"), Arc::new(vec![EndpointHealth::new()]));
-        let bad = vec![EndpointHealth::new()];
-        bad[0].mark_unhealthy();
-        map.insert(Arc::from("bad"), Arc::new(bad));
+        map.insert(Arc::from("good"), make_health_entry(1));
+        let bad = make_health_entry(1);
+        bad.endpoints()[0].mark_unhealthy();
+        map.insert(Arc::from("bad"), bad);
         let registry: HealthRegistry = Arc::new(map);
         let svc = PingoraHealthService::new(Some(registry), false);
         let (status, body) = svc.ready_response();
@@ -413,7 +408,7 @@ mod tests {
     #[test]
     fn ready_verbose_escapes_cluster_names_with_special_chars() {
         let mut map = HashMap::new();
-        map.insert(Arc::from(r#"back"end"#), Arc::new(vec![EndpointHealth::new()]));
+        map.insert(Arc::from(r#"back"end"#), make_health_entry(1));
         let registry: HealthRegistry = Arc::new(map);
         let svc = PingoraHealthService::new(Some(registry), true);
         let (_status, body) = svc.ready_response();
@@ -462,5 +457,16 @@ mod tests {
             "simple",
             "plain string should pass through"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// Build a [`ClusterHealthState`] with `n` healthy endpoints for tests.
+    fn make_health_entry(n: usize) -> praxis_core::health::ClusterHealthState {
+        let eps: Vec<EndpointHealth> = (0..n).map(|_| EndpointHealth::new()).collect();
+        let addrs: Vec<Arc<str>> = (0..n).map(|i| Arc::from(format!("10.0.0.{i}:80"))).collect();
+        Arc::new(ClusterHealthEntry::new(eps, addrs, None, None))
     }
 }

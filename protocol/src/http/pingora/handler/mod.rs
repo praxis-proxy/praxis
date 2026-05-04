@@ -5,6 +5,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use arc_swap::ArcSwap;
 use pingora_core::{Result, apps::HttpServerOptions, server::Server, services::listening::Service};
 use pingora_proxy::{Session, http_proxy};
 use praxis_filter::{CompressionConfig, FilterPipeline};
@@ -96,7 +97,7 @@ const MAX_RETRIES: usize = 3;
 pub fn load_http_handler(
     server: &mut Server,
     listener: &praxis_core::config::Listener,
-    pipeline: Arc<FilterPipeline>,
+    pipeline: Arc<ArcSwap<FilterPipeline>>,
     cert_watcher_shutdowns: &mut Vec<tokio::sync::watch::Sender<bool>>,
 ) -> Result<(), praxis_core::ProxyError> {
     let downstream_read_timeout = listener.downstream_read_timeout_ms.map(Duration::from_millis);
@@ -104,15 +105,11 @@ pub fn load_http_handler(
         .max_connections
         .map(|max| Arc::new(Semaphore::new(max as usize)));
 
-    if pipeline.needs_body_filters() {
-        debug!(listener = %listener.name, "loading HTTP handler with body filters");
-        let handler = PingoraHttpHandler::new(pipeline, downstream_read_timeout, connection_semaphore);
-        wire_service(server, listener, handler, cert_watcher_shutdowns)?;
-    } else {
-        debug!(listener = %listener.name, "loading HTTP handler (no body filters)");
-        let handler = PingoraHttpHandlerNoBody::new(pipeline, downstream_read_timeout, connection_semaphore);
-        wire_service(server, listener, handler, cert_watcher_shutdowns)?;
-    }
+    // Always use the body-capable handler: a reload may add body
+    // filters, and compression init is one-shot in Pingora.
+    debug!(listener = %listener.name, "loading HTTP handler with body filters");
+    let handler = PingoraHttpHandler::new(pipeline, downstream_read_timeout, connection_semaphore);
+    wire_service(server, listener, handler, cert_watcher_shutdowns)?;
     Ok(())
 }
 
@@ -210,6 +207,68 @@ async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx)
         && let Some(mut filter_ctx) = ctx.filter_context_for(pipeline, None)
     {
         let _result = pipeline.execute_http_response(&mut filter_ctx).await;
+    }
+}
+
+/// Record a passive health observation for the selected upstream endpoint.
+///
+/// Called from the `logging` hook on every completed request. Determines
+/// success/failure from the error argument and the stashed upstream
+/// response status code.
+///
+/// No-op when no upstream was selected, no health registry is available,
+/// or passive checking is not configured for the cluster.
+fn record_passive_health(pipeline: &FilterPipeline, error: Option<&pingora_core::Error>, ctx: &PingoraRequestCtx) {
+    let Some(ref cluster_name) = ctx.cluster else {
+        return;
+    };
+    let Some(idx) = ctx.selected_endpoint_index else {
+        return;
+    };
+    let Some(registry) = pipeline.health_registry() else {
+        return;
+    };
+    let Some(health) = registry.get(cluster_name) else {
+        return;
+    };
+
+    let is_failure = error.is_some() || ctx.upstream_response_status.is_some_and(|s| s >= 500);
+    apply_passive_threshold(health, idx, cluster_name, is_failure);
+}
+
+/// Apply passive health threshold for a single endpoint observation.
+fn apply_passive_threshold(
+    health: &praxis_core::health::ClusterHealthEntry,
+    idx: usize,
+    cluster_name: &Arc<str>,
+    is_failure: bool,
+) {
+    if is_failure {
+        if let Some(threshold) = health.passive_unhealthy_threshold()
+            && health
+                .endpoints()
+                .get(idx)
+                .is_some_and(|ep| ep.record_failure(threshold))
+        {
+            tracing::warn!(
+                cluster = %cluster_name,
+                endpoint_index = idx,
+                threshold,
+                "passive health: endpoint marked unhealthy"
+            );
+        }
+    } else if let Some(threshold) = health.passive_healthy_threshold()
+        && health
+            .endpoints()
+            .get(idx)
+            .is_some_and(|ep| ep.record_success(threshold))
+    {
+        tracing::info!(
+            cluster = %cluster_name,
+            endpoint_index = idx,
+            threshold,
+            "passive health: endpoint recovered"
+        );
     }
 }
 
@@ -324,6 +383,148 @@ mod tests {
         assert!(ctx.upstream.is_none(), "upstream should be taken by logging_cleanup");
     }
 
+    #[test]
+    fn passive_health_error_is_failure() {
+        let (pipeline, ctx) = make_passive_scenario(Some(3), Some(2));
+        let error = make_error();
+        record_passive_health(&pipeline, Some(&error), &ctx);
+
+        let registry = pipeline.health_registry().unwrap();
+        let entry = registry.get("test-cluster").unwrap();
+        assert!(
+            entry.endpoints()[0].is_healthy(),
+            "single failure should not yet mark unhealthy (threshold=3)"
+        );
+    }
+
+    #[test]
+    fn passive_health_status_500_is_failure() {
+        let (pipeline, mut ctx) = make_passive_scenario(Some(3), Some(2));
+        ctx.upstream_response_status = Some(500);
+        record_passive_health(&pipeline, None, &ctx);
+
+        let registry = pipeline.health_registry().unwrap();
+        let entry = registry.get("test-cluster").unwrap();
+        assert!(
+            entry.endpoints()[0].is_healthy(),
+            "single 500 should not yet mark unhealthy (threshold=3)"
+        );
+    }
+
+    #[test]
+    fn passive_health_status_below_500_is_success() {
+        let (pipeline, mut ctx) = make_passive_scenario(Some(2), Some(1));
+        ctx.upstream_response_status = Some(499);
+        record_passive_health(&pipeline, None, &ctx);
+
+        let registry = pipeline.health_registry().unwrap();
+        let entry = registry.get("test-cluster").unwrap();
+        assert!(entry.endpoints()[0].is_healthy(), "status 499 should count as success");
+    }
+
+    #[test]
+    fn passive_unhealthy_threshold_transition() {
+        let (pipeline, ctx) = make_passive_scenario(Some(2), Some(1));
+        let error = make_error();
+        record_passive_health(&pipeline, Some(&error), &ctx);
+        record_passive_health(&pipeline, Some(&error), &ctx);
+
+        let registry = pipeline.health_registry().unwrap();
+        let entry = registry.get("test-cluster").unwrap();
+        assert!(
+            !entry.endpoints()[0].is_healthy(),
+            "2 consecutive failures should mark unhealthy (threshold=2)"
+        );
+    }
+
+    #[test]
+    fn passive_healthy_threshold_recovery() {
+        let (pipeline, ctx) = make_passive_scenario(Some(1), Some(2));
+        let error = make_error();
+        record_passive_health(&pipeline, Some(&error), &ctx);
+
+        let registry = pipeline.health_registry().unwrap();
+        let entry = registry.get("test-cluster").unwrap();
+        assert!(
+            !entry.endpoints()[0].is_healthy(),
+            "should be unhealthy after 1 failure"
+        );
+
+        let ctx_ok = make_passive_ctx("test-cluster", 0, Some(200));
+        record_passive_health(&pipeline, None, &ctx_ok);
+        assert!(
+            !entry.endpoints()[0].is_healthy(),
+            "one success should not recover (threshold=2)"
+        );
+
+        record_passive_health(&pipeline, None, &ctx_ok);
+        assert!(
+            entry.endpoints()[0].is_healthy(),
+            "2 consecutive successes should recover (threshold=2)"
+        );
+    }
+
+    #[test]
+    fn passive_health_no_thresholds_is_noop() {
+        let (pipeline, ctx) = make_passive_scenario(None, None);
+        let error = make_error();
+        record_passive_health(&pipeline, Some(&error), &ctx);
+
+        let registry = pipeline.health_registry().unwrap();
+        let entry = registry.get("test-cluster").unwrap();
+        assert!(
+            entry.endpoints()[0].is_healthy(),
+            "no passive thresholds means failures are no-op"
+        );
+    }
+
+    #[test]
+    fn passive_health_endpoint_index_out_of_bounds() {
+        let (pipeline, mut ctx) = make_passive_scenario(Some(1), Some(1));
+        ctx.selected_endpoint_index = Some(999);
+        let error = make_error();
+        record_passive_health(&pipeline, Some(&error), &ctx);
+
+        let registry = pipeline.health_registry().unwrap();
+        let entry = registry.get("test-cluster").unwrap();
+        assert!(entry.endpoints()[0].is_healthy(), "out-of-bounds index should be no-op");
+    }
+
+    #[test]
+    fn passive_health_missing_cluster_is_noop() {
+        let (pipeline, mut ctx) = make_passive_scenario(Some(1), Some(1));
+        ctx.cluster = None;
+        let error = make_error();
+        record_passive_health(&pipeline, Some(&error), &ctx);
+    }
+
+    #[test]
+    fn passive_health_missing_endpoint_index_is_noop() {
+        let (pipeline, mut ctx) = make_passive_scenario(Some(1), Some(1));
+        ctx.selected_endpoint_index = None;
+        let error = make_error();
+        record_passive_health(&pipeline, Some(&error), &ctx);
+    }
+
+    #[test]
+    fn passive_health_missing_registry_is_noop() {
+        let registry = praxis_filter::FilterRegistry::with_builtins();
+        let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.cluster = Some(Arc::from("test-cluster"));
+        ctx.selected_endpoint_index = Some(0);
+        let error = make_error();
+        record_passive_health(&pipeline, Some(&error), &ctx);
+    }
+
+    #[test]
+    fn passive_health_unknown_cluster_is_noop() {
+        let (pipeline, mut ctx) = make_passive_scenario(Some(1), Some(1));
+        ctx.cluster = Some(Arc::from("nonexistent"));
+        let error = make_error();
+        record_passive_health(&pipeline, Some(&error), &ctx);
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -331,5 +532,43 @@ mod tests {
     /// Create a connect error for tests.
     fn make_error() -> Box<pingora_core::Error> {
         pingora_core::Error::explain(pingora_core::ErrorType::ConnectError, "test connect failure")
+    }
+
+    /// Build a [`PingoraRequestCtx`] for passive health testing.
+    fn make_passive_ctx(cluster: &str, endpoint_idx: usize, status: Option<u16>) -> PingoraRequestCtx {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.cluster = Some(Arc::from(cluster));
+        ctx.selected_endpoint_index = Some(endpoint_idx);
+        ctx.upstream_response_status = status;
+        ctx
+    }
+
+    /// Build a pipeline with a health registry and a matching context
+    /// for passive health testing.
+    fn make_passive_scenario(
+        passive_unhealthy: Option<u32>,
+        passive_healthy: Option<u32>,
+    ) -> (FilterPipeline, PingoraRequestCtx) {
+        use std::collections::HashMap;
+
+        use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
+
+        let entry = ClusterHealthEntry::new(
+            vec![EndpointHealth::new()],
+            vec![Arc::from("10.0.0.1:80")],
+            passive_unhealthy,
+            passive_healthy,
+        );
+        let mut map = HashMap::new();
+        map.insert(Arc::from("test-cluster"), Arc::new(entry));
+        let health_registry = Arc::new(map);
+
+        let registry = praxis_filter::FilterRegistry::with_builtins();
+        let mut pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+        pipeline.set_health_registry(health_registry);
+
+        let ctx = make_passive_ctx("test-cluster", 0, None);
+
+        (pipeline, ctx)
     }
 }

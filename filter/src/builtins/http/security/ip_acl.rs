@@ -6,12 +6,11 @@
 use std::net::IpAddr;
 
 use async_trait::async_trait;
-use praxis_core::connectivity::CidrRange;
+use praxis_core::connectivity::{CidrRange, normalize_mapped_ipv4};
 use serde::Deserialize;
 
 use crate::{
     FilterAction, FilterError, Rejection,
-    builtins::http::net::normalize_mapped_ipv4,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };

@@ -3,6 +3,8 @@
 
 //! Pingora HTTP integration: handler, listener setup, health endpoints.
 
+use std::sync::Arc;
+
 use praxis_core::{
     PingoraServerRuntime, ProxyError,
     config::{Config, ProtocolKind},
@@ -47,7 +49,7 @@ impl Protocol for PingoraHttp {
 
         let mut cert_watcher_shutdowns = Vec::new();
         for listener in &http_listeners {
-            let pipeline = pipelines.get(&listener.name).cloned().ok_or_else(|| {
+            let pipeline = pipelines.get(&listener.name).map(Arc::clone).ok_or_else(|| {
                 ProxyError::Config(format!("no pipeline for listener '{name}'", name = listener.name))
             })?;
 

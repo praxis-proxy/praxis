@@ -26,6 +26,7 @@ page.
 | [path-based-routing.yaml](configs/traffic-management/path-based-routing.yaml) | Route by URL path prefix to separate clusters |
 | [hosts.yaml](configs/traffic-management/hosts.yaml) | Route by Host header; one listener, multiple domains |
 | [canary-routing.yaml](configs/traffic-management/canary-routing.yaml) | Weighted traffic split for canary deployments |
+| [circuit-breaker.yaml](configs/traffic-management/circuit-breaker.yaml) | Per-cluster circuit breaker with closed/open/half-open states |
 | [round-robin.yaml](configs/traffic-management/round-robin.yaml) | Default strategy: even distribution across backends |
 | [weighted-load-balancing.yaml](configs/traffic-management/weighted-load-balancing.yaml) | Proportional traffic split via per-endpoint weights |
 | [least-connections.yaml](configs/traffic-management/least-connections.yaml) | Route to backend with fewest in-flight requests |
@@ -35,6 +36,7 @@ page.
 | [rate-limiting.yaml](configs/traffic-management/rate-limiting.yaml) | Token bucket rate limiter with per-IP and global modes |
 | [static-response.yaml](configs/traffic-management/static-response.yaml) | Fixed response without upstream |
 | [redirect.yaml](configs/traffic-management/redirect.yaml) | 3xx redirects with path/query template substitution |
+| [hostname-upstream.yaml](configs/traffic-management/hostname-upstream.yaml) | Resolve hostname upstream endpoints such as `localhost:9000` |
 
 ### Payload Processing
 
@@ -116,6 +118,7 @@ page.
 
 | File | Description |
 | ------ | ------------- |
+| [credential-injection.yaml](configs/ai/credential-injection.yaml) | Inject per-cluster API credentials and strip client tokens |
 | [model-to-header-routing.yaml](configs/ai/model-to-header-routing.yaml) | Route by model field in JSON body via X-Model header |
 
 ### Branching
@@ -137,6 +140,7 @@ page.
 | ------ | ------------- |
 | [production-gateway.yaml](configs/operations/production-gateway.yaml) | Full production setup with composed chains |
 | [multi-listener.yaml](configs/operations/multi-listener.yaml) | Multiple listeners sharing a filter chain |
+| [hot-reload.yaml](configs/operations/hot-reload.yaml) | Dynamic config reload without restart |
 | [admin-interface.yaml](configs/operations/admin-interface.yaml) | Admin interface with health endpoints |
 | [container-default.yaml](configs/operations/container-default.yaml) | Default containerized deployment with public binding |
 | [max-connections.yaml](configs/operations/max-connections.yaml) | Per-listener connection limit with 503 rejection |

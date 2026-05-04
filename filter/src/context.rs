@@ -19,6 +19,10 @@ use crate::{body::BodyMode, pipeline::body::merge_body_mode, results::FilterResu
 /// Created by the protocol layer for each incoming request. Filters read
 /// and mutate it to select clusters, choose upstreams, and inject headers.
 pub struct HttpFilterContext<'a> {
+    /// Per-filter body-done tracking. When `true` at index `i`,
+    /// filter `i` is skipped for remaining body chunks.
+    pub body_done_indices: Vec<bool>,
+
     /// Iteration counters for re-entrant branches.
     /// Branch name -> current iteration count.
     pub branch_iterations: HashMap<Arc<str>, u32>,
@@ -81,6 +85,12 @@ pub struct HttpFilterContext<'a> {
     /// Whether any filter modified the response headers during
     /// `on_response`. Used to skip unnecessary work.
     pub response_headers_modified: bool,
+
+    /// Index of the selected endpoint in the cluster's
+    /// endpoint list. Set by the load balancer filter
+    /// for use by passive health checking in the
+    /// protocol layer.
+    pub selected_endpoint_index: Option<usize>,
 
     /// Rewritten URI path for the upstream request.
     ///

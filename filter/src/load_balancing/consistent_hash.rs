@@ -65,7 +65,7 @@ impl ConsistentHash {
             for offset in 0..len {
                 let ring_idx = (start + offset) % len;
                 let ep = &self.endpoints[self.ring[ring_idx]];
-                if ep.index < state.len() && state[ep.index].is_healthy() {
+                if ep.index < state.endpoints().len() && state.endpoints()[ep.index].is_healthy() {
                     return Arc::clone(&ep.address);
                 }
             }
@@ -104,7 +104,7 @@ fn fnv1a(s: &str) -> u64 {
 mod tests {
     use std::sync::Arc;
 
-    use praxis_core::health::EndpointHealth;
+    use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
     use super::*;
 
@@ -179,12 +179,17 @@ mod tests {
             ],
             None,
         );
-        let state: ClusterHealthState = Arc::new(vec![
-            EndpointHealth::new(),
-            EndpointHealth::new(),
-            EndpointHealth::new(),
-        ]);
-        state[1].mark_unhealthy();
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new(), EndpointHealth::new(), EndpointHealth::new()],
+            vec![
+                Arc::from("10.0.0.1:80"),
+                Arc::from("10.0.0.2:80"),
+                Arc::from("10.0.0.3:80"),
+            ],
+            None,
+            None,
+        ));
+        state.endpoints()[1].mark_unhealthy();
 
         let paths = ["/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h"];
         for path in &paths {
@@ -213,9 +218,14 @@ mod tests {
             ],
             None,
         );
-        let state: ClusterHealthState = Arc::new(vec![EndpointHealth::new(), EndpointHealth::new()]);
-        state[0].mark_unhealthy();
-        state[1].mark_unhealthy();
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new(), EndpointHealth::new()],
+            vec![Arc::from("10.0.0.1:80"), Arc::from("10.0.0.2:80")],
+            None,
+            None,
+        ));
+        state.endpoints()[0].mark_unhealthy();
+        state.endpoints()[1].mark_unhealthy();
 
         let selected = ch.select(Some("/panic"), Some(&state));
         assert!(

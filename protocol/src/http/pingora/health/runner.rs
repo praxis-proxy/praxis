@@ -172,17 +172,17 @@ async fn spawn_probe(idx: usize, addr: String, params: &HealthCheckParams) -> (u
 /// Record a probe result, updating health state and logging transitions.
 #[allow(clippy::indexing_slicing, reason = "bounds checked")]
 fn record_probe_result(params: &HealthCheckParams, idx: usize, addr: &str, success: bool) {
-    if idx >= params.state.len() {
+    if idx >= params.state.endpoints().len() {
         return;
     }
     if success {
         trace!(cluster = %params.cluster_name, endpoint = %addr, "probe succeeded");
-        if params.state[idx].record_success(params.healthy_threshold) {
+        if params.state.endpoints()[idx].record_success(params.healthy_threshold) {
             info!(cluster = %params.cluster_name, endpoint = %addr, "endpoint transitioned to healthy");
         }
     } else {
         trace!(cluster = %params.cluster_name, endpoint = %addr, "probe failed");
-        if params.state[idx].record_failure(params.unhealthy_threshold) {
+        if params.state.endpoints()[idx].record_failure(params.unhealthy_threshold) {
             info!(cluster = %params.cluster_name, endpoint = %addr, "endpoint transitioned to unhealthy");
         }
     }
@@ -197,19 +197,27 @@ fn record_probe_result(params: &HealthCheckParams, idx: usize, addr: &str, succe
 mod tests {
     use std::sync::Arc;
 
-    use praxis_core::health::EndpointHealth;
+    use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
     use tokio::net::TcpListener;
 
     use super::*;
 
     #[tokio::test]
     async fn probe_all_marks_unreachable_unhealthy() {
-        let state: ClusterHealthState = Arc::new(vec![EndpointHealth::new()]);
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new()],
+            vec![Arc::from("placeholder:80")],
+            None,
+            None,
+        ));
         let params = test_params(vec!["127.0.0.1:1".to_owned()], Arc::clone(&state), (1, 1));
 
         probe_all_endpoints(&params).await;
 
-        assert!(!state[0].is_healthy(), "unreachable endpoint should become unhealthy");
+        assert!(
+            !state.endpoints()[0].is_healthy(),
+            "unreachable endpoint should become unhealthy"
+        );
     }
 
     #[tokio::test]
@@ -217,8 +225,13 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap().to_string();
 
-        let state: ClusterHealthState = Arc::new(vec![EndpointHealth::new()]);
-        state[0].mark_unhealthy();
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new()],
+            vec![Arc::from("placeholder:80")],
+            None,
+            None,
+        ));
+        state.endpoints()[0].mark_unhealthy();
 
         let params = test_params(vec![addr], Arc::clone(&state), (1, 1));
 
@@ -230,7 +243,10 @@ mod tests {
 
         let (_socket, _peer) = listener.accept().await.unwrap();
         probe.await.unwrap();
-        assert!(state[0].is_healthy(), "reachable endpoint should become healthy");
+        assert!(
+            state.endpoints()[0].is_healthy(),
+            "reachable endpoint should become healthy"
+        );
     }
 
     #[tokio::test]
@@ -242,24 +258,29 @@ mod tests {
 
     #[tokio::test]
     async fn threshold_requires_multiple_failures() {
-        let state: ClusterHealthState = Arc::new(vec![EndpointHealth::new()]);
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new()],
+            vec![Arc::from("placeholder:80")],
+            None,
+            None,
+        ));
         let params = test_params(vec!["127.0.0.1:1".to_owned()], Arc::clone(&state), (1, 3));
 
         probe_all_endpoints(&params).await;
         assert!(
-            state[0].is_healthy(),
+            state.endpoints()[0].is_healthy(),
             "one failure with threshold 3 should stay healthy"
         );
 
         probe_all_endpoints(&params).await;
         assert!(
-            state[0].is_healthy(),
+            state.endpoints()[0].is_healthy(),
             "two failures with threshold 3 should stay healthy"
         );
 
         probe_all_endpoints(&params).await;
         assert!(
-            !state[0].is_healthy(),
+            !state.endpoints()[0].is_healthy(),
             "three failures with threshold 3 should mark unhealthy"
         );
     }

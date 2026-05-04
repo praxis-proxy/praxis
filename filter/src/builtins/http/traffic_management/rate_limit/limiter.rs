@@ -6,12 +6,13 @@
 use std::net::IpAddr;
 
 use dashmap::DashMap;
+use praxis_core::connectivity::normalize_mapped_ipv4;
 
 use super::{
     EVICTION_SCAN_LIMIT, HEADER_RATELIMIT_LIMIT, HEADER_RATELIMIT_REMAINING, HEADER_RATELIMIT_RESET,
     MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState,
 };
-use crate::builtins::http::{net::normalize_mapped_ipv4, traffic_management::token_bucket::TokenBucket};
+use crate::builtins::http::traffic_management::token_bucket::TokenBucket;
 
 // -----------------------------------------------------------------------------
 // Token Acquisition

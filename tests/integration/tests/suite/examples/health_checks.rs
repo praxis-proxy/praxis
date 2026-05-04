@@ -43,6 +43,16 @@ fn health_checks_config_parses() {
     assert_eq!(hc.timeout_ms, 2000, "timeout should be 2000");
     assert_eq!(hc.healthy_threshold, 2, "healthy threshold should be 2");
     assert_eq!(hc.unhealthy_threshold, 3, "unhealthy threshold should be 3");
+    assert_eq!(
+        hc.passive_unhealthy_threshold,
+        Some(5),
+        "passive_unhealthy_threshold should be 5"
+    );
+    assert_eq!(
+        hc.passive_healthy_threshold,
+        Some(3),
+        "passive_healthy_threshold should be 3"
+    );
 
     let database = config
         .clusters

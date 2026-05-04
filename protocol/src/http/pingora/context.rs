@@ -104,6 +104,10 @@ pub struct PingoraRequestCtx {
     /// Whether the response body has been released (`StreamBuffer` mode).
     pub response_body_released: bool,
 
+    /// Upstream response status code, captured during `response_filter`
+    /// for passive health recording in the `logging` hook.
+    pub upstream_response_status: Option<u16>,
+
     /// Whether the response phase has been executed. Used to ensure
     /// cleanup (e.g. least-connections counter release) in the
     /// `logging()` hook when errors bypass `response_filter`.
@@ -111,6 +115,11 @@ pub struct PingoraRequestCtx {
 
     /// Number of upstream connection retries attempted.
     pub retries: u32,
+
+    /// Index of the selected endpoint in the cluster's
+    /// endpoint list. Set during load balancing; used
+    /// for passive health recording in the logging hook.
+    pub selected_endpoint_index: Option<usize>,
 
     /// Rewritten URI path for the upstream request.
     ///
@@ -139,6 +148,7 @@ pub struct PingoraRequestCtx {
 macro_rules! filter_context {
     ($ctx:expr, $pipeline:expr, $request:expr, $response_header:expr) => {
         praxis_filter::HttpFilterContext {
+            body_done_indices: Vec::new(),
             branch_iterations: std::collections::HashMap::new(),
             client_addr: $ctx.client_addr,
             cluster: $ctx.cluster.take(),
@@ -155,6 +165,7 @@ macro_rules! filter_context {
             response_header: $response_header,
             response_headers_modified: false,
             rewritten_path: $ctx.rewritten_path.take(),
+            selected_endpoint_index: $ctx.selected_endpoint_index,
             upstream: $ctx.upstream.take(),
         }
     };
@@ -249,9 +260,11 @@ impl Default for PingoraRequestCtx {
             response_body_bytes: 0,
             response_body_mode: BodyMode::Stream,
             response_body_released: false,
+            upstream_response_status: None,
             response_phase_done: false,
             retries: 0,
             rewritten_path: None,
+            selected_endpoint_index: None,
             upstream: None,
             upstream_for_retry: None,
         }

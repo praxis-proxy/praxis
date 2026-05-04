@@ -5,6 +5,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use arc_swap::ArcSwap;
 use pingora_core::services::listening::Service;
 use praxis_core::{ProxyError, config::Config};
 use praxis_filter::{FilterPipeline, FilterRegistry};
@@ -39,9 +40,9 @@ impl Protocol for PingoraTcp {
     ) -> Result<Vec<watch::Sender<bool>>, ProxyError> {
         let groups = tls_setup::group_tcp_listeners(config);
         #[allow(clippy::expect_used, reason = "empty pipeline is infallible")]
-        let fallback_pipeline = Arc::new(
+        let fallback_pipeline = Arc::new(ArcSwap::from_pointee(
             FilterPipeline::build(&mut [], &FilterRegistry::with_builtins()).expect("empty pipeline is valid"),
-        );
+        ));
 
         let mut cert_watcher_shutdowns = Vec::new();
 
@@ -49,8 +50,7 @@ impl Protocol for PingoraTcp {
             let pipeline = listeners
                 .first()
                 .and_then(|l| pipelines.get(&l.name))
-                .cloned()
-                .unwrap_or_else(|| Arc::clone(&fallback_pipeline));
+                .map_or_else(|| Arc::clone(&fallback_pipeline), Arc::clone);
 
             let idle_timeout = timeout_ms.map(Duration::from_millis);
             let max_duration = max_dur_secs.map(Duration::from_secs);

@@ -65,7 +65,7 @@ fn start_tcp_proxy(proxy_port: u16, backend_port: u16) -> String {
     let yaml = tcp_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
     std::thread::spawn(move || {
-        praxis::run_server(config);
+        praxis::run_server(config, None);
     });
     let addr = format!("127.0.0.1:{proxy_port}");
     wait_for_tcp(&addr);

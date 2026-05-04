@@ -1,0 +1,35 @@
+# Circuit Breaker
+#
+# Prevents cascading failures by tracking consecutive upstream errors
+# per cluster. After the threshold is reached the circuit opens,
+# rejecting requests with 503. After the recovery window, one probe
+# request is allowed through (half-open). A successful probe closes
+# the circuit; a failed probe re-opens it.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/traffic-management/circuit-breaker.yaml
+
+listeners:
+  - name: http
+    address: "0.0.0.0:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: circuit_breaker
+        clusters:
+          - name: backend
+            consecutive_failures: 5
+            recovery_window_secs: 30
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"

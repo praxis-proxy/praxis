@@ -113,7 +113,7 @@ async fn execute_branch_filters(
             continue;
         }
         match http_filter.on_request(ctx).await {
-            Ok(FilterAction::Continue | FilterAction::Release) => {},
+            Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {},
             Ok(FilterAction::Reject(r)) => return Ok(FilterAction::Reject(r)),
             Err(e) => return Err(e),
         }

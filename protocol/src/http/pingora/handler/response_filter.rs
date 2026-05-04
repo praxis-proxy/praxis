@@ -33,6 +33,7 @@ pub(super) async fn execute(
     let mut resp = response_header_from_pingora(upstream_response);
     ctx.connection_upgraded = is_upgrade_response;
     ctx.response_phase_done = true;
+    ctx.upstream_response_status = Some(upstream_response.status.as_u16());
 
     let (result, _headers_modified) = run_response_pipeline(pipeline, ctx, &mut resp).await?;
     handle_response_result(result, upstream_response, &resp)
@@ -69,7 +70,7 @@ fn handle_response_result(
     resp: &praxis_filter::Response,
 ) -> Result<()> {
     match result {
-        Ok(FilterAction::Continue | FilterAction::Release) => {
+        Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
             write_headers_to_pingora(&resp.headers, resp.status, upstream_response);
             Ok(())
         },

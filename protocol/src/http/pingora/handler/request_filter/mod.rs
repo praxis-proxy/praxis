@@ -103,7 +103,7 @@ pub(in crate::http) async fn execute(
     }
 
     match run_pipeline(pipeline, request, ctx).await {
-        Ok((FilterAction::Continue | FilterAction::Release, extra_headers)) => {
+        Ok((FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone, extra_headers)) => {
             for (name, value) in extra_headers {
                 let _insert = session.req_header_mut().insert_header(name.into_owned(), value);
             }
@@ -133,7 +133,7 @@ async fn run_pipeline(
     request: Request,
     ctx: &mut PingoraRequestCtx,
 ) -> std::result::Result<(FilterAction, Vec<(Cow<'static, str>, String)>), FilterError> {
-    let (action, extra_headers, cluster, upstream, rewritten_path, request_body_mode) = {
+    let (action, extra_headers, cluster, upstream, rewritten_path, request_body_mode, selected_endpoint_index) = {
         let mut filter_ctx = ctx.build_filter_context(pipeline, &request, None);
 
         let action = pipeline.execute_http_request(&mut filter_ctx).await;
@@ -144,17 +144,19 @@ async fn run_pipeline(
             filter_ctx.upstream,
             filter_ctx.rewritten_path,
             filter_ctx.request_body_mode,
+            filter_ctx.selected_endpoint_index,
         )
     };
 
     ctx.request_snapshot = Some(request);
 
     match action {
-        Ok(FilterAction::Continue | FilterAction::Release) => {
+        Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
             ctx.cluster = cluster;
             ctx.upstream = upstream;
             ctx.rewritten_path = rewritten_path;
             ctx.request_body_mode = request_body_mode;
+            ctx.selected_endpoint_index = selected_endpoint_index;
             Ok((FilterAction::Continue, extra_headers))
         },
         Ok(FilterAction::Reject(rejection)) => Ok((FilterAction::Reject(rejection), Vec::new())),

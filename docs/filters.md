@@ -249,6 +249,9 @@ hooks have default implementations that pass through.
 - `Release` : forward accumulated StreamBuffer data to
   upstream; behaves as `Continue` in non-StreamBuffer
   contexts
+- `BodyDone` : signal that this filter has finished body
+  processing; subsequent body chunks skip this filter
+  while other filters continue normally
 
 ```rust
 FilterAction::Reject(Rejection::status(429)
@@ -470,6 +473,7 @@ A filter can have both `conditions` (request phase) and
 | `timeout` | Traffic Management | HTTP | `timeout_ms` (504 on exceed) |
 | `static_response` | Traffic Management | HTTP | `status` (required), `headers`, `body` |
 | `rate_limit` | Traffic Management | HTTP | `mode`, `rate`, `burst`; token bucket with per-IP and global modes |
+| `circuit_breaker` | Traffic Management | HTTP | `clusters[].consecutive_failures`, `.recovery_window_secs`; per-cluster circuit breaking |
 | `headers` | Transformation | HTTP | `request_add`, `response_add/set/remove` |
 | `request_id` | Observability | HTTP | Propagates/generates `X-Request-ID` |
 | `access_log` | Observability | HTTP | Structured JSON logging; optional `sample_rate` |
@@ -479,6 +483,7 @@ A filter can have both `conditions` (request phase) and
 | `forwarded_headers` | Security | HTTP | `trusted_proxies` (CIDR list) |
 | `guardrails` | Security | HTTP | Reject requests matching header/body string or regex rules |
 | `ip_acl` | Security | HTTP | `allow` / `deny` (CIDR lists); 403 on denial |
+| `credential_injection` | Security | HTTP | Per-cluster API key injection with client credential stripping |
 | `json_body_field` | Payload Processing | HTTP | Extract a JSON body field and promote to header |
 | `json_rpc` | Payload Processing | HTTP | Parse JSON-RPC 2.0 envelopes and extract method/id/kind for routing |
 | `compression` | Payload Processing | HTTP | Gzip, brotli, and zstd response compression |

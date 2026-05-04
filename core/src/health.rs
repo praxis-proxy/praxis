@@ -211,12 +211,18 @@ impl Default for EndpointHealth {
 /// ```
 /// use std::{collections::HashMap, sync::Arc};
 ///
-/// use praxis_core::health::{EndpointHealth, HealthRegistry};
+/// use praxis_core::health::{ClusterHealthEntry, EndpointHealth, HealthRegistry};
 ///
+/// let entry = ClusterHealthEntry::new(
+///     vec![EndpointHealth::new()],
+///     vec![Arc::from("10.0.0.1:80")],
+///     None,
+///     None,
+/// );
 /// let mut map = HashMap::new();
-/// map.insert(Arc::from("backend"), Arc::new(vec![EndpointHealth::new()]));
+/// map.insert(Arc::from("backend"), Arc::new(entry));
 /// let registry: HealthRegistry = Arc::new(map);
-/// assert!(registry["backend"][0].is_healthy());
+/// assert!(registry["backend"].endpoints()[0].is_healthy());
 /// ```
 pub type HealthRegistry = Arc<HashMap<Arc<str>, ClusterHealthState>>;
 
@@ -237,8 +243,13 @@ pub fn build_health_registry(clusters: &[crate::config::Cluster]) -> HealthRegis
     let mut map = HashMap::new();
     for cluster in clusters {
         if cluster.health_check.is_some() {
-            let state: Vec<EndpointHealth> = cluster.endpoints.iter().map(|_| EndpointHealth::new()).collect();
-            map.insert(Arc::clone(&cluster.name), Arc::new(state));
+            let endpoints: Vec<EndpointHealth> = cluster.endpoints.iter().map(|_| EndpointHealth::new()).collect();
+            let addresses: Vec<Arc<str>> = cluster.endpoints.iter().map(|ep| Arc::from(ep.address())).collect();
+            let (passive_unhealthy, passive_healthy) = cluster.health_check.as_ref().map_or((None, None), |hc| {
+                (hc.passive_unhealthy_threshold, hc.passive_healthy_threshold)
+            });
+            let entry = ClusterHealthEntry::new(endpoints, addresses, passive_unhealthy, passive_healthy);
+            map.insert(Arc::clone(&cluster.name), Arc::new(entry));
         }
     }
     Arc::new(map)
@@ -262,24 +273,103 @@ struct HealthInner {
 }
 
 // -----------------------------------------------------------------------------
+// ClusterHealthEntry
+// -----------------------------------------------------------------------------
+
+/// Health state and address index for a single cluster.
+///
+/// Wraps the per-endpoint health states with a reverse
+/// lookup from address string to endpoint index.
+///
+/// ```
+/// use std::sync::Arc;
+///
+/// use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
+///
+/// let entry = ClusterHealthEntry::new(
+///     vec![EndpointHealth::new()],
+///     vec![Arc::from("10.0.0.1:80")],
+///     Some(5),
+///     Some(3),
+/// );
+/// assert_eq!(entry.endpoint_index("10.0.0.1:80"), Some(0));
+/// assert!(entry.endpoints()[0].is_healthy());
+/// ```
+#[derive(Debug)]
+pub struct ClusterHealthEntry {
+    /// Per-endpoint health states, indexed by position.
+    endpoints: Vec<EndpointHealth>,
+
+    /// Address string to endpoint index.
+    index: HashMap<Arc<str>, usize>,
+
+    /// Passive healthy threshold (None = disabled).
+    passive_healthy_threshold: Option<u32>,
+
+    /// Passive unhealthy threshold (None = disabled).
+    passive_unhealthy_threshold: Option<u32>,
+}
+
+impl ClusterHealthEntry {
+    /// Create a new cluster health entry.
+    pub fn new(
+        endpoints: Vec<EndpointHealth>,
+        addresses: Vec<Arc<str>>,
+        passive_unhealthy_threshold: Option<u32>,
+        passive_healthy_threshold: Option<u32>,
+    ) -> Self {
+        let index = addresses.into_iter().enumerate().map(|(i, addr)| (addr, i)).collect();
+        Self {
+            endpoints,
+            index,
+            passive_healthy_threshold,
+            passive_unhealthy_threshold,
+        }
+    }
+
+    /// Look up the endpoint index for an address.
+    pub fn endpoint_index(&self, addr: &str) -> Option<usize> {
+        self.index.get(addr).copied()
+    }
+
+    /// Access the per-endpoint health states.
+    pub fn endpoints(&self) -> &[EndpointHealth] {
+        &self.endpoints
+    }
+
+    /// Passive healthy threshold, if configured.
+    pub fn passive_healthy_threshold(&self) -> Option<u32> {
+        self.passive_healthy_threshold
+    }
+
+    /// Passive unhealthy threshold, if configured.
+    pub fn passive_unhealthy_threshold(&self) -> Option<u32> {
+        self.passive_unhealthy_threshold
+    }
+}
+
+// -----------------------------------------------------------------------------
 // ClusterHealthState
 // -----------------------------------------------------------------------------
 
 /// Shared health state for all endpoints in a cluster.
 ///
-/// The `Vec` is indexed in the same order as the cluster's
-/// endpoint list.
-///
 /// ```
 /// use std::sync::Arc;
 ///
-/// use praxis_core::health::{ClusterHealthState, EndpointHealth};
+/// use praxis_core::health::{ClusterHealthEntry, ClusterHealthState, EndpointHealth};
 ///
-/// let state: ClusterHealthState = Arc::new(vec![EndpointHealth::new(), EndpointHealth::new()]);
-/// assert!(state[0].is_healthy());
-/// assert!(state[1].is_healthy());
+/// let entry = ClusterHealthEntry::new(
+///     vec![EndpointHealth::new(), EndpointHealth::new()],
+///     vec![Arc::from("10.0.0.1:80"), Arc::from("10.0.0.2:80")],
+///     None,
+///     None,
+/// );
+/// let state: ClusterHealthState = Arc::new(entry);
+/// assert!(state.endpoints()[0].is_healthy());
+/// assert!(state.endpoints()[1].is_healthy());
 /// ```
-pub type ClusterHealthState = Arc<Vec<EndpointHealth>>;
+pub type ClusterHealthState = Arc<ClusterHealthEntry>;
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -372,23 +462,13 @@ mod tests {
 
     #[test]
     fn build_registry_only_includes_health_checked_clusters() {
-        let clusters = vec![
-            crate::config::Cluster {
-                health_check: Some(crate::config::HealthCheckConfig {
-                    check_type: crate::config::HealthCheckType::Http,
-                    path: "/".to_owned(),
-                    expected_status: 200,
-                    interval_ms: 5000,
-                    timeout_ms: 2000,
-                    healthy_threshold: 2,
-                    unhealthy_threshold: 3,
-                }),
-                ..crate::config::Cluster::with_defaults("checked", vec!["10.0.0.1:80".into(), "10.0.0.2:80".into()])
-            },
-            crate::config::Cluster::with_defaults("unchecked", vec!["10.0.0.3:80".into()]),
-        ];
+        let checked = crate::config::Cluster {
+            health_check: Some(make_health_check_config()),
+            ..crate::config::Cluster::with_defaults("checked", vec!["10.0.0.1:80".into(), "10.0.0.2:80".into()])
+        };
+        let unchecked = crate::config::Cluster::with_defaults("unchecked", vec!["10.0.0.3:80".into()]);
 
-        let registry = build_health_registry(&clusters);
+        let registry = build_health_registry(&[checked, unchecked]);
         assert!(
             registry.contains_key("checked"),
             "checked cluster should be in registry"
@@ -397,7 +477,11 @@ mod tests {
             !registry.contains_key("unchecked"),
             "unchecked cluster should not be in registry"
         );
-        assert_eq!(registry["checked"].len(), 2, "checked cluster should have 2 endpoints");
+        assert_eq!(
+            registry["checked"].endpoints().len(),
+            2,
+            "checked cluster should have 2 endpoints"
+        );
     }
 
     #[test]
@@ -453,6 +537,66 @@ mod tests {
     }
 
     #[test]
+    fn cluster_health_entry_endpoint_index() {
+        let entry = ClusterHealthEntry::new(
+            vec![EndpointHealth::new(), EndpointHealth::new()],
+            vec![Arc::from("10.0.0.1:80"), Arc::from("10.0.0.2:80")],
+            None,
+            None,
+        );
+        assert_eq!(
+            entry.endpoint_index("10.0.0.1:80"),
+            Some(0),
+            "first address should map to index 0"
+        );
+        assert_eq!(
+            entry.endpoint_index("10.0.0.2:80"),
+            Some(1),
+            "second address should map to index 1"
+        );
+        assert_eq!(
+            entry.endpoint_index("unknown:80"),
+            None,
+            "unknown address should return None"
+        );
+    }
+
+    #[test]
+    fn cluster_health_entry_passive_thresholds() {
+        let entry = ClusterHealthEntry::new(
+            vec![EndpointHealth::new()],
+            vec![Arc::from("10.0.0.1:80")],
+            Some(5),
+            Some(3),
+        );
+        assert_eq!(
+            entry.passive_unhealthy_threshold(),
+            Some(5),
+            "passive_unhealthy_threshold mismatch"
+        );
+        assert_eq!(
+            entry.passive_healthy_threshold(),
+            Some(3),
+            "passive_healthy_threshold mismatch"
+        );
+    }
+
+    #[test]
+    fn cluster_health_entry_no_passive() {
+        let entry = ClusterHealthEntry::new(vec![EndpointHealth::new()], vec![Arc::from("10.0.0.1:80")], None, None);
+        assert_eq!(
+            entry.passive_unhealthy_threshold(),
+            None,
+            "should be None when not configured"
+        );
+        assert_eq!(
+            entry.passive_healthy_threshold(),
+            None,
+            "should be None when not configured"
+        );
+    }
+
+    #[test]
     fn concurrent_mixed_probes_stay_consistent() {
         let ep = Arc::new(EndpointHealth::new());
 
@@ -479,5 +623,24 @@ mod tests {
             ep.is_healthy(),
             "cache must match inner state after concurrent mixed probes"
         );
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test Utilities
+    // ---------------------------------------------------------------------------
+
+    /// Build a default [`HealthCheckConfig`] for tests.
+    fn make_health_check_config() -> crate::config::HealthCheckConfig {
+        crate::config::HealthCheckConfig {
+            check_type: crate::config::HealthCheckType::Http,
+            expected_status: 200,
+            healthy_threshold: 2,
+            interval_ms: 5000,
+            passive_healthy_threshold: None,
+            passive_unhealthy_threshold: None,
+            path: "/".to_owned(),
+            timeout_ms: 2000,
+            unhealthy_threshold: 3,
+        }
     }
 }

@@ -1,0 +1,30 @@
+# Hostname Upstream Endpoints
+#
+# Demonstrates using DNS hostnames instead of IP addresses for
+# upstream endpoints. The proxy resolves hostnames to IP addresses
+# at connection time, preferring IPv4 when multiple records exist.
+#
+# Example:
+#
+#   curl http://localhost:8080/
+#
+# The request is forwarded to the backend resolved from the
+# hostname endpoint.
+
+listeners:
+  - name: default
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "localhost:9000"

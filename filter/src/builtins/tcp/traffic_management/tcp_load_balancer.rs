@@ -135,7 +135,7 @@ impl TcpFilter for TcpLoadBalancerFilter {
         let health = Self::cluster_health(ctx.health_registry, cluster_name);
 
         if let Some(h) = health
-            && h.iter().all(|ep| !ep.is_healthy())
+            && h.endpoints().iter().all(|ep| !ep.is_healthy())
         {
             warn!(cluster = %cluster_name, "all endpoints unhealthy, routing to all (panic mode)");
         }
@@ -179,7 +179,7 @@ mod tests {
 
     use praxis_core::{
         config::{Cluster, ConsistentHashOpts, Endpoint, LoadBalancerStrategy, ParameterisedStrategy, SimpleStrategy},
-        health::{ClusterHealthState, EndpointHealth},
+        health::{ClusterHealthEntry, ClusterHealthState, EndpointHealth},
     };
 
     use super::*;
@@ -259,12 +259,17 @@ mod tests {
         let cluster = test_cluster("db", &["10.0.0.1:5432", "10.0.0.2:5432", "10.0.0.3:5432"]);
         let lb = TcpLoadBalancerFilter::new(&[cluster]);
 
-        let state: ClusterHealthState = Arc::new(vec![
-            EndpointHealth::new(),
-            EndpointHealth::new(),
-            EndpointHealth::new(),
-        ]);
-        state[0].mark_unhealthy();
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new(), EndpointHealth::new(), EndpointHealth::new()],
+            vec![
+                Arc::from("10.0.0.1:5432"),
+                Arc::from("10.0.0.2:5432"),
+                Arc::from("10.0.0.3:5432"),
+            ],
+            None,
+            None,
+        ));
+        state.endpoints()[0].mark_unhealthy();
 
         let registry: HealthRegistry = Arc::new([(Arc::from("db"), state)].into_iter().collect());
 

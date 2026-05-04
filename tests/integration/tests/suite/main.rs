@@ -46,6 +46,7 @@ mod failure_mode;
 mod filter_composition;
 mod guardrails;
 mod health_check;
+mod hot_reload;
 mod ip_acl;
 mod json_body_field;
 mod json_rpc;

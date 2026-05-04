@@ -53,10 +53,11 @@ impl fmt::Display for HealthCheckType {
 // HealthCheckConfig
 // -----------------------------------------------------------------------------
 
-/// Per-cluster active health check settings.
+/// Per-cluster health check settings (active and passive).
 ///
-/// Configures periodic probing of upstream endpoints to detect
-/// failures before routing traffic to them.
+/// Active checking configures periodic probing of upstream
+/// endpoints. Passive checking observes real request outcomes
+/// (5xx responses, connection errors) to update health state.
 ///
 /// ```
 /// # use praxis_core::config::{HealthCheckConfig, HealthCheckType};
@@ -68,11 +69,15 @@ impl fmt::Display for HealthCheckType {
 /// timeout_ms: 2000
 /// healthy_threshold: 2
 /// unhealthy_threshold: 3
+/// passive_unhealthy_threshold: 5
+/// passive_healthy_threshold: 3
 /// "#;
 /// let hc: HealthCheckConfig = serde_yaml::from_str(yaml).unwrap();
 /// assert_eq!(hc.check_type, HealthCheckType::Http);
 /// assert_eq!(hc.path, "/healthz");
 /// assert_eq!(hc.interval_ms, 5000);
+/// assert_eq!(hc.passive_unhealthy_threshold, Some(5));
+/// assert_eq!(hc.passive_healthy_threshold, Some(3));
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -85,25 +90,37 @@ pub struct HealthCheckConfig {
     #[serde(rename = "type")]
     pub check_type: HealthCheckType,
 
-    /// HTTP path to probe (only used for `http` type).
-    #[serde(default = "default_path")]
-    pub path: String,
-
     /// Expected HTTP status code for a healthy response.
     #[serde(default = "default_expected_status")]
     pub expected_status: u16,
+
+    /// Consecutive successes required to mark an endpoint healthy.
+    #[serde(default = "default_healthy_threshold")]
+    pub healthy_threshold: u32,
 
     /// Probe interval in milliseconds.
     #[serde(default = "default_interval_ms")]
     pub interval_ms: u64,
 
+    /// Consecutive successes to mark an endpoint healthy again
+    /// via passive observation. `None` disables passive recovery
+    /// (active checks must recover it).
+    #[serde(default)]
+    pub passive_healthy_threshold: Option<u32>,
+
+    /// Consecutive response failures (5xx or connect error) to
+    /// mark an endpoint unhealthy via passive observation.
+    /// `None` disables passive checking.
+    #[serde(default)]
+    pub passive_unhealthy_threshold: Option<u32>,
+
+    /// HTTP path to probe (only used for `http` type).
+    #[serde(default = "default_path")]
+    pub path: String,
+
     /// Probe timeout in milliseconds. Must be less than `interval_ms`.
     #[serde(default = "default_timeout_ms")]
     pub timeout_ms: u64,
-
-    /// Consecutive successes required to mark an endpoint healthy.
-    #[serde(default = "default_healthy_threshold")]
-    pub healthy_threshold: u32,
 
     /// Consecutive failures required to mark an endpoint unhealthy.
     #[serde(default = "default_unhealthy_threshold")]
@@ -200,11 +217,13 @@ unhealthy_threshold: 3
     fn roundtrip_via_serde() {
         let hc = HealthCheckConfig {
             check_type: HealthCheckType::Http,
-            path: "/health".to_owned(),
             expected_status: 204,
-            interval_ms: 10000,
-            timeout_ms: 3000,
             healthy_threshold: 3,
+            interval_ms: 10000,
+            passive_healthy_threshold: Some(3),
+            passive_unhealthy_threshold: Some(5),
+            path: "/health".to_owned(),
+            timeout_ms: 3000,
             unhealthy_threshold: 5,
         };
         let value = serde_yaml::to_value(&hc).unwrap();
@@ -214,6 +233,14 @@ unhealthy_threshold: 3
         assert_eq!(back.expected_status, hc.expected_status, "status should roundtrip");
         assert_eq!(back.interval_ms, hc.interval_ms, "interval should roundtrip");
         assert_eq!(back.timeout_ms, hc.timeout_ms, "timeout should roundtrip");
+        assert_eq!(
+            back.passive_unhealthy_threshold, hc.passive_unhealthy_threshold,
+            "passive_unhealthy should roundtrip"
+        );
+        assert_eq!(
+            back.passive_healthy_threshold, hc.passive_healthy_threshold,
+            "passive_healthy should roundtrip"
+        );
     }
 
     #[test]
@@ -231,5 +258,57 @@ expected_status: 204
 "#;
         let hc: HealthCheckConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(hc.expected_status, 204, "custom expected_status should be 204");
+    }
+
+    #[test]
+    fn passive_thresholds_default_to_none() {
+        let yaml = "type: http\n";
+        let hc: HealthCheckConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            hc.passive_unhealthy_threshold, None,
+            "passive_unhealthy_threshold should default to None"
+        );
+        assert_eq!(
+            hc.passive_healthy_threshold, None,
+            "passive_healthy_threshold should default to None"
+        );
+    }
+
+    #[test]
+    fn passive_thresholds_parse() {
+        let yaml = r#"
+type: http
+passive_unhealthy_threshold: 5
+passive_healthy_threshold: 3
+"#;
+        let hc: HealthCheckConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            hc.passive_unhealthy_threshold,
+            Some(5),
+            "passive_unhealthy_threshold mismatch"
+        );
+        assert_eq!(
+            hc.passive_healthy_threshold,
+            Some(3),
+            "passive_healthy_threshold mismatch"
+        );
+    }
+
+    #[test]
+    fn passive_only_unhealthy_threshold() {
+        let yaml = r#"
+type: http
+passive_unhealthy_threshold: 3
+"#;
+        let hc: HealthCheckConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            hc.passive_unhealthy_threshold,
+            Some(3),
+            "should parse passive_unhealthy_threshold alone"
+        );
+        assert_eq!(
+            hc.passive_healthy_threshold, None,
+            "passive_healthy_threshold should be None"
+        );
     }
 }
