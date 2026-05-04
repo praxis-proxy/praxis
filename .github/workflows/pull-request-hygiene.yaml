@@ -28,10 +28,8 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           prs=$(gh pr list --base main --state open --limit 100 \
-            --json number,isDraft,labels \
-            --jq '[.[] | select(.isDraft == false) |
-              select(.labels | map(.name) | any(. == "conventions/bypass") | not)
-            ] | .[].number')
+            --json number,isDraft \
+            --jq '[.[] | select(.isDraft == false)] | .[].number')
 
           for number in $prs; do
             failed=$(gh pr checks "$number" --required --json bucket \

@@ -154,6 +154,9 @@ deployment guidance.
   TLS toggle, protocol type) are detected and logged
   as warnings.
 - **Graceful shutdown** - configurable drain timeout
+- **Max connections** - per-listener connection limit
+  via semaphore; HTTP returns 503 with `Retry-After`,
+  TCP closes immediately
 - **Runtime tuning** - thread pool sizing and
   work-stealing toggle
 
