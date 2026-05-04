@@ -122,20 +122,3 @@ jobs:
             echo "::error::Unsigned commits found: ${unsigned}"
             exit 1
           fi
-
-  # ----------------------------------------------------------------------------
-  # Copilot Reviewer
-  # ----------------------------------------------------------------------------
-
-  copilot-reviewer:
-    if: >-
-      github.event.action == 'opened' ||
-      github.event.action == 'ready_for_review'
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Assign Copilot as reviewer
-        env:
-          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          gh pr edit "$PR_NUMBER" --repo "${{ github.repository }}" --add-reviewer @copilot
