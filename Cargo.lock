@@ -2126,7 +2126,6 @@ dependencies = [
  "prost",
  "prost-build",
  "prost-types",
- "prost-wkt-build",
  "prost-wkt-types",
  "protox",
  "tonic",
