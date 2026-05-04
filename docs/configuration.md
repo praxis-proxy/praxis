@@ -210,6 +210,31 @@ Pingora applies its own 60s default for initial request
 header reads on fresh connections. This setting controls
 body read timeouts within an active request.
 
+### Max Connections
+
+Optional `max_connections` caps concurrent connections
+per listener. HTTP listeners reject excess requests
+with `503 Service Unavailable` and a `Retry-After: 1`
+header. TCP listeners close the socket immediately.
+
+```yaml
+listeners:
+  - name: public
+    address: "0.0.0.0:8080"
+    max_connections: 10000
+    filter_chains: [main]
+```
+
+The limit is enforced via a per-listener semaphore.
+Permits are held for the request lifetime (HTTP) or
+connection lifetime (TCP) and released automatically on
+completion, error, or timeout. Each listener has an
+independent limit.
+
+See [max-connections.yaml] for an example.
+
+[max-connections.yaml]: ../examples/configs/operations/max-connections.yaml
+
 ### Mixed Protocols
 
 HTTP and TCP listeners can run on a single server instance.
