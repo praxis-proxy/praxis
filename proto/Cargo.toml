@@ -29,6 +29,5 @@ tonic-prost = { workspace = true }
 
 [build-dependencies]
 prost-build = { workspace = true }
-prost-wkt-build = { workspace = true }
 protox = { workspace = true }
 tonic-prost-build = { workspace = true }
