@@ -109,23 +109,23 @@ fn validate_branch(
     chain_names: &HashSet<&str>,
     depth: usize,
 ) -> Result<(), ProxyError> {
+    let bname = &branch.name;
     if !all_names.insert(branch.name.clone()) {
-        return Err(ProxyError::Config(format!("duplicate branch name '{}'", branch.name)));
+        return Err(ProxyError::Config(format!("duplicate branch name '{bname}'")));
     }
 
+    let rejoin = &branch.rejoin;
     if branch.rejoin.contains(':') {
         return Err(ProxyError::Config(format!(
-            "branch '{}': cross-chain rejoin '{}' is not supported; \
+            "branch '{bname}': cross-chain rejoin '{rejoin}' is not supported; \
              listeners flatten all referenced chains into one pipeline, \
-             so use the filter's name directly (e.g. 'routing' not 'main:routing')",
-            branch.name, branch.rejoin
+             so use the filter's name directly (e.g. 'routing' not 'main:routing')"
         )));
     }
 
     if branch.chains.is_empty() {
         return Err(ProxyError::Config(format!(
-            "branch '{}' must have at least one chain",
-            branch.name
+            "branch '{bname}' must have at least one chain"
         )));
     }
 
@@ -145,10 +145,11 @@ fn validate_on_result_filter_name(branch: &BranchChainConfig) -> Result<(), Prox
         return Ok(());
     };
 
+    let bname = &branch.name;
+    let filter = &cond.filter;
     if cond.filter.is_empty() {
         return Err(ProxyError::Config(format!(
-            "branch '{}': on_result.filter must not be empty",
-            branch.name
+            "branch '{bname}': on_result.filter must not be empty"
         )));
     }
     if !cond
@@ -157,8 +158,7 @@ fn validate_on_result_filter_name(branch: &BranchChainConfig) -> Result<(), Prox
         .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     {
         return Err(ProxyError::Config(format!(
-            "branch '{}': on_result.filter '{}' must be ASCII alphanumeric, '_', or '-'",
-            branch.name, cond.filter
+            "branch '{bname}': on_result.filter '{filter}' must be ASCII alphanumeric, '_', or '-'"
         )));
     }
     Ok(())
@@ -166,12 +166,12 @@ fn validate_on_result_filter_name(branch: &BranchChainConfig) -> Result<(), Prox
 
 /// Validate `max_iterations` constraints.
 fn validate_max_iterations(branch: &BranchChainConfig) -> Result<(), ProxyError> {
+    let bname = &branch.name;
     if let Some(max) = branch.max_iterations
         && !(1..=MAX_ITERATIONS_CEILING).contains(&max)
     {
         return Err(ProxyError::Config(format!(
-            "branch '{}': max_iterations must be 1-{MAX_ITERATIONS_CEILING}, got {max}",
-            branch.name
+            "branch '{bname}': max_iterations must be 1-{MAX_ITERATIONS_CEILING}, got {max}"
         )));
     }
     Ok(())

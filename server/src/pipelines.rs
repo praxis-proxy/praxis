@@ -32,9 +32,10 @@ pub(crate) fn resolve_pipelines(
     for listener in &config.listeners {
         let mut entries = Vec::new();
         for chain_name in &listener.filter_chains {
-            let chain_filters = chains
-                .get(chain_name.as_str())
-                .ok_or_else(|| format!("unknown chain '{chain_name}' for listener '{}'", listener.name))?;
+            let chain_filters = chains.get(chain_name.as_str()).ok_or_else(|| {
+                let lname = &listener.name;
+                format!("unknown chain '{chain_name}' for listener '{lname}'")
+            })?;
             entries.extend_from_slice(chain_filters);
         }
 

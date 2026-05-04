@@ -16,6 +16,7 @@
 mod benchmark;
 mod debug;
 mod echo;
+mod lint_deps;
 mod port;
 
 use clap::{Parser, Subcommand};
@@ -46,6 +47,10 @@ enum Command {
 
     /// Run proxy benchmarks and generate reports.
     Benchmark(Box<benchmark::Args>),
+
+    /// Check that workspace dependency versions use
+    /// three-component semver.
+    LintDeps(lint_deps::Args),
 }
 
 // -----------------------------------------------------------------------------
@@ -59,6 +64,7 @@ fn main() {
         Command::Echo(args) => echo::run(args),
         Command::Debug(args) => debug::run(&args),
         Command::Benchmark(args) => benchmark::run(*args),
+        Command::LintDeps(args) => lint_deps::run(args),
     }
 }
 

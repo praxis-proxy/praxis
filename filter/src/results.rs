@@ -125,7 +125,8 @@ impl FilterResultSet {
 /// Validate a result key.
 fn validate_result_key(key: &str) -> Result<(), FilterError> {
     if key.is_empty() || key.len() > MAX_KEY_LEN {
-        return Err(format!("result key must be 1-{MAX_KEY_LEN} bytes, got {}", key.len()).into());
+        let len = key.len();
+        return Err(format!("result key must be 1-{MAX_KEY_LEN} bytes, got {len}").into());
     }
     if !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
         return Err(format!("result key '{key}' must be ASCII alphanumeric, '_', or '-'").into());
@@ -136,11 +137,8 @@ fn validate_result_key(key: &str) -> Result<(), FilterError> {
 /// Validate a result value.
 fn validate_result_value(value: &str) -> Result<(), FilterError> {
     if value.len() > MAX_VALUE_LEN {
-        return Err(format!(
-            "result value must not exceed {MAX_VALUE_LEN} bytes, got {}",
-            value.len()
-        )
-        .into());
+        let len = value.len();
+        return Err(format!("result value must not exceed {MAX_VALUE_LEN} bytes, got {len}").into());
     }
     if value.bytes().any(|b| b < 0x20 && b != 0x09) {
         return Err("result value must not contain control characters".into());

@@ -151,11 +151,10 @@ impl RouterFilter {
         let resolved: Vec<ResolvedRoute> = routes
             .into_iter()
             .map(|route| {
-                let wildcard_suffix = route
-                    .host
-                    .as_ref()
-                    .and_then(|h| h.strip_prefix("*."))
-                    .map(|suffix| format!(".{}", suffix.to_ascii_lowercase()));
+                let wildcard_suffix = route.host.as_ref().and_then(|h| h.strip_prefix("*.")).map(|suffix| {
+                    let lower = suffix.to_ascii_lowercase();
+                    format!(".{lower}")
+                });
                 ResolvedRoute { route, wildcard_suffix }
             })
             .collect();

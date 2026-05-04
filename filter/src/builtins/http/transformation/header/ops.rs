@@ -57,12 +57,13 @@ pub(super) fn validate_raw_header_pairs(
 ) -> Result<Vec<(String, String)>, FilterError> {
     let mut out = Vec::with_capacity(pairs.len());
     for p in pairs {
+        let name = &p.name;
         http::header::HeaderName::from_bytes(p.name.as_bytes()).map_err(|_e| {
-            let msg: FilterError = format!("headers filter: invalid header name '{}' in {section}", p.name).into();
+            let msg: FilterError = format!("headers filter: invalid header name '{name}' in {section}").into();
             msg
         })?;
         http::header::HeaderValue::from_str(&p.value).map_err(|_e| {
-            let msg: FilterError = format!("headers filter: invalid header value for '{}' in {section}", p.name).into();
+            let msg: FilterError = format!("headers filter: invalid header value for '{name}' in {section}").into();
             msg
         })?;
         out.push((p.name, p.value));
@@ -81,12 +82,13 @@ pub(super) fn parse_header_pairs(
 ) -> Result<Vec<(http::header::HeaderName, http::header::HeaderValue)>, FilterError> {
     let mut out = Vec::with_capacity(pairs.len());
     for p in pairs {
+        let pname = &p.name;
         let name = http::header::HeaderName::from_bytes(p.name.as_bytes()).map_err(|_e| {
-            let msg: FilterError = format!("headers filter: invalid header name '{}' in {section}", p.name).into();
+            let msg: FilterError = format!("headers filter: invalid header name '{pname}' in {section}").into();
             msg
         })?;
         let value = http::header::HeaderValue::from_str(&p.value).map_err(|_e| {
-            let msg: FilterError = format!("headers filter: invalid header value for '{}' in {section}", p.name).into();
+            let msg: FilterError = format!("headers filter: invalid header value for '{pname}' in {section}").into();
             msg
         })?;
         out.push((name, value));

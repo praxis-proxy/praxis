@@ -163,8 +163,10 @@ impl Config {
     ///
     /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
     pub fn from_file(path: &Path) -> Result<Self, crate::errors::ProxyError> {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| crate::errors::ProxyError::Config(format!("failed to read {}: {e}", path.display())))?;
+        let content = std::fs::read_to_string(path).map_err(|e| {
+            let display = path.display();
+            crate::errors::ProxyError::Config(format!("failed to read {display}: {e}"))
+        })?;
 
         Self::from_yaml(&content)
     }

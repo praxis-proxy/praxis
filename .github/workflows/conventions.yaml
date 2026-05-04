@@ -89,6 +89,71 @@ jobs:
           fi
 
   # ----------------------------------------------------------------------------
+  # Dependency Version Check
+  # ----------------------------------------------------------------------------
+
+  dep-version-check:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check workspace dependency versions
+        env:
+          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          gh api "repos/${{ github.repository }}/contents/Cargo.toml?ref=$HEAD_SHA" \
+            --jq '.content' | base64 -d > /tmp/cargo.toml
+
+          in_ws=false
+          bad=0
+          skip_next=false
+          while IFS= read -r line; do
+            if [[ "$line" == "[workspace.dependencies]" ]]; then
+              in_ws=true
+              skip_next=false
+              continue
+            elif [[ "$line" == "["* ]]; then
+              in_ws=false
+              skip_next=false
+              continue
+            fi
+
+            $in_ws || continue
+            [[ -z "$line" ]] && continue
+
+            if [[ "$line" == "#"* ]]; then
+              [[ "$line" == *"semver:ignore"* ]] && skip_next=true
+              continue
+            fi
+
+            if $skip_next || [[ "$line" == *"semver:ignore"* ]]; then
+              skip_next=false
+              continue
+            fi
+            skip_next=false
+
+            ver=""
+            if [[ "$line" =~ ^[a-zA-Z][a-zA-Z0-9_-]*[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+              ver="${BASH_REMATCH[1]}"
+            elif [[ "$line" =~ version[[:space:]]*=[[:space:]]*\"([^\"]+)\" ]]; then
+              ver="${BASH_REMATCH[1]}"
+            fi
+
+            if [[ -n "$ver" ]]; then
+              dots="${ver//[^.]/}"
+              if [[ ${#dots} -ne 2 ]]; then
+                crate="${line%%[[:space:]]*=*}"
+                echo "::error::${crate} = \"${ver}\" is not three-component semver (expected MAJOR.MINOR.PATCH)"
+                bad=1
+              fi
+            fi
+          done < /tmp/cargo.toml
+
+          if [[ "$bad" -eq 1 ]]; then
+            exit 1
+          fi
+
+  # ----------------------------------------------------------------------------
   # Signed Commits Check
   # ----------------------------------------------------------------------------
 

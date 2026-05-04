@@ -36,9 +36,10 @@ pub(crate) fn build_tls_settings(
     context_label: &str,
 ) -> Result<(TlsSettings, Option<watch::Sender<bool>>), ProxyError> {
     macro_rules! tls_err {
-        ($e:expr) => {
-            ProxyError::Config(format!("TLS for {address}: {}", $e))
-        };
+        ($e:expr) => {{
+            let err = $e;
+            ProxyError::Config(format!("TLS for {address}: {err}"))
+        }};
     }
 
     if tls.is_hot_reload() {
