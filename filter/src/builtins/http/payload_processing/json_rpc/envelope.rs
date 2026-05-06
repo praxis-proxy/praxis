@@ -13,7 +13,7 @@ use super::config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcConfig};
 
 /// JSON-RPC message kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum JsonRpcKind {
+pub(crate) enum JsonRpcKind {
     /// Request with id (expects response).
     Request,
     /// Notification without id (no response expected).
@@ -26,7 +26,7 @@ pub(super) enum JsonRpcKind {
 
 impl JsonRpcKind {
     /// String representation for headers and filter results.
-    pub(super) fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::Request => "request",
             Self::Notification => "notification",
@@ -38,7 +38,7 @@ impl JsonRpcKind {
 
 /// JSON-RPC id type classification.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum JsonRpcIdKind {
+pub(crate) enum JsonRpcIdKind {
     /// String id.
     String,
     /// Integer id (i64/u64).
@@ -53,7 +53,7 @@ pub(super) enum JsonRpcIdKind {
 
 impl JsonRpcIdKind {
     /// String representation for filter results.
-    pub(super) fn as_str(&self) -> &'static str {
+    pub(crate) fn as_str(&self) -> &'static str {
         match self {
             Self::String => "string",
             Self::Integer => "integer",
@@ -66,7 +66,7 @@ impl JsonRpcIdKind {
 
 /// Parsed JSON-RPC envelope metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct JsonRpcEnvelope {
+pub(crate) struct JsonRpcEnvelope {
     /// Message kind (request/notification/response/batch).
     pub kind: JsonRpcKind,
     /// Method name (for requests and notifications).
@@ -85,7 +85,7 @@ pub(super) struct JsonRpcEnvelope {
 
 /// JSON-RPC parsing error.
 #[derive(Debug, Clone)]
-pub(super) enum JsonRpcParseError {
+pub(crate) enum JsonRpcParseError {
     /// Invalid JSON.
     InvalidJson(String),
     /// Missing required `jsonrpc` field.
@@ -131,7 +131,7 @@ impl std::error::Error for JsonRpcParseError {}
 /// - `Ok(Some(envelope))` for valid JSON-RPC 2.0
 /// - `Ok(None)` for valid JSON but not JSON-RPC (when `on_invalid` allows continuing)
 /// - `Err(error)` for invalid JSON or JSON-RPC violations
-pub(super) fn parse_json_rpc_envelope(
+pub(crate) fn parse_json_rpc_envelope(
     input: &[u8],
     config: &JsonRpcConfig,
 ) -> Result<Option<JsonRpcEnvelope>, JsonRpcParseError> {

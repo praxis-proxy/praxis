@@ -232,6 +232,7 @@ pub(crate) mod test_utils {
             cluster: None,
             executed_filter_indices: Vec::new(),
             extra_request_headers: Vec::new(),
+            filter_metadata: std::collections::HashMap::new(),
             filter_results: std::collections::HashMap::new(),
             health_registry: None,
             request: req,

@@ -1,0 +1,19 @@
+This directory contains vendored Protocol Buffer definitions derived from the
+Envoy proxy project (https://github.com/envoyproxy/envoy).
+
+The following files are derived from Envoy and licensed under the Apache
+License, Version 2.0:
+
+  proto/ext_proc.proto
+  proto/envoy_common.proto
+
+The original sources can be found at:
+
+  api/envoy/service/ext_proc/v3/external_processor.proto
+  api/envoy/extensions/filters/http/ext_proc/v3/processing_mode.proto
+  api/envoy/config/core/v3/base.proto
+  api/envoy/type/v3/http_status.proto
+
+The Google well-known type definitions under proto/google/protobuf/ are
+vendored from the Protocol Buffers project and are licensed under the BSD
+3-Clause License. See the individual file headers for details.

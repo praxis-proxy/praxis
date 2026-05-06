@@ -12,7 +12,7 @@ use crate::FilterError;
 // -----------------------------------------------------------------------------
 
 /// Default maximum request body size for `StreamBuffer` mode (1 MiB).
-pub(super) const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
+pub(crate) const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
 
 // -----------------------------------------------------------------------------
 // BatchPolicy
@@ -21,7 +21,7 @@ pub(super) const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
 /// Batch handling policy for JSON-RPC arrays.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum BatchPolicy {
+pub(crate) enum BatchPolicy {
     /// Reject JSON-RPC batch arrays with HTTP 400.
     #[default]
     Reject,
@@ -36,7 +36,7 @@ pub(super) enum BatchPolicy {
 /// Invalid JSON or non-JSON-RPC input handling.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub(super) enum InvalidJsonRpcBehavior {
+pub(crate) enum InvalidJsonRpcBehavior {
     /// Continue processing (default proxy behavior).
     #[default]
     Continue,
@@ -53,7 +53,7 @@ pub(super) enum InvalidJsonRpcBehavior {
 /// Header configuration for JSON-RPC metadata promotion.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct JsonRpcHeaders {
+pub(crate) struct JsonRpcHeaders {
     /// Header name for JSON-RPC method (e.g., `X-Json-Rpc-Method`).
     pub method: Option<String>,
     /// Header name for JSON-RPC id (e.g., `X-Json-Rpc-Id`).
@@ -81,7 +81,7 @@ impl Default for JsonRpcHeaders {
 /// [`JsonRpcFilter`]: super::JsonRpcFilter
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct JsonRpcConfig {
+pub(crate) struct JsonRpcConfig {
     /// Maximum body size in bytes for `StreamBuffer`.
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
@@ -109,7 +109,7 @@ fn default_max_body_bytes() -> usize {
 // -----------------------------------------------------------------------------
 
 /// Validate and build the final configuration.
-pub(super) fn build_config(cfg: JsonRpcConfig) -> Result<(usize, JsonRpcConfig), FilterError> {
+pub(crate) fn build_config(cfg: JsonRpcConfig) -> Result<(usize, JsonRpcConfig), FilterError> {
     if cfg.max_body_bytes == 0 {
         return Err("json_rpc: 'max_body_bytes' must be greater than 0".into());
     }

@@ -53,6 +53,13 @@ pub struct PingoraRequestCtx {
     /// bytes are raw protocol frames (e.g. `WebSocket`), not HTTP bodies.
     pub connection_upgraded: bool,
 
+    /// Durable per-request metadata that persists across all lifecycle
+    /// phases. Swapped into each [`HttpFilterContext`] and written back
+    /// after filter execution.
+    ///
+    /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+    pub filter_metadata: std::collections::HashMap<String, String>,
+
     /// Pre-read body chunks (`StreamBuffer` mode). When `StreamBuffer` is
     /// active, the body is read during `request_filter` (before upstream
     /// selection) so that body-based routing can influence `upstream_peer`.
@@ -154,6 +161,7 @@ macro_rules! filter_context {
             cluster: $ctx.cluster.take(),
             executed_filter_indices: Vec::new(),
             extra_request_headers: Vec::new(),
+            filter_metadata: std::mem::take(&mut $ctx.filter_metadata),
             filter_results: std::collections::HashMap::new(),
             health_registry: $pipeline.health_registry(),
             request: $request,
@@ -248,6 +256,7 @@ impl Default for PingoraRequestCtx {
             client_http_version: None,
             cluster: None,
             connection_upgraded: false,
+            filter_metadata: std::collections::HashMap::new(),
             pre_read_body: None,
             request_body_buffer: None,
             request_body_bytes: 0,

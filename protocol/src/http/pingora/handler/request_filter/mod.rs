@@ -128,12 +128,22 @@ pub(in crate::http) async fn execute(
 /// Run the request-phase filter pipeline and snapshot the request for later phases.
 ///
 /// Returns the final action and any extra headers promoted by filters.
+#[allow(clippy::too_many_lines, reason = "writeback destructuring")]
 async fn run_pipeline(
     pipeline: &FilterPipeline,
     request: Request,
     ctx: &mut PingoraRequestCtx,
 ) -> std::result::Result<(FilterAction, Vec<(Cow<'static, str>, String)>), FilterError> {
-    let (action, extra_headers, cluster, upstream, rewritten_path, request_body_mode, selected_endpoint_index) = {
+    let (
+        action,
+        extra_headers,
+        cluster,
+        upstream,
+        rewritten_path,
+        request_body_mode,
+        selected_endpoint_index,
+        filter_metadata,
+    ) = {
         let mut filter_ctx = ctx.build_filter_context(pipeline, &request, None);
 
         let action = pipeline.execute_http_request(&mut filter_ctx).await;
@@ -145,10 +155,12 @@ async fn run_pipeline(
             filter_ctx.rewritten_path,
             filter_ctx.request_body_mode,
             filter_ctx.selected_endpoint_index,
+            filter_ctx.filter_metadata,
         )
     };
 
     ctx.request_snapshot = Some(request);
+    ctx.filter_metadata = filter_metadata;
 
     match action {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {

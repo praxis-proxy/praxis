@@ -39,6 +39,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         cluster: None,
         executed_filter_indices: Vec::new(),
         extra_request_headers: Vec::new(),
+        filter_metadata: std::collections::HashMap::new(),
         filter_results: std::collections::HashMap::new(),
         health_registry: None,
         request: req,

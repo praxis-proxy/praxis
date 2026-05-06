@@ -15,8 +15,14 @@ use praxis_protocol::ListenerPipelines;
 
 /// Build a [`FilterPipeline`] for each listener by resolving named chains.
 ///
+/// # Errors
+///
+/// Returns an error when pipeline construction fails (unknown filter chain
+/// referenced by listener, filter instantiation failure, branch chain
+/// resolution error, body limit conflict, or pipeline ordering violation).
+///
 /// [`FilterPipeline`]: praxis_filter::FilterPipeline
-pub(crate) fn resolve_pipelines(
+pub fn resolve_pipelines(
     config: &Config,
     registry: &FilterRegistry,
     health_registry: &praxis_core::health::HealthRegistry,
