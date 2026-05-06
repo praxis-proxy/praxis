@@ -17,6 +17,23 @@ shutdown_timeout_secs: # Optional. Graceful drain time (default: 30).
 insecure_options:      # Optional. Dev/test overrides. See development.md.
 ```
 
+## Validating Configuration
+
+Use `--validate` (or `-t`) to check configuration
+without starting the server. The flag loads the config
+through the same parsing and validation path used
+during startup, including filter pipeline construction
+and ordering checks.
+
+```sh
+praxis --validate --config praxis.yaml
+praxis -t -c praxis.yaml
+```
+
+Exits `0` on success (no output). Exits non-zero and
+prints an error to stderr on failure. Does not bind
+listener ports or enter the server runtime.
+
 ## Dynamic Configuration Reload
 
 Praxis watches the config file for changes and

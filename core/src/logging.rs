@@ -38,6 +38,21 @@ pub fn init_tracing(config: &Config) -> Result<(), ProxyError> {
     Ok(())
 }
 
+/// Validate log overrides from config without initializing the global subscriber.
+///
+/// Useful for configuration validation that needs to check log override
+/// syntax without affecting the global tracing state.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] if any `log_overrides` entry is invalid.
+///
+/// [`ProxyError::Config`]: crate::errors::ProxyError::Config
+pub fn validate_log_overrides(config: &Config) -> Result<(), ProxyError> {
+    build_env_filter(config)?;
+    Ok(())
+}
+
 // -----------------------------------------------------------------------------
 // EnvFilter Factory
 // -----------------------------------------------------------------------------

@@ -207,6 +207,7 @@ async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx)
         && let Some(mut filter_ctx) = ctx.filter_context_for(pipeline, None)
     {
         let _result = pipeline.execute_http_response(&mut filter_ctx).await;
+        ctx.filter_metadata = filter_ctx.filter_metadata;
     }
 }
 
@@ -381,6 +382,27 @@ mod tests {
         logging_cleanup(&pipeline, &mut ctx).await;
         assert!(ctx.cluster.is_none(), "cluster should be taken by logging_cleanup");
         assert!(ctx.upstream.is_none(), "upstream should be taken by logging_cleanup");
+    }
+
+    #[tokio::test]
+    async fn logging_cleanup_preserves_filter_metadata() {
+        let registry = praxis_filter::FilterRegistry::with_builtins();
+        let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.response_phase_done = false;
+        ctx.filter_metadata
+            .insert("mcp.method".to_owned(), "tools/call".to_owned());
+        ctx.request_snapshot = Some(praxis_filter::Request {
+            method: http::Method::POST,
+            uri: "/mcp".parse().unwrap(),
+            headers: http::HeaderMap::new(),
+        });
+        logging_cleanup(&pipeline, &mut ctx).await;
+        assert_eq!(
+            ctx.filter_metadata.get("mcp.method").map(String::as_str),
+            Some("tools/call"),
+            "filter_metadata should survive logging_cleanup"
+        );
     }
 
     #[test]

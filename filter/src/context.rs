@@ -41,6 +41,15 @@ pub struct HttpFilterContext<'a> {
     /// Extra headers to inject into the upstream request.
     pub extra_request_headers: Vec<(Cow<'static, str>, String)>,
 
+    /// Durable per-request metadata that persists across all
+    /// Pingora lifecycle phases (request, request-body, response,
+    /// response-body, logging). Unlike [`filter_results`] which
+    /// are cleared after branch evaluation, metadata survives
+    /// for the entire request lifetime.
+    ///
+    /// [`filter_results`]: Self::filter_results
+    pub filter_metadata: HashMap<String, String>,
+
     /// Filter result map: `filter_name` -> result entries.
     ///
     /// Filters write string key-value pairs here during
@@ -124,9 +133,19 @@ impl HttpFilterContext<'_> {
         self.upstream.as_ref().map(|u| &*u.address)
     }
 
+    /// Read a durable metadata value by key.
+    pub fn get_metadata(&self, key: &str) -> Option<&str> {
+        self.filter_metadata.get(key).map(String::as_str)
+    }
+
     /// X-Request-ID header value, if present and valid UTF-8.
     pub fn request_id(&self) -> Option<&str> {
         self.request.headers.get("x-request-id").and_then(|v| v.to_str().ok())
+    }
+
+    /// Write a durable metadata value that persists across all phases.
+    pub fn set_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) {
+        self.filter_metadata.insert(key.into(), value.into());
     }
 
     /// Upgrade the request body delivery mode for this request.
@@ -364,6 +383,68 @@ mod tests {
             ctx.request_body_mode,
             BodyMode::StreamBuffer { max_bytes: Some(1024) },
             "smaller StreamBuffer limit should win when merging"
+        );
+    }
+
+    #[test]
+    fn get_metadata_returns_none_when_empty() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        assert!(
+            ctx.get_metadata("mcp.method").is_none(),
+            "get_metadata should return None for absent key"
+        );
+    }
+
+    #[test]
+    fn set_metadata_then_get_returns_value() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("mcp.method", "tools/call");
+        assert_eq!(
+            ctx.get_metadata("mcp.method"),
+            Some("tools/call"),
+            "get_metadata should return the set value"
+        );
+    }
+
+    #[test]
+    fn set_metadata_overwrites_existing() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("a2a.method", "SendMessage");
+        ctx.set_metadata("a2a.method", "GetTask");
+        assert_eq!(
+            ctx.get_metadata("a2a.method"),
+            Some("GetTask"),
+            "set_metadata should overwrite previous value"
+        );
+    }
+
+    #[test]
+    fn metadata_independent_of_filter_results() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("mcp.session_id", "gw-123");
+        ctx.filter_results.clear();
+        assert_eq!(
+            ctx.get_metadata("mcp.session_id"),
+            Some("gw-123"),
+            "clearing filter_results should not affect metadata"
+        );
+    }
+
+    #[test]
+    fn set_metadata_accepts_owned_strings() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let key = "a2a.task_id".to_owned();
+        let value = "task-456".to_owned();
+        ctx.set_metadata(key, value);
+        assert_eq!(
+            ctx.get_metadata("a2a.task_id"),
+            Some("task-456"),
+            "set_metadata should accept owned Strings"
         );
     }
 }

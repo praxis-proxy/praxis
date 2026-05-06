@@ -95,7 +95,7 @@ pub(super) async fn execute(
         BodyMode::StreamBuffer { .. } | BodyMode::Stream | _ => {},
     }
 
-    let (result, body_bytes, cluster, upstream) = {
+    let (result, body_bytes, cluster, upstream, filter_metadata) = {
         let mut fctx = ctx.filter_context_for(pipeline, None).ok_or_else(|| {
             pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
@@ -103,11 +103,18 @@ pub(super) async fn execute(
             )
         })?;
         let r = pipeline.execute_http_request_body(&mut fctx, body, end_of_stream).await;
-        (r, fctx.request_body_bytes, fctx.cluster, fctx.upstream)
+        (
+            r,
+            fctx.request_body_bytes,
+            fctx.cluster,
+            fctx.upstream,
+            fctx.filter_metadata,
+        )
     };
     ctx.request_body_bytes = body_bytes;
     ctx.cluster = cluster;
     ctx.upstream = upstream;
+    ctx.filter_metadata = filter_metadata;
 
     match result {
         Ok(FilterAction::Continue | FilterAction::BodyDone) => {

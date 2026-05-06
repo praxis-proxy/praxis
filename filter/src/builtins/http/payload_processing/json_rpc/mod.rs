@@ -3,8 +3,8 @@
 
 //! Extracts JSON-RPC 2.0 envelope metadata from request bodies for routing.
 
-mod config;
-mod envelope;
+pub(crate) mod config;
+pub(crate) mod envelope;
 
 #[cfg(test)]
 #[allow(
@@ -255,6 +255,6 @@ fn set_id_results(
 }
 
 /// Check whether a string contains control characters.
-fn contains_control_chars(s: &str) -> bool {
+pub(crate) fn contains_control_chars(s: &str) -> bool {
     s.bytes().any(|b| (b < 0x20 && b != 0x09) || b == 0x7F)
 }
