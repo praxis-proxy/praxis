@@ -3,7 +3,7 @@
 
 //! Ordering validation checks for filter pipelines.
 
-use praxis_core::config::FilterEntry;
+use praxis_core::config::{FailureMode, FilterEntry};
 use tracing::warn;
 
 use super::filter::PipelineFilter;
@@ -72,6 +72,35 @@ pub(super) fn check_conditional_security(names: &[&str], filters: &[PipelineFilt
                      request conditions; it will be bypassed for \
                      non-matching requests"
                 ));
+            }
+        }
+    }
+}
+
+/// Security filters with `failure_mode: open` (bypass risk on error).
+///
+/// When `allow` is `true`, the error is demoted to a warning.
+#[allow(clippy::indexing_slicing, reason = "enumeration bounds")]
+pub(super) fn check_open_security_filters(
+    names: &[&str],
+    filters: &[PipelineFilter],
+    allow: bool,
+    errors: &mut Vec<String>,
+) {
+    for (i, name) in names.iter().enumerate() {
+        if SECURITY_FILTERS.contains(name) && filters[i].failure_mode == FailureMode::Open {
+            let msg = format!(
+                "security filter '{name}' at position {i} has \
+                 failure_mode: open; runtime errors will bypass \
+                 security enforcement"
+            );
+            if allow {
+                warn!(
+                    filter = %name,
+                    "{msg}; allowed by insecure_options.allow_open_security_filters"
+                );
+            } else {
+                errors.push(msg);
             }
         }
     }
@@ -323,6 +352,53 @@ mod tests {
         let mut errors = Vec::new();
         check_conditional_security(&names, &filters, &mut errors);
         assert!(errors.is_empty(), "unconditional security filter should not error");
+    }
+
+    #[test]
+    fn open_security_filter_errors() {
+        let names = vec!["ip_acl"];
+        let mut pf = make_pf(vec![]);
+        pf.failure_mode = FailureMode::Open;
+        let filters = vec![pf];
+        let mut errors = Vec::new();
+        check_open_security_filters(&names, &filters, false, &mut errors);
+        assert_eq!(errors.len(), 1, "should produce exactly one error");
+        assert!(
+            errors[0].contains("failure_mode: open"),
+            "error should mention failure_mode: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn open_security_filter_allowed_demotes_to_warning() {
+        let names = vec!["ip_acl"];
+        let mut pf = make_pf(vec![]);
+        pf.failure_mode = FailureMode::Open;
+        let filters = vec![pf];
+        let mut errors = Vec::new();
+        check_open_security_filters(&names, &filters, true, &mut errors);
+        assert!(errors.is_empty(), "allow flag should demote error to warning");
+    }
+
+    #[test]
+    fn closed_security_filter_no_error() {
+        let names = vec!["ip_acl"];
+        let filters = vec![make_pf(vec![])];
+        let mut errors = Vec::new();
+        check_open_security_filters(&names, &filters, false, &mut errors);
+        assert!(errors.is_empty(), "closed security filter should not error");
+    }
+
+    #[test]
+    fn open_non_security_filter_no_error() {
+        let names = vec!["headers"];
+        let mut pf = make_pf(vec![]);
+        pf.failure_mode = FailureMode::Open;
+        let filters = vec![pf];
+        let mut errors = Vec::new();
+        check_open_security_filters(&names, &filters, false, &mut errors);
+        assert!(errors.is_empty(), "open non-security filter should not error");
     }
 
     #[test]
