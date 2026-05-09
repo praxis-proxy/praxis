@@ -6,6 +6,8 @@
 pub(crate) mod http;
 mod tcp;
 
+#[cfg(feature = "ext-proc")]
+pub use http::ExtProcFilter;
 pub use http::{
     AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter, CsrfFilter,
     ForwardedHeadersFilter, GuardrailsAction, GuardrailsFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter,

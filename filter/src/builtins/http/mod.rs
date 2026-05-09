@@ -4,6 +4,8 @@
 //! HTTP protocol filters, organized by category.
 
 mod ai;
+#[cfg(feature = "ext-proc")]
+pub(crate) mod net;
 mod observability;
 pub(crate) mod payload_processing;
 mod security;
@@ -11,6 +13,8 @@ mod traffic_management;
 mod transformation;
 
 pub use ai::ModelToHeaderFilter;
+#[cfg(feature = "ext-proc")]
+pub use net::ExtProcFilter;
 pub use observability::{AccessLogFilter, RequestIdFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter, JsonRpcFilter};
 pub use security::{

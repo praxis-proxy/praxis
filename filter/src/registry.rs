@@ -139,6 +139,12 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     register_http(factories, "url_rewrite", UrlRewriteFilter::from_config);
     register_http(factories, "json_body_field", JsonBodyFieldFilter::from_config);
     register_http(factories, "json_rpc", JsonRpcFilter::from_config);
+    #[cfg(feature = "ext-proc")]
+    register_http(
+        factories,
+        "ext_proc",
+        crate::builtins::ExtProcFilter::from_config,
+    );
     #[cfg(feature = "ai-inference")]
     register_http(
         factories,
@@ -248,6 +254,8 @@ mod tests {
             "json_body_field should be registered"
         );
         assert!(names.contains(&"json_rpc"), "json_rpc should be registered");
+        #[cfg(feature = "ext-proc")]
+        assert!(names.contains(&"ext_proc"), "ext_proc should be registered");
         #[cfg(feature = "ai-inference")]
         assert!(
             names.contains(&"model_to_header"),
