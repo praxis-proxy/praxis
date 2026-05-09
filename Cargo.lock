@@ -2253,6 +2253,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "praxis-proxy-ext-proc"
+version = "0.2.0"
+dependencies = [
+ "async-trait",
+ "praxis-proxy-core",
+ "praxis-proxy-filter",
+ "praxis-proxy-proto",
+ "serde",
+ "serde_yaml",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "praxis-proxy-filter"
 version = "0.3.1"
 dependencies = [
