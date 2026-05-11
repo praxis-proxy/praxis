@@ -88,12 +88,7 @@ pub(crate) fn spawn_config_watcher(params: WatcherParams) -> std::thread::JoinHa
 async fn watch_loop(params: WatcherParams) {
     let (tx, mut rx) = mpsc::channel::<()>(16);
 
-    let watch_dir = params
-        .config_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| std::path::Path::new("."))
-        .to_path_buf();
+    let watch_dir = watch_dir_for_path(&params.config_path);
 
     let _watcher = match setup_watcher(tx, &watch_dir) {
         Ok(w) => w,
@@ -215,6 +210,18 @@ async fn drain_and_debounce(rx: &mut mpsc::Receiver<()>) {
 /// Whether a notify event kind is relevant for config reload.
 fn is_relevant_event(kind: EventKind) -> bool {
     matches!(kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_))
+}
+
+/// Resolve the directory to watch for a given config path.
+///
+/// Falls back to `.` when the path has no non-empty parent, covering
+/// bare filenames like `praxis.yaml` where [`Path::parent`] returns
+/// `Some("")` rather than `None`.
+fn watch_dir_for_path(path: &std::path::Path) -> PathBuf {
+    path.parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."))
+        .to_path_buf()
 }
 
 // -----------------------------------------------------------------------------
@@ -371,6 +378,62 @@ mod tests {
         assert_ne!(old_ptr, new_ptr, "pipeline should recover after valid config");
 
         shutdown.cancel();
+    }
+
+    #[test]
+    fn watch_dir_for_path_bare_filename() {
+        assert_eq!(
+            watch_dir_for_path(std::path::Path::new("praxis.yaml")),
+            PathBuf::from("."),
+            "bare filename should resolve to current directory"
+        );
+    }
+
+    #[test]
+    fn watch_dir_for_path_with_directory() {
+        assert_eq!(
+            watch_dir_for_path(std::path::Path::new("/etc/praxis/praxis.yaml")),
+            PathBuf::from("/etc/praxis"),
+            "absolute path should use its parent directory"
+        );
+    }
+
+    #[test]
+    fn watcher_starts_with_bare_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let original_dir = std::env::current_dir().unwrap();
+        std::env::set_current_dir(dir.path()).unwrap();
+
+        std::fs::write("praxis.yaml", VALID_YAML).unwrap();
+
+        let config = Config::from_yaml(VALID_YAML).unwrap();
+        let registry = Arc::new(FilterRegistry::with_builtins());
+        let health_registry = Arc::new(std::collections::HashMap::new());
+        let kv_stores = praxis_core::kv::KvStoreRegistry::new();
+        let pipelines =
+            Arc::new(crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores).unwrap());
+        let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let shutdown = CancellationToken::new();
+
+        let handle = spawn_config_watcher(WatcherParams {
+            config_path: PathBuf::from("praxis.yaml"),
+            health_shutdown,
+            initial_config: config,
+            kv_stores: praxis_core::kv::KvStoreRegistry::new(),
+            pipelines,
+            registry,
+            shutdown: shutdown.clone(),
+        });
+
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !handle.is_finished(),
+            "watcher should be running, not early-exited due to empty watch dir"
+        );
+        shutdown.cancel();
+        handle.join().unwrap();
+
+        std::env::set_current_dir(original_dir).unwrap();
     }
 
     // -------------------------------------------------------------------------
