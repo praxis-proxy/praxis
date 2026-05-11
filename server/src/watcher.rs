@@ -215,7 +215,7 @@ fn is_relevant_event(kind: EventKind) -> bool {
 /// Resolve the directory to watch for a given config path.
 ///
 /// Falls back to `.` when the path has no non-empty parent, covering
-/// bare filenames like `praxis.yaml` where [`Path::parent`] returns
+/// bare filenames like `praxis.yaml` where [`std::path::Path::parent`] returns
 /// `Some("")` rather than `None`.
 fn watch_dir_for_path(path: &std::path::Path) -> PathBuf {
     path.parent()
