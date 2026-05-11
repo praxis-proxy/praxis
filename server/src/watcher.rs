@@ -425,11 +425,14 @@ mod tests {
             shutdown: shutdown.clone(),
         });
 
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(
-            !handle.is_finished(),
-            "watcher should be running, not early-exited due to empty watch dir"
-        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+            assert!(
+                !handle.is_finished(),
+                "watcher exited early: bare filename caused empty-path notify error"
+            );
+        }
         shutdown.cancel();
         handle.join().unwrap();
     }
@@ -455,7 +458,7 @@ mod tests {
 
     impl Drop for CwdGuard {
         fn drop(&mut self) {
-            drop(std::env::set_current_dir(&self.0));
+            std::env::set_current_dir(&self.0).expect("failed to restore working directory");
         }
     }
 
