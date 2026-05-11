@@ -188,7 +188,8 @@ fn is_relevant_event(kind: EventKind) -> bool {
     matches!(kind, EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_))
 }
 
-/// Extract the parent directory of a path, defaulting to `.`.
+/// Extract the parent directory of a path, defaulting to `.` when the
+/// parent is missing or empty.
 fn parent_dir(path: &str) -> PathBuf {
     Path::new(path)
         .parent()
