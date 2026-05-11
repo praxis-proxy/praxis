@@ -400,9 +400,9 @@ mod tests {
 
     #[test]
     fn watcher_starts_with_bare_filename() {
+        let _lock = CWD_MUTEX.get_or_init(Mutex::default).lock().unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let original_dir = std::env::current_dir().unwrap();
-        std::env::set_current_dir(dir.path()).unwrap();
+        let _cwd = CwdGuard::new(dir.path());
 
         std::fs::write("praxis.yaml", VALID_YAML).unwrap();
 
@@ -419,7 +419,7 @@ mod tests {
             config_path: PathBuf::from("praxis.yaml"),
             health_shutdown,
             initial_config: config,
-            kv_stores: praxis_core::kv::KvStoreRegistry::new(),
+            kv_stores,
             pipelines,
             registry,
             shutdown: shutdown.clone(),
@@ -432,13 +432,32 @@ mod tests {
         );
         shutdown.cancel();
         handle.join().unwrap();
-
-        std::env::set_current_dir(original_dir).unwrap();
     }
 
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Serializes tests that mutate the process working directory.
+    static CWD_MUTEX: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();
+
+    /// RAII guard that restores the process working directory on drop.
+    struct CwdGuard(PathBuf);
+
+    impl CwdGuard {
+        /// Change to `path` and capture the original directory for restore.
+        fn new(path: &std::path::Path) -> Self {
+            let original = std::env::current_dir().unwrap();
+            std::env::set_current_dir(path).unwrap();
+            Self(original)
+        }
+    }
+
+    impl Drop for CwdGuard {
+        fn drop(&mut self) {
+            drop(std::env::set_current_dir(&self.0));
+        }
+    }
 
     /// Valid YAML config for watcher tests.
     const VALID_YAML: &str = r#"
