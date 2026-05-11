@@ -190,7 +190,11 @@ fn is_relevant_event(kind: EventKind) -> bool {
 
 /// Extract the parent directory of a path, defaulting to `.`.
 fn parent_dir(path: &str) -> PathBuf {
-    Path::new(path).parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
+    Path::new(path)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
 }
 
 // -----------------------------------------------------------------------------
@@ -219,6 +223,12 @@ mod tests {
     fn parent_dir_root_file() {
         let dir = parent_dir("/cert.pem");
         assert_eq!(dir, PathBuf::from("/"), "root file parent should be /");
+    }
+
+    #[test]
+    fn parent_dir_bare_filename() {
+        let dir = parent_dir("cert.pem");
+        assert_eq!(dir, PathBuf::from("."), "bare filename should fall back to .");
     }
 
     #[test]

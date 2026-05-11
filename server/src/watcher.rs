@@ -91,6 +91,7 @@ async fn watch_loop(params: WatcherParams) {
     let watch_dir = params
         .config_path
         .parent()
+        .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf();
 
