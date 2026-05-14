@@ -421,6 +421,57 @@ processing_mode:
     }
 }
 
+#[test]
+fn rejects_status_on_error_zero() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+status_on_error: 0
+"#,
+    )
+    .unwrap();
+
+    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("status_on_error"),
+        "error should mention status_on_error: {err}"
+    );
+}
+
+#[test]
+fn rejects_status_on_error_out_of_range() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+status_on_error: 600
+"#,
+    )
+    .unwrap();
+
+    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("status_on_error"),
+        "error should mention status_on_error: {err}"
+    );
+}
+
+#[test]
+fn rejects_message_timeout_ms_zero() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+message_timeout_ms: 0
+"#,
+    )
+    .unwrap();
+
+    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("message_timeout_ms"),
+        "error should mention message_timeout_ms: {err}"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

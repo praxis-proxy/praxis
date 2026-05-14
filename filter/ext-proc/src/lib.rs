@@ -350,6 +350,7 @@ struct ForwardRulesConfig {
 /// Fields whose non-default values require unimplemented behaviour
 /// produce a clear error rather than being silently ignored.
 fn validate_config(cfg: &ExtProcConfig) -> Result<(), FilterError> {
+    validate_core_fields(cfg)?;
     validate_processing_mode(&cfg.processing_mode)?;
 
     if cfg.allow_mode_override {
@@ -377,6 +378,21 @@ fn validate_config(cfg: &ExtProcConfig) -> Result<(), FilterError> {
         return Err("ext_proc: allowed_override_modes is not yet supported".into());
     }
 
+    Ok(())
+}
+
+/// Validate core numeric fields.
+fn validate_core_fields(cfg: &ExtProcConfig) -> Result<(), FilterError> {
+    if !(100..=599).contains(&cfg.status_on_error) {
+        return Err(format!(
+            "ext_proc: status_on_error {code} is not a valid HTTP status code (must be 100..=599)",
+            code = cfg.status_on_error,
+        )
+        .into());
+    }
+    if cfg.message_timeout_ms == 0 {
+        return Err("ext_proc: message_timeout_ms must be greater than 0".into());
+    }
     Ok(())
 }
 
