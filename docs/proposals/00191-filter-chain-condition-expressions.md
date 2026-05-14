@@ -50,7 +50,6 @@ Without conditional expressions, users must create multiple filter chains with o
 **Example Configuration:**
 
 ```yaml
-
 - filter: json_body_field
   field: model_id
   header: X-Model-Id
