@@ -1,6 +1,6 @@
 ---
-issue: 191
-discussion: 191
+issue: https://github.com/praxis-proxy/praxis/issues/191
+discussion: https://github.com/praxis-proxy/praxis/discussions/185
 status: proposed
 authors:
 - mariusdanciu
@@ -50,12 +50,12 @@ Without conditional expressions, users must create multiple filter chains with o
 **Example Configuration:**
 
 ```yaml
+---
 - filter: json_body_field
   field: model_id
   header: X-Model-Id
   conditions:
-    - expr: "method("POST") && (path_prefix("/v1/chat/completions") || path_prefix("/v1/responses") || path_prefix("/v1/messages"))"
-
+    - expr: method("POST") && (path_prefix("/v1/chat/completions") || path_prefix("/v1/responses") || path_prefix("/v1/messages"))
 ```
 
 ---
