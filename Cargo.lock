@@ -2254,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-ext-proc"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "praxis-proxy-core",

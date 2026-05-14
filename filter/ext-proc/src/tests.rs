@@ -127,8 +127,8 @@ fn defaults_feature_flags() {
     assert!(cfg.forward_rules.is_none(), "default forward_rules should be None");
 }
 
-#[test]
-fn missing_target_errors() {
+#[tokio::test]
+async fn missing_target_errors() {
     let yaml: serde_yaml::Value = serde_yaml::from_str("failure_mode: open").unwrap();
     let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
     assert!(
@@ -137,25 +137,24 @@ fn missing_target_errors() {
     );
 }
 
-#[test]
-fn invalid_failure_mode_errors() {
+#[tokio::test]
+async fn invalid_target_uri_errors() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
-target: "http://127.0.0.1:50051"
-failure_mode: invalid
+target: "not a valid uri"
 "#,
     )
     .unwrap();
 
     let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
     assert!(
-        err.to_string().contains("unknown variant"),
-        "error should mention unknown variant: {err}"
+        err.to_string().contains("invalid target URI"),
+        "error should mention invalid target URI: {err}"
     );
 }
 
-#[test]
-fn unknown_field_errors() {
+#[tokio::test]
+async fn unknown_field_errors() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -175,8 +174,8 @@ bogus_field: true
 // Unsupported Feature Validation
 // -----------------------------------------------------------------------------
 
-#[test]
-fn rejects_request_body_mode_buffered() {
+#[tokio::test]
+async fn rejects_request_body_mode_buffered() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -197,8 +196,8 @@ processing_mode:
     );
 }
 
-#[test]
-fn rejects_response_body_mode_streamed() {
+#[tokio::test]
+async fn rejects_response_body_mode_streamed() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -215,8 +214,8 @@ processing_mode:
     );
 }
 
-#[test]
-fn rejects_request_header_mode_skip() {
+#[tokio::test]
+async fn rejects_request_header_mode_skip() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -233,8 +232,8 @@ processing_mode:
     );
 }
 
-#[test]
-fn rejects_trailer_mode_send() {
+#[tokio::test]
+async fn rejects_trailer_mode_send() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -251,8 +250,8 @@ processing_mode:
     );
 }
 
-#[test]
-fn rejects_allow_mode_override() {
+#[tokio::test]
+async fn rejects_allow_mode_override() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -268,8 +267,8 @@ allow_mode_override: true
     );
 }
 
-#[test]
-fn rejects_observability_mode() {
+#[tokio::test]
+async fn rejects_observability_mode() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -285,8 +284,8 @@ observability_mode: true
     );
 }
 
-#[test]
-fn rejects_disable_immediate_response() {
+#[tokio::test]
+async fn rejects_disable_immediate_response() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -302,8 +301,8 @@ disable_immediate_response: true
     );
 }
 
-#[test]
-fn rejects_mutation_rules() {
+#[tokio::test]
+async fn rejects_mutation_rules() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -320,8 +319,8 @@ mutation_rules:
     );
 }
 
-#[test]
-fn rejects_forward_rules() {
+#[tokio::test]
+async fn rejects_forward_rules() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -338,8 +337,8 @@ forward_rules:
     );
 }
 
-#[test]
-fn rejects_allow_content_length_header() {
+#[tokio::test]
+async fn rejects_allow_content_length_header() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -355,8 +354,8 @@ allow_content_length_header: true
     );
 }
 
-#[test]
-fn rejects_send_body_without_waiting() {
+#[tokio::test]
+async fn rejects_send_body_without_waiting() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -401,8 +400,8 @@ deferred_close_timeout_ms: 10000
     assert_eq!(filter.name(), "ext_proc");
 }
 
-#[test]
-fn accepts_all_body_send_mode_variants_at_parse_time() {
+#[tokio::test]
+async fn accepts_all_body_send_mode_variants_at_parse_time() {
     for mode in ["streamed", "buffered", "buffered_partial", "full_duplex_streamed"] {
         let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
             r#"
@@ -421,8 +420,8 @@ processing_mode:
     }
 }
 
-#[test]
-fn rejects_status_on_error_zero() {
+#[tokio::test]
+async fn rejects_status_on_error_zero() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -438,8 +437,8 @@ status_on_error: 0
     );
 }
 
-#[test]
-fn rejects_status_on_error_out_of_range() {
+#[tokio::test]
+async fn rejects_status_on_error_out_of_range() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -455,8 +454,8 @@ status_on_error: 600
     );
 }
 
-#[test]
-fn rejects_message_timeout_ms_zero() {
+#[tokio::test]
+async fn rejects_message_timeout_ms_zero() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
