@@ -24,7 +24,7 @@ This proposal introduces conditional expressions for filter chains in Praxis pro
 
 #### Motivation
 
-Currently, filter chains in Praxis execute unconditionally on all matching requests. However, many real-world proxy scenarios require conditional logic to:
+Currently, filter chains in Praxis have simple conditionals (e.g. `When`/`Unless`). However, more expressive conditions are needed:
 
 - Apply different filters based on request path prefixes (e.g., `/api` vs `/public`)
 - Filter requests differently based on HTTP methods (POST vs GET)
