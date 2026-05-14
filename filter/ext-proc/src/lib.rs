@@ -300,6 +300,18 @@ enum BodySendMode {
     FullDuplexStreamed,
 }
 
+impl std::fmt::Display for BodySendMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::None => f.write_str("none"),
+            Self::Streamed => f.write_str("streamed"),
+            Self::Buffered => f.write_str("buffered"),
+            Self::BufferedPartial => f.write_str("buffered_partial"),
+            Self::FullDuplexStreamed => f.write_str("full_duplex_streamed"),
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // MutationRulesConfig / ForwardRulesConfig
 // -----------------------------------------------------------------------------
@@ -406,14 +418,14 @@ fn validate_processing_mode(pm: &ProcessingModeConfig) -> Result<(), FilterError
     }
     if pm.request_body_mode != BodySendMode::None {
         return Err(format!(
-            "ext_proc: request_body_mode '{:?}' is not yet supported (only 'none')",
+            "ext_proc: request_body_mode '{}' is not yet supported (only 'none')",
             pm.request_body_mode,
         )
         .into());
     }
     if pm.response_body_mode != BodySendMode::None {
         return Err(format!(
-            "ext_proc: response_body_mode '{:?}' is not yet supported (only 'none')",
+            "ext_proc: response_body_mode '{}' is not yet supported (only 'none')",
             pm.response_body_mode,
         )
         .into());
