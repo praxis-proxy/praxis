@@ -260,7 +260,21 @@ jobs:
           The following issues were found with proposal files in this PR:
           $(echo -e "$errors")
 
-          See our [proposal process](docs/proposals.md) for requirements."
+          Every proposal file must include a YAML frontmatter header like this:
+
+          \`\`\`yaml
+          ---
+          issue: https://github.com/${{ github.repository }}/issues/NNN
+          discussion: https://github.com/${{ github.repository }}/discussions/NNN
+          status: proposed
+          authors:
+            - your-github-handle
+          ---
+          \`\`\`
+
+          See our [proposal process](docs/proposals.md) for full requirements.
+
+          Once the header is fixed, please re-open this PR."
               gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$body"
             fi
             gh pr close "$PR_NUMBER" --repo "${{ github.repository }}"

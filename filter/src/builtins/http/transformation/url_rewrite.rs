@@ -275,6 +275,16 @@ fn apply_regex<'a>(path: Cow<'a, str>, pattern: &Regex, replacement: &str) -> Co
 /// is empty.
 fn apply_strip<'a>(query: Option<Cow<'a, str>>, names: &HashSet<String>) -> Option<Cow<'a, str>> {
     let qs = query?;
+
+    let any_match = qs.split('&').any(|pair| {
+        let key = pair.split('=').next().unwrap_or("");
+        let decoded = percent_decode_str(key).decode_utf8_lossy();
+        names.contains(decoded.as_ref())
+    });
+    if !any_match {
+        return Some(qs);
+    }
+
     let filtered = strip_params(&qs, names);
     trace!(removed = ?names, "stripped query params");
     if filtered.is_empty() {

@@ -15,9 +15,10 @@ use super::super::{context::PingoraRequestCtx, convert::response_header_from_pin
 
 /// Run the response-phase pipeline and sync header changes to Pingora.
 ///
-/// Strips [RFC 9110] hop-by-hop headers from the upstream response
-/// before the filter pipeline sees them, ensuring they are never
-/// forwarded to the client.
+/// Strips [RFC 9110] hop-by-hop headers and reserved internal
+/// routing headers (`x-praxis-*`, `x-mcp-*`, `x-a2a-*`) from the
+/// upstream response before the filter pipeline sees them, ensuring
+/// proxy-internal metadata is never forwarded to the client.
 ///
 /// [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 pub(super) async fn execute(
@@ -30,6 +31,7 @@ pub(super) async fn execute(
         debug!("101 response missing valid WebSocket Upgrade header; not marking as upgraded");
     }
     super::upstream_response::strip_hop_by_hop_response(upstream_response, is_upgrade_response);
+    super::upstream_response::strip_reserved_internal_response(upstream_response);
     let mut resp = response_header_from_pingora(upstream_response);
     ctx.connection_upgraded = is_upgrade_response;
     ctx.response_phase_done = true;

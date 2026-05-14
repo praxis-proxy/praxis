@@ -64,8 +64,8 @@ impl ServeHttp for PingoraKvService {
             ("GET", [store]) => handle_list(&self.registry, store),
             ("GET", [store, key]) => handle_get(&self.registry, store, key),
             ("PUT", [store, key]) => match read_body(http_session).await {
-                Some(body) => handle_set(&self.registry, store, key, &body),
-                None => json_response(413, br#"{"error":"request body too large"}"#),
+                Ok(body) => handle_set(&self.registry, store, key, &body),
+                Err(resp) => resp,
             },
             ("DELETE", [store, key]) => handle_delete(&self.registry, store, key),
             _ => json_response(404, br#"{"error":"not found"}"#),
@@ -79,17 +79,21 @@ impl ServeHttp for PingoraKvService {
 
 /// Read the request body as a UTF-8 string, up to [`MAX_BODY_BYTES`].
 ///
-/// Returns `None` if the body exceeds the limit.
-async fn read_body(session: &mut ServerSession) -> Option<String> {
+/// Returns an error response if the body exceeds the limit or is not
+/// valid UTF-8.
+async fn read_body(session: &mut ServerSession) -> Result<String, Response<Vec<u8>>> {
     let mut buf = Vec::new();
     while let Some(chunk) = session.read_request_body().await.ok().flatten() {
         if buf.len() + chunk.len() > MAX_BODY_BYTES {
             warn!(limit = MAX_BODY_BYTES, "KV admin request body exceeded size limit");
-            return None;
+            return Err(json_response(413, br#"{"error":"request body too large"}"#));
         }
         buf.extend_from_slice(&chunk);
     }
-    Some(String::from_utf8_lossy(&buf).into_owned())
+    String::from_utf8(buf).map_err(|e| {
+        warn!(error = %e, "KV admin request body is not valid UTF-8");
+        json_response(400, br#"{"error":"request body is not valid UTF-8"}"#)
+    })
 }
 
 // ---------------------------------------------------------------------------

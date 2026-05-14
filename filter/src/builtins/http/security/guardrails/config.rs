@@ -36,7 +36,7 @@ pub(super) const MAX_REGEX_SIZE: usize = 1_048_576;
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum GuardrailsAction {
-    /// Reject the request immediately with 401 (default).
+    /// Reject the request immediately with 403 (default).
     #[default]
     Reject,
 

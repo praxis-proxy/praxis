@@ -484,7 +484,7 @@ A filter can have both `conditions` (request phase) and
 | `forwarded_headers` | Security | HTTP | `trusted_proxies` (CIDR list) |
 | `guardrails` | Security | HTTP | Reject requests matching header/body string or regex rules |
 | `ip_acl` | Security | HTTP | `allow` or `deny` (CIDR lists, mutually exclusive); 403 on denial |
-| `credential_injection` | Security | HTTP | Per-cluster API key injection with client credential stripping |
+| `credential_injection` | Security | HTTP | Per-cluster API key injection with client credential stripping. Literal `value` fields are redacted in `--dump` output. |
 | `json_body_field` | Payload Processing | HTTP | Extract a JSON body field and promote to header |
 | `json_rpc` | Payload Processing | HTTP | Parse JSON-RPC 2.0 envelopes and extract method/id/kind for routing |
 | `compression` | Payload Processing | HTTP | Gzip, brotli, and zstd response compression |
