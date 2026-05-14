@@ -2,7 +2,8 @@
 issue: 191
 discussion: 191
 status: proposed
-authors: marius.danciu@gmail.com
+authors:
+- mariusdanciu
 ---
 
 # Filter Chain Condition Expressions
