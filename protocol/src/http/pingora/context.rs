@@ -68,6 +68,12 @@ pub struct PingoraRequestCtx {
     /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
     pub filter_metadata: std::collections::HashMap<String, String>,
 
+    /// gRPC variant detected from the request `content-type` header.
+    ///
+    /// Set once during `request_filter` and carried through all
+    /// lifecycle phases.
+    pub grpc: praxis_filter::GrpcKind,
+
     /// Cluster name snapshot retained for metrics emission in the
     /// `logging()` hook, after `cluster` has been consumed by filter
     /// context construction.
@@ -179,6 +185,7 @@ macro_rules! filter_context {
             request_headers_to_set: Vec::new(),
             filter_metadata: std::mem::take(&mut $ctx.filter_metadata),
             filter_results: std::collections::HashMap::new(),
+            grpc: $ctx.grpc,
             health_registry: $pipeline.health_registry(),
             kv_stores: $pipeline.kv_stores(),
             request: $request,
@@ -275,6 +282,7 @@ impl Default for PingoraRequestCtx {
             connection_upgraded: false,
             downstream_tls: false,
             filter_metadata: std::collections::HashMap::new(),
+            grpc: praxis_filter::GrpcKind::None,
             metrics_cluster: None,
             pre_read_body: None,
             request_body_buffer: None,
@@ -558,6 +566,12 @@ mod tests {
             BodyMode::StreamBuffer { max_bytes: Some(8192) },
             "response_body_mode should match assigned value"
         );
+    }
+
+    #[test]
+    fn default_grpc_is_none() {
+        let ctx = default_ctx();
+        assert_eq!(ctx.grpc, praxis_filter::GrpcKind::None, "default grpc should be None");
     }
 
     // -------------------------------------------------------------------------

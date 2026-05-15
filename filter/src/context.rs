@@ -8,7 +8,7 @@ use std::{borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Insta
 use http::{HeaderMap, Method, StatusCode, Uri};
 use praxis_core::{connectivity::Upstream, health::HealthRegistry, kv::KvStoreRegistry};
 
-use crate::{body::BodyMode, pipeline::body::merge_body_mode, results::FilterResultSet};
+use crate::{GrpcKind, body::BodyMode, pipeline::body::merge_body_mode, results::FilterResultSet};
 
 // -----------------------------------------------------------------------------
 // HttpFilterContext
@@ -75,6 +75,12 @@ pub struct HttpFilterContext<'a> {
     /// reads these to evaluate branch conditions. Cleared
     /// after branch evaluation at each filter.
     pub filter_results: HashMap<&'static str, FilterResultSet>,
+
+    /// gRPC variant detected from the request `content-type` header.
+    ///
+    /// Set by the protocol layer before pipeline execution.
+    /// Defaults to [`GrpcKind::None`] for non-gRPC requests.
+    pub grpc: GrpcKind,
 
     /// Shared health registry for endpoint health lookups.
     pub health_registry: Option<&'a HealthRegistry>,

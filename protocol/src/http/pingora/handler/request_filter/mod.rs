@@ -88,6 +88,7 @@ pub(in crate::http) async fn execute(
         .map(std::net::SocketAddr::ip)
         .map(normalize_mapped_ipv4);
     ctx.downstream_tls = session.digest().is_some_and(|d| d.ssl_digest.is_some());
+    ctx.grpc = praxis_filter::GrpcKind::from_headers(&request.headers);
     ctx.request_is_idempotent = matches!(
         session.req_header().method,
         http::Method::GET | http::Method::HEAD | http::Method::OPTIONS

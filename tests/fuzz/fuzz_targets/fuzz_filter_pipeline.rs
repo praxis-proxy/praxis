@@ -57,6 +57,7 @@ fuzz_target!(|data: &str| {
             extra_request_headers: Vec::new(),
             filter_metadata: std::collections::HashMap::new(),
             filter_results: std::collections::HashMap::new(),
+            grpc: praxis_filter::GrpcKind::None,
             health_registry: None,
             kv_stores: None,
             request: &request,

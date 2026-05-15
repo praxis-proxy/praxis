@@ -44,6 +44,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         request_headers_to_set: Vec::new(),
         filter_metadata: std::collections::HashMap::new(),
         filter_results: std::collections::HashMap::new(),
+        grpc: praxis_filter::GrpcKind::None,
         health_registry: None,
         kv_stores: None,
         request: req,
