@@ -18,7 +18,6 @@ workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
-praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-proto = { workspace = true }
 serde = { workspace = true }

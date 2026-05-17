@@ -22,7 +22,6 @@ async fn parse_valid_config() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
-failure_mode: open
 message_timeout_ms: 500
 "#,
     )
@@ -44,7 +43,6 @@ async fn parse_full_config_with_processing_mode() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
-failure_mode: closed
 message_timeout_ms: 500
 max_message_timeout_ms: 5000
 processing_mode:
@@ -66,11 +64,6 @@ processing_mode:
 fn defaults_core_fields() {
     let cfg = minimal_config();
 
-    assert_eq!(
-        cfg.failure_mode,
-        FailureMode::Closed,
-        "default failure_mode should be Closed"
-    );
     assert_eq!(
         cfg.message_timeout_ms, DEFAULT_MESSAGE_TIMEOUT_MS,
         "default message_timeout_ms should be {DEFAULT_MESSAGE_TIMEOUT_MS}"
@@ -129,7 +122,7 @@ fn defaults_feature_flags() {
 
 #[tokio::test]
 async fn missing_target_errors() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str("failure_mode: open").unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str("message_timeout_ms: 500").unwrap();
     let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
     assert!(
         err.to_string().contains("target"),

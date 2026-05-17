@@ -42,7 +42,6 @@ mod tests;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use praxis_core::config::FailureMode;
 use praxis_filter::{FilterAction, FilterError, HttpFilter, HttpFilterContext, parse_filter_config};
 use serde::Deserialize;
 use tonic::transport::{Channel, Endpoint};
@@ -73,7 +72,6 @@ const DEFAULT_DEFERRED_CLOSE_TIMEOUT_MS: u64 = 5000;
 /// ```yaml
 /// filter: ext_proc
 /// target: "http://127.0.0.1:50051"
-/// failure_mode: closed
 /// message_timeout_ms: 200
 /// processing_mode:
 ///   request_header_mode: send
@@ -81,6 +79,10 @@ const DEFAULT_DEFERRED_CLOSE_TIMEOUT_MS: u64 = 5000;
 ///   request_body_mode: none
 ///   response_body_mode: none
 /// ```
+///
+/// `failure_mode` is not part of this config. It is a pipeline-level
+/// concern specified on the [`FilterEntry`] wrapper and enforced by
+/// the pipeline executor.
 ///
 /// # Envoy-specific fields not included
 ///
@@ -96,6 +98,7 @@ const DEFAULT_DEFERRED_CLOSE_TIMEOUT_MS: u64 = 5000;
 /// - `disable_clear_route_cache` / `route_cache_action` — Envoy route cache management
 /// - `processing_request_modifier` / `on_processing_response` — Envoy extension point decorators (alpha)
 ///
+/// [`FilterEntry`]: praxis_filter::FilterEntry
 /// [`ExternalProcessor`]: https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/ext_proc/v3/ext_proc.proto
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -106,11 +109,6 @@ const DEFAULT_DEFERRED_CLOSE_TIMEOUT_MS: u64 = 5000;
 struct ExtProcConfig {
     /// gRPC endpoint URI of the external processing server.
     target: String,
-
-    /// Behaviour when the external processor is unreachable or returns
-    /// an error. Maps to Envoy's `failure_mode_allow`.
-    #[serde(default)]
-    failure_mode: FailureMode,
 
     /// Per-message timeout in milliseconds.
     /// Maps to Envoy's `message_timeout`.
@@ -454,7 +452,6 @@ fn validate_processing_mode(pm: &ProcessingModeConfig) -> Result<(), FilterError
 /// ```yaml
 /// filter: ext_proc
 /// target: "http://127.0.0.1:50051"
-/// failure_mode: closed
 /// message_timeout_ms: 200
 /// status_on_error: 500
 /// processing_mode:
@@ -467,10 +464,6 @@ pub struct ExtProcFilter {
     /// Lazily-connecting gRPC channel to the external processor.
     #[allow(dead_code, reason = "used by gRPC callout in subsequent PRs")]
     channel: Channel,
-
-    /// Behaviour when the external processor is unreachable or errors.
-    #[allow(dead_code, reason = "used by gRPC callout in subsequent PRs")]
-    failure_mode: FailureMode,
 
     /// Per-message timeout for gRPC calls.
     #[allow(dead_code, reason = "used by gRPC callout in subsequent PRs")]
@@ -510,7 +503,6 @@ impl ExtProcFilter {
 
         Ok(Box::new(Self {
             channel,
-            failure_mode: cfg.failure_mode,
             message_timeout: Duration::from_millis(cfg.message_timeout_ms),
             status_on_error: cfg.status_on_error,
             target: cfg.target,
