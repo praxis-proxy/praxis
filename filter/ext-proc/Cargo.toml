@@ -19,7 +19,6 @@ workspace = true
 [dependencies]
 async-trait = { workspace = true }
 praxis-filter = { workspace = true }
-praxis-proto = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 tonic = { workspace = true }
