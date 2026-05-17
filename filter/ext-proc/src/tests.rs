@@ -168,46 +168,6 @@ bogus_field: true
 // -----------------------------------------------------------------------------
 
 #[tokio::test]
-async fn rejects_request_body_mode_buffered() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str(
-        r#"
-target: "http://127.0.0.1:50051"
-processing_mode:
-  request_body_mode: buffered
-"#,
-    )
-    .unwrap();
-
-    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
-    assert!(
-        err.to_string().contains("request_body_mode"),
-        "error should mention request_body_mode: {err}"
-    );
-    assert!(
-        err.to_string().contains("not yet supported"),
-        "error should say not yet supported: {err}"
-    );
-}
-
-#[tokio::test]
-async fn rejects_response_body_mode_streamed() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str(
-        r#"
-target: "http://127.0.0.1:50051"
-processing_mode:
-  response_body_mode: streamed
-"#,
-    )
-    .unwrap();
-
-    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
-    assert!(
-        err.to_string().contains("response_body_mode"),
-        "error should mention response_body_mode: {err}"
-    );
-}
-
-#[tokio::test]
 async fn rejects_request_header_mode_skip() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
@@ -226,7 +186,25 @@ processing_mode:
 }
 
 #[tokio::test]
-async fn rejects_trailer_mode_send() {
+async fn rejects_response_header_mode_skip() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+processing_mode:
+  response_header_mode: skip
+"#,
+    )
+    .unwrap();
+
+    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("response_header_mode"),
+        "error should mention response_header_mode: {err}"
+    );
+}
+
+#[tokio::test]
+async fn rejects_request_trailer_mode_send() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
@@ -240,6 +218,24 @@ processing_mode:
     assert!(
         err.to_string().contains("request_trailer_mode"),
         "error should mention request_trailer_mode: {err}"
+    );
+}
+
+#[tokio::test]
+async fn rejects_response_trailer_mode_send() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+processing_mode:
+  response_trailer_mode: send
+"#,
+    )
+    .unwrap();
+
+    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("response_trailer_mode"),
+        "error should mention response_trailer_mode: {err}"
     );
 }
 
@@ -394,7 +390,7 @@ deferred_close_timeout_ms: 10000
 }
 
 #[tokio::test]
-async fn accepts_all_body_send_mode_variants_at_parse_time() {
+async fn rejects_all_request_body_send_mode_variants() {
     for mode in ["streamed", "buffered", "buffered_partial", "full_duplex_streamed"] {
         let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
             r#"
@@ -406,6 +402,34 @@ processing_mode:
         .unwrap();
 
         let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
+        assert!(
+            err.to_string().contains("request_body_mode"),
+            "{mode} error should mention request_body_mode: {err}"
+        );
+        assert!(
+            err.to_string().contains("not yet supported"),
+            "{mode} should parse but fail validation: {err}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn rejects_all_response_body_send_mode_variants() {
+    for mode in ["streamed", "buffered", "buffered_partial", "full_duplex_streamed"] {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+            r#"
+target: "http://127.0.0.1:50051"
+processing_mode:
+  response_body_mode: {mode}
+"#,
+        ))
+        .unwrap();
+
+        let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
+        assert!(
+            err.to_string().contains("response_body_mode"),
+            "{mode} error should mention response_body_mode: {err}"
+        );
         assert!(
             err.to_string().contains("not yet supported"),
             "{mode} should parse but fail validation: {err}"
@@ -461,6 +485,25 @@ message_timeout_ms: 0
     assert!(
         err.to_string().contains("message_timeout_ms"),
         "error should mention message_timeout_ms: {err}"
+    );
+}
+
+#[tokio::test]
+async fn rejects_allowed_override_modes_with_entries() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+allowed_override_modes:
+  - request_header_mode: send
+    response_header_mode: send
+"#,
+    )
+    .unwrap();
+
+    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("allowed_override_modes"),
+        "error should mention allowed_override_modes: {err}"
     );
 }
 
