@@ -508,6 +508,126 @@ allowed_override_modes:
 }
 
 // -----------------------------------------------------------------------------
+// Pipeline-Level failure_mode
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn failure_mode_in_yaml_is_stripped_by_parse() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+failure_mode: open
+"#,
+    )
+    .unwrap();
+
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+    assert_eq!(
+        filter.name(),
+        "ext_proc",
+        "failure_mode should be stripped as a structural key and not cause an unknown-field error"
+    );
+}
+
+#[tokio::test]
+async fn filter_entry_captures_failure_mode_open() {
+    let entry: praxis_filter::FilterEntry = serde_yaml::from_str(
+        r#"
+filter: ext_proc
+failure_mode: open
+target: "http://127.0.0.1:50051"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        entry.failure_mode,
+        praxis_filter::FailureMode::Open,
+        "FilterEntry should capture failure_mode: open"
+    );
+
+    let filter = ExtProcFilter::from_config(&entry.config).unwrap();
+    assert_eq!(
+        filter.name(),
+        "ext_proc",
+        "filter should build from the entry config after structural key stripping"
+    );
+}
+
+#[tokio::test]
+async fn filter_entry_captures_failure_mode_closed() {
+    let entry: praxis_filter::FilterEntry = serde_yaml::from_str(
+        r#"
+filter: ext_proc
+failure_mode: closed
+target: "http://127.0.0.1:50051"
+message_timeout_ms: 300
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        entry.failure_mode,
+        praxis_filter::FailureMode::Closed,
+        "FilterEntry should capture failure_mode: closed"
+    );
+
+    let filter = ExtProcFilter::from_config(&entry.config).unwrap();
+    assert_eq!(
+        filter.name(),
+        "ext_proc",
+        "filter should build from the entry config after structural key stripping"
+    );
+}
+
+#[tokio::test]
+async fn filter_entry_defaults_failure_mode_to_closed() {
+    let entry: praxis_filter::FilterEntry = serde_yaml::from_str(
+        r#"
+filter: ext_proc
+target: "http://127.0.0.1:50051"
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        entry.failure_mode,
+        praxis_filter::FailureMode::Closed,
+        "FilterEntry should default failure_mode to Closed"
+    );
+
+    let filter = ExtProcFilter::from_config(&entry.config).unwrap();
+    assert_eq!(
+        filter.name(),
+        "ext_proc",
+        "filter should build from the entry config without failure_mode"
+    );
+}
+
+#[tokio::test]
+async fn pipeline_builds_with_ext_proc_and_failure_mode() {
+    let mut registry = praxis_filter::FilterRegistry::with_builtins();
+    registry
+        .register("ext_proc", praxis_filter::http_builtin(ExtProcFilter::from_config))
+        .unwrap();
+
+    let mut entries: Vec<praxis_filter::FilterEntry> = serde_yaml::from_str(
+        r#"
+- filter: ext_proc
+  failure_mode: open
+  target: "http://127.0.0.1:50051"
+- filter: ext_proc
+  failure_mode: closed
+  target: "http://127.0.0.1:50052"
+"#,
+    )
+    .unwrap();
+
+    let pipeline = praxis_filter::FilterPipeline::build(&mut entries, &registry).unwrap();
+    assert_eq!(pipeline.len(), 2, "pipeline should contain both ext_proc filters");
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
