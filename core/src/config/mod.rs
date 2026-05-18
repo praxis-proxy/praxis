@@ -23,7 +23,7 @@ mod runtime;
 mod validate;
 
 pub use admin::AdminConfig;
-pub use body_limits::BodyLimitsConfig;
+pub use body_limits::{BodyLimitsConfig, DEFAULT_MAX_BODY_BYTES};
 pub use bootstrap::{DEFAULT_CONFIG, load_config};
 pub use branch_chain::{BranchChainConfig, BranchCondition};
 pub use chain_ref::ChainRef;
@@ -223,7 +223,7 @@ fn default_shutdown_timeout_secs() -> u64 {
 mod tests {
     use std::path::Path;
 
-    use super::Config;
+    use super::{Config, DEFAULT_MAX_BODY_BYTES};
 
     #[test]
     fn default_shutdown_timeout_is_30() {
@@ -242,15 +242,17 @@ mod tests {
     }
 
     #[test]
-    fn body_limits_default_to_none() {
+    fn body_limits_default_to_ten_mib() {
         let config = Config::from_yaml(VALID_YAML).unwrap();
-        assert!(
-            config.body_limits.max_request_bytes.is_none(),
-            "max_request_bytes should default to None"
+        assert_eq!(
+            config.body_limits.max_request_bytes,
+            Some(DEFAULT_MAX_BODY_BYTES),
+            "max_request_bytes should default to 10 MiB"
         );
-        assert!(
-            config.body_limits.max_response_bytes.is_none(),
-            "max_response_bytes should default to None"
+        assert_eq!(
+            config.body_limits.max_response_bytes,
+            Some(DEFAULT_MAX_BODY_BYTES),
+            "max_response_bytes should default to 10 MiB"
         );
     }
 
@@ -375,7 +377,7 @@ filter_chains:
         let config = Config::from_yaml(yaml).unwrap();
         assert_eq!(
             config.body_limits.max_request_bytes,
-            Some(10_485_760),
+            Some(DEFAULT_MAX_BODY_BYTES),
             "request body limit mismatch"
         );
         assert_eq!(

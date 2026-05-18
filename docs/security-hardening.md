@@ -21,11 +21,19 @@ ambiguous configuration:
   path).
 - TLS certificate and key paths reject directory
   traversal (`..`).
-- Health check targets reject loopback and cloud
-  metadata addresses (SSRF protection).
+- Health check targets reject loopback, link-local,
+  and cloud metadata addresses (SSRF protection).
 - Root execution (UID 0) rejected by default.
 - Supply chain audited via `cargo audit` and
   `cargo deny`.
+- Reserved internal headers (`x-praxis-*`,
+  `x-mcp-*`, `x-a2a-*`) are rejected from client
+  requests, stripped before forwarding to backends,
+  and stripped from backend responses before reaching
+  clients.
+- `--dump` redacts credential injection literal
+  values as `[REDACTED]` to prevent accidental secret
+  exposure in config dumps.
 
 ## Network Security
 

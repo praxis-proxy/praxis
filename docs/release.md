@@ -19,6 +19,7 @@ Before tagging a release:
 - [ ] Benchmarks have been run; performance is similar or better than the previous release
 - [ ] Version in root `Cargo.toml` is bumped
 - [ ] `Cargo.lock` is regenerated with the new version
+- [ ] `SECURITY.md` lists the new minor version
 - [ ] GitHub Release changelog is drafted (see below)
 
 ## Tagging a Release

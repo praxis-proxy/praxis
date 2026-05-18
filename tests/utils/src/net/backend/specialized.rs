@@ -50,6 +50,36 @@ pub fn start_hop_by_hop_response_backend() -> u16 {
     })
 }
 
+/// Start a backend that includes reserved internal headers
+/// (`x-praxis-*`, `x-mcp-*`, `x-a2a-*`) in its responses.
+/// Used to verify the proxy strips them before forwarding to
+/// the client.
+///
+/// # Panics
+///
+/// Panics if the server fails to bind or accept connections.
+pub fn start_reserved_header_response_backend() -> u16 {
+    spawn_tcp_server(|mut stream| {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _headers = read_until_headers_complete(&mut stream);
+
+        let body = "reserved-header-test";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Length: {}\r\n\
+             X-Praxis-Mcp-Method: tools/call\r\n\
+             X-Mcp-Servername: backend-1\r\n\
+             X-A2a-Method: task/send\r\n\
+             X-Request-Id: abc-123\r\n\
+             Server: test-backend\r\n\
+             \r\n\
+             {body}",
+            body.len()
+        );
+        let _sent = stream.write_all(response.as_bytes());
+    })
+}
+
 /// Start a backend that waits `delay` before responding.
 pub fn start_slow_backend(body: &str, delay: Duration) -> u16 {
     let body = body.to_owned();

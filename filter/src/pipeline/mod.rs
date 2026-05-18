@@ -98,14 +98,20 @@ impl FilterPipeline {
         allow_unbounded: bool,
     ) -> Result<(), FilterError> {
         if let Some(ceiling) = max_request {
-            self.body_capabilities.request_body_mode =
-                clamp_body_mode(self.body_capabilities.request_body_mode, ceiling);
+            self.body_capabilities.request_body_mode = clamp_body_mode(
+                self.body_capabilities.request_body_mode,
+                ceiling,
+                self.body_capabilities.needs_request_body,
+            );
             self.body_capabilities.needs_request_body = true;
         }
 
         if let Some(ceiling) = max_response {
-            self.body_capabilities.response_body_mode =
-                clamp_body_mode(self.body_capabilities.response_body_mode, ceiling);
+            self.body_capabilities.response_body_mode = clamp_body_mode(
+                self.body_capabilities.response_body_mode,
+                ceiling,
+                self.body_capabilities.needs_response_body,
+            );
             self.body_capabilities.needs_response_body = true;
         }
 
@@ -182,7 +188,11 @@ impl FilterPipeline {
 // -----------------------------------------------------------------------------
 
 /// Tighten a body mode's size limit to the given ceiling.
-fn clamp_body_mode(mode: BodyMode, ceiling: usize) -> BodyMode {
+/// When `filter_declared` is true a filter explicitly chose Stream
+/// mode; preserve it so streaming filters keep working. When false
+/// the mode is the default (no filter needs body); convert to
+/// `SizeLimit` so the body limit is enforced by buffering.
+fn clamp_body_mode(mode: BodyMode, ceiling: usize, filter_declared: bool) -> BodyMode {
     match mode {
         BodyMode::StreamBuffer { max_bytes } => BodyMode::StreamBuffer {
             max_bytes: Some(max_bytes.map_or(ceiling, |m| m.min(ceiling))),
@@ -190,6 +200,7 @@ fn clamp_body_mode(mode: BodyMode, ceiling: usize) -> BodyMode {
         BodyMode::SizeLimit { max_bytes } => BodyMode::SizeLimit {
             max_bytes: max_bytes.min(ceiling),
         },
+        BodyMode::Stream if filter_declared => BodyMode::Stream,
         BodyMode::Stream => BodyMode::SizeLimit { max_bytes: ceiling },
     }
 }

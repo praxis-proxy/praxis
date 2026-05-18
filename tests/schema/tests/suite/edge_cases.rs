@@ -3,7 +3,7 @@
 
 //! Edge case and meta-tests.
 
-use praxis_core::config::Config;
+use praxis_core::config::{Config, DEFAULT_MAX_BODY_BYTES};
 
 use super::test_utils;
 
@@ -113,7 +113,7 @@ filter_chains:
     assert_eq!(config.shutdown_timeout_secs, 60, "shutdown_timeout_secs mismatch");
     assert_eq!(
         config.body_limits.max_request_bytes,
-        Some(10_485_760),
+        Some(DEFAULT_MAX_BODY_BYTES),
         "max_request_bytes mismatch"
     );
     assert_eq!(
@@ -182,15 +182,17 @@ filter_chains:
 }
 
 #[test]
-fn body_byte_limits_default_to_none() {
+fn body_byte_limits_default_to_ten_mib() {
     let config = Config::from_yaml(&test_utils::minimal_valid_yaml()).unwrap();
-    assert!(
-        config.body_limits.max_request_bytes.is_none(),
-        "max_request_bytes should default to None"
+    assert_eq!(
+        config.body_limits.max_request_bytes,
+        Some(DEFAULT_MAX_BODY_BYTES),
+        "max_request_bytes should default to 10 MiB"
     );
-    assert!(
-        config.body_limits.max_response_bytes.is_none(),
-        "max_response_bytes should default to None"
+    assert_eq!(
+        config.body_limits.max_response_bytes,
+        Some(DEFAULT_MAX_BODY_BYTES),
+        "max_response_bytes should default to 10 MiB"
     );
 }
 

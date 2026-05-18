@@ -30,6 +30,13 @@ const PEEK_MAX: usize = 16384; // 16 KiB
 /// Timeout for upstream TCP connect (including DNS resolution).
 const UPSTREAM_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Timeout for SNI peek phase.
+///
+/// Bounds the time a client can hold a connection during the initial
+/// TLS `ClientHello` read. Without this, a slow-drip client could
+/// hold a connection (and semaphore permit) indefinitely.
+const SNI_PEEK_TIMEOUT: Duration = Duration::from_secs(5);
+
 // -----------------------------------------------------------------------------
 // PingoraTcpProxy
 // -----------------------------------------------------------------------------
@@ -221,7 +228,11 @@ impl ServerApp for PingoraTcpProxy {
         let (remote_addr, local_addr) = extract_addrs(&session);
 
         let (sni_hostname, peeked_bytes) = if self.upstream_addr.is_none() {
-            peek_sni(&mut session).await
+            let Ok(result) = tokio::time::timeout(SNI_PEEK_TIMEOUT, peek_sni(&mut session)).await else {
+                warn!("SNI peek timed out, closing connection");
+                return None;
+            };
+            result
         } else {
             (None, Vec::new())
         };

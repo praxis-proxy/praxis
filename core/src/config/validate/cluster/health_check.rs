@@ -179,13 +179,13 @@ fn extract_host(addr: &str) -> &str {
 /// Returns `true` for IP addresses that are SSRF-sensitive.
 ///
 /// Note: [RFC 1918] private ranges (10/8, 172.16/12, 192.168/16)
-/// are intentionally not flagged; only loopback and cloud metadata
+/// are intentionally not flagged; only loopback and link-local
 /// addresses are considered sensitive.
 ///
 /// [RFC 1918]: https://datatracker.ietf.org/doc/html/rfc1918
 fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => v4.is_loopback() || *v4 == std::net::Ipv4Addr::new(169, 254, 169, 254),
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local(),
         IpAddr::V6(v6) => v6.is_loopback(),
     }
 }
@@ -491,6 +491,18 @@ clusters:
         assert!(
             super::is_ssrf_sensitive(&"169.254.169.254".parse().unwrap()),
             "cloud metadata address should be flagged"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_flags_link_local_range() {
+        assert!(
+            super::is_ssrf_sensitive(&"169.254.0.1".parse().unwrap()),
+            "169.254.0.1 (link-local) should be flagged"
+        );
+        assert!(
+            super::is_ssrf_sensitive(&"169.254.255.255".parse().unwrap()),
+            "169.254.255.255 (link-local upper bound) should be flagged"
         );
     }
 

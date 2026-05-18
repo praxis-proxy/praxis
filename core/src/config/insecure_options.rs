@@ -62,7 +62,9 @@ pub struct InsecureOptions {
     /// Allow TLS without SNI hostname verification.
     pub allow_tls_without_sni: bool,
 
-    /// Allow stream-buffered body mode with no size limit.
+    /// Allow startup without `body_limits.max_request_bytes` or
+    /// `body_limits.max_response_bytes` configured. Without this
+    /// flag, missing body limits are a hard validation error.
     pub allow_unbounded_body: bool,
 
     /// Run the CSRF filter in log-only mode: evaluate all rules

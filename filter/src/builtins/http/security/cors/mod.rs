@@ -197,12 +197,14 @@ impl CorsFilter {
 
     /// Check whether the requested method is allowed.
     ///
-    /// Per the Fetch Standard, `*` without credentials means
-    /// all methods are allowed.
+    /// Uses exact (case-sensitive) comparison per [RFC 9110 Section 9.1],
+    /// which defines HTTP methods as case-sensitive tokens.
+    /// `*` without credentials means all methods are allowed
+    /// per the Fetch Standard.
+    ///
+    /// [RFC 9110 Section 9.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-9.1
     fn is_method_allowed(&self, method: &str) -> bool {
-        self.methods_header
-            .split(", ")
-            .any(|m| m == "*" || m.eq_ignore_ascii_case(method))
+        self.methods_header.split(", ").any(|m| m == "*" || m == method)
     }
 
     /// Check whether all requested headers are allowed.
@@ -286,9 +288,13 @@ impl HttpFilter for CorsFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let Some(origin) = ctx.request.headers.get("origin").and_then(|v| v.to_str().ok()) else {
+        let Some(raw_origin) = ctx.request.headers.get("origin") else {
             trace!("no Origin header; non-CORS request");
             return Ok(FilterAction::Continue);
+        };
+        let Some(origin) = raw_origin.to_str().ok() else {
+            debug!("rejecting request with non-UTF-8 Origin header");
+            return Ok(FilterAction::Reject(Rejection::status(400)));
         };
 
         if ctx.request.method == http::Method::OPTIONS

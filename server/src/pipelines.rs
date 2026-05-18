@@ -35,6 +35,7 @@ pub fn resolve_pipelines(
         .map(|c| (c.name.as_str(), c.filters.as_slice()))
         .collect();
 
+
     let mut pipelines = HashMap::with_capacity(config.listeners.len());
 
     for listener in &config.listeners {
@@ -242,18 +243,20 @@ filter_chains:
         let pipelines = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores()).unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
         let caps = pipeline.body_capabilities();
-        assert!(caps.needs_request_body, "pipeline with router should need request body");
+        assert!(caps.needs_request_body, "body limits should enable request body access");
         assert!(
             caps.needs_response_body,
-            "pipeline with router should need response body"
+            "body limits should enable response body access"
         );
         assert_eq!(
             caps.request_body_mode,
-            praxis_filter::BodyMode::SizeLimit { max_bytes: 1024 }
+            praxis_filter::BodyMode::SizeLimit { max_bytes: 1024 },
+            "default Stream should become SizeLimit for enforcement"
         );
         assert_eq!(
             caps.response_body_mode,
-            praxis_filter::BodyMode::SizeLimit { max_bytes: 2048 }
+            praxis_filter::BodyMode::SizeLimit { max_bytes: 2048 },
+            "default Stream should become SizeLimit for enforcement"
         );
     }
 

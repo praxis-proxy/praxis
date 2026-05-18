@@ -1233,7 +1233,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-core"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "dashmap",
  "pingora-core",
@@ -1248,7 +1248,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-filter"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1266,7 +1266,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-tls"
-version = "0.2.0"
+version = "0.3.1"
 dependencies = [
  "rustls",
  "rustls-pemfile",

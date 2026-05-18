@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Shane Utt
 
-//! Header manipulation filter: add request headers; add, set, or remove response headers.
+//! Header manipulation filter: add, set, or remove request and response headers.
 
 mod ops;
 
@@ -23,7 +23,9 @@ use async_trait::async_trait;
 use serde::Deserialize;
 use tracing::trace;
 
-use self::ops::{append_headers, parse_header_pairs, remove_headers, set_headers, validate_raw_header_pairs};
+use self::ops::{
+    append_headers, parse_header_names, parse_header_pairs, remove_headers, set_headers, validate_raw_header_pairs,
+};
 use crate::{
     FilterAction, FilterError,
     factory::parse_filter_config,
@@ -41,6 +43,14 @@ pub(crate) struct HeaderFilterConfig {
     /// Headers to append to the upstream request.
     #[serde(default)]
     pub(crate) request_add: Vec<HeaderPair>,
+
+    /// Header names to remove from the upstream request.
+    #[serde(default)]
+    pub(crate) request_remove: Vec<String>,
+
+    /// Headers to set on the upstream request (overwrites existing values).
+    #[serde(default)]
+    pub(crate) request_set: Vec<HeaderPair>,
 
     /// Headers to append to the downstream response.
     #[serde(default)]
@@ -70,8 +80,8 @@ pub(crate) struct HeaderPair {
 // HeaderFilter
 // -----------------------------------------------------------------------------
 
-/// Adds headers to upstream requests; adds, sets, or removes headers
-/// on downstream responses.
+/// Adds, sets, or removes headers on upstream requests and downstream
+/// responses.
 ///
 /// # YAML configuration
 ///
@@ -80,6 +90,11 @@ pub(crate) struct HeaderPair {
 /// request_add:
 ///   - name: X-Forwarded-By
 ///     value: praxis
+/// request_set:
+///   - name: X-Custom-Auth
+///     value: bearer-token
+/// request_remove:
+///   - X-Internal-Only
 /// response_add:
 ///   - name: X-Frame-Options
 ///     value: DENY
@@ -110,6 +125,12 @@ pub struct HeaderFilter {
     /// Headers to append to the upstream request (raw strings for `Cow` output).
     pub(crate) request_add: Vec<(String, String)>,
 
+    /// Pre-parsed header names to strip from the upstream request.
+    pub(crate) request_remove: Vec<http::header::HeaderName>,
+
+    /// Pre-parsed headers to overwrite on the upstream request.
+    pub(crate) request_set: Vec<(http::header::HeaderName, http::header::HeaderValue)>,
+
     /// Pre-parsed headers to append to the downstream response.
     pub(crate) response_add: Vec<(http::header::HeaderName, http::header::HeaderValue)>,
 
@@ -132,23 +153,16 @@ impl HeaderFilter {
         let cfg: HeaderFilterConfig = parse_filter_config("headers", config)?;
 
         let request_add = validate_raw_header_pairs(cfg.request_add, "request_add")?;
+        let request_remove = parse_header_names(cfg.request_remove, "request_remove")?;
+        let request_set = parse_header_pairs(cfg.request_set, "request_set")?;
         let response_add = parse_header_pairs(cfg.response_add, "response_add")?;
+        let response_remove = parse_header_names(cfg.response_remove, "response_remove")?;
         let response_set = parse_header_pairs(cfg.response_set, "response_set")?;
-
-        let response_remove = cfg
-            .response_remove
-            .into_iter()
-            .map(|name| {
-                http::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_e| {
-                    let msg: FilterError =
-                        format!("headers filter: invalid header name '{name}' in response_remove").into();
-                    msg
-                })
-            })
-            .collect::<Result<Vec<_>, _>>()?;
 
         Ok(Box::new(Self {
             request_add,
+            request_remove,
+            request_set,
             response_add,
             response_remove,
             response_set,
@@ -163,6 +177,14 @@ impl HttpFilter for HeaderFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        for name in &self.request_remove {
+            trace!(header = %name, "removing request header");
+            ctx.request_headers_to_remove.push(name.clone());
+        }
+        for (name, value) in &self.request_set {
+            trace!(header = %name, "setting request header");
+            ctx.request_headers_to_set.push((name.clone(), value.clone()));
+        }
         for (name, value) in &self.request_add {
             trace!(header = %name, "adding request header");
             ctx.extra_request_headers

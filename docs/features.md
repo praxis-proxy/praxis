@@ -103,7 +103,7 @@ deployment guidance.
 - Admin endpoints reject public interfaces
 - TLS paths reject directory traversal (`..`)
 - Health check targets validated against SSRF
-  (loopback and cloud metadata blocked)
+  (loopback, link-local, and cloud metadata blocked)
 - Upstream TLS verification enabled by default
 - Insecure overrides require explicit opt-in and
   emit warnings
@@ -118,6 +118,9 @@ deployment guidance.
 - **Guardrails**: reject requests matching header or
   body content via string or regex rules; supports
   negated matching
+- **CSRF protection**: origin-based CSRF validation
+  with gradual enforcement rollout, `Sec-Fetch-Site`
+  support, wildcard subdomains, and log-only mode
 - **Forwarded headers**: X-Forwarded-For/Proto/Host
   injection with trusted proxy CIDR support
 
@@ -127,6 +130,9 @@ deployment guidance.
   (X-Request-ID by default); echoed in responses
 - **Access logging** - structured request/response logging
   via `tracing`
+- **Prometheus metrics** - `/metrics` on the admin
+  listener exposes request counts and duration
+  histograms in Prometheus text exposition format
 - **Admin health endpoints** - `/ready` and `/healthy`
   on a dedicated admin listener. `/ready` returns
   per-cluster health status with healthy/unhealthy/total

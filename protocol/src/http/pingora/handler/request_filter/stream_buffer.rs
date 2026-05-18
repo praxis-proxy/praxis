@@ -15,13 +15,23 @@ use crate::http::pingora::context::PingoraRequestCtx;
 // Constants
 // -----------------------------------------------------------------------------
 
-/// Headers redacted from TRACE echo responses to prevent credential leakage.
-const TRACE_REDACTED_HEADERS: &[&str] = &[
-    "authorization",
-    "cookie",
-    "proxy-authorization",
-    "set-cookie",
-    "x-api-key",
+/// Headers allowed in TRACE echo responses.
+///
+/// Only headers known to be non-sensitive are echoed. All others
+/// are redacted to prevent credential leakage (e.g. `Authorization`,
+/// `Cookie`, `X-Auth-Token`, `X-Api-Key`).
+const TRACE_ALLOWED_HEADERS: &[&str] = &[
+    "accept",
+    "accept-encoding",
+    "accept-language",
+    "cache-control",
+    "connection",
+    "content-length",
+    "content-type",
+    "host",
+    "max-forwards",
+    "user-agent",
+    "via",
 ];
 
 // -----------------------------------------------------------------------------
@@ -38,8 +48,8 @@ pub(super) fn build_trace_response(session: &Session) -> Rejection {
     let req = session.req_header();
     let mut body = format!("{} {} {:?}\r\n", req.method, req.uri, req.version);
     for (name, value) in &req.headers {
-        if TRACE_REDACTED_HEADERS.contains(&name.as_str()) {
-            tracing::debug!(header = %name, "redacting sensitive header from TRACE response");
+        if !TRACE_ALLOWED_HEADERS.contains(&name.as_str()) {
+            tracing::debug!(header = %name, "redacting header from TRACE response");
             continue;
         }
         let val = value.to_str().unwrap_or("[binary]");

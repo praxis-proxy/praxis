@@ -95,3 +95,25 @@ pub(super) fn parse_header_pairs(
     }
     Ok(out)
 }
+
+/// Parse a list of header name strings into validated [`HeaderName`] values.
+///
+/// # Errors
+///
+/// Returns [`FilterError`] if any name is invalid.
+///
+/// [`HeaderName`]: http::header::HeaderName
+pub(super) fn parse_header_names(
+    names: Vec<String>,
+    section: &str,
+) -> Result<Vec<http::header::HeaderName>, FilterError> {
+    names
+        .into_iter()
+        .map(|name| {
+            http::header::HeaderName::from_bytes(name.as_bytes()).map_err(|_e| {
+                let msg: FilterError = format!("headers filter: invalid header name '{name}' in {section}").into();
+                msg
+            })
+        })
+        .collect()
+}

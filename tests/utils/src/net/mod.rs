@@ -13,8 +13,8 @@ pub mod wait;
 pub use backend::{
     Backend, BackendGuard, RoutedBackend, WsBackendGuard, start_backend, start_backend_v6, start_backend_with_shutdown,
     start_echo_backend, start_echo_backend_with_shutdown, start_header_echo_backend,
-    start_header_echo_backend_with_shutdown, start_hop_by_hop_response_backend, start_slow_backend,
-    start_uri_echo_backend, start_uri_echo_backend_with_shutdown, start_websocket_echo_backend,
+    start_header_echo_backend_with_shutdown, start_hop_by_hop_response_backend, start_reserved_header_response_backend,
+    start_slow_backend, start_uri_echo_backend, start_uri_echo_backend_with_shutdown, start_websocket_echo_backend,
 };
 pub use http_client::{
     http_get, http_get_retry, http_get_v6, http_post, http_send, json_post, parse_body, parse_header, parse_header_all,

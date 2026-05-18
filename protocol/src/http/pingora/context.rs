@@ -175,6 +175,8 @@ macro_rules! filter_context {
             downstream_tls: $ctx.downstream_tls,
             executed_filter_indices: Vec::new(),
             extra_request_headers: Vec::new(),
+            request_headers_to_remove: Vec::new(),
+            request_headers_to_set: Vec::new(),
             filter_metadata: std::mem::take(&mut $ctx.filter_metadata),
             filter_results: std::collections::HashMap::new(),
             health_registry: $pipeline.health_registry(),

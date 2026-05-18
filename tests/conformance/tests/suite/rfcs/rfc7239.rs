@@ -75,8 +75,8 @@ fn rfc7239_forwarded_header_format() {
 
     assert_eq!(status, 200, "request should succeed");
     assert!(
-        body.contains("proto=http") && body.contains("host=example.com"),
-        "Forwarded header must have correct format; echoed headers: {body}"
+        body.contains("proto=http") && body.contains("host=\"example.com\""),
+        "Forwarded header must have correct format with quoted host; echoed headers: {body}"
     );
 }
 
@@ -169,8 +169,8 @@ fn rfc7239_forwarded_header_includes_for_proto_host() {
         "Forwarded header must include 'proto' parameter; echoed headers: {body}"
     );
     assert!(
-        body_lower.contains("host=test.example.com"),
-        "Forwarded header must include 'host' parameter; echoed headers: {body}"
+        body_lower.contains("host=\"test.example.com\""),
+        "Forwarded header must include quoted 'host' parameter; echoed headers: {body}"
     );
 }
 

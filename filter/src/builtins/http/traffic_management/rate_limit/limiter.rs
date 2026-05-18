@@ -9,8 +9,8 @@ use dashmap::DashMap;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 
 use super::{
-    EVICTION_SCAN_LIMIT, HEADER_RATELIMIT_LIMIT, HEADER_RATELIMIT_REMAINING, HEADER_RATELIMIT_RESET,
-    MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState,
+    EVICTION_SCAN_LIMIT, HARD_CAP_PER_IP_ENTRIES, HEADER_RATELIMIT_LIMIT, HEADER_RATELIMIT_REMAINING,
+    HEADER_RATELIMIT_RESET, MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState,
 };
 use crate::builtins::http::traffic_management::token_bucket::TokenBucket;
 
@@ -106,22 +106,51 @@ impl RateLimitFilter {
     pub(super) fn try_acquire_for(&self, client_addr: Option<IpAddr>) -> Result<f64, f64> {
         let now = self.now_nanos();
         match &self.state {
-            RateLimitState::Global(bucket) => match bucket.try_acquire(self.rate, self.burst, now) {
-                Some(remaining) => Ok(remaining),
-                None => Err(bucket.current_tokens(self.rate, self.burst, now)),
-            },
-            RateLimitState::PerIp(map) => {
-                let Some(ip) = client_addr.map(normalize_mapped_ipv4) else {
-                    tracing::info!("rate_limit: rejecting request with no client address");
-                    return Err(0.0);
-                };
-                self.maybe_evict(map, now);
-                let bucket = map.entry(ip).or_insert_with(|| TokenBucket::new(self.burst));
-                match bucket.try_acquire(self.rate, self.burst, now) {
-                    Some(remaining) => Ok(remaining),
-                    None => Err(bucket.current_tokens(self.rate, self.burst, now)),
-                }
-            },
+            RateLimitState::Global(bucket) => Self::acquire_from_bucket(bucket, self.rate, self.burst, now),
+            RateLimitState::PerIp(map) => self.acquire_per_ip(map, client_addr, now),
+        }
+    }
+
+    /// Per-IP token acquisition with hard cap enforcement.
+    ///
+    /// Rejects unknown IPs when the map exceeds [`HARD_CAP_PER_IP_ENTRIES`]
+    /// to prevent unbounded memory growth via address rotation.
+    fn acquire_per_ip(
+        &self,
+        map: &DashMap<IpAddr, TokenBucket>,
+        client_addr: Option<IpAddr>,
+        now: u64,
+    ) -> Result<f64, f64> {
+        let Some(ip) = client_addr.map(normalize_mapped_ipv4) else {
+            tracing::info!("rate_limit: rejecting request with no client address");
+            return Err(0.0);
+        };
+        self.maybe_evict(map, now);
+
+        if let Some(bucket) = map.get(&ip) {
+            return Self::acquire_from_bucket(&bucket, self.rate, self.burst, now);
+        }
+
+        // Reject unknown IPs when the map exceeds the hard cap to
+        // prevent unbounded memory growth via address rotation.
+        if map.len() >= HARD_CAP_PER_IP_ENTRIES {
+            tracing::warn!(
+                entries = map.len(),
+                hard_cap = HARD_CAP_PER_IP_ENTRIES,
+                "rate_limit: per-IP map hard cap reached, rejecting new IP"
+            );
+            return Err(0.0);
+        }
+
+        let bucket = map.entry(ip).or_insert_with(|| TokenBucket::new(self.burst));
+        Self::acquire_from_bucket(&bucket, self.rate, self.burst, now)
+    }
+
+    /// Try to acquire one token from a single bucket.
+    fn acquire_from_bucket(bucket: &TokenBucket, rate: f64, burst: f64, now: u64) -> Result<f64, f64> {
+        match bucket.try_acquire(rate, burst, now) {
+            Some(remaining) => Ok(remaining),
+            None => Err(bucket.current_tokens(rate, burst, now)),
         }
     }
 

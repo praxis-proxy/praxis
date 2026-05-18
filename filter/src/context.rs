@@ -50,6 +50,12 @@ pub struct HttpFilterContext<'a> {
     /// Extra headers to inject into the upstream request.
     pub extra_request_headers: Vec<(Cow<'static, str>, String)>,
 
+    /// Headers to remove from the upstream request.
+    pub request_headers_to_remove: Vec<http::header::HeaderName>,
+
+    /// Headers to set (overwrite) on the upstream request.
+    pub request_headers_to_set: Vec<(http::header::HeaderName, http::header::HeaderValue)>,
+
     /// Durable per-request metadata that persists across all
     /// Pingora lifecycle phases (request, request-body, response,
     /// response-body, logging). Unlike [`filter_results`] which

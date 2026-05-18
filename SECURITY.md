@@ -2,9 +2,11 @@
 
 ## Supported Versions
 
-| Version | Supported |
+| Version   | Supported   |
 | --------- | ----------- |
-| 0.1.x | No (Alpha) |
+| 0.1.x     | No (Alpha)  |
+| 0.2.x     | No (Alpha)  |
+| 0.3.x     | No (Alpha)  |
 
 Only the latest patch release of each minor version
 receives security updates.

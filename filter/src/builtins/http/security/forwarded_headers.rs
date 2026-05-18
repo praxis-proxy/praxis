@@ -122,10 +122,17 @@ impl ForwardedHeadersFilter {
     /// IPv6 addresses are quoted per [RFC 7239 Section 6]:
     /// `for="[::1]"`.
     ///
+    /// The `host` parameter is unconditionally quoted as a
+    /// `quoted-string` to prevent injection via `;`, `,`, or
+    /// `"` in untrusted Host values. Embedded `"` and `\` are
+    /// backslash-escaped. RFC 7239 allows bare `token` values
+    /// too, but quoting is correct for all inputs.
+    ///
     /// When the client is trusted and a `Forwarded` header already
     /// exists, the new entry is appended comma-separated.
     ///
     /// [RFC 7239]: https://datatracker.ietf.org/doc/html/rfc7239
+    /// [RFC 7239 Section 4]: https://datatracker.ietf.org/doc/html/rfc7239#section-4
     /// [RFC 7239 Section 6]: https://datatracker.ietf.org/doc/html/rfc7239#section-6
     fn inject_standard_forwarded(
         &self,
@@ -140,11 +147,8 @@ impl ForwardedHeadersFilter {
         let for_param = format_for_param(client_ip);
         let mut entry = format!("for={for_param};proto={proto}");
         if let Some(h) = host {
-            if h.contains(':') {
-                let _ok = write!(entry, ";host=\"{h}\"");
-            } else {
-                let _ok = write!(entry, ";host={h}");
-            }
+            let escaped = quote_forwarded_value(h);
+            let _ok = write!(entry, ";host={escaped}");
         }
 
         let value = if self.is_trusted(client_ip)
@@ -166,8 +170,8 @@ impl ForwardedHeadersFilter {
 
 /// Format the `for` parameter value per [RFC 7239 Section 6].
 ///
-/// IPv6 addresses must be quoted and enclosed in brackets.
-/// IPv4 addresses are bare tokens.
+/// IPv6 addresses require quoting because `:` and `[]` are
+/// not valid `token` characters. IPv4 addresses are bare tokens.
 ///
 /// [RFC 7239 Section 6]: https://datatracker.ietf.org/doc/html/rfc7239#section-6
 fn format_for_param(ip: &IpAddr) -> String {
@@ -175,6 +179,26 @@ fn format_for_param(ip: &IpAddr) -> String {
         IpAddr::V4(v4) => format!("{v4}"),
         IpAddr::V6(v6) => format!("\"[{v6}]\""),
     }
+}
+
+/// Wrap a value as a `quoted-string` for the `Forwarded` header.
+///
+/// RFC 7239 allows both `token` and `quoted-string`; we
+/// unconditionally quote because it is correct for all inputs.
+/// Embedded `\` and `"` are backslash-escaped.
+///
+/// [RFC 7239 Section 4]: https://datatracker.ietf.org/doc/html/rfc7239#section-4
+fn quote_forwarded_value(value: &str) -> String {
+    let mut out = String::with_capacity(value.len() + 2);
+    out.push('"');
+    for ch in value.chars() {
+        if ch == '"' || ch == '\\' {
+            out.push('\\');
+        }
+        out.push(ch);
+    }
+    out.push('"');
+    out
 }
 
 #[async_trait]
@@ -450,7 +474,7 @@ trusted_proxies:
             .map(|(_, v)| v.as_str());
         assert_eq!(
             fwd,
-            Some("for=203.0.113.50;proto=http;host=example.com"),
+            Some("for=203.0.113.50;proto=http;host=\"example.com\""),
             "standard Forwarded header should match RFC 7239 format"
         );
     }
@@ -614,6 +638,124 @@ use_standard_header: true
         .unwrap();
         let filter = ForwardedHeadersFilter::from_config(&yaml).unwrap();
         assert_eq!(filter.name(), "forwarded_headers");
+    }
+
+    #[tokio::test]
+    async fn standard_forwarded_host_semicolon_escaped() {
+        let f = make_standard_filter(&[]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers
+            .insert(http::header::HOST, "evil;host=injected".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("203.0.113.50".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let fwd = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "Forwarded")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            fwd,
+            Some("for=203.0.113.50;proto=http;host=\"evil;host=injected\""),
+            "semicolons in host must be safely quoted"
+        );
+    }
+
+    #[tokio::test]
+    async fn standard_forwarded_host_quotes_escaped() {
+        let f = make_standard_filter(&[]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers
+            .insert(http::header::HOST, "evil\",host=injected".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("203.0.113.50".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let fwd = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "Forwarded")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            fwd,
+            Some("for=203.0.113.50;proto=http;host=\"evil\\\",host=injected\""),
+            "embedded quotes in host must be backslash-escaped"
+        );
+    }
+
+    #[tokio::test]
+    async fn standard_forwarded_host_comma_escaped() {
+        let f = make_standard_filter(&[]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers
+            .insert(http::header::HOST, "evil,for=spoofed".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("203.0.113.50".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let fwd = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "Forwarded")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            fwd,
+            Some("for=203.0.113.50;proto=http;host=\"evil,for=spoofed\""),
+            "commas in host must be safely quoted"
+        );
+    }
+
+    #[tokio::test]
+    async fn standard_forwarded_host_backslash_escaped() {
+        let f = make_standard_filter(&[]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert(http::header::HOST, "evil\\host".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("203.0.113.50".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let fwd = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "Forwarded")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            fwd,
+            Some("for=203.0.113.50;proto=http;host=\"evil\\\\host\""),
+            "backslashes in host must be double-escaped"
+        );
+    }
+
+    #[test]
+    fn quote_forwarded_value_simple() {
+        assert_eq!(
+            quote_forwarded_value("example.com"),
+            "\"example.com\"",
+            "simple value should be wrapped in quotes"
+        );
+    }
+
+    #[test]
+    fn quote_forwarded_value_with_embedded_quote() {
+        assert_eq!(
+            quote_forwarded_value("a\"b"),
+            "\"a\\\"b\"",
+            "embedded quote must be escaped"
+        );
+    }
+
+    #[test]
+    fn quote_forwarded_value_with_backslash() {
+        assert_eq!(
+            quote_forwarded_value("a\\b"),
+            "\"a\\\\b\"",
+            "embedded backslash must be escaped"
+        );
     }
 
     #[test]

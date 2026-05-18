@@ -8,6 +8,7 @@ use praxis_filter::{FilterAction, FilterError, HttpFilter, HttpFilterContext};
 use praxis_test_utils::{
     free_port, http_send, parse_body, parse_header, parse_status, simple_proxy_yaml, start_backend_with_shutdown,
     start_header_echo_backend_with_shutdown, start_hop_by_hop_response_backend, start_proxy, start_proxy_with_registry,
+    start_reserved_header_response_backend,
 };
 
 // -----------------------------------------------------------------------------
@@ -326,6 +327,45 @@ fn conflicting_content_length_rejected() {
         status, 400,
         "conflicting Content-Length values should be rejected with 400: {raw}"
     );
+}
+
+#[test]
+fn reserved_internal_headers_stripped_from_upstream_response() {
+    let backend_port = start_reserved_header_response_backend();
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+    let request = format!(
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Connection: close\r\n\
+         \r\n"
+    );
+    let raw = http_send(proxy.addr(), &request);
+
+    assert!(
+        parse_header(&raw, "x-praxis-mcp-method").is_none(),
+        "x-praxis-* headers should be stripped from upstream response: {raw}"
+    );
+    assert!(
+        parse_header(&raw, "x-mcp-servername").is_none(),
+        "x-mcp-* headers should be stripped from upstream response: {raw}"
+    );
+    assert!(
+        parse_header(&raw, "x-a2a-method").is_none(),
+        "x-a2a-* headers should be stripped from upstream response: {raw}"
+    );
+    assert!(
+        parse_header(&raw, "x-request-id").is_some(),
+        "non-reserved x- headers should be preserved in response: {raw}"
+    );
+    assert!(
+        parse_header(&raw, "server").is_some(),
+        "standard headers should be preserved in response: {raw}"
+    );
+    let body = parse_body(&raw);
+    assert_eq!(body, "reserved-header-test", "response body should be forwarded intact");
 }
 
 // -----------------------------------------------------------------------------

@@ -807,7 +807,33 @@ async fn preflight_case_insensitive_header_match() {
 }
 
 #[tokio::test]
-async fn preflight_case_insensitive_method_match() {
+async fn preflight_case_sensitive_method_match() {
+    let f = make_filter(
+        &["https://example.com"],
+        &["POST"],
+        &[],
+        &[],
+        false,
+        false,
+        false,
+        false,
+    );
+
+    let req = make_preflight_request("https://example.com", "POST", None);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = f.on_request(&mut ctx).await.unwrap();
+
+    match action {
+        FilterAction::Reject(r) => {
+            assert_eq!(r.status, 204, "exact method match should succeed");
+            assert_header(&r, "Access-Control-Allow-Origin", "https://example.com");
+        },
+        _ => panic!("expected Reject for preflight"),
+    }
+}
+
+#[tokio::test]
+async fn preflight_case_mismatch_method_rejected() {
     let f = make_filter(
         &["https://example.com"],
         &["post"],
@@ -825,10 +851,16 @@ async fn preflight_case_insensitive_method_match() {
 
     match action {
         FilterAction::Reject(r) => {
-            assert_eq!(r.status, 204, "case-insensitive method match should succeed");
-            assert_header(&r, "Access-Control-Allow-Origin", "https://example.com");
+            assert_eq!(
+                r.status, 204,
+                "case mismatch should be rejected (methods are case-sensitive per RFC 9110)"
+            );
+            assert!(
+                !has_header(&r, "Access-Control-Allow-Origin"),
+                "case-mismatched method should not include CORS headers"
+            );
         },
-        _ => panic!("expected Reject for preflight"),
+        _ => panic!("expected Reject for disallowed preflight method"),
     }
 }
 
@@ -964,6 +996,50 @@ fn origin_policy_websocket_scheme_normalization() {
         policy_http.is_allowed("ws://example.com"),
         "ws should normalize to http and match"
     );
+}
+
+#[tokio::test]
+async fn non_utf8_origin_rejected_with_400() {
+    let f = make_filter(&["*"], &["GET"], &[], &[], false, false, false, false);
+
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers
+        .insert("origin", HeaderValue::from_bytes(&[0x80, 0xFF]).unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = f.on_request(&mut ctx).await.unwrap();
+
+    match action {
+        FilterAction::Reject(r) => {
+            assert_eq!(
+                r.status, 400,
+                "non-UTF-8 Origin should be rejected with 400 (valid Origin is always ASCII)"
+            );
+        },
+        _ => panic!("expected Reject for non-UTF-8 Origin"),
+    }
+}
+
+#[tokio::test]
+async fn non_utf8_origin_preflight_rejected_with_400() {
+    let f = make_filter(&["*"], &["GET"], &[], &[], false, false, false, false);
+
+    let mut req = crate::test_utils::make_request(http::Method::OPTIONS, "/");
+    req.headers
+        .insert("origin", HeaderValue::from_bytes(&[0x80, 0xFF]).unwrap());
+    req.headers
+        .insert("access-control-request-method", "GET".parse().unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = f.on_request(&mut ctx).await.unwrap();
+
+    match action {
+        FilterAction::Reject(r) => {
+            assert_eq!(
+                r.status, 400,
+                "preflight with non-UTF-8 Origin should be rejected with 400"
+            );
+        },
+        _ => panic!("expected Reject for non-UTF-8 Origin on preflight"),
+    }
 }
 
 // -----------------------------------------------------------------------------

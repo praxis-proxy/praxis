@@ -14,12 +14,13 @@ use serde::Serialize;
 
 /// Top-level dump output written to stdout as YAML.
 #[derive(Serialize)]
-pub(crate) struct EffectiveConfigDump<'a> {
+pub(crate) struct EffectiveConfigDump {
     /// Where the configuration was loaded from.
     pub config_source: String,
 
-    /// The fully parsed configuration (with defaults applied).
-    pub configuration: &'a Config,
+    /// The fully parsed configuration (with defaults applied),
+    /// sensitive values redacted.
+    pub configuration: Config,
 
     /// Resolved top-level listener chains, preserving config order.
     pub resolved_listeners: Vec<ResolvedListenerDump>,
@@ -66,14 +67,17 @@ pub(crate) struct ResolvedFilterDump {
 
 /// Build the dump model from a validated configuration.
 ///
+/// Sensitive values (e.g. credential injection literals) are
+/// redacted before inclusion in the dump.
+///
 /// # Errors
 ///
 /// Returns an error if a listener references a chain not present in the config
 /// (should not happen after validation).
-pub(crate) fn build_dump<'a>(
-    config: &'a Config,
+pub(crate) fn build_dump(
+    config: &Config,
     config_source: &str,
-) -> Result<EffectiveConfigDump<'a>, Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<EffectiveConfigDump, Box<dyn std::error::Error + Send + Sync>> {
     let chains: HashMap<&str, &[_]> = config
         .filter_chains
         .iter()
@@ -82,9 +86,47 @@ pub(crate) fn build_dump<'a>(
 
     Ok(EffectiveConfigDump {
         config_source: config_source.to_owned(),
-        configuration: config,
+        configuration: redact_secrets(config),
         resolved_listeners: build_resolved_listeners(config, &chains)?,
     })
+}
+
+/// Clone a [`Config`] and replace credential injection literal values with
+/// `"[REDACTED]"`.
+fn redact_secrets(config: &Config) -> Config {
+    let mut redacted = config.clone();
+    for chain in &mut redacted.filter_chains {
+        for entry in &mut chain.filters {
+            if entry.filter_type == "credential_injection" {
+                redact_credential_values(&mut entry.config);
+            }
+        }
+    }
+    redacted
+}
+
+/// Walk the flattened config YAML for a `credential_injection` filter
+/// and replace any `value` keys inside `clusters` entries.
+fn redact_credential_values(config: &mut serde_yaml::Value) {
+    let Some(mapping) = config.as_mapping_mut() else {
+        return;
+    };
+    let clusters_key = serde_yaml::Value::String("clusters".to_owned());
+    let Some(clusters) = mapping.get_mut(&clusters_key) else {
+        return;
+    };
+    let Some(seq) = clusters.as_sequence_mut() else {
+        return;
+    };
+    let value_key = serde_yaml::Value::String("value".to_owned());
+    let redacted = serde_yaml::Value::String("[REDACTED]".to_owned());
+    for entry in seq {
+        if let Some(m) = entry.as_mapping_mut()
+            && m.contains_key(&value_key)
+        {
+            m.insert(value_key.clone(), redacted.clone());
+        }
+    }
 }
 
 /// Resolve all listeners into their dump representations.
@@ -144,7 +186,7 @@ fn build_resolved_filters(
 /// # Errors
 ///
 /// Returns an error if YAML serialization or stdout write fails.
-pub(crate) fn write_dump(dump: &EffectiveConfigDump<'_>) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+pub(crate) fn write_dump(dump: &EffectiveConfigDump) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let yaml = serde_yaml::to_string(dump)?;
     std::io::stdout().lock().write_all(yaml.as_bytes())?;
     Ok(())
@@ -367,5 +409,46 @@ filter_chains:
 
         let dump = build_dump(&config, "test.yaml").unwrap();
         assert_eq!(dump.resolved_listeners[0].filters[0].name.as_deref(), Some("routing"));
+    }
+
+    const CREDENTIAL_INJECTION_YAML: &str = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: credential_injection
+        clusters:
+          - name: backend
+            header: Authorization
+            value: "super-secret-key"
+            header_prefix: "Bearer "
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:9090"
+"#;
+
+    #[test]
+    fn credential_injection_values_redacted_in_dump() {
+        let config = Config::from_yaml(CREDENTIAL_INJECTION_YAML).unwrap();
+        let dump = build_dump(&config, "test.yaml").unwrap();
+        let yaml = serde_yaml::to_string(&dump).unwrap();
+        assert!(
+            !yaml.contains("super-secret-key"),
+            "credential value must be redacted in dump: {yaml}"
+        );
+        assert!(yaml.contains("[REDACTED]"), "redaction marker must appear: {yaml}");
+        assert!(
+            yaml.contains("header_prefix"),
+            "non-sensitive fields must remain: {yaml}"
+        );
     }
 }

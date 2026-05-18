@@ -27,7 +27,7 @@ members = [
 exclude = ["tests/fuzz"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.1"
 edition = "2024"
 rust-version = "1.94"
 authors = ["Shane Utt <shaneutt@linux.com>"]
@@ -46,7 +46,7 @@ criterion = { version = "0.8.2", features = ["async_tokio"] }
 futures = "0.3.32"
 h2 = "0.4.14"
 http = "1.4.0"
-metrics = "0.24.2"
+metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.16.2", default-features = false }
 # Pinned to match Pingora's dependency.
 nix = "0.24.3"
@@ -56,7 +56,7 @@ pingora-core = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingo
 pingora-http = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "d066f6818038dc296326566afb8e7bf39fb463ff" }
 pingora-proxy = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "d066f6818038dc296326566afb8e7bf39fb463ff", features = ["rustls"] }
 percent-encoding = "2.3.2"
-praxis-proto = { version = "0.2.0", path = "filter/proto", package = "praxis-proxy-proto" }
+praxis-proto = { version = "0.3.1", path = "filter/proto", package = "praxis-proxy-proto" }
 prost = "0.14.3"
 prost-build = "0.14.3"
 prost-types = "0.14.3"
@@ -64,10 +64,10 @@ prost-wkt-types = { version = "0.7.1", features = ["vendored-protox"] }
 protox = "0.9.1"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
 praxis = { path = "server" }
-praxis-core = { version = "0.2.0", path = "core", package = "praxis-proxy-core" }
-praxis-filter = { version = "0.2.0", path = "filter", package = "praxis-proxy-filter" }
-praxis-protocol = { version = "0.2.0", path = "protocol", package = "praxis-proxy-protocol" }
-praxis-tls = { version = "0.2.0", path = "tls", package = "praxis-proxy-tls" }
+praxis-core = { version = "0.3.1", path = "core", package = "praxis-proxy-core" }
+praxis-filter = { version = "0.3.1", path = "filter", package = "praxis-proxy-filter" }
+praxis-protocol = { version = "0.3.1", path = "protocol", package = "praxis-proxy-protocol" }
+praxis-tls = { version = "0.3.1", path = "tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.149"
@@ -85,7 +85,7 @@ tikv-jemallocator = "0.6.1"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 tonic-prost-build = { version = "0.14.6", features = ["transport"] }
-tokio = { version = "1.52.2", features = ["macros", "rt"] }
+tokio = { version = "1.52.3", features = ["macros", "rt"] }
 tokio-util = "0.7.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }

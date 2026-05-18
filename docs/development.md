@@ -108,17 +108,19 @@ insecure_options:
   allow_root: false
   allow_tls_without_sni: false
   allow_unbounded_body: false
+  csrf_log_only: false
   skip_pipeline_validation: false
 ```
 
 | Flag | Effect |
 | ------ | -------- |
 | `allow_open_security_filters` | Allow security-critical filters (`ip_acl`, `forwarded_headers`) to use `failure_mode: open`. Without this flag, open security filters are rejected because a runtime error would bypass security enforcement. With this flag enabled, the error is demoted to a warning. |
-| `allow_private_health_checks` | Allow health check endpoints that resolve to loopback (`127.0.0.0/8`) or cloud metadata addresses. Blocked by default as SSRF protection. |
+| `allow_private_health_checks` | Allow health check endpoints that resolve to loopback (`127.0.0.0/8`), link-local (`169.254.0.0/16`), or cloud metadata addresses. Blocked by default as SSRF protection. |
 | `allow_public_admin` | Allow the admin health endpoint to bind to a public interface (`0.0.0.0` / `[::]`). By default this is a validation error. |
 | `allow_root` | Allow starting as root (UID 0). Praxis refuses to run as root by default. |
 | `allow_tls_without_sni` | Allow upstream TLS connections without an explicit SNI hostname. Most TLS servers require SNI; without this flag, missing SNI is a validation error. |
-| `allow_unbounded_body` | Allow `StreamBuffer` body mode without a size limit (`max_bytes: None`). Without this flag, unbounded stream buffering is rejected. |
+| `allow_unbounded_body` | Allow unbounded body processing. This covers two checks: (1) `body_limits.max_request_bytes` or `max_response_bytes` set to `null`, and (2) `StreamBuffer` body mode without a `max_bytes` limit. Without this flag, both are rejected at startup. |
+| `csrf_log_only` | Run the CSRF filter in log-only mode: evaluate all rules but log violations as warnings instead of rejecting requests. Useful for initial rollout monitoring. |
 | `skip_pipeline_validation` | Demote pipeline ordering errors (e.g. filter placement issues) to warnings instead of failing startup. |
 
 Example overriding two flags for local development:
@@ -131,6 +133,44 @@ insecure_options:
   allow_public_admin: true
   allow_private_health_checks: true
 ```
+
+## Project Management
+
+All repositories in the `praxis-proxy` organization
+use a consistent workflow for planning, prioritizing,
+and tracking work.
+
+### Milestones
+
+Milestones represent a body of work toward a shared
+goal (e.g. a release, a feature area, or a hardening
+pass). Every issue and pull request should belong to
+a milestone. Milestones provide scope boundaries and
+help answer "what ships together?"
+
+### Priority Labels
+
+Priority labels indicate the order in which work
+within a milestone should be addressed. Every issue
+should have exactly one priority label:
+
+| Label | Description |
+| --- | --- |
+| `priority/critical` | Must be worked on immediately before anything else |
+| `priority/high` | Needs to be worked on immediately, defer to criticals |
+| `priority/medium` | Resolve after high and critical |
+| `priority/low` | Resolve after all other priority levels |
+
+When picking up work, address issues in priority
+order: critical first, then high, medium, and low.
+
+### Project Boards
+
+GitHub project boards visualize the state of work
+across milestones. Use boards to track issues through
+their lifecycle (backlog, in progress, in review,
+done). Boards are the primary tool for stand-ups and
+status checks.
 
 ## Performance & Benchmarking
 

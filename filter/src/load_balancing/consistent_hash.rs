@@ -75,7 +75,13 @@ impl ConsistentHash {
     }
 }
 
-/// FNV-1a 64-bit hash (fast).
+/// FNV-1a 64-bit hash (fast, deterministic).
+///
+/// **Security note:** FNV-1a is unkeyed; an attacker who knows
+/// the backend addresses can brute-force header values to target
+/// a specific backend. For adversarial environments, consider
+/// offering a keyed hash (e.g. `SipHash` with a random seed) as
+/// an alternative strategy.
 fn fnv1a(s: &str) -> u64 {
     let mut hash: u64 = 0xCBF2_9CE4_8422_2325;
     for byte in s.bytes() {

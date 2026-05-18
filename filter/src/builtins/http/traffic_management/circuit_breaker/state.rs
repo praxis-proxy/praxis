@@ -80,6 +80,15 @@ impl CircuitBreaker {
     /// `HalfOpen` (probe allowed); subsequent callers
     /// still see `Open` until the probe completes.
     ///
+    /// **Oscillation risk:** if the single probe request is
+    /// dropped (e.g. client disconnect) before reaching the
+    /// upstream, no `record_success` or `record_failure` is
+    /// called. The circuit remains in Half-Open, and
+    /// subsequent callers see `Open` until the recovery
+    /// window elapses again. A future enhancement could
+    /// allow a configurable number of concurrent half-open
+    /// probes to reduce sensitivity to dropped requests.
+    ///
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.

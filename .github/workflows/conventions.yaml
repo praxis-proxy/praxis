@@ -28,19 +28,19 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          MAX_ADDITIONS: "250"
+          MAX_ADDITIONS: "500"
         run: |
           labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
-          if echo "$labels" | grep -q '^conventions/bypass$'; then
-            echo "conventions/bypass label present — skipping size check"
+          if echo "$labels" | grep -q '^skip/pr-hygiene$'; then
+            echo "skip/pr-hygiene label present — skipping size check"
             exit 0
           fi
 
           if [ "${{ github.event.action }}" = "reopened" ]; then
             perm=$(gh api repos/${{ github.repository }}/collaborators/${{ github.event.sender.login }}/permission -q .permission)
             if [ "$perm" = "admin" ] || [ "$perm" = "maintain" ]; then
-              gh pr edit "$PR_NUMBER" --repo "${{ github.repository }}" --add-label "conventions/bypass"
-              echo "Maintainer reopened — added conventions/bypass label"
+              gh pr edit "$PR_NUMBER" --repo "${{ github.repository }}" --add-label "skip/pr-hygiene"
+              echo "Maintainer reopened — added skip/pr-hygiene label"
               exit 0
             fi
           fi
@@ -62,7 +62,7 @@ jobs:
 
           See our [coding conventions](docs/conventions.md) for guidance.
 
-          > If this PR legitimately requires a large change, a maintainer can add the \`conventions/bypass\` label to skip this check."
+          > If this PR legitimately requires a large change, a maintainer can add the \`skip/pr-hygiene\` label to skip this check."
               gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$body"
             fi
             gh pr close "$PR_NUMBER" --repo "${{ github.repository }}"
@@ -82,6 +82,12 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
+          labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
+          if echo "$labels" | grep -q '^skip/pr-hygiene$'; then
+            echo "skip/pr-hygiene label present — skipping description check"
+            exit 0
+          fi
+
           word_count=$(echo "$PR_BODY" | wc -w)
           if [ "$word_count" -lt 2 ]; then # minimum "fixes <issue_number>"
             gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
@@ -99,8 +105,15 @@ jobs:
       - name: Check workspace dependency versions
         env:
           GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
+          labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
+          if echo "$labels" | grep -q '^skip/dep-versioning$'; then
+            echo "skip/dep-versioning label present — skipping version check"
+            exit 0
+          fi
+
           gh api "repos/${{ github.repository }}/contents/Cargo.toml?ref=$HEAD_SHA" \
             --jq '.content' | base64 -d > /tmp/cargo.toml
 
@@ -168,6 +181,12 @@ jobs:
           GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
+          labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
+          if echo "$labels" | grep -q '^skip/commit-signing$'; then
+            echo "skip/commit-signing label present — skipping signing check"
+            exit 0
+          fi
+
           unsigned=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
             --paginate --jq '[.[] | select(.commit.verification.verified == false) | .sha[:7]] | join(", ")')
 
@@ -203,8 +222,8 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
-          if echo "$labels" | grep -q '^conventions/bypass$'; then
-            echo "conventions/bypass label present — skipping proposal check"
+          if echo "$labels" | grep -q '^skip/proposals$'; then
+            echo "skip/proposals label present — skipping proposal check"
             exit 0
           fi
 
@@ -260,7 +279,21 @@ jobs:
           The following issues were found with proposal files in this PR:
           $(echo -e "$errors")
 
-          See our [proposal process](docs/proposals.md) for requirements."
+          Every proposal file must include a YAML frontmatter header like this:
+
+          \`\`\`yaml
+          ---
+          issue: https://github.com/${{ github.repository }}/issues/NNN
+          discussion: https://github.com/${{ github.repository }}/discussions/NNN
+          status: proposed
+          authors:
+            - your-github-handle
+          ---
+          \`\`\`
+
+          See our [proposal process](docs/proposals.md) for full requirements.
+
+          Once the header is fixed, please re-open this PR."
               gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$body"
             fi
             gh pr close "$PR_NUMBER" --repo "${{ github.repository }}"

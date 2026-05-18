@@ -256,6 +256,231 @@ fn remove_headers_empty_list_is_noop() {
     assert_eq!(headers.len(), 1, "empty remove list should not affect headers");
 }
 
+
+#[tokio::test]
+async fn request_set_populates_headers_to_set() {
+    let filter = make_header_filter(
+        r#"request_set:
+  - name: x-custom
+    value: overwritten"#,
+    );
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    assert_eq!(
+        ctx.request_headers_to_set.len(),
+        1,
+        "should queue exactly one header set operation"
+    );
+    let (ref name, ref value) = ctx.request_headers_to_set[0];
+    assert_eq!(name.as_str(), "x-custom", "set header name should match");
+    assert_eq!(value.to_str().unwrap(), "overwritten", "set header value should match");
+}
+
+#[tokio::test]
+async fn request_remove_populates_headers_to_remove() {
+    let filter = make_header_filter(
+        r#"request_remove:
+  - x-internal"#,
+    );
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    assert_eq!(
+        ctx.request_headers_to_remove.len(),
+        1,
+        "should queue exactly one header remove operation"
+    );
+    assert_eq!(
+        ctx.request_headers_to_remove[0].as_str(),
+        "x-internal",
+        "remove header name should match"
+    );
+}
+
+#[tokio::test]
+async fn request_set_and_remove_combined() {
+    let filter = make_header_filter(
+        r#"request_set:
+  - name: x-replaced
+    value: new-value
+request_remove:
+  - x-unwanted"#,
+    );
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    assert_eq!(ctx.request_headers_to_remove.len(), 1, "should queue one remove");
+    assert_eq!(ctx.request_headers_to_set.len(), 1, "should queue one set");
+    assert_eq!(
+        ctx.request_headers_to_remove[0].as_str(),
+        "x-unwanted",
+        "remove target should be x-unwanted"
+    );
+    assert_eq!(
+        ctx.request_headers_to_set[0].0.as_str(),
+        "x-replaced",
+        "set target should be x-replaced"
+    );
+}
+
+#[tokio::test]
+async fn request_set_and_add_combined() {
+    let filter = make_header_filter(
+        r#"request_set:
+  - name: x-mode
+    value: override
+request_add:
+  - name: x-extra
+    value: appended"#,
+    );
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    assert_eq!(ctx.request_headers_to_set.len(), 1, "should queue one set");
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should queue one add");
+}
+
+#[tokio::test]
+async fn request_remove_nonexistent_continues() {
+    let filter = make_header_filter(
+        r#"request_remove:
+  - x-nonexistent"#,
+    );
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, crate::FilterAction::Continue),
+        "removing nonexistent header should still continue"
+    );
+    assert_eq!(
+        ctx.request_headers_to_remove.len(),
+        1,
+        "removal should still be queued for the protocol layer"
+    );
+}
+
+#[test]
+fn from_config_rejects_invalid_request_set_header_name() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+request_set:
+  - name: "bad name!"
+    value: "value"
+"#,
+    )
+    .unwrap();
+    let err = expect_config_err(&yaml);
+    assert!(
+        err.contains("invalid header name"),
+        "should reject invalid request_set header name: {err}"
+    );
+}
+
+#[test]
+fn from_config_rejects_invalid_request_remove_header_name() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+request_remove:
+  - "bad name!"
+"#,
+    )
+    .unwrap();
+    let err = expect_config_err(&yaml);
+    assert!(
+        err.contains("invalid header name"),
+        "should reject invalid request_remove header name: {err}"
+    );
+}
+
+#[tokio::test]
+async fn request_set_multiple_headers() {
+    let filter = make_header_filter(
+        r#"request_set:
+  - name: x-first
+    value: one
+  - name: x-second
+    value: two"#,
+    );
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    assert_eq!(ctx.request_headers_to_set.len(), 2, "should queue two set operations");
+}
+
+#[tokio::test]
+async fn request_remove_multiple_headers() {
+    let filter = make_header_filter(
+        r#"request_remove:
+  - x-first
+  - x-second"#,
+    );
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    assert_eq!(
+        ctx.request_headers_to_remove.len(),
+        2,
+        "should queue two remove operations"
+    );
+}
+
+#[tokio::test]
+async fn request_all_operations_combined() {
+    let filter = make_header_filter(
+        r#"request_add:
+  - name: x-added
+    value: new
+request_set:
+  - name: x-set
+    value: overridden
+request_remove:
+  - x-removed"#,
+    );
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should add one header");
+    assert_eq!(ctx.request_headers_to_set.len(), 1, "should set one header");
+    assert_eq!(ctx.request_headers_to_remove.len(), 1, "should remove one header");
+}
+
+#[tokio::test]
+async fn request_set_empty_value() {
+    let filter = make_header_filter(
+        r#"request_set:
+  - name: x-empty
+    value: """#,
+    );
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    assert_eq!(ctx.request_headers_to_set.len(), 1, "should accept empty header value");
+    assert_eq!(
+        ctx.request_headers_to_set[0].1.to_str().unwrap(),
+        "",
+        "empty value should be preserved"
+    );
+}
+
+#[tokio::test]
+async fn from_config_empty_accepts_request_set_and_remove() {
+    let config = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    let filter = HeaderFilter::from_config(&config).unwrap();
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    assert!(
+        ctx.request_headers_to_set.is_empty(),
+        "empty config should produce no set ops"
+    );
+    assert!(
+        ctx.request_headers_to_remove.is_empty(),
+        "empty config should produce no remove ops"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
@@ -267,6 +492,12 @@ fn make_header_filter(yaml: &str) -> HeaderFilter {
     let cfg: HeaderFilterConfig = serde_yaml::from_value(config).unwrap();
     HeaderFilter {
         request_add: cfg.request_add.into_iter().map(|p| (p.name, p.value)).collect(),
+        request_remove: cfg.request_remove.into_iter().map(|n| hdr_name(&n)).collect(),
+        request_set: cfg
+            .request_set
+            .into_iter()
+            .map(|p| hdr_pair(&p.name, &p.value))
+            .collect(),
         response_add: cfg
             .response_add
             .into_iter()

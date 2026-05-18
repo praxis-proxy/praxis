@@ -149,7 +149,7 @@ builtins/
     ai/                       AI workloads (inference)
     observability/            Access logs, request IDs
     payload_processing/       Compression, body field extraction
-    security/                 CORS, forwarded headers, guardrails, IP ACL
+    security/                 CORS, CSRF, forwarded headers, guardrails, IP ACL
     traffic_management/       Router, load balancer, timeout, rate limit, redirect, static response
     transformation/           Header, path rewrite, URL rewrite
   tcp/                        TCP protocol filters
@@ -484,11 +484,13 @@ A filter can have both `conditions` (request phase) and
 | `forwarded_headers` | Security | HTTP | `trusted_proxies` (CIDR list) |
 | `guardrails` | Security | HTTP | Reject requests matching header/body string or regex rules |
 | `ip_acl` | Security | HTTP | `allow` or `deny` (CIDR lists, mutually exclusive); 403 on denial |
-| `credential_injection` | Security | HTTP | Per-cluster API key injection with client credential stripping |
+| `credential_injection` | Security | HTTP | Per-cluster API key injection with client credential stripping. Literal `value` fields are redacted in `--dump` output. |
 | `json_body_field` | Payload Processing | HTTP | Extract a JSON body field and promote to header |
 | `json_rpc` | Payload Processing | HTTP | Parse JSON-RPC 2.0 envelopes and extract method/id/kind for routing |
+| `mcp` | Payload Processing | HTTP | MCP protocol classifier: extract method, tool/resource/prompt name, and session metadata for routing |
 | `compression` | Payload Processing | HTTP | Gzip, brotli, and zstd response compression |
 | `cors` | Security | HTTP | CORS preflight handling, origin validation, credential support |
+| `csrf` | Security | HTTP | Origin-based CSRF protection with gradual rollout and Sec-Fetch-Site support |
 | `redirect` | Traffic Management | HTTP | `status` (301/302/307/308), `location` template with `${path}`/`${query}` |
 | `path_rewrite` | Transformation | HTTP | `strip_prefix`, `add_prefix`, or `replace` (regex) on request path |
 | `url_rewrite` | Transformation | HTTP | `operations[]`: `regex_replace`, `strip_query_params`, `add_query_params` |

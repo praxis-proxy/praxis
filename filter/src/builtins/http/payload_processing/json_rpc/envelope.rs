@@ -136,10 +136,20 @@ pub(crate) fn parse_json_rpc_envelope(
     config: &JsonRpcConfig,
 ) -> Result<Option<JsonRpcEnvelope>, JsonRpcParseError> {
     let value: Value = serde_json::from_slice(input).map_err(|e| JsonRpcParseError::InvalidJson(e.to_string()))?;
+    parse_json_rpc_value(&value, config)
+}
 
+/// Parse a JSON-RPC 2.0 envelope from a pre-parsed [`Value`].
+///
+/// Same semantics as [`parse_json_rpc_envelope`] but avoids re-parsing
+/// the raw bytes when the caller already has a [`Value`].
+pub(crate) fn parse_json_rpc_value(
+    value: &Value,
+    config: &JsonRpcConfig,
+) -> Result<Option<JsonRpcEnvelope>, JsonRpcParseError> {
     match value {
-        Value::Array(ref items) => parse_batch(items, config),
-        Value::Object(_) => match parse_single_message(&value) {
+        Value::Array(items) => parse_batch(items, config),
+        Value::Object(_) => match parse_single_message(value) {
             Ok(envelope) => Ok(Some(envelope)),
             Err(JsonRpcParseError::MissingVersion) => handle_non_json_rpc(config),
             Err(e) => Err(e),

@@ -42,7 +42,7 @@ output includes the effective parsed config (with
 defaults applied) plus resolved top-level listener
 chains.
 
-```sh
+```console
 praxis --dump --config praxis.yaml
 praxis -T -c praxis.yaml
 ```
@@ -382,8 +382,10 @@ supports TCP-level filters too.
 | `ip_acl` | Security | HTTP |
 | `credential_injection` | Security | HTTP |
 | `json_body_field` | Payload Processing | HTTP |
+| `mcp` | Payload Processing | HTTP |
 | `compression` | Payload Processing | HTTP |
 | `cors` | Security | HTTP |
+| `csrf` | Security | HTTP |
 | `redirect` | Traffic Management | HTTP |
 | `path_rewrite` | Transformation | HTTP |
 | `url_rewrite` | Transformation | HTTP |
@@ -472,8 +474,8 @@ either mechanism can mark an endpoint unhealthy, and
 either can recover it.
 
 By default, health check endpoints that resolve to
-loopback or cloud metadata addresses are rejected
-(SSRF protection).
+loopback, link-local, or cloud metadata addresses are
+rejected (SSRF protection).
 
 ### Headers
 
@@ -744,6 +746,39 @@ are supported. `allow_credentials: true` is incompatible
 with wildcard origins, methods, or headers per the Fetch
 spec.
 
+### CSRF
+
+Cross-site request forgery protection via origin
+validation. Safe methods (GET, HEAD, OPTIONS by default)
+bypass the check. State-changing methods require an
+`Origin` or `Referer` header matching the trusted
+origins. Rejected requests receive 403 Forbidden.
+See [csrf.yaml].
+
+[csrf.yaml]: ../examples/configs/security/csrf.yaml
+
+```yaml
+- filter: csrf
+  trusted_origins:
+    - "https://app.example.com"
+    - "https://*.example.com"
+  enforce_percentage: 100
+  enable_sec_fetch_site: true
+```
+
+| Field | Type | Default | Description |
+| ------- | ------ | --------- | ------------- |
+| `trusted_origins` | list | required | Origins to allow; `["*"]` for any |
+| `safe_methods` | list | GET, HEAD, OPTIONS | Methods that bypass CSRF checks |
+| `enforce_percentage` | integer | 100 | Percentage of requests to enforce (0..=100); enables gradual rollout |
+| `enable_sec_fetch_site` | bool | false | Reject requests with `Sec-Fetch-Site: cross-site` |
+
+Wildcard subdomain patterns (e.g.
+`https://*.example.com`) are supported. A bare wildcard
+(`"*"`) cannot be mixed with other origins. Set
+`insecure_options.csrf_log_only: true` to log violations
+without rejecting requests during initial rollout.
+
 ### Redirect
 
 Returns a 3xx redirect without contacting any upstream:
@@ -829,11 +864,15 @@ Large).
 
 ```yaml
 body_limits:
-  max_request_bytes: 10485760    # 10 MB
-  max_response_bytes: 5242880    # 5 MB
+  max_request_bytes: 10485760    # 10 MiB
+  max_response_bytes: 5242880    # 5 MiB
 ```
 
-Both default to unlimited when omitted.
+Both default to 10 MiB (10,485,760 bytes) when
+omitted. Setting either to `null` removes the ceiling
+but requires `insecure_options.allow_unbounded_body:
+true`; without that flag, startup fails with a
+validation error.
 
 ## Header and Request Limits
 

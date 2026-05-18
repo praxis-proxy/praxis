@@ -110,8 +110,9 @@ impl FilterRegistry {
 fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     use crate::builtins::{
         AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter, CsrfFilter,
-        ForwardedHeadersFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter, PathRewriteFilter,
-        RateLimitFilter, RedirectFilter, RequestIdFilter, StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
+        ForwardedHeadersFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter, McpFilter,
+        PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter, StaticResponseFilter, TimeoutFilter,
+        UrlRewriteFilter,
     };
 
     register_http(factories, "access_log", AccessLogFilter::from_config);
@@ -139,6 +140,7 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     register_http(factories, "url_rewrite", UrlRewriteFilter::from_config);
     register_http(factories, "json_body_field", JsonBodyFieldFilter::from_config);
     register_http(factories, "json_rpc", JsonRpcFilter::from_config);
+    register_http(factories, "mcp", McpFilter::from_config);
     #[cfg(feature = "ai-inference")]
     register_http(
         factories,
@@ -250,6 +252,7 @@ mod tests {
             "json_body_field should be registered"
         );
         assert!(names.contains(&"json_rpc"), "json_rpc should be registered");
+        assert!(names.contains(&"mcp"), "mcp should be registered");
         #[cfg(feature = "ai-inference")]
         assert!(
             names.contains(&"model_to_header"),

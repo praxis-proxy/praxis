@@ -1,12 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Shane Utt
 
-//! Hop-by-hop header stripping on upstream responses ([RFC 9110]).
+//! Upstream response transformations: hop-by-hop header stripping
+//! and reserved internal header removal ([RFC 9110]).
 //!
 //! [RFC 9110 Section 7.6.1] requires intermediaries to remove
 //! hop-by-hop headers in both directions. This module handles
 //! the response path: stripping hop-by-hop headers from the
-//! upstream response before forwarding to the client.
+//! upstream response before forwarding to the client. It also
+//! removes reserved internal routing headers that backends may
+//! echo back.
 //!
 //! [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 //! [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
@@ -67,6 +70,35 @@ fn is_websocket_response(headers: &http::HeaderMap) -> bool {
         .get("upgrade")
         .and_then(|v| v.to_str().ok())
         .is_some_and(hop_by_hop::is_websocket_upgrade)
+}
+
+// -----------------------------------------------------------------------------
+// Reserved Internal Header Stripping (Response)
+// -----------------------------------------------------------------------------
+
+/// Strip reserved internal headers from an upstream response.
+///
+/// Removes proxy-internal routing metadata that backends may echo
+/// back. These headers are for intra-proxy routing only and must
+/// not reach the client.
+pub(crate) fn strip_reserved_internal_response(resp: &mut ResponseHeader) {
+    let to_remove: Vec<http::HeaderName> = resp
+        .headers
+        .keys()
+        .filter(|name| super::reserved_headers::is_reserved_internal_header(name))
+        .cloned()
+        .collect();
+
+    for name in &to_remove {
+        let _removed = resp.remove_header(name);
+    }
+
+    if !to_remove.is_empty() {
+        debug!(
+            count = to_remove.len(),
+            "stripped reserved internal headers from upstream response"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -400,6 +432,213 @@ mod tests {
             "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=",
             "websocket accept header should be preserved"
         );
+    }
+
+    #[test]
+    fn strips_x_praxis_reserved_headers_from_response() {
+        let mut resp = make_response(&[
+            ("x-praxis-mcp-method", "tools/call"),
+            ("x-praxis-route", "internal"),
+            ("content-type", "application/json"),
+        ]);
+
+        strip_reserved_internal_response(&mut resp);
+
+        assert!(
+            resp.headers.get("x-praxis-mcp-method").is_none(),
+            "x-praxis-mcp-method should be stripped from response"
+        );
+        assert!(
+            resp.headers.get("x-praxis-route").is_none(),
+            "x-praxis-route should be stripped from response"
+        );
+        assert_eq!(
+            resp.headers.get("content-type").unwrap(),
+            "application/json",
+            "content-type should be preserved"
+        );
+    }
+
+    #[test]
+    fn strips_x_mcp_reserved_headers_from_response() {
+        let mut resp = make_response(&[
+            ("x-mcp-servername", "backend-1"),
+            ("x-mcp-toolname", "get_weather"),
+            ("server", "test"),
+        ]);
+
+        strip_reserved_internal_response(&mut resp);
+
+        assert!(
+            resp.headers.get("x-mcp-servername").is_none(),
+            "x-mcp-servername should be stripped from response"
+        );
+        assert!(
+            resp.headers.get("x-mcp-toolname").is_none(),
+            "x-mcp-toolname should be stripped from response"
+        );
+        assert_eq!(
+            resp.headers.get("server").unwrap(),
+            "test",
+            "server header should be preserved"
+        );
+    }
+
+    #[test]
+    fn strips_x_a2a_reserved_headers_from_response() {
+        let mut resp = make_response(&[
+            ("x-a2a-method", "task/send"),
+            ("x-a2a-family", "internal"),
+            ("cache-control", "no-cache"),
+        ]);
+
+        strip_reserved_internal_response(&mut resp);
+
+        assert!(
+            resp.headers.get("x-a2a-method").is_none(),
+            "x-a2a-method should be stripped from response"
+        );
+        assert!(
+            resp.headers.get("x-a2a-family").is_none(),
+            "x-a2a-family should be stripped from response"
+        );
+        assert_eq!(
+            resp.headers.get("cache-control").unwrap(),
+            "no-cache",
+            "cache-control should be preserved"
+        );
+    }
+
+    #[test]
+    fn strips_multiple_reserved_prefixes_from_response() {
+        let mut resp = make_response(&[
+            ("x-praxis-mcp-method", "tools/call"),
+            ("x-mcp-servername", "backend-1"),
+            ("x-a2a-method", "task/send"),
+            ("x-request-id", "abc-123"),
+            ("content-type", "text/plain"),
+        ]);
+
+        strip_reserved_internal_response(&mut resp);
+
+        assert!(
+            resp.headers.get("x-praxis-mcp-method").is_none(),
+            "x-praxis-* should be stripped"
+        );
+        assert!(
+            resp.headers.get("x-mcp-servername").is_none(),
+            "x-mcp-* should be stripped"
+        );
+        assert!(resp.headers.get("x-a2a-method").is_none(), "x-a2a-* should be stripped");
+        assert_eq!(
+            resp.headers.get("x-request-id").unwrap(),
+            "abc-123",
+            "non-reserved x- headers should be preserved"
+        );
+        assert_eq!(
+            resp.headers.get("content-type").unwrap(),
+            "text/plain",
+            "standard headers should be preserved"
+        );
+    }
+
+    #[test]
+    fn preserves_standard_mcp_protocol_headers_in_response() {
+        let mut resp = make_response(&[
+            ("mcp-session-id", "session-123"),
+            ("mcp-method", "tools/call"),
+            ("mcp-name", "get_weather"),
+            ("mcp-protocol-version", "2025-03-26"),
+        ]);
+
+        strip_reserved_internal_response(&mut resp);
+
+        assert_eq!(
+            resp.headers.get("mcp-session-id").unwrap(),
+            "session-123",
+            "standard mcp-session-id should be preserved (no x- prefix)"
+        );
+        assert_eq!(
+            resp.headers.get("mcp-method").unwrap(),
+            "tools/call",
+            "standard mcp-method should be preserved"
+        );
+        assert_eq!(
+            resp.headers.get("mcp-name").unwrap(),
+            "get_weather",
+            "standard mcp-name should be preserved"
+        );
+        assert_eq!(
+            resp.headers.get("mcp-protocol-version").unwrap(),
+            "2025-03-26",
+            "standard mcp-protocol-version should be preserved"
+        );
+    }
+
+    #[test]
+    fn preserves_non_reserved_x_headers_in_response() {
+        let mut resp = make_response(&[
+            ("x-request-id", "abc-123"),
+            ("x-correlation-id", "xyz-789"),
+            ("x-forwarded-for", "10.0.0.1"),
+            ("x-custom-header", "custom-value"),
+        ]);
+
+        strip_reserved_internal_response(&mut resp);
+
+        assert_eq!(
+            resp.headers.get("x-request-id").unwrap(),
+            "abc-123",
+            "x-request-id should be preserved"
+        );
+        assert_eq!(
+            resp.headers.get("x-correlation-id").unwrap(),
+            "xyz-789",
+            "x-correlation-id should be preserved"
+        );
+        assert_eq!(
+            resp.headers.get("x-forwarded-for").unwrap(),
+            "10.0.0.1",
+            "x-forwarded-for should be preserved"
+        );
+        assert_eq!(
+            resp.headers.get("x-custom-header").unwrap(),
+            "custom-value",
+            "x-custom-header should be preserved"
+        );
+    }
+
+    #[test]
+    fn no_reserved_headers_is_noop_response() {
+        let mut resp = make_response(&[
+            ("content-type", "text/html"),
+            ("x-request-id", "abc-123"),
+            ("server", "test"),
+        ]);
+
+        strip_reserved_internal_response(&mut resp);
+
+        assert_eq!(
+            resp.headers.get("content-type").unwrap(),
+            "text/html",
+            "content-type should be preserved"
+        );
+        assert_eq!(
+            resp.headers.get("x-request-id").unwrap(),
+            "abc-123",
+            "x-request-id should be preserved"
+        );
+        assert_eq!(
+            resp.headers.get("server").unwrap(),
+            "test",
+            "server should be preserved"
+        );
+    }
+
+    #[test]
+    fn empty_response_reserved_strip_no_panic() {
+        let mut resp = ResponseHeader::build(200, None).unwrap();
+        strip_reserved_internal_response(&mut resp);
     }
 
     // -------------------------------------------------------------------------

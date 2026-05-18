@@ -708,6 +708,13 @@ the framework level:
   `X-Forwarded-Proto`, or similar headers. Praxis
   injects these with configurable trust boundaries
   via the `forwarded_headers` filter.
+- **Reserved internal headers**: Praxis uses
+  `x-praxis-*`, `x-mcp-*`, and `x-a2a-*` prefixes
+  for proxy-internal routing metadata (e.g.
+  body-derived fields promoted to headers). These are
+  rejected from client requests (400), stripped before
+  forwarding to backends, and stripped from backend
+  responses before reaching clients.
 - **Retry safety**: retries must only apply to idempotent
   requests where no bytes have been written upstream.
 

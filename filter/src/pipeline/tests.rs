@@ -647,7 +647,7 @@ fn apply_body_limits_no_limits_leaves_stream_mode() {
 }
 
 #[test]
-fn apply_body_limits_request_limit_uses_size_limit_mode() {
+fn apply_body_limits_converts_default_stream_to_size_limit() {
     let caps = BodyCapabilities::default();
     let mut pipeline = FilterPipeline {
         body_capabilities: caps,
@@ -656,55 +656,40 @@ fn apply_body_limits_request_limit_uses_size_limit_mode() {
         health_registry: None,
         kv_stores: None,
     };
-    pipeline.apply_body_limits(Some(1_048_576), None, false).unwrap();
+    pipeline
+        .apply_body_limits(Some(1_048_576), Some(524_288), false)
+        .unwrap();
     let caps = pipeline.body_capabilities();
 
-    assert!(caps.needs_request_body, "request limit should enable request body");
+    assert!(
+        caps.needs_request_body,
+        "limits should enable body access for enforcement"
+    );
+    assert!(
+        caps.needs_response_body,
+        "limits should enable body access for enforcement"
+    );
     assert_eq!(
         caps.request_body_mode,
         BodyMode::SizeLimit { max_bytes: 1_048_576 },
-        "request limit without body filters should use SizeLimit mode"
+        "default Stream should become SizeLimit for enforcement"
     );
-
-    assert!(!caps.needs_response_body, "response side should be untouched");
-    assert_eq!(
-        caps.response_body_mode,
-        BodyMode::Stream,
-        "response mode should remain Stream"
-    );
-}
-
-#[test]
-fn apply_body_limits_response_limit_uses_size_limit_mode() {
-    let caps = BodyCapabilities::default();
-    let mut pipeline = FilterPipeline {
-        body_capabilities: caps,
-        compression: None,
-        filters: vec![],
-        health_registry: None,
-        kv_stores: None,
-    };
-    pipeline.apply_body_limits(None, Some(524_288), false).unwrap();
-    let caps = pipeline.body_capabilities();
-
-    assert!(caps.needs_response_body, "response limit should enable response body");
     assert_eq!(
         caps.response_body_mode,
         BodyMode::SizeLimit { max_bytes: 524_288 },
-        "response limit without body filters should use SizeLimit mode"
-    );
-
-    assert!(!caps.needs_request_body, "request side should be untouched");
-    assert_eq!(
-        caps.request_body_mode,
-        BodyMode::Stream,
-        "request mode should remain Stream"
+        "default Stream should become SizeLimit for enforcement"
     );
 }
 
 #[test]
-fn apply_body_limits_both_applied_independently() {
-    let caps = BodyCapabilities::default();
+fn apply_body_limits_preserves_filter_declared_stream() {
+    let caps = BodyCapabilities {
+        needs_request_body: true,
+        request_body_mode: BodyMode::Stream,
+        needs_response_body: true,
+        response_body_mode: BodyMode::Stream,
+        ..BodyCapabilities::default()
+    };
     let mut pipeline = FilterPipeline {
         body_capabilities: caps,
         compression: None,
@@ -712,21 +697,21 @@ fn apply_body_limits_both_applied_independently() {
         health_registry: None,
         kv_stores: None,
     };
-    pipeline.apply_body_limits(Some(1_024), Some(2_048), false).unwrap();
+    pipeline
+        .apply_body_limits(Some(1_048_576), Some(524_288), false)
+        .unwrap();
     let caps = pipeline.body_capabilities();
 
     assert_eq!(
         caps.request_body_mode,
-        BodyMode::SizeLimit { max_bytes: 1_024 },
-        "request body limit should use SizeLimit when no body filters"
+        BodyMode::Stream,
+        "filter-declared Stream should be preserved"
     );
     assert_eq!(
         caps.response_body_mode,
-        BodyMode::SizeLimit { max_bytes: 2_048 },
-        "response body limit should use SizeLimit when no body filters"
+        BodyMode::Stream,
+        "filter-declared Stream should be preserved"
     );
-    assert!(caps.needs_request_body, "request limit should enable request body");
-    assert!(caps.needs_response_body, "response limit should enable response body");
 }
 
 #[tokio::test]
@@ -1275,7 +1260,7 @@ async fn response_header_swap_same_count_detected() {
 }
 
 #[test]
-fn apply_body_limits_stream_uses_size_limit() {
+fn apply_body_limits_default_stream_becomes_size_limit() {
     let caps = BodyCapabilities::default();
     let mut pipeline = FilterPipeline {
         body_capabilities: caps,
@@ -1288,12 +1273,12 @@ fn apply_body_limits_stream_uses_size_limit() {
     assert_eq!(
         pipeline.body_capabilities().request_body_mode,
         BodyMode::SizeLimit { max_bytes: 4096 },
-        "Stream mode should become SizeLimit"
+        "default Stream should become SizeLimit for enforcement"
     );
     assert_eq!(
         pipeline.body_capabilities().response_body_mode,
         BodyMode::SizeLimit { max_bytes: 8192 },
-        "Stream mode should become SizeLimit"
+        "default Stream should become SizeLimit for enforcement"
     );
 }
 

@@ -72,7 +72,7 @@ jobs:
           prs=$(gh pr list --base main --state open --limit 100 \
             --json number,isDraft,labels \
             --jq '[.[] | select(.isDraft == true) |
-              select(.labels | map(.name) | any(. == "conventions/bypass") | not)
+              select(.labels | map(.name) | any(. == "skip/stale-close") | not)
             ] | .[].number')
 
           for number in $prs; do
@@ -112,7 +112,7 @@ jobs:
           prs=$(gh pr list --base main --state open --limit 100 \
             --json number,isDraft,labels \
             --jq '[.[] | select(.isDraft == false) |
-              select(.labels | map(.name) | any(. == "conventions/bypass") | not)
+              select(.labels | map(.name) | any(. == "skip/stale-close") | not)
             ] | .[].number')
 
           for number in $prs; do

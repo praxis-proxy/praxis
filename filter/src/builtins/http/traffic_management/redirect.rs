@@ -83,10 +83,12 @@ struct RedirectConfig {
     #[serde(default = "default_status", deserialize_with = "deserialize_redirect_status")]
     status: RedirectStatus,
 
-    /// Location URL template. Supports `${path}` and `${query}` placeholders.
+    /// Location URL template. Supports `${path}`, `${query}`, `${host}`, and `${scheme}` placeholders.
     ///
     /// `${query}` expands to `?key=val` (with leading `?`) when a query string
-    /// is present, or to an empty string when absent. Templates should use
+    /// is present, or to an empty string when absent. `${host}` expands to the
+    /// request `Host` header value (port stripped). `${scheme}` expands to the
+    /// inferred scheme (`http` or `https`). Templates should use
     /// `${path}${query}` without a literal `?` separator.
     location: String,
 }
@@ -111,9 +113,11 @@ where
 
 /// Returns a redirect response without contacting any upstream.
 ///
-/// The `location` template supports `${path}` and `${query}` substitution
-/// from the original request URI. `${query}` includes the leading `?` when
-/// a query string is present, and expands to nothing when absent.
+/// The `location` template supports `${path}`, `${query}`, `${host}`, and
+/// `${scheme}` substitution from the original request. `${query}` includes
+/// the leading `?` when a query string is present, and expands to nothing
+/// when absent. `${host}` is the `Host` header with port stripped. `${scheme}`
+/// is inferred from `X-Forwarded-Proto`, downstream TLS state, or the URI.
 ///
 /// # YAML configuration
 ///
@@ -156,7 +160,7 @@ where
 pub struct RedirectFilter {
     /// HTTP redirect status code.
     status: RedirectStatus,
-    /// Location URL template with `${path}` / `${query}` placeholders.
+    /// Location URL template with `${path}`, `${query}`, `${host}`, and `${scheme}` placeholders.
     location: String,
 }
 
@@ -187,7 +191,14 @@ impl HttpFilter for RedirectFilter {
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let uri = &ctx.request.uri;
-        let location = expand_location(&self.location, uri.path(), uri.query());
+        let host = ctx
+            .request
+            .headers
+            .get("host")
+            .and_then(|v| v.to_str().ok())
+            .map(strip_port);
+        let scheme = infer_scheme(ctx);
+        let location = expand_location(&self.location, uri.path(), uri.query(), host, scheme);
         let rejection = Rejection::status(self.status.as_u16()).with_header("Location", &location);
         Ok(FilterAction::Reject(rejection))
     }
@@ -197,7 +208,9 @@ impl HttpFilter for RedirectFilter {
 // Utility Functions
 // -----------------------------------------------------------------------------
 
-/// Expand `${path}` and `${query}` placeholders in the location template.
+/// Expand template placeholders in the location string.
+///
+/// Supported placeholders: `${path}`, `${query}`, `${host}`, `${scheme}`.
 ///
 /// The path is normalized before substitution to prevent open
 /// redirects via crafted paths like `//evil.com`. Normalization
@@ -205,11 +218,48 @@ impl HttpFilter for RedirectFilter {
 ///
 /// `${query}` includes the `?` prefix when a query string is present,
 /// and expands to an empty string when absent.
-fn expand_location(template: &str, path: &str, query: Option<&str>) -> String {
+fn expand_location(template: &str, path: &str, query: Option<&str>, host: Option<&str>, scheme: &str) -> String {
     let safe_path = crate::builtins::http::transformation::path_sanitize::normalize_rewritten_path(path);
-    let result = template.replace("${path}", &safe_path);
+    let mut result = template.replace("${path}", &safe_path);
     let query_with_prefix = query.map_or(String::new(), |q| format!("?{q}"));
-    result.replace("${query}", &query_with_prefix)
+    result = result.replace("${query}", &query_with_prefix);
+    if let Some(h) = host {
+        result = result.replace("${host}", h);
+    }
+    result.replace("${scheme}", scheme)
+}
+
+/// Strip port from a `Host` header value (e.g. `example.com:8080` -> `example.com`).
+fn strip_port(host: &str) -> &str {
+    host.split(':').next().unwrap_or(host)
+}
+
+/// Infer the request scheme from headers and connection state.
+///
+/// Checks `X-Forwarded-Proto` first, then `downstream_tls`, then
+/// falls back to the URI scheme. Defaults to `"http"`.
+fn infer_scheme(ctx: &HttpFilterContext<'_>) -> &'static str {
+    if ctx
+        .request
+        .headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|s| s.eq_ignore_ascii_case("https"))
+    {
+        return "https";
+    }
+    if ctx.downstream_tls {
+        return "https";
+    }
+    if ctx
+        .request
+        .uri
+        .scheme_str()
+        .is_some_and(|s| s.eq_ignore_ascii_case("https"))
+    {
+        return "https";
+    }
+    "http"
 }
 
 // -----------------------------------------------------------------------------
@@ -283,13 +333,19 @@ mod tests {
 
     #[test]
     fn expand_location_substitutes_path() {
-        let result = expand_location("https://example.com${path}", "/api/users", None);
+        let result = expand_location("https://example.com${path}", "/api/users", None, None, "http");
         assert_eq!(result, "https://example.com/api/users", "path should be substituted");
     }
 
     #[test]
     fn expand_location_substitutes_query_with_prefix() {
-        let result = expand_location("https://example.com${path}${query}", "/search", Some("q=rust"));
+        let result = expand_location(
+            "https://example.com${path}${query}",
+            "/search",
+            Some("q=rust"),
+            None,
+            "http",
+        );
         assert_eq!(
             result, "https://example.com/search?q=rust",
             "query should include leading ? and value"
@@ -298,7 +354,7 @@ mod tests {
 
     #[test]
     fn expand_location_absent_query_expands_to_nothing() {
-        let result = expand_location("https://example.com${path}${query}", "/page", None);
+        let result = expand_location("https://example.com${path}${query}", "/page", None, None, "http");
         assert_eq!(
             result, "https://example.com/page",
             "missing query should expand to empty string with no trailing ?"
@@ -307,7 +363,7 @@ mod tests {
 
     #[test]
     fn expand_location_double_slash_path_normalized() {
-        let result = expand_location("https://example.com${path}", "//evil.com/foo", None);
+        let result = expand_location("https://example.com${path}", "//evil.com/foo", None, None, "http");
         assert_eq!(
             result, "https://example.com/evil.com/foo",
             "double-slash path should be collapsed to prevent open redirect"
@@ -316,7 +372,7 @@ mod tests {
 
     #[test]
     fn expand_location_triple_slash_path_normalized() {
-        let result = expand_location("https://example.com${path}", "///evil.com", None);
+        let result = expand_location("https://example.com${path}", "///evil.com", None, None, "http");
         assert_eq!(
             result, "https://example.com/evil.com",
             "triple-slash path should be collapsed"
@@ -325,25 +381,31 @@ mod tests {
 
     #[test]
     fn expand_location_traversal_in_path_normalized() {
-        let result = expand_location("https://example.com${path}", "/a/../b", None);
+        let result = expand_location("https://example.com${path}", "/a/../b", None, None, "http");
         assert_eq!(result, "https://example.com/b", "path traversal should be resolved");
     }
 
     #[test]
     fn expand_location_no_placeholders() {
-        let result = expand_location("https://other.com/fixed", "/ignored", Some("ignored=true"));
+        let result = expand_location(
+            "https://other.com/fixed",
+            "/ignored",
+            Some("ignored=true"),
+            None,
+            "http",
+        );
         assert_eq!(result, "https://other.com/fixed", "no placeholders should pass through");
     }
 
     #[test]
     fn expand_location_root_path() {
-        let result = expand_location("https://example.com${path}", "/", None);
+        let result = expand_location("https://example.com${path}", "/", None, None, "http");
         assert_eq!(result, "https://example.com/", "root path should expand to /");
     }
 
     #[test]
     fn expand_location_empty_path_normalizes_to_slash() {
-        let result = expand_location("https://example.com${path}", "", None);
+        let result = expand_location("https://example.com${path}", "", None, None, "http");
         assert_eq!(
             result, "https://example.com/",
             "empty path should normalize to / for safety"
@@ -356,6 +418,8 @@ mod tests {
             "https://example.com${path}${query}",
             "/search",
             Some("q=hello+world&page=1&filter=%E2%9C%93"),
+            None,
+            "http",
         );
         assert_eq!(
             result, "https://example.com/search?q=hello+world&page=1&filter=%E2%9C%93",
@@ -518,7 +582,13 @@ mod tests {
 
     #[test]
     fn expand_location_preserves_percent_encoded_path() {
-        let result = expand_location("https://example.com${path}${query}", "/path%20with%20spaces", None);
+        let result = expand_location(
+            "https://example.com${path}${query}",
+            "/path%20with%20spaces",
+            None,
+            None,
+            "http",
+        );
         assert_eq!(
             result, "https://example.com/path%20with%20spaces",
             "percent-encoded spaces should be preserved verbatim"
@@ -527,7 +597,7 @@ mod tests {
 
     #[test]
     fn expand_location_preserves_utf8_encoded_path() {
-        let result = expand_location("https://example.com${path}${query}", "/caf%C3%A9", None);
+        let result = expand_location("https://example.com${path}${query}", "/caf%C3%A9", None, None, "http");
         assert_eq!(
             result, "https://example.com/caf%C3%A9",
             "percent-encoded UTF-8 characters should be preserved"
@@ -538,7 +608,7 @@ mod tests {
     fn expand_location_very_long_path() {
         let long_segment = "a".repeat(10_000);
         let path = format!("/{long_segment}");
-        let result = expand_location("https://example.com${path}", &path, None);
+        let result = expand_location("https://example.com${path}", &path, None, None, "http");
         assert_eq!(
             result.len(),
             "https://example.com/".len() + 10_000,
@@ -551,12 +621,286 @@ mod tests {
     fn expand_location_very_long_query() {
         let long_value = "x".repeat(10_000);
         let query = format!("key={long_value}");
-        let result = expand_location("https://example.com${path}${query}", "/p", Some(&query));
+        let result = expand_location("https://example.com${path}${query}", "/p", Some(&query), None, "http");
         assert_eq!(
             result.len(),
             "https://example.com/p?key=".len() + 10_000,
             "very long query should be preserved in full"
         );
         assert!(result.contains(&long_value), "long query value should appear in result");
+    }
+
+    #[test]
+    fn expand_location_substitutes_host() {
+        let result = expand_location("https://${host}${path}", "/page", None, Some("example.com"), "https");
+        assert_eq!(
+            result, "https://example.com/page",
+            "host should be substituted into template"
+        );
+    }
+
+    #[test]
+    fn expand_location_substitutes_scheme() {
+        let result = expand_location("${scheme}://new.example.com${path}", "/page", None, None, "https");
+        assert_eq!(
+            result, "https://new.example.com/page",
+            "scheme should be substituted into template"
+        );
+    }
+
+    #[test]
+    fn expand_location_host_and_scheme_combined() {
+        let result = expand_location(
+            "${scheme}://${host}/new${path}${query}",
+            "/page",
+            Some("v=1"),
+            Some("example.com"),
+            "https",
+        );
+        assert_eq!(
+            result, "https://example.com/new/page?v=1",
+            "both host and scheme should be substituted"
+        );
+    }
+
+    #[test]
+    fn expand_location_missing_host_preserves_placeholder() {
+        let result = expand_location("https://${host}/page", "/", None, None, "http");
+        assert_eq!(
+            result, "https://${host}/page",
+            "missing host should leave placeholder intact"
+        );
+    }
+
+    #[test]
+    fn expand_location_http_scheme() {
+        let result = expand_location("${scheme}://example.com${path}", "/page", None, None, "http");
+        assert_eq!(result, "http://example.com/page", "http scheme should be substituted");
+    }
+
+    #[test]
+    fn strip_port_removes_port() {
+        assert_eq!(strip_port("example.com:8080"), "example.com", "port should be stripped");
+    }
+
+    #[test]
+    fn strip_port_no_port_passthrough() {
+        assert_eq!(
+            strip_port("example.com"),
+            "example.com",
+            "host without port should pass through"
+        );
+    }
+
+    #[test]
+    fn strip_port_empty_string() {
+        assert_eq!(strip_port(""), "", "empty string should return empty");
+    }
+
+    #[test]
+    fn strip_port_ipv4_with_port() {
+        assert_eq!(strip_port("10.0.0.1:443"), "10.0.0.1", "IPv4 port should be stripped");
+    }
+
+    #[tokio::test]
+    async fn on_request_infers_http_scheme_by_default() {
+        let yaml =
+            serde_yaml::from_str::<serde_yaml::Value>(r#"location: "${scheme}://new.example.com${path}""#).unwrap();
+        let filter = RedirectFilter::from_config(&yaml).unwrap();
+
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/page");
+        req.headers.insert("host", "old.example.com".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        match action {
+            FilterAction::Reject(r) => {
+                assert_eq!(
+                    r.headers[0].1, "http://new.example.com/page",
+                    "default scheme should be http"
+                );
+            },
+            _ => panic!("expected Reject"),
+        }
+    }
+
+    #[tokio::test]
+    async fn on_request_infers_https_from_x_forwarded_proto() {
+        let yaml =
+            serde_yaml::from_str::<serde_yaml::Value>(r#"location: "${scheme}://new.example.com${path}""#).unwrap();
+        let filter = RedirectFilter::from_config(&yaml).unwrap();
+
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/page");
+        req.headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        match action {
+            FilterAction::Reject(r) => {
+                assert_eq!(
+                    r.headers[0].1, "https://new.example.com/page",
+                    "x-forwarded-proto: https should yield https scheme"
+                );
+            },
+            _ => panic!("expected Reject"),
+        }
+    }
+
+    #[tokio::test]
+    async fn on_request_infers_https_from_downstream_tls() {
+        let yaml =
+            serde_yaml::from_str::<serde_yaml::Value>(r#"location: "${scheme}://new.example.com${path}""#).unwrap();
+        let filter = RedirectFilter::from_config(&yaml).unwrap();
+
+        let req = crate::test_utils::make_request(http::Method::GET, "/page");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.downstream_tls = true;
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        match action {
+            FilterAction::Reject(r) => {
+                assert_eq!(
+                    r.headers[0].1, "https://new.example.com/page",
+                    "downstream TLS should yield https scheme"
+                );
+            },
+            _ => panic!("expected Reject"),
+        }
+    }
+
+    #[tokio::test]
+    async fn on_request_host_substitution() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"status: 302
+location: "https://new.example.com${path}""#,
+        )
+        .unwrap();
+        let filter = RedirectFilter::from_config(&yaml).unwrap();
+
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/page");
+        req.headers.insert("host", "old.example.com:8080".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        match action {
+            FilterAction::Reject(r) => {
+                assert_eq!(r.status, 302, "status should be 302");
+                assert_eq!(
+                    r.headers[0].1, "https://new.example.com/page",
+                    "location should use new host"
+                );
+            },
+            _ => panic!("expected Reject"),
+        }
+    }
+
+    #[tokio::test]
+    async fn on_request_host_template_with_port_stripping() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(r#"location: "https://${host}/new${path}""#).unwrap();
+        let filter = RedirectFilter::from_config(&yaml).unwrap();
+
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/old");
+        req.headers.insert("host", "example.com:9090".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        match action {
+            FilterAction::Reject(r) => {
+                assert_eq!(
+                    r.headers[0].1, "https://example.com/new/old",
+                    "host port should be stripped in template"
+                );
+            },
+            _ => panic!("expected Reject"),
+        }
+    }
+
+    #[tokio::test]
+    async fn on_request_x_forwarded_proto_case_insensitive() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(r#"location: "${scheme}://example.com${path}""#).unwrap();
+        let filter = RedirectFilter::from_config(&yaml).unwrap();
+
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert("x-forwarded-proto", "HTTPS".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        match action {
+            FilterAction::Reject(r) => {
+                assert_eq!(
+                    r.headers[0].1, "https://example.com/",
+                    "HTTPS (uppercase) should be recognized"
+                );
+            },
+            _ => panic!("expected Reject"),
+        }
+    }
+
+    #[tokio::test]
+    async fn on_request_x_forwarded_proto_http_stays_http() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(r#"location: "${scheme}://example.com${path}""#).unwrap();
+        let filter = RedirectFilter::from_config(&yaml).unwrap();
+
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert("x-forwarded-proto", "http".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        match action {
+            FilterAction::Reject(r) => {
+                assert_eq!(
+                    r.headers[0].1, "http://example.com/",
+                    "x-forwarded-proto: http should yield http"
+                );
+            },
+            _ => panic!("expected Reject"),
+        }
+    }
+
+    #[tokio::test]
+    async fn on_request_full_template_with_all_variables() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            r#"status: 307
+location: "${scheme}://${host}/redirected${path}${query}""#,
+        )
+        .unwrap();
+        let filter = RedirectFilter::from_config(&yaml).unwrap();
+
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/api/v1?key=abc");
+        req.headers.insert("host", "api.example.com".parse().unwrap());
+        req.headers.insert("x-forwarded-proto", "https".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        match action {
+            FilterAction::Reject(r) => {
+                assert_eq!(r.status, 307, "status should be 307");
+                assert_eq!(
+                    r.headers[0].1, "https://api.example.com/redirected/api/v1?key=abc",
+                    "all template variables should be expanded"
+                );
+            },
+            _ => panic!("expected Reject"),
+        }
+    }
+
+    #[tokio::test]
+    async fn on_request_no_host_header_leaves_host_placeholder() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(r#"location: "https://${host}/page""#).unwrap();
+        let filter = RedirectFilter::from_config(&yaml).unwrap();
+
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        match action {
+            FilterAction::Reject(r) => {
+                assert_eq!(
+                    r.headers[0].1, "https://${host}/page",
+                    "missing host header should leave placeholder"
+                );
+            },
+            _ => panic!("expected Reject"),
+        }
     }
 }

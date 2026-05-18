@@ -62,6 +62,8 @@ fuzz_target!(|data: &str| {
             request: &request,
             request_body_bytes: 0,
             request_body_mode: praxis_filter::BodyMode::Stream,
+            request_headers_to_remove: Vec::new(),
+            request_headers_to_set: Vec::new(),
             request_start: std::time::Instant::now(),
             response_body_bytes: 0,
             response_body_mode: praxis_filter::BodyMode::Stream,

@@ -559,3 +559,131 @@ fn json_rpc_routing_falls_through_to_default() {
         "unknown method should route to default cluster"
     );
 }
+
+#[test]
+fn mcp_classifier_routing_routes_by_tool_name() {
+    let weather_guard = start_backend_with_shutdown("weather-response");
+    let weather_port = weather_guard.port();
+    let calendar_guard = start_backend_with_shutdown("calendar-response");
+    let calendar_port = calendar_guard.port();
+    let default_guard = start_backend_with_shutdown("default-response");
+    let default_port = default_guard.port();
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "payload-processing/mcp-classifier-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", weather_port),
+            ("127.0.0.1:9002", calendar_port),
+            ("127.0.0.1:9003", default_port),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &mcp_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather"}}"#,
+            &[("Mcp-Method", "tools/call"), ("Mcp-Name", "get_weather")],
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "tools/call get_weather should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "weather-response",
+        "tools/call with name=get_weather should route to weather-tools cluster"
+    );
+}
+
+#[test]
+fn mcp_classifier_routing_default_fallback() {
+    let weather_guard = start_backend_with_shutdown("weather-response");
+    let weather_port = weather_guard.port();
+    let calendar_guard = start_backend_with_shutdown("calendar-response");
+    let calendar_port = calendar_guard.port();
+    let default_guard = start_backend_with_shutdown("default-response");
+    let default_port = default_guard.port();
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "payload-processing/mcp-classifier-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", weather_port),
+            ("127.0.0.1:9002", calendar_port),
+            ("127.0.0.1:9003", default_port),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &mcp_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#,
+            &[("Mcp-Method", "tools/list")],
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "tools/list should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "default-response",
+        "tools/list should route to default-mcp cluster"
+    );
+}
+
+#[test]
+fn mcp_classifier_routing_routes_calendar_without_client_mcp_headers() {
+    let weather_guard = start_backend_with_shutdown("weather-response");
+    let weather_port = weather_guard.port();
+    let calendar_guard = start_backend_with_shutdown("calendar-response");
+    let calendar_port = calendar_guard.port();
+    let default_guard = start_backend_with_shutdown("default-response");
+    let default_port = default_guard.port();
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "payload-processing/mcp-classifier-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", weather_port),
+            ("127.0.0.1:9002", calendar_port),
+            ("127.0.0.1:9003", default_port),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &mcp_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_calendar"}}"#,
+            &[],
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "tools/call get_calendar should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "calendar-response",
+        "tools/call with name=get_calendar should route to calendar-tools cluster without client Mcp-* headers"
+    );
+}
+
+fn mcp_json_post(path: &str, body: &str, headers: &[(&str, &str)]) -> String {
+    let mut extra = String::new();
+    for (name, value) in headers {
+        extra.push_str(&format!("{name}: {value}\r\n"));
+    }
+    format!(
+        "POST {path} HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         {extra}\
+         \r\n\
+         {body}",
+        body.len(),
+    )
+}

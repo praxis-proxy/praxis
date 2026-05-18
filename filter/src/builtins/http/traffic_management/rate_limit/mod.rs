@@ -41,6 +41,13 @@ use crate::{
 /// Maximum number of per-IP entries before eviction is triggered.
 const MAX_PER_IP_ENTRIES: usize = 100_000;
 
+/// Hard cap on per-IP entries; new IPs are rejected with 429 above this.
+///
+/// Acts as a safety net above the soft eviction threshold. Prevents
+/// unbounded memory growth when attackers rotate source addresses
+/// faster than the eviction scan can reclaim entries.
+const HARD_CAP_PER_IP_ENTRIES: usize = 200_000; // 2 * MAX_PER_IP_ENTRIES
+
 /// Maximum entries to scan during a single eviction pass.
 const EVICTION_SCAN_LIMIT: usize = 128;
 

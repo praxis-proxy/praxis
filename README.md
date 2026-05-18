@@ -32,7 +32,6 @@ with the following documentation first:
 - [Conventions](docs/conventions.md)
 - [Development](docs/development.md)
 - [Benchmarks](docs/benchmarks.md)
-- [Proposals](docs/proposals.md)
 
 For larger changes, open a [discussion] and follow the
 [proposal process](docs/proposals.md).

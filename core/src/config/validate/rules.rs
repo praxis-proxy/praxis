@@ -17,7 +17,7 @@ use super::{
     listener::{validate_listener_names, validate_listeners},
 };
 use crate::{
-    config::{Config, ProtocolKind},
+    config::{BodyLimitsConfig, Config, ProtocolKind},
     errors::ProxyError,
 };
 
@@ -54,6 +54,7 @@ impl Config {
             ));
         }
 
+        validate_body_limits(&self.body_limits, self.insecure_options.allow_unbounded_body)?;
         validate_cluster_names(&self.clusters)?;
         validate_clusters(&self.clusters, &self.insecure_options)?;
         validate_upstream_ca_file(self.runtime.upstream_ca_file.as_deref())?;
@@ -61,6 +62,40 @@ impl Config {
 
         Ok(())
     }
+}
+
+// -----------------------------------------------------------------------------
+// Body Limits Validation
+// -----------------------------------------------------------------------------
+
+/// Require both body limits unless the operator opts out.
+fn validate_body_limits(limits: &BodyLimitsConfig, allow_unbounded: bool) -> Result<(), ProxyError> {
+    let missing_request = limits.max_request_bytes.is_none();
+    let missing_response = limits.max_response_bytes.is_none();
+
+    if !missing_request && !missing_response {
+        return Ok(());
+    }
+
+    if allow_unbounded {
+        warn!(
+            max_request_bytes = ?limits.max_request_bytes,
+            max_response_bytes = ?limits.max_response_bytes,
+            "body limits not fully configured; allowed by insecure_options.allow_unbounded_body"
+        );
+        return Ok(());
+    }
+
+    Err(ProxyError::Config(format!(
+        "body_limits.max_request_bytes ({}) and body_limits.max_response_bytes ({}) \
+         must both be set; use insecure_options.allow_unbounded_body: true to override",
+        limits
+            .max_request_bytes
+            .map_or_else(|| "none".to_owned(), |v| v.to_string()),
+        limits
+            .max_response_bytes
+            .map_or_else(|| "none".to_owned(), |v| v.to_string()),
+    )))
 }
 
 // -----------------------------------------------------------------------------
@@ -158,7 +193,7 @@ fn validate_runtime_threads(threads: usize) -> Result<(), ProxyError> {
     reason = "tests use unwrap/expect/indexing/raw strings for brevity"
 )]
 mod tests {
-    use crate::config::{Config, ProtocolKind};
+    use crate::config::{Config, DEFAULT_MAX_BODY_BYTES, ProtocolKind};
 
     #[test]
     fn reject_invalid_admin_address() {
@@ -442,5 +477,69 @@ filter_chains:
     fn reject_invalid_yaml() {
         let err = Config::from_yaml("not: [valid: yaml: {{").unwrap_err();
         assert!(err.to_string().contains("invalid YAML"));
+    }
+
+    #[test]
+    fn reject_null_body_limits() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+body_limits:
+  max_request_bytes: null
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("allow_unbounded_body"),
+            "should reject null body limits: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_null_body_limits_with_insecure_flag() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+body_limits:
+  max_request_bytes: null
+  max_response_bytes: null
+insecure_options:
+  allow_unbounded_body: true
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn accept_default_body_limits() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let config = Config::from_yaml(yaml).unwrap();
+        assert_eq!(
+            config.body_limits.max_request_bytes,
+            Some(DEFAULT_MAX_BODY_BYTES),
+            "default body limit should be 10 MiB"
+        );
     }
 }
