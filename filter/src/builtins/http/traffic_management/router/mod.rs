@@ -4,6 +4,7 @@
 //! Path-prefix and host-header routing filter.
 
 mod config;
+mod json_alias;
 mod matching;
 
 #[cfg(test)]
@@ -21,12 +22,15 @@ mod tests;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use http::HeaderMap;
+use http::{HeaderMap, header::HeaderName};
 use praxis_core::config::{PathMatch, Route};
 use tracing::{debug, trace};
 
 use self::{
-    config::RouterConfig,
+    config::{
+        DEFAULT_JSON_ALIAS_HEADER, DEFAULT_JSON_ALIAS_MAX_BODY_BYTES, JsonAlias, MAX_JSON_ALIAS_BODY_BYTES,
+        RouterConfig, RouterRouteConfig,
+    },
     matching::{route_matches_request, should_stop_early, update_best_match},
 };
 use crate::{
@@ -74,6 +78,18 @@ use crate::{
 /// [`rewritten_path`]: crate::HttpFilterContext::rewritten_path
 #[derive(Debug)]
 pub struct RouterFilter {
+    /// Whether any route has JSON aliases configured.
+    #[allow(dead_code, reason = "alias config is validated before body access is wired")]
+    has_json_alias_routes: bool,
+
+    /// Maximum body bytes to buffer for JSON alias resolution.
+    #[allow(dead_code, reason = "alias config is validated before body buffering is wired")]
+    json_alias_max_body_bytes: usize,
+
+    /// Header name for the promoted JSON alias value.
+    #[allow(dead_code, reason = "alias config is validated before header promotion is wired")]
+    json_alias_header: HeaderName,
+
     /// Ordered route table with pre-computed wildcard suffixes.
     routes: Vec<ResolvedRoute>,
 }
@@ -84,6 +100,10 @@ struct ResolvedRoute {
     /// The original route configuration.
     route: Route,
 
+    /// Optional JSON aliases configured on this route.
+    #[allow(dead_code, reason = "route aliases are validated before body aliasing is wired")]
+    json_aliases: Option<Vec<JsonAlias>>,
+
     /// For wildcard hosts (e.g. `*.example.com`), the pre-lowercased
     /// suffix with leading dot: `.example.com`. `None` for exact hosts
     /// or routes without a host constraint.
@@ -91,7 +111,7 @@ struct ResolvedRoute {
 }
 
 impl RouterFilter {
-    /// Create a router from a list of routes.
+    /// Create a router from a list of routes with default alias options.
     ///
     /// Returns an error if any `path_prefix` (other than `"/"`)
     /// does not end with `'/'`.
@@ -142,21 +162,44 @@ impl RouterFilter {
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn new(routes: Vec<Route>) -> Result<Self, FilterError> {
+        Self::with_alias_options(
+            routes.into_iter().map(RouterRouteConfig::from).collect(),
+            DEFAULT_JSON_ALIAS_HEADER,
+            DEFAULT_JSON_ALIAS_MAX_BODY_BYTES,
+        )
+    }
+
+    /// Create a router with explicit alias options.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if route or alias configuration is invalid.
+    fn with_alias_options(
+        routes: Vec<RouterRouteConfig>,
+        json_alias_header: &str,
+        json_alias_max_body_bytes: usize,
+    ) -> Result<Self, FilterError> {
         let mut routes = routes;
         sort_routes(&mut routes);
         validate_prefixes(&routes)?;
-        let resolved: Vec<ResolvedRoute> = routes
-            .into_iter()
-            .map(|route| {
-                let wildcard_suffix = route.host.as_ref().and_then(|h| h.strip_prefix("*.")).map(|suffix| {
-                    let lower = suffix.to_ascii_lowercase();
-                    format!(".{lower}")
-                });
-                ResolvedRoute { route, wildcard_suffix }
-            })
-            .collect();
-        debug!(routes = resolved.len(), "router initialized");
-        Ok(Self { routes: resolved })
+        validate_json_aliases(&routes)?;
+        let json_alias_header = parse_json_alias_header(json_alias_header)?;
+        validate_alias_options(&routes, json_alias_max_body_bytes)?;
+
+        let has_json_alias_routes = routes.iter().any(|r| r.json_aliases.is_some());
+
+        let resolved = resolve_routes(routes);
+        debug!(
+            routes = resolved.len(),
+            has_aliases = has_json_alias_routes,
+            "router initialized"
+        );
+        Ok(Self {
+            has_json_alias_routes,
+            json_alias_max_body_bytes,
+            json_alias_header,
+            routes: resolved,
+        })
     }
 
     /// Create a router from parsed YAML config.
@@ -168,7 +211,11 @@ impl RouterFilter {
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: RouterConfig = crate::parse_filter_config("router", config)?;
-        Ok(Box::new(Self::new(cfg.routes)?))
+        Ok(Box::new(Self::with_alias_options(
+            cfg.routes,
+            &cfg.json_alias_header,
+            cfg.json_alias_max_body_bytes,
+        )?))
     }
 
     /// Find the best matching route for the given path, host, and headers.
@@ -194,19 +241,20 @@ impl RouterFilter {
 }
 
 /// Sorts routes by specificity: exact paths first, then longest prefix.
-fn sort_routes(routes: &mut [Route]) {
+fn sort_routes(routes: &mut [RouterRouteConfig]) {
     routes.sort_by(|a, b| {
-        b.path_match.len().cmp(&a.path_match.len()).then_with(|| {
-            let a_exact = u8::from(a.path_match.is_exact());
-            let b_exact = u8::from(b.path_match.is_exact());
+        b.route.path_match.len().cmp(&a.route.path_match.len()).then_with(|| {
+            let a_exact = u8::from(a.route.path_match.is_exact());
+            let b_exact = u8::from(b.route.path_match.is_exact());
             b_exact.cmp(&a_exact)
         })
     });
 }
 
 /// Validates that prefix-only routes have segment-bounded prefixes.
-fn validate_prefixes(routes: &[Route]) -> Result<(), FilterError> {
-    for route in routes {
+fn validate_prefixes(routes: &[RouterRouteConfig]) -> Result<(), FilterError> {
+    for route_config in routes {
+        let route = &route_config.route;
         if let PathMatch::Prefix { path_prefix } = &route.path_match
             && path_prefix != "/"
             && !path_prefix.ends_with('/')
@@ -220,6 +268,98 @@ fn validate_prefixes(routes: &[Route]) -> Result<(), FilterError> {
         }
     }
     Ok(())
+}
+
+/// Validates JSON alias configuration on all routes.
+fn validate_json_aliases(routes: &[RouterRouteConfig]) -> Result<(), FilterError> {
+    for route_config in routes {
+        let route = &route_config.route;
+        let Some(aliases) = &route_config.json_aliases else {
+            continue;
+        };
+        if aliases.is_empty() {
+            return Err(format!(
+                "router: json_aliases for cluster '{}' must not be empty (omit the key instead)",
+                route.cluster,
+            )
+            .into());
+        }
+        for alias in aliases {
+            validate_single_alias(alias, &route.cluster)?;
+        }
+    }
+    Ok(())
+}
+
+/// Validates a single JSON alias field, pattern, and target.
+fn validate_single_alias(alias: &JsonAlias, cluster: &str) -> Result<(), FilterError> {
+    if alias.field.is_empty() {
+        return Err(format!("router: json alias field for cluster '{cluster}' must not be empty").into());
+    }
+    if alias.pattern.is_empty() {
+        return Err(format!("router: json alias match pattern for cluster '{cluster}' must not be empty").into());
+    }
+    if alias.pattern.chars().filter(|&c| c == '*').count() > 1 {
+        return Err(format!(
+            "router: json alias pattern '{}' for cluster '{cluster}' must contain at most one '*'",
+            alias.pattern,
+        )
+        .into());
+    }
+    if alias.target.as_ref().is_some_and(String::is_empty) {
+        return Err(format!(
+            "router: json alias target for pattern '{}' in cluster '{cluster}' \
+             must not be empty (omit the key to preserve the original value)",
+            alias.pattern,
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Parsed unconditionally so an invalid name fails at construction, not at
+/// request time when alias validation may have been skipped (no alias routes).
+fn parse_json_alias_header(json_alias_header: &str) -> Result<HeaderName, FilterError> {
+    HeaderName::from_bytes(json_alias_header.as_bytes()).map_err(|e| {
+        format!("router: json_alias_header '{json_alias_header}' is not a valid HTTP header name: {e}").into()
+    })
+}
+
+/// Validates global alias options when alias routes exist.
+fn validate_alias_options(routes: &[RouterRouteConfig], max_bytes: usize) -> Result<(), FilterError> {
+    let has_aliases = routes.iter().any(|r| r.json_aliases.is_some());
+    if !has_aliases {
+        return Ok(());
+    }
+    if max_bytes == 0 {
+        return Err("router: json_alias_max_body_bytes must be greater than 0".into());
+    }
+    if max_bytes > MAX_JSON_ALIAS_BODY_BYTES {
+        return Err(format!(
+            "router: json_alias_max_body_bytes must be <= {MAX_JSON_ALIAS_BODY_BYTES} bytes (got {max_bytes})",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Converts raw routes into resolved routes with pre-computed wildcard suffixes.
+fn resolve_routes(routes: Vec<RouterRouteConfig>) -> Vec<ResolvedRoute> {
+    routes
+        .into_iter()
+        .map(|route_config| {
+            let route = route_config.route;
+            let wildcard_suffix = route.host.as_ref().and_then(|h| h.strip_prefix("*.")).map(|suffix| {
+                let lower = suffix.to_ascii_lowercase();
+                format!(".{lower}")
+            });
+            ResolvedRoute {
+                route,
+                json_aliases: route_config.json_aliases,
+                wildcard_suffix,
+            }
+        })
+        .collect()
 }
 
 #[async_trait]

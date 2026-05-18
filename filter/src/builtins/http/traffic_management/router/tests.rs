@@ -10,6 +10,7 @@ use praxis_core::config::{PathMatch, Route};
 
 use super::{
     ResolvedRoute, RouterFilter,
+    config::{JsonAlias, RouterConfig, RouterRouteConfig},
     matching::{route_matches_request, should_stop_early, update_best_match},
 };
 use crate::{FilterAction, filter::HttpFilter};
@@ -476,6 +477,7 @@ fn route_matches_request_path_only_hit() {
     let route = prefix_route("/api/", "api");
     let resolved = ResolvedRoute {
         route,
+        json_aliases: None,
         wildcard_suffix: None,
     };
     assert!(
@@ -489,6 +491,7 @@ fn route_matches_request_path_miss() {
     let route = prefix_route("/api/", "api");
     let resolved = ResolvedRoute {
         route,
+        json_aliases: None,
         wildcard_suffix: None,
     };
     assert!(
@@ -509,6 +512,7 @@ fn route_matches_request_host_hit() {
     };
     let resolved = ResolvedRoute {
         route,
+        json_aliases: None,
         wildcard_suffix: None,
     };
     assert!(
@@ -529,6 +533,7 @@ fn route_matches_request_host_miss() {
     };
     let resolved = ResolvedRoute {
         route,
+        json_aliases: None,
         wildcard_suffix: None,
     };
     assert!(
@@ -549,6 +554,7 @@ fn route_matches_request_host_miss_when_no_host() {
     };
     let resolved = ResolvedRoute {
         route,
+        json_aliases: None,
         wildcard_suffix: None,
     };
     assert!(
@@ -569,6 +575,7 @@ fn route_matches_request_header_hit() {
     };
     let resolved = ResolvedRoute {
         route,
+        json_aliases: None,
         wildcard_suffix: None,
     };
     let mut hdrs = HeaderMap::new();
@@ -591,6 +598,7 @@ fn route_matches_request_header_miss() {
     };
     let resolved = ResolvedRoute {
         route,
+        json_aliases: None,
         wildcard_suffix: None,
     };
     let mut hdrs = HeaderMap::new();
@@ -613,6 +621,7 @@ fn route_matches_request_compound() {
     };
     let resolved = ResolvedRoute {
         route,
+        json_aliases: None,
         wildcard_suffix: None,
     };
     let mut hdrs = HeaderMap::new();
@@ -1184,6 +1193,320 @@ fn mixed_exact_and_prefix_ordering() {
 }
 
 // -----------------------------------------------------------------------------
+// JSON Alias Validation Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn json_alias_validation_empty_aliases_rejected() {
+    let err = RouterFilter::with_alias_options(
+        vec![router_route("/", "test", Some(vec![]))],
+        super::config::DEFAULT_JSON_ALIAS_HEADER,
+        super::config::DEFAULT_JSON_ALIAS_MAX_BODY_BYTES,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("must not be empty"),
+        "empty json_aliases should be rejected: {err}"
+    );
+}
+
+#[test]
+fn json_alias_validation_empty_field_rejected() {
+    let err = RouterFilter::with_alias_options(
+        vec![router_route(
+            "/",
+            "test",
+            Some(vec![JsonAlias {
+                field: String::new(),
+                pattern: "fast".to_owned(),
+                target: None,
+            }]),
+        )],
+        super::config::DEFAULT_JSON_ALIAS_HEADER,
+        super::config::DEFAULT_JSON_ALIAS_MAX_BODY_BYTES,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("field"),
+        "empty field should be rejected: {err}"
+    );
+}
+
+#[test]
+fn json_alias_validation_empty_pattern_rejected() {
+    let err = RouterFilter::with_alias_options(
+        vec![router_route(
+            "/",
+            "test",
+            Some(vec![JsonAlias {
+                field: "model".to_owned(),
+                pattern: String::new(),
+                target: None,
+            }]),
+        )],
+        super::config::DEFAULT_JSON_ALIAS_HEADER,
+        super::config::DEFAULT_JSON_ALIAS_MAX_BODY_BYTES,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("must not be empty"),
+        "empty match pattern should be rejected: {err}"
+    );
+}
+
+#[test]
+fn json_alias_validation_multiple_wildcards_rejected() {
+    let err = RouterFilter::with_alias_options(
+        vec![router_route(
+            "/",
+            "test",
+            Some(vec![JsonAlias {
+                field: "model".to_owned(),
+                pattern: "a-*-b-*".to_owned(),
+                target: None,
+            }]),
+        )],
+        super::config::DEFAULT_JSON_ALIAS_HEADER,
+        super::config::DEFAULT_JSON_ALIAS_MAX_BODY_BYTES,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("at most one"),
+        "multiple wildcards should be rejected: {err}"
+    );
+}
+
+#[test]
+fn json_alias_validation_empty_target_rejected() {
+    let err = RouterFilter::with_alias_options(
+        vec![router_route(
+            "/",
+            "test",
+            Some(vec![JsonAlias {
+                field: "model".to_owned(),
+                pattern: "fast".to_owned(),
+                target: Some(String::new()),
+            }]),
+        )],
+        super::config::DEFAULT_JSON_ALIAS_HEADER,
+        super::config::DEFAULT_JSON_ALIAS_MAX_BODY_BYTES,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("must not be empty"),
+        "empty target should be rejected: {err}"
+    );
+}
+
+#[test]
+fn json_alias_config_stores_header_and_max_bytes() {
+    let filter = RouterFilter::with_alias_options(
+        vec![json_alias_route(
+            "/",
+            "test",
+            vec![("tenant_id", "acme", Some("tenant-acme"))],
+        )],
+        "X-Tenant",
+        4096,
+    )
+    .unwrap();
+
+    assert_eq!(
+        filter.json_alias_header.as_str(),
+        "x-tenant",
+        "custom json_alias_header"
+    );
+    assert_eq!(filter.json_alias_max_body_bytes, 4096, "custom max body bytes");
+}
+
+#[test]
+fn json_alias_config_preserves_route_count() {
+    let filter = make_alias_config_filter();
+    assert_eq!(filter.routes.len(), 3, "should have 3 routes");
+}
+
+#[test]
+fn json_alias_config_preserves_anthropic_alias() {
+    let filter = make_alias_config_filter();
+    let anthropic = find_resolved_route(&filter, "anthropic");
+    let aliases = anthropic.json_aliases.as_ref().unwrap();
+
+    assert_eq!(aliases.len(), 1, "anthropic should have 1 alias");
+    assert_eq!(aliases[0].field, "model", "anthropic alias field");
+    assert_eq!(aliases[0].pattern, "claude-*", "wildcard alias pattern");
+    assert!(aliases[0].target.is_none(), "wildcard alias should have no target");
+}
+
+#[test]
+fn json_alias_config_preserves_openai_aliases() {
+    let filter = make_alias_config_filter();
+    let openai = find_resolved_route(&filter, "openai");
+    let aliases = openai.json_aliases.as_ref().unwrap();
+
+    assert_eq!(aliases.len(), 2, "openai should have 2 aliases");
+    assert_eq!(aliases[0].field, "model", "first alias field");
+    assert_eq!(aliases[0].pattern, "fast", "first alias pattern");
+    assert_eq!(aliases[0].target.as_deref(), Some("gpt-4o-mini"), "first alias target");
+    assert_eq!(aliases[1].field, "tenant_id", "second alias field");
+    assert_eq!(aliases[1].pattern, "cheap", "second alias pattern");
+}
+
+#[test]
+fn json_alias_config_preserves_fallback_without_aliases() {
+    let filter = make_alias_config_filter();
+    let fallback = find_resolved_route(&filter, "fallback");
+
+    assert!(fallback.json_aliases.is_none(), "fallback should have no aliases");
+}
+
+#[test]
+fn json_alias_from_config_parses_global_options() {
+    let cfg = parse_json_alias_config();
+
+    assert_eq!(cfg.json_alias_header, "X-AI-Model", "custom json alias header");
+    assert_eq!(cfg.json_alias_max_body_bytes, 4096, "custom max body bytes");
+    assert_eq!(cfg.routes.len(), 3, "should parse 3 routes");
+}
+
+#[test]
+fn json_alias_from_config_parses_first_route_alias() {
+    let cfg = parse_json_alias_config();
+    let first = &cfg.routes[0];
+
+    assert_eq!(&*first.route.cluster, "openai", "first route cluster");
+    let aliases = first.json_aliases.as_ref().unwrap();
+    assert_eq!(aliases.len(), 1, "first route should have one alias");
+    assert_eq!(aliases[0].field, "model", "first alias field");
+    assert_eq!(aliases[0].pattern, "fast", "first alias pattern");
+    assert_eq!(aliases[0].target.as_deref(), Some("gpt-4o-mini"), "first alias target");
+}
+
+#[test]
+fn json_alias_from_config_parses_second_route_alias() {
+    let cfg = parse_json_alias_config();
+    let second = &cfg.routes[1];
+
+    assert_eq!(&*second.route.cluster, "tenant", "second route cluster");
+    let aliases = second.json_aliases.as_ref().unwrap();
+    assert_eq!(aliases.len(), 1, "second route should have one alias");
+    assert_eq!(aliases[0].field, "tenant_id", "second alias field");
+    assert_eq!(aliases[0].pattern, "fast", "second alias pattern");
+    assert_eq!(aliases[0].target.as_deref(), Some("tenant-fast"), "second alias target");
+}
+
+#[test]
+fn json_alias_from_config_parses_fallback_without_aliases() {
+    let cfg = parse_json_alias_config();
+    let third = &cfg.routes[2];
+
+    assert_eq!(&*third.route.cluster, "fallback", "third route cluster");
+    assert!(third.json_aliases.is_none(), "fallback should have no aliases");
+}
+
+#[test]
+fn json_alias_from_config_builds_filter() {
+    let yaml = serde_yaml::from_str::<serde_yaml::Value>(json_alias_config_yaml()).unwrap();
+    let filter = RouterFilter::from_config(&yaml).unwrap();
+
+    assert_eq!(filter.name(), "router", "from_config should produce a valid router");
+}
+
+#[test]
+fn json_alias_from_config_uses_defaults() {
+    let cfg: RouterConfig = serde_yaml::from_str(
+        r#"
+routes:
+  - path_prefix: "/"
+    cluster: "default"
+    json_aliases:
+      - field: model
+        match: fast
+        target: gpt-4o-mini
+"#,
+    )
+    .unwrap();
+
+    assert_eq!(
+        cfg.json_alias_header,
+        super::config::DEFAULT_JSON_ALIAS_HEADER,
+        "should use default json_alias_header"
+    );
+    assert_eq!(
+        cfg.json_alias_max_body_bytes,
+        super::config::DEFAULT_JSON_ALIAS_MAX_BODY_BYTES,
+        "should use default max body bytes"
+    );
+}
+
+#[test]
+fn json_alias_validate_invalid_header_name_rejected() {
+    let err = RouterFilter::with_alias_options(
+        vec![json_alias_route(
+            "/",
+            "test",
+            vec![("model", "fast", Some("gpt-4o-mini"))],
+        )],
+        "bad header",
+        super::config::DEFAULT_JSON_ALIAS_MAX_BODY_BYTES,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("not a valid HTTP header name"),
+        "invalid header name should be rejected: {err}"
+    );
+}
+
+#[test]
+fn json_alias_validate_zero_max_bytes_rejected() {
+    let err = RouterFilter::with_alias_options(
+        vec![json_alias_route(
+            "/",
+            "test",
+            vec![("model", "fast", Some("gpt-4o-mini"))],
+        )],
+        super::config::DEFAULT_JSON_ALIAS_HEADER,
+        0,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("must be greater than 0"),
+        "zero max bytes should be rejected: {err}"
+    );
+}
+
+#[test]
+fn json_alias_validate_max_bytes_above_upper_bound_rejected() {
+    let err = RouterFilter::with_alias_options(
+        vec![json_alias_route(
+            "/",
+            "test",
+            vec![("model", "fast", Some("gpt-4o-mini"))],
+        )],
+        super::config::DEFAULT_JSON_ALIAS_HEADER,
+        super::config::MAX_JSON_ALIAS_BODY_BYTES + 1,
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("must be <="),
+        "above upper bound should be rejected: {err}"
+    );
+}
+
+#[test]
+fn json_alias_validate_max_bytes_at_upper_bound_accepted() {
+    let result = RouterFilter::with_alias_options(
+        vec![json_alias_route(
+            "/",
+            "test",
+            vec![("model", "fast", Some("gpt-4o-mini"))],
+        )],
+        super::config::DEFAULT_JSON_ALIAS_HEADER,
+        super::config::MAX_JSON_ALIAS_BODY_BYTES,
+    );
+    assert!(result.is_ok(), "exactly at upper bound should be accepted");
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
@@ -1191,7 +1514,32 @@ fn make_router(routes: Vec<Route>) -> RouterFilter {
     RouterFilter::new(routes).expect("test routes should be valid")
 }
 
-/// Build a simple prefix route with no host or header constraints.
+fn json_alias_config_yaml() -> &'static str {
+    r#"
+json_alias_header: X-AI-Model
+json_alias_max_body_bytes: 4096
+routes:
+  - path_prefix: "/v1/chat/"
+    cluster: "openai"
+    json_aliases:
+      - field: model
+        match: fast
+        target: gpt-4o-mini
+  - path_prefix: "/tenant/"
+    cluster: "tenant"
+    json_aliases:
+      - field: tenant_id
+        match: fast
+        target: tenant-fast
+  - path_prefix: "/"
+    cluster: "fallback"
+"#
+}
+
+fn parse_json_alias_config() -> RouterConfig {
+    serde_yaml::from_str(json_alias_config_yaml()).unwrap()
+}
+
 fn prefix_route(prefix: &str, cluster: &str) -> Route {
     Route {
         path_match: PathMatch::Prefix {
@@ -1203,7 +1551,6 @@ fn prefix_route(prefix: &str, cluster: &str) -> Route {
     }
 }
 
-/// Build a simple exact-path route with no host or header constraints.
 fn exact_route(path: &str, cluster: &str) -> Route {
     Route {
         path_match: PathMatch::Exact { path: path.to_owned() },
@@ -1211,4 +1558,58 @@ fn exact_route(path: &str, cluster: &str) -> Route {
         headers: None,
         cluster: cluster.into(),
     }
+}
+
+fn router_route(prefix: &str, cluster: &str, json_aliases: Option<Vec<JsonAlias>>) -> RouterRouteConfig {
+    RouterRouteConfig {
+        route: prefix_route(prefix, cluster),
+        json_aliases,
+    }
+}
+
+fn json_alias_route(prefix: &str, cluster: &str, aliases: Vec<(&str, &str, Option<&str>)>) -> RouterRouteConfig {
+    router_route(
+        prefix,
+        cluster,
+        Some(
+            aliases
+                .into_iter()
+                .map(|(field, pattern, target)| JsonAlias {
+                    field: field.to_owned(),
+                    pattern: pattern.to_owned(),
+                    target: target.map(str::to_owned),
+                })
+                .collect(),
+        ),
+    )
+}
+
+/// Build the standard three-route alias config used by multiple tests.
+fn make_alias_config_filter() -> RouterFilter {
+    RouterFilter::with_alias_options(
+        vec![
+            json_alias_route(
+                "/v1/chat/",
+                "openai",
+                vec![
+                    ("model", "fast", Some("gpt-4o-mini")),
+                    ("tenant_id", "cheap", Some("tenant-cheap")),
+                ],
+            ),
+            json_alias_route("/v1/messages/", "anthropic", vec![("model", "claude-*", None)]),
+            router_route("/", "fallback", None),
+        ],
+        "X-AI-Model",
+        4096,
+    )
+    .unwrap()
+}
+
+/// Find a route by cluster name (panics if not found).
+fn find_resolved_route<'a>(filter: &'a RouterFilter, cluster: &str) -> &'a ResolvedRoute {
+    filter
+        .routes
+        .iter()
+        .find(|r| &*r.route.cluster == cluster)
+        .unwrap_or_else(|| panic!("no route with cluster '{cluster}'"))
 }
