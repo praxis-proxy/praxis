@@ -83,7 +83,7 @@ pub(crate) fn init_tracing(default_level: &str) {
     let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(default_level));
 
-    let json = std::env::var("PRAXIS_LOG_FORMAT").is_ok_and(|v| v == "json");
+    let json = std::env::var("PRAXIS_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
 
     if json {
         tracing_subscriber::fmt().json().with_env_filter(env_filter).init();
