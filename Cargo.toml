@@ -74,8 +74,8 @@ rcgen = "0.14.8"
 regex = "1.12.3"
 rustls = "0.23.40"
 rustls-pemfile = "2.2.0"
-# NOTE: serde_yaml is deprecated upstream. Migration to serde_yml is tracked.
-serde_yaml = "0.9.34"
+# NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.
+serde_yaml = { package = "yaml_serde", version = "0.10.4" }
 tempfile = "3.27.0"
 tokio-rustls = "0.26.4"
 tokio-tungstenite = "0.29.0"
