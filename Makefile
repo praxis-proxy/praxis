@@ -118,14 +118,6 @@ test-smoke:
 # Bench
 # -------------------------------------------------------------------
 
-# Fortio builds are not available on GitHub for Darwin (Mac OSX).
-# On Mac, use `brew install fortio` so it is on $PATH at bench time.
-ifeq ($(UNAME_S),darwin)
-  FORTIO_DEP :=
-else
-  FORTIO_DEP := $(FORTIO)
-endif
-
 bench: $(VEGETA) $(FORTIO_DEP)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo bench -p benchmarks
 
@@ -261,6 +253,14 @@ $(FORTIO): | $(BINUTILS_DIR)
 	$(if $(FORTIO_SHA256),echo "$(FORTIO_SHA256)  $(BINUTILS_DIR)/fortio.tgz" | $(SHA256SUM) -c,)
 	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/fortio.tgz usr/bin/fortio --strip-components=2
 	rm -f $(BINUTILS_DIR)/fortio.tgz
+
+# Fortio builds are not available on GitHub for Darwin (Mac OSX).
+# On Mac, use `brew install fortio` so it is on $PATH at bench time.
+ifeq ($(UNAME_S),darwin)
+  FORTIO_DEP :=
+else
+  FORTIO_DEP := $(FORTIO)
+endif
 
 tools: $(H2SPEC) $(VEGETA) $(FORTIO_DEP)
 
