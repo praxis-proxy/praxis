@@ -27,9 +27,9 @@ pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, Bod
 #[cfg(feature = "ai-inference")]
 pub use builtins::PromptEnrichFilter;
 pub use builtins::{
-    CircuitBreakerFilter, CredentialInjectionFilter, DisallowedOriginMode, GuardrailsAction, GuardrailsFilter,
-    LoadBalancerFilter, RateLimitMode, RedirectStatus, RouterFilter, RuleTargetKind, has_dot_dot_traversal,
-    http::payload_processing::compression_config::CompressionConfig, normalize_rewritten_path,
+    CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, GuardrailsAction,
+    GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode, RedirectStatus, RouterFilter, RuleTargetKind,
+    has_dot_dot_traversal, http::payload_processing::compression_config::CompressionConfig, normalize_rewritten_path,
 };
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{HttpFilterContext, Request, Response};

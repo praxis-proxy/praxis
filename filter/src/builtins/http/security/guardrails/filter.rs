@@ -21,20 +21,29 @@ use crate::{
 // GuardrailsFilter
 // -----------------------------------------------------------------------------
 
-/// Rejects requests matching string or regex rules against headers and/or body content.
+/// Rejects requests matching string, regex, or PII rules against headers
+/// and/or body content.
 ///
 /// # YAML configuration
 ///
 /// ```yaml
 /// filter: guardrails
+/// action: flag            # or "reject" (default)
 /// rules:
+///   # Detect PII in a header
+///   - target: header
+///     name: "Authorization"
+///     contains: [ssn, credit_card, email]
+///   # Detect PII in body
+///   - target: body
+///     contains: [ssn, credit_card, phone, email]
+///   # Block SQL injection in body
+///   - target: body
+///     contains: "DROP TABLE"
 ///   # Block requests from bad bots
 ///   - target: header
 ///     name: "User-Agent"
 ///     pattern: "bad-bot.*"
-///   # Block SQL injection in body
-///   - target: body
-///     contains: "DROP TABLE"
 ///   # Require body to look like JSON (reject if NOT matching)
 ///   - target: body
 ///     pattern: "^\\{.*\\}$"
@@ -143,21 +152,25 @@ impl GuardrailsFilter {
                 continue;
             };
 
-            let matched = ctx
+            // Retain the matching value for PII kind logging.
+            let matching_value = ctx
                 .request
                 .headers
                 .get_all(header_name.as_str())
                 .iter()
                 .filter_map(|val| val.to_str().ok())
-                .any(|s| rule.matches(s));
+                .find(|s| rule.matches(s));
 
+            let matched = matching_value.is_some();
             let triggered = if rule.negate { !matched } else { matched };
 
             if triggered {
+                let pii_kind = matching_value.and_then(|s| rule.matched_pii(s));
                 tracing::info!(
                     header = %header_name,
                     negate = rule.negate,
-                    "guardrails: header rule triggered, rejecting"
+                    pii_kind = ?pii_kind,
+                    "guardrails: header rule triggered"
                 );
                 return true;
             }
@@ -176,7 +189,12 @@ impl GuardrailsFilter {
             let triggered = if rule.negate { !matched } else { matched };
 
             if triggered {
-                tracing::info!(negate = rule.negate, "guardrails: body rule triggered, rejecting");
+                let pii_kind = if matched { rule.matched_pii(body) } else { None };
+                tracing::info!(
+                    negate = rule.negate,
+                    pii_kind = ?pii_kind,
+                    "guardrails: body rule triggered"
+                );
                 return true;
             }
         }
