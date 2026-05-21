@@ -118,14 +118,6 @@ test-smoke:
 # Bench
 # -------------------------------------------------------------------
 
-# Fortio builds are not available on GitHub for Darwin (Mac OSX).
-# On Mac, use `brew install fortio` so it is on $PATH at bench time.
-ifeq ($(UNAME_S),darwin)
-  FORTIO_DEP :=
-else
-  FORTIO_DEP := $(FORTIO)
-endif
-
 bench: $(VEGETA) $(FORTIO_DEP)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo bench -p benchmarks
 
@@ -151,6 +143,7 @@ fuzz-build:
 lint:
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo +nightly fmt --all -- --check
+	cargo xtask lint-deps
 
 fmt:
 	cargo +nightly fmt --all
@@ -242,6 +235,7 @@ $(H2SPEC): | $(BINUTILS_DIR)
 VEGETA_SHA256_linux_amd64  := e8759ce45c14e18374bdccd3ba6068197bc3a9f9b7e484db3837f701b9d12e61
 VEGETA_SHA256_linux_arm64  := 950381173a5575e25e8e086f36fc03bf65d61a2433329b48e41e1cb5e4133bba
 VEGETA_SHA256_darwin_amd64 := 4e912c83ce07db4e1e394e1cbb657f2396dff2f7ed90f03869a184cc17d0f994
+VEGETA_SHA256_darwin_arm64 := fc408e242c4f4839e6fe536dbf1130bb02f430134827f6d831bf367a0929a799
 VEGETA_SHA256 := $(VEGETA_SHA256_$(UNAME_S)_$(ARCH_GO))
 
 $(VEGETA): | $(BINUTILS_DIR)
@@ -261,6 +255,14 @@ $(FORTIO): | $(BINUTILS_DIR)
 	$(if $(FORTIO_SHA256),echo "$(FORTIO_SHA256)  $(BINUTILS_DIR)/fortio.tgz" | $(SHA256SUM) -c,)
 	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/fortio.tgz usr/bin/fortio --strip-components=2
 	rm -f $(BINUTILS_DIR)/fortio.tgz
+
+# Fortio builds are not available on GitHub for Darwin (Mac OSX).
+# On Mac, use `brew install fortio` so it is on $PATH at bench time.
+ifeq ($(UNAME_S),darwin)
+  FORTIO_DEP :=
+else
+  FORTIO_DEP := $(FORTIO)
+endif
 
 tools: $(H2SPEC) $(VEGETA) $(FORTIO_DEP)
 
