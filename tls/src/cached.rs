@@ -245,7 +245,7 @@ fn parse_cert_pem(cert_path: &str) -> Result<Vec<Vec<u8>>, TlsError> {
 
 /// Read a PEM private key file and return the DER-encoded key bytes.
 fn parse_key_pem(key_path: &str) -> Result<Vec<u8>, TlsError> {
-    let pem = read_pem_file(key_path)?;
+    let pem = Zeroizing::new(read_pem_file(key_path)?);
     rustls_pemfile::private_key(&mut &pem[..])
         .map_err(|e| TlsError::FileLoadError {
             path: key_path.to_owned(),
