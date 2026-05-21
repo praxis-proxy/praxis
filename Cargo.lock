@@ -331,11 +331,11 @@ dependencies = [
  "praxis-proxy-filter",
  "serde",
  "serde_json",
- "serde_yaml",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -1452,6 +1452,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
+name = "libyaml-rs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2e126dda6f34391ab7b444f9922055facc83c07a910da3eb16f1e4d9c45dc777"
+
+[[package]]
 name = "libz-ng-sys"
 version = "1.1.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2223,12 +2229,12 @@ dependencies = [
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
  "serde",
- "serde_yaml",
  "tempfile",
  "tikv-jemallocator",
  "tokio",
  "tokio-util",
  "tracing",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2240,10 +2246,10 @@ dependencies = [
  "praxis-proxy-tls",
  "regex",
  "serde",
- "serde_yaml",
  "thiserror 2.0.18",
  "tracing",
  "tracing-subscriber",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2261,11 +2267,11 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "serde_yaml",
  "thiserror 2.0.18",
  "tokio",
  "tonic",
  "tracing",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2302,11 +2308,11 @@ dependencies = [
  "rcgen",
  "rustls",
  "serde_json",
- "serde_yaml",
  "tempfile",
  "tokio",
  "tokio-util",
  "tracing",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2319,11 +2325,11 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "serde",
- "serde_yaml",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "yaml_serde",
  "zeroize",
 ]
 
@@ -2345,12 +2351,12 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "serde_json",
- "serde_yaml",
  "tempfile",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
  "tracing",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2383,11 +2389,11 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
- "serde_yaml",
  "tempfile",
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2402,8 +2408,8 @@ dependencies = [
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
  "praxis-test-utils",
- "serde_yaml",
  "tokio",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2418,7 +2424,7 @@ dependencies = [
  "praxis-test-utils",
  "serde",
  "serde_json",
- "serde_yaml",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -2428,7 +2434,7 @@ dependencies = [
  "praxis-proxy-core",
  "praxis-proxy-filter",
  "praxis-test-utils",
- "serde_yaml",
+ "yaml_serde",
 ]
 
 [[package]]
@@ -4281,11 +4287,24 @@ dependencies = [
  "praxis-proxy-core",
  "serde",
  "serde_json",
- "serde_yaml",
  "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "yaml_serde",
+]
+
+[[package]]
+name = "yaml_serde"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08c7c1b1a6a7c8a6b2741a6c21a4f8918e51899b111cfa08d1288202656e3975"
+dependencies = [
+ "indexmap 2.14.0",
+ "itoa",
+ "libyaml-rs",
+ "ryu",
+ "serde",
 ]
 
 [[package]]
