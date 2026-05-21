@@ -9,6 +9,30 @@ V       ?=
 UNAME_S := $(shell uname -s | tr A-Z a-z)
 UNAME_M := $(shell uname -m)
 
+# -------------------------------------------------------------------
+# Prerequisite checks
+# -------------------------------------------------------------------
+
+REQUIRED_CMDS := cargo
+RUST_TARGETS := all build release check clean \
+	test test-unit \
+	test-schema test-integration test-conformance \
+	test-security test-security-suite test-resilience test-smoke \
+	test-config-validation test-config \
+	bench \
+	lint fmt doc audit coverage coverage-check \
+	run-echo run-debug
+NIGHTLY_TARGETS := lint fmt fuzz fuzz-build
+CMAKE_TARGETS := all build release check \
+	test test-unit \
+	test-schema test-integration test-conformance \
+	test-security test-security-suite test-resilience test-smoke \
+	test-config-validation test-config \
+	bench \
+	lint doc coverage coverage-check \
+	run-echo run-debug \
+	fuzz fuzz-build
+
 ifneq ($(V),)
   _NOCAPTURE := -- --nocapture
 endif
@@ -24,7 +48,33 @@ endif
 	test-container test-container-run \
 	run-echo run-debug \
 	tools clean-tools \
+	check-prereqs \
+	check-prereqs-cmake \
+	check-prereqs-nightly \
 	help
+
+# Uses --version rather than command -v so we catch broken installs.
+check-prereqs:
+	@for cmd in $(REQUIRED_CMDS); do \
+		$$cmd --version >/dev/null 2>&1 || { \
+			echo "\"$$cmd\" is not installed or broken — install/reinstall it before running make (see docs/development.md)" >&2; \
+			exit 1; \
+		}; \
+	done
+check-prereqs-cmake: check-prereqs
+	@cmake --version >/dev/null 2>&1 || { \
+		echo "\"cmake\" is not installed or broken — install/reinstall it before running make (see docs/development.md)" >&2; \
+		exit 1; \
+	}
+check-prereqs-nightly: check-prereqs
+	@cargo +nightly --version >/dev/null 2>&1 || { \
+		echo "Rust nightly toolchain is not installed — run \"rustup toolchain install nightly\" (see docs/development.md)" >&2; \
+		exit 1; \
+	}
+
+$(RUST_TARGETS): check-prereqs
+$(CMAKE_TARGETS): check-prereqs-cmake
+$(NIGHTLY_TARGETS): check-prereqs-nightly
 
 # -------------------------------------------------------------------
 # All
