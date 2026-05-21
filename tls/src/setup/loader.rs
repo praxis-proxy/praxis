@@ -6,7 +6,6 @@
 use std::sync::Arc;
 
 use rustls::{crypto::CryptoProvider, sign::CertifiedKey};
-
 use zeroize::Zeroizing;
 
 use crate::{CertKeyPair, TlsError};
