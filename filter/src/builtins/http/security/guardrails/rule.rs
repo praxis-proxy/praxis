@@ -1,11 +1,11 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
-
 //! Compiled rule types and config-to-rule parsing.
 
 use regex::{Regex, RegexBuilder};
 
-use super::config::{MAX_REGEX_PATTERN_LEN, MAX_REGEX_SIZE, RuleConfig, RuleTargetKind};
+use super::{
+    config::{ContainsValue, MAX_REGEX_PATTERN_LEN, MAX_REGEX_SIZE, RuleConfig, RuleTargetKind},
+    pii::{self, PiiKind},
+};
 use crate::FilterError;
 
 // -----------------------------------------------------------------------------
@@ -30,6 +30,9 @@ pub(super) enum RuleMatcher {
 
     /// Pre-compiled regex.
     Pattern(Regex),
+
+    /// Built-in PII category detection.
+    Pii(Vec<PiiKind>),
 }
 
 /// A compiled guardrail rule ready for per-request evaluation.
@@ -51,6 +54,16 @@ impl CompiledRule {
         match &self.matcher {
             RuleMatcher::Contains(needle) => haystack.to_lowercase().contains(needle.as_str()),
             RuleMatcher::Pattern(re) => re.is_match(haystack),
+            RuleMatcher::Pii(kinds) => pii::matches_any(kinds, haystack).is_some(),
+        }
+    }
+
+    /// For PII matchers, return the first category that matched `haystack`.
+    /// Returns `None` for non-PII matchers or when nothing matched.
+    pub(super) fn matched_pii(&self, haystack: &str) -> Option<PiiKind> {
+        match &self.matcher {
+            RuleMatcher::Pii(kinds) => pii::matches_any(kinds, haystack),
+            _ => None,
         }
     }
 }
@@ -82,11 +95,19 @@ pub(super) fn parse_target(rule: &RuleConfig) -> Result<RuleTarget, FilterError>
 /// to prevent configurations from consuming excessive memory.
 pub(super) fn parse_matcher(rule: &RuleConfig) -> Result<RuleMatcher, FilterError> {
     match (&rule.contains, &rule.pattern) {
-        (Some(s), None) => {
-            if s.is_empty() {
-                return Err("guardrails: 'contains' must not be empty".into());
-            }
-            Ok(RuleMatcher::Contains(s.to_lowercase()))
+        (Some(cv), None) => match cv {
+            ContainsValue::Literal(s) => {
+                if s.is_empty() {
+                    return Err("guardrails: 'contains' must not be empty".into());
+                }
+                Ok(RuleMatcher::Contains(s.to_lowercase()))
+            },
+            ContainsValue::Pii(kinds) => {
+                if kinds.is_empty() {
+                    return Err("guardrails: 'contains' PII list must not be empty".into());
+                }
+                Ok(RuleMatcher::Pii(kinds.clone()))
+            },
         },
         (None, Some(p)) => {
             if p.is_empty() {

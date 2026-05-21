@@ -5,6 +5,48 @@
 
 use serde::Deserialize;
 
+use super::pii::PiiKind;
+
+// -----------------------------------------------------------------------------
+// ContainsValue
+// -----------------------------------------------------------------------------
+
+/// The value of a `contains` rule field — either a literal substring or a
+/// list of built-in PII categories.
+///
+/// In YAML, use the variant name as the key:
+///
+/// ```yaml
+/// # Literal substring
+/// contains:
+///   literal: "DROP TABLE"
+///
+/// # PII category list
+/// contains:
+///   pii: [ssn, credit_card, email]
+/// ```
+///
+/// ```
+/// use praxis_filter::ContainsValue;
+///
+/// // Literal substring
+/// let v: ContainsValue = serde_yaml::from_str("literal: \"DROP TABLE\"").unwrap();
+/// assert!(matches!(v, ContainsValue::Literal(_)));
+///
+/// // PII category list
+/// let v: ContainsValue = serde_yaml::from_str("pii: [ssn, email]").unwrap();
+/// assert!(matches!(v, ContainsValue::Pii(_)));
+/// ```
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ContainsValue {
+    /// Literal substring match (case-insensitive).
+    Literal(String),
+
+    /// Built-in PII category detection.
+    Pii(Vec<PiiKind>),
+}
+
 // -----------------------------------------------------------------------------
 // Guardrails Constants
 // -----------------------------------------------------------------------------
@@ -90,8 +132,8 @@ pub(super) struct RuleConfig {
     /// What to inspect: header or body.
     pub target: RuleTargetKind,
 
-    /// Literal substring match (case-sensitive).
-    pub contains: Option<String>,
+    /// Literal substring (case-insensitive) or PII category list.
+    pub contains: Option<ContainsValue>,
 
     /// Regex pattern match.
     pub pattern: Option<String>,
