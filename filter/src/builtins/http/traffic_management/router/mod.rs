@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use http::{HeaderMap, header::HeaderName};
-use praxis_core::config::{PathMatch, Route};
+use praxis_core::config::Route;
 use tracing::{debug, trace};
 
 use self::{
@@ -116,8 +116,9 @@ struct ResolvedRoute {
 impl RouterFilter {
     /// Create a router from a list of routes with default alias options.
     ///
-    /// Returns an error if any `path_prefix` (other than `"/"`)
-    /// does not end with `'/'`.
+    /// Path prefix matching uses segment-boundary semantics per Gateway API:
+    /// `/api` matches `/api`, `/api/`, `/api/v1` but NOT `/apikeys`.
+    /// Trailing slashes on prefixes are ignored (`/api` ≡ `/api/`).
     ///
     /// ```
     /// use praxis_core::config::{PathMatch, Route};
@@ -134,7 +135,7 @@ impl RouterFilter {
     ///     },
     ///     Route {
     ///         path_match: PathMatch::Prefix {
-    ///             path_prefix: "/api/".to_owned(),
+    ///             path_prefix: "/api".to_owned(),
     ///         },
     ///         host: None,
     ///         headers: None,
@@ -144,24 +145,9 @@ impl RouterFilter {
     /// .unwrap();
     /// ```
     ///
-    /// ```
-    /// use praxis_core::config::{PathMatch, Route};
-    /// use praxis_filter::RouterFilter;
-    ///
-    /// let err = RouterFilter::new(vec![Route {
-    ///     path_match: PathMatch::Prefix {
-    ///         path_prefix: "/api".to_owned(),
-    ///     },
-    ///     host: None,
-    ///     headers: None,
-    ///     cluster: "api".into(),
-    /// }])
-    /// .unwrap_err();
-    /// assert!(err.to_string().contains("must end with '/'"));
-    /// ```
     /// # Errors
     ///
-    /// Returns [`FilterError`] if any route prefix does not end with `/`.
+    /// Returns [`FilterError`] if alias configuration is invalid.
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn new(routes: Vec<Route>) -> Result<Self, FilterError> {
@@ -184,7 +170,6 @@ impl RouterFilter {
     ) -> Result<Self, FilterError> {
         let mut routes = routes;
         sort_routes(&mut routes);
-        validate_prefixes(&routes)?;
         validate_json_aliases(&routes)?;
         let json_alias_header = parse_json_alias_header(json_alias_header)?;
         validate_alias_options(&routes, json_alias_max_body_bytes)?;
@@ -262,25 +247,6 @@ fn sort_routes(routes: &mut [RouterRouteConfig]) {
             b_exact.cmp(&a_exact)
         })
     });
-}
-
-/// Validates that prefix-only routes have segment-bounded prefixes.
-fn validate_prefixes(routes: &[RouterRouteConfig]) -> Result<(), FilterError> {
-    for route_config in routes {
-        let route = &route_config.route;
-        if let PathMatch::Prefix { path_prefix } = &route.path_match
-            && path_prefix != "/"
-            && !path_prefix.ends_with('/')
-        {
-            return Err(format!(
-                "router: path_prefix '{path_prefix}' for cluster '{}' must end with '/' \
-                 to ensure segment-bounded matching",
-                route.cluster,
-            )
-            .into());
-        }
-    }
-    Ok(())
 }
 
 /// Validates JSON alias configuration on all routes.

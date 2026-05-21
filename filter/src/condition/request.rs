@@ -76,7 +76,7 @@ fn matches_request(m: &ConditionMatch, req: &Request) -> bool {
     }
 
     if let Some(ref prefix) = m.path_prefix
-        && !req.uri.path().starts_with(prefix)
+        && !crate::path_match::path_prefix_matches(req.uri.path(), prefix)
     {
         return false;
     }
