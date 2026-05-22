@@ -2259,10 +2259,10 @@ dependencies = [
  "async-trait",
  "praxis-proxy-filter",
  "serde",
- "serde_yaml",
  "tokio",
  "tonic",
  "tracing",
+ "yaml_serde",
 ]
 
 [[package]]
