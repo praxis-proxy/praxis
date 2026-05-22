@@ -402,6 +402,18 @@ fn validate_core_fields(cfg: &ExtProcConfig) -> Result<(), FilterError> {
     if cfg.message_timeout_ms == 0 {
         return Err("ext_proc: message_timeout_ms must be greater than 0".into());
     }
+    if let Some(max) = cfg.max_message_timeout_ms {
+        if max == 0 {
+            return Err("ext_proc: max_message_timeout_ms must be greater than 0".into());
+        }
+        if max < cfg.message_timeout_ms {
+            let timeout = cfg.message_timeout_ms;
+            return Err(
+                format!("ext_proc: max_message_timeout_ms ({max}) must be >= message_timeout_ms ({timeout})")
+                    .into(),
+            );
+        }
+    }
     Ok(())
 }
 

@@ -489,6 +489,41 @@ message_timeout_ms: 0
 }
 
 #[tokio::test]
+async fn rejects_max_message_timeout_ms_zero() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+max_message_timeout_ms: 0
+"#,
+    )
+    .unwrap();
+
+    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("max_message_timeout_ms"),
+        "error should reject max_message_timeout_ms set to 0: {err}"
+    );
+}
+
+#[tokio::test]
+async fn rejects_max_message_timeout_ms_less_than_message_timeout_ms() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+message_timeout_ms: 500
+max_message_timeout_ms: 100
+"#,
+    )
+    .unwrap();
+
+    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("max_message_timeout_ms"),
+        "error should reject max_message_timeout_ms less than message_timeout_ms: {err}"
+    );
+}
+
+#[tokio::test]
 async fn rejects_allowed_override_modes_with_entries() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
@@ -625,6 +660,23 @@ async fn pipeline_builds_with_ext_proc_and_failure_mode() {
 
     let pipeline = praxis_filter::FilterPipeline::build(&mut entries, &registry).unwrap();
     assert_eq!(pipeline.len(), 2, "pipeline should contain both ext_proc filters");
+}
+
+#[tokio::test]
+async fn rejects_negative_max_message_timeout_ms() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+max_message_timeout_ms: -1
+"#,
+    )
+    .unwrap();
+
+    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("max_message_timeout_ms") || err.to_string().contains("integer"),
+        "error should reject negative max_message_timeout_ms: {err}"
+    );
 }
 
 // -----------------------------------------------------------------------------
