@@ -394,11 +394,10 @@ fn validate_config(cfg: &ExtProcConfig) -> Result<(), FilterError> {
 /// Validate core numeric fields.
 fn validate_core_fields(cfg: &ExtProcConfig) -> Result<(), FilterError> {
     if !(100..=599).contains(&cfg.status_on_error) {
-        return Err(format!(
-            "ext_proc: status_on_error {code} is not a valid HTTP status code (must be 100..=599)",
-            code = cfg.status_on_error,
-        )
-        .into());
+        let code = cfg.status_on_error;
+        return Err(
+            format!("ext_proc: status_on_error {code} is not a valid HTTP status code (must be 100..=599)").into(),
+        );
     }
     if cfg.message_timeout_ms == 0 {
         return Err("ext_proc: message_timeout_ms must be greater than 0".into());
@@ -415,18 +414,12 @@ fn validate_processing_mode(pm: &ProcessingModeConfig) -> Result<(), FilterError
         return Err("ext_proc: response_header_mode 'skip' is not yet supported".into());
     }
     if pm.request_body_mode != BodySendMode::None {
-        return Err(format!(
-            "ext_proc: request_body_mode '{}' is not yet supported (only 'none')",
-            pm.request_body_mode,
-        )
-        .into());
+        let mode = pm.request_body_mode;
+        return Err(format!("ext_proc: request_body_mode '{mode}' is not yet supported (only 'none')").into());
     }
     if pm.response_body_mode != BodySendMode::None {
-        return Err(format!(
-            "ext_proc: response_body_mode '{}' is not yet supported (only 'none')",
-            pm.response_body_mode,
-        )
-        .into());
+        let mode = pm.response_body_mode;
+        return Err(format!("ext_proc: response_body_mode '{mode}' is not yet supported (only 'none')").into());
     }
     if pm.request_trailer_mode == HeaderSendMode::Send {
         return Err("ext_proc: request_trailer_mode 'send' is not yet supported".into());
@@ -496,7 +489,8 @@ impl ExtProcFilter {
             .target
             .parse()
             .map_err(|e: tonic::transport::Error| -> FilterError {
-                format!("ext_proc: invalid target URI '{}': {e}", cfg.target).into()
+                let target = &cfg.target;
+                format!("ext_proc: invalid target URI '{target}': {e}").into()
             })?;
 
         let channel = endpoint.connect_lazy();
