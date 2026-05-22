@@ -361,7 +361,7 @@ struct ForwardRulesConfig {
 /// produce a clear error rather than being silently ignored.
 fn validate_config(cfg: &ExtProcConfig) -> Result<(), FilterError> {
     validate_core_fields(cfg)?;
-    validate_processing_mode(&cfg.processing_mode)?;
+    validate_processing_mode(cfg.processing_mode)?;
 
     if cfg.allow_mode_override {
         return Err("ext_proc: allow_mode_override is not yet supported".into());
@@ -409,8 +409,7 @@ fn validate_core_fields(cfg: &ExtProcConfig) -> Result<(), FilterError> {
         if max < cfg.message_timeout_ms {
             let timeout = cfg.message_timeout_ms;
             return Err(
-                format!("ext_proc: max_message_timeout_ms ({max}) must be >= message_timeout_ms ({timeout})")
-                    .into(),
+                format!("ext_proc: max_message_timeout_ms ({max}) must be >= message_timeout_ms ({timeout})").into(),
             );
         }
     }
@@ -418,7 +417,7 @@ fn validate_core_fields(cfg: &ExtProcConfig) -> Result<(), FilterError> {
 }
 
 /// Reject unsupported [`ProcessingModeConfig`] values.
-fn validate_processing_mode(pm: &ProcessingModeConfig) -> Result<(), FilterError> {
+fn validate_processing_mode(pm: ProcessingModeConfig) -> Result<(), FilterError> {
     if pm.request_header_mode == HeaderSendMode::Skip {
         return Err("ext_proc: request_header_mode 'skip' is not yet supported".into());
     }
@@ -501,13 +500,10 @@ impl ExtProcFilter {
         let cfg: ExtProcConfig = parse_filter_config("ext_proc", config)?;
         validate_config(&cfg)?;
 
-        let endpoint: Endpoint = cfg
-            .target
-            .parse()
-            .map_err(|e| -> FilterError {
-                let target = &cfg.target;
-                format!("ext_proc: invalid target URI '{target}': {e}").into()
-            })?;
+        let endpoint: Endpoint = cfg.target.parse().map_err(|e| -> FilterError {
+            let target = &cfg.target;
+            format!("ext_proc: invalid target URI '{target}': {e}").into()
+        })?;
 
         let channel = endpoint.connect_lazy();
 
