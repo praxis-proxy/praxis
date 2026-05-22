@@ -484,7 +484,7 @@ message_timeout_ms: 0
     let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
     assert!(
         err.to_string().contains("message_timeout_ms"),
-        "error should mention message_timeout_ms: {err}"
+        "error should reject message_timeout_ms set to 0: {err}"
     );
 }
 
