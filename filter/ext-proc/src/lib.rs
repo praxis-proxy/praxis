@@ -208,7 +208,7 @@ fn default_deferred_close_timeout_ms() -> u64 {
 /// Mirrors Envoy's [`ProcessingMode`] proto.
 ///
 /// [`ProcessingMode`]: https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/ext_proc/v3/processing_mode.proto
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ProcessingModeConfig {
     /// How to handle request headers. Default: `send`.
