@@ -453,6 +453,7 @@ fn validate_processing_mode(pm: &ProcessingModeConfig) -> Result<(), FilterError
 ///   request_body_mode: none
 ///   response_body_mode: none
 /// ```
+#[derive(Debug)]
 pub struct ExtProcFilter {
     /// Lazily-connecting gRPC channel to the external processor.
     #[allow(dead_code, reason = "used by gRPC callout in subsequent PRs")]
