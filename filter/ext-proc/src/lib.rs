@@ -517,7 +517,7 @@ impl HttpFilter for ExtProcFilter {
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        tracing::trace!(
+        tracing::warn!(
             target = %self.target,
             "ext_proc on_request (skeleton)"
         );
