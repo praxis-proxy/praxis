@@ -488,7 +488,7 @@ impl ExtProcFilter {
         let endpoint: Endpoint = cfg
             .target
             .parse()
-            .map_err(|e: tonic::transport::Error| -> FilterError {
+            .map_err(|e| -> FilterError {
                 let target = &cfg.target;
                 format!("ext_proc: invalid target URI '{target}': {e}").into()
             })?;
