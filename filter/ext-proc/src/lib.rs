@@ -456,7 +456,10 @@ fn validate_processing_mode(pm: &ProcessingModeConfig) -> Result<(), FilterError
 #[derive(Debug)]
 pub struct ExtProcFilter {
     /// Lazily-connecting gRPC channel to the external processor.
-    #[allow(dead_code, reason = "used by gRPC callout in subsequent PRs")]
+    ///
+    /// Drives `ExternalProcessorClient` from `praxis-proto` once the
+    /// gRPC callout is implemented.
+    #[allow(dead_code, reason = "used by ExternalProcessorClient in subsequent PRs")]
     channel: Channel,
 
     /// Per-message timeout for gRPC calls.
