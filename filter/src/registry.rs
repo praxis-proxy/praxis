@@ -110,9 +110,9 @@ impl FilterRegistry {
 fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     use crate::builtins::{
         AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter, CsrfFilter,
-        ForwardedHeadersFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter, McpFilter,
-        PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter, StaticResponseFilter, TimeoutFilter,
-        UrlRewriteFilter,
+        ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter,
+        McpFilter, PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter, StaticResponseFilter,
+        TimeoutFilter, UrlRewriteFilter,
     };
 
     register_http(factories, "access_log", AccessLogFilter::from_config);
@@ -127,6 +127,7 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     );
     register_http(factories, "headers", HeaderFilter::from_config);
     register_http(factories, "forwarded_headers", ForwardedHeadersFilter::from_config);
+    register_http(factories, "grpc_detection", GrpcDetectionFilter::from_config);
     register_http(factories, "guardrails", crate::GuardrailsFilter::from_config);
     register_http(factories, "ip_acl", IpAclFilter::from_config);
     register_http(factories, "load_balancer", crate::LoadBalancerFilter::from_config);
@@ -232,6 +233,7 @@ mod tests {
             names.contains(&"forwarded_headers"),
             "forwarded_headers should be registered"
         );
+        assert!(names.contains(&"grpc_detection"), "grpc_detection should be registered");
         assert!(names.contains(&"guardrails"), "guardrails should be registered");
         assert!(names.contains(&"headers"), "headers should be registered");
         assert!(names.contains(&"ip_acl"), "ip_acl should be registered");

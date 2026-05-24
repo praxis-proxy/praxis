@@ -15,7 +15,6 @@ mod condition;
 mod context;
 mod factory;
 mod filter;
-mod grpc;
 pub(crate) mod load_balancing;
 mod pipeline;
 mod registry;
@@ -36,7 +35,6 @@ pub use condition::{should_execute, should_execute_response, should_execute_resp
 pub use context::{HttpFilterContext, Request, Response};
 pub use factory::{FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config, tcp_builtin};
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
-pub use grpc::GrpcKind;
 pub use pipeline::FilterPipeline;
 pub use praxis_core::config::{FailureMode, FilterEntry};
 pub use registry::FilterRegistry;
@@ -242,7 +240,6 @@ pub(crate) mod test_utils {
             request_headers_to_set: Vec::new(),
             filter_metadata: std::collections::HashMap::new(),
             filter_results: std::collections::HashMap::new(),
-            grpc: crate::GrpcKind::None,
             health_registry: None,
             kv_stores: None,
             request: req,
