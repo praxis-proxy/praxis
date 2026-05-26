@@ -17,6 +17,8 @@ mod prompt_enrich;
     reason = "store module is the foundation for upcoming response store filter"
 )]
 pub(crate) mod store;
+#[cfg(feature = "ai-inference")]
+pub mod token_usage;
 
 pub use agentic::{A2aFilter, JsonRpcFilter, McpFilter};
 #[cfg(feature = "ai-inference")]
