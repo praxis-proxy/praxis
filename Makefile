@@ -14,7 +14,7 @@ UNAME_M := $(shell uname -m)
 # -------------------------------------------------------------------
 
 REQUIRED_CMDS := cargo
-RUST_TARGETS := all build release check clean \
+RUST_TARGETS := all build release check \
 	test test-unit \
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience test-smoke \
