@@ -2,9 +2,10 @@
 # Configuration
 # -------------------------------------------------------------------
 
-VERSION ?= $(shell perl -ne 'print $$1 if /^version\s*=\s*"(.+)"/' Cargo.toml)
-IMAGE   ?= praxis
-V       ?=
+VERSION          ?= $(shell perl -ne 'print $$1 if /^version\s*=\s*"(.+)"/' Cargo.toml)
+IMAGE            ?= praxis
+CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
+V                ?=
 
 UNAME_S := $(shell uname -s | tr A-Z a-z)
 UNAME_M := $(shell uname -m)
@@ -20,6 +21,7 @@ endif
 	bench \
 	lint fmt doc audit coverage coverage-check \
 	fuzz fuzz-build \
+	require-container-engine \
 	container container-run \
 	test-container test-container-run \
 	run-echo run-debug \
@@ -54,27 +56,28 @@ clean:
 # Container
 # -------------------------------------------------------------------
 
-container:
-	podman build -t $(IMAGE):$(VERSION) -f Containerfile . || \
-	docker build -t $(IMAGE):$(VERSION) -f Containerfile .
+require-container-engine:
+ifndef CONTAINER_ENGINE
+	$(error No container engine found — install podman or docker)
+endif
 
-container-run:
-	podman run --rm --network=host $(IMAGE):$(VERSION) 2>&1 || \
-	docker run --rm --network=host $(IMAGE):$(VERSION) 2>&1
+container: | require-container-engine
+	$(CONTAINER_ENGINE) build -t $(IMAGE):$(VERSION) -f Containerfile .
+
+container-run: | require-container-engine
+	$(CONTAINER_ENGINE) run --rm --network=host $(IMAGE):$(VERSION) 2>&1
 
 # -------------------------------------------------------------------
 # Test Container
 # -------------------------------------------------------------------
 
-test-container:
-	podman build --ignorefile Containerfile.test.dockerignore \
-		-t $(IMAGE)-test:$(VERSION) -f Containerfile.test . || \
-	docker build -t $(IMAGE)-test:$(VERSION) -f Containerfile.test .
+test-container: | require-container-engine
+	$(CONTAINER_ENGINE) build \
+		$(if $(findstring podman,$(CONTAINER_ENGINE)),--ignorefile Containerfile.test.dockerignore) \
+		-t $(IMAGE)-test:$(VERSION) -f Containerfile.test .
 
 test-container-run: test-container
-	podman run --rm -v $(CURDIR):/src -v praxis-test-cache:/cache \
-		$(IMAGE)-test:$(VERSION) 2>&1 || \
-	docker run --rm -v $(CURDIR):/src -v praxis-test-cache:/cache \
+	$(CONTAINER_ENGINE) run --rm -v $(CURDIR):/src -v praxis-test-cache:/cache \
 		$(IMAGE)-test:$(VERSION) 2>&1
 
 # -------------------------------------------------------------------
