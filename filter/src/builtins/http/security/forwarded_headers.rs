@@ -143,7 +143,7 @@ impl ForwardedHeadersFilter {
     ) {
         use std::fmt::Write;
 
-        tracing::debug!("setting standard Forwarded header");
+        tracing::debug!(client_ip = %client_ip, "setting standard Forwarded header");
         let for_param = format_for_param(client_ip);
         let mut entry = format!("for={for_param};proto={proto}");
         if let Some(h) = host {
@@ -226,7 +226,7 @@ impl HttpFilter for ForwardedHeadersFilter {
                 let _ok = write!(val, "{client_ip}");
                 val
             } else {
-                tracing::warn!("existing X-Forwarded-For contains non-UTF-8 bytes; overwriting");
+                tracing::warn!(client_ip = %client_ip, "existing X-Forwarded-For contains non-UTF-8 bytes; overwriting");
                 let mut val = String::with_capacity(45);
                 let _ok = write!(val, "{client_ip}");
                 val
@@ -243,7 +243,6 @@ impl HttpFilter for ForwardedHeadersFilter {
         ctx.extra_request_headers
             .push((Cow::Borrowed("X-Forwarded-Proto"), proto.into()));
 
-        tracing::debug!("setting X-Forwarded-Host from Host header");
         let host_value = ctx
             .request
             .headers
@@ -251,6 +250,7 @@ impl HttpFilter for ForwardedHeadersFilter {
             .and_then(|h| h.to_str().ok())
             .map(str::to_owned);
         if let Some(ref host) = host_value {
+            tracing::debug!(host = %host, "setting X-Forwarded-Host from Host header");
             ctx.extra_request_headers
                 .push((Cow::Borrowed("X-Forwarded-Host"), host.clone()));
         }

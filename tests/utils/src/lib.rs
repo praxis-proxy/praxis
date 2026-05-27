@@ -16,6 +16,7 @@
 
 pub mod agentic;
 pub mod example_config;
+pub mod filters;
 pub mod net;
 pub mod proxy;
 
