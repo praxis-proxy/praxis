@@ -123,12 +123,18 @@ filter_chains:
         circuit_breaker:
           failure_threshold: 5
           recovery_timeout: 30s
-
-      - filter: guardrails
-        rules:
-          - target: header
-            name: "x-praxis-callout-flagged"
-            contains: "true"
+        branch_chains:
+          - name: block_flagged
+            on_result:
+              filter: lakera-guard
+              key: flagged
+              value: "true"
+            rejoin: terminal
+            chains:
+              - name: reject
+                filters:
+                  - filter: static_response
+                    status: 403
 
   - name: routing
     filters:
