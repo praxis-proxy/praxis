@@ -109,12 +109,13 @@ impl FilterRegistry {
 #[allow(clippy::too_many_lines, reason = "one line per filter, will grow")]
 fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     use crate::builtins::{
-        AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter, CsrfFilter,
-        ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter,
-        McpFilter, PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter, StaticResponseFilter,
-        TimeoutFilter, UrlRewriteFilter,
+        A2aFilter, AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter,
+        CsrfFilter, ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter,
+        JsonRpcFilter, McpFilter, PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter,
+        StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
     };
 
+    register_http(factories, "a2a", A2aFilter::from_config);
     register_http(factories, "access_log", AccessLogFilter::from_config);
     register_http(factories, "circuit_breaker", CircuitBreakerFilter::from_config);
     register_http(factories, "compression", CompressionFilter::from_config);
@@ -217,6 +218,7 @@ mod tests {
         let mut names = registry.available_filters();
         names.sort();
 
+        assert!(names.contains(&"a2a"), "a2a should be registered");
         assert!(names.contains(&"access_log"), "access_log should be registered");
         assert!(
             names.contains(&"circuit_breaker"),

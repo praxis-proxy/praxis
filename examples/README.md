@@ -120,6 +120,7 @@ page.
 
 | File | Description |
 | ------ | ------------- |
+| [a2a-classifier-routing.yaml](configs/ai/a2a-classifier-routing.yaml) | Route A2A requests by method, family, task ID, and streaming detection |
 | [ai-inference-body-based-routing.yaml](configs/ai/ai-inference-body-based-routing.yaml) | Route LLM requests by model field in JSON body |
 | [credential-injection.yaml](configs/ai/credential-injection.yaml) | Inject per-cluster API credentials and strip client tokens |
 | [json-rpc-routing.yaml](configs/ai/json-rpc-routing.yaml) | Route JSON-RPC 2.0 requests by method for MCP and A2A protocols |

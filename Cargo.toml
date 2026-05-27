@@ -46,7 +46,7 @@ clap = { version = "4.6.1", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 futures = "0.3.32"
 h2 = "0.4.14"
-http = "1.4.0"
+http = "1.4.1"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "user"] }
@@ -63,7 +63,7 @@ prost-build = "0.14.3"
 prost-types = "0.14.3"
 prost-wkt-types = { version = "0.7.1", features = ["vendored-protox"] }
 protox = "0.9.1"
-rand = "0.9.1"
+rand = "0.9.4"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
 praxis = { path = "server" }
 praxis-core = { version = "0.3.1", path = "core", package = "praxis-proxy-core" }
@@ -72,7 +72,7 @@ praxis-protocol = { version = "0.3.1", path = "protocol", package = "praxis-prox
 praxis-tls = { version = "0.3.1", path = "tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
-serde_json = "1.0.149"
+serde_json = "1.0.150"
 rcgen = "0.14.8"
 regex = "1.12.3"
 rustls = "0.23.40"

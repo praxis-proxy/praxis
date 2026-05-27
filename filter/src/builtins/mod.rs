@@ -11,8 +11,8 @@ pub use http::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::PromptEnrichFilter;
 pub use http::{
-    AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter, CsrfFilter,
-    DisallowedOriginMode, ForwardedHeadersFilter, GrpcDetectionFilter, GuardrailsAction, GuardrailsFilter,
+    A2aFilter, AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter,
+    CsrfFilter, DisallowedOriginMode, ForwardedHeadersFilter, GrpcDetectionFilter, GuardrailsAction, GuardrailsFilter,
     HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter, LoadBalancerFilter, McpFilter, PathRewriteFilter,
     RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus, RequestIdFilter, RouterFilter, RuleTargetKind,
     StaticResponseFilter, TimeoutFilter, UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,

@@ -34,6 +34,7 @@
     reason = "test code"
 )]
 
+mod a2a;
 mod adversarial;
 mod agentic_mocks;
 mod body;
