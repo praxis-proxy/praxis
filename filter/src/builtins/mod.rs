@@ -17,5 +17,4 @@ pub use http::{
     normalize_rewritten_path, PathRewriteFilter, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus,
     RequestIdFilter, RouterFilter, RuleTargetKind, StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
 };
-};
 pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};
