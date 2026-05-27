@@ -145,3 +145,180 @@ impl ConversationBackend for InMemoryConversationBackend {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "tests"
+)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use super::{ConversationBackend, ConversationMessage, ConversationScope, InMemoryConversationBackend};
+    use crate::builtins::http::ai::state::{ConversationError, MessageRole};
+
+    fn msg(role: MessageRole, text: &str) -> ConversationMessage {
+        ConversationMessage::new(role, serde_json::Value::String(text.to_owned()))
+    }
+
+    #[tokio::test]
+    async fn entry_is_retrievable_after_create() {
+        // Given a backend with one conversation
+        let backend = InMemoryConversationBackend::default();
+        let messages = vec![msg(MessageRole::User, "hello")];
+        let ttl = Duration::from_secs(3600);
+
+        let id = backend
+            .create(ConversationScope::Global, messages.clone(), ttl)
+            .await
+            .unwrap();
+
+        // when we retrieve it by id
+        let entry = backend.get(&ConversationScope::Global, &id).await.unwrap().unwrap();
+
+        // then it contains the original message under the expected scope
+        assert_eq!(entry.messages().len(), 1, "entry should contain the initial message");
+        assert_eq!(
+            *entry.scope(),
+            ConversationScope::Global,
+            "scope should match the one used at create"
+        );
+    }
+
+    #[tokio::test]
+    async fn get_returns_none_for_unknown_id() {
+        // Given an empty backend
+        let backend = InMemoryConversationBackend::default();
+
+        // when we retrieve a non-existent conversation
+        let result = backend.get(&ConversationScope::Global, "non-existent").await.unwrap();
+
+        // then None is returned without error
+        assert!(
+            result.is_none(),
+            "get should return None for an unknown conversation id"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_adds_messages_and_returns_updated_entry() {
+        // Given a backend with one conversation containing one message
+        let backend = InMemoryConversationBackend::default();
+
+        let initial_messages = vec![msg(MessageRole::User, "hello")];
+        let ttl = Duration::from_secs(3600);
+        let id = backend
+            .create(ConversationScope::Global, initial_messages, ttl)
+            .await
+            .unwrap();
+
+        // when we append a reply
+        let new_messages = vec![msg(MessageRole::Assistant, "hi")];
+        let ttl = None;
+        let entry = backend
+            .append(&ConversationScope::Global, &id, new_messages, ttl)
+            .await
+            .unwrap();
+
+        // then the returned entry contains both messages in insertion order
+        let messages = entry.messages();
+        assert_eq!(
+            messages.len(),
+            2,
+            "entry should contain both the original and the appended message"
+        );
+
+        assert_eq!(
+            messages[0].role(),
+            &MessageRole::User,
+            "first message should be the original user message"
+        );
+        assert_eq!(
+            messages[1].role(),
+            &MessageRole::Assistant,
+            "second message should be the appended assistant reply"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_fails_with_not_found_for_unknown_id() {
+        // given an empty backend
+        let backend = InMemoryConversationBackend::default();
+
+        // when we append to a non-existent conversation
+        let messages = vec![];
+        let ttl = None;
+        let err = backend
+            .append(&ConversationScope::Global, "non-existent", messages, ttl)
+            .await
+            .unwrap_err();
+
+        // then NotFound is returned
+        assert!(
+            matches!(err, ConversationError::NotFound(_)),
+            "append on an unknown id should return NotFound"
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_succeeds_when_conversation_does_not_exist() {
+        // given an empty backend
+        let backend = InMemoryConversationBackend::default();
+
+        // when we delete a non-existent conversation
+        let result = backend.delete(&ConversationScope::Global, "non-existent").await;
+
+        // then it succeeds ( because delete is idempotent)
+        assert!(result.is_ok(), "deleting a non-existent conversation should not fail");
+    }
+
+    #[tokio::test]
+    async fn get_returns_scope_mismatch_when_scope_differs() {
+        // given a conversation created under global scope
+        let backend = InMemoryConversationBackend::default();
+
+        let messages = vec![msg(MessageRole::User, "hello")];
+        let ttl = Duration::from_secs(3600);
+
+        let id = backend.create(ConversationScope::Global, messages, ttl).await.unwrap();
+
+        // when we retrieve it with a different scope
+        let err = backend
+            .get(
+                &ConversationScope::Tenant {
+                    tenant_id: Arc::from("tenant-A"),
+                },
+                &id,
+            )
+            .await
+            .unwrap_err();
+
+        // then ScopeMismatch is returned
+        assert!(
+            matches!(err, ConversationError::ScopeMismatch(_)),
+            "get with wrong scope should return ScopeMisMatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_entry_is_not_returned_by_get() {
+        // Given a conversation with a 1ms TTL
+        let backend = InMemoryConversationBackend::default();
+        let messages = vec![msg(MessageRole::User, "hello")];
+        let ttl = Duration::from_millis(1);
+        let id = backend.create(ConversationScope::Global, messages, ttl).await.unwrap();
+
+        // when ttl elapses and we retrieve the conversation
+        tokio::time::sleep(Duration::from_millis(2)).await;
+        let result = backend.get(&ConversationScope::Global, &id).await.unwrap();
+
+        // then it is treated as non-existent
+        assert!(
+            result.is_none(),
+            "an expired conversation should be treated as non existent"
+        );
+    }
+}
