@@ -4,6 +4,10 @@ discussion: https://github.com/praxis-proxy/praxis/discussions/87
 status: proposed
 authors:
   - usize
+stakeholders:
+  - shaneutt
+  - twghu
+  - nerdalert
 ---
 
 # HTTP Callout Filter
