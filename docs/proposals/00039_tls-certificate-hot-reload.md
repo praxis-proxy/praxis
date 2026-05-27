@@ -3,6 +3,9 @@ issue: https://github.com/praxis-proxy/praxis/issues/39
 status: released
 authors:
   - shaneutt
+stakeholders:
+  - shaneutt
+  - twghu
 ---
 
 # TLS Certificate Hot-Reload

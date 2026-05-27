@@ -3,6 +3,9 @@ issue: https://github.com/praxis-proxy/praxis/issues/63
 status: blocked
 authors:
   - araujof
+stakeholders:
+  - shaneutt
+  - twghu
 ---
 
 # Hook System and Plugin Support
