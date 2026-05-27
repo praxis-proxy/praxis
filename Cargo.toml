@@ -63,7 +63,7 @@ prost-build = "0.14.3"
 prost-types = "0.14.3"
 prost-wkt-types = { version = "0.7.1", features = ["vendored-protox"] }
 protox = "0.9.1"
-rand = "0.9.4"
+rand = "0.10.1"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
 praxis = { path = "server" }
 praxis-core = { version = "0.3.1", path = "core", package = "praxis-proxy-core" }
@@ -83,7 +83,7 @@ tempfile = "3.27.0"
 tokio-rustls = "0.26.4"
 tokio-tungstenite = "0.29.0"
 thiserror = "2.0.18"
-tikv-jemallocator = "0.6.1"
+tikv-jemallocator = "0.7.0"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
 tonic-prost-build = { version = "0.14.6", features = ["transport"] }
