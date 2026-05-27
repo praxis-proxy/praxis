@@ -7,6 +7,7 @@ members = [
     # Praxis Proxy Framework
     "core",
     "filter",
+    "filter/ext-proc",
     "filter/proto",
     "protocol",
     "tls",
@@ -55,6 +56,7 @@ pingora-core = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingo
 pingora-http = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "d066f6818038dc296326566afb8e7bf39fb463ff" }
 pingora-proxy = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "d066f6818038dc296326566afb8e7bf39fb463ff", features = ["rustls"] }
 percent-encoding = "2.3.2"
+praxis-ext-proc = { version = "0.3.1", path = "filter/ext-proc", package = "praxis-proxy-ext-proc" }
 praxis-proto = { version = "0.3.1", path = "filter/proto", package = "praxis-proxy-proto" }
 prost = "0.14.3"
 prost-build = "0.14.3"
