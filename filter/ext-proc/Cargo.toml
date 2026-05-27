@@ -1,0 +1,28 @@
+[package]
+name = "praxis-proxy-ext-proc"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Envoy-compatible ext_proc filter for Praxis"
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+publish = false
+
+[lib]
+name = "praxis_ext_proc"
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait = { workspace = true }
+praxis-filter = { workspace = true }
+serde = { workspace = true }
+serde_yaml = { workspace = true }
+tonic = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

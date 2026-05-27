@@ -16,4 +16,5 @@ Makefile
 tests/
 xtask/
 examples/
+!examples/configs/operations/container-default.yaml
 benchmarks/

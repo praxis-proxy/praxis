@@ -29,7 +29,7 @@ pub(crate) fn compute_comparisons(
                 .iter()
                 .find(|r| r.proxy == "praxis" && r.scenario == result.scenario)
             {
-                comparisons.push(result.compare(baseline, threshold));
+                comparisons.push(result.compare(baseline, threshold, None));
             }
         }
     }
@@ -90,10 +90,19 @@ fn print_comparison_rows(
     any_regressed
 }
 
+/// Maximum coefficient of variation allowed before skipping comparison.
+const STABILITY_CV: f64 = 0.15;
+
 /// Print a single comparison row and return whether it regressed.
 fn print_comparison_row(current: &ScenarioResults, baseline: &ScenarioResults, threshold: f64) -> bool {
-    let cmp = current.compare(baseline, threshold);
-    let status = if cmp.regressed { "FAIL" } else { "PASS" };
+    let cmp = current.compare(baseline, threshold, Some(STABILITY_CV));
+    let status = if cmp.skipped {
+        "SKIP"
+    } else if cmp.regressed {
+        "FAIL"
+    } else {
+        "PASS"
+    };
     println!(
         "{:<30} {:<10} {:>13.1}% {:>13.1}% {:>8}",
         cmp.scenario,

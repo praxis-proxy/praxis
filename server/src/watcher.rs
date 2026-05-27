@@ -90,7 +90,7 @@ async fn watch_loop(params: WatcherParams) {
 
     let watch_dir = watch_dir_for_path(&params.config_path);
 
-    let _watcher = match setup_watcher(tx, &watch_dir, params.config_path.clone()) {
+    let _watcher = match setup_watcher(tx, &watch_dir) {
         Ok(w) => w,
         Err(e) => {
             error!(error = %e, "failed to start config file watcher");
@@ -108,7 +108,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
     loop {
         tokio::select! {
             Some(()) = rx.recv() => {
-                tracing::debug!("config file change detected, debouncing");
+                tracing::debug!(debounce_ms = DEBOUNCE_MS, "config file change detected, debouncing");
                 drain_and_debounce(rx).await;
                 handle_reload(
                     &params.config_path,
@@ -186,20 +186,10 @@ fn handle_reload(
 /// on relevant filesystem events.
 ///
 /// [`RecommendedWatcher`]: notify::RecommendedWatcher
-fn setup_watcher(
-    tx: mpsc::Sender<()>,
-    watch_dir: &std::path::Path,
-    config_path: PathBuf,
-) -> Result<RecommendedWatcher, notify::Error> {
+fn setup_watcher(tx: mpsc::Sender<()>, watch_dir: &std::path::Path) -> Result<RecommendedWatcher, notify::Error> {
     let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| match res {
-        Ok(event) if is_relevant_event(event.kind) => {
-            if !event.paths.iter().any(|p| p == &config_path) {
-                tracing::trace!("ignoring event for non-config file");
-                return;
-            }
-            if tx.try_send(()).is_err() {
-                tracing::trace!("config watcher channel full, event coalesced by debounce");
-            }
+        Ok(event) if is_relevant_event(event.kind) && tx.try_send(()).is_err() => {
+            tracing::trace!("config watcher channel full, event coalesced by debounce");
         },
         Err(e) => {
             tracing::warn!(error = %e, "config file watcher error");

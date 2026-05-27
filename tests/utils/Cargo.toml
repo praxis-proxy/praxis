@@ -25,6 +25,7 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 async-trait = { workspace = true }
+bytes = { workspace = true }
 pingora-core = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "io-util", "time", "sync"] }
 tracing = { workspace = true }

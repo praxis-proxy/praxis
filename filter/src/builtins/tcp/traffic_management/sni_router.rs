@@ -117,13 +117,13 @@ impl TcpFilter for SniRouterFilter {
 
     async fn on_connect(&self, ctx: &mut TcpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let Some(sni) = ctx.sni else {
-            debug!("no SNI in ClientHello, trying default upstream");
+            debug!(remote = %ctx.remote_addr, "no SNI in ClientHello, trying default upstream");
             return if let Some(upstream) = &self.default_upstream {
                 trace!(upstream = %upstream, "using default upstream (no SNI)");
                 ctx.upstream_addr = Some(Cow::Owned(upstream.clone()));
                 Ok(FilterAction::Continue)
             } else {
-                debug!("no SNI and no default upstream, rejecting");
+                debug!(remote = %ctx.remote_addr, "no SNI and no default upstream, rejecting");
                 Ok(FilterAction::Reject(Rejection::status(421)))
             };
         };
