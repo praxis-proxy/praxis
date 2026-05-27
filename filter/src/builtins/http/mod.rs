@@ -3,7 +3,7 @@
 
 //! HTTP protocol filters, organized by category.
 
-mod ai;
+pub(crate) mod ai;
 mod observability;
 pub(crate) mod payload_processing;
 mod security;
@@ -25,4 +25,6 @@ pub use traffic_management::{
     CircuitBreakerFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus,
     RouterFilter, StaticResponseFilter, TimeoutFilter,
 };
-pub use transformation::{HeaderFilter, PathRewriteFilter, UrlRewriteFilter, normalize_rewritten_path};
+pub use transformation::{
+    HeaderFilter, PathRewriteFilter, UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,
+};

@@ -42,6 +42,7 @@ page.
 
 | File | Description |
 | ------ | ------------- |
+| [mcp-static-catalog.yaml](configs/payload-processing/mcp-static-catalog.yaml) | MCP static catalog and broker; tools/call routing in a follow-up PR |
 | [stream-buffer.yaml](configs/payload-processing/stream-buffer.yaml) | Stream-buffered body inspection before forwarding |
 | [compression.yaml](configs/payload-processing/compression.yaml) | Gzip, brotli, and zstd response compression |
 | [multi-field-extraction.yaml](configs/payload-processing/multi-field-extraction.yaml) | Extract multiple JSON fields into headers in one pass |

@@ -43,7 +43,7 @@ pub struct PingoraRequestCtx {
     /// header can reflect the protocol the client used.
     pub client_http_version: Option<http::Version>,
 
-    /// Name of the cluster selected by the router filter.
+    /// Name of the cluster selected by a cluster-selecting filter.
     pub cluster: Option<Arc<str>>,
 
     /// Whether the downstream connection uses TLS.
@@ -67,6 +67,13 @@ pub struct PingoraRequestCtx {
     ///
     /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
     pub filter_metadata: std::collections::HashMap<String, String>,
+
+    /// Post-mutation request body length produced during `StreamBuffer`
+    /// pre-read.
+    ///
+    /// Stored so `upstream_request_filter` can repair request framing
+    /// before Pingora sends headers to the backend.
+    pub mutated_request_body_len: Option<usize>,
 
     /// Cluster name snapshot retained for metrics emission in the
     /// `logging()` hook, after `cluster` has been consumed by filter
@@ -275,6 +282,7 @@ impl Default for PingoraRequestCtx {
             connection_upgraded: false,
             downstream_tls: false,
             filter_metadata: std::collections::HashMap::new(),
+            mutated_request_body_len: None,
             metrics_cluster: None,
             pre_read_body: None,
             request_body_buffer: None,
