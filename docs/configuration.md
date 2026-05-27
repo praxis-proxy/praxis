@@ -381,7 +381,9 @@ supports TCP-level filters too.
 | `guardrails` | Security | HTTP |
 | `ip_acl` | Security | HTTP |
 | `credential_injection` | Security | HTTP |
+| `a2a` | Payload Processing | HTTP |
 | `json_body_field` | Payload Processing | HTTP |
+| `json_rpc` | Payload Processing | HTTP |
 | `mcp` | Payload Processing | HTTP |
 | `compression` | Payload Processing | HTTP |
 | `cors` | Security | HTTP |
@@ -389,6 +391,8 @@ supports TCP-level filters too.
 | `redirect` | Traffic Management | HTTP |
 | `path_rewrite` | Transformation | HTTP |
 | `url_rewrite` | Transformation | HTTP |
+| `sni_router` | Traffic Management | TCP |
+| `tcp_load_balancer` | Traffic Management | TCP |
 | `model_to_header` | AI / Inference | HTTP (requires `ai-inference` feature) |
 | `prompt_enrich` | AI / Inference | HTTP (requires `ai-inference` feature) |
 
@@ -607,6 +611,62 @@ TCP and HTTP listeners:
 - filter: tcp_access_log
 ```
 
+### SNI Router
+
+Routes TLS connections to upstream addresses based on
+the SNI hostname from the TLS ClientHello. Supports
+exact matches and wildcard patterns (e.g.
+`*.example.com`). Performs exact-match lookup first,
+then longest-suffix wildcard match. Matching is
+case-insensitive per RFC 4343.
+
+```yaml
+- filter: sni_router
+  routes:
+    - server_names: ["api.example.com"]
+      upstream: "10.0.0.1:443"
+    - server_names: ["*.example.com"]
+      upstream: "10.0.0.2:443"
+  default_upstream: "10.0.0.3:443"
+```
+
+| Field | Type | Required | Description |
+| ----- | ---- | -------- | ----------- |
+| `routes` | list | yes | SNI route entries |
+| `routes[].server_names` | list | yes | Exact or wildcard hostnames |
+| `routes[].upstream` | string | yes | Upstream address for matches |
+| `default_upstream` | string | no | Fallback when no route matches |
+
+Connections without SNI or with no matching route use
+`default_upstream` if configured, otherwise receive a
+421 rejection. Bare wildcards (`*`), IP addresses as
+server names, and duplicate server names across routes
+are rejected at config validation.
+
+### TCP Load Balancer
+
+Selects an upstream TCP endpoint from a cluster using
+the configured load-balancing strategy. Reads
+`ctx.cluster` to find the target cluster, selects an
+endpoint, and writes `ctx.upstream_addr`. Supports
+round-robin (default), least-connections, and
+consistent-hash strategies.
+
+```yaml
+- filter: tcp_load_balancer
+  clusters:
+    - name: db_pool
+      endpoints:
+        - "10.0.0.1:5432"
+        - "10.0.0.2:5432"
+```
+
+Weighted endpoints and strategy selection follow the
+same syntax as the HTTP `load_balancer` filter. Health
+check integration is supported; if all endpoints are
+unhealthy, the filter enters panic mode and routes to
+all endpoints.
+
 ### JSON Body Field
 
 Extracts a top-level field from a JSON request body and
@@ -624,6 +684,69 @@ enabling body-based routing.
 request header name to promote the value into. If the
 field is missing or the body is not valid JSON, the
 filter passes through without modification.
+
+### JSON-RPC
+
+Parses JSON-RPC 2.0 request bodies and promotes
+method, id, and message kind to request headers for
+routing. Uses StreamBuffer mode to inspect the body
+before upstream selection.
+
+```yaml
+- filter: json_rpc
+  max_body_bytes: 1048576
+  batch_policy: reject
+  on_invalid: continue
+```
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `max_body_bytes` | integer | 1048576 | Maximum body size to buffer (1 MiB) |
+| `batch_policy` | string | `"reject"` | `"reject"` returns 400 for batch arrays; `"first"` uses first valid request |
+| `on_invalid` | string | `"continue"` | `"continue"` passes non-JSON through; `"reject"` returns 400; `"error"` raises a filter error |
+| `headers.method` | string | `"X-Json-Rpc-Method"` | Header name for the JSON-RPC method |
+| `headers.id` | string | `"X-Json-Rpc-Id"` | Header name for the JSON-RPC id |
+| `headers.kind` | string | `"X-Json-Rpc-Kind"` | Header name for the message kind |
+
+Message kinds: `request`, `notification`, `response`,
+`batch`. The filter also writes `json_rpc.*` entries
+to the filter result set for branch chain conditions.
+
+### MCP
+
+Extracts Model Context Protocol metadata from JSON-RPC
+request bodies and promotes method, tool/resource/prompt
+name, session ID, and protocol version to request
+headers and filter results for routing. Validates MCP
+headers against body-derived values when
+`header_validation` is configured.
+
+```yaml
+- filter: mcp
+  max_body_bytes: 65536
+  on_invalid: reject
+```
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `max_body_bytes` | integer | 65536 | Maximum body size to buffer (64 KiB) |
+| `on_invalid` | string | `"reject"` | `"reject"` returns 400 for non-MCP; `"continue"` passes through |
+| `header_validation.mismatch` | string | `"reject"` | `"reject"` or `"ignore"` when MCP headers conflict with body values |
+| `header_validation.missing` | string | `"ignore"` | `"ignore"`, `"synthesize"` (inject from body), or `"reject"` |
+| `headers.method` | string | `"x-praxis-mcp-method"` | Header name for MCP method |
+| `headers.name` | string | `"x-praxis-mcp-name"` | Header name for tool/resource/prompt name |
+| `headers.kind` | string | `"x-praxis-mcp-kind"` | Header name for JSON-RPC kind |
+| `headers.session_present` | string | `"x-praxis-mcp-session-present"` | Header name for session presence |
+
+Recognized MCP methods include `initialize`,
+`tools/call`, `tools/list`, `resources/read`,
+`resources/list`, `prompts/get`, `prompts/list`,
+`ping`, and others. Methods requiring a name selector
+(`tools/call`, `resources/read`, `prompts/get`) return
+a JSON-RPC error if the selector is missing and
+`on_invalid` is `"reject"`. The filter writes `mcp.*`
+and `json_rpc.*` entries to the filter result set for
+branch chain conditions.
 
 ### Static Response
 

@@ -268,16 +268,26 @@ Shared state flowing through HTTP filters for a request:
 pub struct HttpFilterContext<'a> {
     pub client_addr: Option<IpAddr>,
     pub cluster: Option<Arc<str>>,
+    pub downstream_tls: bool,
     pub extra_request_headers: Vec<(Cow<'static, str>, String)>,
+    pub filter_metadata: HashMap<String, String>,
+    pub filter_results: HashMap<&'static str, FilterResultSet>,
     pub health_registry: Option<&'a HealthRegistry>,
+    pub kv_stores: Option<&'a KvStoreRegistry>,
     pub request: &'a Request,
-    pub request_start: Instant,
-    pub response_header: Option<&'a mut Response>,
     pub request_body_bytes: u64,
+    pub request_body_mode: BodyMode,
+    pub request_headers_to_remove: Vec<HeaderName>,
+    pub request_headers_to_set: Vec<(HeaderName, HeaderValue)>,
+    pub request_start: Instant,
     pub response_body_bytes: u64,
+    pub response_body_mode: BodyMode,
+    pub response_header: Option<&'a mut Response>,
     pub response_headers_modified: bool,
     pub rewritten_path: Option<String>,
+    pub selected_endpoint_index: Option<usize>,
     pub upstream: Option<Upstream>,
+    // Internal pipeline tracking fields omitted.
 }
 ```
 
@@ -341,9 +351,15 @@ fn request_body_access(&self) -> BodyAccess {
 | ----------------------------- | --------------- | ------------------------- |
 | `Stream` (default)            | Per chunk       | Logging, transforms       |
 | `StreamBuffer { max_bytes }`  | Deferred stream | Inspection before forward |
+| `SizeLimit { max_bytes }`     | Stream + ceiling | Global size enforcement  |
 
 If any filter requests `StreamBuffer`, the pipeline
-defers upstream forwarding until release.
+defers upstream forwarding until release. `SizeLimit`
+streams chunks without buffering but enforces a byte
+ceiling, returning 413 on overflow. It is used when no
+filter needs body access but a global size limit is
+configured. Precedence: `StreamBuffer` > `SizeLimit` >
+`Stream`.
 
 ### StreamBuffer Mode
 
@@ -485,9 +501,10 @@ A filter can have both `conditions` (request phase) and
 | `guardrails` | Security | HTTP | Reject requests matching header/body string or regex rules |
 | `ip_acl` | Security | HTTP | `allow` or `deny` (CIDR lists, mutually exclusive); 403 on denial |
 | `credential_injection` | Security | HTTP | Per-cluster API key injection with client credential stripping. Literal `value` fields are redacted in `--dump` output. |
+| `a2a` | Payload Processing | HTTP | A2A protocol classifier: extract method, family, task ID, streaming detection, and version for routing |
 | `json_body_field` | Payload Processing | HTTP | Extract a JSON body field and promote to header |
-| `json_rpc` | Payload Processing | HTTP | Parse JSON-RPC 2.0 envelopes and extract method/id/kind for routing |
-| `mcp` | Payload Processing | HTTP | MCP protocol classifier: extract method, tool/resource/prompt name, and session metadata for routing |
+| `json_rpc` | AI / Agentic | HTTP | Parse JSON-RPC 2.0 envelopes and extract method/id/kind for routing |
+| `mcp` | AI / Agentic | HTTP | MCP protocol classifier: extract method, tool/resource/prompt name, and session metadata for routing |
 | `compression` | Payload Processing | HTTP | Gzip, brotli, and zstd response compression |
 | `cors` | Security | HTTP | CORS preflight handling, origin validation, credential support |
 | `csrf` | Security | HTTP | Origin-based CSRF protection with gradual rollout and Sec-Fetch-Site support |

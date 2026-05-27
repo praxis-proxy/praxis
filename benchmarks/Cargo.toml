@@ -11,6 +11,9 @@ readme = "../README.md"
 publish = false
 autobenches = false
 
+[lib]
+bench = false
+
 [lints]
 workspace = true
 

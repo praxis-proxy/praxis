@@ -50,4 +50,4 @@ pub(super) fn extract_fields(
 // Control Character Validation
 // -----------------------------------------------------------------------------
 
-pub(super) use crate::builtins::http::payload_processing::json_rpc::contains_control_chars;
+pub(super) use crate::builtins::http::ai::agentic::json_rpc::contains_control_chars;

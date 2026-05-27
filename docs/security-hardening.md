@@ -74,8 +74,8 @@ ambiguous configuration:
   to bound request volume per client or globally.
   Tune limits based on expected traffic patterns.
 - **CORS**: Use the `cors` filter with explicit
-  `allowed_origins` rather than wildcards. Restrict
-  `allowed_methods` and `allowed_headers` to what
+  `allow_origins` rather than wildcards. Restrict
+  `allow_methods` and `allow_headers` to what
   your application requires.
 
 ## Deployment

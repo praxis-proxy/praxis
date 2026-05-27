@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use rcgen::{CertificateParams, DnType, IsCa, KeyPair};
+use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair};
 
 // -----------------------------------------------------------------------------
 // Crypto Provider
@@ -132,13 +132,12 @@ fn gen_certs_at(dir: &std::path::Path, ca_cn: &str) -> GeneratedCerts {
     ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     ca_params.distinguished_name.push(DnType::CommonName, ca_cn);
     let ca_cert = ca_params.self_signed(&ca_key).expect("CA self-sign");
+    let issuer = Issuer::from_params(&ca_params, &ca_key);
 
     let server_key = KeyPair::generate().expect("server key generation");
     let mut server_params = CertificateParams::new(vec!["localhost".to_owned()]).expect("server params");
     server_params.distinguished_name.push(DnType::CommonName, "localhost");
-    let server_cert = server_params
-        .signed_by(&server_key, &ca_cert, &ca_key)
-        .expect("server cert sign");
+    let server_cert = server_params.signed_by(&server_key, &issuer).expect("server cert sign");
 
     let cert_path = dir.join("server.pem");
     let key_path = dir.join("server-key.pem");
@@ -162,14 +161,13 @@ fn gen_certs_with_sans_at(dir: &std::path::Path, ca_cn: &str, sans: Vec<String>)
     ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     ca_params.distinguished_name.push(DnType::CommonName, ca_cn);
     let ca_cert = ca_params.self_signed(&ca_key).expect("CA self-sign");
+    let issuer = Issuer::from_params(&ca_params, &ca_key);
 
     let cn = sans.first().map_or("localhost", String::as_str).to_owned();
     let server_key = KeyPair::generate().expect("server key generation");
     let mut server_params = CertificateParams::new(sans).expect("server params");
     server_params.distinguished_name.push(DnType::CommonName, cn);
-    let server_cert = server_params
-        .signed_by(&server_key, &ca_cert, &ca_key)
-        .expect("server cert sign");
+    let server_cert = server_params.signed_by(&server_key, &issuer).expect("server cert sign");
 
     let cert_path = dir.join("server.pem");
     let key_path = dir.join("server-key.pem");

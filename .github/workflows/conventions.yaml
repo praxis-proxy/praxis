@@ -53,17 +53,9 @@ jobs:
             already=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
               --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
             if [ "$already" -eq 0 ]; then
-              body="${marker}
-          ### PR too large
-
-          This PR adds **${added} lines** (limit: **${MAX_ADDITIONS}**).
-
-          Large PRs are difficult to review and more likely to introduce subtle bugs. Please break this contribution into smaller, focused PRs that each address a single concern.
-
-          See our [coding conventions](docs/conventions.md) for guidance.
-
-          > If this PR legitimately requires a large change, a maintainer can add the \`skip/pr-hygiene\` label to skip this check."
-              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$body"
+              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+                --body "${marker}
+          **PR too large**: ${added} lines added (limit: ${MAX_ADDITIONS}). Please split into smaller PRs. Add \`skip/pr-hygiene\` label to override."
             fi
             gh pr close "$PR_NUMBER" --repo "${{ github.repository }}"
           fi
@@ -195,13 +187,9 @@ jobs:
             already=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
               --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
             if [ "$already" -eq 0 ]; then
-              body="${marker}
-          ### Unsigned commits detected
-
-          The following commits are not signed: **${unsigned}**
-
-          Please sign your commits. For instructions on how to set up GPG/SSH signing, see [GitHub Documentation](https://docs.github.com/en/authentication/managing-commit-signature-verification)."
-              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$body"
+              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+                --body "${marker}
+          **Unsigned commits**: ${unsigned}. Please [sign your commits](https://docs.github.com/en/authentication/managing-commit-signature-verification)."
             fi
             echo "::error::Unsigned commits found: ${unsigned}"
             exit 1
@@ -273,28 +261,11 @@ jobs:
             already=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
               --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
             if [ "$already" -eq 0 ]; then
-              body="${marker}
-          ### Proposal validation failed
-
-          The following issues were found with proposal files in this PR:
+              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+                --body "${marker}
+          **Proposal validation failed**:
           $(echo -e "$errors")
-
-          Every proposal file must include a YAML frontmatter header like this:
-
-          \`\`\`yaml
-          ---
-          issue: https://github.com/${{ github.repository }}/issues/NNN
-          discussion: https://github.com/${{ github.repository }}/discussions/NNN
-          status: proposed
-          authors:
-            - your-github-handle
-          ---
-          \`\`\`
-
-          See our [proposal process](docs/proposals.md) for full requirements.
-
-          Once the header is fixed, please re-open this PR."
-              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$body"
+          See [proposal process](docs/proposals.md) for requirements. Fix and re-open."
             fi
             gh pr close "$PR_NUMBER" --repo "${{ github.repository }}"
           fi

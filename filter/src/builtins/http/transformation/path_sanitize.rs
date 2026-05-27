@@ -41,6 +41,12 @@ pub fn normalize_rewritten_path(path: &str) -> Cow<'_, str> {
     Cow::Owned(normalize(path))
 }
 
+/// Return true when any path segment is a `..` traversal segment,
+/// including percent-encoded dot variants (`%2e%2e`, `.%2e`, `%2e.`).
+pub fn has_dot_dot_traversal(path: &str) -> bool {
+    path.split('/').any(is_traversal_segment)
+}
+
 /// Fast check: does the path contain sequences that need normalization?
 fn needs_normalization(path: &str) -> bool {
     !path.starts_with('/')
@@ -76,6 +82,33 @@ fn normalize(path: &str) -> String {
         }
     }
     result
+}
+
+/// Return true when a path segment is exactly two literal or percent-encoded dots.
+#[allow(clippy::indexing_slicing, reason = "bounds checked by i + 2 < b.len()")]
+fn is_traversal_segment(seg: &str) -> bool {
+    if seg == ".." {
+        return true;
+    }
+    let mut dots = 0u16;
+    let mut i = 0;
+    let b = seg.as_bytes();
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && b[i + 1].eq_ignore_ascii_case(&b'2')
+            && b[i + 2].eq_ignore_ascii_case(&b'e')
+        {
+            dots += 1;
+            i += 3;
+        } else if b[i] == b'.' {
+            dots += 1;
+            i += 1;
+        } else {
+            return false;
+        }
+    }
+    dots == 2
 }
 
 // -----------------------------------------------------------------------------
@@ -200,6 +233,29 @@ mod tests {
         assert_eq!(
             &*result, "/a/%2e%2e/b",
             "percent-encoded traversal should pass through verbatim"
+        );
+    }
+
+    #[test]
+    fn traversal_detector_matches_encoded_variants() {
+        assert!(has_dot_dot_traversal("/a/../b"), "literal '..' is traversal");
+        assert!(has_dot_dot_traversal("/a/%2e%2e/b"), "fully encoded is traversal");
+        assert!(has_dot_dot_traversal("/a/%2E%2E/b"), "uppercase encoded is traversal");
+        assert!(has_dot_dot_traversal("/a/.%2e/b"), "mixed dot+encoded is traversal");
+        assert!(has_dot_dot_traversal("/a/%2e./b"), "mixed encoded+dot is traversal");
+    }
+
+    #[test]
+    fn traversal_detector_allows_non_traversal_dot_segments() {
+        assert!(!has_dot_dot_traversal("/a/..config"), "'..config' is not traversal");
+        assert!(!has_dot_dot_traversal("/a/."), "single dot is not traversal");
+        assert!(
+            !has_dot_dot_traversal("/a/%2e%2e%2e"),
+            "triple encoded dot is not traversal"
+        );
+        assert!(
+            !has_dot_dot_traversal(&format!("/a/{}", "%2e".repeat(258))),
+            "long encoded dot segment is not traversal"
         );
     }
 

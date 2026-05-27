@@ -9,6 +9,7 @@ pub use test_utils::load_example_config;
 
 mod access_logging;
 mod admin_interface;
+mod agentic_routing;
 mod api_key_filter;
 mod basic_reverse_proxy;
 mod canary_routing;
@@ -17,6 +18,7 @@ mod conditional_filters;
 mod credential_injection;
 mod csrf;
 mod default_config;
+mod grpc_detection;
 mod header_manipulation;
 mod health_checks;
 mod hostname_upstream;

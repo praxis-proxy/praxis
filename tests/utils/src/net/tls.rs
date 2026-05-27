@@ -11,7 +11,7 @@ use std::{
     time::Duration,
 };
 
-use rcgen::{CertificateParams, DnType, IsCa, KeyPair, SanType};
+use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair, SanType};
 use rustls::ClientConfig;
 use tempfile::TempDir;
 
@@ -36,8 +36,8 @@ pub struct TestCertificates {
     /// DER-encoded server certificate for identity comparison.
     pub server_cert_der: Vec<u8>,
 
-    /// The rcgen CA certificate for signing additional certificates.
-    ca_cert: rcgen::Certificate,
+    /// The rcgen CA certificate parameters for building issuers.
+    ca_params: CertificateParams,
 
     /// The rcgen CA key pair for signing additional certificates.
     ca_key: KeyPair,
@@ -53,7 +53,8 @@ impl TestCertificates {
     ///
     /// Panics if certificate generation or file I/O fails.
     pub fn generate() -> Self {
-        let (ca_key, ca_cert) = generate_ca("Praxis Test CA");
+        let (ca_key, ca_params, ca_cert) = generate_ca("Praxis Test CA");
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
 
         let server_key = KeyPair::generate().expect("server key generation");
         let mut server_params = CertificateParams::new(vec!["localhost".to_owned()]).expect("server params");
@@ -61,9 +62,7 @@ impl TestCertificates {
         server_params
             .subject_alt_names
             .push(SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)));
-        let server_cert = server_params
-            .signed_by(&server_key, &ca_cert, &ca_key)
-            .expect("server cert sign");
+        let server_cert = server_params.signed_by(&server_key, &issuer).expect("server cert sign");
 
         let temp_dir = TempDir::new().expect("tempdir creation");
         let cert_path = temp_dir.path().join("server.pem");
@@ -82,7 +81,7 @@ impl TestCertificates {
             ca_cert_path,
             ca_cert_der: ca_cert.der().to_vec(),
             server_cert_der,
-            ca_cert,
+            ca_params,
             ca_key,
             temp_dir,
         }
@@ -98,7 +97,8 @@ impl TestCertificates {
     /// Panics if certificate generation or file I/O fails.
     #[allow(clippy::too_many_lines, reason = "cert generation steps")]
     pub fn generate_for_san(san: &str) -> Self {
-        let (ca_key, ca_cert) = generate_ca(&format!("Praxis Test CA ({san})"));
+        let (ca_key, ca_params, ca_cert) = generate_ca(&format!("Praxis Test CA ({san})"));
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
 
         let server_key = KeyPair::generate().expect("server key generation");
         let mut server_params = CertificateParams::new(vec![san.to_owned()]).expect("server params");
@@ -106,9 +106,7 @@ impl TestCertificates {
         server_params
             .subject_alt_names
             .push(SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)));
-        let server_cert = server_params
-            .signed_by(&server_key, &ca_cert, &ca_key)
-            .expect("server cert sign");
+        let server_cert = server_params.signed_by(&server_key, &issuer).expect("server cert sign");
 
         let temp_dir = TempDir::new().expect("tempdir creation");
         let cert_path = temp_dir.path().join("server.pem");
@@ -127,7 +125,7 @@ impl TestCertificates {
             ca_cert_path,
             ca_cert_der: ca_cert.der().to_vec(),
             server_cert_der,
-            ca_cert,
+            ca_params,
             ca_key,
             temp_dir,
         }
@@ -182,12 +180,11 @@ impl TestCertificates {
     ///
     /// [`ClientCert`]: ClientCert
     pub fn generate_client_cert(&self) -> ClientCert {
+        let issuer = Issuer::from_params(&self.ca_params, &self.ca_key);
         let client_key = KeyPair::generate().expect("client key generation");
         let mut client_params = CertificateParams::new(vec!["localhost".to_owned()]).expect("client cert params");
         client_params.distinguished_name.push(DnType::CommonName, "Test Client");
-        let client_cert = client_params
-            .signed_by(&client_key, &self.ca_cert, &self.ca_key)
-            .expect("client cert sign");
+        let client_cert = client_params.signed_by(&client_key, &issuer).expect("client cert sign");
 
         let cert_path = self.temp_dir.path().join("client.pem");
         let key_path = self.temp_dir.path().join("client-key.pem");
@@ -279,14 +276,14 @@ pub struct ClientCert {
 // CA Generation
 // -----------------------------------------------------------------------------
 
-/// Generate a self-signed CA certificate and key pair.
-fn generate_ca(cn: &str) -> (KeyPair, rcgen::Certificate) {
+/// Generate a self-signed CA certificate, parameters, and key pair.
+fn generate_ca(cn: &str) -> (KeyPair, CertificateParams, rcgen::Certificate) {
     let ca_key = KeyPair::generate().expect("CA key generation");
     let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
     ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
     ca_params.distinguished_name.push(DnType::CommonName, cn);
     let ca_cert = ca_params.self_signed(&ca_key).expect("CA self-sign");
-    (ca_key, ca_cert)
+    (ca_key, ca_params, ca_cert)
 }
 
 // -----------------------------------------------------------------------------

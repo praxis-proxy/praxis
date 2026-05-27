@@ -464,7 +464,12 @@ praxis-filter                   Filter pipeline engine
 └── builtins/                   Built-in filter implementations
     ├── http/                   HTTP protocol filters
     │   ├── ai/                 AI filters for HTTP workloads
-    │   │   └── inference/      Model routing (model_to_header)
+    │   │   ├── agentic/        Agentic protocol classifiers
+    │   │   │   ├── json_rpc    JSON-RPC 2.0 envelope parsing and metadata extraction
+    │   │   │   └── mcp         MCP protocol classifier and metadata extraction
+    │   │   ├── inference/      Model routing and prompt enrichment
+    │   │   │   └── model_to_header  Extract model field, promote to header
+    │   │   └── prompt_enrich   Inject messages into chat completion bodies
     │   ├── net                 Shared IP utilities (IPv4-mapped normalization)
     │   ├── observability/
     │   │   ├── access_log      Structured JSON request/response logging
@@ -475,6 +480,7 @@ praxis-filter                   Filter pipeline engine
     │   ├── security/
     │   │   ├── cors            CORS preflight handling, origin validation
     │   │   ├── credential_injection  Per-cluster API key injection
+    │   │   ├── csrf            CSRF protection via origin validation
     │   │   ├── forwarded_headers  X-Forwarded-For/Proto/Host injection
     │   │   ├── guardrails      Reject requests matching string/regex rules
     │   │   └── ip_acl          Allow/deny by source IP/CIDR
@@ -497,7 +503,8 @@ praxis-filter                   Filter pipeline engine
         ├── observability/
         │   └── tcp_access_log  Structured JSON connection logging
         └── traffic_management/
-            └── sni_router      SNI-based upstream routing
+            ├── sni_router      SNI-based upstream routing
+            └── tcp_load_balancer  Cluster-backed TCP endpoint selection
 
 praxis-proto                    Envoy ext_proc protobuf definitions (opt-in via ext-proc feature)
 ├── envoy/service/common/v3     Common Envoy service types

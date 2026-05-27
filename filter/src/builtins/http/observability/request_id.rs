@@ -123,14 +123,14 @@ impl RequestIdFilter {
             .get(&*self.header_name)
             .and_then(|v| v.to_str().ok())
         {
-            tracing::trace!("using client-supplied request ID for response header");
+            tracing::trace!(header = %self.header_name, "using client-supplied request ID for response header");
             return Some(client_id.to_owned());
         }
         ctx.extra_request_headers
             .iter()
             .find(|(name, _)| name.eq_ignore_ascii_case(&self.header_name))
             .map(|(_, value)| {
-                tracing::trace!("using injected request ID for response header");
+                tracing::trace!(header = %self.header_name, "using injected request ID for response header");
                 value.clone()
             })
     }

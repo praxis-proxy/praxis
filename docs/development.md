@@ -65,7 +65,10 @@ Review [extensions.md] first.
 4. Add unit tests and doctests.
 5. Add an example config in the appropriate category under
    `examples/configs/`.
-6. Add an integration test in `tests/integration/`.
+6. Add a functional integration test in
+   `tests/integration/tests/suite/examples/`.
+7. Update `examples/README.md` to list any new or renamed
+   example configs.
 
 [extensions.md]:./extensions.md
 
@@ -148,21 +151,30 @@ pass). Every issue and pull request should belong to
 a milestone. Milestones provide scope boundaries and
 help answer "what ships together?"
 
-### Priority Labels
+### Priority
 
-Priority labels indicate the order in which work
-within a milestone should be addressed. Every issue
-should have exactly one priority label:
+Every issue should have a priority set via the
+built-in Priority issue field (not labels). Address
+work in priority order:
 
-| Label | Description |
+| Priority | Description |
 | --- | --- |
-| `priority/critical` | Must be worked on immediately before anything else |
-| `priority/high` | Needs to be worked on immediately, defer to criticals |
-| `priority/medium` | Resolve after high and critical |
-| `priority/low` | Resolve after all other priority levels |
+| Urgent | Must be worked on immediately before anything else |
+| High | Needs to be worked on immediately, defer to urgents |
+| Medium | Resolve after high and urgent |
+| Low | Resolve after all other priority levels |
 
-When picking up work, address issues in priority
-order: critical first, then high, medium, and low.
+### Size
+
+Every issue should have a size set via the built-in
+Size issue field. Size is a rough effort estimate:
+
+| Size | Rough Estimate |
+| --- | --- |
+| Large | 1 week or more |
+| Medium | Roughly 3 days |
+| Small | Roughly 1 day |
+| Tiny | Less than a day |
 
 ### Project Boards
 

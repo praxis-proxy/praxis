@@ -363,18 +363,35 @@ Output: `target/criterion/flamegraph-{timestamp}.svg`
 
 ## CI
 
-Eight GitHub Actions workflows run on this repository:
+GitHub Actions workflows run on this repository:
 
-- `tests.yaml`: lint, build, and test on every push/PR
-- `conventions.yaml`: coding conventions enforcement
-  on PRs
-- `conformance.yaml`: conformance tests
+- `tests.yaml`: unit lint and test on push/PR
+- `integration.yaml`: integration test suites on
+  push/PR
+- `conformance.yaml`: HTTP/2 conformance (h2spec, RFC
+  compliance) on push/PR
+- `conventions.yaml`: coding conventions and PR
+  hygiene enforcement on PRs
 - `supply-chain.yaml`: supply chain safety checks
-  (`cargo audit`, `cargo deny`) on push and PRs
+  (`cargo audit`, `cargo deny`) on push/PR
 - `container.yaml`: build, run, and health-check the
-  container image on every push/PR
-- `microbenchmarks.yaml`: Criterion microbenchmarks on
-  push to main (results uploaded as artifacts)
-- `coverage.yaml`: code coverage checks
-- `publish.yaml`: build and push the container image
-  to GHCR on manual dispatch
+  container image on push/PR
+- `microbenchmarks.yaml`: Criterion microbenchmarks
+  with baseline comparison on push/PR
+- `benchmarks.yaml`: comparative benchmarks (Praxis
+  vs Envoy) on push to main
+- `coverage.yaml`: code coverage gate (90% minimum)
+  on push/PR
+- `codeql.yaml`: CodeQL security analysis on push/PR
+  and weekly schedule
+- `documentation.yaml`: rustdoc generation on push/PR
+- `fuzz.yaml`: fuzz testing on push/PR and nightly
+  schedule
+- `msrv.yaml`: minimum supported Rust version check
+  on push/PR
+- `nightly.yaml`: comprehensive nightly test runs
+- `pull-request-hygiene.yaml`: automated PR lifecycle
+  management (draft on failure, close stale)
+- `release.yaml`: tag-triggered release workflow
+- `publish.yaml`: manual container build and push to
+  GHCR

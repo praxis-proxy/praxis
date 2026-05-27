@@ -97,34 +97,16 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           pr_lines=$(jq '.data[0].totals.lines.percent' pr-coverage.json)
-          pr_covered=$(jq '.data[0].totals.lines.covered' pr-coverage.json)
-          pr_count=$(jq '.data[0].totals.lines.count' pr-coverage.json)
           pr_functions=$(jq '.data[0].totals.functions.percent' pr-coverage.json)
-
           base_lines=$(jq '.data[0].totals.lines.percent' base-coverage.json)
-          base_covered=$(jq '.data[0].totals.lines.covered' base-coverage.json)
-          base_count=$(jq '.data[0].totals.lines.count' base-coverage.json)
           base_functions=$(jq '.data[0].totals.functions.percent' base-coverage.json)
 
-          lines_delta=$(awk "BEGIN {printf \"%.2f\", ${pr_lines} - ${base_lines}}")
-          functions_delta=$(awk "BEGIN {printf \"%.2f\", ${pr_functions} - ${base_functions}}")
-
-          pr_lines_fmt=$(awk "BEGIN {printf \"%.2f\", ${pr_lines}}")
-          base_lines_fmt=$(awk "BEGIN {printf \"%.2f\", ${base_lines}}")
-          pr_functions_fmt=$(awk "BEGIN {printf \"%.2f\", ${pr_functions}}")
-          base_functions_fmt=$(awk "BEGIN {printf \"%.2f\", ${base_functions}}")
-
-          if awk "BEGIN {exit !(${lines_delta} > 0.01)}"; then
-            lines_delta_fmt="+${lines_delta}"
-          else
-            lines_delta_fmt="${lines_delta}"
-          fi
-
-          if awk "BEGIN {exit !(${functions_delta} > 0.01)}"; then
-            functions_delta_fmt="+${functions_delta}"
-          else
-            functions_delta_fmt="${functions_delta}"
-          fi
+          pr_fmt=$(awk "BEGIN {printf \"%.2f\", ${pr_lines}}")
+          base_fmt=$(awk "BEGIN {printf \"%.2f\", ${base_lines}}")
+          delta=$(awk "BEGIN {d=${pr_lines}-${base_lines}; printf \"%+.2f\", d}")
+          fn_pr=$(awk "BEGIN {printf \"%.2f\", ${pr_functions}}")
+          fn_base=$(awk "BEGIN {printf \"%.2f\", ${base_functions}}")
+          fn_delta=$(awk "BEGIN {d=${pr_functions}-${base_functions}; printf \"%+.2f\", d}")
 
           marker="<!-- praxis:coverage-comparison -->"
           existing_id=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
@@ -133,21 +115,10 @@ jobs:
             gh api -X DELETE "repos/${{ github.repository }}/issues/comments/${existing_id}"
           fi
 
-          body=$(cat <<EOF
-          ${marker}
-          ### Coverage Report
-
-          | Metric | Base | PR | Delta |
-          |--------|------|----|-------|
-          | Lines | ${base_lines_fmt}% | ${pr_lines_fmt}% | ${lines_delta_fmt}% |
-          | Functions | ${base_functions_fmt}% | ${pr_functions_fmt}% | ${functions_delta_fmt}% |
-
-          **Lines covered**: ${pr_covered}/${pr_count} (base: ${base_covered}/${base_count})
-
-          > Coverage gate: 90% lines (enforced by \`make coverage-check\`)
-          EOF
-          )
-          gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$body"
+          gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+            --body "${marker}
+          ### Coverage
+          Lines: ${base_fmt}% → ${pr_fmt}% (${delta}%) | Functions: ${fn_base}% → ${fn_pr}% (${fn_delta}%)"
 
       - name: Post comment (no baseline)
         if: >-
@@ -159,7 +130,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           pr_lines=$(jq '.data[0].totals.lines.percent' pr-coverage.json)
-          pr_lines_fmt=$(awk "BEGIN {printf \"%.2f\", ${pr_lines}}")
+          pr_fmt=$(awk "BEGIN {printf \"%.2f\", ${pr_lines}}")
 
           marker="<!-- praxis:coverage-comparison -->"
           existing_id=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
@@ -168,15 +139,7 @@ jobs:
             gh api -X DELETE "repos/${{ github.repository }}/issues/comments/${existing_id}"
           fi
 
-          body=$(cat <<EOF
-          ${marker}
-          ### Coverage Report
-
-          **Lines**: ${pr_lines_fmt}%
-
-          No baseline available from \`main\`. Coverage recorded; trend comparison skipped.
-
-          > A baseline will be created on the next push to \`main\`.
-          EOF
-          )
-          gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$body"
+          gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+            --body "${marker}
+          ### Coverage
+          Lines: ${pr_fmt}%. No baseline from \`main\`; comparison skipped."

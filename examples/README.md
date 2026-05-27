@@ -37,14 +37,13 @@ page.
 | [static-response.yaml](configs/traffic-management/static-response.yaml) | Fixed response without upstream |
 | [redirect.yaml](configs/traffic-management/redirect.yaml) | 3xx redirects with path/query template substitution |
 | [hostname-upstream.yaml](configs/traffic-management/hostname-upstream.yaml) | Resolve hostname upstream endpoints such as `localhost:9000` |
+| [grpc-detection.yaml](configs/traffic-management/grpc-detection.yaml) | Detect gRPC content-type and branch-route by variant |
 
 ### Payload Processing
 
 | File | Description |
 | ------ | ------------- |
-| [ai-inference-body-based-routing.yaml](configs/payload-processing/ai-inference-body-based-routing.yaml) | Route LLM requests by model field in JSON body |
-| [json-rpc-routing.yaml](configs/payload-processing/json-rpc-routing.yaml) | Route JSON-RPC 2.0 requests by method for MCP and A2A protocols |
-| [mcp-classifier-routing.yaml](configs/payload-processing/mcp-classifier-routing.yaml) | Route MCP requests by body-derived method and tool name |
+| [mcp-static-catalog.yaml](configs/payload-processing/mcp-static-catalog.yaml) | MCP static catalog and broker; tools/call routing in a follow-up PR |
 | [stream-buffer.yaml](configs/payload-processing/stream-buffer.yaml) | Stream-buffered body inspection before forwarding |
 | [compression.yaml](configs/payload-processing/compression.yaml) | Gzip, brotli, and zstd response compression |
 | [multi-field-extraction.yaml](configs/payload-processing/multi-field-extraction.yaml) | Extract multiple JSON fields into headers in one pass |
@@ -121,7 +120,11 @@ page.
 
 | File | Description |
 | ------ | ------------- |
+| [a2a-classifier-routing.yaml](configs/ai/a2a-classifier-routing.yaml) | Route A2A requests by method, family, task ID, and streaming detection |
+| [ai-inference-body-based-routing.yaml](configs/ai/ai-inference-body-based-routing.yaml) | Route LLM requests by model field in JSON body |
 | [credential-injection.yaml](configs/ai/credential-injection.yaml) | Inject per-cluster API credentials and strip client tokens |
+| [json-rpc-routing.yaml](configs/ai/json-rpc-routing.yaml) | Route JSON-RPC 2.0 requests by method for MCP and A2A protocols |
+| [mcp-classifier-routing.yaml](configs/ai/mcp-classifier-routing.yaml) | Route MCP requests by body-derived method and tool name |
 | [model-to-header-routing.yaml](configs/ai/model-to-header-routing.yaml) | Route by model field in JSON body via X-Model header |
 | [prompt-enrichment.yaml](configs/ai/prompt-enrichment.yaml) | Inject system messages into chat completion requests |
 

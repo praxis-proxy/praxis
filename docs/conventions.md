@@ -57,10 +57,11 @@ write comments that restate what names already convey.
 1. Unit tests covering the implementation
 2. Integration tests proving end-to-end behavior
 3. An example config in `examples/configs/`
-4. A configuration test validating that the example
-   parses correctly (covered by
-   `all_example_configs_parse` for YAML examples)
-5. Significant changes need to be [benchmarked].
+4. A functional integration test for the example config
+   in `tests/integration/tests/suite/examples/`
+5. Update `examples/README.md` to list any new or
+   renamed example configs
+6. Significant changes need to be [benchmarked].
 
 This is not optional. A feature without tests and an
 example is not complete.

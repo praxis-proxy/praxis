@@ -120,30 +120,18 @@ jobs:
           fi
 
           if [ "$HAS_REGRESSION" = "true" ]; then
-            status_line="**Warning: potential regressions detected**"
+            status="**Regressions detected** (threshold: 15%)"
           else
-            status_line="No regressions detected"
+            status="No regressions (threshold: 15%)"
           fi
 
-          body=$(cat <<EOF
-          ${marker}
-          ### Microbenchmark Comparison
-
-          ${status_line} (threshold: 15%)
-
-          <details>
-          <summary>Full comparison</summary>
-
+          gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+            --body "${marker}
+          ### Microbenchmarks
+          ${status}
           \`\`\`
           ${COMPARISON}
-          \`\`\`
-
-          </details>
-
-          > Benchmarks run on shared CI runners. Changes under 15% are likely noise.
-          EOF
-          )
-          gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$body"
+          \`\`\`"
 
       - name: Post comment (no baseline)
         if: >-
@@ -161,16 +149,10 @@ jobs:
             gh api -X DELETE "repos/${{ github.repository }}/issues/comments/${existing_id}"
           fi
 
-          body=$(cat <<EOF
-          ${marker}
-          ### Microbenchmark Comparison
-
-          No baseline available from \`main\`. Benchmark results recorded; comparison skipped.
-
-          > A baseline will be created on the next push to \`main\`.
-          EOF
-          )
-          gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" --body "$body"
+          gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+            --body "${marker}
+          ### Microbenchmarks
+          No baseline from \`main\`. Results recorded; comparison skipped."
 
       - name: Upload baseline
         if: github.event_name == 'push'
