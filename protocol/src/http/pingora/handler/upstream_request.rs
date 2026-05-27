@@ -8,6 +8,7 @@
 
 use http::Uri;
 use pingora_http::RequestHeader;
+use praxis_filter::has_dot_dot_traversal;
 use tracing::debug;
 
 use super::{
@@ -96,7 +97,7 @@ pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &mut PingoraReq
         ));
     }
 
-    if uri.path().split('/').any(is_traversal_segment) {
+    if has_dot_dot_traversal(uri.path()) {
         return Err(pingora_core::Error::explain(
             pingora_core::ErrorType::InternalError,
             format!("rewritten path contains '..' traversal: {new_path}"),
@@ -106,34 +107,6 @@ pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &mut PingoraReq
     debug!(rewritten_path = %new_path, "applying path rewrite to upstream request");
     req.set_uri(uri);
     Ok(())
-}
-
-/// Check if a path segment is a `..` traversal, including
-/// percent-encoded variants (`%2e%2e`, `.%2e`, `%2e.`, etc.).
-#[allow(clippy::indexing_slicing, reason = "bounds checked by i + 2 < b.len()")]
-fn is_traversal_segment(seg: &str) -> bool {
-    if seg == ".." {
-        return true;
-    }
-    let mut dots = 0u8;
-    let mut i = 0;
-    let b = seg.as_bytes();
-    while i < b.len() {
-        if b[i] == b'%'
-            && i + 2 < b.len()
-            && b[i + 1].eq_ignore_ascii_case(&b'2')
-            && b[i + 2].eq_ignore_ascii_case(&b'e')
-        {
-            dots += 1;
-            i += 3;
-        } else if b[i] == b'.' {
-            dots += 1;
-            i += 1;
-        } else {
-            return false;
-        }
-    }
-    dots == 2
 }
 
 // -----------------------------------------------------------------------------
@@ -164,6 +137,18 @@ pub(crate) fn strip_reserved_internal(req: &mut RequestHeader) {
             "stripped reserved internal headers before upstream"
         );
     }
+}
+
+/// Repair request framing after `StreamBuffer` body mutation.
+///
+/// Pingora forwards upstream headers after `StreamBuffer` pre-read, so a
+/// body-mutating filter must update `Content-Length` before those headers
+/// are sent to the backend.
+pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &PingoraRequestCtx) {
+    let Some(new_len) = ctx.mutated_request_body_len else {
+        return;
+    };
+    let _result = req.insert_header(http::header::CONTENT_LENGTH, new_len.to_string());
 }
 
 // -----------------------------------------------------------------------------
@@ -631,22 +616,6 @@ mod tests {
     }
 
     #[test]
-    fn is_traversal_segment_variants() {
-        assert!(is_traversal_segment(".."), "literal '..' is traversal");
-        assert!(is_traversal_segment("%2e%2e"), "fully encoded is traversal");
-        assert!(is_traversal_segment("%2E%2E"), "uppercase encoded is traversal");
-        assert!(is_traversal_segment(".%2e"), "mixed dot+encoded is traversal");
-        assert!(is_traversal_segment("%2e."), "mixed encoded+dot is traversal");
-        assert!(!is_traversal_segment("..config"), "'..config' is not traversal");
-        assert!(!is_traversal_segment("."), "single dot is not traversal");
-        assert!(!is_traversal_segment(""), "empty is not traversal");
-        assert!(
-            !is_traversal_segment("%2e%2e%2e"),
-            "triple encoded dot is not traversal"
-        );
-    }
-
-    #[test]
     fn apply_rewritten_path_accepts_root() {
         let mut req = RequestHeader::build("GET", b"/original", None).unwrap();
         let mut ctx = PingoraRequestCtx::default();
@@ -756,6 +725,29 @@ mod tests {
             req.headers.get("connection").unwrap(),
             "Upgrade",
             "connection should be preserved for WebSocket upgrades"
+        );
+    }
+
+    #[test]
+    fn apply_mutated_content_length_updates_header() {
+        let mut req = make_request(&[("content-length", "1024")]);
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.mutated_request_body_len = Some(512);
+        apply_mutated_content_length(&mut req, &ctx);
+        assert_eq!(
+            req.headers.get("content-length").and_then(|v| v.to_str().ok()),
+            Some("512")
+        );
+    }
+
+    #[test]
+    fn apply_mutated_content_length_noop_when_none() {
+        let mut req = make_request(&[("content-length", "1024")]);
+        let ctx = PingoraRequestCtx::default();
+        apply_mutated_content_length(&mut req, &ctx);
+        assert_eq!(
+            req.headers.get("content-length").and_then(|v| v.to_str().ok()),
+            Some("1024")
         );
     }
 

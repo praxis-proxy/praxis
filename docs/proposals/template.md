@@ -4,6 +4,8 @@ discussion: # add a link here
 status: proposed
 authors:
   - # add all authors github handles here
+stakeholders:
+  - # add key stakeholder github handles here
 ---
 
 # Title
