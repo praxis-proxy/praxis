@@ -24,7 +24,7 @@ This is the first concrete deliverable from the sub-request
 orchestration primitive described in
 [discussion #87](https://github.com/praxis-proxy/praxis/discussions/87),
 scoped to inline HTTP callouts with fail-open/closed
-semantics — without requiring ext-proc.
+semantics without requiring ext-proc.
 
 ### Goals
 
