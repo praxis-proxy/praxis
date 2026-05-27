@@ -110,9 +110,9 @@ impl FilterRegistry {
 fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     use crate::builtins::{
         A2aFilter, AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter,
-        CsrfFilter, ForwardedHeadersFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter, McpFilter,
-        PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter, StaticResponseFilter, TimeoutFilter,
-        UrlRewriteFilter,
+        CsrfFilter, ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter,
+        JsonRpcFilter, McpFilter, PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter,
+        StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
     };
 
     register_http(factories, "a2a", A2aFilter::from_config);
