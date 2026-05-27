@@ -501,6 +501,7 @@ A filter can have both `conditions` (request phase) and
 | `guardrails` | Security | HTTP | Reject requests matching header/body string or regex rules |
 | `ip_acl` | Security | HTTP | `allow` or `deny` (CIDR lists, mutually exclusive); 403 on denial |
 | `credential_injection` | Security | HTTP | Per-cluster API key injection with client credential stripping. Literal `value` fields are redacted in `--dump` output. |
+| `a2a` | Payload Processing | HTTP | A2A protocol classifier: extract method, family, task ID, streaming detection, and version for routing |
 | `json_body_field` | Payload Processing | HTTP | Extract a JSON body field and promote to header |
 | `json_rpc` | AI / Agentic | HTTP | Parse JSON-RPC 2.0 envelopes and extract method/id/kind for routing |
 | `mcp` | AI / Agentic | HTTP | MCP protocol classifier: extract method, tool/resource/prompt name, and session metadata for routing |

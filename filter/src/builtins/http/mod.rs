@@ -3,7 +3,7 @@
 
 //! HTTP protocol filters, organized by category.
 
-mod ai;
+pub(crate) mod ai;
 mod observability;
 pub(crate) mod payload_processing;
 mod security;
@@ -14,7 +14,7 @@ mod transformation;
 pub use ai::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::PromptEnrichFilter;
-pub use ai::{JsonRpcFilter, McpFilter};
+pub use ai::{A2aFilter, JsonRpcFilter, McpFilter};
 pub use observability::{AccessLogFilter, RequestIdFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter};
 pub use security::{
@@ -22,7 +22,9 @@ pub use security::{
     GuardrailsFilter, IpAclFilter, RuleTargetKind,
 };
 pub use traffic_management::{
-    CircuitBreakerFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus,
-    RouterFilter, StaticResponseFilter, TimeoutFilter,
+    CircuitBreakerFilter, GrpcDetectionFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter,
+    RedirectStatus, RouterFilter, StaticResponseFilter, TimeoutFilter,
 };
-pub use transformation::{HeaderFilter, PathRewriteFilter, UrlRewriteFilter, normalize_rewritten_path};
+pub use transformation::{
+    HeaderFilter, PathRewriteFilter, UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,
+};

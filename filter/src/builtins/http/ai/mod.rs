@@ -10,7 +10,7 @@ mod inference;
 #[cfg(feature = "ai-inference")]
 mod prompt_enrich;
 
-pub use agentic::{JsonRpcFilter, McpFilter};
+pub use agentic::{A2aFilter, JsonRpcFilter, McpFilter};
 #[cfg(feature = "ai-inference")]
 pub use inference::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]

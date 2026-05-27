@@ -229,9 +229,16 @@ fn expand_location(template: &str, path: &str, query: Option<&str>, host: Option
     result.replace("${scheme}", scheme)
 }
 
-/// Strip port from a `Host` header value (e.g. `example.com:8080` -> `example.com`).
+/// Strip port from a `Host` header value, handling IPv4 and bracketed IPv6.
 fn strip_port(host: &str) -> &str {
-    host.split(':').next().unwrap_or(host)
+    if host.starts_with('[') {
+        match host.find(']') {
+            Some(i) => &host[..=i],
+            None => host,
+        }
+    } else {
+        host.split(':').next().unwrap_or(host)
+    }
 }
 
 /// Infer the request scheme from headers and connection state.
@@ -700,6 +707,42 @@ mod tests {
     #[test]
     fn strip_port_ipv4_with_port() {
         assert_eq!(strip_port("10.0.0.1:443"), "10.0.0.1", "IPv4 port should be stripped");
+    }
+
+    #[test]
+    fn strip_port_ipv6_with_port() {
+        assert_eq!(
+            strip_port("[::1]:8443"),
+            "[::1]",
+            "bracketed IPv6 port should be stripped"
+        );
+    }
+
+    #[test]
+    fn strip_port_ipv6_without_port() {
+        assert_eq!(
+            strip_port("[::1]"),
+            "[::1]",
+            "bracketed IPv6 without port should pass through"
+        );
+    }
+
+    #[test]
+    fn strip_port_ipv6_zone_id_with_port() {
+        assert_eq!(
+            strip_port("[fe80::1%25eth0]:8080"),
+            "[fe80::1%25eth0]",
+            "bracketed IPv6 zone ID port should be stripped"
+        );
+    }
+
+    #[test]
+    fn strip_port_malformed_ipv6_bracket_passthrough() {
+        assert_eq!(
+            strip_port("[::1"),
+            "[::1",
+            "malformed bracketed host should pass through unchanged"
+        );
     }
 
     #[tokio::test]

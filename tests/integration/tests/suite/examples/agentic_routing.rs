@@ -257,9 +257,167 @@ fn mcp_classifier_routing_routes_calendar_without_client_mcp_headers() {
     );
 }
 
+#[test]
+fn a2a_classifier_routing_routes_send_message() {
+    let agent_guard = start_backend_with_shutdown("agent-response");
+    let streaming_guard = start_backend_with_shutdown("streaming-response");
+    let task_specific_guard = start_backend_with_shutdown("task-specific-response");
+    let task_guard = start_backend_with_shutdown("task-response");
+    let message_guard = start_backend_with_shutdown("message-response");
+    let notification_guard = start_backend_with_shutdown("notification-response");
+    let agent_info_guard = start_backend_with_shutdown("agent-info-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_a2a_example_config(
+        proxy_port,
+        agent_guard.port(),
+        streaming_guard.port(),
+        task_specific_guard.port(),
+        task_guard.port(),
+        message_guard.port(),
+        notification_guard.port(),
+        agent_info_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":"Hello"}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "SendMessage should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "agent-response",
+        "SendMessage should route to agent-backend cluster"
+    );
+}
+
+#[test]
+fn a2a_classifier_routing_routes_streaming() {
+    let agent_guard = start_backend_with_shutdown("agent-response");
+    let streaming_guard = start_backend_with_shutdown("streaming-response");
+    let task_specific_guard = start_backend_with_shutdown("task-specific-response");
+    let task_guard = start_backend_with_shutdown("task-response");
+    let message_guard = start_backend_with_shutdown("message-response");
+    let notification_guard = start_backend_with_shutdown("notification-response");
+    let agent_info_guard = start_backend_with_shutdown("agent-info-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_a2a_example_config(
+        proxy_port,
+        agent_guard.port(),
+        streaming_guard.port(),
+        task_specific_guard.port(),
+        task_guard.port(),
+        message_guard.port(),
+        notification_guard.port(),
+        agent_info_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":2,"method":"SendStreamingMessage","params":{}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "SendStreamingMessage should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "streaming-response",
+        "SendStreamingMessage should route to streaming-backend via x-praxis-a2a-streaming: true"
+    );
+}
+
+#[test]
+fn a2a_classifier_routing_default_fallback() {
+    let agent_guard = start_backend_with_shutdown("agent-response");
+    let streaming_guard = start_backend_with_shutdown("streaming-response");
+    let task_specific_guard = start_backend_with_shutdown("task-specific-response");
+    let task_guard = start_backend_with_shutdown("task-response");
+    let message_guard = start_backend_with_shutdown("message-response");
+    let notification_guard = start_backend_with_shutdown("notification-response");
+    let agent_info_guard = start_backend_with_shutdown("agent-info-response");
+    let default_guard = start_backend_with_shutdown("default-response");
+    let proxy_port = free_port();
+
+    let config = load_a2a_example_config(
+        proxy_port,
+        agent_guard.port(),
+        streaming_guard.port(),
+        task_specific_guard.port(),
+        task_guard.port(),
+        message_guard.port(),
+        notification_guard.port(),
+        agent_info_guard.port(),
+        default_guard.port(),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(proxy.addr(), &a2a_json_post("/", r#"{"not":"json-rpc"}"#));
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "non-A2A traffic should return 200 with on_invalid: continue"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "default-response",
+        "non-A2A traffic should route to default-backend"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test Utilities
 // ---------------------------------------------------------------------------
+
+#[allow(clippy::too_many_arguments, reason = "test utility with all A2A example ports")]
+fn load_a2a_example_config(
+    proxy_port: u16,
+    agent_port: u16,
+    streaming_port: u16,
+    task_specific_port: u16,
+    task_port: u16,
+    message_port: u16,
+    notification_port: u16,
+    agent_info_port: u16,
+    default_port: u16,
+) -> praxis_core::config::Config {
+    load_example_config(
+        "ai/a2a-classifier-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", agent_port),
+            ("127.0.0.1:9002", streaming_port),
+            ("127.0.0.1:9003", task_specific_port),
+            ("127.0.0.1:9004", task_port),
+            ("127.0.0.1:9005", message_port),
+            ("127.0.0.1:9006", notification_port),
+            ("127.0.0.1:9007", agent_info_port),
+            ("127.0.0.1:9000", default_port),
+        ]),
+    )
+}
+
+fn a2a_json_post(path: &str, body: &str) -> String {
+    format!(
+        "POST {path} HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: {}\r\n\
+         \r\n\
+         {body}",
+        body.len(),
+    )
+}
 
 fn mcp_json_post(path: &str, body: &str, headers: &[(&str, &str)]) -> String {
     let mut extra = String::new();

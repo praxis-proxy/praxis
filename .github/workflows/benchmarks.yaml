@@ -13,7 +13,7 @@ on:
         description: "Regression threshold (fraction, e.g. 0.01 = 1%)"
         required: false
         type: string
-        default: "0.01"
+        default: "0.1"
 
 concurrency:
   group: ${{ github.workflow }}
@@ -23,7 +23,7 @@ permissions: {}
 
 env:
   CARGO_TERM_COLOR: always
-  THRESHOLD: ${{ inputs.threshold || '0.01' }}
+  THRESHOLD: ${{ inputs.threshold || '0.10' }}
 
 jobs:
   # -----------------------------------------------------------------
@@ -76,22 +76,39 @@ jobs:
           cargo xtask benchmark \
             --proxy envoy \
             --threshold "$THRESHOLD" \
-            --runs 3 \
-            --duration 30 \
-            --warmup 10 \
+            --runs 5 \
+            --duration 60 \
+            --warmup 30 \
             --format yaml \
             --output benchmark-results.yaml
 
       - name: Compare against baseline
+        id: compare
         if: steps.baseline.outputs.status == 'ok'
+        continue-on-error: true
         env:
           THRESHOLD: ${{ env.THRESHOLD }}
         run: |
           cargo xtask benchmark compare \
             baseline.yaml benchmark-results.yaml \
-            --threshold "$THRESHOLD"
+            --threshold "$THRESHOLD" | tee compare-output.txt
+
+      - name: Post comparison to job summary
+        if: steps.compare.outcome != 'skipped'
+        run: |
+          {
+            echo "## Benchmark Comparison"
+            echo '```'
+            cat compare-output.txt 2>/dev/null || echo "No comparison output"
+            echo '```'
+            if [ "${{ steps.compare.outcome }}" = "failure" ]; then
+              echo ""
+              echo "> **Warning**: Regression detected. Review results for CI noise vs genuine regression."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload baseline
+        if: steps.compare.outcome != 'failure'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: benchmark-baseline

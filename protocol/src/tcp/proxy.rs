@@ -229,7 +229,7 @@ impl ServerApp for PingoraTcpProxy {
 
         let (sni_hostname, peeked_bytes) = if self.upstream_addr.is_none() {
             let Ok(result) = tokio::time::timeout(SNI_PEEK_TIMEOUT, peek_sni(&mut session)).await else {
-                warn!("SNI peek timed out, closing connection");
+                warn!(remote = %remote_addr, "SNI peek timed out, closing connection");
                 return None;
             };
             result
@@ -266,7 +266,7 @@ impl ServerApp for PingoraTcpProxy {
         )
         .await;
 
-        debug!("closing TCP session (connections not pooled)");
+        debug!(remote = %remote_addr, upstream = %upstream_addr, "closing TCP session (connections not pooled)");
         None
     }
 }
