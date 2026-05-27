@@ -37,6 +37,7 @@ page.
 | [static-response.yaml](configs/traffic-management/static-response.yaml) | Fixed response without upstream |
 | [redirect.yaml](configs/traffic-management/redirect.yaml) | 3xx redirects with path/query template substitution |
 | [hostname-upstream.yaml](configs/traffic-management/hostname-upstream.yaml) | Resolve hostname upstream endpoints such as `localhost:9000` |
+| [grpc-detection.yaml](configs/traffic-management/grpc-detection.yaml) | Detect gRPC content-type and branch-route by variant |
 
 ### Payload Processing
 
