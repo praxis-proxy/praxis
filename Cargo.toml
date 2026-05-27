@@ -61,6 +61,7 @@ prost-build = "0.14.3"
 prost-types = "0.14.3"
 prost-wkt-types = { version = "0.7.1", features = ["vendored-protox"] }
 protox = "0.9.1"
+rand = "0.9.1"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
 praxis = { path = "server" }
 praxis-core = { version = "0.3.1", path = "core", package = "praxis-proxy-core" }

@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Agentic protocol filters: JSON-RPC 2.0 extraction, MCP classification.
+//! HTTP AI and agentic protocol filters.
+//!
+//! These filters extract JSON-RPC and MCP metadata for routing and handle
+//! MCP static catalog behavior inside the built-in HTTP AI filter family.
 
 pub(crate) mod json_rpc;
 mod mcp;
