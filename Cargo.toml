@@ -88,6 +88,7 @@ tokio = { version = "1.52.3", features = ["macros", "rt"] }
 tokio-util = "0.7.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+uuid ={ version = "1.23.1", features = ["v4"]}
 zeroize = "1.8.2"
 
 [profile.release]

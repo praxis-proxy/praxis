@@ -5,6 +5,13 @@
 //!
 //! This module defines [`ConversationBackend`], a pluggable trait for storing
 //! and retrieving multi-turn conversation history
+#![allow(
+    dead_code,
+    reason = "consumed by AI filters defined in EPIC #354, not yet implemented"
+)]
+
+mod memory;
+
 
 use std::{
     sync::Arc,
