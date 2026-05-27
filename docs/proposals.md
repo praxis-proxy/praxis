@@ -64,6 +64,7 @@ CI will close PRs that:
 
 - Are missing a `discussion` or `issue` link
 - Have no `authors` listed
+- Have no `stakeholders` listed
 - Include the `How?` section in a new proposal
 
 [template]: proposals/template.md
@@ -91,6 +92,21 @@ nothing about them is guaranteed.
 After a soak period determined by maintainers a maintainer
 may promote the feature from experimental to released. The
 proposal status is updated to `released`.
+
+## Stakeholders
+
+Every proposal must list its stakeholders in the
+frontmatter. Stakeholders are people with a vested
+interest in the outcome of a proposal: maintainers,
+domain experts, downstream consumers, or anyone whose
+work is directly affected by the change. Stakeholders
+are expected to review and provide feedback throughout
+the proposal lifecycle.
+
+Authors are the people writing and driving the proposal.
+Stakeholders are the people who need to be kept informed
+and whose input is essential for the proposal to succeed.
+An author may also be a stakeholder.
 
 ## Status Values
 

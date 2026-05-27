@@ -22,15 +22,16 @@ const REWRITE_FILTERS: &[&str] = &["path_rewrite", "url_rewrite"];
 // Error Checks
 // -----------------------------------------------------------------------------
 
-/// LB without a preceding router.
+/// `load_balancer` without a filter that sets `ctx.cluster` will fail
+/// every request with "no cluster selected".
 #[allow(clippy::indexing_slicing, reason = "enumeration bounds")]
-pub(super) fn check_lb_without_router(names: &[&str], errors: &mut Vec<String>) {
+pub(super) fn check_lb_without_cluster_selector(names: &[&str], errors: &mut Vec<String>) {
     for (i, name) in names.iter().enumerate() {
         if *name == "load_balancer" && !names[..i].contains(&"router") {
             errors.push(
                 "load_balancer without a preceding router \
-                 filter; requests will fail with \
-                 'no cluster selected'"
+                 or cluster-selecting filter; requests will \
+                 fail with 'no cluster selected'"
                     .to_owned(),
             );
             return;
@@ -128,29 +129,31 @@ pub(super) fn check_duplicate_load_balancers(names: &[&str], errors: &mut Vec<St
     }
 }
 
-/// Cross-reference router cluster names against LB cluster names.
+/// Every cluster selected by a pipeline filter must be defined by the
+/// load balancer that will consume `ctx.cluster`.
 pub(super) fn check_misaligned_clusters(entries: &[FilterEntry], errors: &mut Vec<String>) {
-    let router_clusters = super::clusters::extract_router_clusters(entries);
+    let selected_clusters = super::clusters::extract_selected_clusters(entries);
     let lb_clusters = super::clusters::extract_lb_clusters(entries);
 
-    if router_clusters.is_empty() || lb_clusters.is_empty() {
+    if selected_clusters.is_empty() || lb_clusters.is_empty() {
         return;
     }
 
-    for cluster in &router_clusters {
+    for cluster in &selected_clusters {
         if !lb_clusters.contains(cluster.as_str()) {
             errors.push(format!(
-                "router routes to cluster '{cluster}' which is not \
-                 defined in the load_balancer configuration"
+                "cluster-selecting filter references cluster \
+                 '{cluster}' which is not defined in the \
+                 load_balancer configuration"
             ));
         }
     }
 
     for cluster in &lb_clusters {
-        if !router_clusters.contains(cluster.as_str()) {
+        if !selected_clusters.contains(cluster.as_str()) {
             warn!(
                 cluster = %cluster,
-                "load_balancer defines cluster not referenced by any router"
+                "load_balancer defines cluster not referenced by any cluster-selecting filter"
             );
         }
     }
@@ -274,7 +277,7 @@ mod tests {
     fn lb_without_router_errors() {
         let names = vec!["load_balancer"];
         let mut errors = Vec::new();
-        check_lb_without_router(&names, &mut errors);
+        check_lb_without_cluster_selector(&names, &mut errors);
         assert_eq!(errors.len(), 1, "should produce exactly one error");
         assert!(
             errors[0].contains("load_balancer without a preceding router"),
@@ -287,15 +290,36 @@ mod tests {
     fn lb_with_router_no_error() {
         let names = vec!["router", "load_balancer"];
         let mut errors = Vec::new();
-        check_lb_without_router(&names, &mut errors);
+        check_lb_without_cluster_selector(&names, &mut errors);
         assert!(errors.is_empty(), "router before LB should produce no errors");
+    }
+
+    #[test]
+    fn lb_with_only_mcp_static_catalog_errors() {
+        let names = vec!["mcp", "load_balancer"];
+        let mut errors = Vec::new();
+        check_lb_without_cluster_selector(&names, &mut errors);
+        assert_eq!(errors.len(), 1);
+        assert!(
+            errors[0].contains("load_balancer without a preceding router"),
+            "MCP static catalog does not select a cluster in this PR: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn mcp_static_catalog_with_router_no_conflict_check() {
+        let names = vec!["mcp", "router", "load_balancer"];
+        let mut errors = Vec::new();
+        check_lb_without_cluster_selector(&names, &mut errors);
+        assert!(errors.is_empty());
     }
 
     #[test]
     fn no_lb_no_error() {
         let names = vec!["router", "ip_acl"];
         let mut errors = Vec::new();
-        check_lb_without_router(&names, &mut errors);
+        check_lb_without_cluster_selector(&names, &mut errors);
         assert!(errors.is_empty(), "no LB present should produce no errors");
     }
 

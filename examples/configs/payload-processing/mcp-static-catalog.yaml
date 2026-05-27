@@ -1,0 +1,54 @@
+# Praxis MCP static catalog and broker; tools/call routing follows in a later PR
+#
+# Pipeline: mcp -> load_balancer (no router).
+# Praxis short-circuits initialize, tools/list, ping,
+# and notifications/initialized. tools/call routing is added
+# in a follow-up PR.
+#
+# Backend endpoints are placeholders for follow-up tools/call routing.
+#   cargo run -p praxis -- -c examples/configs/payload-processing/mcp-static-catalog.yaml
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: mcp
+        path: /mcp
+        max_body_bytes: 65536
+        servers:
+          - name: weather
+            cluster: weather-mcp
+            path: /mcp
+            tool_prefix: "weather_"
+            tools:
+              - name: get_weather
+                description: Get current weather
+                inputSchema:
+                  type: object
+                  properties:
+                    city:
+                      type: string
+              - name: forecast
+                description: Get weather forecast
+          - name: calendar
+            cluster: calendar-mcp
+            path: /mcp
+            tool_prefix: "cal_"
+            tools:
+              - name: create_event
+                description: Create a calendar event
+              - name: list_events
+                description: List calendar events
+
+      - filter: load_balancer
+        clusters:
+          - name: weather-mcp
+            endpoints:
+              - "127.0.0.1:3001"
+          - name: calendar-mcp
+            endpoints:
+              - "127.0.0.1:3002"

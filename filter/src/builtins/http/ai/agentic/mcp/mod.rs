@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! MCP protocol classifier filter for body-aware routing.
+//! MCP protocol filter for body-aware routing and static catalog behavior.
 
+mod broker;
 pub(crate) mod config;
 pub(crate) mod envelope;
 
@@ -84,6 +85,10 @@ impl McpFilter {
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
+        if broker::McpBrokerFilter::matches_config(config) {
+            return broker::McpBrokerFilter::from_config(config);
+        }
+
         let cfg: McpConfig = parse_filter_config("mcp", config)?;
         let validated_config = build_config(cfg)?;
         let json_rpc_config = build_json_rpc_config(validated_config.max_body_bytes);

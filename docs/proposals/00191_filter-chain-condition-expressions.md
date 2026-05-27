@@ -3,7 +3,10 @@ issue: https://github.com/praxis-proxy/praxis/issues/191
 discussion: https://github.com/praxis-proxy/praxis/discussions/185
 status: proposed
 authors:
-- mariusdanciu
+  - mariusdanciu
+stakeholders:
+  - shaneutt
+  - twghu
 ---
 
 # Filter Chain Condition Expressions

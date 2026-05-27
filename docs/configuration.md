@@ -381,6 +381,7 @@ supports TCP-level filters too.
 | `guardrails` | Security | HTTP |
 | `ip_acl` | Security | HTTP |
 | `credential_injection` | Security | HTTP |
+| `a2a` | Payload Processing | HTTP |
 | `json_body_field` | Payload Processing | HTTP |
 | `json_rpc` | Payload Processing | HTTP |
 | `mcp` | Payload Processing | HTTP |

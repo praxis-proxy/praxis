@@ -1,0 +1,43 @@
+# gRPC Detection
+#
+# Detects gRPC requests from the content-type header and
+# promotes the variant to filter metadata and results.
+# A branch returns a static response for gRPC traffic,
+# proving detection works end-to-end.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/traffic-management/grpc-detection.yaml
+#   curl -H "content-type: application/grpc" http://localhost:8080/
+#   curl http://localhost:8080/
+listeners:
+  - name: grpc-detect
+    address: "127.0.0.1:8080"
+    protocol: http
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: grpc_detection
+        branch_chains:
+          - name: grpc_route
+            on_result:
+              filter: grpc_detection
+              key: kind
+              result: grpc
+            rejoin: terminal
+            chains:
+              - name: grpc_response
+                filters:
+                  - filter: static_response
+                    status: 200
+                    body: "grpc-detected"
+      - filter: router
+        name: routing
+        routes:
+          - path_prefix: "/"
+            cluster: default
+      - filter: load_balancer
+        clusters:
+          - name: default
+            endpoints:
+              - "127.0.0.1:3000"

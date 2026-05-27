@@ -51,12 +51,11 @@ pub use with_body::PingoraHttpHandler;
 /// Maximum number of upstream connection retries for idempotent requests.
 const MAX_RETRIES: usize = 3;
 
-/// Pingora's internal retry buffer limit (`BODY_BUF_LIMIT`).
+/// Pingora still replays retry attempts from a fixed-size internal buffer.
 ///
-/// When a retry is triggered, Pingora replays the request body from
-/// its internal buffer. Bodies exceeding this limit are silently
-/// truncated. Retries are disabled for requests with larger bodies
-/// to prevent sending corrupted payloads.
+/// `StreamBuffer` initial forwarding uses Praxis-owned `pre_read_body`, but
+/// retry replay cannot safely cover bodies larger than Pingora's retry
+/// buffer.
 const RETRY_BODY_LIMIT: u64 = 64 * 1024;
 
 // -----------------------------------------------------------------------------
@@ -188,14 +187,19 @@ fn adjust_compression(
 
 /// Handle upstream connect failures with retry logic.
 ///
-/// Retries are skipped when the request body exceeds Pingora's
-/// `64 KiB` retry buffer limit to prevent forwarding truncated
-/// payloads on the retry attempt.
+/// Retries are skipped when the effective forwarded body size exceeds
+/// Pingora's retry buffer limit.
+///
+/// Body-mutating filters can change payload length after `request_filter`,
+/// so the retry guard uses the larger of the original and mutated lengths.
 fn handle_connect_failure(ctx: &mut PingoraRequestCtx, e: Box<pingora_core::Error>) -> Box<pingora_core::Error> {
     if ctx.request_is_idempotent {
-        if ctx.request_body_bytes > RETRY_BODY_LIMIT {
+        let mutated_len = ctx.mutated_request_body_len.unwrap_or(0) as u64;
+        let effective_body_size = std::cmp::max(ctx.request_body_bytes, mutated_len);
+        if effective_body_size > RETRY_BODY_LIMIT {
             warn!(
                 body_bytes = ctx.request_body_bytes,
+                mutated_len = ?ctx.mutated_request_body_len,
                 limit = RETRY_BODY_LIMIT,
                 "skipping retry: request body exceeds Pingora retry buffer limit"
             );
@@ -377,6 +381,20 @@ mod tests {
         let e = handle_connect_failure(&mut ctx, make_error());
         assert!(!e.retry(), "should not retry when body exceeds retry buffer limit");
         assert_eq!(ctx.retries, 0, "retry counter should not increment");
+    }
+
+    #[test]
+    fn mutated_body_exceeding_limit_skips_retry() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.request_is_idempotent = true;
+        ctx.request_body_bytes = 1024;
+        ctx.mutated_request_body_len = Some((RETRY_BODY_LIMIT + 1) as usize);
+        let e = handle_connect_failure(&mut ctx, make_error());
+        assert!(
+            !e.retry(),
+            "should not retry when mutated body exceeds retry buffer limit"
+        );
+        assert_eq!(ctx.retries, 0);
     }
 
     #[test]
