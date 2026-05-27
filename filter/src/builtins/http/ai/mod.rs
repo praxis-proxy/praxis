@@ -9,6 +9,7 @@ pub(crate) mod agentic;
 mod inference;
 #[cfg(feature = "ai-inference")]
 mod prompt_enrich;
+pub mod state;
 
 pub use agentic::{JsonRpcFilter, McpFilter};
 #[cfg(feature = "ai-inference")]
