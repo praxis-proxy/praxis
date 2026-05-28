@@ -127,6 +127,7 @@ page.
 | [mcp-classifier-routing.yaml](configs/ai/mcp-classifier-routing.yaml) | Route MCP requests by body-derived method and tool name |
 | [model-to-header-routing.yaml](configs/ai/model-to-header-routing.yaml) | Route by model field in JSON body via X-Model header |
 | [prompt-enrichment.yaml](configs/ai/prompt-enrichment.yaml) | Inject system messages into chat completion requests |
+| [format-routing.yaml](configs/ai/openai/responses/format-routing.yaml) | Route by AI API format (Responses vs Chat Completions) |
 
 ### Branching
 
