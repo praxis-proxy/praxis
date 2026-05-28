@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Shane Utt
 
-#![deny(unsafe_code)]
-
 //! Praxis server entry point.
 //!
 //! Loads configuration, initializes tracing (with optional JSON output and

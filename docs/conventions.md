@@ -110,7 +110,7 @@ and verify conformance against them.
 Security is enforced at the lint level. See lints in
 [Cargo.toml] for the full set.
 
-- `#![deny(unsafe_code)]` in all crate roots (no
+- `unsafe_code = "deny"` in workspace lints (no
   exceptions; unsafe belongs upstream)
 - Clippy runs with `-D warnings` (zero tolerance)
 - Errors via `thiserror`

@@ -3,7 +3,6 @@
 
 //! Criterion benchmarks for header manipulation filter.
 
-#![deny(unsafe_code)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,

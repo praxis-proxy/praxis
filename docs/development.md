@@ -43,7 +43,7 @@ the `make audit` target. The `deny.toml` config bans
 wildcard version requirements, unknown registries, and
 unknown git sources. Multiple versions of the same crate
 produce a warning. All crates enforce
-`#![deny(unsafe_code)]` and Clippy runs with
+`unsafe_code = "deny"` in workspace lints and Clippy runs with
 `-D warnings` (zero tolerance).
 
 See [architecture.md](architecture.md) for workspace layout

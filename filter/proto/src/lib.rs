@@ -3,8 +3,6 @@
 //! This crate compiles vendored `.proto` files from the Envoy project into
 //! Rust types with [`tonic`] gRPC client and server stubs.
 
-#![deny(unsafe_code)]
-
 pub mod envoy {
     pub mod service {
         pub mod common {
