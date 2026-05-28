@@ -157,7 +157,6 @@ where
 fn clamp_body_mode_to_ceiling(mode: BodyMode, baseline: BodyMode) -> BodyMode {
     let ceiling = match baseline {
         BodyMode::StreamBuffer { max_bytes: Some(v) } | BodyMode::SizeLimit { max_bytes: v } => Some(v),
-        BodyMode::StreamBuffer { max_bytes: None } | BodyMode::Stream => None,
         _ => None,
     };
 
@@ -168,7 +167,7 @@ fn clamp_body_mode_to_ceiling(mode: BodyMode, baseline: BodyMode) -> BodyMode {
         (BodyMode::SizeLimit { max_bytes }, Some(limit)) => BodyMode::SizeLimit {
             max_bytes: max_bytes.min(limit),
         },
-        (m, None) | (m, Some(_)) => m,
+        (m, None | Some(_)) => m,
     }
 }
 
