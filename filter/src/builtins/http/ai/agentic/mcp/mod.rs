@@ -30,10 +30,11 @@ use self::{
     config::{InvalidMcpBehavior, McpConfig, MismatchBehavior, MissingHeaderBehavior, build_config},
     envelope::{McpEnvelope, extract_mcp_envelope},
 };
-use super::json_rpc::{config::JsonRpcConfig, contains_control_chars, envelope::parse_json_rpc_value};
+use super::json_rpc::{config::JsonRpcConfig, envelope::parse_json_rpc_value};
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
+    builtins::http::value_safety::contains_control_chars,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
