@@ -296,7 +296,7 @@ mod tests {
             "response_id should be set with resp_ prefix"
         );
         assert!(
-            ctx.filter_metadata.get("responses.conversation_id").is_some(),
+            ctx.filter_metadata.contains_key("responses.conversation_id"),
             "conversation_id should be set"
         );
         assert_eq!(
@@ -525,7 +525,7 @@ mod tests {
         let ctx = run_filter(r#"{"input": "Hello"}"#, &[]).await;
 
         assert!(
-            ctx.filter_metadata.get("responses.response_id").is_some(),
+            ctx.filter_metadata.contains_key("responses.response_id"),
             "response_id should still be generated"
         );
     }
