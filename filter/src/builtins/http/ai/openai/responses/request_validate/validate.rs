@@ -297,7 +297,10 @@ mod tests {
         let ctx = make_ctx_with_metadata(&[]);
         let body = serde_json::json!({"input": "test", "metadata": {"k": 123}});
         let err = validate_request(&ctx, &body).unwrap_err();
-        assert!(err.message.contains("metadata value"), "error should mention metadata value: {err}");
+        assert!(
+            err.message.contains("metadata value"),
+            "error should mention metadata value: {err}"
+        );
         assert!(err.message.contains("string"), "error should mention string: {err}");
     }
 
