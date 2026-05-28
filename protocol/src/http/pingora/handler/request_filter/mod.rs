@@ -174,6 +174,7 @@ async fn run_pipeline(
     request: Request,
     ctx: &mut PingoraRequestCtx,
 ) -> std::result::Result<PipelineResult, FilterError> {
+    let baseline_request_body_mode = ctx.request_body_mode;
     let (
         action,
         extra_headers,
@@ -213,7 +214,7 @@ async fn run_pipeline(
             ctx.cluster = cluster;
             ctx.upstream = upstream;
             ctx.rewritten_path = rewritten_path;
-            ctx.request_body_mode = request_body_mode;
+            ctx.request_body_mode = super::clamp_body_mode_to_ceiling(request_body_mode, baseline_request_body_mode);
             ctx.selected_endpoint_index = selected_endpoint_index;
             Ok(PipelineResult {
                 action: FilterAction::Continue,
@@ -270,7 +271,7 @@ mod tests {
 
     use http::{HeaderMap, Method, Uri};
     use praxis_core::config::FailureMode;
-    use praxis_filter::{FilterAction, FilterPipeline, FilterRegistry, Request};
+    use praxis_filter::{BodyMode, FilterAction, FilterPipeline, FilterRegistry, Request};
 
     use super::*;
     use crate::http::pingora::context::PingoraRequestCtx;
@@ -411,6 +412,32 @@ mod tests {
             normalize_mapped_ipv4(mapped),
             expected,
             "::ffff:127.0.0.1 should normalize to 127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn clamp_body_mode_to_ceiling_caps_stream_buffer_limit() {
+        let clamped = super::super::clamp_body_mode_to_ceiling(
+            BodyMode::StreamBuffer { max_bytes: Some(4096) },
+            BodyMode::StreamBuffer { max_bytes: Some(1024) },
+        );
+        assert_eq!(
+            clamped,
+            BodyMode::StreamBuffer { max_bytes: Some(1024) },
+            "runtime StreamBuffer widening should be clamped to baseline ceiling"
+        );
+    }
+
+    #[test]
+    fn clamp_body_mode_to_ceiling_caps_unbounded_stream_buffer() {
+        let clamped = super::super::clamp_body_mode_to_ceiling(
+            BodyMode::StreamBuffer { max_bytes: None },
+            BodyMode::SizeLimit { max_bytes: 512 },
+        );
+        assert_eq!(
+            clamped,
+            BodyMode::StreamBuffer { max_bytes: Some(512) },
+            "runtime unbounded StreamBuffer should be clamped to baseline ceiling"
         );
     }
 
