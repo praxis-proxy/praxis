@@ -33,7 +33,6 @@
 //! [`ext_proc`]: https://www.envoyproxy.io/docs/envoy/latest/api-v3/service/ext_proc/v3/external_processor.proto
 //! [`ExternalProcessor`]: https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/ext_proc/v3/ext_proc.proto
 
-#![deny(unsafe_code)]
 #![deny(unreachable_pub)]
 
 #[cfg(test)]

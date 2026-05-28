@@ -167,6 +167,7 @@ pub(super) async fn pre_read_body(
         ctx.rewritten_path = filter_ctx.rewritten_path;
         ctx.upstream = filter_ctx.upstream;
         ctx.filter_metadata = filter_ctx.filter_metadata;
+        ctx.filter_results = filter_ctx.filter_results;
         all_extra_headers.extend(filter_ctx.extra_request_headers);
 
         match action {

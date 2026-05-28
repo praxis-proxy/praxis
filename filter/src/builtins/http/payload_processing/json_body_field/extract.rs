@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Shane Utt
 
-//! Field extraction logic and control character validation.
+//! Field extraction logic and header-value validation.
 
 use std::borrow::Cow;
 
@@ -12,7 +12,7 @@ use tracing::{trace, warn};
 // -----------------------------------------------------------------------------
 
 /// Extract mapped JSON fields into request headers, skipping values
-/// with control characters. Returns `true` if any field was promoted.
+/// that are not safe header values. Returns `true` if any field was promoted.
 pub(super) fn extract_fields(
     mappings: &[(String, String)],
     value: &serde_json::Value,
@@ -29,7 +29,7 @@ pub(super) fn extract_fields(
                 warn!(
                     field = %field,
                     header = %header,
-                    "skipping header injection: value contains control characters"
+                    "skipping header injection: value is not safe for header promotion"
                 );
                 continue;
             }
@@ -47,7 +47,7 @@ pub(super) fn extract_fields(
 }
 
 // -----------------------------------------------------------------------------
-// Control Character Validation
+// Header Value Validation
 // -----------------------------------------------------------------------------
 
-pub(super) use crate::builtins::http::ai::agentic::json_rpc::contains_control_chars;
+pub(super) use crate::builtins::http::value_safety::contains_control_chars;

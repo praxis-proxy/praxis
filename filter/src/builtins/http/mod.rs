@@ -9,11 +9,14 @@ pub(crate) mod payload_processing;
 mod security;
 mod traffic_management;
 mod transformation;
+pub(crate) mod value_safety;
 
 #[cfg(feature = "ai-inference")]
 pub use ai::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::PromptEnrichFilter;
+#[cfg(feature = "ai-inference")]
+pub use ai::ResponsesFormatFilter;
 pub use ai::{A2aFilter, JsonRpcFilter, McpFilter};
 pub use observability::{AccessLogFilter, RequestIdFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter};

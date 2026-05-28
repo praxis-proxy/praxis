@@ -28,10 +28,12 @@ use self::config::{CatalogTool, McpBrokerConfig, build_config};
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
-    builtins::http::ai::agentic::json_rpc::{
-        config::JsonRpcConfig,
-        contains_control_chars,
-        envelope::{JsonRpcEnvelope, JsonRpcIdKind, JsonRpcKind, parse_json_rpc_value},
+    builtins::http::{
+        ai::agentic::json_rpc::{
+            config::JsonRpcConfig,
+            envelope::{JsonRpcEnvelope, JsonRpcIdKind, JsonRpcKind, parse_json_rpc_value},
+        },
+        value_safety::contains_control_chars,
     },
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},

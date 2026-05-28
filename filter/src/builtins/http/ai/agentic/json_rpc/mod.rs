@@ -254,7 +254,4 @@ fn set_id_results(
     Ok(())
 }
 
-/// Check whether a string contains control characters.
-pub(crate) fn contains_control_chars(s: &str) -> bool {
-    s.bytes().any(|b| (b < 0x20 && b != 0x09) || b == 0x7F)
-}
+use crate::builtins::http::value_safety::contains_control_chars;

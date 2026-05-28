@@ -90,7 +90,7 @@ server -> protocol -> filter -> core -> tls
 See `docs/conventions.md` for the full coding style
 guide. Key points:
 
-- `#![deny(unsafe_code)]` in all crates
+- `unsafe_code = "deny"` in workspace lints
 - All items (public and private) require `///` doc
   comments; enforced by `missing_docs` and
   `missing_docs_in_private_items` lints

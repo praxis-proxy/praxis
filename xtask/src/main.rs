@@ -3,7 +3,6 @@
 
 //! Development tasks for the Praxis proxy.
 
-#![deny(unsafe_code)]
 #![allow(
     clippy::exit,
     clippy::print_stdout,

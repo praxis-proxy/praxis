@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Shane Utt
 
-#![deny(unsafe_code)]
 #![deny(unreachable_pub)]
 
 //! Filter pipeline engine for Praxis.
@@ -26,6 +25,8 @@ pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
 #[cfg(feature = "ai-inference")]
 pub use builtins::PromptEnrichFilter;
+#[cfg(feature = "ai-inference")]
+pub use builtins::ResponsesFormatFilter;
 pub use builtins::{
     CircuitBreakerFilter, CredentialInjectionFilter, DisallowedOriginMode, GuardrailsAction, GuardrailsFilter,
     LoadBalancerFilter, RateLimitMode, RedirectStatus, RouterFilter, RuleTargetKind, has_dot_dot_traversal,
