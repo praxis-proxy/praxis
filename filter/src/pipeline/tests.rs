@@ -538,7 +538,7 @@ fn body_capabilities_buffer_overrides_stream_buffer() {
 }
 
 #[test]
-fn body_capabilities_multiple_stream_buffer_takes_min() {
+fn body_capabilities_multiple_stream_buffer_merges() {
     let pipeline = make_pipeline(vec![
         Box::new(StreamBufferReleaseFilter { marker: b"A" }),
         Box::new(StreamBufferReleaseFilter { marker: b"B" }),
