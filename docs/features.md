@@ -96,7 +96,7 @@ deployment guidance.
 
 **Build-level guarantees:**
 
-- `#![deny(unsafe_code)]` in every crate
+- `unsafe_code = "deny"` in workspace lints
 - Rustls (no OpenSSL, no C FFI in the TLS path)
 - Supply chain auditing via `cargo audit` and
   `cargo deny`

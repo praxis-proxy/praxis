@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Shane Utt
 
-#![deny(unsafe_code)]
 #![deny(unreachable_pub)]
 
 //! Core configuration, error types, and server factory for Praxis.
