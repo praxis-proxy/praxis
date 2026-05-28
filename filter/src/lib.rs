@@ -27,6 +27,8 @@ pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, Bod
 #[cfg(feature = "ai-inference")]
 pub use builtins::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
+pub use builtins::RequestValidateFilter;
+#[cfg(feature = "ai-inference")]
 pub use builtins::ResponsesFormatFilter;
 pub use builtins::{
     CircuitBreakerFilter, CredentialInjectionFilter, DisallowedOriginMode, GuardrailsAction, GuardrailsFilter,

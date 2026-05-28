@@ -11,6 +11,8 @@ pub use http::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
+pub use http::RequestValidateFilter;
+#[cfg(feature = "ai-inference")]
 pub use http::ResponsesFormatFilter;
 pub use http::{
     A2aFilter, AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter,

@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! `OpenAI` protocol filters.
+//! `OpenAI` API filters: Responses API pipeline.
 
 pub(crate) mod responses;
 
+#[cfg(feature = "ai-inference")]
+pub use responses::RequestValidateFilter;
 pub use responses::ResponsesFormatFilter;
