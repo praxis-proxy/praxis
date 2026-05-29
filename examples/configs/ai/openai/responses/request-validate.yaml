@@ -50,4 +50,4 @@ filter_chains:
         clusters:
           - name: inference
             endpoints:
-              - "127.0.0.1:3001"
+              - "127.0.0.1:8000"
