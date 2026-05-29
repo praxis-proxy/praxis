@@ -43,9 +43,6 @@ jobs:
       - name: Install nightly Rust
         uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # nightly-2026-03-28 (rustc 1.96.0)
 
-      - name: Ensure nightly available under date-pinned name
-        run: rustup toolchain install "$(grep -m1 'rust-toolchain@' .github/workflows/tests.yaml | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}')" --profile minimal
-
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz
 
