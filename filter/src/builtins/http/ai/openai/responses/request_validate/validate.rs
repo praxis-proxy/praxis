@@ -3,24 +3,11 @@
 
 //! Validation logic for Responses API requests.
 //!
-//! Parameter-combination checks read from `responses_format.*`
-//! classifier metadata. Metadata constraint checks read from the
-//! parsed JSON body directly.
+//! Only validates parameters the proxy needs for its own operation
+//! (stream/background interaction, background/store dependency, model
+//! for routing). All other validation is left to the inference server.
 
 use crate::filter::HttpFilterContext;
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Maximum number of metadata keys per request.
-const MAX_METADATA_KEYS: usize = 16;
-
-/// Maximum length of a metadata key in characters.
-const MAX_METADATA_KEY_LEN: usize = 64;
-
-/// Maximum length of a metadata value in characters.
-const MAX_METADATA_VALUE_LEN: usize = 512;
 
 // -----------------------------------------------------------------------------
 // ValidationError
@@ -65,14 +52,12 @@ impl std::fmt::Display for ValidationError {
 
 /// Validate a Responses API request.
 ///
-/// Reads `stream`, `store`, `background` from `responses_format.*`
-/// classifier metadata. Validates request `metadata` constraints
-/// from the raw JSON body.
-pub(crate) fn validate_request(ctx: &HttpFilterContext<'_>, body: &serde_json::Value) -> Result<(), ValidationError> {
+/// Only checks parameter combinations the proxy needs for its own
+/// operation. All other validation is left to the inference server.
+pub(crate) fn validate_request(ctx: &HttpFilterContext<'_>) -> Result<(), ValidationError> {
     validate_stream_background(ctx)?;
     validate_background_store(ctx)?;
     validate_model(ctx)?;
-    validate_request_metadata(body)?;
     Ok(())
 }
 
@@ -109,44 +94,6 @@ fn validate_model(ctx: &HttpFilterContext<'_>) -> Result<(), ValidationError> {
     Ok(())
 }
 
-/// Validate request metadata constraints from the JSON body.
-fn validate_request_metadata(body: &serde_json::Value) -> Result<(), ValidationError> {
-    let Some(metadata) = body.get("metadata") else {
-        return Ok(());
-    };
-
-    let Some(obj) = metadata.as_object() else {
-        return Err(ValidationError::new("metadata must be an object"));
-    };
-
-    if obj.len() > MAX_METADATA_KEYS {
-        return Err(ValidationError::new(format!(
-            "metadata exceeds maximum of {MAX_METADATA_KEYS} keys (got {})",
-            obj.len()
-        )));
-    }
-
-    for (key, value) in obj {
-        if key.chars().count() > MAX_METADATA_KEY_LEN {
-            return Err(ValidationError::new(format!(
-                "metadata key '{key}' exceeds maximum length of {MAX_METADATA_KEY_LEN} characters"
-            )));
-        }
-        let Some(v) = value.as_str() else {
-            return Err(ValidationError::new(format!(
-                "metadata value for key '{key}' must be a string"
-            )));
-        };
-        if v.chars().count() > MAX_METADATA_VALUE_LEN {
-            return Err(ValidationError::new(format!(
-                "metadata value for key '{key}' exceeds maximum length of {MAX_METADATA_VALUE_LEN} characters"
-            )));
-        }
-    }
-
-    Ok(())
-}
-
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -176,17 +123,10 @@ mod tests {
         ctx
     }
 
-    fn empty_body() -> serde_json::Value {
-        serde_json::json!({"input": "test"})
-    }
-
     #[test]
     fn valid_minimal_request() {
         let ctx = make_ctx_with_metadata(&[]);
-        assert!(
-            validate_request(&ctx, &empty_body()).is_ok(),
-            "minimal request should be valid"
-        );
+        assert!(validate_request(&ctx).is_ok(), "minimal request should be valid");
     }
 
     #[test]
@@ -195,7 +135,7 @@ mod tests {
             ("responses_format.stream", "true"),
             ("responses_format.background", "true"),
         ]);
-        let err = validate_request(&ctx, &empty_body()).unwrap_err();
+        let err = validate_request(&ctx).unwrap_err();
         assert!(
             err.message.contains("stream and background"),
             "error should mention stream and background: {err}"
@@ -209,7 +149,7 @@ mod tests {
             ("responses_format.background", "false"),
         ]);
         assert!(
-            validate_request(&ctx, &empty_body()).is_ok(),
+            validate_request(&ctx).is_ok(),
             "stream=true background=false should be valid"
         );
     }
@@ -220,7 +160,7 @@ mod tests {
             ("responses_format.background", "true"),
             ("responses_format.store", "false"),
         ]);
-        let err = validate_request(&ctx, &empty_body()).unwrap_err();
+        let err = validate_request(&ctx).unwrap_err();
         assert!(err.message.contains("store"), "error should mention store: {err}");
     }
 
@@ -231,7 +171,7 @@ mod tests {
             ("responses_format.store", "true"),
         ]);
         assert!(
-            validate_request(&ctx, &empty_body()).is_ok(),
+            validate_request(&ctx).is_ok(),
             "background=true store=true should be valid"
         );
     }
@@ -239,69 +179,14 @@ mod tests {
     #[test]
     fn empty_model_rejected() {
         let ctx = make_ctx_with_metadata(&[("responses_format.model", "")]);
-        let err = validate_request(&ctx, &empty_body()).unwrap_err();
+        let err = validate_request(&ctx).unwrap_err();
         assert!(err.message.contains("model"), "error should mention model: {err}");
     }
 
     #[test]
     fn absent_model_accepted() {
         let ctx = make_ctx_with_metadata(&[]);
-        assert!(
-            validate_request(&ctx, &empty_body()).is_ok(),
-            "absent model should be valid"
-        );
-    }
-
-    #[test]
-    fn metadata_too_many_keys_rejected() {
-        let ctx = make_ctx_with_metadata(&[]);
-        let mut metadata = serde_json::Map::new();
-        for i in 0..17 {
-            metadata.insert(format!("k{i}"), serde_json::json!("v"));
-        }
-        let body = serde_json::json!({"input": "test", "metadata": metadata});
-        let err = validate_request(&ctx, &body).unwrap_err();
-        assert!(err.message.contains("metadata"), "error should mention metadata: {err}");
-    }
-
-    #[test]
-    fn metadata_key_too_long() {
-        let ctx = make_ctx_with_metadata(&[]);
-        let body = serde_json::json!({"input": "test", "metadata": {"k".repeat(65): "v"}});
-        let err = validate_request(&ctx, &body).unwrap_err();
-        assert!(err.message.contains("metadata key"), "error should mention key: {err}");
-    }
-
-    #[test]
-    fn metadata_value_too_long() {
-        let ctx = make_ctx_with_metadata(&[]);
-        let body = serde_json::json!({"input": "test", "metadata": {"k": "v".repeat(513)}});
-        let err = validate_request(&ctx, &body).unwrap_err();
-        assert!(
-            err.message.contains("metadata value"),
-            "error should mention value: {err}"
-        );
-    }
-
-    #[test]
-    fn metadata_non_object_rejected() {
-        let ctx = make_ctx_with_metadata(&[]);
-        let body = serde_json::json!({"input": "test", "metadata": []});
-        let err = validate_request(&ctx, &body).unwrap_err();
-        assert!(err.message.contains("metadata"), "error should mention metadata: {err}");
-        assert!(err.message.contains("object"), "error should mention object: {err}");
-    }
-
-    #[test]
-    fn metadata_non_string_value_rejected() {
-        let ctx = make_ctx_with_metadata(&[]);
-        let body = serde_json::json!({"input": "test", "metadata": {"k": 123}});
-        let err = validate_request(&ctx, &body).unwrap_err();
-        assert!(
-            err.message.contains("metadata value"),
-            "error should mention metadata value: {err}"
-        );
-        assert!(err.message.contains("string"), "error should mention string: {err}");
+        assert!(validate_request(&ctx).is_ok(), "absent model should be valid");
     }
 
     #[test]

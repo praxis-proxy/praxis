@@ -136,7 +136,7 @@ impl HttpFilter for RequestValidateFilter {
             },
         };
 
-        if let Err(e) = validate_request(ctx, &parsed) {
+        if let Err(e) = validate_request(ctx) {
             debug!(error = %e, "request validation failed");
             return Ok(FilterAction::Reject(
                 Rejection::status(400)
