@@ -35,6 +35,9 @@ jobs:
         with:
           components: rustfmt
 
+      - name: Ensure rustfmt for date-pinned nightly
+        run: rustup component add --toolchain "$(grep -m1 'rust-toolchain@' .github/workflows/tests.yaml | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}')" rustfmt
+
       - name: Install stable Rust
         uses: dtolnay/rust-toolchain@10c3493d811a9096cee4fdf287e41e852f6a51ba # 1.94.0
         with:
