@@ -40,7 +40,7 @@ jobs:
       - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install nightly Rust (for rustfmt)
-        uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # nightly-2026-03-28 (rustc 1.96.0)
+        uses: ./.github/actions/install-nightly-rust
         with:
           components: rustfmt
 

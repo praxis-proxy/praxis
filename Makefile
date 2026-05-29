@@ -5,7 +5,7 @@
 VERSION          ?= $(shell perl -ne 'print $$1 if /^version\s*=\s*"(.+)"/' Cargo.toml)
 IMAGE            ?= praxis
 CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
-NIGHTLY_VERSION  := $(shell grep -m1 'rust-toolchain@' .github/workflows/tests.yaml | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}')
+NIGHTLY_VERSION  := $(shell grep -m1 'rust-toolchain@' .github/actions/install-nightly-rust/action.yml | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}')
 V                ?=
 
 UNAME_S := $(shell uname -s | tr A-Z a-z)

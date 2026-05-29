@@ -1,0 +1,15 @@
+name: Install nightly Rust
+description: Install the pinned nightly Rust toolchain
+
+inputs:
+  components:
+    description: "Comma-separated list of components to install (e.g. rustfmt)"
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # nightly-2026-03-28 (rustc 1.96.0)
+      with:
+        components: ${{ inputs.components }}
