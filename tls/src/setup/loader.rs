@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use rustls::{crypto::CryptoProvider, sign::CertifiedKey};
+use zeroize::Zeroizing;
 
 use crate::{CertKeyPair, TlsError};
 
@@ -63,10 +64,10 @@ pub(super) fn load_cert_and_key(
         path: pair.cert_path.clone(),
         detail: format!("failed to read cert: {e}"),
     })?;
-    let key_pem = std::fs::read(&pair.key_path).map_err(|e| TlsError::FileLoadError {
+    let key_pem = Zeroizing::new(std::fs::read(&pair.key_path).map_err(|e| TlsError::FileLoadError {
         path: pair.key_path.clone(),
         detail: format!("failed to read key: {e}"),
-    })?;
+    })?);
 
     let certs = rustls_pemfile::certs(&mut &cert_pem[..])
         .collect::<Result<Vec<_>, _>>()

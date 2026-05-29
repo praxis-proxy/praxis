@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Shane Utt
 
-#![deny(unsafe_code)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -16,6 +15,7 @@
 
 pub mod agentic;
 pub mod example_config;
+pub mod filters;
 pub mod net;
 pub mod proxy;
 

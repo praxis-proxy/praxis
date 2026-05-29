@@ -7,7 +7,10 @@ use std::{
     io::{Read, Write},
     net::TcpStream,
     path::PathBuf,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
     time::Duration,
 };
 
@@ -41,6 +44,9 @@ pub struct TestCertificates {
 
     /// The rcgen CA key pair for signing additional certificates.
     ca_key: KeyPair,
+
+    /// Counter for generating unique client certificate filenames.
+    client_cert_counter: AtomicUsize,
 
     /// Temporary directory holding cert files; cleaned up on drop.
     temp_dir: TempDir,
@@ -83,6 +89,7 @@ impl TestCertificates {
             server_cert_der,
             ca_params,
             ca_key,
+            client_cert_counter: AtomicUsize::new(0),
             temp_dir,
         }
     }
@@ -127,6 +134,7 @@ impl TestCertificates {
             server_cert_der,
             ca_params,
             ca_key,
+            client_cert_counter: AtomicUsize::new(0),
             temp_dir,
         }
     }
@@ -186,8 +194,9 @@ impl TestCertificates {
         client_params.distinguished_name.push(DnType::CommonName, "Test Client");
         let client_cert = client_params.signed_by(&client_key, &issuer).expect("client cert sign");
 
-        let cert_path = self.temp_dir.path().join("client.pem");
-        let key_path = self.temp_dir.path().join("client-key.pem");
+        let n = self.client_cert_counter.fetch_add(1, Ordering::Relaxed);
+        let cert_path = self.temp_dir.path().join(format!("client-{n}.pem"));
+        let key_path = self.temp_dir.path().join(format!("client-{n}-key.pem"));
 
         std::fs::write(&cert_path, client_cert.pem()).expect("write client cert PEM");
         std::fs::write(&key_path, client_key.serialize_pem()).expect("write client key PEM");

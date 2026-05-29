@@ -18,6 +18,7 @@ mod conditional_filters;
 mod credential_injection;
 mod csrf;
 mod default_config;
+mod grpc_detection;
 mod header_manipulation;
 mod health_checks;
 mod hostname_upstream;
@@ -35,6 +36,8 @@ mod payload_processing;
 mod prompt_enrichment;
 mod protocols;
 mod redirect;
+#[cfg(feature = "ai-inference")]
+mod responses_format;
 mod round_robin;
 mod session_affinity;
 mod static_response;

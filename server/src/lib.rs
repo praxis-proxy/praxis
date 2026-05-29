@@ -1,8 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Shane Utt
 
-#![deny(unsafe_code)]
-
 //! Server bootstrap for the Praxis proxy.
 
 pub(crate) mod pipelines;

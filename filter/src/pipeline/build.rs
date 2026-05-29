@@ -117,7 +117,7 @@ impl FilterPipeline {
 
         let mut errors = Vec::new();
 
-        super::checks::check_lb_without_router(&names, &mut errors);
+        super::checks::check_lb_without_cluster_selector(&names, &mut errors);
         super::checks::check_unconditional_static_response(&names, &self.filters, &mut errors);
         super::checks::check_conditional_security(&names, &self.filters, &mut errors);
         super::checks::check_open_security_filters(&names, &self.filters, allow_open_security, &mut errors);
