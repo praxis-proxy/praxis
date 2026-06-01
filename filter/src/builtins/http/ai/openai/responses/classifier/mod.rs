@@ -26,8 +26,8 @@ impl AiRequestFormat {
     /// Stable string representation for headers, metadata, and filter results.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::Responses => "responses",
-            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "openai_responses",
+            Self::ChatCompletions => "openai_chat_completions",
             Self::UnknownJson => "unknown",
             Self::InvalidJson => "invalid_json",
             Self::NonJson => "non_json",
@@ -226,7 +226,7 @@ mod tests {
         assert_eq!(
             result.format,
             AiRequestFormat::ChatCompletions,
-            "messages array should classify as chat_completions"
+            "messages array should classify as openai_chat_completions"
         );
         assert_eq!(result.model.as_deref(), Some("gpt-4"), "model should be extracted");
     }
@@ -239,7 +239,7 @@ mod tests {
         assert_eq!(
             result.format,
             AiRequestFormat::ChatCompletions,
-            "should be chat_completions"
+            "should be openai_chat_completions"
         );
         assert_eq!(result.stream, Some(true), "stream should be extracted");
     }

@@ -59,13 +59,13 @@ use crate::{
 /// # YAML
 ///
 /// ```yaml
-/// filter: responses_format
+/// filter: openai_responses_format
 /// ```
 ///
 /// # Full YAML
 ///
 /// ```yaml
-/// filter: responses_format
+/// filter: openai_responses_format
 /// on_invalid: continue
 /// max_body_bytes: 67108864
 /// headers:
@@ -87,7 +87,7 @@ impl ResponsesFormatFilter {
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
-        let cfg: ResponsesFormatConfig = parse_filter_config("responses_format", config)?;
+        let cfg: ResponsesFormatConfig = parse_filter_config("openai_responses_format", config)?;
         let validated = build_config(cfg)?;
         Ok(Box::new(Self { config: validated }))
     }
@@ -96,7 +96,7 @@ impl ResponsesFormatFilter {
 #[async_trait]
 impl HttpFilter for ResponsesFormatFilter {
     fn name(&self) -> &'static str {
-        "responses_format"
+        "openai_responses_format"
     }
 
     fn request_body_access(&self) -> BodyAccess {
@@ -179,32 +179,35 @@ fn handle_invalid_format(format: AiRequestFormat, config: &ResponsesFormatConfig
 /// Write durable metadata that persists across all Pingora lifecycle phases.
 fn write_metadata(ctx: &mut HttpFilterContext<'_>, classified: &classifier::ClassifiedRequest) {
     let format_str = classified.format.as_str();
-    ctx.set_metadata("responses_format.format", format_str);
+    ctx.set_metadata("openai_responses_format.format", format_str);
 
     if let Some(model) = &classified.model
         && is_safe_promoted_value(model)
     {
-        ctx.set_metadata("responses_format.model", model.clone());
+        ctx.set_metadata("openai_responses_format.model", model.clone());
     }
 
     if let Some(stream) = classified.stream {
-        ctx.set_metadata("responses_format.stream", if stream { "true" } else { "false" });
+        ctx.set_metadata("openai_responses_format.stream", if stream { "true" } else { "false" });
     }
 
     if let Some(store) = classified.store {
-        ctx.set_metadata("responses_format.store", if store { "true" } else { "false" });
+        ctx.set_metadata("openai_responses_format.store", if store { "true" } else { "false" });
     }
 
     if let Some(background) = classified.background {
-        ctx.set_metadata("responses_format.background", if background { "true" } else { "false" });
+        ctx.set_metadata(
+            "openai_responses_format.background",
+            if background { "true" } else { "false" },
+        );
     }
 
     if classified.has_previous_response_id {
-        ctx.set_metadata("responses_format.has_previous_response_id", "true");
+        ctx.set_metadata("openai_responses_format.has_previous_response_id", "true");
     }
 
     if classified.has_conversation {
-        ctx.set_metadata("responses_format.has_conversation", "true");
+        ctx.set_metadata("openai_responses_format.has_conversation", "true");
     }
 }
 
@@ -243,7 +246,7 @@ fn promote_filter_results(
     ctx: &mut HttpFilterContext<'_>,
     classified: &classifier::ClassifiedRequest,
 ) -> Result<(), FilterError> {
-    let results = ctx.filter_results.entry("responses_format").or_default();
+    let results = ctx.filter_results.entry("openai_responses_format").or_default();
 
     results.set("format", classified.format.as_str())?;
 

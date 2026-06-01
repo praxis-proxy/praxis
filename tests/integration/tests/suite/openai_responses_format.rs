@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Integration tests for the `responses_format` classifier filter.
+//! Integration tests for the `openai_responses_format` classifier filter.
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
@@ -396,7 +396,7 @@ fn filter_results_enable_branch_routing() {
     assert_eq!(
         parse_body(&raw_chat),
         "default-branch-miss",
-        "branch should not fire for chat_completions, falling through to default"
+        "branch should not fire for openai_chat_completions, falling through to default"
     );
 }
 
@@ -496,17 +496,17 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: responses_format
+      - filter: openai_responses_format
         on_invalid: continue
       - filter: router
         routes:
           - path: "/v1/responses"
             headers:
-              x-praxis-ai-format: "responses"
+              x-praxis-ai-format: "openai_responses"
             cluster: "responses"
           - path: "/v1/chat/completions"
             headers:
-              x-praxis-ai-format: "chat_completions"
+              x-praxis-ai-format: "openai_chat_completions"
             cluster: "chat"
           - path_prefix: "/"
             cluster: "default"
@@ -536,7 +536,7 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: responses_format
+      - filter: openai_responses_format
         on_invalid: continue
       - filter: router
         routes:
@@ -562,7 +562,7 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: responses_format
+      - filter: openai_responses_format
         on_invalid: reject
       - filter: router
         routes:
@@ -588,7 +588,7 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: responses_format
+      - filter: openai_responses_format
       - filter: router
         routes:
           - path_prefix: "/"
@@ -613,7 +613,7 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: responses_format
+      - filter: openai_responses_format
       - filter: router
         routes:
           - path_prefix: "/"
@@ -638,13 +638,13 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: responses_format
+      - filter: openai_responses_format
         branch_chains:
           - name: responses_branch
             on_result:
-              filter: responses_format
+              filter: openai_responses_format
               key: format
-              result: responses
+              result: openai_responses
             rejoin: terminal
             chains:
               - name: responses_chain
@@ -682,11 +682,11 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: responses_format
+      - filter: openai_responses_format
         branch_chains:
           - name: background_branch
             on_result:
-              filter: responses_format
+              filter: openai_responses_format
               key: background
               result: true
             rejoin: terminal
@@ -726,7 +726,7 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: responses_format
+      - filter: openai_responses_format
       - filter: router
         routes:
           - path_prefix: "/"
@@ -765,7 +765,7 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: responses_format
+      - filter: openai_responses_format
       - filter: router
         routes:
           - path_prefix: "/"
