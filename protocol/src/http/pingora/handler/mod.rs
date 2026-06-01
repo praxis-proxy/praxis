@@ -154,6 +154,13 @@ where
 /// run (typically from pipeline capabilities + global body limits). Runtime
 /// `set_*_body_mode` calls may widen limits; this helper preserves the original
 /// ceiling while still allowing upgrades between body mode variants.
+///
+/// `Stream` mode passes through unconditionally because it delivers chunks
+/// as they arrive without accumulating them — there is no buffer to cap.
+/// A filter that downgrades from `StreamBuffer` to `Stream` at runtime is
+/// opting out of buffering entirely, which is always safe from a memory
+/// perspective. The pipeline-level body size limit (enforced separately
+/// via `SizeLimit`) remains the backstop for oversized payloads.
 fn clamp_body_mode_to_ceiling(mode: BodyMode, baseline: BodyMode) -> BodyMode {
     let ceiling = match baseline {
         BodyMode::StreamBuffer { max_bytes: Some(v) } | BodyMode::SizeLimit { max_bytes: v } => Some(v),
@@ -167,6 +174,8 @@ fn clamp_body_mode_to_ceiling(mode: BodyMode, baseline: BodyMode) -> BodyMode {
         (BodyMode::SizeLimit { max_bytes }, Some(limit)) => BodyMode::SizeLimit {
             max_bytes: max_bytes.min(limit),
         },
+        // Stream has no buffer to clamp; other modes pass through when the
+        // baseline imposes no ceiling (e.g. unbounded StreamBuffer).
         (m, None | Some(_)) => m,
     }
 }

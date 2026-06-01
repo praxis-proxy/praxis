@@ -441,6 +441,68 @@ mod tests {
         );
     }
 
+    #[test]
+    fn clamp_body_mode_to_ceiling_stream_passes_through_with_ceiling() {
+        let clamped = super::super::clamp_body_mode_to_ceiling(
+            BodyMode::Stream,
+            BodyMode::StreamBuffer { max_bytes: Some(1024) },
+        );
+        assert_eq!(
+            clamped,
+            BodyMode::Stream,
+            "Stream has no buffer to clamp and should pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn clamp_body_mode_to_ceiling_stream_passes_through_without_ceiling() {
+        let clamped = super::super::clamp_body_mode_to_ceiling(BodyMode::Stream, BodyMode::Stream);
+        assert_eq!(
+            clamped,
+            BodyMode::Stream,
+            "Stream baseline imposes no ceiling; Stream mode passes through"
+        );
+    }
+
+    #[test]
+    fn clamp_body_mode_to_ceiling_size_limit_clamped_to_baseline() {
+        let clamped = super::super::clamp_body_mode_to_ceiling(
+            BodyMode::SizeLimit { max_bytes: 8192 },
+            BodyMode::SizeLimit { max_bytes: 2048 },
+        );
+        assert_eq!(
+            clamped,
+            BodyMode::SizeLimit { max_bytes: 2048 },
+            "runtime SizeLimit should be clamped to baseline ceiling"
+        );
+    }
+
+    #[test]
+    fn clamp_body_mode_to_ceiling_no_ceiling_passes_through() {
+        let clamped = super::super::clamp_body_mode_to_ceiling(
+            BodyMode::StreamBuffer { max_bytes: Some(4096) },
+            BodyMode::StreamBuffer { max_bytes: None },
+        );
+        assert_eq!(
+            clamped,
+            BodyMode::StreamBuffer { max_bytes: Some(4096) },
+            "unbounded baseline imposes no ceiling; runtime mode passes through"
+        );
+    }
+
+    #[test]
+    fn clamp_body_mode_to_ceiling_within_limit_unchanged() {
+        let clamped = super::super::clamp_body_mode_to_ceiling(
+            BodyMode::StreamBuffer { max_bytes: Some(512) },
+            BodyMode::StreamBuffer { max_bytes: Some(1024) },
+        );
+        assert_eq!(
+            clamped,
+            BodyMode::StreamBuffer { max_bytes: Some(512) },
+            "runtime limit within baseline ceiling should be unchanged"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
