@@ -17,6 +17,10 @@ runs:
     - name: Register toolchain under date-pinned name
       run: |
         NIGHTLY=$(grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}' "${{ github.action_path }}/action.yml" | head -1)
+        if [ -z "$NIGHTLY" ]; then
+          echo "::error::Could not extract nightly version from action.yml"
+          exit 1
+        fi
         if [ -n "${{ inputs.components }}" ]; then
           rustup toolchain install "$NIGHTLY" --profile minimal --component "${{ inputs.components }}"
         else

@@ -71,6 +71,10 @@ check-prereqs-cmake: check-prereqs
 		exit 1; \
 	}
 check-prereqs-nightly: check-prereqs
+	@test -n "$(NIGHTLY_VERSION)" || { \
+		echo "Could not determine NIGHTLY_VERSION from .github/actions/install-nightly-rust/action.yml" >&2; \
+		exit 1; \
+	}
 	@cargo +$(NIGHTLY_VERSION) --version >/dev/null 2>&1 || { \
 		echo "Rust $(NIGHTLY_VERSION) is not installed — run \"rustup toolchain install $(NIGHTLY_VERSION)\" (see docs/development.md)" >&2; \
 		exit 1; \
