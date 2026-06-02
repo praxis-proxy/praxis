@@ -219,7 +219,7 @@ jobs:
           missing=$(gh api \
             "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
             --paginate \
-            --jq '[.[] | select(.commit.message | test("^Signed-off-by: "; "m") | not) | .sha[:7]] | join(", ")')
+            --jq '[.[] | select(.commit.message | test("(?m)^Signed-off-by: ") | not) | .sha[:7]] | join(", ")')
 
           if [ -n "$missing" ]; then
             marker="<!-- praxis:signoff-check -->"
@@ -316,7 +316,7 @@ jobs:
           ${violations}
 
           Sorry, this project does not accept commits authored by tools as valid.
-          Commits need to be authored by and signed-off by the human(s) responsible for the PR, with their name and contact.
+          Commits need to be authored by and signed-off by the human(s) responsible for the PR, with their name and contact."
             fi
             echo "::error::AI tool authorship found in PR commits"
             exit 1
