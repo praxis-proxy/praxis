@@ -7,8 +7,10 @@ name: Documentation
 on:
   push:
     branches: [main]
+    paths-ignore: ['website/**']
   pull_request:
     branches: [main]
+    paths-ignore: ['website/**']
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

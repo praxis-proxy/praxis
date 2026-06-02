@@ -7,8 +7,10 @@ name: Tests (Integration)
 on:
   push:
     branches: [main]
+    paths-ignore: ['website/**']
   pull_request:
     branches: [main]
+    paths-ignore: ['website/**']
   workflow_dispatch:
     inputs:
       debug:

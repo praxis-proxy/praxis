@@ -7,8 +7,10 @@ name: CodeQL
 on:
   push:
     branches: [ main ]
+    paths-ignore: ['website/**']
   pull_request:
     branches: [ main ]
+    paths-ignore: ['website/**']
   schedule:
     - cron: "0 6 * * 1"
   workflow_dispatch:
