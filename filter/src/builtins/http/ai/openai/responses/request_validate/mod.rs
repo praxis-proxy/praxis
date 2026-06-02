@@ -30,7 +30,7 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tracing::debug;
+use tracing::{debug, trace};
 
 use self::validate::validate_request;
 use crate::{
@@ -145,34 +145,29 @@ impl HttpFilter for RequestValidateFilter {
             return Ok(FilterAction::Continue);
         }
 
-        let Some(chunk) = body.as_deref() else {
-            return Ok(reject_invalid("request body is required"));
-        };
-
-        let parsed: serde_json::Value = match serde_json::from_slice(chunk) {
+        let parsed = match parse_and_validate(ctx, body) {
             Ok(v) => v,
-            Err(e) => {
-                debug!(error = %e, "failed to parse request body");
-                return Ok(reject_invalid(&format!("invalid request body: {e}")));
-            },
+            Err(action) => return Ok(action),
         };
-
-        if let Err(e) = validate_request(ctx) {
-            debug!(error = %e, "request validation failed");
-            return Ok(reject_invalid(&e.to_string()));
-        }
 
         let response_id = self.generate_response_id();
-        let conversation_id = extract_conversation_id(&parsed).unwrap_or_else(|| self.generate_conversation_id());
+        let conversation_id = if let Some(id) = extract_conversation_id(&parsed) {
+            trace!(conversation_id = %id, "conversation ID extracted from request");
+            id
+        } else {
+            let id = self.generate_conversation_id();
+            trace!(conversation_id = %id, "conversation ID generated");
+            id
+        };
+
+        enrich_context(ctx, &parsed, &response_id, &conversation_id);
+        write_filter_results(ctx, &response_id)?;
 
         debug!(
             response_id = %response_id,
             conversation_id = %conversation_id,
             "request validated"
         );
-
-        write_metadata(ctx, &parsed, &response_id, &conversation_id);
-        write_filter_results(ctx, &response_id)?;
 
         Ok(FilterAction::Release)
     }
@@ -181,6 +176,29 @@ impl HttpFilter for RequestValidateFilter {
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+/// Parse the request body and run validation checks.
+fn parse_and_validate(ctx: &HttpFilterContext<'_>, body: &Option<Bytes>) -> Result<serde_json::Value, FilterAction> {
+    let Some(chunk) = body.as_deref() else {
+        debug!("rejecting request with missing body");
+        return Err(reject_invalid("request body is required"));
+    };
+
+    let parsed: serde_json::Value = match serde_json::from_slice(chunk) {
+        Ok(v) => v,
+        Err(e) => {
+            debug!(error = %e, "failed to parse request body");
+            return Err(reject_invalid(&format!("invalid request body: {e}")));
+        },
+    };
+
+    if let Err(e) = validate_request(ctx) {
+        debug!(error = %e, "request validation failed");
+        return Err(reject_invalid(&e.to_string()));
+    }
+
+    Ok(parsed)
+}
 
 /// Build a 400 rejection with a JSON error body.
 fn reject_invalid(message: &str) -> FilterAction {
@@ -207,12 +225,12 @@ fn extract_conversation_id(body: &serde_json::Value) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Write durable metadata for downstream filters.
+/// Enrich filter context with validated metadata for downstream filters.
 ///
 /// Reads `stream`, `store`, `background` from `responses_format.*`
 /// classifier metadata and applies spec defaults. Extracts
 /// `instructions`, `include`, and `conversation.id` from the body.
-fn write_metadata(ctx: &mut HttpFilterContext<'_>, body: &serde_json::Value, response_id: &str, conversation_id: &str) {
+fn enrich_context(ctx: &mut HttpFilterContext<'_>, body: &serde_json::Value, response_id: &str, conversation_id: &str) {
     ctx.set_metadata("responses.response_id", response_id);
     ctx.set_metadata("responses.conversation_id", conversation_id);
 
@@ -227,14 +245,19 @@ fn write_metadata(ctx: &mut HttpFilterContext<'_>, body: &serde_json::Value, res
     let stream = ctx.get_metadata("responses_format.stream").is_some_and(|v| v == "true");
     ctx.set_metadata("responses.stream", if stream { "true" } else { "false" });
 
+    trace!(store, background, stream, "classifier metadata applied");
+
     if let Some(instructions) = body.get("instructions").and_then(serde_json::Value::as_str) {
         ctx.set_metadata("responses.instructions", instructions);
+        trace!("instructions extracted from body");
     }
 
     if let Some(include) = body.get("include").and_then(serde_json::Value::as_array) {
         let values: Vec<&str> = include.iter().filter_map(serde_json::Value::as_str).collect();
         if !values.is_empty() {
-            ctx.set_metadata("responses.include", values.join(","));
+            let joined = values.join(",");
+            ctx.set_metadata("responses.include", joined.as_str());
+            trace!(include = %joined, "include values extracted from body");
         }
     }
 }
