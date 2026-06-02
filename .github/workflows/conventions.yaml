@@ -6,8 +6,8 @@ name: Coding Conventions
 
 on:
   pull_request_target:
-    branches: [ main ]
-    types: [ opened, synchronize, reopened, ready_for_review ]
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
@@ -57,7 +57,8 @@ jobs:
                 --body "${marker}
           **PR too large**: ${added} lines added (limit: ${MAX_ADDITIONS}). Please split into smaller PRs. Add \`skip/pr-hygiene\` label to override."
             fi
-            gh pr close "$PR_NUMBER" --repo "${{ github.repository }}"
+            echo "::error::PR has ${added} lines added (limit: ${MAX_ADDITIONS})"
+            exit 1
           fi
 
   # ----------------------------------------------------------------------------
@@ -81,9 +82,15 @@ jobs:
           fi
 
           word_count=$(echo "$PR_BODY" | wc -w)
-          if [ "$word_count" -lt 2 ]; then # minimum "fixes <issue_number>"
-            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
-              --body "Please add a description to this PR explaining what it does and why. See our [coding conventions](docs/conventions.md)."
+          if [ "$word_count" -lt 2 ]; then
+            marker="<!-- praxis:pr-description-check -->"
+            already=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
+            if [ "$already" -eq 0 ]; then
+              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+                --body "${marker}
+          Please add a description to this PR explaining what it does and why. See our [coding conventions](docs/developing/conventions.md)."
+            fi
           fi
 
   # ----------------------------------------------------------------------------
@@ -180,7 +187,7 @@ jobs:
           fi
 
           unsigned=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
-            --paginate --jq '[.[] | select(.commit.verification.verified == false) | .sha[:7]] | join(", ")')
+            --paginate --jq '[.[] | select(.parents | length == 1) | select(.commit.verification.verified == false) | .sha[:7]] | join(", ")')
 
           if [ -n "$unsigned" ]; then
             marker="<!-- praxis:signed-commits-check -->"
@@ -192,6 +199,136 @@ jobs:
           **Unsigned commits**: ${unsigned}. Please [sign your commits](https://docs.github.com/en/authentication/managing-commit-signature-verification)."
             fi
             echo "::error::Unsigned commits found: ${unsigned}"
+            exit 1
+          fi
+
+  # ----------------------------------------------------------------------------
+  # Signoff Check
+  # ----------------------------------------------------------------------------
+
+  signoff-check:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check commits for Signed-off-by
+        env:
+          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          labels=$(gh pr view "$PR_NUMBER" \
+            --repo "${{ github.repository }}" \
+            --json labels -q '.labels[].name')
+          if echo "$labels" | grep -q '^skip/signoff$'; then
+            echo "skip/signoff label present — skipping signoff check"
+            exit 0
+          fi
+
+          missing=$(gh api \
+            "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
+            --paginate \
+            --jq '[.[] | select(.parents | length == 1) | select(.commit.message | test("(?m)^Signed-off-by: ") | not) | .sha[:7]] | join(", ")')
+
+          if [ -n "$missing" ]; then
+            marker="<!-- praxis:signoff-check -->"
+            already=$(gh api \
+              "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
+            if [ "$already" -eq 0 ]; then
+              gh pr comment "$PR_NUMBER" \
+                --repo "${{ github.repository }}" \
+                --body "${marker}
+          **Missing Signed-off-by**: ${missing}. All commits require sign-off (via \`git commit --signoff\`)."
+            fi
+            echo "::error::Commits missing Signed-off-by: ${missing}"
+            exit 1
+          fi
+
+  # ----------------------------------------------------------------------------
+  # AI Authorship Check
+  # ----------------------------------------------------------------------------
+
+  ai-authorship-check:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Check for AI tool authorship
+        env:
+          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          labels=$(gh pr view "$PR_NUMBER" \
+            --repo "${{ github.repository }}" \
+            --json labels -q '.labels[].name')
+          if echo "$labels" | grep -q '^skip/ai-authorship$'; then
+            echo "skip/ai-authorship label present — skipping"
+            exit 0
+          fi
+
+          commits=$(gh api \
+            "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
+            --paginate)
+
+          AI_EMAIL='noreply@anthropic\.com'
+          AI_AUTHOR='claude (code|opus|sonnet|haiku)|\bcopilot\b|\bcodeium\b|\btabnine\b|\bwindsurf\b|\bamazon q\b|\bgemini code\b|\baider\b|\banthropic\b'
+          AI_TOOL='claude|anthropic|copilot|codeium|tabnine|windsurf|cursor|amazon\.q|gemini|aider|noreply@anthropic\.com'
+          CREDIT='^\s*(co-authored-by|assisted-by|generated-by|authored-by)\s*:'
+          ANY_TRAILER='^\s*(co-authored-by|assisted-by|generated-by|authored-by|signed-off-by)\s*:'
+
+          violations=$(echo "$commits" | jq -r \
+            --arg ai_email "$AI_EMAIL" \
+            --arg ai_author "$AI_AUTHOR" \
+            --arg ai_tool "$AI_TOOL" \
+            --arg credit "$CREDIT" \
+            --arg any_trailer "$ANY_TRAILER" '
+            [
+              (.[] | select(.parents | length == 1) |
+                .sha[:7] as $sha |
+                select(
+                  (.commit.author.email |
+                    test($ai_email; "i")) or
+                  (.commit.committer.email |
+                    test($ai_email; "i"))
+                ) |
+                "- `\($sha)`: AI tool email in author/committer"),
+              (.[] | select(.parents | length == 1) |
+                .sha[:7] as $sha |
+                select(
+                  (.commit.author.name |
+                    test($ai_author; "i")) or
+                  (.commit.committer.name |
+                    test($ai_author; "i"))
+                ) |
+                "- `\($sha)`: AI tool in author/committer name"),
+              (.[] | select(.parents | length == 1) |
+                .sha[:7] as $sha |
+                .commit.message | split("\n")[] |
+                select(
+                  (test($any_trailer; "i") and
+                    test($ai_email; "i")) or
+                  (test($credit; "i") and
+                    test($ai_tool; "i"))
+                ) |
+                "- `\($sha)`: `\(gsub("^\\s+"; ""))`")
+            ] | join("\n")
+          ')
+
+          if [ -n "$violations" ]; then
+            marker="<!-- praxis:ai-authorship-check -->"
+            already=$(gh api \
+              "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
+            if [ "$already" -eq 0 ]; then
+              gh pr comment "$PR_NUMBER" \
+                --repo "${{ github.repository }}" \
+                --body "${marker}
+          **AI tool authorship detected**:
+
+          ${violations}
+
+          Sorry, this project does not accept commits authored by tools as valid.
+          Commits need to be authored by and signed-off by the human(s) responsible for the PR, with their name and contact."
+            fi
+            echo "::error::AI tool authorship found in PR commits"
             exit 1
           fi
 
@@ -265,7 +402,8 @@ jobs:
                 --body "${marker}
           **Proposal validation failed**:
           $(echo -e "$errors")
-          See [proposal process](docs/proposals.md) for requirements. Fix and re-open."
+          See [proposal process](docs/proposals.md) for requirements."
             fi
-            gh pr close "$PR_NUMBER" --repo "${{ github.repository }}"
+            echo "::error::Proposal validation failed"
+            exit 1
           fi

@@ -66,8 +66,8 @@
   KB of the request body), agentic protocol parsing
   (JSON-RPC envelope extraction), and security systems
   (guardrails payload scanning, content classification).
-  See [architecture.md][payload-processing] for the
-  full body access model.
+  See the [payload processing][payload-processing]
+  docs for the full body access model.
 - **Body-based routing**: the built-in `json_body_field`
   filter extracts top-level fields from JSON request
   bodies and promotes values to request headers, enabling
@@ -84,19 +84,19 @@
 - **Payload size limits**: global hard ceilings on
   request and response payload size.
 
-[payload-processing]:./architecture.md#payload-processing
+[payload-processing]:./architecture/payload-processing.md
 
 ## Security
 
 Security is a primary design constraint. Praxis ships
 with secure defaults and fails closed on ambiguous
 configuration. See the
-[Security Hardening Guide](security-hardening.md) for
+[Security Hardening Guide](operating/security-hardening.md) for
 deployment guidance.
 
 **Build-level guarantees:**
 
-- `#![deny(unsafe_code)]` in every crate
+- `unsafe_code = "deny"` in workspace lints
 - Rustls (no OpenSSL, no C FFI in the TLS path)
 - Supply chain auditing via `cargo audit` and
   `cargo deny`
@@ -197,10 +197,10 @@ deployment guidance.
   server instance. See
   [Protocol Abstraction][protocol-abstraction].
 
-[http-lifecycle]:./architecture.md#http-connection-lifecycle
-[tcp-lifecycle]:./architecture.md#tcp-connection-lifecycle
-[protocol-abstraction]:./architecture.md#protocol-adapters
-[tls-docs]:./tls.md
+[http-lifecycle]:./architecture/connection-lifecycle.md#http-connection-lifecycle
+[tcp-lifecycle]:./architecture/connection-lifecycle.md#tcp-connection-lifecycle
+[protocol-abstraction]:./architecture/overview.md#protocol-adapters
+[tls-docs]:./operating/tls.md
 
 ## AI Inference
 
@@ -316,4 +316,4 @@ cargo build -p praxis --no-default-features
   zero overhead via the `HttpFilter`/`TcpFilter` traits
   and `register_filters!` macro.
 
-[filters]:./filters.md
+[filters]:./filters/README.md

@@ -3,6 +3,10 @@ issue: https://github.com/praxis-proxy/praxis/issues/11
 status: released
 authors:
   - shaneutt
+graduation_criteria: []
+stakeholders:
+  - shaneutt
+  - twghu
 ---
 
 # Dynamic Configuration Reloading

@@ -3,6 +3,10 @@ issue: https://github.com/praxis-proxy/praxis/issues/39
 status: released
 authors:
   - shaneutt
+graduation_criteria: []
+stakeholders:
+  - shaneutt
+  - twghu
 ---
 
 # TLS Certificate Hot-Reload

@@ -15,7 +15,7 @@ ambiguous configuration:
   for upstream connections.
 - Admin endpoints are restricted to localhost; public
   binding is a validation error.
-- `#![deny(unsafe_code)]` in every crate; no unsafe
+- `unsafe_code = "deny"` in workspace lints; no unsafe
   Rust in the Praxis codebase.
 - Rustls for TLS (no OpenSSL, no C FFI in the TLS
   path).

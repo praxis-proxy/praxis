@@ -3,7 +3,13 @@ issue: https://github.com/praxis-proxy/praxis/issues/191
 discussion: https://github.com/praxis-proxy/praxis/discussions/185
 status: proposed
 authors:
-- mariusdanciu
+  - mariusdanciu
+graduation_criteria:
+  - Expression language POC and benchmarks completed
+  - How? section with requirements and design
+stakeholders:
+  - shaneutt
+  - twghu
 ---
 
 # Filter Chain Condition Expressions

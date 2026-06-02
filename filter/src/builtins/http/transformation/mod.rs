@@ -10,5 +10,5 @@ mod url_rewrite;
 
 pub use header::HeaderFilter;
 pub use path_rewrite::PathRewriteFilter;
-pub use path_sanitize::normalize_rewritten_path;
+pub use path_sanitize::{has_dot_dot_traversal, normalize_rewritten_path};
 pub use url_rewrite::UrlRewriteFilter;

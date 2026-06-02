@@ -1,0 +1,53 @@
+name: Issue Triage
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+
+on:
+  issues:
+    types: [opened, milestoned, demilestoned]
+
+permissions: {}
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Triage Labels
+  # ----------------------------------------------------------------------------
+
+  triage:
+    runs-on: ubuntu-24.04
+    permissions:
+      issues: write
+    steps:
+      - name: Add triage/needs-triage on new issue
+        if: github.event.action == 'opened'
+        env:
+          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          gh issue edit "$ISSUE" --repo "$GH_REPO" \
+            --add-label "triage/needs-triage"
+
+      - name: Accept triaged issue
+        if: github.event.action == 'milestoned'
+        env:
+          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          gh issue edit "$ISSUE" --repo "$GH_REPO" \
+            --remove-label "triage/needs-triage" \
+            --add-label "triage/accepted"
+
+      - name: Revert to needs-triage on demilestone
+        if: github.event.action == 'demilestoned'
+        env:
+          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          gh issue edit "$ISSUE" --repo "$GH_REPO" \
+            --remove-label "triage/accepted" \
+            --add-label "triage/needs-triage"

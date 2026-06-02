@@ -27,7 +27,7 @@ use crate::{config::Config, errors::ProxyError};
 /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
 pub fn init_tracing(config: &Config) -> Result<(), ProxyError> {
     let env_filter = build_env_filter(config)?;
-    let json = std::env::var("PRAXIS_LOG_FORMAT").as_deref() == Ok("json");
+    let json = std::env::var("PRAXIS_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
 
     if json {
         tracing_subscriber::fmt().json().with_env_filter(env_filter).init();

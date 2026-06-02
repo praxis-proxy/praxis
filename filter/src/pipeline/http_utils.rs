@@ -182,3 +182,122 @@ pub(super) async fn run_response_filter(
         },
     }
 }
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "tests"
+)]
+mod tests {
+    use bytes::Bytes;
+
+    use super::*;
+
+    #[test]
+    fn accumulate_body_bytes_some_adds_to_counter() {
+        let mut counter = 0u64;
+        let body = Some(Bytes::from_static(b"hello"));
+        accumulate_body_bytes(&mut counter, &body);
+        assert_eq!(counter, 5, "counter should equal byte length of body");
+    }
+
+    #[test]
+    fn accumulate_body_bytes_none_does_not_change_counter() {
+        let mut counter = 42u64;
+        accumulate_body_bytes(&mut counter, &None);
+        assert_eq!(counter, 42, "counter should remain unchanged for None body");
+    }
+
+    #[test]
+    fn accumulate_body_bytes_multiple_sums_correctly() {
+        let mut counter = 0u64;
+        accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"abc")));
+        accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"defgh")));
+        accumulate_body_bytes(&mut counter, &None);
+        accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"ij")));
+        assert_eq!(counter, 10, "counter should be sum of all Some chunk lengths");
+    }
+
+    #[test]
+    fn released_or_continue_true_returns_release() {
+        assert!(
+            matches!(released_or_continue(true), FilterAction::Release),
+            "true should produce FilterAction::Release"
+        );
+    }
+
+    #[test]
+    fn released_or_continue_false_returns_continue() {
+        assert!(
+            matches!(released_or_continue(false), FilterAction::Continue),
+            "false should produce FilterAction::Continue"
+        );
+    }
+
+    #[test]
+    fn dispatch_body_result_ok_continue() {
+        let outcome = dispatch_body_result(Ok(FilterAction::Continue), "test", "request", FailureMode::Closed).unwrap();
+        assert!(
+            matches!(outcome, BodyFilterOutcome::Continue),
+            "Ok(Continue) should produce BodyFilterOutcome::Continue"
+        );
+    }
+
+    #[test]
+    fn dispatch_body_result_ok_release() {
+        let outcome = dispatch_body_result(Ok(FilterAction::Release), "test", "request", FailureMode::Closed).unwrap();
+        assert!(
+            matches!(outcome, BodyFilterOutcome::Released),
+            "Ok(Release) should produce BodyFilterOutcome::Released"
+        );
+    }
+
+    #[test]
+    fn dispatch_body_result_ok_reject() {
+        let rejection = Rejection::status(429);
+        let outcome = dispatch_body_result(
+            Ok(FilterAction::Reject(rejection)),
+            "test",
+            "request",
+            FailureMode::Closed,
+        )
+        .unwrap();
+        assert!(
+            matches!(outcome, BodyFilterOutcome::Rejected(ref r) if r.status == 429),
+            "Ok(Reject(429)) should produce BodyFilterOutcome::Rejected with status 429"
+        );
+    }
+
+    #[test]
+    fn dispatch_body_result_ok_body_done() {
+        let outcome = dispatch_body_result(Ok(FilterAction::BodyDone), "test", "request", FailureMode::Closed).unwrap();
+        assert!(
+            matches!(outcome, BodyFilterOutcome::BodyDone),
+            "Ok(BodyDone) should produce BodyFilterOutcome::BodyDone"
+        );
+    }
+
+    #[test]
+    fn dispatch_body_result_err_failure_mode_open_swallows_error() {
+        let err: FilterError = "test error".into();
+        let outcome = dispatch_body_result(Err(err), "test", "request", FailureMode::Open).unwrap();
+        assert!(
+            matches!(outcome, BodyFilterOutcome::Continue),
+            "error with FailureMode::Open should produce BodyFilterOutcome::Continue"
+        );
+    }
+
+    #[test]
+    fn dispatch_body_result_err_failure_mode_closed_propagates() {
+        let err: FilterError = "test error".into();
+        let result = dispatch_body_result(Err(err), "test", "request", FailureMode::Closed);
+        assert!(result.is_err(), "error with FailureMode::Closed should propagate");
+    }
+}

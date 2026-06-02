@@ -44,3 +44,63 @@ pub(crate) fn build_weighted_endpoints(cluster: &Cluster) -> Vec<WeightedEndpoin
         })
         .collect()
 }
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "tests"
+)]
+mod tests {
+    use praxis_core::config::Endpoint;
+
+    use super::*;
+
+    #[test]
+    fn build_weighted_endpoints_three_endpoints() {
+        let cluster = Cluster::with_defaults(
+            "test",
+            vec![
+                Endpoint::from("10.0.0.1:80"),
+                Endpoint::Weighted {
+                    address: "10.0.0.2:80".to_owned(),
+                    weight: 3,
+                },
+                Endpoint::from("10.0.0.3:80"),
+            ],
+        );
+        let weighted = build_weighted_endpoints(&cluster);
+        assert_eq!(
+            weighted.len(),
+            3,
+            "should produce one WeightedEndpoint per cluster endpoint"
+        );
+        assert_endpoint(&weighted[0], "10.0.0.1:80", 1, 0);
+        assert_endpoint(&weighted[1], "10.0.0.2:80", 3, 1);
+        assert_endpoint(&weighted[2], "10.0.0.3:80", 1, 2);
+    }
+
+    #[test]
+    fn build_weighted_endpoints_empty_cluster() {
+        let cluster = Cluster::with_defaults("empty", vec![]);
+        let weighted = build_weighted_endpoints(&cluster);
+        assert!(weighted.is_empty(), "empty cluster should produce empty vec");
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test Utilities
+    // ---------------------------------------------------------------------------
+
+    /// Assert a [`WeightedEndpoint`] has the expected address, weight, and index.
+    fn assert_endpoint(ep: &WeightedEndpoint, addr: &str, weight: u32, index: usize) {
+        assert_eq!(ep.address.as_ref(), addr, "address mismatch for index {index}");
+        assert_eq!(ep.weight, weight, "weight mismatch for {addr}");
+        assert_eq!(ep.index, index, "index mismatch for {addr}");
+    }
+}

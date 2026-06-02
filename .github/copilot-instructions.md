@@ -22,8 +22,8 @@ Praxis is a high-performance proxy server.
 
 See the following before reviewing:
 
-* `docs/architecture.md`,
-* `docs/conventions.md`
+* `docs/architecture/overview.md`,
+* `docs/developing/conventions.md`
 * All other `docs/`
 * `.claude/CLAUDE.md`
 
@@ -35,4 +35,4 @@ To make sure you understand the architecture, conventions, and preferences.
 2. **Testing**: coverage of new or changed behavior
 3. **Security**: input validation, header leakage
 4. **Performance**: hot-path allocations, unnecessary clones
-5. **Conventions**: `docs/conventions.md` compliance
+5. **Conventions**: `docs/developing/conventions.md` compliance

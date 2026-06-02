@@ -43,7 +43,7 @@ pub struct PingoraRequestCtx {
     /// header can reflect the protocol the client used.
     pub client_http_version: Option<http::Version>,
 
-    /// Name of the cluster selected by the router filter.
+    /// Name of the cluster selected by a cluster-selecting filter.
     pub cluster: Option<Arc<str>>,
 
     /// Whether the downstream connection uses TLS.
@@ -68,10 +68,32 @@ pub struct PingoraRequestCtx {
     /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
     pub filter_metadata: std::collections::HashMap<String, String>,
 
+    /// Post-mutation request body length produced during `StreamBuffer`
+    /// pre-read.
+    ///
+    /// Stored so `upstream_request_filter` can repair request framing
+    /// before Pingora sends headers to the backend.
+    pub mutated_request_body_len: Option<usize>,
+
+    /// Filter results from body pre-read. Carried into the next
+    /// [`HttpFilterContext`] so that branch chains attached to the
+    /// first `on_request` filter can evaluate body-derived results.
+    ///
+    /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+    pub filter_results: std::collections::HashMap<&'static str, praxis_filter::FilterResultSet>,
+
     /// Cluster name snapshot retained for metrics emission in the
     /// `logging()` hook, after `cluster` has been consumed by filter
     /// context construction.
     pub metrics_cluster: Option<Arc<str>>,
+
+    /// Pre-built [`SharedString`] for the metrics cluster label.
+    ///
+    /// Cached when `metrics_cluster` is set so that
+    /// `emit_request_metrics` avoids an `Arc` clone per request.
+    ///
+    /// [`SharedString`]: ::metrics::SharedString
+    pub metrics_cluster_shared: Option<::metrics::SharedString>,
 
     /// Pre-read body chunks (`StreamBuffer` mode). When `StreamBuffer` is
     /// active, the body is read during `request_filter` (before upstream
@@ -178,7 +200,7 @@ macro_rules! filter_context {
             request_headers_to_remove: Vec::new(),
             request_headers_to_set: Vec::new(),
             filter_metadata: std::mem::take(&mut $ctx.filter_metadata),
-            filter_results: std::collections::HashMap::new(),
+            filter_results: std::mem::take(&mut $ctx.filter_results),
             health_registry: $pipeline.health_registry(),
             kv_stores: $pipeline.kv_stores(),
             request: $request,
@@ -266,6 +288,10 @@ impl PingoraRequestCtx {
 }
 
 impl Default for PingoraRequestCtx {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "context default enumerates all lifecycle fields explicitly"
+    )]
     fn default() -> Self {
         Self {
             _connection_permit: None,
@@ -275,7 +301,10 @@ impl Default for PingoraRequestCtx {
             connection_upgraded: false,
             downstream_tls: false,
             filter_metadata: std::collections::HashMap::new(),
+            mutated_request_body_len: None,
+            filter_results: std::collections::HashMap::new(),
             metrics_cluster: None,
+            metrics_cluster_shared: None,
             pre_read_body: None,
             request_body_buffer: None,
             request_body_bytes: 0,

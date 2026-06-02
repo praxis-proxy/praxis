@@ -79,8 +79,9 @@ impl CachedCaCerts {
 ///
 /// ```
 /// use praxis_tls::CachedClientCert;
+/// use zeroize::Zeroizing;
 ///
-/// let cached = CachedClientCert::new(vec![vec![1, 2, 3]], vec![4, 5, 6]);
+/// let cached = CachedClientCert::new(vec![vec![1, 2, 3]], Zeroizing::new(vec![4, 5, 6]));
 /// assert_eq!(cached.cert_der().len(), 1);
 /// assert_eq!(cached.key_der(), &[4, 5, 6]);
 /// ```
@@ -97,11 +98,8 @@ pub struct CachedClientCert {
 
 impl CachedClientCert {
     /// Wrap pre-parsed DER certificate chain and private key.
-    pub fn new(cert_der: Vec<Vec<u8>>, key_der: Vec<u8>) -> Self {
-        Self {
-            cert_der,
-            key_der: Zeroizing::new(key_der),
-        }
+    pub fn new(cert_der: Vec<Vec<u8>>, key_der: Zeroizing<Vec<u8>>) -> Self {
+        Self { cert_der, key_der }
     }
 
     /// Borrow the DER-encoded certificate chain.
@@ -126,6 +124,14 @@ impl CachedClientCert {
         tracing::debug!(cert_path, key_path, "loading client certificate");
 
         let cert_der = parse_cert_pem(cert_path)?;
+
+        if cert_der.is_empty() {
+            return Err(TlsError::FileLoadError {
+                path: cert_path.to_owned(),
+                detail: "no certificates found in client cert file".to_owned(),
+            });
+        }
+
         let key_der = parse_key_pem(key_path)?;
 
         tracing::info!(cert_path, "cached client certificate");
@@ -244,8 +250,8 @@ fn parse_cert_pem(cert_path: &str) -> Result<Vec<Vec<u8>>, TlsError> {
 }
 
 /// Read a PEM private key file and return the DER-encoded key bytes.
-fn parse_key_pem(key_path: &str) -> Result<Vec<u8>, TlsError> {
-    let pem = read_pem_file(key_path)?;
+fn parse_key_pem(key_path: &str) -> Result<Zeroizing<Vec<u8>>, TlsError> {
+    let pem = Zeroizing::new(read_pem_file(key_path)?);
     rustls_pemfile::private_key(&mut &pem[..])
         .map_err(|e| TlsError::FileLoadError {
             path: key_path.to_owned(),
@@ -255,7 +261,7 @@ fn parse_key_pem(key_path: &str) -> Result<Vec<u8>, TlsError> {
             path: key_path.to_owned(),
             detail: "no private key found".to_owned(),
         })
-        .map(|k| k.secret_der().to_vec())
+        .map(|k| Zeroizing::new(k.secret_der().to_vec()))
 }
 
 /// Read a file into a byte vector, mapping I/O errors to [`TlsError`].
@@ -291,10 +297,10 @@ mod tests {
     #[test]
     fn cached_client_cert_stores_der() {
         let cert_der = vec![vec![10, 20]];
-        let key_der = vec![30, 40];
+        let key_der = Zeroizing::new(vec![30, 40]);
         let cached = CachedClientCert::new(cert_der.clone(), key_der.clone());
         assert_eq!(cached.cert_der().len(), 1, "should store one client cert");
-        assert_eq!(cached.key_der(), &key_der, "key DER should match");
+        assert_eq!(cached.key_der(), &*key_der, "key DER should match");
     }
 
     #[test]
@@ -336,6 +342,22 @@ mod tests {
 
         let err = CachedClientCert::from_pem_files(cert_path.to_str().unwrap(), key_path.to_str().unwrap());
         assert!(err.is_err(), "empty key PEM should fail");
+    }
+
+    #[test]
+    fn cached_client_cert_from_pem_empty_cert() {
+        let pair = gen_test_certs();
+        let dir = tempfile::TempDir::new().unwrap();
+        let empty_cert = dir.path().join("empty.pem");
+        std::fs::write(&empty_cert, "").unwrap();
+
+        let err = CachedClientCert::from_pem_files(empty_cert.to_str().unwrap(), pair.key_path.to_str().unwrap());
+        assert!(err.is_err(), "empty cert PEM should fail");
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("no certificates found"),
+            "error should mention missing certificates: {msg}"
+        );
     }
 
     #[test]
@@ -456,7 +478,7 @@ mod tests {
 
     #[test]
     fn cached_client_cert_clone() {
-        let cached = CachedClientCert::new(vec![vec![10]], vec![20]);
+        let cached = CachedClientCert::new(vec![vec![10]], Zeroizing::new(vec![20]));
         let cloned = cached.clone();
         assert_eq!(cached.cert_der(), cloned.cert_der(), "cloned cert DER should match");
         assert_eq!(cached.key_der(), cloned.key_der(), "cloned key DER should match");

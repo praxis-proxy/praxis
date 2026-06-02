@@ -200,6 +200,7 @@ impl ProxyHttp for PingoraHttpHandler {
         upstream_request::strip_hop_by_hop(upstream_request, is_upgrade);
         upstream_request::strip_reserved_internal(upstream_request);
         upstream_request::apply_rewritten_path(upstream_request, ctx)?;
+        upstream_request::apply_mutated_content_length(upstream_request, ctx);
         via::append_request_via(upstream_request, http::Version::HTTP_11);
         Ok(())
     }

@@ -184,7 +184,7 @@ impl HttpFilter for PromptEnrichFilter {
 }
 
 // -----------------------------------------------------------------------------
-// Private Helpers
+// Private Utilities
 // -----------------------------------------------------------------------------
 
 /// Map [`InvalidBodyBehavior`] to the appropriate [`FilterAction`].

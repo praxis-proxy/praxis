@@ -14,6 +14,7 @@ repository.
 ## Quick Reference
 
 ```console
+make setup-hooks    # install git pre-commit hook (fmt + lint)
 make build          # workspace build (includes benches + fuzz)
 make test           # all tests (downloads h2spec if needed)
 make fmt            # format with nightly rustfmt
@@ -44,12 +45,12 @@ make test-resilience    # load, failure recovery, throughput
 make test-smoke         # quick startup and round-trip sanity
 ```
 
-See `docs/development.md` for the full command
-reference and dev tool usage.
+See `docs/developing/getting-started.md` for the full
+command reference and dev tool usage.
 
 ## Architecture
 
-See `docs/architecture.md` for the full design.
+See `docs/architecture/overview.md` for the full design.
 
 **Crate dependency flow:**
 
@@ -87,10 +88,10 @@ server -> protocol -> filter -> core -> tls
 
 ## Conventions
 
-See `docs/conventions.md` for the full coding style
-guide. Key points:
+See `docs/developing/conventions.md` for the full
+coding style guide. Key points:
 
-- `#![deny(unsafe_code)]` in all crates
+- `unsafe_code = "deny"` in workspace lints
 - All items (public and private) require `///` doc
   comments; enforced by `missing_docs` and
   `missing_docs_in_private_items` lints
@@ -114,7 +115,7 @@ guide. Key points:
   config structs; `#[serde(try_from)]` for
   constrained numerics; `#[serde(default)]`
   instead of `Option<T>` with `unwrap_or`.
-  See `docs/conventions.md` "Type Design".
+  See `docs/developing/type-design.md`.
   (e.g. `10_485_760; // 10 MiB`)
 
 ## Workspace Lints
@@ -170,13 +171,14 @@ exchange). Parse-only validation is not sufficient;
 every example must prove its feature works with all
 configured variants.
 
-See `docs/conventions.md` for full test conventions
-(no inline comments in test bodies, no doc comments
-on test functions, full-width separators only).
+See `docs/developing/conventions.md` for full test
+conventions (no inline comments in test bodies, no
+doc comments on test functions, full-width separators
+only).
 
 ## Adding a Filter
 
-See `docs/extensions.md` for the full guide.
+See `docs/filters/extensions.md` for the full guide.
 
 1. Create module under
    `filter/src/builtins/<protocol>/<category>/`
@@ -222,7 +224,9 @@ limits).
 
 Filters live under
 `filter/src/builtins/<protocol>/<category>/`.
-See `docs/filters.md` for the full filter reference.
+See `docs/filters/README.md` for the filter system
+documentation and `docs/operating/filter-reference.md`
+for built-in filter configurations.
 
 Categories: `ai`, `observability`,
 `payload_processing`, `security`,
@@ -249,7 +253,7 @@ CI workflows that post PR comments must use the
 
 ## Pingora Boundary
 
-See `docs/security-hardening.md` for details.
+See `docs/operating/security-hardening.md` for details.
 
 Pingora handles: request smuggling prevention, H2
 backpressure, connection pool safety, HTTP/1.1

@@ -36,6 +36,10 @@ pub enum SimpleStrategy {
 
     /// Pick the endpoint with the fewest active in-flight requests.
     LeastConnections,
+
+    /// Sample two random endpoints; pick the less loaded one.
+    #[serde(rename = "p2c")]
+    PowerOfTwoChoices,
 }
 
 /// Load-balancing strategies that carry parameters.
@@ -117,6 +121,17 @@ consistent_hash:
                 header: Some("X-User-Id".into()),
             })),
             "should parse consistent_hash with header"
+        );
+    }
+
+    #[test]
+    fn load_balancer_strategy_parses_p2c() {
+        let yaml = "p2c";
+        let strategy: LoadBalancerStrategy = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            strategy,
+            LoadBalancerStrategy::Simple(SimpleStrategy::PowerOfTwoChoices),
+            "should parse 'p2c' string"
         );
     }
 

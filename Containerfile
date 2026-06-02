@@ -37,7 +37,7 @@ COPY filter/proto/proto filter/proto/proto
 
 # Strip workspace members not needed for the praxis binary
 # so we don't need their Cargo.toml files.
-RUN sed -i '/xtask/d; /benchmarks/d; /tests\//d' Cargo.toml
+RUN sed -i '/xtask/d; /benchmarks/d; /tests\//d; /filter\/ext-proc/d' Cargo.toml
 RUN mkdir -p core/src \
     filter/src \
     filter/proto/src \

@@ -4,6 +4,10 @@ discussion: # add a link here
 status: proposed
 authors:
   - # add all authors github handles here
+graduation_criteria:
+  - # conditions that must hold before status advances
+stakeholders:
+  - # add key stakeholder github handles here
 ---
 
 # Title

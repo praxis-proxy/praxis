@@ -236,47 +236,154 @@ pub struct ScenarioResults {
 
 impl ScenarioResults {
     /// Compute the median result from the collected runs.
-    #[allow(clippy::indexing_slicing, reason = "guarded")]
+    ///
+    /// Computes independent per-metric medians rather than selecting
+    /// a single run. This prevents a high-p99 outlier run from also
+    /// dragging throughput down (or vice versa).
+    ///
+    /// ```
+    /// use benchmarks::result::{
+    ///     BenchmarkResult, Environment, ErrorMetrics, LatencyMetrics, ScenarioResults,
+    ///     ThroughputMetrics,
+    /// };
+    ///
+    /// let mut results = ScenarioResults {
+    ///     scenario: "test".into(),
+    ///     proxy: "praxis".into(),
+    ///     runs: vec![
+    ///         make_result(0.020, 5000.0),
+    ///         make_result(0.010, 10_000.0),
+    ///         make_result(0.015, 7500.0),
+    ///     ],
+    ///     median: None,
+    /// };
+    /// results.compute_median();
+    /// let m = results.median.as_ref().unwrap();
+    /// assert!((m.latency.p99 - 0.015).abs() < 1e-9);
+    /// assert!((m.throughput.requests_per_sec - 7500.0).abs() < 1e-9);
+    ///
+    /// fn make_result(p99: f64, rps: f64) -> BenchmarkResult {
+    ///     BenchmarkResult {
+    ///         commit: "abc".into(),
+    ///         timestamp: "2026-01-01T00:00:00Z".into(),
+    ///         scenario: "test".into(),
+    ///         proxy: "praxis".into(),
+    ///         tool: "vegeta".into(),
+    ///         environment: Environment {
+    ///             cpu: "test".into(),
+    ///             os: "linux".into(),
+    ///         },
+    ///         latency: LatencyMetrics {
+    ///             min: 0.001,
+    ///             max: 0.1,
+    ///             mean: 0.01,
+    ///             p50: 0.005,
+    ///             p90: 0.02,
+    ///             p95: 0.03,
+    ///             p99,
+    ///             p99_9: 0.09,
+    ///         },
+    ///         throughput: ThroughputMetrics {
+    ///             requests_per_sec: rps,
+    ///             bytes_per_sec: rps * 100.0,
+    ///         },
+    ///         resource: None,
+    ///         errors: ErrorMetrics {
+    ///             non_2xx: Some(0),
+    ///             timeouts: 0,
+    ///             connect_failures: 0,
+    ///         },
+    ///         raw_report: None,
+    ///     }
+    /// }
+    /// ```
     pub fn compute_median(&mut self) {
-        if self.runs.is_empty() {
+        let Some(first) = self.runs.first() else {
             self.median = None;
             return;
-        }
+        };
 
-        let mut indices: Vec<usize> = (0..self.runs.len()).collect();
-        indices.sort_by(|&a, &b| {
-            self.runs[a]
-                .latency
-                .p99
-                .partial_cmp(&self.runs[b].latency.p99)
-                .unwrap_or(std::cmp::Ordering::Equal)
+        self.median = Some(BenchmarkResult {
+            commit: first.commit.clone(),
+            timestamp: first.timestamp.clone(),
+            scenario: first.scenario.clone(),
+            proxy: first.proxy.clone(),
+            tool: first.tool.clone(),
+            environment: first.environment.clone(),
+            latency: median_latency(&self.runs),
+            throughput: median_throughput(&self.runs),
+            resource: None,
+            errors: ErrorMetrics {
+                non_2xx: None,
+                timeouts: 0,
+                connect_failures: 0,
+            },
+            raw_report: None,
         });
+    }
 
-        let mid = indices.len() / 2;
-        self.median = Some(self.runs[indices[mid]].clone());
+    /// Check whether the runs are stable enough for meaningful comparison.
+    ///
+    /// Returns `true` if the coefficient of variation for both p99
+    /// latency and throughput is below `max_cv`. When `false`, the
+    /// inter-run variance is too high for the comparison to be
+    /// trustworthy (e.g. noisy CI runner).
+    pub fn is_stable(&self, max_cv: f64) -> bool {
+        let p99s: Vec<f64> = self.runs.iter().map(|r| r.latency.p99).collect();
+        let rpss: Vec<f64> = self.runs.iter().map(|r| r.throughput.requests_per_sec).collect();
+        let p99_cv = coefficient_of_variation(&p99s);
+        let rps_cv = coefficient_of_variation(&rpss);
+        tracing::debug!(p99_cv, rps_cv, max_cv, "stability check");
+        p99_cv <= max_cv && rps_cv <= max_cv
     }
 
     /// Compare these results against a baseline, producing a [`ComparativeResults`] that indicates regressions.
-    pub fn compare(&self, baseline: &ScenarioResults, threshold: f64) -> ComparativeResults {
-        let (current_p99, current_rps) = extract_metrics(&self.median);
-        let (baseline_p99, baseline_rps) = extract_metrics(&baseline.median);
+    ///
+    /// Uses AND-gated regression: both p99 latency must increase AND
+    /// throughput must decrease beyond `threshold` to flag a
+    /// regression. Isolated metric movement is treated as noise.
+    ///
+    /// If `stability_cv` is `Some(max_cv)`, runs with a coefficient
+    /// of variation exceeding `max_cv` are marked as skipped rather
+    /// than evaluated.
+    pub fn compare(&self, baseline: &ScenarioResults, threshold: f64, stability_cv: Option<f64>) -> ComparativeResults {
+        if let Some(max_cv) = stability_cv
+            && !self.is_stable(max_cv)
+        {
+            tracing::debug!(scenario = %self.scenario, "skipping unstable scenario");
+            return self.skipped_result();
+        }
 
-        let p99_change = relative_change(current_p99, baseline_p99);
-        let throughput_change = relative_change(current_rps, baseline_rps);
+        let (cur_p99, cur_rps) = extract_metrics(&self.median);
+        let (base_p99, base_rps) = extract_metrics(&baseline.median);
+        let p99_change = relative_change(cur_p99, base_p99);
+        let throughput_change = relative_change(cur_rps, base_rps);
 
-        let regressed = p99_change > threshold || throughput_change < -threshold;
-        tracing::debug!(p99_change, throughput_change, threshold, regressed, "regression check");
-
+        let regressed = p99_change > threshold && throughput_change < -threshold;
         let improved = p99_change < -threshold && throughput_change > threshold;
-        tracing::debug!(improved, "improvement check");
+        tracing::debug!(p99_change, throughput_change, threshold, regressed, improved);
 
         ComparativeResults {
             scenario: self.scenario.clone(),
             proxy: self.proxy.clone(),
             regressed,
             improved,
+            skipped: false,
             p99_latency_change: p99_change,
             throughput_change,
+        }
+    }
+
+    /// Build a [`ComparativeResults`] indicating the scenario was skipped.
+    fn skipped_result(&self) -> ComparativeResults {
+        ComparativeResults {
+            scenario: self.scenario.clone(),
+            proxy: self.proxy.clone(),
+            regressed: false,
+            improved: false,
+            skipped: true,
+            p99_latency_change: 0.0,
+            throughput_change: 0.0,
         }
     }
 
@@ -303,6 +410,28 @@ impl ScenarioResults {
     }
 }
 
+/// Compute per-metric median latency across runs.
+fn median_latency(runs: &[BenchmarkResult]) -> LatencyMetrics {
+    LatencyMetrics {
+        min: f64_median(runs.iter().map(|r| r.latency.min)),
+        max: f64_median(runs.iter().map(|r| r.latency.max)),
+        mean: f64_median(runs.iter().map(|r| r.latency.mean)),
+        p50: f64_median(runs.iter().map(|r| r.latency.p50)),
+        p90: f64_median(runs.iter().map(|r| r.latency.p90)),
+        p95: f64_median(runs.iter().map(|r| r.latency.p95)),
+        p99: f64_median(runs.iter().map(|r| r.latency.p99)),
+        p99_9: f64_median(runs.iter().map(|r| r.latency.p99_9)),
+    }
+}
+
+/// Compute per-metric median throughput across runs.
+fn median_throughput(runs: &[BenchmarkResult]) -> ThroughputMetrics {
+    ThroughputMetrics {
+        requests_per_sec: f64_median(runs.iter().map(|r| r.throughput.requests_per_sec)),
+        bytes_per_sec: f64_median(runs.iter().map(|r| r.throughput.bytes_per_sec)),
+    }
+}
+
 /// Extract p99 and rps from a median result.
 fn extract_metrics(median: &Option<BenchmarkResult>) -> (f64, f64) {
     median
@@ -321,12 +450,53 @@ fn relative_change(current: f64, baseline: f64) -> f64 {
     }
 }
 
+/// Compute the median of an iterator of `f64` values.
+///
+/// ```
+/// use benchmarks::result::f64_median;
+///
+/// let m = f64_median([3.0, 1.0, 2.0].into_iter());
+/// assert!((m - 2.0).abs() < 1e-9);
+/// ```
+pub fn f64_median(values: impl Iterator<Item = f64>) -> f64 {
+    let mut v: Vec<f64> = values.collect();
+    if v.is_empty() {
+        return 0.0;
+    }
+    v.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    v.get(v.len() / 2).copied().unwrap_or(0.0)
+}
+
+/// Coefficient of variation (stddev / mean) for a slice of values.
+///
+/// Returns 0.0 for empty slices or zero-mean data.
+///
+/// ```
+/// use benchmarks::result::coefficient_of_variation;
+///
+/// let cv = coefficient_of_variation(&[100.0, 100.0, 100.0]);
+/// assert!(cv.abs() < 1e-9, "identical values have CV = 0");
+/// ```
+pub fn coefficient_of_variation(values: &[f64]) -> f64 {
+    if values.is_empty() {
+        return 0.0;
+    }
+    let n = f64::from(u32::try_from(values.len()).unwrap_or(u32::MAX));
+    let mean = values.iter().sum::<f64>() / n;
+    if mean.abs() < f64::EPSILON {
+        return 0.0;
+    }
+    let variance = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / n;
+    variance.sqrt() / mean
+}
+
 // -----------------------------------------------------------------------------
 // Comparative Results
 // -----------------------------------------------------------------------------
 
 /// Result of comparing two [`ScenarioResults`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(clippy::struct_excessive_bools, reason = "three independent boolean outcomes")]
 pub struct ComparativeResults {
     /// Scenario name.
     pub scenario: String,
@@ -339,6 +509,10 @@ pub struct ComparativeResults {
 
     /// Whether performance improved beyond the threshold.
     pub improved: bool,
+
+    /// Whether the comparison was skipped due to unstable measurements.
+    #[serde(default)]
+    pub skipped: bool,
 
     /// Percentage change in p99 latency.
     pub p99_latency_change: f64,
@@ -396,7 +570,30 @@ pub fn current_environment() -> Environment {
 mod tests {
     use super::*;
     #[test]
-    fn compare_detects_p99_regression() {
+    fn compare_combined_regression_detected() {
+        let baseline = ScenarioResults {
+            scenario: "test".into(),
+            proxy: "praxis".into(),
+            runs: vec![],
+            median: Some(sample_result(0.010, 10_000.0)),
+        };
+        let current = ScenarioResults {
+            scenario: "test".into(),
+            proxy: "praxis".into(),
+            runs: vec![],
+            median: Some(sample_result(0.0115, 8_500.0)),
+        };
+
+        let cmp = current.compare(&baseline, 0.05, None);
+        assert!(cmp.regressed, "15% p99 increase + 15% throughput drop should regress");
+        assert!(
+            (cmp.p99_latency_change - 0.15).abs() < 0.01,
+            "p99 change should be ~15%"
+        );
+    }
+
+    #[test]
+    fn compare_p99_only_does_not_regress() {
         let baseline = ScenarioResults {
             scenario: "test".into(),
             proxy: "praxis".into(),
@@ -410,16 +607,12 @@ mod tests {
             median: Some(sample_result(0.0115, 10_000.0)),
         };
 
-        let cmp = current.compare(&baseline, 0.05);
-        assert!(cmp.regressed, "15% p99 increase should regress at 5% threshold");
-        assert!(
-            (cmp.p99_latency_change - 0.15).abs() < 0.01,
-            "p99 change should be ~15%"
-        );
+        let cmp = current.compare(&baseline, 0.05, None);
+        assert!(!cmp.regressed, "p99-only increase should not regress with AND gate");
     }
 
     #[test]
-    fn compare_detects_throughput_regression() {
+    fn compare_throughput_only_does_not_regress() {
         let baseline = ScenarioResults {
             scenario: "test".into(),
             proxy: "praxis".into(),
@@ -433,12 +626,8 @@ mod tests {
             median: Some(sample_result(0.010, 9_000.0)),
         };
 
-        let cmp = current.compare(&baseline, 0.05);
-        assert!(cmp.regressed, "10% throughput drop should regress at 5% threshold");
-        assert!(
-            (cmp.throughput_change - (-0.10)).abs() < 0.01,
-            "throughput change should be ~-10%"
-        );
+        let cmp = current.compare(&baseline, 0.05, None);
+        assert!(!cmp.regressed, "throughput-only drop should not regress with AND gate");
     }
 
     #[test]
@@ -456,7 +645,7 @@ mod tests {
             median: Some(sample_result(0.0103, 9_800.0)),
         };
 
-        let cmp = current.compare(&baseline, 0.05);
+        let cmp = current.compare(&baseline, 0.05, None);
         assert!(!cmp.regressed, "3% changes should not regress at 5% threshold");
         assert!(!cmp.improved, "3% changes should not count as improved");
     }
@@ -476,7 +665,7 @@ mod tests {
             median: Some(sample_result(0.008, 11_500.0)),
         };
 
-        let cmp = current.compare(&baseline, 0.05);
+        let cmp = current.compare(&baseline, 0.05, None);
         assert!(!cmp.regressed, "improvement should not be flagged as regression");
         assert!(
             cmp.improved,
@@ -499,13 +688,60 @@ mod tests {
             median: Some(sample_result(0.0097, 10_300.0)),
         };
 
-        let cmp = current.compare(&baseline, 0.05);
+        let cmp = current.compare(&baseline, 0.05, None);
         assert!(!cmp.regressed, "marginal change should not flag as regression");
         assert!(!cmp.improved, "3%/3% changes should not flag as improved at 5% bar");
     }
 
     #[test]
-    fn compute_median_selects_middle_run() {
+    fn compare_skips_unstable_runs() {
+        let baseline = ScenarioResults {
+            scenario: "test".into(),
+            proxy: "praxis".into(),
+            runs: vec![],
+            median: Some(sample_result(0.010, 10_000.0)),
+        };
+        let current = ScenarioResults {
+            scenario: "test".into(),
+            proxy: "praxis".into(),
+            runs: vec![
+                sample_result(0.005, 20_000.0),
+                sample_result(0.050, 5_000.0),
+                sample_result(0.010, 10_000.0),
+            ],
+            median: Some(sample_result(0.010, 10_000.0)),
+        };
+
+        let cmp = current.compare(&baseline, 0.05, Some(0.15));
+        assert!(cmp.skipped, "high-variance runs should be skipped");
+        assert!(!cmp.regressed, "skipped scenarios should not flag as regression");
+    }
+
+    #[test]
+    fn compare_stable_runs_not_skipped() {
+        let baseline = ScenarioResults {
+            scenario: "test".into(),
+            proxy: "praxis".into(),
+            runs: vec![],
+            median: Some(sample_result(0.010, 10_000.0)),
+        };
+        let current = ScenarioResults {
+            scenario: "test".into(),
+            proxy: "praxis".into(),
+            runs: vec![
+                sample_result(0.0100, 10_000.0),
+                sample_result(0.0101, 9_990.0),
+                sample_result(0.0099, 10_010.0),
+            ],
+            median: Some(sample_result(0.0100, 10_000.0)),
+        };
+
+        let cmp = current.compare(&baseline, 0.05, Some(0.15));
+        assert!(!cmp.skipped, "low-variance runs should not be skipped");
+    }
+
+    #[test]
+    fn compute_median_per_metric_independent() {
         let mut results = ScenarioResults {
             scenario: "test".into(),
             proxy: "praxis".into(),
@@ -518,9 +754,10 @@ mod tests {
         };
         results.compute_median();
         let median = results.median.as_ref().unwrap();
+        assert!((median.latency.p99 - 0.015).abs() < 1e-9, "median p99 should be 0.015");
         assert!(
-            (median.latency.p99 - 0.015).abs() < 1e-9,
-            "median should select the middle p99"
+            (median.throughput.requests_per_sec - 7500.0).abs() < 1e-9,
+            "median rps should be 7500.0"
         );
     }
 
@@ -597,6 +834,85 @@ mod tests {
         let (p99, rps) = extract_metrics(&Some(result));
         assert!((p99 - 0.025).abs() < 1e-9, "p99 should match result, got {p99}");
         assert!((rps - 5000.0).abs() < 1e-9, "rps should match result, got {rps}");
+    }
+
+    #[test]
+    fn f64_median_odd_count() {
+        let m = f64_median([3.0, 1.0, 2.0].into_iter());
+        assert!((m - 2.0).abs() < 1e-9, "median of [1,2,3] should be 2.0");
+    }
+
+    #[test]
+    fn f64_median_even_count() {
+        let m = f64_median([4.0, 1.0, 3.0, 2.0].into_iter());
+        assert!((m - 3.0).abs() < 1e-9, "median of 4 values should take upper-middle");
+    }
+
+    #[test]
+    fn f64_median_single() {
+        let m = f64_median([42.0].into_iter());
+        assert!((m - 42.0).abs() < 1e-9, "single value median should be itself");
+    }
+
+    #[test]
+    fn f64_median_empty() {
+        let m = f64_median(std::iter::empty());
+        assert!((m - 0.0).abs() < 1e-9, "empty iterator median should be 0.0");
+    }
+
+    #[test]
+    fn cv_identical_values() {
+        let cv = coefficient_of_variation(&[100.0, 100.0, 100.0]);
+        assert!(cv.abs() < 1e-9, "identical values should have CV = 0");
+    }
+
+    #[test]
+    fn cv_moderate_variance() {
+        let cv = coefficient_of_variation(&[90.0, 100.0, 110.0]);
+        assert!(cv > 0.05, "10% spread should produce noticeable CV, got {cv}");
+        assert!(cv < 0.15, "10% spread should not exceed 0.15, got {cv}");
+    }
+
+    #[test]
+    fn cv_high_variance() {
+        let cv = coefficient_of_variation(&[10.0, 50.0, 100.0]);
+        assert!(cv > 0.5, "high spread should produce large CV, got {cv}");
+    }
+
+    #[test]
+    fn cv_empty_slice() {
+        let cv = coefficient_of_variation(&[]);
+        assert!((cv - 0.0).abs() < 1e-9, "empty slice CV should be 0.0");
+    }
+
+    #[test]
+    fn is_stable_with_tight_values() {
+        let results = ScenarioResults {
+            scenario: "test".into(),
+            proxy: "praxis".into(),
+            runs: vec![
+                sample_result(0.0100, 10_000.0),
+                sample_result(0.0101, 9_990.0),
+                sample_result(0.0099, 10_010.0),
+            ],
+            median: None,
+        };
+        assert!(results.is_stable(0.15), "tight values should be stable");
+    }
+
+    #[test]
+    fn is_stable_with_wild_values() {
+        let results = ScenarioResults {
+            scenario: "test".into(),
+            proxy: "praxis".into(),
+            runs: vec![
+                sample_result(0.005, 20_000.0),
+                sample_result(0.050, 5_000.0),
+                sample_result(0.010, 10_000.0),
+            ],
+            median: None,
+        };
+        assert!(!results.is_stable(0.15), "wild swings should be unstable");
     }
 
     // ---------------------------------------------------------------------------

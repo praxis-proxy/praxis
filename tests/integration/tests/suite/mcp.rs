@@ -106,7 +106,7 @@ fn mcp_header_body_mismatch_rejected_with_id() {
     );
     let raw = http_send(proxy.addr(), &request);
 
-    assert_eq!(parse_status(&raw), 400);
+    assert_eq!(parse_status(&raw), 200, "JSON-RPC application errors use HTTP 200");
     let response_body = parse_body(&raw);
     let parsed: serde_json::Value = serde_json::from_str(&response_body).unwrap();
     assert_eq!(parsed["error"]["code"], -32001);
@@ -268,11 +268,7 @@ fn mcp_tools_call_missing_name_rejected() {
     let request = json_post_with_mcp_headers("/mcp/", body, &[]);
     let raw = http_send(proxy.addr(), &request);
 
-    assert_eq!(
-        parse_status(&raw),
-        400,
-        "tools/call without params.name should be rejected"
-    );
+    assert_eq!(parse_status(&raw), 200, "JSON-RPC InvalidParams uses HTTP 200 per spec");
     assert_invalid_params_response(&raw, &serde_json::json!(1));
 }
 
@@ -289,7 +285,7 @@ fn mcp_tools_call_missing_params_rejected() {
     let request = json_post_with_mcp_headers("/mcp/", body, &[]);
     let raw = http_send(proxy.addr(), &request);
 
-    assert_eq!(parse_status(&raw), 400, "tools/call without params should be rejected");
+    assert_eq!(parse_status(&raw), 200, "JSON-RPC InvalidParams uses HTTP 200 per spec");
     assert_invalid_params_response(&raw, &serde_json::json!(1));
 }
 
@@ -306,11 +302,7 @@ fn mcp_tools_call_non_string_name_rejected() {
     let request = json_post_with_mcp_headers("/mcp/", body, &[]);
     let raw = http_send(proxy.addr(), &request);
 
-    assert_eq!(
-        parse_status(&raw),
-        400,
-        "tools/call with non-string params.name should be rejected"
-    );
+    assert_eq!(parse_status(&raw), 200, "JSON-RPC InvalidParams uses HTTP 200 per spec");
     assert_invalid_params_response(&raw, &serde_json::json!("req\\1"));
 }
 
@@ -333,8 +325,8 @@ fn mcp_spurious_name_header_for_nameless_method_rejected() {
 
     assert_eq!(
         parse_status(&raw),
-        400,
-        "spurious Mcp-Name on nameless method should be rejected in default mode"
+        200,
+        "JSON-RPC HeaderMismatch uses HTTP 200 per spec"
     );
 }
 

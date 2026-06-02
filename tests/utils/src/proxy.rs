@@ -36,9 +36,10 @@ fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &Fi
 
     let mut entries = Vec::new();
     for chain_name in &listener.filter_chains {
-        if let Some(filters) = chains.get(chain_name.as_str()) {
-            entries.extend_from_slice(filters);
-        }
+        let filters = chains
+            .get(chain_name.as_str())
+            .unwrap_or_else(|| panic!("unknown filter chain: {chain_name}"));
+        entries.extend_from_slice(filters);
     }
 
     let mut pipeline = FilterPipeline::build_with_chains(&mut entries, registry, &chains).unwrap();

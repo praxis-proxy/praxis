@@ -117,7 +117,8 @@ fn extract_dep_version(line: &str) -> Option<(String, String)> {
 /// Check whether a version string has exactly three dot-separated
 /// components.
 fn is_three_component(version: &str) -> bool {
-    version.split('.').count() == 3
+    let base = version.split(['-', '+']).next().unwrap_or(version);
+    base.split('.').count() == 3
 }
 
 // -----------------------------------------------------------------------------
@@ -138,6 +139,9 @@ fn extract_quoted(s: &str) -> Option<String> {
 /// Expects the table form: `{ version = "1.2.3", ... }`.
 fn extract_table_version(s: &str) -> Option<String> {
     let idx = s.find("version")?;
+    if idx > 0 && s.as_bytes().get(idx - 1).is_some_and(u8::is_ascii_alphanumeric) {
+        return None;
+    }
     let after_key = s[idx + "version".len()..].trim_start();
     let after_eq = after_key.strip_prefix('=')?;
     extract_quoted(after_eq.trim_start())

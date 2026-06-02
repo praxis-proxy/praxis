@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Shane Utt
 
-#![deny(unsafe_code)]
 #![deny(unreachable_pub)]
 
 //! TLS configuration types for the Praxis proxy.

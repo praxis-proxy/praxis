@@ -53,6 +53,13 @@ pub(super) struct RouterConfig {
 
 /// Router-owned route config so JSON body aliasing stays out of
 /// [`praxis_core::config::Route`].
+///
+/// `deny_unknown_fields` is intentionally omitted because
+/// `#[serde(flatten)]` on `route` is incompatible with it.
+/// Unknown fields within the `Route` portion are validated by
+/// `Route`'s own `deny_unknown_fields`.
+///
+/// [`praxis_core::config::Route`]: praxis_core::config::Route
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct RouterRouteConfig {
     /// Generic path, host, header, and cluster routing fields.

@@ -1,0 +1,36 @@
+# P2C (Power of Two Choices) Load Balancing
+#
+# Samples two random endpoints and picks the one with fewer
+# in-flight requests. O(1) selection with near-optimal load
+# distribution. Preferred over least_connections for large
+# endpoint pools.
+#
+# Usage:
+#   cargo run -p praxis -- -c examples/configs/traffic-management/p2c.yaml
+#   curl http://localhost:8080/ &
+#   curl http://localhost:8080/ &
+#   curl http://localhost:8080/ &
+#   wait
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            load_balancer_strategy: p2c
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"
+              - "127.0.0.1:3003"

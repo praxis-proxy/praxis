@@ -64,6 +64,7 @@ CI will close PRs that:
 
 - Are missing a `discussion` or `issue` link
 - Have no `authors` listed
+- Have no `stakeholders` listed
 - Include the `How?` section in a new proposal
 
 [template]: proposals/template.md
@@ -91,6 +92,52 @@ nothing about them is guaranteed.
 After a soak period determined by maintainers a maintainer
 may promote the feature from experimental to released. The
 proposal status is updated to `released`.
+
+## Stakeholders
+
+Every proposal must list its stakeholders in the
+frontmatter. Stakeholders are people with a vested
+interest in the outcome of a proposal: maintainers,
+domain experts, downstream consumers, or anyone whose
+work is directly affected by the change. Stakeholders
+are expected to review and provide feedback throughout
+the proposal lifecycle.
+
+Authors are the people writing and driving the proposal.
+Stakeholders are the people who need to be kept informed
+and whose input is essential for the proposal to succeed.
+An author may also be a stakeholder.
+
+## Graduation Criteria
+
+Every proposal must list graduation criteria in the
+frontmatter. These are the conditions that must be
+satisfied before a maintainer will advance the
+proposal's status (e.g. `proposed` to `accepted`,
+`experimental` to `released`).
+
+Graduation criteria serve as a TODO list for the
+proposal. They capture important open items that
+must be resolved before the proposal can graduate,
+without necessarily blocking the current PR. If a
+concern is real but can be addressed in a follow-up
+iteration, add it as a graduation criterion and
+merge the PR. The criterion holds up the status
+change, not the pull request.
+
+Good graduation criteria are specific and
+verifiable:
+
+- "How? section with requirements and design"
+- "Benchmark results for candidate implementations"
+- "Storage trait API reviewed by stakeholders"
+
+Avoid vague criteria like "general agreement" or
+"feels ready."
+
+Released proposals should have an empty
+`graduation_criteria` list, since all criteria were
+met when the status advanced to `released`.
 
 ## Status Values
 

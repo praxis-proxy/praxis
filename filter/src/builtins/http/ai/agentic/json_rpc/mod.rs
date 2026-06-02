@@ -76,10 +76,10 @@ use crate::{
 /// assert_eq!(filter.name(), "json_rpc");
 /// ```
 pub struct JsonRpcFilter {
-    /// Maximum body bytes for `StreamBuffer`.
-    pub(crate) max_body_bytes: usize,
     /// Parsed filter configuration.
     config: JsonRpcConfig,
+    /// Maximum body bytes for `StreamBuffer`.
+    pub(crate) max_body_bytes: usize,
 }
 
 impl JsonRpcFilter {
@@ -94,8 +94,8 @@ impl JsonRpcFilter {
         let cfg: JsonRpcConfig = parse_filter_config("json_rpc", config)?;
         let (max_body_bytes, validated_config) = build_config(cfg)?;
         Ok(Box::new(Self {
-            max_body_bytes,
             config: validated_config,
+            max_body_bytes,
         }))
     }
 }
@@ -151,7 +151,7 @@ impl HttpFilter for JsonRpcFilter {
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Private Utilities
 // -----------------------------------------------------------------------------
 
 /// Handle JSON-RPC parse errors based on error type and `on_invalid` config.
@@ -254,7 +254,4 @@ fn set_id_results(
     Ok(())
 }
 
-/// Check whether a string contains control characters.
-pub(crate) fn contains_control_chars(s: &str) -> bool {
-    s.bytes().any(|b| (b < 0x20 && b != 0x09) || b == 0x7F)
-}
+use crate::builtins::http::value_safety::contains_control_chars;
