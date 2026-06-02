@@ -76,10 +76,10 @@ use crate::{
 /// assert_eq!(filter.name(), "json_rpc");
 /// ```
 pub struct JsonRpcFilter {
-    /// Maximum body bytes for `StreamBuffer`.
-    pub(crate) max_body_bytes: usize,
     /// Parsed filter configuration.
     config: JsonRpcConfig,
+    /// Maximum body bytes for `StreamBuffer`.
+    pub(crate) max_body_bytes: usize,
 }
 
 impl JsonRpcFilter {
@@ -94,8 +94,8 @@ impl JsonRpcFilter {
         let cfg: JsonRpcConfig = parse_filter_config("json_rpc", config)?;
         let (max_body_bytes, validated_config) = build_config(cfg)?;
         Ok(Box::new(Self {
-            max_body_bytes,
             config: validated_config,
+            max_body_bytes,
         }))
     }
 }

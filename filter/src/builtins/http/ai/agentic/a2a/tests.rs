@@ -23,7 +23,7 @@ use crate::{FilterAction, filter::HttpFilter};
 fn parse_minimal_config() {
     let yaml: serde_yaml::Value = serde_yaml::from_str("{}").unwrap();
     let filter = A2aFilter::from_config(&yaml).unwrap();
-    assert_eq!(filter.name(), "a2a");
+    assert_eq!(filter.name(), "a2a", "minimal config should produce a2a filter");
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn parse_full_config() {
     )
     .unwrap();
     let filter = A2aFilter::from_config(&yaml).unwrap();
-    assert_eq!(filter.name(), "a2a");
+    assert_eq!(filter.name(), "a2a", "full config should produce a2a filter");
 }
 
 #[test]
@@ -177,12 +177,36 @@ fn method_classification_is_case_sensitive() {
 
 #[test]
 fn family_classification_message_and_task() {
-    assert_eq!(A2aMethod::SendMessage.family(), A2aFamily::Message);
-    assert_eq!(A2aMethod::SendStreamingMessage.family(), A2aFamily::Message);
-    assert_eq!(A2aMethod::GetTask.family(), A2aFamily::Task);
-    assert_eq!(A2aMethod::ListTasks.family(), A2aFamily::Task);
-    assert_eq!(A2aMethod::CancelTask.family(), A2aFamily::Task);
-    assert_eq!(A2aMethod::SubscribeToTask.family(), A2aFamily::Task);
+    assert_eq!(
+        A2aMethod::SendMessage.family(),
+        A2aFamily::Message,
+        "SendMessage should be Message family"
+    );
+    assert_eq!(
+        A2aMethod::SendStreamingMessage.family(),
+        A2aFamily::Message,
+        "SendStreamingMessage should be Message family"
+    );
+    assert_eq!(
+        A2aMethod::GetTask.family(),
+        A2aFamily::Task,
+        "GetTask should be Task family"
+    );
+    assert_eq!(
+        A2aMethod::ListTasks.family(),
+        A2aFamily::Task,
+        "ListTasks should be Task family"
+    );
+    assert_eq!(
+        A2aMethod::CancelTask.family(),
+        A2aFamily::Task,
+        "CancelTask should be Task family"
+    );
+    assert_eq!(
+        A2aMethod::SubscribeToTask.family(),
+        A2aFamily::Task,
+        "SubscribeToTask should be Task family"
+    );
 }
 
 #[test]
@@ -393,7 +417,11 @@ fn no_original_method_for_canonical() {
     let json = serde_json::json!({"jsonrpc": "2.0", "method": "SendMessage"});
     let envelope = extract_a2a_envelope(&json, "SendMessage", &BTreeMap::new(), &HeaderMap::new());
 
-    assert_eq!(envelope.method, A2aMethod::SendMessage);
+    assert_eq!(
+        envelope.method,
+        A2aMethod::SendMessage,
+        "canonical method should resolve directly"
+    );
     assert_eq!(
         envelope.original_method, None,
         "canonical method should not set original_method"
@@ -458,9 +486,20 @@ async fn streaming_message_sets_streaming_true() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
-    assert_eq!(ctx.get_metadata("a2a.streaming"), Some("true"));
-    assert_eq!(ctx.get_metadata("a2a.family"), Some("message"));
+    assert!(
+        matches!(action, FilterAction::Release),
+        "streaming message should release"
+    );
+    assert_eq!(
+        ctx.get_metadata("a2a.streaming"),
+        Some("true"),
+        "streaming should be true"
+    );
+    assert_eq!(
+        ctx.get_metadata("a2a.family"),
+        Some("message"),
+        "family should be message"
+    );
 }
 
 #[tokio::test]
@@ -473,10 +512,18 @@ async fn get_task_extracts_task_id() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
-    assert_eq!(ctx.get_metadata("a2a.method"), Some("GetTask"));
-    assert_eq!(ctx.get_metadata("a2a.family"), Some("task"));
-    assert_eq!(ctx.get_metadata("a2a.task_id"), Some("task-999"));
+    assert!(matches!(action, FilterAction::Release), "GetTask should release");
+    assert_eq!(
+        ctx.get_metadata("a2a.method"),
+        Some("GetTask"),
+        "method should be GetTask"
+    );
+    assert_eq!(ctx.get_metadata("a2a.family"), Some("task"), "family should be task");
+    assert_eq!(
+        ctx.get_metadata("a2a.task_id"),
+        Some("task-999"),
+        "task_id should be extracted"
+    );
 }
 
 #[tokio::test]
@@ -490,9 +537,20 @@ async fn push_notification_config_extracts_task_id_from_params() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
-    assert_eq!(ctx.get_metadata("a2a.family"), Some("push_notification"));
-    assert_eq!(ctx.get_metadata("a2a.task_id"), Some("task-abc"));
+    assert!(
+        matches!(action, FilterAction::Release),
+        "push notification config should release"
+    );
+    assert_eq!(
+        ctx.get_metadata("a2a.family"),
+        Some("push_notification"),
+        "family should be push_notification"
+    );
+    assert_eq!(
+        ctx.get_metadata("a2a.task_id"),
+        Some("task-abc"),
+        "task_id should be extracted from params"
+    );
 }
 
 #[tokio::test]
@@ -532,8 +590,16 @@ async fn unknown_method_classifies_as_family_unknown() {
         matches!(action, FilterAction::Release),
         "unknown methods should still be classified, not rejected"
     );
-    assert_eq!(ctx.get_metadata("a2a.method"), Some("CustomUnknown"));
-    assert_eq!(ctx.get_metadata("a2a.family"), Some("unknown"));
+    assert_eq!(
+        ctx.get_metadata("a2a.method"),
+        Some("CustomUnknown"),
+        "unknown method should be promoted"
+    );
+    assert_eq!(
+        ctx.get_metadata("a2a.family"),
+        Some("unknown"),
+        "unknown method family should be unknown"
+    );
 }
 
 #[tokio::test]
@@ -547,7 +613,7 @@ async fn version_header_extracted_to_metadata() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(matches!(action, FilterAction::Release), "should release with version");
     assert_eq!(
         ctx.get_metadata("a2a.version"),
         Some("1.0"),
@@ -613,7 +679,7 @@ async fn on_request_is_noop() {
 
     let action = filter.on_request(&mut ctx).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Continue));
+    assert!(matches!(action, FilterAction::Continue), "on_request should be a no-op");
 }
 
 #[tokio::test]
@@ -700,7 +766,7 @@ async fn promotes_filter_results() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(matches!(action, FilterAction::Release), "should release on valid A2A");
 
     let results = ctx.filter_results.get("a2a").unwrap();
     assert_eq!(
@@ -736,7 +802,7 @@ async fn promotes_method_and_family_headers() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(matches!(action, FilterAction::Release), "should release on valid A2A");
 
     let headers: std::collections::HashMap<_, _> = ctx
         .extra_request_headers
@@ -744,8 +810,16 @@ async fn promotes_method_and_family_headers() {
         .map(|(k, v)| (k.as_ref(), v.as_str()))
         .collect();
 
-    assert_eq!(headers.get("x-praxis-a2a-method"), Some(&"SendStreamingMessage"));
-    assert_eq!(headers.get("x-praxis-a2a-family"), Some(&"message"));
+    assert_eq!(
+        headers.get("x-praxis-a2a-method"),
+        Some(&"SendStreamingMessage"),
+        "method header should be promoted"
+    );
+    assert_eq!(
+        headers.get("x-praxis-a2a-family"),
+        Some(&"message"),
+        "family header should be promoted"
+    );
 }
 
 #[tokio::test]
@@ -758,7 +832,7 @@ async fn promotes_kind_and_streaming_headers() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(matches!(action, FilterAction::Release), "should release on valid A2A");
 
     let headers: std::collections::HashMap<_, _> = ctx
         .extra_request_headers
@@ -766,8 +840,16 @@ async fn promotes_kind_and_streaming_headers() {
         .map(|(k, v)| (k.as_ref(), v.as_str()))
         .collect();
 
-    assert_eq!(headers.get("x-praxis-a2a-kind"), Some(&"request"));
-    assert_eq!(headers.get("x-praxis-a2a-streaming"), Some(&"true"));
+    assert_eq!(
+        headers.get("x-praxis-a2a-kind"),
+        Some(&"request"),
+        "kind header should be promoted"
+    );
+    assert_eq!(
+        headers.get("x-praxis-a2a-streaming"),
+        Some(&"true"),
+        "streaming header should be true"
+    );
 }
 
 #[tokio::test]
@@ -780,7 +862,7 @@ async fn notification_sets_kind() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(matches!(action, FilterAction::Release), "notification should release");
     assert_eq!(
         ctx.get_metadata("json_rpc.kind"),
         Some("notification"),
@@ -799,7 +881,7 @@ async fn version_promoted_to_headers_and_results() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(matches!(action, FilterAction::Release), "should release with version");
 
     let headers: std::collections::HashMap<_, _> = ctx
         .extra_request_headers
@@ -834,7 +916,10 @@ async fn control_char_method_skips_all_promotions() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(
+        matches!(action, FilterAction::Release),
+        "control char method should still release"
+    );
 
     let headers: std::collections::HashMap<_, _> = ctx
         .extra_request_headers
@@ -870,7 +955,10 @@ async fn control_char_task_id_skips_promotion() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(
+        matches!(action, FilterAction::Release),
+        "control char task ID should still release"
+    );
     assert_eq!(
         ctx.get_metadata("a2a.task_id"),
         None,
@@ -889,7 +977,10 @@ async fn too_long_task_id_not_promoted() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(
+        matches!(action, FilterAction::Release),
+        "too-long task ID should still release"
+    );
     assert_eq!(
         ctx.get_metadata("a2a.task_id"),
         None,
@@ -919,7 +1010,10 @@ async fn too_long_version_not_promoted() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(
+        matches!(action, FilterAction::Release),
+        "too-long version should still release"
+    );
     assert_eq!(
         ctx.get_metadata("a2a.version"),
         None,
@@ -997,7 +1091,10 @@ async fn canonical_method_stores_same_in_json_rpc_method() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(
+        matches!(action, FilterAction::Release),
+        "canonical method should release"
+    );
     assert_eq!(
         ctx.get_metadata("json_rpc.method"),
         Some("SendMessage"),
@@ -1026,11 +1123,12 @@ fn make_default_filter() -> A2aFilter {
 fn make_filter(yaml: &str) -> A2aFilter {
     let cfg: A2aConfig = serde_yaml::from_str(yaml).unwrap();
     let validated_config = build_config(cfg).unwrap();
-    let json_rpc_config = super::build_json_rpc_config(validated_config.max_body_bytes);
+    let max_body_bytes = validated_config.max_body_bytes;
+    let json_rpc_config = super::build_json_rpc_config(max_body_bytes);
     A2aFilter {
-        max_body_bytes: validated_config.max_body_bytes,
         config: validated_config,
         json_rpc_config,
+        max_body_bytes,
     }
 }
 

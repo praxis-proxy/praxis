@@ -54,20 +54,20 @@ pub(crate) enum InvalidJsonRpcBehavior {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct JsonRpcHeaders {
-    /// Header name for JSON-RPC method (e.g., `X-Json-Rpc-Method`).
-    pub method: Option<String>,
     /// Header name for JSON-RPC id (e.g., `X-Json-Rpc-Id`).
     pub id: Option<String>,
     /// Header name for JSON-RPC kind (e.g., `X-Json-Rpc-Kind`).
     pub kind: Option<String>,
+    /// Header name for JSON-RPC method (e.g., `X-Json-Rpc-Method`).
+    pub method: Option<String>,
 }
 
 impl Default for JsonRpcHeaders {
     fn default() -> Self {
         Self {
-            method: Some("X-Json-Rpc-Method".to_owned()),
             id: Some("X-Json-Rpc-Id".to_owned()),
             kind: Some("X-Json-Rpc-Kind".to_owned()),
+            method: Some("X-Json-Rpc-Method".to_owned()),
         }
     }
 }
@@ -82,21 +82,21 @@ impl Default for JsonRpcHeaders {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct JsonRpcConfig {
-    /// Maximum body size in bytes for `StreamBuffer`.
-    #[serde(default = "default_max_body_bytes")]
-    pub max_body_bytes: usize,
-
     /// Batch handling policy.
     #[serde(default)]
     pub batch_policy: BatchPolicy,
 
-    /// Invalid input handling behavior.
-    #[serde(default)]
-    pub on_invalid: InvalidJsonRpcBehavior,
-
     /// Header names for metadata promotion.
     #[serde(default)]
     pub headers: JsonRpcHeaders,
+
+    /// Maximum body size in bytes for `StreamBuffer`.
+    #[serde(default = "default_max_body_bytes")]
+    pub max_body_bytes: usize,
+
+    /// Invalid input handling behavior.
+    #[serde(default)]
+    pub on_invalid: InvalidJsonRpcBehavior,
 }
 
 /// Default max body bytes.

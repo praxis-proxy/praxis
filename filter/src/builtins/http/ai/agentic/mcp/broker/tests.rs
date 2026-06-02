@@ -1164,10 +1164,10 @@ servers:
     let (validated, catalog) = build_config(cfg).unwrap();
     let json_rpc_config = build_json_rpc_config(validated.max_body_bytes);
     McpBrokerFilter {
+        catalog,
         json_rpc_config,
         max_body_bytes: validated.max_body_bytes,
         public_path: validated.path.clone(),
-        catalog,
     }
 }
 

@@ -19,7 +19,7 @@ use crate::{FilterAction, filter::HttpFilter};
 fn parse_minimal_config() {
     let yaml: serde_yaml::Value = serde_yaml::from_str("{}").unwrap();
     let filter = McpFilter::from_config(&yaml).unwrap();
-    assert_eq!(filter.name(), "mcp");
+    assert_eq!(filter.name(), "mcp", "minimal config should produce mcp filter");
 }
 
 #[test]
@@ -40,14 +40,17 @@ fn parse_full_config() {
     )
     .unwrap();
     let filter = McpFilter::from_config(&yaml).unwrap();
-    assert_eq!(filter.name(), "mcp");
+    assert_eq!(filter.name(), "mcp", "full config should produce mcp filter");
 }
 
 #[test]
 fn reject_zero_max_body_bytes() {
     let yaml: serde_yaml::Value = serde_yaml::from_str("max_body_bytes: 0").unwrap();
     let err = McpFilter::from_config(&yaml).err().expect("should fail");
-    assert!(err.to_string().contains("must be greater than 0"));
+    assert!(
+        err.to_string().contains("must be greater than 0"),
+        "error should mention max_body_bytes constraint"
+    );
 }
 
 #[test]
@@ -60,7 +63,10 @@ fn reject_empty_header_names() {
     )
     .unwrap();
     let err = McpFilter::from_config(&yaml).err().expect("should fail");
-    assert!(err.to_string().contains("must not be empty"));
+    assert!(
+        err.to_string().contains("must not be empty"),
+        "error should mention empty header name"
+    );
 }
 
 #[test]
@@ -73,7 +79,10 @@ fn reject_invalid_header_names() {
     )
     .unwrap();
     let err = McpFilter::from_config(&yaml).err().expect("should fail");
-    assert!(err.to_string().contains("not a valid HTTP header name"));
+    assert!(
+        err.to_string().contains("not a valid HTTP header name"),
+        "error should mention invalid header name"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -90,9 +99,17 @@ async fn tools_call_extracts_method_and_name() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
-    assert_eq!(ctx.get_metadata("mcp.method"), Some("tools/call"));
-    assert_eq!(ctx.get_metadata("mcp.name"), Some("get_weather"));
+    assert!(matches!(action, FilterAction::Release), "tools/call should release");
+    assert_eq!(
+        ctx.get_metadata("mcp.method"),
+        Some("tools/call"),
+        "method should be tools/call"
+    );
+    assert_eq!(
+        ctx.get_metadata("mcp.name"),
+        Some("get_weather"),
+        "name should be get_weather"
+    );
 }
 
 #[tokio::test]
@@ -105,9 +122,17 @@ async fn initialize_extracts_protocol_version() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
-    assert_eq!(ctx.get_metadata("mcp.method"), Some("initialize"));
-    assert_eq!(ctx.get_metadata("mcp.protocol_version"), Some("2025-03-26"));
+    assert!(matches!(action, FilterAction::Release), "initialize should release");
+    assert_eq!(
+        ctx.get_metadata("mcp.method"),
+        Some("initialize"),
+        "method should be initialize"
+    );
+    assert_eq!(
+        ctx.get_metadata("mcp.protocol_version"),
+        Some("2025-03-26"),
+        "protocol version should be extracted"
+    );
 }
 
 #[tokio::test]
@@ -121,8 +146,15 @@ async fn session_id_detected() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
-    assert_eq!(ctx.get_metadata("mcp.session_id"), Some("gw-123"));
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should release with session id"
+    );
+    assert_eq!(
+        ctx.get_metadata("mcp.session_id"),
+        Some("gw-123"),
+        "session id should be detected"
+    );
 }
 
 #[tokio::test]
@@ -135,9 +167,17 @@ async fn resources_read_extracts_uri() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
-    assert_eq!(ctx.get_metadata("mcp.method"), Some("resources/read"));
-    assert_eq!(ctx.get_metadata("mcp.name"), Some("file:///data.csv"));
+    assert!(matches!(action, FilterAction::Release), "resources/read should release");
+    assert_eq!(
+        ctx.get_metadata("mcp.method"),
+        Some("resources/read"),
+        "method should be resources/read"
+    );
+    assert_eq!(
+        ctx.get_metadata("mcp.name"),
+        Some("file:///data.csv"),
+        "URI should be extracted as name"
+    );
 }
 
 #[tokio::test]
@@ -150,7 +190,7 @@ async fn non_json_rpc_continues_when_configured() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Continue));
+    assert!(matches!(action, FilterAction::Continue), "non-JSON-RPC should continue");
 }
 
 #[tokio::test]
@@ -163,7 +203,10 @@ async fn non_json_rpc_rejected_by_default() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Reject(_)));
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "non-JSON-RPC should be rejected by default"
+    );
 }
 
 #[tokio::test]
@@ -174,7 +217,7 @@ async fn on_request_is_noop() {
 
     let action = filter.on_request(&mut ctx).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Continue));
+    assert!(matches!(action, FilterAction::Continue), "on_request should be a no-op");
 }
 
 #[tokio::test]
@@ -186,13 +229,17 @@ async fn returns_continue_on_none_body() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Continue));
+    assert!(matches!(action, FilterAction::Continue), "None body should continue");
 }
 
 #[test]
 fn body_access_is_read_only() {
     let filter = make_default_filter();
-    assert_eq!(filter.request_body_access(), crate::body::BodyAccess::ReadOnly);
+    assert_eq!(
+        filter.request_body_access(),
+        crate::body::BodyAccess::ReadOnly,
+        "MCP filter should use ReadOnly body access"
+    );
 }
 
 #[test]
@@ -202,7 +249,8 @@ fn body_mode_is_stream_buffer() {
         filter.request_body_mode(),
         crate::body::BodyMode::StreamBuffer {
             max_bytes: Some(super::config::DEFAULT_MAX_BODY_BYTES)
-        }
+        },
+        "MCP filter should use StreamBuffer with default max bytes"
     );
 }
 
@@ -216,13 +264,25 @@ async fn promotes_filter_results() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(matches!(action, FilterAction::Release), "should release on valid MCP");
 
     let results = ctx.filter_results.get("mcp").unwrap();
-    assert_eq!(results.get("method"), Some("tools/call"));
-    assert_eq!(results.get("name"), Some("get_weather"));
-    assert_eq!(results.get("kind"), Some("request"));
-    assert_eq!(results.get("session_present"), Some("false"));
+    assert_eq!(
+        results.get("method"),
+        Some("tools/call"),
+        "method result should be tools/call"
+    );
+    assert_eq!(
+        results.get("name"),
+        Some("get_weather"),
+        "name result should be get_weather"
+    );
+    assert_eq!(results.get("kind"), Some("request"), "kind result should be request");
+    assert_eq!(
+        results.get("session_present"),
+        Some("false"),
+        "session_present should be false without session header"
+    );
 }
 
 #[tokio::test]
@@ -232,21 +292,21 @@ async fn promotes_internal_headers() {
     let req = make_mcp_request(&[]);
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let mut body = Some(Bytes::from(body_str));
-
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
-
-    assert!(matches!(action, FilterAction::Release));
-
+    assert!(matches!(action, FilterAction::Release), "should release on valid MCP");
     let headers: std::collections::HashMap<_, _> = ctx
         .extra_request_headers
         .iter()
         .map(|(k, v)| (k.as_ref(), v.as_str()))
         .collect();
-
-    assert_eq!(headers.get("x-praxis-mcp-method"), Some(&"tools/call"));
-    assert_eq!(headers.get("x-praxis-mcp-name"), Some(&"get_weather"));
-    assert_eq!(headers.get("x-praxis-mcp-kind"), Some(&"request"));
-    assert_eq!(headers.get("x-praxis-mcp-session-present"), Some(&"false"));
+    assert_eq!(headers.get("x-praxis-mcp-method"), Some(&"tools/call"), "method header");
+    assert_eq!(headers.get("x-praxis-mcp-name"), Some(&"get_weather"), "name header");
+    assert_eq!(headers.get("x-praxis-mcp-kind"), Some(&"request"), "kind header");
+    assert_eq!(
+        headers.get("x-praxis-mcp-session-present"),
+        Some(&"false"),
+        "session-present header"
+    );
 }
 
 #[tokio::test]
@@ -260,10 +320,17 @@ async fn session_present_true_in_results() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should release with session id"
+    );
 
     let results = ctx.filter_results.get("mcp").unwrap();
-    assert_eq!(results.get("session_present"), Some("true"));
+    assert_eq!(
+        results.get("session_present"),
+        Some("true"),
+        "session_present should be true when session header is present"
+    );
 }
 
 #[tokio::test]
@@ -276,9 +343,17 @@ async fn notification_sets_kind() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
-    assert_eq!(ctx.get_metadata("json_rpc.kind"), Some("notification"));
-    assert_eq!(ctx.get_metadata("mcp.method"), Some("notifications/initialized"));
+    assert!(matches!(action, FilterAction::Release), "notification should release");
+    assert_eq!(
+        ctx.get_metadata("json_rpc.kind"),
+        Some("notification"),
+        "kind should be notification"
+    );
+    assert_eq!(
+        ctx.get_metadata("mcp.method"),
+        Some("notifications/initialized"),
+        "method should be notifications/initialized"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -320,21 +395,30 @@ fn mcp_method_round_trips() {
 #[test]
 fn tools_call_requires_name() {
     use super::envelope::McpMethod;
-    assert!(McpMethod::ToolsCall.requires_name());
-    assert!(!McpMethod::ToolsCall.requires_uri());
+    assert!(McpMethod::ToolsCall.requires_name(), "tools/call should require name");
+    assert!(
+        !McpMethod::ToolsCall.requires_uri(),
+        "tools/call should not require URI"
+    );
 }
 
 #[test]
 fn resources_read_requires_uri() {
     use super::envelope::McpMethod;
-    assert!(McpMethod::ResourcesRead.requires_uri());
-    assert!(!McpMethod::ResourcesRead.requires_name());
+    assert!(
+        McpMethod::ResourcesRead.requires_uri(),
+        "resources/read should require URI"
+    );
+    assert!(
+        !McpMethod::ResourcesRead.requires_name(),
+        "resources/read should not require name"
+    );
 }
 
 #[test]
 fn prompts_get_requires_name() {
     use super::envelope::McpMethod;
-    assert!(McpMethod::PromptsGet.requires_name());
+    assert!(McpMethod::PromptsGet.requires_name(), "prompts/get should require name");
 }
 
 // -----------------------------------------------------------------------------
@@ -367,7 +451,10 @@ async fn complete_json_at_eos_releases() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(
+        matches!(action, FilterAction::Release),
+        "complete JSON at EOS should release"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -384,7 +471,10 @@ async fn control_char_method_skips_all_promotions() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(
+        matches!(action, FilterAction::Release),
+        "control char method should still release"
+    );
 
     let headers: std::collections::HashMap<_, _> = ctx
         .extra_request_headers
@@ -424,9 +514,20 @@ async fn matching_headers_succeed() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
-    assert_eq!(ctx.get_metadata("mcp.method"), Some("tools/call"));
-    assert_eq!(ctx.get_metadata("mcp.name"), Some("get_weather"));
+    assert!(
+        matches!(action, FilterAction::Release),
+        "matching headers should release"
+    );
+    assert_eq!(
+        ctx.get_metadata("mcp.method"),
+        Some("tools/call"),
+        "method should be extracted"
+    );
+    assert_eq!(
+        ctx.get_metadata("mcp.name"),
+        Some("get_weather"),
+        "name should be extracted"
+    );
 }
 
 #[tokio::test]
@@ -439,7 +540,10 @@ async fn header_body_mismatch_rejected() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Reject(_)));
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "header/body mismatch should be rejected"
+    );
 }
 
 #[tokio::test]
@@ -452,8 +556,15 @@ async fn missing_headers_ignored_by_default() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
-    assert_eq!(ctx.get_metadata("mcp.method"), Some("tools/call"));
+    assert!(
+        matches!(action, FilterAction::Release),
+        "missing headers should be ignored by default"
+    );
+    assert_eq!(
+        ctx.get_metadata("mcp.method"),
+        Some("tools/call"),
+        "method should still be extracted"
+    );
 }
 
 #[tokio::test]
@@ -466,7 +577,10 @@ async fn missing_headers_rejected_when_configured() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Reject(_)));
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "missing headers should be rejected when configured"
+    );
 }
 
 #[tokio::test]
@@ -503,7 +617,10 @@ async fn invalid_utf8_header_ignored_when_mismatch_ignore() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    assert!(matches!(action, FilterAction::Release));
+    assert!(
+        matches!(action, FilterAction::Release),
+        "invalid UTF-8 header should be ignored when mismatch: ignore"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -771,10 +888,11 @@ fn make_filter(yaml: &str) -> McpFilter {
     let cfg: McpConfig = serde_yaml::from_str(yaml).unwrap();
     let validated_config = build_config(cfg).unwrap();
     let json_rpc_config = super::build_json_rpc_config(validated_config.max_body_bytes);
+    let max_body_bytes = validated_config.max_body_bytes;
     McpFilter {
-        max_body_bytes: validated_config.max_body_bytes,
         config: validated_config,
         json_rpc_config,
+        max_body_bytes,
     }
 }
 

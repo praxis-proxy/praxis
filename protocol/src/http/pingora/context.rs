@@ -87,6 +87,14 @@ pub struct PingoraRequestCtx {
     /// context construction.
     pub metrics_cluster: Option<Arc<str>>,
 
+    /// Pre-built [`SharedString`] for the metrics cluster label.
+    ///
+    /// Cached when `metrics_cluster` is set so that
+    /// `emit_request_metrics` avoids an `Arc` clone per request.
+    ///
+    /// [`SharedString`]: ::metrics::SharedString
+    pub metrics_cluster_shared: Option<::metrics::SharedString>,
+
     /// Pre-read body chunks (`StreamBuffer` mode). When `StreamBuffer` is
     /// active, the body is read during `request_filter` (before upstream
     /// selection) so that body-based routing can influence `upstream_peer`.
@@ -296,6 +304,7 @@ impl Default for PingoraRequestCtx {
             mutated_request_body_len: None,
             filter_results: std::collections::HashMap::new(),
             metrics_cluster: None,
+            metrics_cluster_shared: None,
             pre_read_body: None,
             request_body_buffer: None,
             request_body_bytes: 0,

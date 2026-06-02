@@ -57,7 +57,8 @@ jobs:
                 --body "${marker}
           **PR too large**: ${added} lines added (limit: ${MAX_ADDITIONS}). Please split into smaller PRs. Add \`skip/pr-hygiene\` label to override."
             fi
-            gh pr close "$PR_NUMBER" --repo "${{ github.repository }}"
+            echo "::error::PR has ${added} lines added (limit: ${MAX_ADDITIONS})"
+            exit 1
           fi
 
   # ----------------------------------------------------------------------------
@@ -81,9 +82,15 @@ jobs:
           fi
 
           word_count=$(echo "$PR_BODY" | wc -w)
-          if [ "$word_count" -lt 2 ]; then # minimum "fixes <issue_number>"
-            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
-              --body "Please add a description to this PR explaining what it does and why. See our [coding conventions](docs/developing/conventions.md)."
+          if [ "$word_count" -lt 2 ]; then
+            marker="<!-- praxis:pr-description-check -->"
+            already=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
+            if [ "$already" -eq 0 ]; then
+              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+                --body "${marker}
+          Please add a description to this PR explaining what it does and why. See our [coding conventions](docs/developing/conventions.md)."
+            fi
           fi
 
   # ----------------------------------------------------------------------------
@@ -395,7 +402,8 @@ jobs:
                 --body "${marker}
           **Proposal validation failed**:
           $(echo -e "$errors")
-          See [proposal process](docs/proposals.md) for requirements. Fix and re-open."
+          See [proposal process](docs/proposals.md) for requirements."
             fi
-            gh pr close "$PR_NUMBER" --repo "${{ github.repository }}"
+            echo "::error::Proposal validation failed"
+            exit 1
           fi
