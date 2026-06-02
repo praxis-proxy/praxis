@@ -79,15 +79,15 @@ pub(super) struct McpServerConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct McpBrokerConfig {
-    /// Public MCP path handled by Praxis.
-    #[serde(default = "default_path")]
-    pub path: String,
-    /// Maximum body size in bytes.
-    #[serde(default = "default_max_body_bytes")]
-    pub max_body_bytes: usize,
     /// Behavior when a tool has an invalid schema.
     #[serde(default)]
     pub invalid_tool_policy: InvalidToolPolicy,
+    /// Maximum body size in bytes.
+    #[serde(default = "default_max_body_bytes")]
+    pub max_body_bytes: usize,
+    /// Public MCP path handled by Praxis.
+    #[serde(default = "default_path")]
+    pub path: String,
     /// Backend server definitions.
     #[serde(default)]
     pub servers: Vec<McpServerConfig>,
@@ -101,22 +101,22 @@ pub(super) struct McpBrokerConfig {
 #[derive(Debug, Clone)]
 #[allow(dead_code, reason = "fields used by follow-up tools/call routing")]
 pub(super) struct CatalogTool {
+    /// Optional tool annotations.
+    pub annotations: Option<serde_json::Value>,
+    /// Backend MCP endpoint path.
+    pub backend_path: String,
+    /// Backend cluster name.
+    pub cluster: String,
+    /// Optional description.
+    pub description: Option<String>,
     /// Exposed (prefixed) tool name visible to clients.
     pub exposed_name: String,
+    /// MCP input schema.
+    pub input_schema: serde_json::Value,
     /// Original tool name on the backend.
     pub original_name: String,
     /// Backend server name from config.
     pub server_name: String,
-    /// Backend cluster name.
-    pub cluster: String,
-    /// Backend MCP endpoint path.
-    pub backend_path: String,
-    /// Optional description.
-    pub description: Option<String>,
-    /// MCP input schema.
-    pub input_schema: serde_json::Value,
-    /// Optional tool annotations.
-    pub annotations: Option<serde_json::Value>,
 }
 
 // -----------------------------------------------------------------------------
@@ -317,13 +317,13 @@ fn build_catalog_entry(server: &McpServerConfig, tool: &ToolConfig) -> CatalogTo
     };
 
     CatalogTool {
+        annotations: tool.annotations.clone(),
+        backend_path: server.path.clone(),
+        cluster: server.cluster.clone(),
+        description: tool.description.clone(),
         exposed_name,
+        input_schema: tool.input_schema.clone().unwrap_or_else(default_input_schema),
         original_name: tool.name.clone(),
         server_name: server.name.clone(),
-        cluster: server.cluster.clone(),
-        backend_path: server.path.clone(),
-        description: tool.description.clone(),
-        input_schema: tool.input_schema.clone().unwrap_or_else(default_input_schema),
-        annotations: tool.annotations.clone(),
     }
 }

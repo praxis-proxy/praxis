@@ -74,16 +74,16 @@ impl JsonRpcIdKind {
 /// Parsed JSON-RPC envelope metadata.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct JsonRpcEnvelope {
-    /// Message kind (request/notification/response/batch).
-    pub kind: JsonRpcKind,
-    /// Method name (for requests and notifications).
-    pub method: Option<String>,
+    /// Batch length (for batches only).
+    pub batch_len: Option<usize>,
     /// ID as string (for requests and responses).
     pub id: Option<String>,
     /// ID type classification.
     pub id_kind: JsonRpcIdKind,
-    /// Batch length (for batches only).
-    pub batch_len: Option<usize>,
+    /// Message kind (request/notification/response/batch).
+    pub kind: JsonRpcKind,
+    /// Method name (for requests and notifications).
+    pub method: Option<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -204,11 +204,11 @@ fn parse_single_message(value: &Value) -> Result<JsonRpcEnvelope, JsonRpcParseEr
 
     if obj.contains_key("result") || obj.contains_key("error") {
         return Ok(JsonRpcEnvelope {
-            kind: JsonRpcKind::Response,
-            method: None,
+            batch_len: None,
             id,
             id_kind,
-            batch_len: None,
+            kind: JsonRpcKind::Response,
+            method: None,
         });
     }
 
@@ -249,11 +249,11 @@ fn build_request_or_notification(
     };
 
     Ok(JsonRpcEnvelope {
-        kind,
-        method: Some(method),
+        batch_len: None,
         id,
         id_kind,
-        batch_len: None,
+        kind,
+        method: Some(method),
     })
 }
 

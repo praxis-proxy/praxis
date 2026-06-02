@@ -326,7 +326,9 @@ mod tests {
 
         std::fs::write(&config_path, VALID_YAML_CHANGED).unwrap();
 
-        std::thread::sleep(Duration::from_millis(2000));
+        poll_until(Duration::from_secs(5), || {
+            Arc::as_ptr(&pipelines.get("web").unwrap().load()) != old_ptr
+        });
 
         let new_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
         assert_ne!(old_ptr, new_ptr, "pipeline should be swapped after config file change");
@@ -363,7 +365,8 @@ mod tests {
         std::thread::sleep(Duration::from_millis(200));
 
         std::fs::write(&config_path, "invalid: [[[yaml").unwrap();
-        std::thread::sleep(Duration::from_millis(1500));
+
+        std::thread::sleep(Duration::from_millis(DEBOUNCE_MS + 200));
 
         let current_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
         assert_eq!(
@@ -372,7 +375,10 @@ mod tests {
         );
 
         std::fs::write(&config_path, VALID_YAML_CHANGED).unwrap();
-        std::thread::sleep(Duration::from_millis(1500));
+
+        poll_until(Duration::from_secs(5), || {
+            Arc::as_ptr(&pipelines.get("web").unwrap().load()) != old_ptr
+        });
 
         let new_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
         assert_ne!(old_ptr, new_ptr, "pipeline should recover after valid config");
@@ -440,6 +446,17 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Poll `predicate` every 20ms until it returns `true` or `timeout` elapses.
+    fn poll_until(timeout: Duration, predicate: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + timeout;
+        while std::time::Instant::now() < deadline {
+            if predicate() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
 
     /// Serializes tests that mutate the process working directory.
     static CWD_MUTEX: std::sync::OnceLock<Mutex<()>> = std::sync::OnceLock::new();

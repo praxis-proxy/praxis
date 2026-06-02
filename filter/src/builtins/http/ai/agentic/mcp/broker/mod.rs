@@ -84,14 +84,14 @@ const SERVER_NAME: &str = "praxis";
 ///         description: Create a calendar event
 /// ```
 pub(crate) struct McpBrokerFilter {
+    /// Static tool catalog built from config.
+    catalog: Vec<CatalogTool>,
     /// Shared JSON-RPC parser configuration.
     json_rpc_config: JsonRpcConfig,
     /// Maximum body bytes for `StreamBuffer`.
     max_body_bytes: usize,
     /// Public path this MCP broker handles (e.g. `/mcp`).
     public_path: String,
-    /// Static tool catalog built from config.
-    catalog: Vec<CatalogTool>,
 }
 
 impl McpBrokerFilter {
@@ -113,10 +113,10 @@ impl McpBrokerFilter {
         let json_rpc_config = build_json_rpc_config(validated.max_body_bytes);
 
         Ok(Box::new(Self {
+            catalog,
             json_rpc_config,
             max_body_bytes: validated.max_body_bytes,
             public_path: validated.path.clone(),
-            catalog,
         }))
     }
 }
@@ -461,13 +461,13 @@ fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
     use crate::builtins::http::ai::agentic::json_rpc::config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders};
 
     JsonRpcConfig {
-        max_body_bytes,
         batch_policy: BatchPolicy::Reject,
-        on_invalid: InvalidJsonRpcBehavior::Continue,
         headers: JsonRpcHeaders {
-            method: None,
             id: None,
             kind: None,
+            method: None,
         },
+        max_body_bytes,
+        on_invalid: InvalidJsonRpcBehavior::Continue,
     }
 }

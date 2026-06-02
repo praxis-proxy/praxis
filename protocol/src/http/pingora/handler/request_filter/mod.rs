@@ -3,7 +3,7 @@
 
 //! Request-phase filter execution.
 
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 
 use pingora_core::Result;
 use pingora_proxy::Session;
@@ -205,6 +205,7 @@ async fn run_pipeline(
 
     ctx.request_snapshot = Some(request);
     ctx.filter_metadata = filter_metadata;
+    ctx.metrics_cluster_shared = cluster.as_ref().map(|c| ::metrics::SharedString::from(Arc::clone(c)));
     ctx.metrics_cluster = cluster.clone();
 
     match action {

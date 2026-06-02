@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use crate::FilterError;
+use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -133,6 +133,14 @@ fn default_max_body_bytes() -> usize {
 pub(crate) fn build_config(cfg: ResponsesFormatConfig) -> Result<ResponsesFormatConfig, FilterError> {
     if cfg.max_body_bytes == 0 {
         return Err("responses_format: 'max_body_bytes' must be greater than 0".into());
+    }
+
+    if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
+        return Err(format!(
+            "responses_format: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
+            cfg.max_body_bytes
+        )
+        .into());
     }
 
     validate_header_name("format", cfg.headers.format.as_deref())?;

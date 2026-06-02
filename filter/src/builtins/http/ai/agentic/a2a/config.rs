@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::FilterError;
+use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -40,25 +40,25 @@ pub(crate) enum InvalidA2aBehavior {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct A2aHeaders {
-    /// Header name for the canonical A2A method (e.g. `x-praxis-a2a-method`).
-    #[serde(default = "default_method_header")]
-    pub method: Option<String>,
-
     /// Header name for the A2A family (e.g. `x-praxis-a2a-family`).
     #[serde(default = "default_family_header")]
     pub family: Option<String>,
-
-    /// Header name for the extracted task ID (e.g. `x-praxis-a2a-task-id`).
-    #[serde(default = "default_task_id_header")]
-    pub task_id: Option<String>,
 
     /// Header name for the JSON-RPC kind (e.g. `x-praxis-a2a-kind`).
     #[serde(default = "default_kind_header")]
     pub kind: Option<String>,
 
+    /// Header name for the canonical A2A method (e.g. `x-praxis-a2a-method`).
+    #[serde(default = "default_method_header")]
+    pub method: Option<String>,
+
     /// Header name for streaming detection (e.g. `x-praxis-a2a-streaming`).
     #[serde(default = "default_streaming_header")]
     pub streaming: Option<String>,
+
+    /// Header name for the extracted task ID (e.g. `x-praxis-a2a-task-id`).
+    #[serde(default = "default_task_id_header")]
+    pub task_id: Option<String>,
 
     /// Header name for A2A version (e.g. `x-praxis-a2a-version`).
     #[serde(default = "default_version_header")]
@@ -68,11 +68,11 @@ pub(crate) struct A2aHeaders {
 impl Default for A2aHeaders {
     fn default() -> Self {
         Self {
-            method: default_method_header(),
             family: default_family_header(),
-            task_id: default_task_id_header(),
             kind: default_kind_header(),
+            method: default_method_header(),
             streaming: default_streaming_header(),
+            task_id: default_task_id_header(),
             version: default_version_header(),
         }
     }
@@ -140,21 +140,21 @@ fn default_version_header() -> Option<String> {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct A2aConfig {
+    /// Header names for A2A metadata promotion.
+    #[serde(default)]
+    pub headers: A2aHeaders,
+
     /// Maximum body size in bytes for `StreamBuffer`.
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
-
-    /// Invalid input handling behavior.
-    #[serde(default)]
-    pub on_invalid: InvalidA2aBehavior,
 
     /// Method aliases for compatibility (slash-delimited → `PascalCase`).
     #[serde(default)]
     pub method_aliases: BTreeMap<String, String>,
 
-    /// Header names for A2A metadata promotion.
+    /// Invalid input handling behavior.
     #[serde(default)]
-    pub headers: A2aHeaders,
+    pub on_invalid: InvalidA2aBehavior,
 }
 
 /// Default max body bytes.
@@ -170,6 +170,14 @@ fn default_max_body_bytes() -> usize {
 pub(crate) fn build_config(cfg: A2aConfig) -> Result<A2aConfig, FilterError> {
     if cfg.max_body_bytes == 0 {
         return Err("a2a: 'max_body_bytes' must be greater than 0".into());
+    }
+
+    if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
+        return Err(format!(
+            "a2a: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
+            cfg.max_body_bytes
+        )
+        .into());
     }
 
     // Validate header names
