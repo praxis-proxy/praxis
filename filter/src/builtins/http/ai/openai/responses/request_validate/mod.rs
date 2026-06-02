@@ -40,6 +40,13 @@ use crate::{
 };
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Maximum request body size for `StreamBuffer` mode (64 MiB).
+const MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
+
+// -----------------------------------------------------------------------------
 // RequestValidateFilter
 // -----------------------------------------------------------------------------
 
@@ -56,17 +63,29 @@ pub struct RequestValidateFilter {
     counter: AtomicU64,
 }
 
+impl Default for RequestValidateFilter {
+    fn default() -> Self {
+        Self {
+            counter: AtomicU64::new(0),
+        }
+    }
+}
+
 impl RequestValidateFilter {
     /// Create a filter from YAML config.
     ///
+    /// This filter has no configuration fields. The config parameter
+    /// is accepted but ignored.
+    ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if the YAML config contains unknown fields.
+    /// This function does not return errors; the `Result` return type
+    /// is required by the [`FilterFactory`] signature.
+    ///
+    /// [`FilterFactory`]: crate::FilterFactory
     #[allow(clippy::unnecessary_wraps, reason = "signature required by FilterFactory")]
     pub fn from_config(_config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
-        Ok(Box::new(Self {
-            counter: AtomicU64::new(0),
-        }))
+        Ok(Box::new(Self::default()))
     }
 
     /// Generate a response ID with `resp_` prefix.
@@ -108,7 +127,7 @@ impl HttpFilter for RequestValidateFilter {
 
     fn request_body_mode(&self) -> BodyMode {
         BodyMode::StreamBuffer {
-            max_bytes: Some(67_108_864), // 64 MiB
+            max_bytes: Some(MAX_BODY_BYTES),
         }
     }
 
@@ -126,7 +145,9 @@ impl HttpFilter for RequestValidateFilter {
             return Ok(FilterAction::Continue);
         }
 
-        let chunk = body.as_deref().unwrap_or_default();
+        let Some(chunk) = body.as_deref() else {
+            return Ok(reject_invalid("request body is required"));
+        };
 
         let parsed: serde_json::Value = match serde_json::from_slice(chunk) {
             Ok(v) => v,
@@ -138,11 +159,7 @@ impl HttpFilter for RequestValidateFilter {
 
         if let Err(e) = validate_request(ctx) {
             debug!(error = %e, "request validation failed");
-            return Ok(FilterAction::Reject(
-                Rejection::status(400)
-                    .with_header("content-type", "application/json")
-                    .with_body(Bytes::from(e.to_json_body())),
-            ));
+            return Ok(reject_invalid(&e.to_string()));
         }
 
         let response_id = self.generate_response_id();
@@ -251,8 +268,7 @@ mod tests {
 
     #[test]
     fn from_config_succeeds() {
-        let yaml: serde_yaml::Value = serde_yaml::from_str("{}").unwrap();
-        let filter = RequestValidateFilter::from_config(&yaml).unwrap();
+        let filter = RequestValidateFilter::from_config(&serde_yaml::Value::Null).unwrap();
         assert_eq!(
             filter.name(),
             "request_validate",
@@ -262,8 +278,7 @@ mod tests {
 
     #[test]
     fn body_access_is_read_only() {
-        let yaml: serde_yaml::Value = serde_yaml::from_str("{}").unwrap();
-        let filter = RequestValidateFilter::from_config(&yaml).unwrap();
+        let filter = RequestValidateFilter::default();
         assert_eq!(
             filter.request_body_access(),
             BodyAccess::ReadOnly,
@@ -273,14 +288,14 @@ mod tests {
 
     #[test]
     fn response_id_has_prefix() {
-        let filter = make_concrete_filter();
+        let filter = RequestValidateFilter::default();
         let id = filter.generate_response_id();
         assert!(id.starts_with("resp_"), "response ID should start with resp_");
     }
 
     #[test]
     fn conversation_id_has_prefix() {
-        let filter = make_concrete_filter();
+        let filter = RequestValidateFilter::default();
         let id = filter.generate_conversation_id();
         assert!(id.starts_with("conv_"), "conversation ID should start with conv_");
     }
@@ -508,7 +523,7 @@ mod tests {
 
     #[tokio::test]
     async fn not_end_of_stream_continues() {
-        let filter = make_filter();
+        let filter = RequestValidateFilter::default();
         let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         let mut body = Some(Bytes::from(r#"{"input": "partial"}"#));
@@ -533,12 +548,6 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
-
-    fn make_concrete_filter() -> RequestValidateFilter {
-        RequestValidateFilter {
-            counter: AtomicU64::new(0),
-        }
-    }
 
     fn make_filter() -> Box<dyn HttpFilter> {
         RequestValidateFilter::from_config(&serde_yaml::Value::Null).unwrap()

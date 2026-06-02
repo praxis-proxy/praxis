@@ -27,17 +27,6 @@ impl ValidationError {
             message: message.into(),
         }
     }
-
-    /// Format as a JSON error response body.
-    pub(crate) fn to_json_body(&self) -> String {
-        serde_json::json!({
-            "error": {
-                "message": &self.message,
-                "type": "invalid_request_error"
-            }
-        })
-        .to_string()
-    }
 }
 
 impl std::fmt::Display for ValidationError {
@@ -57,7 +46,6 @@ impl std::fmt::Display for ValidationError {
 pub(crate) fn validate_request(ctx: &HttpFilterContext<'_>) -> Result<(), ValidationError> {
     validate_stream_background(ctx)?;
     validate_background_store(ctx)?;
-    validate_model(ctx)?;
     Ok(())
 }
 
@@ -82,14 +70,6 @@ fn validate_background_store(ctx: &HttpFilterContext<'_>) -> Result<(), Validati
         && classifier_bool(ctx, "responses_format.store") == Some(false)
     {
         return Err(ValidationError::new("background responses require store to be true"));
-    }
-    Ok(())
-}
-
-/// Validate model field if present (must be non-empty).
-fn validate_model(ctx: &HttpFilterContext<'_>) -> Result<(), ValidationError> {
-    if ctx.get_metadata("responses_format.model") == Some("") {
-        return Err(ValidationError::new("model must not be an empty string"));
     }
     Ok(())
 }
@@ -173,60 +153,6 @@ mod tests {
         assert!(
             validate_request(&ctx).is_ok(),
             "background=true store=true should be valid"
-        );
-    }
-
-    #[test]
-    fn empty_model_rejected() {
-        let ctx = make_ctx_with_metadata(&[("responses_format.model", "")]);
-        let err = validate_request(&ctx).unwrap_err();
-        assert!(err.message.contains("model"), "error should mention model: {err}");
-    }
-
-    #[test]
-    fn absent_model_accepted() {
-        let ctx = make_ctx_with_metadata(&[]);
-        assert!(validate_request(&ctx).is_ok(), "absent model should be valid");
-    }
-
-    #[test]
-    fn validation_error_json_body() {
-        let err = ValidationError::new("test error");
-        let body = err.to_json_body();
-        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(
-            parsed["error"]["message"].as_str(),
-            Some("test error"),
-            "JSON body should contain the error message"
-        );
-        assert_eq!(
-            parsed["error"]["type"].as_str(),
-            Some("invalid_request_error"),
-            "JSON body should have the correct error type"
-        );
-    }
-
-    #[test]
-    fn validation_error_escapes_quotes() {
-        let err = ValidationError::new(r#"bad "value""#);
-        let body = err.to_json_body();
-        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(
-            parsed["error"]["message"].as_str(),
-            Some(r#"bad "value""#),
-            "quotes in error message should be properly escaped"
-        );
-    }
-
-    #[test]
-    fn validation_error_escapes_control_characters() {
-        let err = ValidationError::new("line1\nline2");
-        let body = err.to_json_body();
-        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(
-            parsed["error"]["message"].as_str(),
-            Some("line1\nline2"),
-            "control characters in error message should be JSON-escaped"
         );
     }
 }
