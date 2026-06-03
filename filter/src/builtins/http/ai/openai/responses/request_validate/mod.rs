@@ -7,7 +7,7 @@
 //! Expects the upstream `responses_format` classifier to have already
 //! identified this request as a Responses API request and promoted
 //! routing facts (`model`, `stream`, `store`, `background`) to
-//! `responses_format.*` metadata.
+//! `openai_responses_format.*` metadata.
 //!
 //! This filter reads classifier metadata for parameter-combination
 //! validation, then does targeted JSON field extraction for fields
@@ -147,7 +147,7 @@ impl HttpFilter for RequestValidateFilter {
             return Ok(FilterAction::Continue);
         }
 
-        if ctx.get_metadata("responses_format.format") != Some("responses") {
+        if ctx.get_metadata("openai_responses_format.format") != Some("openai_responses") {
             trace!("skipping non-responses request");
             return Ok(FilterAction::Release);
         }
@@ -234,22 +234,26 @@ fn extract_conversation_id(body: &serde_json::Value) -> Option<String> {
 
 /// Enrich filter context with validated metadata for downstream filters.
 ///
-/// Reads `stream`, `store`, `background` from `responses_format.*`
+/// Reads `stream`, `store`, `background` from `openai_responses_format.*`
 /// classifier metadata and applies spec defaults. Extracts
 /// `instructions`, `include`, and `conversation.id` from the body.
 fn enrich_context(ctx: &mut HttpFilterContext<'_>, body: &serde_json::Value, response_id: &str, conversation_id: &str) {
     ctx.set_metadata("responses.response_id", response_id);
     ctx.set_metadata("responses.conversation_id", conversation_id);
 
-    let store = ctx.get_metadata("responses_format.store").is_none_or(|v| v != "false");
+    let store = ctx
+        .get_metadata("openai_responses_format.store")
+        .is_none_or(|v| v != "false");
     ctx.set_metadata("responses.store", if store { "true" } else { "false" });
 
     let background = ctx
-        .get_metadata("responses_format.background")
+        .get_metadata("openai_responses_format.background")
         .is_some_and(|v| v == "true");
     ctx.set_metadata("responses.background", if background { "true" } else { "false" });
 
-    let stream = ctx.get_metadata("responses_format.stream").is_some_and(|v| v == "true");
+    let stream = ctx
+        .get_metadata("openai_responses_format.stream")
+        .is_some_and(|v| v == "true");
     ctx.set_metadata("responses.stream", if stream { "true" } else { "false" });
 
     trace!(store, background, stream, "classifier metadata applied");
@@ -363,7 +367,7 @@ mod tests {
 
     #[tokio::test]
     async fn reads_stream_from_classifier_metadata() {
-        let ctx = run_filter(r#"{"input": "Hi"}"#, &[("responses_format.stream", "true")]).await;
+        let ctx = run_filter(r#"{"input": "Hi"}"#, &[("openai_responses_format.stream", "true")]).await;
 
         assert_eq!(
             ctx.filter_metadata.get("responses.stream").map(String::as_str),
@@ -374,7 +378,7 @@ mod tests {
 
     #[tokio::test]
     async fn reads_store_from_classifier_metadata() {
-        let ctx = run_filter(r#"{"input": "Hi"}"#, &[("responses_format.store", "false")]).await;
+        let ctx = run_filter(r#"{"input": "Hi"}"#, &[("openai_responses_format.store", "false")]).await;
 
         assert_eq!(
             ctx.filter_metadata.get("responses.store").map(String::as_str),
@@ -385,7 +389,7 @@ mod tests {
 
     #[tokio::test]
     async fn reads_background_from_classifier_metadata() {
-        let ctx = run_filter(r#"{"input": "Hi"}"#, &[("responses_format.background", "true")]).await;
+        let ctx = run_filter(r#"{"input": "Hi"}"#, &[("openai_responses_format.background", "true")]).await;
 
         assert_eq!(
             ctx.filter_metadata.get("responses.background").map(String::as_str),
@@ -460,8 +464,8 @@ mod tests {
         let action = run_filter_raw(
             r#"{"input": "test"}"#,
             &[
-                ("responses_format.stream", "true"),
-                ("responses_format.background", "true"),
+                ("openai_responses_format.stream", "true"),
+                ("openai_responses_format.background", "true"),
             ],
         )
         .await;
@@ -476,8 +480,8 @@ mod tests {
         let action = run_filter_raw(
             r#"{"input": "test"}"#,
             &[
-                ("responses_format.background", "true"),
-                ("responses_format.store", "false"),
+                ("openai_responses_format.background", "true"),
+                ("openai_responses_format.store", "false"),
             ],
         )
         .await;
@@ -492,8 +496,8 @@ mod tests {
         let action = run_filter_raw(
             r#"{"input": "test"}"#,
             &[
-                ("responses_format.stream", "true"),
-                ("responses_format.background", "true"),
+                ("openai_responses_format.stream", "true"),
+                ("openai_responses_format.background", "true"),
             ],
         )
         .await;
@@ -513,8 +517,8 @@ mod tests {
         let action = run_filter_raw(
             r#"{"input": "test"}"#,
             &[
-                ("responses_format.stream", "true"),
-                ("responses_format.background", "true"),
+                ("openai_responses_format.stream", "true"),
+                ("openai_responses_format.background", "true"),
             ],
         )
         .await;
@@ -559,7 +563,7 @@ mod tests {
             "/v1/chat/completions",
         )));
         let mut ctx = crate::test_utils::make_filter_context(req);
-        ctx.set_metadata("responses_format.format", "chat_completions");
+        ctx.set_metadata("openai_responses_format.format", "openai_chat_completions");
         let mut body = Some(Bytes::from(r#"{"messages":[]}"#));
 
         let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
@@ -629,7 +633,7 @@ mod tests {
             "/v1/responses",
         )));
         let mut ctx = crate::test_utils::make_filter_context(req);
-        ctx.set_metadata("responses_format.format", "responses");
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
         for (k, v) in classifier_metadata {
             ctx.set_metadata(*k, *v);
         }
@@ -651,7 +655,7 @@ mod tests {
             "/v1/responses",
         )));
         let mut ctx = crate::test_utils::make_filter_context(req);
-        ctx.set_metadata("responses_format.format", "responses");
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
         for (k, v) in classifier_metadata {
             ctx.set_metadata(*k, *v);
         }
