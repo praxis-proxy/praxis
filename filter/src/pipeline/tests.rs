@@ -623,6 +623,7 @@ fn apply_body_limits_no_limits_leaves_stream_mode() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline.apply_body_limits(None, None, false).unwrap();
 
@@ -655,6 +656,7 @@ fn apply_body_limits_converts_default_stream_to_size_limit() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline
         .apply_body_limits(Some(1_048_576), Some(524_288), false)
@@ -696,6 +698,7 @@ fn apply_body_limits_preserves_filter_declared_stream() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline
         .apply_body_limits(Some(1_048_576), Some(524_288), false)
@@ -1268,6 +1271,7 @@ fn apply_body_limits_default_stream_becomes_size_limit() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline.apply_body_limits(Some(4096), Some(8192), false).unwrap();
     assert_eq!(
@@ -1293,6 +1297,7 @@ fn apply_body_limits_filter_stricter_than_config() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline.apply_body_limits(Some(1000), None, false).unwrap();
     assert_eq!(
@@ -1315,6 +1320,7 @@ fn apply_body_limits_config_stricter_than_filter() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline.apply_body_limits(Some(1000), None, false).unwrap();
     assert_eq!(
@@ -1337,6 +1343,7 @@ fn apply_body_limits_rejects_unbounded_stream_buffer() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     let err = pipeline.apply_body_limits(None, None, false).unwrap_err();
     assert!(
@@ -1358,6 +1365,7 @@ fn apply_body_limits_allows_unbounded_stream_buffer_with_override() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline
         .apply_body_limits(None, None, true)
@@ -1565,6 +1573,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         filters: vec![filter_a, filter_b, filter_c],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -1608,6 +1617,7 @@ async fn all_executed_filters_run_on_response() {
         ],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -1658,6 +1668,7 @@ async fn skipped_filter_skips_its_branches() {
         filters: vec![parent],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
 
     let req = crate::test_utils::make_request(Method::GET, "/other");
@@ -2671,6 +2682,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         filters,
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }
 }
 
@@ -2690,6 +2702,7 @@ fn make_pipeline_with_conditions(
         filters,
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }
 }
 
@@ -2709,6 +2722,7 @@ fn make_pipeline_with_response_conditions(
         filters,
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }
 }
 

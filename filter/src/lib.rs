@@ -265,6 +265,7 @@ pub(crate) mod test_utils {
             filter_results: std::collections::HashMap::new(),
             health_registry: None,
             kv_stores: None,
+            time_source: &praxis_core::time::SystemTimeSource,
             request: req,
             request_body_bytes: 0,
             request_body_mode: crate::body::BodyMode::Stream,

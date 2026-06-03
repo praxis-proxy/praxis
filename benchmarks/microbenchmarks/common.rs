@@ -46,6 +46,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         filter_results: std::collections::HashMap::new(),
         health_registry: None,
         kv_stores: None,
+        time_source: &praxis_core::time::SystemTimeSource,
         request: req,
         request_body_bytes: 0,
         request_body_mode: praxis_filter::BodyMode::Stream,

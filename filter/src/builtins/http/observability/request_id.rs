@@ -9,7 +9,6 @@ use std::{
         Arc,
         atomic::{AtomicU64, Ordering},
     },
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -99,13 +98,9 @@ impl RequestIdFilter {
     /// Combines the current time in microseconds with a per-instance
     /// monotone counter. Not cryptographically random but unique
     /// within a filter instance for any realistic request rate.
-    fn generate_id(&self) -> String {
+    fn generate_id(&self, time_source: &dyn praxis_core::time::TimeSource) -> String {
         #[allow(clippy::cast_possible_truncation, reason = "micros fit u64")]
-        let micros = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_micros()
-            .min(u128::from(u64::MAX)) as u64;
+        let micros = time_source.now().as_micros().min(u128::from(u64::MAX)) as u64;
 
         let seq = self.counter.fetch_add(1, Ordering::Relaxed);
 
@@ -168,7 +163,7 @@ impl HttpFilter for RequestIdFilter {
             .headers
             .get(&*self.header_name)
             .and_then(|v| v.to_str().ok())
-            .map_or_else(|| self.generate_id(), str::to_owned);
+            .map_or_else(|| self.generate_id(ctx.time_source), str::to_owned);
 
         debug!(request_id = %id, header = %self.header_name, "forwarding request ID");
 
@@ -309,10 +304,23 @@ mod tests {
 
     #[test]
     fn generated_ids_are_unique() {
+        let ts = praxis_core::time::FixedTimeSource::new(std::time::Duration::from_secs(1_700_000_000));
         let filter = make_filter("");
-        let id1 = filter.generate_id();
-        let id2 = filter.generate_id();
+        let id1 = filter.generate_id(&ts);
+        let id2 = filter.generate_id(&ts);
         assert_ne!(id1, id2, "consecutive generated IDs must be unique");
+    }
+
+    #[test]
+    fn generate_id_uses_time_source() {
+        let ts = praxis_core::time::FixedTimeSource::new(std::time::Duration::from_micros(0x0011_2233_4455_6677));
+        let filter = make_filter("");
+        let id = filter.generate_id(&ts);
+        assert!(
+            id.starts_with("00112233"),
+            "ID should start with hex-encoded fixed micros, got: {id}"
+        );
+        assert_eq!(id.len(), 32, "generated ID should be 32 hex chars");
     }
 
     // -------------------------------------------------------------------------

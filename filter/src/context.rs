@@ -6,7 +6,7 @@
 use std::{borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
 
 use http::{HeaderMap, Method, StatusCode, Uri};
-use praxis_core::{connectivity::Upstream, health::HealthRegistry, kv::KvStoreRegistry};
+use praxis_core::{connectivity::Upstream, health::HealthRegistry, kv::KvStoreRegistry, time::TimeSource};
 
 use crate::{body::BodyMode, pipeline::body::merge_body_mode, results::FilterResultSet};
 
@@ -81,6 +81,9 @@ pub struct HttpFilterContext<'a> {
 
     /// Named key-value stores for runtime mappings.
     pub kv_stores: Option<&'a KvStoreRegistry>,
+
+    /// Wall-clock time source for timestamp generation.
+    pub time_source: &'a dyn TimeSource,
 
     /// Transport-agnostic request headers, URI, and method.
     pub request: &'a Request,
