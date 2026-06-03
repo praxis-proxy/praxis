@@ -22,7 +22,7 @@ stakeholders:
 
 External filter crates self-register into Praxis's
 `FilterRegistry` at build time. The operator's only
-change is adding the crate to `Cargo.toml` — no
+change is adding the crate to `Cargo.toml`. No
 Rust code edits, no `extern crate`, no manual
 `registry.register()`.
 
@@ -47,8 +47,13 @@ Two parts:
   factory declared once in the external crate.
 - **Backward compatible.** `register_filters!` and
   `registry.register()` still work.
-- **Duplicate detection.** Conflicting names panic
-  at startup with a clear message.
+- **Duplicate detection.** Conflicting filter names
+  are caught at startup. The generated macro code
+  unwraps the `Result` from `registry.register()`,
+  turning duplicates into a hard panic since there
+  is no caller to propagate the error to. Manual
+  `registry.register()` calls continue to return
+  `Result` as today.
 
 ## Why?
 
@@ -63,13 +68,13 @@ coordinated changes to Praxis:
 3. Rebuild (unavoidable)
 
 Step 2 restates what the external crate already
-knows. Any external filter crate — whether it
+knows. Any external filter crate (whether it
 implements an agentic loop, a custom auth provider,
-or a third-party integration — should be
-consumable with:
+or a third-party integration) should be consumable
+with:
 
 ```toml
-# Cargo.toml — the ONLY change
+# Cargo.toml: the ONLY change
 [dependencies]
 my-filters = "0.1"
 ```
@@ -83,7 +88,7 @@ filter_chains:
         some_option: "value"
 ```
 
-Also benefits Praxis's own optional filters —
+Also benefits Praxis's own optional filters.
 `ext_proc` and AI-inference filters can
 self-register when their feature flag is enabled
 instead of requiring `#[cfg]` blocks in
@@ -91,10 +96,16 @@ instead of requiring `#[cfg]` blocks in
 
 ### User Stories
 
+This mechanism covers `HttpFilter` and `TcpFilter`
+registration only. Plugin/hook discovery (#63) is
+a separate system with its own `PluginManager` and
+registration API. The two do not share a discovery
+mechanism.
+
 - As an external filter crate author, I want to
   publish a crate that self-registers its filters
   so that Praxis operators add one dependency line
-  and write YAML config — zero Rust code changes.
+  and write YAML config with zero Rust code changes.
 - As a Praxis operator, I want to add third-party
   filter crates without modifying Praxis's source
   so that I can upgrade Praxis and filter crates
