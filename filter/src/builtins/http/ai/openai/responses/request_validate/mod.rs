@@ -100,6 +100,8 @@ impl RequestValidateFilter {
         format!("conv_{id}")
     }
 
+    // TODO(#460): replace with shared IdGenerator that includes
+    // per-instance entropy to avoid collisions across instances.
     /// Generate a raw hex ID from timestamp and counter.
     fn generate_raw_id(&self) -> String {
         #[allow(clippy::cast_possible_truncation, reason = "micros fit u64")]
