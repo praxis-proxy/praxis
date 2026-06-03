@@ -56,8 +56,8 @@ fn classifier_bool(ctx: &HttpFilterContext<'_>, key: &str) -> Option<bool> {
 
 /// Reject `stream=true` combined with `background=true`.
 fn validate_stream_background(ctx: &HttpFilterContext<'_>) -> Result<(), ValidationError> {
-    if classifier_bool(ctx, "responses_format.stream") == Some(true)
-        && classifier_bool(ctx, "responses_format.background") == Some(true)
+    if classifier_bool(ctx, "openai_responses_format.stream") == Some(true)
+        && classifier_bool(ctx, "openai_responses_format.background") == Some(true)
     {
         return Err(ValidationError::new("stream and background cannot both be true"));
     }
@@ -66,8 +66,8 @@ fn validate_stream_background(ctx: &HttpFilterContext<'_>) -> Result<(), Validat
 
 /// Reject `background=true` when `store=false`.
 fn validate_background_store(ctx: &HttpFilterContext<'_>) -> Result<(), ValidationError> {
-    if classifier_bool(ctx, "responses_format.background") == Some(true)
-        && classifier_bool(ctx, "responses_format.store") == Some(false)
+    if classifier_bool(ctx, "openai_responses_format.background") == Some(true)
+        && classifier_bool(ctx, "openai_responses_format.store") == Some(false)
     {
         return Err(ValidationError::new("background responses require store to be true"));
     }
@@ -112,8 +112,8 @@ mod tests {
     #[test]
     fn stream_and_background_rejected() {
         let ctx = make_ctx_with_metadata(&[
-            ("responses_format.stream", "true"),
-            ("responses_format.background", "true"),
+            ("openai_responses_format.stream", "true"),
+            ("openai_responses_format.background", "true"),
         ]);
         let err = validate_request(&ctx).unwrap_err();
         assert!(
@@ -125,8 +125,8 @@ mod tests {
     #[test]
     fn stream_true_background_false_accepted() {
         let ctx = make_ctx_with_metadata(&[
-            ("responses_format.stream", "true"),
-            ("responses_format.background", "false"),
+            ("openai_responses_format.stream", "true"),
+            ("openai_responses_format.background", "false"),
         ]);
         assert!(
             validate_request(&ctx).is_ok(),
@@ -137,8 +137,8 @@ mod tests {
     #[test]
     fn background_without_store_rejected() {
         let ctx = make_ctx_with_metadata(&[
-            ("responses_format.background", "true"),
-            ("responses_format.store", "false"),
+            ("openai_responses_format.background", "true"),
+            ("openai_responses_format.store", "false"),
         ]);
         let err = validate_request(&ctx).unwrap_err();
         assert!(err.message.contains("store"), "error should mention store: {err}");
@@ -147,8 +147,8 @@ mod tests {
     #[test]
     fn background_with_store_accepted() {
         let ctx = make_ctx_with_metadata(&[
-            ("responses_format.background", "true"),
-            ("responses_format.store", "true"),
+            ("openai_responses_format.background", "true"),
+            ("openai_responses_format.store", "true"),
         ]);
         assert!(
             validate_request(&ctx).is_ok(),
