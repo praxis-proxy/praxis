@@ -181,7 +181,7 @@ fn non_json_reject_returns_reject() {
 }
 
 #[test]
-fn responses_format_not_rejected() {
+fn openai_responses_format_not_rejected() {
     let cfg: ResponsesFormatConfig = serde_yaml::from_str("on_invalid: reject").unwrap();
     let result = handle_invalid_format(AiRequestFormat::Responses, &cfg);
     assert!(result.is_none(), "responses format should not be rejected");
