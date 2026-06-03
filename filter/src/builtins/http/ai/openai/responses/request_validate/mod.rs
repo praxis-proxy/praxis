@@ -145,6 +145,11 @@ impl HttpFilter for RequestValidateFilter {
             return Ok(FilterAction::Continue);
         }
 
+        if ctx.get_metadata("responses_format.format") != Some("responses") {
+            trace!("skipping non-responses request");
+            return Ok(FilterAction::Release);
+        }
+
         let parsed = match parse_and_validate(ctx, body) {
             Ok(v) => v,
             Err(action) => return Ok(action),
@@ -545,6 +550,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn skips_chat_completions_request() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/chat/completions",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("responses_format.format", "chat_completions");
+        let mut body = Some(Bytes::from(r#"{"messages":[]}"#));
+
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Release),
+            "chat completions request should be released without validation"
+        );
+        assert!(
+            !ctx.filter_metadata.contains_key("responses.response_id"),
+            "responses metadata should not be set for non-responses requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_missing_format_metadata() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        let mut body = Some(Bytes::from(r#"{"input":"test"}"#));
+
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Release),
+            "request without classifier metadata should be released without validation"
+        );
+    }
+
+    #[tokio::test]
     async fn not_end_of_stream_continues() {
         let filter = RequestValidateFilter::default();
         let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -583,6 +627,7 @@ mod tests {
             "/v1/responses",
         )));
         let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("responses_format.format", "responses");
         for (k, v) in classifier_metadata {
             ctx.set_metadata(*k, *v);
         }
@@ -604,6 +649,7 @@ mod tests {
             "/v1/responses",
         )));
         let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("responses_format.format", "responses");
         for (k, v) in classifier_metadata {
             ctx.set_metadata(*k, *v);
         }
