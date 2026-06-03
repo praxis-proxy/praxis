@@ -4,15 +4,14 @@
 //! `openai_responses_validate` filter: validate and enrich incoming Responses
 //! API requests.
 //!
-//! Expects the upstream `responses_format` classifier to have already
+//! Expects the upstream `openai_responses_format` classifier to have already
 //! identified this request as a Responses API request and promoted
 //! routing facts (`model`, `stream`, `store`, `background`) to
 //! `openai_responses_format.*` metadata.
 //!
 //! This filter reads classifier metadata for parameter-combination
-//! validation, then does targeted JSON field extraction for fields
-//! the classifier does not cover (`instructions`, `conversation.id`,
-//! `include`). It does **not** deserialize the full body into a
+//! validation, then does targeted JSON field extraction for
+//! `conversation.id`. It does **not** deserialize the full body into a
 //! typed struct.
 //!
 //! # YAML
@@ -57,7 +56,7 @@ const MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
 /// extraction. Does not deserialize the full body into a typed struct.
 ///
 /// This filter has no configuration, body buffering is handled by
-/// the upstream `responses_format` classifier.
+/// the upstream `openai_responses_format` classifier.
 pub struct OpenaiResponsesValidateFilter {
     /// Monotonic counter for unique ID generation.
     counter: AtomicU64,
@@ -167,8 +166,7 @@ impl HttpFilter for OpenaiResponsesValidateFilter {
             id
         };
 
-        enrich_context(ctx, &parsed, &response_id, &conversation_id);
-        write_filter_results(ctx, &response_id)?;
+        enrich_context(ctx, &response_id, &conversation_id);
 
         debug!(
             response_id = %response_id,
@@ -235,9 +233,8 @@ fn extract_conversation_id(body: &serde_json::Value) -> Option<String> {
 /// Enrich filter context with validated metadata for downstream filters.
 ///
 /// Reads `stream`, `store`, `background` from `openai_responses_format.*`
-/// classifier metadata and applies spec defaults. Extracts
-/// `instructions`, `include`, and `conversation.id` from the body.
-fn enrich_context(ctx: &mut HttpFilterContext<'_>, body: &serde_json::Value, response_id: &str, conversation_id: &str) {
+/// classifier metadata and applies spec defaults.
+fn enrich_context(ctx: &mut HttpFilterContext<'_>, response_id: &str, conversation_id: &str) {
     ctx.set_metadata("responses.response_id", response_id);
     ctx.set_metadata("responses.conversation_id", conversation_id);
 
@@ -257,28 +254,6 @@ fn enrich_context(ctx: &mut HttpFilterContext<'_>, body: &serde_json::Value, res
     ctx.set_metadata("responses.stream", if stream { "true" } else { "false" });
 
     trace!(store, background, stream, "classifier metadata applied");
-
-    if let Some(instructions) = body.get("instructions").and_then(serde_json::Value::as_str) {
-        ctx.set_metadata("responses.instructions", instructions);
-        trace!("instructions extracted from body");
-    }
-
-    if let Some(include) = body.get("include").and_then(serde_json::Value::as_array) {
-        let values: Vec<&str> = include.iter().filter_map(serde_json::Value::as_str).collect();
-        if !values.is_empty() {
-            let joined = values.join(",");
-            ctx.set_metadata("responses.include", joined.as_str());
-            trace!(include = %joined, "include values extracted from body");
-        }
-    }
-}
-
-/// Write filter results for branch chain decisions.
-fn write_filter_results(ctx: &mut HttpFilterContext<'_>, response_id: &str) -> Result<(), FilterError> {
-    let results = ctx.filter_results.entry("openai_responses_validate").or_default();
-    results.set("validated", "true")?;
-    results.set("response_id", response_id.to_owned())?;
-    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -418,44 +393,6 @@ mod tests {
                 .get("responses.conversation_id")
                 .is_some_and(|v| v.starts_with("conv_")),
             "conversation_id should be generated with conv_ prefix"
-        );
-    }
-
-    #[tokio::test]
-    async fn valid_request_with_include_passes_through_all_values() {
-        let ctx = run_filter(
-            r#"{"input": "Hi", "include": ["reasoning.encrypted_content", "unknown_value"]}"#,
-            &[],
-        )
-        .await;
-
-        assert_eq!(
-            ctx.filter_metadata.get("responses.include").map(String::as_str),
-            Some("reasoning.encrypted_content,unknown_value"),
-            "include should pass through all values including unrecognized ones"
-        );
-    }
-
-    #[tokio::test]
-    async fn valid_request_with_instructions() {
-        let ctx = run_filter(r#"{"input": "Hi", "instructions": "Be helpful and concise."}"#, &[]).await;
-
-        assert_eq!(
-            ctx.filter_metadata.get("responses.instructions").map(String::as_str),
-            Some("Be helpful and concise."),
-            "instructions should be preserved in metadata"
-        );
-    }
-
-    #[tokio::test]
-    async fn valid_request_sets_filter_results() {
-        let ctx = run_filter(r#"{"input": "Hi"}"#, &[]).await;
-        let results = ctx.filter_results.get("openai_responses_validate").unwrap();
-
-        assert!(results.matches("validated", "true"), "validated result should be true");
-        assert!(
-            results.get("response_id").is_some_and(|v| v.starts_with("resp_")),
-            "response_id result should be set"
         );
     }
 

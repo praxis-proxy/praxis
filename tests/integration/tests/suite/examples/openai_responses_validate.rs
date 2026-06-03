@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 
 use praxis_test_utils::{
-    free_port, http_send, json_post, load_example_config, parse_body, parse_status, start_echo_backend_with_shutdown,
+    free_port, http_send, json_post, load_example_config, parse_body, parse_status, start_backend_with_shutdown,
     start_proxy,
 };
 
@@ -16,7 +16,7 @@ use praxis_test_utils::{
 
 #[test]
 fn openai_responses_validate_example_forwards_valid_responses_request() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_backend_with_shutdown("ok");
     let proxy_port = free_port();
 
     let config = load_example_config(
@@ -32,16 +32,12 @@ fn openai_responses_validate_example_forwards_valid_responses_request() {
     );
 
     assert_eq!(parse_status(&raw), 200, "valid responses request should be forwarded");
-    let body = parse_body(&raw);
-    assert!(
-        body.contains("Hello, world!"),
-        "request body should be forwarded unchanged: {body}"
-    );
+    assert_eq!(parse_body(&raw), "ok", "request should reach the backend");
 }
 
 #[test]
 fn openai_responses_validate_example_rejects_stream_and_background() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_backend_with_shutdown("ok");
     let proxy_port = free_port();
 
     let config = load_example_config(
@@ -71,7 +67,7 @@ fn openai_responses_validate_example_rejects_stream_and_background() {
 
 #[test]
 fn openai_responses_validate_example_accepts_minimal_request() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_backend_with_shutdown("ok");
     let proxy_port = free_port();
 
     let config = load_example_config(

@@ -3,16 +3,15 @@
 # Requires the ai-inference feature:
 #   cargo build -p praxis --features ai-inference
 #
-# The responses_format classifier must run before openai_responses_validate.
+# The openai_responses_format classifier must run before openai_responses_validate.
 # It buffers the body, classifies the request as Responses API, and
-# promotes model/stream/store/background to responses_format.*
+# promotes model/stream/store/background to openai_responses_format.*
 # metadata that openai_responses_validate reads for parameter-combination
 # validation.
 #
-# openai_responses_validate then does targeted field extraction for fields
-# the classifier does not cover (instructions, metadata constraints,
-# conversation.id, include), generates response and conversation IDs,
-# and writes responses.* metadata for downstream pipeline filters.
+# openai_responses_validate then extracts conversation.id when present,
+# generates response and conversation IDs, and writes responses.*
+# metadata for downstream pipeline filters.
 #
 # Valid requests are forwarded to the upstream backend with the
 # original body unchanged. Invalid requests receive a 400 JSON
