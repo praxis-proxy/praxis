@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use praxis_test_utils::{
-    free_port, http_send, json_post, load_example_config, parse_body, parse_status,
-    start_echo_backend_with_shutdown, start_proxy,
+    free_port, http_send, json_post, load_example_config, parse_body, parse_status, start_echo_backend_with_shutdown,
+    start_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -28,10 +28,7 @@ fn request_validate_example_forwards_valid_responses_request() {
 
     let raw = http_send(
         proxy.addr(),
-        &json_post(
-            "/v1/responses",
-            r#"{"model":"gpt-4.1","input":"Hello, world!"}"#,
-        ),
+        &json_post("/v1/responses", r#"{"model":"gpt-4.1","input":"Hello, world!"}"#),
     );
 
     assert_eq!(parse_status(&raw), 200, "valid responses request should be forwarded");
@@ -62,11 +59,7 @@ fn request_validate_example_rejects_stream_and_background() {
         ),
     );
 
-    assert_eq!(
-        parse_status(&raw),
-        400,
-        "stream + background should be rejected"
-    );
+    assert_eq!(parse_status(&raw), 400, "stream + background should be rejected");
     let body = parse_body(&raw);
     let parsed: serde_json::Value = serde_json::from_str(&body).expect("error body should be JSON");
     assert_eq!(
@@ -88,10 +81,7 @@ fn request_validate_example_accepts_minimal_request() {
     );
     let proxy = start_proxy(&config);
 
-    let raw = http_send(
-        proxy.addr(),
-        &json_post("/v1/responses", r#"{"input":"Hello"}"#),
-    );
+    let raw = http_send(proxy.addr(), &json_post("/v1/responses", r#"{"input":"Hello"}"#));
 
     assert_eq!(
         parse_status(&raw),
