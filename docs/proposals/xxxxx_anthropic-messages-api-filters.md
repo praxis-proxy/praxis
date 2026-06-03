@@ -344,3 +344,519 @@ what can be mapped, and log what was dropped.
   discovered model endpoint speaks `Anthropic` or
   `OpenAI` format and apply the appropriate
   transformation filters automatically.
+
+### Translation Decision
+
+The classifier detects the request format (always
+`anthropic_messages` for Anthropic requests) but does
+not determine whether the backend needs translation.
+The translation decision requires knowing the selected
+cluster's capabilities, which is a post-routing concern.
+
+OGX solves this with a static provider allowlist
+(`_NATIVE_MESSAGES_MODULES`). For Praxis, the
+translation decision will use shared backend metadata
+(#466) so filters can query cluster capabilities
+after routing. Until #466 is designed, the operator
+explicitly selects the passthrough or transformation
+pipeline in config.
+
+Interim approach: the load_balancer cluster config
+declares `api_formats` per cluster. A filter after the
+router checks the selected cluster's formats against
+the detected request format and sets a filter result
+for branch chain routing.
+
+```yaml
+- filter: load_balancer
+  clusters:
+    - name: vllm-native
+      api_formats: [messages, chat_completions]
+      endpoints: ["127.0.0.1:8000"]
+    - name: openai-only
+      api_formats: [chat_completions]
+      endpoints: ["127.0.0.1:9000"]
+```
+
+This will be replaced by the shared backend metadata
+mechanism once #466 is implemented.
+## How?
+
+### Source Material
+
+- `Anthropic` Messages API docs:
+  https://platform.claude.com/docs/en/api/messages
+- OGX transformation reference:
+  `ogx/src/ogx/providers/inline/messages/impl.py`
+- Target: `filter/src/builtins/http/ai/anthropic/`
+  in praxis
+
+### Architecture
+
+Five filters, each implementing `HttpFilter`.
+Filters communicate via `HttpFilterContext`:
+- `filter_metadata`: durable key-value state
+  persisting across lifecycle phases
+- `filter_results`: ephemeral key-value pairs
+  consumed by branch conditions
+- `extra_request_headers`: headers injected into
+  upstream requests
+- Request/response body access via
+  `on_request_body` / `on_response_body`
+
+The classifier extends the existing
+`AiRequestFormat` enum (moved to
+`filter/src/builtins/http/ai/classifier/mod.rs` as
+a shared module) with an `AnthropicMessages`
+variant. Branch chains route dynamically based on
+the classified format and cluster capabilities —
+the operator does not hardcode which pipeline to
+use.
+
+---
+
+### Filter 0: `anthropic_messages_format`
+
+**Purpose:** Classify requests as `Anthropic` Messages
+API and promote routing facts to headers, metadata,
+and filter results. Mirrors the pattern of
+`responses_format` but detects `/v1/messages`
+requests.
+
+**Praxis trait methods:**
+- `on_request_body`: parse JSON body, classify
+  format, write metadata and headers
+- `request_body_mode` → `StreamBuffer` (read-only)
+
+**Classification logic:**
+
+The classifier must distinguish `Anthropic` Messages
+from OpenAI Chat Completions. Both have `messages`,
+so the classifier uses multiple signals:
+
+1. `anthropic-version` request header (strongest
+   signal: only Anthropic clients send this)
+2. Top-level `system` field (Anthropic separates
+   system from messages; OpenAI puts it in the
+   messages array for older models)
+3. Required `max_tokens` (Anthropic requires it;
+   OpenAI defaults it)
+4. Typed content blocks in `messages` (objects with
+   `type: "text"` / `type: "image"` / etc.)
+5. Path-based: request to `/v1/messages` endpoint
+
+Classification result:
+- Extends `AiRequestFormat` with
+  `AnthropicMessages` variant
+- `as_str()` returns `"anthropic_messages"`
+
+**Promoted facts:**
+- `x-praxis-ai-format: anthropic_messages`
+- `x-praxis-ai-model: <model>` (extracted from
+  body)
+- `x-praxis-ai-stream: true|false`
+- `filter_metadata`: `anthropic_format.format`,
+  `anthropic_format.model`,
+  `anthropic_format.stream`,
+  `anthropic_format.max_tokens`
+- `filter_results`: `anthropic_format.format`,
+  `anthropic_format.model`
+
+**Config:**
+
+```yaml
+filter: anthropic_messages_format
+on_invalid: continue  # continue | reject
+max_body_bytes: 1048576  # 1 MiB
+headers:
+  format: x-praxis-ai-format
+  model: x-praxis-ai-model
+  stream: x-praxis-ai-stream
+```
+
+---
+
+### Filter 1: `anthropic_request_validate`
+
+**Purpose:** Validate proxy-needed fields in
+`Anthropic` Messages requests before forwarding.
+Unlike #354's `request_validate`, this filter does
+not create shared orchestrator state or initialize
+persistence: `Anthropic` Messages has no stateful
+orchestration.
+
+**Praxis trait methods:**
+- `on_request_body`: parse JSON body, validate
+  fields, reject with 400 if invalid
+- `request_body_mode` → `StreamBuffer` (read-only)
+
+**Validation checks:**
+- `messages` array exists and is non-empty
+- `max_tokens` is present and > 0
+- `model` is present and non-empty
+- Content blocks (when arrays) have valid `type`
+  fields
+- Tool definitions (when present) have `name` and
+  `input_schema`
+
+**Validation principle:** Only validate what the
+proxy needs for its own operation. Let the inference
+server handle parameter ranges, model availability,
+and content-level validation. Forward unknown fields
+as-is.
+
+**Config:**
+
+```yaml
+filter: anthropic_request_validate
+max_body_bytes: 1048576  # 1 MiB
+```
+
+---
+
+### Filter 2: `anthropic_to_openai`
+
+**Purpose:** Transform an `Anthropic` Messages API
+request body into an OpenAI Chat Completions request
+body. Runs on the request path. Enables Anthropic
+SDK clients to reach OpenAI-compatible backends
+(vLLM, llm-d, KServe).
+
+**Praxis trait methods:**
+- `on_request_body`: rewrite JSON body
+- `request_body_mode` → `StreamBuffer`
+  (read-write)
+- `on_response_body`: transform response body
+  (non-streaming) or SSE chunks (streaming) from
+  OpenAI format back to Anthropic format
+
+**Request transformation (Anthropic → OpenAI):**
+
+- Hoist `system` → prepend OpenAI message with
+  `role: "system"`. Handles both string and text
+  block array forms.
+- Flatten content blocks in each message:
+  - `type: "text"` → string content or OpenAI
+    text content part
+  - `type: "image"` with `source.type: "base64"`
+    → OpenAI `type: "image_url"` with data URL
+  - `type: "image"` with `source.type: "url"`
+    → OpenAI `type: "image_url"` with URL
+  - `type: "tool_use"` → OpenAI `tool_calls`
+    entry with `function.arguments =
+    serde_json::to_string(input)`
+  - `type: "tool_result"` → separate OpenAI
+    message with `role: "tool"`, `tool_call_id`,
+    and string content. Images in tool results
+    promoted to follow-up user messages.
+  - `type: "thinking"` → dropped (logged)
+  - `type: "redacted_thinking"` → dropped (logged)
+- Map parameters:
+  - `max_tokens` → `max_tokens`
+  - `stop_sequences` → `stop`
+  - `temperature` → `temperature` (strip for
+    Opus 4.7+ targeting)
+  - `top_p` → `top_p` (same caveat)
+  - `top_k` → extra body parameter
+- Map `tool_choice`:
+  - `"any"` → `"required"`
+  - `"none"` → `"none"`
+  - `"auto"` → `"auto"`
+  - `{"type": "tool", "name": "X"}` →
+    `{"type": "function", "function":
+    {"name": "X"}}`
+- Map `tools`:
+  - Custom tools: `input_schema` → `parameters`,
+    `name` → `function.name`,
+    `description` → `function.description`
+  - Server-side tools (`web_search_*`, `bash_*`,
+    `text_editor_*`): dropped with
+    `tracing::warn!`
+- Rewrite `Content-Type` and `Content-Length`
+  headers
+- Strip `anthropic-version` and `x-api-key`
+  headers (credential injection handles upstream
+  auth)
+
+**Response transformation (OpenAI → Anthropic):**
+
+Non-streaming:
+- `choices[0].message.content` → content block
+  with `type: "text"`
+- `choices[0].message.tool_calls` → content
+  blocks with `type: "tool_use"`, `id`,
+  `name`, `input = serde_json::from_str(args)`
+- `finish_reason` → `stop_reason`:
+  `"stop"` → `"end_turn"`,
+  `"tool_calls"` → `"tool_use"`,
+  `"length"` → `"max_tokens"`,
+  `"content_filter"` → `"end_turn"` (lossy;
+     original preserved in filter metadata)
+- `usage.prompt_tokens` → `input_tokens`,
+  `usage.completion_tokens` → `output_tokens`,
+  `usage.prompt_tokens_details.cached_tokens`
+  → `cache_read_input_tokens`
+- Generate `id` as `msg_{uuid}`, set
+  `type: "message"`, `role: "assistant"`
+
+**Config:**
+
+```yaml
+filter: anthropic_to_openai
+max_body_bytes: 1048576  # 1 MiB
+```
+
+---
+
+### Filter 3: `anthropic_stream_events`
+
+**Purpose:** Transform streaming SSE responses
+between `OpenAI` Chat Completions chunks and
+`Anthropic` Messages events. Separated from request
+transformation so operators can use SSE event
+handling independently: e.g. for logging, metrics,
+or guardrails on passthrough streams without
+transforming the request body.
+
+**Praxis trait methods:**
+- `on_response_body`: process each TCP chunk as it
+  arrives, transform complete SSE events immediately,
+  buffer only partial lines across chunk boundaries
+- `response_body_mode` → `Stream` (not `StreamBuffer`;
+  no full-response buffering)
+
+**Per-chunk processing:**
+Each `on_response_body` call:
+1. Combines leftover partial data from the previous
+   chunk with new bytes
+2. Splits on `\n\n` SSE event boundaries
+3. Transforms each complete `data:` line immediately
+4. Stores any trailing partial data in filter metadata
+5. Forwards transformed events to the client
+
+This conforms to the [Inference Proxy Conformance
+Guidelines] Sections 4.2 (no streaming-to-non-streaming
+conversion) and 4.3 (no full-response buffering).
+
+[Inference Proxy Conformance Guidelines]: https://docs.google.com/document/d/1yDzs9ehHFxqYbufOmY-sEXiEtn9nhXUKHx4uKjasC5Q/edit?tab=t.0
+
+**State machine (per-request, stored in filter metadata):**
+- Track: current block index, block type, open
+  blocks, finish reason, output tokens
+- First chunk → `message_start` with empty
+  message envelope
+- Text delta → `content_block_start` (first),
+  then `content_block_delta(text_delta)`
+- Tool call delta → `content_block_start` with
+  empty `tool_use` block (first per tool), then
+  `content_block_delta(input_json_delta)`
+- Block end → `content_block_stop`
+- `[DONE]` → `message_delta` with `stop_reason`
+  and `usage`, then `message_stop`
+
+**Config:**
+
+```yaml
+filter: anthropic_stream_events
+```
+
+---
+
+### Filter 4: `anthropic_passthrough`
+
+**Purpose:** Preserve Anthropic-native features
+when routing to backends that natively support
+`/v1/messages` (`Anthropic` API, vLLM with Anthropic
+endpoint). No body transformation: only header
+management and credential injection coordination.
+
+**Praxis trait methods:**
+- `on_request`: manage headers, set upstream path
+- `on_response`: forward rate-limit headers
+
+**Behavior:**
+
+Request:
+- Preserve `anthropic-version` header (inject
+  default `2023-06-01` if absent)
+- Preserve `cache_control` blocks in body as-is
+- Preserve `thinking` parameter as-is
+- Coordinate with `credential_injection` filter
+  for `x-api-key` header injection
+- Set upstream path to `/v1/messages`
+
+Response:
+- Forward Anthropic rate-limit headers to client:
+  `x-ratelimit-limit-requests`,
+  `x-ratelimit-limit-tokens`,
+  `x-ratelimit-remaining-requests`,
+  `x-ratelimit-remaining-tokens`,
+  `x-ratelimit-reset-requests`,
+  `x-ratelimit-reset-tokens`
+- Forward `request-id` header
+- Pass through SSE events unchanged (native
+  Anthropic streaming)
+
+**Config:**
+
+```yaml
+filter: anthropic_passthrough
+default_version: "2023-06-01"
+forward_rate_limits: true
+```
+
+---
+
+### Filter Chain Configuration
+
+#### Anthropic client → OpenAI backend (vLLM/llm-d):
+
+```yaml
+filter_chains:
+  - name: anthropic-to-openai
+    filters:
+      - filter: anthropic_messages_format
+        name: classify
+
+      - filter: anthropic_request_validate
+
+      - filter: anthropic_to_openai
+        name: transform
+
+      - filter: anthropic_stream_events
+
+    cluster: vllm-backend
+```
+
+#### Anthropic client → Anthropic backend:
+
+```yaml
+filter_chains:
+  - name: anthropic-native
+    filters:
+      - filter: anthropic_messages_format
+        name: classify
+
+      - filter: anthropic_request_validate
+
+      - filter: anthropic_passthrough
+        name: passthrough
+
+      - filter: credential_injection
+        clusters:
+          anthropic:
+            header: x-api-key
+            value_from_env: ANTHROPIC_API_KEY
+
+    cluster: anthropic-backend
+```
+
+#### Unified gateway (auto-detect and route):
+
+```yaml
+routes:
+  - path: /v1/messages
+    filters:
+      - filter: anthropic_messages_format
+        name: detect
+        branch_chains:
+          - name: to-openai
+            on_result:
+              filter: detect
+              key: format
+              result: anthropic_messages
+            chain: anthropic-to-openai
+
+    cluster: anthropic-backend
+
+  - path: /v1/chat/completions
+    filters:
+      - filter: responses_format
+        name: detect
+
+    cluster: vllm-backend
+
+  - path: /v1/responses
+    filters:
+      - filter: responses_format
+        name: detect
+
+    cluster: vllm-backend
+```
+
+---
+
+### Implementation Tiers
+
+Build order; each tier produces a working system:
+
+| Tier | Filter | What works after |
+|------|--------|------------------|
+| 0 | `anthropic_messages_format` | Classification and routing. Anthropic requests detected and promoted to headers/metadata for branch-chain routing. |
+| 1 | `anthropic_request_validate` | Request validation. Malformed requests rejected at the proxy with consistent error format. |
+| 2 | `anthropic_passthrough` | Native Anthropic backend routing. Clients reach `Anthropic` API through Praxis with credential injection and rate-limit forwarding. |
+| 3 | `anthropic_to_openai` (request + non-streaming response) | `Anthropic` SDK clients can reach vLLM/llm-d backends. Non-streaming responses translated back. |
+| 4 | `anthropic_stream_events` | Per-chunk SSE streaming. `OpenAI` chunks translated to `Anthropic` events incrementally as they arrive. Conformant with [Inference Proxy Conformance Guidelines](https://docs.google.com/document/d/1yDzs9ehHFxqYbufOmY-sEXiEtn9nhXUKHx4uKjasC5Q/edit?tab=t.0). |
+
+---
+
+### File Structure in Praxis
+
+```
+filter/src/builtins/http/ai/
+  classifier/
+    mod.rs                       # shared AiRequestFormat enum
+  anthropic/
+    mod.rs                       # module exports
+    messages_format/
+      mod.rs                     # classifier filter
+      config.rs                  # YAML config
+    request_validate/
+      mod.rs                     # validation filter
+      config.rs                  # YAML config
+    to_openai/
+      mod.rs                     # transformation filter
+      config.rs                  # YAML config
+      request.rs                 # Anthropic → OpenAI request
+      response.rs                # OpenAI → Anthropic response
+    stream_events/
+      mod.rs                     # per-chunk SSE transformation
+      config.rs                  # YAML config
+    passthrough/
+      mod.rs                     # passthrough filter
+      config.rs                  # YAML config
+```
+
+---
+
+### Open Questions
+
+1. **Classifier placement.** Resolved: the shared
+   `AiRequestFormat` enum is moved to
+   `ai/classifier/` and extended with
+   `AnthropicMessages`. Both `responses_format` and
+   `anthropic_messages_format` filters import from
+   the same classifier. One enum, one classification
+   function.
+
+2. **Path rewriting.** When transforming Anthropic →
+   OpenAI, the upstream path must change from
+   `/v1/messages` to `/v1/chat/completions`. Should
+   this be done in the transformation filter or via
+   Praxis route configuration?
+
+3. **Token counting.** Anthropic uses different
+   tokenization than OpenAI. When transforming
+   responses back, should `usage.input_tokens` /
+   `output_tokens` reflect the original Anthropic
+   token count or the OpenAI backend's count?
+
+4. **Batches API.** Anthropic supports
+   `/v1/messages/batches` for async batch
+   processing. Should this be a separate filter or
+   part of `anthropic_to_openai`? Deferred for now.
+
+5. **`/v1/messages/count_tokens`.** Anthropic
+   supports a token counting endpoint. Should
+   Praxis proxy this or implement it locally?
+   Deferred for now.
