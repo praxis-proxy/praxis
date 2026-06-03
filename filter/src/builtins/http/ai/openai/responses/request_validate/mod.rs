@@ -11,9 +11,9 @@
 //!
 //! This filter reads classifier metadata for parameter-combination
 //! validation, then does targeted JSON field extraction for fields
-//! the classifier does not cover (`instructions`, `metadata`,
-//! `conversation.id`, `include`). It does **not** deserialize the
-//! full body into a typed struct.
+//! the classifier does not cover (`instructions`, `conversation.id`,
+//! `include`). It does **not** deserialize the full body into a
+//! typed struct.
 //!
 //! # YAML
 //!
@@ -56,7 +56,7 @@ const MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
 /// parses the body as [`serde_json::Value`] for targeted field
 /// extraction. Does not deserialize the full body into a typed struct.
 ///
-/// This filter has no configuration — body buffering is handled by
+/// This filter has no configuration, body buffering is handled by
 /// the upstream `responses_format` classifier.
 pub struct RequestValidateFilter {
     /// Monotonic counter for unique ID generation.
