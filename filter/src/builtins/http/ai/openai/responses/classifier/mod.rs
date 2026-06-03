@@ -42,20 +42,20 @@ impl AiRequestFormat {
 /// Extracted facts from a classified request body.
 #[derive(Debug)]
 pub(crate) struct ClassifiedRequest {
-    /// Detected body format.
-    pub format: AiRequestFormat,
-    /// Extracted `model` field value, if present.
-    pub model: Option<String>,
-    /// Extracted `stream` field value, if present.
-    pub stream: Option<bool>,
-    /// Extracted `store` field value, if present.
-    pub store: Option<bool>,
     /// Extracted `background` field value, if present.
     pub background: Option<bool>,
-    /// Whether `previous_response_id` is present and non-null.
-    pub has_previous_response_id: bool,
+    /// Detected body format.
+    pub format: AiRequestFormat,
     /// Whether `conversation` is present and non-null.
     pub has_conversation: bool,
+    /// Whether `previous_response_id` is present and non-null.
+    pub has_previous_response_id: bool,
+    /// Extracted `model` field value, if present.
+    pub model: Option<String>,
+    /// Extracted `store` field value, if present.
+    pub store: Option<bool>,
+    /// Extracted `stream` field value, if present.
+    pub stream: Option<bool>,
 }
 
 // -----------------------------------------------------------------------------
@@ -82,13 +82,13 @@ pub(crate) fn classify_request_body(body: &[u8]) -> ClassifiedRequest {
     let format = classify_format(obj);
 
     ClassifiedRequest {
-        format,
-        model: extract_string(obj, "model"),
-        stream: obj.get("stream").and_then(serde_json::Value::as_bool),
-        store: obj.get("store").and_then(serde_json::Value::as_bool),
         background: obj.get("background").and_then(serde_json::Value::as_bool),
-        has_previous_response_id: obj.get("previous_response_id").is_some_and(|v| !v.is_null()),
+        format,
         has_conversation: obj.get("conversation").is_some_and(|v| !v.is_null()),
+        has_previous_response_id: obj.get("previous_response_id").is_some_and(|v| !v.is_null()),
+        model: extract_string(obj, "model"),
+        store: obj.get("store").and_then(serde_json::Value::as_bool),
+        stream: obj.get("stream").and_then(serde_json::Value::as_bool),
     }
 }
 
@@ -111,13 +111,13 @@ fn classify_format(obj: &serde_json::Map<String, serde_json::Value>) -> AiReques
 /// Build a result with no extracted facts.
 fn empty_result(format: AiRequestFormat) -> ClassifiedRequest {
     ClassifiedRequest {
-        format,
-        model: None,
-        stream: None,
-        store: None,
         background: None,
-        has_previous_response_id: false,
+        format,
         has_conversation: false,
+        has_previous_response_id: false,
+        model: None,
+        store: None,
+        stream: None,
     }
 }
 

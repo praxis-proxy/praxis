@@ -73,6 +73,16 @@ fn zero_max_body_bytes_rejected() {
 }
 
 #[test]
+fn rejects_max_body_bytes_above_ceiling() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("max_body_bytes: 67108865").unwrap();
+    let result = ResponsesFormatFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "max_body_bytes above 64 MiB ceiling should be rejected"
+    );
+}
+
+#[test]
 fn invalid_header_name_rejected() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"

@@ -6,7 +6,7 @@
 mod access;
 mod buffer;
 mod builder;
-mod limits;
+pub(crate) mod limits;
 mod mode;
 
 pub use access::BodyAccess;

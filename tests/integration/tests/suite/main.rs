@@ -47,6 +47,7 @@ mod downstream_read_timeout;
 mod examples;
 mod failure_mode;
 mod filter_composition;
+mod filter_metadata;
 mod guardrails;
 mod health_check;
 mod hot_reload;

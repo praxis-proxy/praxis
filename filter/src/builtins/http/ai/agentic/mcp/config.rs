@@ -77,15 +77,15 @@ pub(crate) struct HeaderValidation {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct McpHeaders {
+    /// Header name for the JSON-RPC kind (e.g. `x-praxis-mcp-kind`).
+    #[serde(default = "default_kind_header")]
+    pub kind: Option<String>,
     /// Header name for the MCP method (e.g. `x-praxis-mcp-method`).
     #[serde(default = "default_method_header")]
     pub method: Option<String>,
     /// Header name for the tool/resource/prompt name (e.g. `x-praxis-mcp-name`).
     #[serde(default = "default_name_header")]
     pub name: Option<String>,
-    /// Header name for the JSON-RPC kind (e.g. `x-praxis-mcp-kind`).
-    #[serde(default = "default_kind_header")]
-    pub kind: Option<String>,
     /// Header name for MCP session presence (e.g. `x-praxis-mcp-session-present`).
     #[serde(default = "default_session_present_header")]
     pub session_present: Option<String>,
@@ -94,9 +94,9 @@ pub(crate) struct McpHeaders {
 impl Default for McpHeaders {
     fn default() -> Self {
         Self {
+            kind: default_kind_header(),
             method: default_method_header(),
             name: default_name_header(),
-            kind: default_kind_header(),
             session_present: default_session_present_header(),
         }
     }
@@ -146,14 +146,6 @@ fn default_session_present_header() -> Option<String> {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct McpConfig {
-    /// Maximum body size in bytes for `StreamBuffer`.
-    #[serde(default = "default_max_body_bytes")]
-    pub max_body_bytes: usize,
-
-    /// Invalid input handling behavior.
-    #[serde(default)]
-    pub on_invalid: InvalidMcpBehavior,
-
     /// Header validation settings.
     #[serde(default)]
     pub header_validation: HeaderValidation,
@@ -161,6 +153,14 @@ pub(crate) struct McpConfig {
     /// Header names for MCP metadata promotion.
     #[serde(default)]
     pub headers: McpHeaders,
+
+    /// Maximum body size in bytes for `StreamBuffer`.
+    #[serde(default = "default_max_body_bytes")]
+    pub max_body_bytes: usize,
+
+    /// Invalid input handling behavior.
+    #[serde(default)]
+    pub on_invalid: InvalidMcpBehavior,
 }
 
 /// Default max body bytes.

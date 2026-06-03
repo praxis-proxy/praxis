@@ -109,10 +109,10 @@ pub(crate) struct McpEnvelope {
     pub method: McpMethod,
     /// Tool/resource/prompt name extracted from params.
     pub name: Option<String>,
-    /// `Mcp-Session-Id` value from the request header.
-    pub session_id: Option<String>,
     /// Protocol version from initialize params or `Mcp-Protocol-Version` header.
     pub protocol_version: Option<String>,
+    /// `Mcp-Session-Id` value from the request header.
+    pub session_id: Option<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -132,8 +132,8 @@ pub(crate) fn extract_mcp_envelope(value: &Value, method_str: &str, request_head
     McpEnvelope {
         method,
         name,
-        session_id,
         protocol_version,
+        session_id,
     }
 }
 

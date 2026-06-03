@@ -124,14 +124,14 @@ pub fn method_label(method: &str) -> &'static str {
 /// so the metrics facade can intern them without per-request allocation.
 /// Only `cluster` is dynamic.
 pub(crate) struct RequestMetricLabels {
-    /// HTTP method (e.g. `"GET"`).
-    pub method: &'static str,
-    /// Status class (e.g. `"2xx"`).
-    pub status_class: &'static str,
-    /// Route name or `"unknown"`.
-    pub route: &'static str,
     /// Cluster name or `"none"`.
     pub cluster: ::metrics::SharedString,
+    /// HTTP method (e.g. `"GET"`).
+    pub method: &'static str,
+    /// Route name or `"unknown"`.
+    pub route: &'static str,
+    /// Status class (e.g. `"2xx"`).
+    pub status_class: &'static str,
 }
 
 /// Record HTTP request metrics for a completed request.

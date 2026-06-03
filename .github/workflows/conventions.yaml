@@ -57,7 +57,8 @@ jobs:
                 --body "${marker}
           **PR too large**: ${added} lines added (limit: ${MAX_ADDITIONS}). Please split into smaller PRs. Add \`skip/pr-hygiene\` label to override."
             fi
-            gh pr close "$PR_NUMBER" --repo "${{ github.repository }}"
+            echo "::error::PR has ${added} lines added (limit: ${MAX_ADDITIONS})"
+            exit 1
           fi
 
   # ----------------------------------------------------------------------------
@@ -81,9 +82,15 @@ jobs:
           fi
 
           word_count=$(echo "$PR_BODY" | wc -w)
-          if [ "$word_count" -lt 2 ]; then # minimum "fixes <issue_number>"
-            gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
-              --body "Please add a description to this PR explaining what it does and why. See our [coding conventions](docs/developing/conventions.md)."
+          if [ "$word_count" -lt 2 ]; then
+            marker="<!-- praxis:pr-description-check -->"
+            already=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
+            if [ "$already" -eq 0 ]; then
+              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+                --body "${marker}
+          Please add a description to this PR explaining what it does and why. See our [coding conventions](docs/developing/conventions.md)."
+            fi
           fi
 
   # ----------------------------------------------------------------------------
@@ -180,7 +187,7 @@ jobs:
           fi
 
           unsigned=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
-            --paginate --jq '[.[] | select(.commit.verification.verified == false) | .sha[:7]] | join(", ")')
+            --paginate --jq '[.[] | select(.parents | length == 1) | select(.commit.verification.verified == false) | .sha[:7]] | join(", ")')
 
           if [ -n "$unsigned" ]; then
             marker="<!-- praxis:signed-commits-check -->"
@@ -219,7 +226,7 @@ jobs:
           missing=$(gh api \
             "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
             --paginate \
-            --jq '[.[] | select(.commit.message | test("^Signed-off-by: "; "m") | not) | .sha[:7]] | join(", ")')
+            --jq '[.[] | select(.parents | length == 1) | select(.commit.message | test("(?m)^Signed-off-by: ") | not) | .sha[:7]] | join(", ")')
 
           if [ -n "$missing" ]; then
             marker="<!-- praxis:signoff-check -->"
@@ -274,7 +281,8 @@ jobs:
             --arg credit "$CREDIT" \
             --arg any_trailer "$ANY_TRAILER" '
             [
-              (.[] | .sha[:7] as $sha |
+              (.[] | select(.parents | length == 1) |
+                .sha[:7] as $sha |
                 select(
                   (.commit.author.email |
                     test($ai_email; "i")) or
@@ -282,7 +290,8 @@ jobs:
                     test($ai_email; "i"))
                 ) |
                 "- `\($sha)`: AI tool email in author/committer"),
-              (.[] | .sha[:7] as $sha |
+              (.[] | select(.parents | length == 1) |
+                .sha[:7] as $sha |
                 select(
                   (.commit.author.name |
                     test($ai_author; "i")) or
@@ -290,7 +299,8 @@ jobs:
                     test($ai_author; "i"))
                 ) |
                 "- `\($sha)`: AI tool in author/committer name"),
-              (.[] | .sha[:7] as $sha |
+              (.[] | select(.parents | length == 1) |
+                .sha[:7] as $sha |
                 .commit.message | split("\n")[] |
                 select(
                   (test($any_trailer; "i") and
@@ -316,7 +326,7 @@ jobs:
           ${violations}
 
           Sorry, this project does not accept commits authored by tools as valid.
-          Commits need to be authored by and signed-off by the human(s) responsible for the PR, with their name and contact.
+          Commits need to be authored by and signed-off by the human(s) responsible for the PR, with their name and contact."
             fi
             echo "::error::AI tool authorship found in PR commits"
             exit 1
@@ -392,7 +402,8 @@ jobs:
                 --body "${marker}
           **Proposal validation failed**:
           $(echo -e "$errors")
-          See [proposal process](docs/proposals.md) for requirements. Fix and re-open."
+          See [proposal process](docs/proposals.md) for requirements."
             fi
-            gh pr close "$PR_NUMBER" --repo "${{ github.repository }}"
+            echo "::error::Proposal validation failed"
+            exit 1
           fi
