@@ -4,8 +4,8 @@
 //! Validation logic for Responses API requests.
 //!
 //! Only validates parameters the proxy needs for its own operation
-//! (stream/background interaction, background/store dependency, model
-//! for routing). All other validation is left to the inference server.
+//! (stream/background interaction, background/store dependency).
+//! All other validation is left to the inference server.
 
 use crate::filter::HttpFilterContext;
 
