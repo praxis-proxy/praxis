@@ -348,38 +348,26 @@ what can be mapped, and log what was dropped.
 ### Translation Decision
 
 The classifier detects the request format (always
-`anthropic_messages` for Anthropic requests) but does
-not determine whether the backend needs translation.
-The translation decision requires knowing the selected
-cluster's capabilities, which is a post-routing concern.
+`anthropic_messages` for `Anthropic` requests) but
+does not determine whether the backend needs
+translation. This follows the existing Praxis
+classify → route pattern: the classifier promotes
+facts to internal headers, and the operator
+configures routes that direct traffic to the
+appropriate pipeline.
 
-OGX solves this with a static provider allowlist
-(`_NATIVE_MESSAGES_MODULES`). For Praxis, the
-translation decision will use shared backend metadata
-(#466) so filters can query cluster capabilities
-after routing. Until #466 is designed, the operator
-explicitly selects the passthrough or transformation
-pipeline in config.
+For passthrough backends (vLLM, `Anthropic` API):
+the operator configures a route that sends
+`/v1/messages` traffic to a passthrough filter
+chain. For OpenAI-only backends: the operator
+configures a route to a transformation filter
+chain. The router selects the cluster; the
+listener selects the filter chain.
 
-Interim approach: the load_balancer cluster config
-declares `api_formats` per cluster. A filter after the
-router checks the selected cluster's formats against
-the detected request format and sets a filter result
-for branch chain routing.
-
-```yaml
-- filter: load_balancer
-  clusters:
-    - name: vllm-native
-      api_formats: [messages, chat_completions]
-      endpoints: ["127.0.0.1:8000"]
-    - name: openai-only
-      api_formats: [chat_completions]
-      endpoints: ["127.0.0.1:9000"]
-```
-
-This will be replaced by the shared backend metadata
-mechanism once #466 is implemented.
+This is the same pattern used by `responses_format`
+for Responses API vs Chat Completions routing. See
+`examples/configs/ai/openai/responses/format-routing.yaml`
+for the canonical example.
 ## How?
 
 ### Source Material
@@ -408,10 +396,10 @@ The classifier extends the existing
 `AiRequestFormat` enum (moved to
 `filter/src/builtins/http/ai/classifier/mod.rs` as
 a shared module) with an `AnthropicMessages`
-variant. Branch chains route dynamically based on
-the classified format and cluster capabilities —
-the operator does not hardcode which pipeline to
-use.
+variant. The operator configures routes and filter
+chains for passthrough vs transformation using the
+existing classify → route pattern (see Translation
+Decision above).
 
 ---
 
