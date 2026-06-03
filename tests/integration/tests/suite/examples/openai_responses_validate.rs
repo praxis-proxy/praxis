@@ -15,7 +15,7 @@ use praxis_test_utils::{
 // -----------------------------------------------------------------------------
 
 #[test]
-fn request_validate_example_forwards_valid_responses_request() {
+fn openai_responses_validate_example_forwards_valid_responses_request() {
     let backend_guard = start_echo_backend_with_shutdown();
     let proxy_port = free_port();
 
@@ -40,7 +40,7 @@ fn request_validate_example_forwards_valid_responses_request() {
 }
 
 #[test]
-fn request_validate_example_rejects_stream_and_background() {
+fn openai_responses_validate_example_rejects_stream_and_background() {
     let backend_guard = start_echo_backend_with_shutdown();
     let proxy_port = free_port();
 
@@ -70,7 +70,7 @@ fn request_validate_example_rejects_stream_and_background() {
 }
 
 #[test]
-fn request_validate_example_accepts_minimal_request() {
+fn openai_responses_validate_example_accepts_minimal_request() {
     let backend_guard = start_echo_backend_with_shutdown();
     let proxy_port = free_port();
 

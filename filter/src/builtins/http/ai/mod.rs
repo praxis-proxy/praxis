@@ -16,7 +16,7 @@ pub use agentic::{A2aFilter, JsonRpcFilter, McpFilter};
 #[cfg(feature = "ai-inference")]
 pub use inference::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
-pub use openai::RequestValidateFilter;
+pub use openai::OpenaiResponsesValidateFilter;
 #[cfg(feature = "ai-inference")]
 pub use openai::ResponsesFormatFilter;
 #[cfg(feature = "ai-inference")]

@@ -302,4 +302,4 @@ fn promote_filter_results(
 pub(crate) mod request_validate;
 
 #[cfg(feature = "ai-inference")]
-pub use request_validate::RequestValidateFilter;
+pub use request_validate::OpenaiResponsesValidateFilter;

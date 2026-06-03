@@ -14,9 +14,9 @@ pub(crate) mod value_safety;
 #[cfg(feature = "ai-inference")]
 pub use ai::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
-pub use ai::PromptEnrichFilter;
+pub use ai::OpenaiResponsesValidateFilter;
 #[cfg(feature = "ai-inference")]
-pub use ai::RequestValidateFilter;
+pub use ai::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::ResponsesFormatFilter;
 pub use ai::{A2aFilter, JsonRpcFilter, McpFilter};

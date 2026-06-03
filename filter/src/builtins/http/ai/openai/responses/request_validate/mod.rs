@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! `request_validate` filter: validate and enrich incoming Responses
+//! `openai_responses_validate` filter: validate and enrich incoming Responses
 //! API requests.
 //!
 //! Expects the upstream `responses_format` classifier to have already
@@ -18,7 +18,7 @@
 //! # YAML
 //!
 //! ```yaml
-//! filter: request_validate
+//! filter: openai_responses_validate
 //! ```
 
 mod validate;
@@ -47,7 +47,7 @@ use crate::{
 const MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
 
 // -----------------------------------------------------------------------------
-// RequestValidateFilter
+// OpenaiResponsesValidateFilter
 // -----------------------------------------------------------------------------
 
 /// Validates and enriches Responses API requests.
@@ -58,12 +58,12 @@ const MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
 ///
 /// This filter has no configuration, body buffering is handled by
 /// the upstream `responses_format` classifier.
-pub struct RequestValidateFilter {
+pub struct OpenaiResponsesValidateFilter {
     /// Monotonic counter for unique ID generation.
     counter: AtomicU64,
 }
 
-impl Default for RequestValidateFilter {
+impl Default for OpenaiResponsesValidateFilter {
     fn default() -> Self {
         Self {
             counter: AtomicU64::new(0),
@@ -71,7 +71,7 @@ impl Default for RequestValidateFilter {
     }
 }
 
-impl RequestValidateFilter {
+impl OpenaiResponsesValidateFilter {
     /// Create a filter from YAML config.
     ///
     /// This filter has no configuration fields. The config parameter
@@ -118,9 +118,9 @@ impl RequestValidateFilter {
 }
 
 #[async_trait]
-impl HttpFilter for RequestValidateFilter {
+impl HttpFilter for OpenaiResponsesValidateFilter {
     fn name(&self) -> &'static str {
-        "request_validate"
+        "openai_responses_validate"
     }
 
     fn request_body_access(&self) -> BodyAccess {
@@ -275,7 +275,7 @@ fn enrich_context(ctx: &mut HttpFilterContext<'_>, body: &serde_json::Value, res
 
 /// Write filter results for branch chain decisions.
 fn write_filter_results(ctx: &mut HttpFilterContext<'_>, response_id: &str) -> Result<(), FilterError> {
-    let results = ctx.filter_results.entry("request_validate").or_default();
+    let results = ctx.filter_results.entry("openai_responses_validate").or_default();
     results.set("validated", "true")?;
     results.set("response_id", response_id.to_owned())?;
     Ok(())
@@ -302,17 +302,17 @@ mod tests {
 
     #[test]
     fn from_config_succeeds() {
-        let filter = RequestValidateFilter::from_config(&serde_yaml::Value::Null).unwrap();
+        let filter = OpenaiResponsesValidateFilter::from_config(&serde_yaml::Value::Null).unwrap();
         assert_eq!(
             filter.name(),
-            "request_validate",
+            "openai_responses_validate",
             "filter name should be request_validate"
         );
     }
 
     #[test]
     fn body_access_is_read_only() {
-        let filter = RequestValidateFilter::default();
+        let filter = OpenaiResponsesValidateFilter::default();
         assert_eq!(
             filter.request_body_access(),
             BodyAccess::ReadOnly,
@@ -322,14 +322,14 @@ mod tests {
 
     #[test]
     fn response_id_has_prefix() {
-        let filter = RequestValidateFilter::default();
+        let filter = OpenaiResponsesValidateFilter::default();
         let id = filter.generate_response_id();
         assert!(id.starts_with("resp_"), "response ID should start with resp_");
     }
 
     #[test]
     fn conversation_id_has_prefix() {
-        let filter = RequestValidateFilter::default();
+        let filter = OpenaiResponsesValidateFilter::default();
         let id = filter.generate_conversation_id();
         assert!(id.starts_with("conv_"), "conversation ID should start with conv_");
     }
@@ -450,7 +450,7 @@ mod tests {
     #[tokio::test]
     async fn valid_request_sets_filter_results() {
         let ctx = run_filter(r#"{"input": "Hi"}"#, &[]).await;
-        let results = ctx.filter_results.get("request_validate").unwrap();
+        let results = ctx.filter_results.get("openai_responses_validate").unwrap();
 
         assert!(results.matches("validated", "true"), "validated result should be true");
         assert!(
@@ -596,7 +596,7 @@ mod tests {
 
     #[tokio::test]
     async fn not_end_of_stream_continues() {
-        let filter = RequestValidateFilter::default();
+        let filter = OpenaiResponsesValidateFilter::default();
         let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         let mut body = Some(Bytes::from(r#"{"input": "partial"}"#));
@@ -623,7 +623,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn make_filter() -> Box<dyn HttpFilter> {
-        RequestValidateFilter::from_config(&serde_yaml::Value::Null).unwrap()
+        OpenaiResponsesValidateFilter::from_config(&serde_yaml::Value::Null).unwrap()
     }
 
     async fn run_filter(body_str: &str, classifier_metadata: &[(&str, &str)]) -> HttpFilterContext<'static> {
