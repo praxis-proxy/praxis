@@ -75,7 +75,10 @@ pub(super) fn update_best_match<'a>(
 
 /// Return `true` if shorter prefixes cannot improve on the current best.
 pub(super) fn should_stop_early(best: Option<(Specificity, &Route)>, route: &Route) -> bool {
-    let route_len = route.path_match.len();
+    let route_len = match &route.path_match {
+        PathMatch::Exact { path } => path.len(),
+        PathMatch::Prefix { path_prefix } => crate::path_match::path_prefix_specificity(path_prefix),
+    };
     best.is_some_and(|((_, bp, _), _)| route_len < bp)
 }
 

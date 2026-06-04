@@ -23,7 +23,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use http::{HeaderMap, header::HeaderName};
-use praxis_core::config::Route;
+use praxis_core::config::{PathMatch, Route};
 use tracing::{debug, trace};
 
 use self::{
@@ -118,7 +118,7 @@ impl RouterFilter {
     ///
     /// Path prefix matching uses segment-boundary semantics per Gateway API:
     /// `/api` matches `/api`, `/api/`, `/api/v1` but NOT `/apikeys`.
-    /// Trailing slashes on prefixes are ignored (`/api` ≡ `/api/`).
+    /// Trailing slashes on prefixes are ignored (`/api` is equivalent to `/api/`).
     ///
     /// ```
     /// use praxis_core::config::{PathMatch, Route};
@@ -241,7 +241,15 @@ impl RouterFilter {
 /// Sorts routes by specificity: exact paths first, then longest prefix.
 fn sort_routes(routes: &mut [RouterRouteConfig]) {
     routes.sort_by(|a, b| {
-        b.route.path_match.len().cmp(&a.route.path_match.len()).then_with(|| {
+        let a_len = match &a.route.path_match {
+            PathMatch::Exact { path } => path.len(),
+            PathMatch::Prefix { path_prefix } => crate::path_match::path_prefix_specificity(path_prefix),
+        };
+        let b_len = match &b.route.path_match {
+            PathMatch::Exact { path } => path.len(),
+            PathMatch::Prefix { path_prefix } => crate::path_match::path_prefix_specificity(path_prefix),
+        };
+        b_len.cmp(&a_len).then_with(|| {
             let a_exact = u8::from(a.route.path_match.is_exact());
             let b_exact = u8::from(b.route.path_match.is_exact());
             b_exact.cmp(&a_exact)

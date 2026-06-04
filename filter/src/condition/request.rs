@@ -375,6 +375,15 @@ mod tests {
     }
 
     #[test]
+    fn when_path_prefix_rejects_non_segment_boundary() {
+        let req = make_request(Method::GET, "/apikeys", HeaderMap::new());
+        assert!(
+            !should_execute(&[when(path_match("/api"))], &req),
+            "path prefix /api must not match /apikeys (non-segment boundary)"
+        );
+    }
+
+    #[test]
     fn multiple_headers_one_missing_fails() {
         let mut headers = HeaderMap::new();
         headers.insert("x-a", HeaderValue::from_static("1"));
