@@ -220,6 +220,41 @@ Branches rejoin at configurable points (next,
 terminal, named filter, re-entrance with iteration
 limits).
 
+## Key Patterns
+
+- **Classify → route**: classifier filters promote
+  facts to internal headers (`x-praxis-ai-*`) and
+  the router matches those headers to select
+  clusters. See
+  `examples/configs/ai/openai/responses/format-routing.yaml`.
+- **Branch on filter results**: branch chains split
+  or rejoin request-phase pipelines based on filter
+  results (`on_result`). See
+  `examples/configs/pipeline/branch-chains.yaml`
+  and `tests/integration/tests/suite/responses_format.rs`.
+  Branch sub-chains only run `on_request`;
+  `on_request_body` and `on_response_body` are not
+  executed for filters inside branch chains.
+  Body-transforming filters must be in the main
+  pipeline path or gated with normal filter
+  conditions.
+- **Prefer existing routing mechanisms**: use
+  classifier-promoted headers, router matches,
+  filter conditions, and branch chains before
+  adding new routing or capability mechanisms.
+- **Do not buffer full streaming responses**:
+  streaming and SSE filters should use
+  `BodyMode::Stream` and process chunks
+  incrementally unless the feature explicitly
+  requires buffering.
+- **Validate only proxy-needed fields**: let the
+  backend handle parameter ranges, model
+  availability, and role ordering.
+- **Use dedicated rewrite filters for URL/path
+  translation**: use `path_rewrite` or `url_rewrite`;
+  provider and protocol filters should not set
+  `ctx.rewritten_path` directly.
+
 ## Filter Organization
 
 Filters live under
