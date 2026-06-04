@@ -72,11 +72,7 @@ pub(crate) struct ClassifiedRequest {
 /// - `POST   /v1/responses/compact`
 /// - `DELETE /v1/responses/{id}`
 pub(crate) fn is_responses_path(method: &http::Method, path: &str) -> bool {
-    let path = if path == "/" {
-        path
-    } else {
-        path.strip_suffix('/').unwrap_or(path)
-    };
+    let path = path.strip_suffix('/').filter(|p| !p.is_empty()).unwrap_or(path);
     let segments: Vec<&str> = path.split('/').collect();
 
     match (method, segments.as_slice()) {
