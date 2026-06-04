@@ -364,7 +364,7 @@ configures a route to a transformation filter
 chain. The router selects the cluster; the
 listener selects the filter chain.
 
-This is the same pattern used by `responses_format`
+This is the same pattern used by `openai_responses_format`
 for Responses API vs Chat Completions routing. See
 `examples/configs/ai/openai/responses/format-routing.yaml`
 for the canonical example.
@@ -408,7 +408,7 @@ Decision above).
 **Purpose:** Classify requests as `Anthropic` Messages
 API and promote routing facts to headers, metadata,
 and filter results. Mirrors the pattern of
-`responses_format` but detects `/v1/messages`
+`openai_responses_format` but detects `/v1/messages`
 requests.
 
 **Praxis trait methods:**
@@ -732,44 +732,61 @@ filter_chains:
 
       - filter: credential_injection
         clusters:
-          anthropic:
+          - name: anthropic
             header: x-api-key
-            value_from_env: ANTHROPIC_API_KEY
+            env_var: ANTHROPIC_API_KEY
 
     cluster: anthropic-backend
 ```
 
-#### Unified gateway (auto-detect and route):
+#### Unified gateway (separate filter chains per format):
+
+Note: branch chains cannot be used for transformation
+because body hooks (`on_request_body`, `on_response_body`)
+are not executed for filters inside branch chains. Use
+separate filter chains with path-based routing instead.
 
 ```yaml
-routes:
-  - path: /v1/messages
+listeners:
+  - name: gateway
+    address: "0.0.0.0:8080"
+    filter_chains:
+      - anthropic-passthrough
+      - openai
+
+filter_chains:
+  - name: anthropic-passthrough
     filters:
       - filter: anthropic_messages_format
-        name: detect
-        branch_chains:
-          - name: to-openai
-            on_result:
-              filter: detect
-              key: format
-              result: anthropic_messages
-            chain: anthropic-to-openai
+        on_invalid: continue
+      - filter: anthropic_request_validate
+      - filter: anthropic_passthrough
+        default_version: "2023-06-01"
+      - filter: router
+        routes:
+          - path_prefix: "/v1/messages"
+            cluster: anthropic-backend
+      - filter: load_balancer
+        clusters:
+          - name: anthropic-backend
+            endpoints:
+              - "api.anthropic.com:443"
+            tls:
+              sni: "api.anthropic.com"
 
-    cluster: anthropic-backend
-
-  - path: /v1/chat/completions
+  - name: openai
     filters:
-      - filter: responses_format
-        name: detect
-
-    cluster: vllm-backend
-
-  - path: /v1/responses
-    filters:
-      - filter: responses_format
-        name: detect
-
-    cluster: vllm-backend
+      - filter: openai_responses_format
+        on_invalid: continue
+      - filter: router
+        routes:
+          - path_prefix: "/v1/"
+            cluster: vllm-backend
+      - filter: load_balancer
+        clusters:
+          - name: vllm-backend
+            endpoints:
+              - "127.0.0.1:8000"
 ```
 
 ---
@@ -822,8 +839,8 @@ filter/src/builtins/http/ai/
 1. **Classifier placement.** Resolved: the shared
    `AiRequestFormat` enum is moved to
    `ai/classifier/` and extended with
-   `AnthropicMessages`. Both `responses_format` and
-   `anthropic_messages_format` filters import from
+   `AnthropicMessages`. Both `openai_responses_format`
+   and `anthropic_messages_format` filters import from
    the same classifier. One enum, one classification
    function.
 
