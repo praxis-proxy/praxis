@@ -427,6 +427,195 @@ async fn null_headers_suppress_emission() {
 }
 
 // -----------------------------------------------------------------------------
+// Path-Based Classification (method + path in on_request_body)
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn get_v1_responses_with_id_classifies_as_responses() {
+    let ctx = run_filter_with_method("{}", "", http::Method::GET, "/v1/responses/resp_abc123").await;
+
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.format")
+            .map(String::as_str),
+        Some("openai_responses"),
+        "GET /v1/responses/{{id}} should classify as responses"
+    );
+}
+
+#[tokio::test]
+async fn get_v1_responses_input_items_classifies_as_responses() {
+    let ctx = run_filter_with_method("{}", "", http::Method::GET, "/v1/responses/resp_abc123/input_items").await;
+
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.format")
+            .map(String::as_str),
+        Some("openai_responses"),
+        "GET /v1/responses/{{id}}/input_items should classify as responses"
+    );
+}
+
+#[tokio::test]
+async fn delete_v1_responses_with_id_classifies_as_responses() {
+    let ctx = run_filter_with_method("{}", "", http::Method::DELETE, "/v1/responses/resp_abc123").await;
+
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.format")
+            .map(String::as_str),
+        Some("openai_responses"),
+        "DELETE /v1/responses/{{id}} should classify as responses"
+    );
+}
+
+#[tokio::test]
+async fn post_v1_responses_cancel_classifies_as_responses() {
+    let ctx = run_filter_with_method("{}", "", http::Method::POST, "/v1/responses/resp_abc123/cancel").await;
+
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.format")
+            .map(String::as_str),
+        Some("openai_responses"),
+        "POST /v1/responses/{{id}}/cancel should classify as responses"
+    );
+    let results = ctx.filter_results.get("openai_responses_format").unwrap();
+    assert_eq!(results.get("format"), Some("openai_responses"), "filter result format");
+}
+
+#[tokio::test]
+async fn post_v1_responses_input_tokens_classifies_as_responses() {
+    let ctx = run_filter_with_method("{}", "", http::Method::POST, "/v1/responses/input_tokens").await;
+
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.format")
+            .map(String::as_str),
+        Some("openai_responses"),
+        "POST /v1/responses/input_tokens should classify as responses"
+    );
+}
+
+#[tokio::test]
+async fn post_v1_responses_compact_classifies_as_responses() {
+    let ctx = run_filter_with_method("{}", "", http::Method::POST, "/v1/responses/compact").await;
+
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.format")
+            .map(String::as_str),
+        Some("openai_responses"),
+        "POST /v1/responses/compact should classify as responses"
+    );
+}
+
+#[tokio::test]
+async fn get_path_match_promotes_filter_results() {
+    let ctx = run_filter_with_method("{}", "", http::Method::GET, "/v1/responses/resp_abc123").await;
+    let results = ctx.filter_results.get("openai_responses_format").unwrap();
+
+    assert_eq!(results.get("format"), Some("openai_responses"), "filter result format");
+    assert_eq!(results.get("model"), None, "no model from path-only classification");
+    assert_eq!(results.get("stream"), None, "no stream from path-only classification");
+}
+
+#[tokio::test]
+async fn delete_path_match_promotes_filter_results() {
+    let ctx = run_filter_with_method("{}", "", http::Method::DELETE, "/v1/responses/resp_abc123").await;
+    let results = ctx.filter_results.get("openai_responses_format").unwrap();
+
+    assert_eq!(results.get("format"), Some("openai_responses"), "filter result format");
+}
+
+#[tokio::test]
+async fn get_path_match_promotes_format_header() {
+    let ctx = run_filter_with_method("{}", "", http::Method::GET, "/v1/responses/resp_abc").await;
+    let headers = collect_headers(&ctx);
+
+    assert_eq!(
+        headers.get("x-praxis-ai-format"),
+        Some(&"openai_responses"),
+        "GET path match should promote format header"
+    );
+    assert!(
+        !headers.contains_key("x-praxis-ai-model"),
+        "no model for path-only classification"
+    );
+    assert!(
+        !headers.contains_key("x-praxis-ai-stream"),
+        "no stream for path-only classification"
+    );
+}
+
+#[tokio::test]
+async fn get_path_match_no_body_facts() {
+    let ctx = run_filter_with_method("{}", "", http::Method::GET, "/v1/responses/resp_abc").await;
+
+    assert!(
+        !ctx.filter_metadata.contains_key("openai_responses_format.model"),
+        "no model from path-only classification"
+    );
+    assert!(
+        !ctx.filter_metadata.contains_key("openai_responses_format.stream"),
+        "no stream from path-only classification"
+    );
+    assert!(
+        !ctx.filter_metadata.contains_key("openai_responses_format.store"),
+        "no store from path-only classification"
+    );
+    assert!(
+        !ctx.filter_metadata.contains_key("openai_responses_format.background"),
+        "no background from path-only classification"
+    );
+}
+
+#[tokio::test]
+async fn put_unrelated_path_classifies_body_normally() {
+    let ctx = run_filter_with_method(
+        "{}",
+        r#"{"model":"gpt-4","messages":[]}"#,
+        http::Method::PUT,
+        "/v1/chat/completions",
+    )
+    .await;
+
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.format")
+            .map(String::as_str),
+        Some("openai_chat_completions"),
+        "non-path method should classify using request body"
+    );
+}
+
+#[tokio::test]
+async fn post_v1_responses_classifies_body_normally() {
+    let ctx = run_filter_with_method(
+        "{}",
+        r#"{"model":"gpt-4.1","input":"test"}"#,
+        http::Method::POST,
+        "/v1/responses",
+    )
+    .await;
+
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.format")
+            .map(String::as_str),
+        Some("openai_responses"),
+        "POST should classify via body, not path"
+    );
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.model")
+            .map(String::as_str),
+        Some("gpt-4.1"),
+        "POST should extract model from body"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
@@ -465,6 +654,25 @@ async fn run_filter_raw(config_yaml: &str, body_str: &str) -> FilterAction {
     let mut body = Some(Bytes::from(body_str.to_owned()));
 
     filter.on_request_body(&mut ctx, &mut body, true).await.unwrap()
+}
+
+/// Run the filter's `on_request_body` with a custom method and path.
+async fn run_filter_with_method(
+    config_yaml: &str,
+    body_str: &str,
+    method: http::Method,
+    path: &str,
+) -> HttpFilterContext<'static> {
+    let filter = make_filter(config_yaml);
+    let req = crate::test_utils::make_request(method, path);
+
+    let req: &'static crate::context::Request = Box::leak(Box::new(req));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    let mut body = Some(Bytes::from(body_str.to_owned()));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(matches!(action, FilterAction::Release), "filter should release");
+    ctx
 }
 
 /// Build a `ResponsesFormatFilter` from a YAML snippet.
