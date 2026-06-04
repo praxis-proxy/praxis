@@ -121,7 +121,7 @@ following to your shell profile (`~/.bashrc`,
 `~/.zshrc`, etc.):
 
 ```sh
-export RUSTC_WRAPPER=$(which sccache)
+export RUSTC_WRAPPER=sccache
 ```
 
 ### Warming the cache
