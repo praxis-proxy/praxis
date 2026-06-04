@@ -38,5 +38,20 @@ docs/**/
 !docs/architecture/
 !docs/developing/
 !docs/filters/
+!docs/getting-started/
+!docs/configuration/
+!docs/protocols/
+!docs/security/
+!docs/development/
 !docs/operating/
 !docs/proposals/
+
+# Docs spec files
+docs/superpowers/
+
+# Website
+website/node_modules/
+website/.docusaurus/
+website/build/
+.superpowers/
+.gstack/

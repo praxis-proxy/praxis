@@ -1,3 +1,8 @@
+---
+sidebar_position: 4
+title: Features
+---
+
 # Features
 
 ## Core Architecture
@@ -84,14 +89,14 @@
 - **Payload size limits**: global hard ceilings on
   request and response payload size.
 
-[payload-processing]:./architecture/payload-processing.md
+[payload-processing]:../architecture/system-design#payload-processing
 
 ## Security
 
 Security is a primary design constraint. Praxis ships
 with secure defaults and fails closed on ambiguous
 configuration. See the
-[Security Hardening Guide](operating/security-hardening.md) for
+[Security Hardening Guide](../security/hardening) for
 deployment guidance.
 
 **Build-level guarantees:**
@@ -197,10 +202,10 @@ deployment guidance.
   server instance. See
   [Protocol Abstraction][protocol-abstraction].
 
-[http-lifecycle]:./architecture/connection-lifecycle.md#http-connection-lifecycle
-[tcp-lifecycle]:./architecture/connection-lifecycle.md#tcp-connection-lifecycle
-[protocol-abstraction]:./architecture/overview.md#protocol-adapters
-[tls-docs]:./operating/tls.md
+[http-lifecycle]:../architecture/system-design#http-connection-lifecycle
+[tcp-lifecycle]:../architecture/system-design#tcp-connection-lifecycle
+[protocol-abstraction]:../architecture/system-design#protocol-adapters
+[tls-docs]:../protocols/tls
 
 ## AI Inference
 
@@ -316,4 +321,4 @@ cargo build -p praxis --no-default-features
   zero overhead via the `HttpFilter`/`TcpFilter` traits
   and `register_filters!` macro.
 
-[filters]:./filters/README.md
+[filters]:../filters/filter-model
