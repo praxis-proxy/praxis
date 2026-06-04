@@ -4,6 +4,10 @@ discussion: https://github.com/praxis-proxy/praxis/issues/99#issuecomment-441137
 status: proposed
 authors:
   - nerdalert
+graduation_criteria:
+  - State class taxonomy agreed by stakeholders
+  - How? section with requirements and design
+  - Storage trait API design reviewed
 stakeholders:
   - shaneutt
   - twghu

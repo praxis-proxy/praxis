@@ -213,4 +213,46 @@ mod tests {
             "Debug output should contain struct name"
         );
     }
+
+    #[test]
+    fn concurrent_resolve_during_reload_returns_consistent_cert() {
+        let (_c1, pair1) = make_pair();
+        let resolver = Arc::new(ReloadableCertResolver::new(&pair1).expect("initial load"));
+        let cert1_der = resolver.current.load_full().cert[0].as_ref().to_vec();
+
+        let (_c2, pair2) = make_pair();
+        let resolver_clone = Arc::clone(&resolver);
+        let handle = std::thread::spawn(move || {
+            resolver_clone.reload(&pair2).expect("reload should succeed");
+        });
+
+        let observed: Vec<_> = (0..100)
+            .map(|_| resolver.current.load_full().cert[0].as_ref().to_vec())
+            .collect();
+        handle.join().expect("reload thread should not panic");
+        let cert2_der = resolver.current.load_full().cert[0].as_ref().to_vec();
+
+        for (i, cert) in observed.iter().enumerate() {
+            assert!(
+                *cert == cert1_der || *cert == cert2_der,
+                "observation {i} must be old or new cert, not a torn read"
+            );
+        }
+    }
+
+    // ---------------------------------------------------------------------------
+    // Test Utilities
+    // ---------------------------------------------------------------------------
+
+    /// Build a [`CertKeyPair`] from freshly generated test certs.
+    fn make_pair() -> (crate::test_utils::TestCerts, CertKeyPair) {
+        let certs = gen_test_certs();
+        let pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+        (certs, pair)
+    }
 }

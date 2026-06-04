@@ -25,13 +25,16 @@ use rand::{TryRngCore, rngs::OsRng};
 use tracing::{debug, trace};
 
 use self::config::{CatalogTool, McpBrokerConfig, build_config};
+use super::protocol;
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
-    builtins::http::ai::agentic::json_rpc::{
-        config::JsonRpcConfig,
-        contains_control_chars,
-        envelope::{JsonRpcEnvelope, JsonRpcIdKind, JsonRpcKind, parse_json_rpc_value},
+    builtins::http::{
+        ai::agentic::json_rpc::{
+            config::JsonRpcConfig,
+            envelope::{JsonRpcEnvelope, JsonRpcIdKind, JsonRpcKind, parse_json_rpc_value},
+        },
+        value_safety::contains_control_chars,
     },
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
@@ -40,9 +43,6 @@ use crate::{
 // -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
-
-/// MCP protocol version currently supported by Praxis.
-const SUPPORTED_PROTOCOL_VERSION: &str = "2025-03-26";
 
 /// Server name reported in MCP initialize responses.
 const SERVER_NAME: &str = "praxis";
@@ -82,14 +82,21 @@ const SERVER_NAME: &str = "praxis";
 ///         description: Create a calendar event
 /// ```
 pub(crate) struct McpBrokerFilter {
+    /// Static tool catalog built from config.
+    catalog: Vec<CatalogTool>,
+    /// Protocol version the broker uses in `initialize` responses.
+    default_version: String,
     /// Shared JSON-RPC parser configuration.
     json_rpc_config: JsonRpcConfig,
     /// Maximum body bytes for `StreamBuffer`.
     max_body_bytes: usize,
+    /// Configured protocol profile (stored for future profile-aware dispatch).
+    #[allow(dead_code, reason = "plumbing for follow-up profile-aware behavior")]
+    protocol_profile: protocol::ProtocolProfile,
     /// Public path this MCP broker handles (e.g. `/mcp`).
     public_path: String,
-    /// Static tool catalog built from config.
-    catalog: Vec<CatalogTool>,
+    /// Implemented versions used for protocol version negotiation.
+    supported_versions: Vec<String>,
 }
 
 impl McpBrokerFilter {
@@ -111,10 +118,13 @@ impl McpBrokerFilter {
         let json_rpc_config = build_json_rpc_config(validated.max_body_bytes);
 
         Ok(Box::new(Self {
+            catalog,
+            default_version: validated.default_version.clone(),
             json_rpc_config,
             max_body_bytes: validated.max_body_bytes,
+            protocol_profile: validated.protocol_profile,
             public_path: validated.path.clone(),
-            catalog,
+            supported_versions: validated.supported_versions.clone(),
         }))
     }
 }
@@ -147,6 +157,7 @@ impl HttpFilter for McpBrokerFilter {
         }
     }
 
+    #[allow(clippy::too_many_lines, reason = "sequential parse-extract-dispatch pipeline")]
     async fn on_request_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -186,7 +197,15 @@ impl HttpFilter for McpBrokerFilter {
             ctx.set_metadata("mcp.method", method_str.clone());
         }
 
-        dispatch_method(ctx, &self.catalog, &value, &envelope, method_str)
+        dispatch_method(
+            ctx,
+            &self.catalog,
+            &value,
+            &envelope,
+            method_str,
+            &self.supported_versions,
+            &self.default_version,
+        )
     }
 }
 
@@ -197,12 +216,18 @@ impl HttpFilter for McpBrokerFilter {
 /// Maps a JSON-RPC method to the MCP handler that owns it.
 /// Never returns [`FilterAction::Release`] — all paths produce
 /// a terminal synthetic response.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "project threshold is 5; version plumbing adds two"
+)]
 fn dispatch_method(
     ctx: &mut HttpFilterContext<'_>,
     catalog: &[CatalogTool],
     value: &serde_json::Value,
     envelope: &JsonRpcEnvelope,
     method_str: &str,
+    supported_versions: &[String],
+    default_version: &str,
 ) -> Result<FilterAction, FilterError> {
     if method_str.starts_with("notifications/") {
         return Ok(handle_notification(envelope));
@@ -213,7 +238,7 @@ fn dispatch_method(
     }
 
     let action = match method_str {
-        "initialize" => handle_initialize(ctx, value, envelope)?,
+        "initialize" => handle_initialize(ctx, value, envelope, supported_versions, default_version)?,
         "tools/list" => handle_tools_list(catalog, envelope)?,
         "tools/call" => json_rpc_error_action(envelope, -32601, "method not yet supported"),
         "ping" => handle_ping(envelope),
@@ -276,8 +301,11 @@ fn handle_initialize(
     ctx: &mut HttpFilterContext<'_>,
     value: &serde_json::Value,
     envelope: &JsonRpcEnvelope,
+    supported_versions: &[String],
+    default_version: &str,
 ) -> Result<FilterAction, FilterError> {
     record_client_protocol_version(ctx, value);
+    let response_version = negotiate_protocol_version(value, supported_versions, default_version);
     let session_id = generate_session_id()?;
 
     debug!(session_id_len = session_id.len(), "MCP initialize");
@@ -287,8 +315,33 @@ fn handle_initialize(
         Rejection::status(200)
             .with_header("content-type", "application/json")
             .with_header("mcp-session-id", &session_id)
-            .with_body(Bytes::from(initialize_response_body(envelope).to_string())),
+            .with_body(Bytes::from(
+                initialize_response_body(envelope, response_version).to_string(),
+            )),
     ))
+}
+
+/// Select the protocol version for the initialize response.
+///
+/// Echoes the client's requested version when the broker supports it,
+/// otherwise falls back to `default_version`.
+fn negotiate_protocol_version<'a>(
+    value: &serde_json::Value,
+    supported_versions: &'a [String],
+    default_version: &'a str,
+) -> &'a str {
+    let requested = value
+        .get("params")
+        .and_then(|p| p.get("protocolVersion"))
+        .and_then(|v| v.as_str());
+
+    if let Some(req) = requested
+        && let Some(matched) = supported_versions.iter().find(|v| v.as_str() == req)
+    {
+        return matched.as_str();
+    }
+
+    default_version
 }
 
 /// Persist the client's advertised MCP protocol version for later negotiation
@@ -304,13 +357,13 @@ fn record_client_protocol_version(ctx: &mut HttpFilterContext<'_>, value: &serde
     }
 }
 
-/// Build the initialize response from dynamic crate and protocol constants.
-fn initialize_response_body(envelope: &JsonRpcEnvelope) -> serde_json::Value {
+/// Build the initialize response from the configured protocol version.
+fn initialize_response_body(envelope: &JsonRpcEnvelope, protocol_version: &str) -> serde_json::Value {
     serde_json::json!({
         "jsonrpc": "2.0",
         "id": id_value(envelope),
         "result": {
-            "protocolVersion": SUPPORTED_PROTOCOL_VERSION,
+            "protocolVersion": protocol_version,
             "capabilities": {
                 "tools": {
                     "listChanged": false,
@@ -459,13 +512,13 @@ fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
     use crate::builtins::http::ai::agentic::json_rpc::config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders};
 
     JsonRpcConfig {
-        max_body_bytes,
         batch_policy: BatchPolicy::Reject,
-        on_invalid: InvalidJsonRpcBehavior::Continue,
         headers: JsonRpcHeaders {
-            method: None,
             id: None,
             kind: None,
+            method: None,
         },
+        max_body_bytes,
+        on_invalid: InvalidJsonRpcBehavior::Continue,
     }
 }

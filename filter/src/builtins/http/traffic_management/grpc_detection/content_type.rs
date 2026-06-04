@@ -39,7 +39,7 @@ impl GrpcKind {
 
     /// Classify a `content-type` header value as a gRPC variant.
     pub(crate) fn from_content_type(value: &str) -> Self {
-        let mime = value.split(';').next().unwrap_or_default().trim();
+        let mime = value.split_once(';').map_or(value, |(before, _)| before).trim();
         if !mime
             .get(..16)
             .is_some_and(|p| p.as_bytes().eq_ignore_ascii_case(b"application/grpc"))

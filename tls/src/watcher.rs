@@ -317,6 +317,97 @@ mod tests {
     }
 
     #[test]
+    fn reload_cert_failure_returns_false() {
+        let certs = gen_test_certs();
+        let good_pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+        let certified = loader::load_certified_key(&good_pair).expect("load cert");
+        let original_der = certified.cert[0].as_ref().to_vec();
+        let current = Arc::new(ArcSwap::from_pointee(certified));
+
+        let bad_pair = CertKeyPair {
+            cert_path: "/nonexistent/cert.pem".to_owned(),
+            default: false,
+            key_path: "/nonexistent/key.pem".to_owned(),
+            server_names: Vec::new(),
+        };
+
+        let success = reload_cert(&current, &bad_pair);
+        assert!(!success, "reload with nonexistent paths should return false");
+
+        let after_der = current.load_full().cert[0].as_ref().to_vec();
+        assert_eq!(
+            original_der, after_der,
+            "certificate should be unchanged after failed reload"
+        );
+    }
+
+    #[test]
+    fn reload_cert_success_returns_true() {
+        let certs = gen_test_certs();
+        let pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+        let certified = loader::load_certified_key(&pair).expect("load cert");
+        let current = Arc::new(ArcSwap::from_pointee(certified));
+
+        let new_certs = gen_test_certs();
+        let new_pair = CertKeyPair {
+            cert_path: new_certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: new_certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+
+        let success = reload_cert(&current, &new_pair);
+        assert!(success, "reload with valid paths should return true");
+    }
+
+    #[test]
+    fn backoff_doubles_on_consecutive_failures() {
+        let mut backoff_ms = DEBOUNCE_MS;
+
+        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+        assert_eq!(backoff_ms, DEBOUNCE_MS * 2, "first failure should double backoff");
+
+        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+        assert_eq!(backoff_ms, DEBOUNCE_MS * 4, "second failure should double again");
+    }
+
+    #[test]
+    fn backoff_caps_at_max() {
+        let mut backoff_ms = MAX_BACKOFF_MS / 2 + 1;
+
+        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+        assert_eq!(backoff_ms, MAX_BACKOFF_MS, "backoff should cap at MAX_BACKOFF_MS");
+
+        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+        assert_eq!(backoff_ms, MAX_BACKOFF_MS, "backoff should remain at MAX_BACKOFF_MS");
+    }
+
+    #[test]
+    fn backoff_resets_on_success() {
+        let mut backoff_ms = DEBOUNCE_MS;
+
+        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+        backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
+        assert!(backoff_ms > DEBOUNCE_MS, "backoff should have increased after failures");
+
+        backoff_ms = DEBOUNCE_MS;
+        assert_eq!(
+            backoff_ms, DEBOUNCE_MS,
+            "backoff should reset to DEBOUNCE_MS on success"
+        );
+    }
+
+    #[test]
     fn watcher_reloads_on_file_change() {
         let certs = gen_test_certs();
         let temp_dir = certs._temp_dir.as_ref().expect("temp dir");

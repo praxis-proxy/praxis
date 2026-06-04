@@ -29,6 +29,9 @@ mod max_connections;
 #[cfg(feature = "ai-inference")]
 mod model_to_header;
 mod multi_listener;
+#[cfg(feature = "ai-inference")]
+mod openai_responses_format;
+mod p2c;
 mod path_based_routing;
 mod path_rewriting;
 mod payload_processing;

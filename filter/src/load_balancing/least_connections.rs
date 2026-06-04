@@ -66,7 +66,7 @@ impl LeastConnections {
     /// Decrement the in-flight counter for `addr` after a response.
     pub(crate) fn release(&self, addr: &str) {
         if let Some(counter) = self.counters.get(addr) {
-            let _ = counter.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
+            let _ = counter.fetch_update(Ordering::Release, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
         }
     }
 

@@ -1,25 +1,5 @@
 # Filters
 
-## Listeners
-
-```mermaid
-flowchart LR
-    Client -->|TCP| L0["Listener (named)"]
-    L0 -->|rustls| TLS
-    TLS --> Resolve["Chain Resolution"]
-    Resolve --> Pipeline["Filter Pipeline"]
-    Pipeline --> Pool["Upstream Pool"]
-    Pool --> Backend
-
-    Config["Config (YAML)"] -. startup .-> Chains
-    Chains["filter_chains:"] -. per listener .-> Resolve
-```
-
-Each listener has a `name` and a list of `filter_chains`.
-At startup, the referenced chains are resolved and
-concatenated into a single pipeline per listener. Different
-listeners can compose different subsets of chains.
-
 ## Filter Model
 
 Filters are the core processing units in Praxis. Each
@@ -29,6 +9,9 @@ request/response lifecycle.
 
 Filters are chained into pipelines; the pipeline executor
 calls each filter in order on requests and in reverse on responses.
+
+For listener and chain resolution architecture, see
+the [architecture overview](../architecture/overview.md).
 
 ### What Filters Receive
 
@@ -95,15 +78,15 @@ pattern. A few highlights:
 - **Conditional filters**: [conditional-filters.yaml]
 - **Production gateway**: [production-gateway.yaml]
 
-[`examples/configs/`]: ../examples/configs/
-[hosts.yaml]: ../examples/configs/traffic-management/hosts.yaml
-[path-based-routing.yaml]: ../examples/configs/traffic-management/path-based-routing.yaml
-[guardrails.yaml]: ../examples/configs/security/guardrails.yaml
-[ip-acl.yaml]: ../examples/configs/security/ip-acl.yaml
-[rate-limiting.yaml]: ../examples/configs/traffic-management/rate-limiting.yaml
-[composed-chains.yaml]: ../examples/configs/pipeline/composed-chains.yaml
-[conditional-filters.yaml]: ../examples/configs/pipeline/conditional-filters.yaml
-[production-gateway.yaml]: ../examples/configs/operations/production-gateway.yaml
+[`examples/configs/`]: ../../examples/configs/
+[hosts.yaml]: ../../examples/configs/traffic-management/hosts.yaml
+[path-based-routing.yaml]: ../../examples/configs/traffic-management/path-based-routing.yaml
+[guardrails.yaml]: ../../examples/configs/security/guardrails.yaml
+[ip-acl.yaml]: ../../examples/configs/security/ip-acl.yaml
+[rate-limiting.yaml]: ../../examples/configs/traffic-management/rate-limiting.yaml
+[composed-chains.yaml]: ../../examples/configs/pipeline/composed-chains.yaml
+[conditional-filters.yaml]: ../../examples/configs/pipeline/conditional-filters.yaml
+[production-gateway.yaml]: ../../examples/configs/operations/production-gateway.yaml
 
 ## Filter Chains
 
@@ -481,42 +464,6 @@ Response predicates: `status` (list of status codes),
 A filter can have both `conditions` (request phase) and
 `response_conditions` (response phase).
 
-## Built-in Filters
-
-| Filter | Category | Protocol | Key config |
-| --- | --- | --- | --- |
-| `router` | Traffic Management | HTTP | `routes[].path_prefix`, `.host`, `.cluster` |
-| `load_balancer` | Traffic Management | HTTP | `clusters[].endpoints`, `.load_balancer_strategy` |
-| `timeout` | Traffic Management | HTTP | `timeout_ms` (504 on exceed) |
-| `static_response` | Traffic Management | HTTP | `status` (required), `headers`, `body` |
-| `rate_limit` | Traffic Management | HTTP | `mode`, `rate`, `burst`; token bucket with per-IP and global modes |
-| `circuit_breaker` | Traffic Management | HTTP | `clusters[].consecutive_failures`, `.recovery_window_secs`; per-cluster circuit breaking |
-| `headers` | Transformation | HTTP | `request_add`, `response_add/set/remove` |
-| `request_id` | Observability | HTTP | Propagates/generates `X-Request-ID` |
-| `access_log` | Observability | HTTP | Structured JSON logging; optional `sample_rate` |
-| `sni_router` | Traffic Management | TCP | `routes[].server_names`, `.upstream`, `default_upstream` |
-| `tcp_load_balancer` | Traffic Management | TCP | Cluster-backed TCP endpoint selection (round-robin, least-connections, consistent-hash) |
-| `tcp_access_log` | Observability | TCP | Structured JSON connection logging |
-| `forwarded_headers` | Security | HTTP | `trusted_proxies` (CIDR list) |
-| `guardrails` | Security | HTTP | Reject requests matching header/body string or regex rules |
-| `ip_acl` | Security | HTTP | `allow` or `deny` (CIDR lists, mutually exclusive); 403 on denial |
-| `credential_injection` | Security | HTTP | Per-cluster API key injection with client credential stripping. Literal `value` fields are redacted in `--dump` output. |
-| `a2a` | Payload Processing | HTTP | A2A protocol classifier: extract method, family, task ID, streaming detection, and version for routing |
-| `json_body_field` | Payload Processing | HTTP | Extract a JSON body field and promote to header |
-| `json_rpc` | AI / Agentic | HTTP | Parse JSON-RPC 2.0 envelopes and extract method/id/kind for routing |
-| `mcp` | AI / Agentic | HTTP | MCP protocol classifier: extract method, tool/resource/prompt name, and session metadata for routing |
-| `compression` | Payload Processing | HTTP | Gzip, brotli, and zstd response compression |
-| `cors` | Security | HTTP | CORS preflight handling, origin validation, credential support |
-| `csrf` | Security | HTTP | Origin-based CSRF protection with gradual rollout and Sec-Fetch-Site support |
-| `redirect` | Traffic Management | HTTP | `status` (301/302/307/308), `location` template with `${path}`/`${query}` |
-| `path_rewrite` | Transformation | HTTP | `strip_prefix`, `add_prefix`, or `replace` (regex) on request path |
-| `url_rewrite` | Transformation | HTTP | `operations[]`: `regex_replace`, `strip_query_params`, `add_query_params` |
-| `model_to_header` | AI / Inference | HTTP | Extract JSON "model" field and promote to X-Model header. Requires `ai-inference` feature. |
-| `prompt_enrich` | AI / Inference | HTTP | Inject messages into OpenAI-compatible chat completion request bodies. Requires `ai-inference` feature. |
-
-For detailed configuration of each built-in filter, see
-[configuration.md](configuration.md).
-
 ### Security Filter Restrictions
 
 Security-critical filters (`ip_acl`, `forwarded_headers`)
@@ -536,148 +483,10 @@ pipeline, only the last one takes effect. Validation
 rejects this by default; set `allow_rewrite_override: true`
 on the later filter to permit it.
 
-## Custom Filters
+## Related
 
-### HTTP Filter Example
-
-Create a crate for your filter(s):
-
-```toml
-[dependencies]
-praxis-filter = { git = "https://github.com/praxis-proxy/praxis" }
-async-trait = "0.1.89"
-serde = { version = "1.0.228", features = ["derive"] }
-serde_yaml = "0.9.34"
-```
-
-```rust
-// my_filters/src/lib.rs
-use async_trait::async_trait;
-use praxis_filter::{
-    HttpFilter, FilterAction, HttpFilterContext,
-    FilterError, Rejection,
-};
-use serde::Deserialize;
-
-pub struct ApiKeyFilter { valid_keys: Vec<String> }
-
-#[derive(Deserialize)]
-struct Config { keys: Vec<String> }
-
-impl ApiKeyFilter {
-    pub fn from_config(
-        config: &serde_yaml::Value,
-    ) -> Result<Box<dyn HttpFilter>, FilterError> {
-        let cfg: Config =
-            serde_yaml::from_value(config.clone())?;
-        Ok(Box::new(Self { valid_keys: cfg.keys }))
-    }
-}
-
-#[async_trait]
-impl HttpFilter for ApiKeyFilter {
-    fn name(&self) -> &'static str { "api_key" }
-
-    async fn on_request(
-        &self, ctx: &mut HttpFilterContext<'_>,
-    ) -> Result<FilterAction, FilterError> {
-        let key = ctx.request.headers
-            .get("x-api-key")
-            .and_then(|v| v.to_str().ok());
-        match key {
-            Some(k)
-                if self.valid_keys.iter().any(|v| v == k)
-            => {
-                Ok(FilterAction::Continue)
-            }
-            _ => Ok(FilterAction::Reject(
-                Rejection::status(401),
-            )),
-        }
-    }
-}
-```
-
-Factory signature:
-`fn(&serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError>`.
-Filters are created once at startup, must be `Send + Sync`.
-
-### TCP Filter Example
-
-```rust
-use async_trait::async_trait;
-use praxis_filter::{
-    TcpFilter, TcpFilterContext, FilterAction, FilterError,
-};
-
-pub struct ConnectionLogger;
-
-#[async_trait]
-impl TcpFilter for ConnectionLogger {
-    fn name(&self) -> &'static str { "connection_logger" }
-
-    async fn on_connect(
-        &self, ctx: &mut TcpFilterContext<'_>,
-    ) -> Result<FilterAction, FilterError> {
-        tracing::info!(
-            remote = ctx.remote_addr,
-            "new connection"
-        );
-        Ok(FilterAction::Continue)
-    }
-
-    async fn on_disconnect(
-        &self, ctx: &mut TcpFilterContext<'_>,
-    ) -> Result<(), FilterError> {
-        tracing::info!(
-            remote = ctx.remote_addr,
-            "connection closed"
-        );
-        Ok(())
-    }
-}
-```
-
-### Registration
-
-The `register_filters!` macro uses `http "name" => factory`
-syntax. TCP filters use `tcp "name" => factory`.
-
-```rust
-use my_filters::ApiKeyFilter;
-use praxis_filter::register_filters;
-
-register_filters! {
-    http "api_key" => ApiKeyFilter::from_config,
-}
-```
-
-The macro generates a `custom_registry()` function that
-returns a `FilterRegistry` with both built-in and custom
-filters. Use it with the test utilities
-(`start_proxy_with_registry`) or build your own server
-bootstrap from the workspace crates (`praxis-core`,
-`praxis-filter`, `praxis-protocol`).
-
-### YAML Config
-
-```yaml
-filter_chains:
-  - name: main
-    filters:
-      - filter: api_key
-        keys: ["secret-key-1", "secret-key-2"]  # use env/secrets in production
-      - filter: router
-        routes:
-          - path_prefix: "/"
-            cluster: backend
-```
-
-The YAML block under `filter: api_key` is passed as-is to
-`from_config`. Conditions work with custom filters with no
-extra code.
-
-For detailed configuration of individual built-in filters,
-see [configuration.md](configuration.md). For best
-practices when writing custom filters, see
-[extensions.md](extensions.md).
+- [Filter Reference](../operating/filter-reference.md):
+  configuration for all built-in filters
+- [Extensions](extensions.md): writing custom filters
+- [Payload Processing](../architecture/payload-processing.md):
+  body access architecture

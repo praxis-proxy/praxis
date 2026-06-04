@@ -4,6 +4,9 @@ discussion: https://github.com/praxis-proxy/praxis/discussions/185
 status: proposed
 authors:
   - mariusdanciu
+graduation_criteria:
+  - Expression language POC and benchmarks completed
+  - How? section with requirements and design
 stakeholders:
   - shaneutt
   - twghu

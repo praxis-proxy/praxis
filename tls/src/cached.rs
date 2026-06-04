@@ -124,6 +124,14 @@ impl CachedClientCert {
         tracing::debug!(cert_path, key_path, "loading client certificate");
 
         let cert_der = parse_cert_pem(cert_path)?;
+
+        if cert_der.is_empty() {
+            return Err(TlsError::FileLoadError {
+                path: cert_path.to_owned(),
+                detail: "no certificates found in client cert file".to_owned(),
+            });
+        }
+
         let key_der = parse_key_pem(key_path)?;
 
         tracing::info!(cert_path, "cached client certificate");
@@ -334,6 +342,22 @@ mod tests {
 
         let err = CachedClientCert::from_pem_files(cert_path.to_str().unwrap(), key_path.to_str().unwrap());
         assert!(err.is_err(), "empty key PEM should fail");
+    }
+
+    #[test]
+    fn cached_client_cert_from_pem_empty_cert() {
+        let pair = gen_test_certs();
+        let dir = tempfile::TempDir::new().unwrap();
+        let empty_cert = dir.path().join("empty.pem");
+        std::fs::write(&empty_cert, "").unwrap();
+
+        let err = CachedClientCert::from_pem_files(empty_cert.to_str().unwrap(), pair.key_path.to_str().unwrap());
+        assert!(err.is_err(), "empty cert PEM should fail");
+        let msg = err.unwrap_err().to_string();
+        assert!(
+            msg.contains("no certificates found"),
+            "error should mention missing certificates: {msg}"
+        );
     }
 
     #[test]

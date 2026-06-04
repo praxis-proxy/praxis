@@ -79,14 +79,14 @@ impl Default for McpMockConfig {
 
 /// A tool fixture advertised by the mock MCP server.
 pub struct McpToolFixture {
+    /// Tool name used for matching in `tools/call`.
+    pub name: String,
+
     /// Tool description shown in `tools/list`.
     pub description: Option<String>,
 
     /// JSON Schema for the tool's input parameters.
     pub input_schema: Value,
-
-    /// Tool name used for matching in `tools/call`.
-    pub name: String,
 }
 
 impl McpToolFixture {
@@ -94,9 +94,9 @@ impl McpToolFixture {
     /// object schema, and no description.
     pub fn new(name: impl Into<String>) -> Self {
         Self {
+            name: name.into(),
             description: None,
             input_schema: json!({"type": "object", "additionalProperties": false}),
-            name: name.into(),
         }
     }
 

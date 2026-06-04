@@ -53,6 +53,7 @@ endif
 	check-prereqs \
 	check-prereqs-cmake \
 	check-prereqs-nightly \
+	setup-hooks \
 	help
 
 # Uses --version rather than command -v so we catch broken installs.
@@ -222,6 +223,14 @@ coverage-check:
 		--output-path coverage.json
 
 # -------------------------------------------------------------------
+# Dev Setup
+# -------------------------------------------------------------------
+
+setup-hooks:
+	ln -sf ../../.hooks/pre-commit .git/hooks/pre-commit
+	@echo "Git hooks installed."
+
+# -------------------------------------------------------------------
 # Dev tools
 # -------------------------------------------------------------------
 
@@ -375,6 +384,9 @@ help:
 	@echo "Binutils (target/praxis-binutils/):"
 	@echo "  tools                download all external CLI tools"
 	@echo "  clean-tools          remove downloaded tools"
+	@echo ""
+	@echo "Dev Setup:"
+	@echo "  setup-hooks          install git pre-commit hook (fmt + lint)"
 	@echo ""
 	@echo "Dev tools:"
 	@echo "  run-echo             start echo server (xtask)"

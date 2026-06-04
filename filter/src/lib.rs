@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Shane Utt
 
-#![deny(unsafe_code)]
 #![deny(unreachable_pub)]
 
 //! Filter pipeline engine for Praxis.
@@ -26,6 +25,8 @@ pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
 #[cfg(feature = "ai-inference")]
 pub use builtins::PromptEnrichFilter;
+#[cfg(feature = "ai-inference")]
+pub use builtins::ResponsesFormatFilter;
 pub use builtins::{
     CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, GuardrailsAction,
     GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode, RedirectStatus, RouterFilter, RuleTargetKind,
@@ -68,7 +69,7 @@ macro_rules! register_filters {
                     ($factory)(config)
                 }),
             ),
-        ).expect(concat!("duplicate filter name: '", $name, "'"));
+        ).unwrap_or_else(|_| panic!("duplicate filter name: '{}'", $name));
     };
     ( @register $registry:ident, tcp $name:expr => $factory:expr ) => {
         $registry.register(
@@ -78,7 +79,7 @@ macro_rules! register_filters {
                     ($factory)(config)
                 }),
             ),
-        ).expect(concat!("duplicate filter name: '", $name, "'"));
+        ).unwrap_or_else(|_| panic!("duplicate filter name: '{}'", $name));
     };
     ( $( $kind:ident $name:expr => $factory:expr ),* $(,)? ) => {
         /// Build a custom filter registry with builtins and user-registered filters.
@@ -130,6 +131,28 @@ mod macro_tests {
         assert!(
             registry.available_filters().contains(&"dummy_tcp"),
             "registry should contain custom TCP filter"
+        );
+    }
+
+    #[test]
+    fn macro_registers_http_filter_with_name_expression() {
+        let mut registry = crate::FilterRegistry::with_builtins();
+        let name = String::from("dummy_http_expr");
+        register_filters!(@register registry, http name.as_str() => DummyHttpFilter::from_config);
+        assert!(
+            registry.available_filters().contains(&"dummy_http_expr"),
+            "registry should contain custom HTTP filter registered with a name expression"
+        );
+    }
+
+    #[test]
+    fn macro_registers_tcp_filter_with_name_expression() {
+        let mut registry = crate::FilterRegistry::with_builtins();
+        let name = String::from("dummy_tcp_expr");
+        register_filters!(@register registry, tcp name.as_str() => DummyTcpFilter::from_config);
+        assert!(
+            registry.available_filters().contains(&"dummy_tcp_expr"),
+            "registry should contain custom TCP filter registered with a name expression"
         );
     }
 

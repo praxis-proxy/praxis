@@ -264,6 +264,13 @@ register_filters! {
 
 TCP filters would use `tcp "name" => factory` syntax.
 
+The macro generates a `custom_registry()` function that
+returns a `FilterRegistry` with both built-in and custom
+filters. Use it with the test utilities
+(`start_proxy_with_registry`) or build your own server
+bootstrap from the workspace crates (`praxis-core`,
+`praxis-filter`, `praxis-protocol`).
+
 ### YAML Config
 
 Any keys placed alongside `filter:` in the filter chain
@@ -284,7 +291,8 @@ filter_chains:
 Custom filters participate identically to built-ins: same
 ordering, context access, and short-circuit capability.
 
-See [filters.md](filters.md) for extensive documentation.
+See the [filter system documentation](README.md) for the
+full API reference.
 
 ## Best Practices
 

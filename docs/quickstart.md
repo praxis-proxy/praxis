@@ -62,9 +62,9 @@ curl http://127.0.0.1:8080/
 
 ## Next steps
 
-- [Configuration](configuration.md): filter chains,
-  routing, load balancing, TLS, and all options.
+- [Configuration](operating/configuration.md): filter
+  chains, routing, load balancing, TLS, and all options.
 - [Example configs](../examples/configs/): working YAML
   for every feature.
-- [Filters](filters.md): built-in filters and how to
-  write your own.
+- [Filters](filters/README.md): built-in filters and
+  how to write your own.

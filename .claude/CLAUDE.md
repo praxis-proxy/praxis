@@ -14,6 +14,7 @@ repository.
 ## Quick Reference
 
 ```console
+make setup-hooks    # install git pre-commit hook (fmt + lint)
 make build          # workspace build (includes benches + fuzz)
 make test           # all tests (downloads h2spec if needed)
 make fmt            # format with nightly rustfmt
@@ -44,12 +45,12 @@ make test-resilience    # load, failure recovery, throughput
 make test-smoke         # quick startup and round-trip sanity
 ```
 
-See `docs/development.md` for the full command
-reference and dev tool usage.
+See `docs/developing/getting-started.md` for the full
+command reference and dev tool usage.
 
 ## Architecture
 
-See `docs/architecture.md` for the full design.
+See `docs/architecture/overview.md` for the full design.
 
 **Crate dependency flow:**
 
@@ -87,10 +88,10 @@ server -> protocol -> filter -> core -> tls
 
 ## Conventions
 
-See `docs/conventions.md` for the full coding style
-guide. Key points:
+See `docs/developing/conventions.md` for the full
+coding style guide. Key points:
 
-- `#![deny(unsafe_code)]` in all crates
+- `unsafe_code = "deny"` in workspace lints
 - All items (public and private) require `///` doc
   comments; enforced by `missing_docs` and
   `missing_docs_in_private_items` lints
@@ -114,7 +115,7 @@ guide. Key points:
   config structs; `#[serde(try_from)]` for
   constrained numerics; `#[serde(default)]`
   instead of `Option<T>` with `unwrap_or`.
-  See `docs/conventions.md` "Type Design".
+  See `docs/developing/type-design.md`.
   (e.g. `10_485_760; // 10 MiB`)
 
 ## Workspace Lints
@@ -170,13 +171,14 @@ exchange). Parse-only validation is not sufficient;
 every example must prove its feature works with all
 configured variants.
 
-See `docs/conventions.md` for full test conventions
-(no inline comments in test bodies, no doc comments
-on test functions, full-width separators only).
+See `docs/developing/conventions.md` for full test
+conventions (no inline comments in test bodies, no
+doc comments on test functions, full-width separators
+only).
 
 ## Adding a Filter
 
-See `docs/extensions.md` for the full guide.
+See `docs/filters/extensions.md` for the full guide.
 
 1. Create module under
    `filter/src/builtins/<protocol>/<category>/`
@@ -218,11 +220,48 @@ Branches rejoin at configurable points (next,
 terminal, named filter, re-entrance with iteration
 limits).
 
+## Key Patterns
+
+- **Classify → route**: classifier filters promote
+  facts to internal headers (`x-praxis-ai-*`) and
+  the router matches those headers to select
+  clusters. See
+  `examples/configs/ai/openai/responses/format-routing.yaml`.
+- **Branch on filter results**: branch chains split
+  or rejoin request-phase pipelines based on filter
+  results (`on_result`). See
+  `examples/configs/pipeline/branch-chains.yaml`
+  and `tests/integration/tests/suite/responses_format.rs`.
+  Branch sub-chains only run `on_request`;
+  `on_request_body` and `on_response_body` are not
+  executed for filters inside branch chains.
+  Body-transforming filters must be in the main
+  pipeline path or gated with normal filter
+  conditions.
+- **Prefer existing routing mechanisms**: use
+  classifier-promoted headers, router matches,
+  filter conditions, and branch chains before
+  adding new routing or capability mechanisms.
+- **Do not buffer full streaming responses**:
+  streaming and SSE filters should use
+  `BodyMode::Stream` and process chunks
+  incrementally unless the feature explicitly
+  requires buffering.
+- **Validate only proxy-needed fields**: let the
+  backend handle parameter ranges, model
+  availability, and role ordering.
+- **Use dedicated rewrite filters for URL/path
+  translation**: use `path_rewrite` or `url_rewrite`;
+  provider and protocol filters should not set
+  `ctx.rewritten_path` directly.
+
 ## Filter Organization
 
 Filters live under
 `filter/src/builtins/<protocol>/<category>/`.
-See `docs/filters.md` for the full filter reference.
+See `docs/filters/README.md` for the filter system
+documentation and `docs/operating/filter-reference.md`
+for built-in filter configurations.
 
 Categories: `ai`, `observability`,
 `payload_processing`, `security`,
@@ -249,7 +288,7 @@ CI workflows that post PR comments must use the
 
 ## Pingora Boundary
 
-See `docs/security-hardening.md` for details.
+See `docs/operating/security-hardening.md` for details.
 
 Pingora handles: request smuggling prevention, H2
 backpressure, connection pool safety, HTTP/1.1

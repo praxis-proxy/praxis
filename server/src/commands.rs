@@ -124,4 +124,40 @@ filter_chains:
         let result = validate_config_for_startup(&config);
         assert!(result.is_err(), "unknown filter type should fail validation");
     }
+
+    #[test]
+    fn invalid_yaml_syntax_returns_error() {
+        let result = Config::from_yaml("{{{{ not: valid: yaml: [");
+        assert!(result.is_err(), "malformed YAML syntax should fail parsing");
+    }
+
+    #[test]
+    fn empty_config_string_returns_error() {
+        let result = Config::from_yaml("");
+        assert!(result.is_err(), "empty config string should fail parsing");
+    }
+
+    #[test]
+    fn config_with_invalid_chain_reference_returns_error() {
+        let result = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [nonexistent_chain]
+filter_chains:
+  - name: main
+    filters: []
+"#,
+        );
+        assert!(
+            result.is_err(),
+            "listener referencing undefined chain should fail validation"
+        );
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("nonexistent_chain"),
+            "error should mention the missing chain name: {err}"
+        );
+    }
 }

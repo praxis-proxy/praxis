@@ -55,10 +55,16 @@ as a PR. File naming convention:
 ```
 
 The first PR must contain only the **What?** and **Why?**
-sections. The **How?** section is almost always contentious
-and must be added in a follow-up PR after the goals and
-motivation are accepted. See the [template] for the full
-structure.
+sections. The **How?** section must be added after the
+goals and motivation are accepted. See the [template]
+for the full structure.
+
+> **v0.x.x simplification**: During pre-1.0 development,
+> the **How?** section does not require an upfront design
+> document. Once the **What?** and **Why?** are agreed on,
+> the **How?** can simply list the PRs that implement the
+> solution. A full requirements and design writeup is
+> welcome but not required until 1.0.
 
 CI will close PRs that:
 
@@ -72,8 +78,9 @@ CI will close PRs that:
 ### 5. Iteration
 
 Iterate on the proposal in subsequent PRs. Add the
-**How?** section with requirements and design details.
-Refine until a maintainer marks the proposal as accepted.
+**How?** section: either a list of implementing PRs
+or a full requirements and design writeup. Refine
+until a maintainer marks the proposal as accepted.
 
 ### 6. Experimental
 
@@ -107,6 +114,37 @@ Authors are the people writing and driving the proposal.
 Stakeholders are the people who need to be kept informed
 and whose input is essential for the proposal to succeed.
 An author may also be a stakeholder.
+
+## Graduation Criteria
+
+Every proposal must list graduation criteria in the
+frontmatter. These are the conditions that must be
+satisfied before a maintainer will advance the
+proposal's status (e.g. `proposed` to `accepted`,
+`experimental` to `released`).
+
+Graduation criteria serve as a TODO list for the
+proposal. They capture important open items that
+must be resolved before the proposal can graduate,
+without necessarily blocking the current PR. If a
+concern is real but can be addressed in a follow-up
+iteration, add it as a graduation criterion and
+merge the PR. The criterion holds up the status
+change, not the pull request.
+
+Good graduation criteria are specific and
+verifiable:
+
+- "How? section with requirements and design"
+- "Benchmark results for candidate implementations"
+- "Storage trait API reviewed by stakeholders"
+
+Avoid vague criteria like "general agreement" or
+"feels ready."
+
+Released proposals should have an empty
+`graduation_criteria` list, since all criteria were
+met when the status advanced to `released`.
 
 ## Status Values
 

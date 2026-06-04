@@ -3,7 +3,10 @@
 
 //! JSON alias pattern matching and resolution helpers.
 
-#![allow(dead_code, reason = "alias helpers are validated before body aliasing is wired")]
+#![allow(
+    dead_code,
+    reason = "all items are validated via tests; callers wired in body-aliasing follow-up"
+)]
 
 use super::{ResolvedRoute, config::JsonAlias};
 

@@ -466,3 +466,241 @@ async fn connect_upstream(upstream_addr: &str) -> Option<TcpStream> {
         },
     }
 }
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::too_many_lines,
+    clippy::cast_possible_truncation,
+    reason = "tests"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn try_parse_sni_valid_client_hello_with_sni() {
+        let sni_ext = build_sni_extension("example.com");
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &sni_ext);
+        let record = wrap_in_record(&hello);
+        let filled = record.len();
+
+        let result = try_parse_sni(&record, filled);
+        assert!(
+            matches!(result, SniPeekResult::Parsed(ref info) if info.sni.as_deref() == Some("example.com")),
+            "valid TLS ClientHello with SNI should return Parsed"
+        );
+    }
+
+    #[test]
+    fn try_parse_sni_empty_buffer() {
+        let buf = [];
+        let result = try_parse_sni(&buf, 0);
+        assert!(
+            matches!(result, SniPeekResult::NeedMore),
+            "empty buffer should return NeedMore"
+        );
+    }
+
+    #[test]
+    fn try_parse_sni_non_tls_data() {
+        let buf = b"GET / HTTP/1.1\r\nHost: example.com\r\n\r\n";
+        let result = try_parse_sni(buf, buf.len());
+        assert!(
+            matches!(result, SniPeekResult::NotTls),
+            "HTTP request should return NotTls"
+        );
+    }
+
+    #[test]
+    fn try_parse_sni_truncated_client_hello() {
+        let sni_ext = build_sni_extension("example.com");
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &sni_ext);
+        let record = wrap_in_record(&hello);
+        let truncated = &record[..5];
+
+        let result = try_parse_sni(truncated, 5);
+        assert!(
+            matches!(result, SniPeekResult::NeedMore),
+            "truncated ClientHello (first 5 bytes) should return NeedMore"
+        );
+    }
+
+    #[test]
+    fn try_parse_sni_filled_less_than_buf_len() {
+        let sni_ext = build_sni_extension("test.example.org");
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &sni_ext);
+        let record = wrap_in_record(&hello);
+        let filled = record.len();
+        let mut padded = record.clone();
+        padded.resize(filled + 512, 0);
+
+        let result = try_parse_sni(&padded, filled);
+        assert!(
+            matches!(result, SniPeekResult::Parsed(ref info) if info.sni.as_deref() == Some("test.example.org")),
+            "should parse correctly using filled as slice bound"
+        );
+    }
+
+    #[test]
+    fn handle_sni_read_parsed_truncates_and_returns_done() {
+        let sni_ext = build_sni_extension("parsed.example.com");
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &sni_ext);
+        let record = wrap_in_record(&hello);
+        let filled = record.len();
+        let mut buf = record.clone();
+        buf.resize(filled + 256, 0xAA);
+
+        let action = handle_sni_read(&mut buf, filled);
+        assert!(
+            matches!(action, PeekAction::Done(Some(ref sni)) if sni == "parsed.example.com"),
+            "Parsed result should yield Done with SNI hostname"
+        );
+        assert_eq!(buf.len(), filled, "buf should be truncated to filled length");
+    }
+
+    #[test]
+    fn handle_sni_read_need_more_below_peek_max_resizes_when_full() {
+        let mut buf = vec![22, 3, 3, 0, 100, 1];
+        let filled = buf.len();
+
+        let action = handle_sni_read(&mut buf, filled);
+        assert!(
+            matches!(action, PeekAction::ReadMore),
+            "NeedMore below PEEK_MAX should return ReadMore"
+        );
+        assert_eq!(
+            buf.len(),
+            filled * 2,
+            "buf should double in size when filled == buf.len()"
+        );
+    }
+
+    #[test]
+    fn handle_sni_read_need_more_below_peek_max_no_resize_when_not_full() {
+        let raw = [22u8, 3, 3, 0, 100, 1];
+        let mut buf = vec![0u8; 1024];
+        buf[..raw.len()].copy_from_slice(&raw);
+        let filled = raw.len();
+
+        let action = handle_sni_read(&mut buf, filled);
+        assert!(
+            matches!(action, PeekAction::ReadMore),
+            "NeedMore below PEEK_MAX should return ReadMore"
+        );
+        assert_eq!(buf.len(), 1024, "buf should not resize when filled < buf.len()");
+    }
+
+    #[test]
+    fn handle_sni_read_need_more_at_peek_max_returns_done_none() {
+        let raw = [22u8, 3, 3, 0, 100, 1];
+        let mut buf = vec![0u8; PEEK_MAX];
+        buf[..raw.len()].copy_from_slice(&raw);
+        let filled = PEEK_MAX;
+
+        let action = handle_sni_read(&mut buf, filled);
+        assert!(
+            matches!(action, PeekAction::Done(None)),
+            "NeedMore at PEEK_MAX should return Done(None)"
+        );
+        assert_eq!(
+            buf.len(),
+            PEEK_MAX,
+            "buf should be truncated to filled (which equals PEEK_MAX)"
+        );
+    }
+
+    #[test]
+    fn handle_sni_read_not_tls_returns_done_none() {
+        let mut buf = b"GET / HTTP/1.1\r\n".to_vec();
+        let filled = buf.len();
+
+        let action = handle_sni_read(&mut buf, filled);
+        assert!(
+            matches!(action, PeekAction::Done(None)),
+            "NotTls should return Done(None)"
+        );
+        assert_eq!(buf.len(), filled, "buf should be truncated to filled length");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// TLS `ContentType` for Handshake records.
+    const CONTENT_TYPE_HANDSHAKE: u8 = 22;
+
+    /// TLS `HandshakeType` for `ClientHello`.
+    const HANDSHAKE_TYPE_CLIENT_HELLO: u8 = 1;
+
+    /// SNI `NameType` for DNS hostnames.
+    const SNI_NAME_TYPE_HOST: u8 = 0;
+
+    /// Build an SNI extension payload (type 0x0000).
+    fn build_sni_extension(hostname: &str) -> Vec<u8> {
+        let name_bytes = hostname.as_bytes();
+        let name_len = name_bytes.len() as u16;
+        let entry_len = 1 + 2 + name_len;
+        let list_len = entry_len;
+
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&0u16.to_be_bytes());
+        let ext_data_len = 2 + list_len;
+        ext.extend_from_slice(&ext_data_len.to_be_bytes());
+        ext.extend_from_slice(&list_len.to_be_bytes());
+        ext.push(SNI_NAME_TYPE_HOST);
+        ext.extend_from_slice(&name_len.to_be_bytes());
+        ext.extend_from_slice(name_bytes);
+        ext
+    }
+
+    /// Build a `ClientHello` body from components.
+    fn build_client_hello(session_id: &[u8], cipher_suites: &[u8], compression: &[u8], extensions: &[u8]) -> Vec<u8> {
+        let mut hello = Vec::new();
+        hello.extend_from_slice(&[0x03, 0x03]);
+        hello.extend_from_slice(&[0u8; 32]);
+
+        hello.push(session_id.len() as u8);
+        hello.extend_from_slice(session_id);
+
+        let cs_len = cipher_suites.len() as u16;
+        hello.extend_from_slice(&cs_len.to_be_bytes());
+        hello.extend_from_slice(cipher_suites);
+
+        hello.push(compression.len() as u8);
+        hello.extend_from_slice(compression);
+
+        if !extensions.is_empty() {
+            let ext_len = extensions.len() as u16;
+            hello.extend_from_slice(&ext_len.to_be_bytes());
+            hello.extend_from_slice(extensions);
+        }
+
+        hello
+    }
+
+    /// Wrap a `ClientHello` body in handshake + TLS record headers.
+    fn wrap_in_record(hello_body: &[u8]) -> Vec<u8> {
+        let mut handshake = Vec::new();
+        handshake.push(HANDSHAKE_TYPE_CLIENT_HELLO);
+        let hs_len = hello_body.len() as u32;
+        handshake.push((hs_len >> 16) as u8);
+        handshake.push((hs_len >> 8) as u8);
+        handshake.push(hs_len as u8);
+        handshake.extend_from_slice(hello_body);
+
+        let mut record = Vec::new();
+        record.push(CONTENT_TYPE_HANDSHAKE);
+        record.extend_from_slice(&[0x03, 0x01]);
+        let rec_len = handshake.len() as u16;
+        record.extend_from_slice(&rec_len.to_be_bytes());
+        record.extend_from_slice(&handshake);
+
+        record
+    }
+}

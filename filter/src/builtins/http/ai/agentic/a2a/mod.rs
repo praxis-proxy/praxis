@@ -32,8 +32,9 @@ use self::{
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
-    builtins::http::ai::agentic::json_rpc::{
-        config::JsonRpcConfig, contains_control_chars, envelope::parse_json_rpc_value,
+    builtins::http::{
+        ai::agentic::json_rpc::{config::JsonRpcConfig, envelope::parse_json_rpc_value},
+        value_safety::contains_control_chars,
     },
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
@@ -101,12 +102,13 @@ impl A2aFilter {
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: A2aConfig = parse_filter_config("a2a", config)?;
         let validated_config = build_config(cfg)?;
-        let json_rpc_config = build_json_rpc_config(validated_config.max_body_bytes);
+        let max_body_bytes = validated_config.max_body_bytes;
+        let json_rpc_config = build_json_rpc_config(max_body_bytes);
 
         Ok(Box::new(Self {
-            max_body_bytes: validated_config.max_body_bytes,
             config: validated_config,
             json_rpc_config,
+            max_body_bytes,
         }))
     }
 }
@@ -184,7 +186,7 @@ impl HttpFilter for A2aFilter {
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Private Utilities
 // -----------------------------------------------------------------------------
 
 /// Build a `JsonRpcConfig` for the shared parser with A2A-appropriate defaults.
@@ -192,17 +194,17 @@ fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
     use crate::builtins::http::ai::agentic::json_rpc::config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders};
 
     JsonRpcConfig {
-        max_body_bytes,
         // A2A classification produces one static routing decision per request.
         // JSON-RPC batches can mix methods, task IDs, and streaming semantics,
         // so reject them instead of routing by an arbitrary batch element.
         batch_policy: BatchPolicy::Reject,
-        on_invalid: InvalidJsonRpcBehavior::Continue,
         headers: JsonRpcHeaders {
-            method: None,
             id: None,
             kind: None,
+            method: None,
         },
+        max_body_bytes,
+        on_invalid: InvalidJsonRpcBehavior::Continue,
     }
 }
 

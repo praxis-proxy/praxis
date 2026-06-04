@@ -256,16 +256,16 @@ fn emit_request_metrics(session: &Session, ctx: &PingoraRequestCtx) {
     };
     let method = metrics::method_label(raw_method);
 
-    let cluster = ctx.metrics_cluster.as_ref().map_or_else(
-        || ::metrics::SharedString::const_str("none"),
-        |cluster| ::metrics::SharedString::from(Arc::clone(cluster)),
-    );
+    let cluster = ctx
+        .metrics_cluster_shared
+        .clone()
+        .unwrap_or_else(|| ::metrics::SharedString::const_str("none"));
 
     let labels = metrics::RequestMetricLabels {
-        method,
-        status_class,
-        route: "unknown",
         cluster,
+        method,
+        route: "unknown",
+        status_class,
     };
 
     let duration_secs = ctx.request_start.elapsed().as_secs_f64();

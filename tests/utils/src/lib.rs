@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Shane Utt
 
-#![deny(unsafe_code)]
 #![allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -20,7 +19,11 @@ pub mod filters;
 pub mod net;
 pub mod proxy;
 
-pub use agentic::*;
+pub use agentic::{
+    A2aMockConfig, A2aMockServerGuard, A2aRecordedRequest, McpMockConfig, McpMockServerGuard, McpRecordedRequest,
+    McpToolFixture, start_a2a_mock_server, start_a2a_mock_server_with_config, start_mcp_mock_server,
+    start_mcp_mock_server_with_config,
+};
 pub use example_config::{example_config_path, load_example_config, patch_yaml};
 pub use net::*;
 pub use proxy::{

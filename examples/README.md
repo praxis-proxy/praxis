@@ -30,6 +30,7 @@ page.
 | [round-robin.yaml](configs/traffic-management/round-robin.yaml) | Default strategy: even distribution across backends |
 | [weighted-load-balancing.yaml](configs/traffic-management/weighted-load-balancing.yaml) | Proportional traffic split via per-endpoint weights |
 | [least-connections.yaml](configs/traffic-management/least-connections.yaml) | Route to backend with fewest in-flight requests |
+| [p2c.yaml](configs/traffic-management/p2c.yaml) | Power-of-two-choices: O(1) load-aware selection |
 | [session-affinity.yaml](configs/traffic-management/session-affinity.yaml) | consistent_hash to pin a user to one backend |
 | [health-checks.yaml](configs/traffic-management/health-checks.yaml) | Active HTTP and TCP health check probes per cluster |
 | [timeout.yaml](configs/traffic-management/timeout.yaml) | 504 when upstream exceeds a latency SLA |
@@ -127,6 +128,7 @@ page.
 | [mcp-classifier-routing.yaml](configs/ai/mcp-classifier-routing.yaml) | Route MCP requests by body-derived method and tool name |
 | [model-to-header-routing.yaml](configs/ai/model-to-header-routing.yaml) | Route by model field in JSON body via X-Model header |
 | [prompt-enrichment.yaml](configs/ai/prompt-enrichment.yaml) | Inject system messages into chat completion requests |
+| [format-routing.yaml](configs/ai/openai/responses/format-routing.yaml) | Route by AI API format (Responses vs Chat Completions) |
 
 ### Branching
 

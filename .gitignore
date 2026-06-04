@@ -23,15 +23,20 @@ coverage.json
 # IDEs
 .idea/
 
-# Dotdirs (allow .github/ and .cargo/)
+# Dotdirs (allow .github/, .cargo/, and .hooks/)
 .*/
 !.cargo/
 !.github/
 !.claude/
+!.hooks/
 .claude/*
 !.claude/CLAUDE.md
 
 # Docs are markdown only
 docs/**/
 !docs/
+!docs/architecture/
+!docs/developing/
+!docs/filters/
+!docs/operating/
 !docs/proposals/

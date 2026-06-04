@@ -3,6 +3,10 @@ issue: https://github.com/praxis-proxy/praxis/issues/63
 status: blocked
 authors:
   - araujof
+graduation_criteria:
+  - CPEX core publishes a tagged release
+  - Phase 1 foundation delivered and validated
+  - Reference plugin demonstrates the authoring API
 stakeholders:
   - shaneutt
   - twghu

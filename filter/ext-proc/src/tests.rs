@@ -84,14 +84,29 @@ fn defaults_core_fields() {
 
 #[test]
 fn defaults_processing_mode() {
-    let cfg = minimal_config();
-
-    assert_eq!(cfg.processing_mode.request_header_mode, HeaderSendMode::Send);
-    assert_eq!(cfg.processing_mode.response_header_mode, HeaderSendMode::Send);
-    assert_eq!(cfg.processing_mode.request_body_mode, BodySendMode::None);
-    assert_eq!(cfg.processing_mode.response_body_mode, BodySendMode::None);
-    assert_eq!(cfg.processing_mode.request_trailer_mode, HeaderSendMode::Skip);
-    assert_eq!(cfg.processing_mode.response_trailer_mode, HeaderSendMode::Skip);
+    let pm = minimal_config().processing_mode;
+    assert_eq!(
+        pm.request_header_mode,
+        HeaderSendMode::Send,
+        "default request_header_mode"
+    );
+    assert_eq!(
+        pm.response_header_mode,
+        HeaderSendMode::Send,
+        "default response_header_mode"
+    );
+    assert_eq!(pm.request_body_mode, BodySendMode::None, "default request_body_mode");
+    assert_eq!(pm.response_body_mode, BodySendMode::None, "default response_body_mode");
+    assert_eq!(
+        pm.request_trailer_mode,
+        HeaderSendMode::Skip,
+        "default request_trailer_mode"
+    );
+    assert_eq!(
+        pm.response_trailer_mode,
+        HeaderSendMode::Skip,
+        "default response_trailer_mode"
+    );
 }
 
 #[test]
@@ -361,32 +376,35 @@ send_body_without_waiting_for_header_response: true
     );
 }
 
-#[tokio::test]
-async fn accepts_custom_status_on_error() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str(
-        r#"
-target: "http://127.0.0.1:50051"
-status_on_error: 503
-"#,
+#[test]
+fn accepts_custom_status_on_error() {
+    let cfg: ExtProcConfig = parse_filter_config(
+        "ext_proc",
+        &serde_yaml::from_str(
+            r#"target: "http://127.0.0.1:50051"
+status_on_error: 503"#,
+        )
+        .unwrap(),
     )
     .unwrap();
-
-    let filter = ExtProcFilter::from_config(&yaml).unwrap();
-    assert_eq!(filter.name(), "ext_proc");
+    assert_eq!(cfg.status_on_error, 503, "custom status_on_error should be preserved");
 }
 
-#[tokio::test]
-async fn accepts_custom_deferred_close_timeout() {
-    let yaml: serde_yaml::Value = serde_yaml::from_str(
-        r#"
-target: "http://127.0.0.1:50051"
-deferred_close_timeout_ms: 10000
-"#,
+#[test]
+fn accepts_custom_deferred_close_timeout() {
+    let cfg: ExtProcConfig = parse_filter_config(
+        "ext_proc",
+        &serde_yaml::from_str(
+            r#"target: "http://127.0.0.1:50051"
+deferred_close_timeout_ms: 10000"#,
+        )
+        .unwrap(),
     )
     .unwrap();
-
-    let filter = ExtProcFilter::from_config(&yaml).unwrap();
-    assert_eq!(filter.name(), "ext_proc");
+    assert_eq!(
+        cfg.deferred_close_timeout_ms, 10000,
+        "custom deferred_close_timeout_ms should be preserved"
+    );
 }
 
 #[tokio::test]
@@ -520,6 +538,24 @@ max_message_timeout_ms: 100
     assert!(
         err.to_string().contains("max_message_timeout_ms"),
         "error should reject max_message_timeout_ms less than message_timeout_ms: {err}"
+    );
+}
+
+#[tokio::test]
+async fn rejects_deferred_close_timeout_less_than_message_timeout() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+message_timeout_ms: 500
+deferred_close_timeout_ms: 100
+"#,
+    )
+    .unwrap();
+
+    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("deferred_close_timeout_ms"),
+        "error should reject deferred_close_timeout_ms < message_timeout_ms: {err}"
     );
 }
 

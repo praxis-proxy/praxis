@@ -16,21 +16,23 @@ Praxis is a high-performance and security-first proxy server and framework for A
 
 ## Documentation
 
-- [Configuration](docs/configuration.md)
+Full documentation index: [docs/README.md](docs/README.md)
+
+- [Configuration](docs/operating/configuration.md)
 - [Features](docs/features.md)
-- [Filters](docs/filters.md)
-- [Extensions](docs/extensions.md)
-- [TLS](docs/tls.md)
-- [Security Hardening](docs/security-hardening.md)
+- [Filters](docs/filters/README.md)
+- [Extensions](docs/filters/extensions.md)
+- [TLS](docs/operating/tls.md)
+- [Security Hardening](docs/operating/security-hardening.md)
 
 ## Contributing
 
 [Issues] and [pull requests] are welcome. Familiarize yourself
 with the following documentation first:
 
-- [Architecture](docs/architecture.md)
-- [Conventions](docs/conventions.md)
-- [Development](docs/development.md)
+- [Architecture](docs/architecture/overview.md)
+- [Conventions](docs/developing/conventions.md)
+- [Development](docs/developing/getting-started.md)
 - [Benchmarks](docs/benchmarks.md)
 
 For larger changes, open a [discussion] and follow the

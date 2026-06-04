@@ -1,4 +1,4 @@
-# Development
+# Getting Started
 
 ## Requirements
 
@@ -46,40 +46,10 @@ produce a warning. All crates enforce
 `#![deny(unsafe_code)]` and Clippy runs with
 `-D warnings` (zero tolerance).
 
-See [architecture.md](architecture.md) for workspace layout
-and crate dependencies.
-See [security-hardening.md](security-hardening.md) for
+See the [crate layout](../architecture/crate-layout.md) for workspace
+structure and crate dependencies.
+See [security-hardening.md](../operating/security-hardening.md) for
 deployment guidance.
-
-## Adding a new Built-in Filter
-
-Review [extensions.md] first.
-
-1. Create the filter module under
-   `filter/src/builtins/<protocol>/<category>/`.
-2. Implement `HttpFilter` (or `TcpFilter` for TCP-level
-   filters). Add a `from_config` factory that deserializes
-   a `serde_yaml::Value` into your config struct.
-3. Register it in `filter/src/registry.rs`
-   alongside the existing built-ins.
-4. Add unit tests and doctests.
-5. Add an example config in the appropriate category under
-   `examples/configs/`.
-6. Add a functional integration test in
-   `tests/integration/tests/suite/examples/`.
-7. Update `examples/README.md` to list any new or renamed
-   example configs.
-
-[extensions.md]:./extensions.md
-
-## Adding a Protocol
-
-1. Implement the `Protocol` trait in a new module under
-   `protocol/src/`.
-2. Add a variant to `ProtocolKind` in
-   `core/src/config/listener.rs`.
-3. Wire it up in `server/src/server.rs` where the protocol
-   is selected.
 
 ## Security: Binding Low Ports
 
@@ -137,53 +107,6 @@ insecure_options:
   allow_private_health_checks: true
 ```
 
-## Project Management
-
-All repositories in the `praxis-proxy` organization
-use a consistent workflow for planning, prioritizing,
-and tracking work.
-
-### Milestones
-
-Milestones represent a body of work toward a shared
-goal (e.g. a release, a feature area, or a hardening
-pass). Every issue and pull request should belong to
-a milestone. Milestones provide scope boundaries and
-help answer "what ships together?"
-
-### Priority
-
-Every issue should have a priority set via the
-built-in Priority issue field (not labels). Address
-work in priority order:
-
-| Priority | Description |
-| --- | --- |
-| Urgent | Must be worked on immediately before anything else |
-| High | Needs to be worked on immediately, defer to urgents |
-| Medium | Resolve after high and urgent |
-| Low | Resolve after all other priority levels |
-
-### Size
-
-Every issue should have a size set via the built-in
-Size issue field. Size is a rough effort estimate:
-
-| Size | Rough Estimate |
-| --- | --- |
-| Large | 1 week or more |
-| Medium | Roughly 3 days |
-| Small | Roughly 1 day |
-| Tiny | Less than a day |
-
-### Project Boards
-
-GitHub project boards visualize the state of work
-across milestones. Use boards to track issues through
-their lifecycle (backlog, in progress, in review,
-done). Boards are the primary tool for stand-ups and
-status checks.
-
 ## Performance & Benchmarking
 
-See [benchmarks.md](./benchmarks.md).
+See [benchmarks.md](../benchmarks.md).

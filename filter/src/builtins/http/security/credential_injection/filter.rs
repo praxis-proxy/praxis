@@ -6,6 +6,7 @@
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use zeroize::Zeroizing;
 
 use super::config::{ClusterCredentialConfig, CredentialInjectionConfig};
 use crate::{
@@ -23,8 +24,8 @@ struct ClusterCredential {
     /// Header name to inject.
     header: String,
 
-    /// Full header value (prefix + credential).
-    header_value: String,
+    /// Full header value (prefix + credential), zeroized on drop.
+    header_value: Zeroizing<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -154,7 +155,7 @@ impl HttpFilter for CredentialInjectionFilter {
             "injecting credential header (replaces any client-provided value)"
         );
         ctx.extra_request_headers
-            .push((Cow::Owned(cred.header.clone()), cred.header_value.clone()));
+            .push((Cow::Owned(cred.header.clone()), cred.header_value.as_str().to_owned()));
 
         Ok(FilterAction::Continue)
     }
@@ -175,7 +176,7 @@ fn resolve_credential(cfg: &ClusterCredentialConfig) -> Result<ClusterCredential
 
     Ok(ClusterCredential {
         header: cfg.header.clone(),
-        header_value,
+        header_value: Zeroizing::new(header_value),
     })
 }
 

@@ -3,8 +3,6 @@
 //! This crate compiles vendored `.proto` files from the Envoy project into
 //! Rust types with [`tonic`] gRPC client and server stubs.
 
-#![deny(unsafe_code)]
-
 pub mod envoy {
     pub mod service {
         pub mod common {
@@ -13,8 +11,12 @@ pub mod envoy {
                 unreachable_pub,
                 trivial_casts,
                 unused_qualifications,
-                clippy::all,
-                clippy::pedantic,
+                clippy::doc_markdown,
+                clippy::derive_partial_eq_without_eq,
+                clippy::doc_lazy_continuation,
+                clippy::enum_variant_names,
+                clippy::needless_borrows_for_generic_args,
+                clippy::default_trait_access,
                 reason = "generated protobuf code"
             )]
             pub mod v3 {
@@ -28,8 +30,12 @@ pub mod envoy {
                 unreachable_pub,
                 trivial_casts,
                 unused_qualifications,
-                clippy::all,
-                clippy::pedantic,
+                clippy::doc_markdown,
+                clippy::derive_partial_eq_without_eq,
+                clippy::doc_lazy_continuation,
+                clippy::enum_variant_names,
+                clippy::needless_borrows_for_generic_args,
+                clippy::default_trait_access,
                 reason = "generated protobuf code"
             )]
             pub mod v3 {

@@ -19,20 +19,20 @@ Working example configs for every TLS scenario live in
 | [tcp-tls-termination] | TLS on TCP listener |
 | [tcp-tls-mtls] | mTLS on TCP listener |
 
-[`examples/configs/protocols/`]: ../examples/configs/protocols/
-[tls-termination]: ../examples/configs/protocols/tls-termination.yaml
-[tls-http-reencrypt]: ../examples/configs/protocols/tls-http-reencrypt.yaml
-[tls-multi-cert]: ../examples/configs/protocols/tls-multi-cert.yaml
-[tls-version-constraint]: ../examples/configs/protocols/tls-version-constraint.yaml
-[tls-mtls-listener]: ../examples/configs/protocols/tls-mtls-listener.yaml
-[tls-mtls-listener-request]: ../examples/configs/protocols/tls-mtls-listener-request.yaml
-[tls-mtls-upstream]: ../examples/configs/protocols/tls-mtls-upstream.yaml
-[tls-mtls-both]: ../examples/configs/protocols/tls-mtls-both.yaml
-[tls-verify-disabled]: ../examples/configs/protocols/tls-verify-disabled.yaml
-[upstream-tls]: ../examples/configs/protocols/upstream-tls.yaml
-[upstream-ca-file]: ../examples/configs/protocols/upstream-ca-file.yaml
-[tcp-tls-termination]: ../examples/configs/protocols/tcp-tls-termination.yaml
-[tcp-tls-mtls]: ../examples/configs/protocols/tcp-tls-mtls.yaml
+[`examples/configs/protocols/`]: ../../examples/configs/protocols/
+[tls-termination]: ../../examples/configs/protocols/tls-termination.yaml
+[tls-http-reencrypt]: ../../examples/configs/protocols/tls-http-reencrypt.yaml
+[tls-multi-cert]: ../../examples/configs/protocols/tls-multi-cert.yaml
+[tls-version-constraint]: ../../examples/configs/protocols/tls-version-constraint.yaml
+[tls-mtls-listener]: ../../examples/configs/protocols/tls-mtls-listener.yaml
+[tls-mtls-listener-request]: ../../examples/configs/protocols/tls-mtls-listener-request.yaml
+[tls-mtls-upstream]: ../../examples/configs/protocols/tls-mtls-upstream.yaml
+[tls-mtls-both]: ../../examples/configs/protocols/tls-mtls-both.yaml
+[tls-verify-disabled]: ../../examples/configs/protocols/tls-verify-disabled.yaml
+[upstream-tls]: ../../examples/configs/protocols/upstream-tls.yaml
+[upstream-ca-file]: ../../examples/configs/protocols/upstream-ca-file.yaml
+[tcp-tls-termination]: ../../examples/configs/protocols/tcp-tls-termination.yaml
+[tcp-tls-mtls]: ../../examples/configs/protocols/tcp-tls-mtls.yaml
 
 ## Listener TLS
 

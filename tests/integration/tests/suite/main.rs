@@ -47,6 +47,7 @@ mod downstream_read_timeout;
 mod examples;
 mod failure_mode;
 mod filter_composition;
+mod filter_metadata;
 mod guardrails;
 mod health_check;
 mod hot_reload;
@@ -55,6 +56,8 @@ mod json_body_field;
 mod json_rpc;
 mod mcp;
 mod mcp_broker;
+#[cfg(feature = "ai-inference")]
+mod openai_responses_format;
 mod path_rewrite;
 mod payload_processing;
 mod per_listener_pipeline;
