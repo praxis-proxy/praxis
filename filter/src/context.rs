@@ -82,9 +82,6 @@ pub struct HttpFilterContext<'a> {
     /// Named key-value stores for runtime mappings.
     pub kv_stores: Option<&'a KvStoreRegistry>,
 
-    /// Wall-clock time source for timestamp generation.
-    pub time_source: &'a dyn TimeSource,
-
     /// Transport-agnostic request headers, URI, and method.
     pub request: &'a Request,
 
@@ -124,6 +121,9 @@ pub struct HttpFilterContext<'a> {
     /// for use by passive health checking in the
     /// protocol layer.
     pub selected_endpoint_index: Option<usize>,
+
+    /// Wall-clock time source for timestamp generation.
+    pub time_source: &'a dyn TimeSource,
 
     /// Rewritten URI path for the upstream request.
     ///

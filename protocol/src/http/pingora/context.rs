@@ -195,7 +195,6 @@ macro_rules! filter_context {
             filter_results: std::mem::take(&mut $ctx.filter_results),
             health_registry: $pipeline.health_registry(),
             kv_stores: $pipeline.kv_stores(),
-            time_source: $pipeline.time_source(),
             request: $request,
             request_body_bytes: $ctx.request_body_bytes,
             request_body_mode: $ctx.request_body_mode,
@@ -206,6 +205,7 @@ macro_rules! filter_context {
             response_headers_modified: false,
             rewritten_path: $ctx.rewritten_path.take(),
             selected_endpoint_index: $ctx.selected_endpoint_index,
+            time_source: $pipeline.time_source(),
             upstream: $ctx.upstream.take(),
         }
     };
