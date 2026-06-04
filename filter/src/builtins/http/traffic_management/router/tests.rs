@@ -724,7 +724,7 @@ fn should_stop_early_false_when_no_best() {
 fn prefix_without_trailing_slash_accepted() {
     let router = make_router(vec![prefix_route("/api", "api"), prefix_route("/", "default")]);
     let route = router.match_route("/api/v1", None, &HeaderMap::new()).unwrap();
-    assert_eq!(&*route.cluster, "api");
+    assert_eq!(&*route.cluster, "api", "/api/v1 should match /api prefix without trailing slash");
 }
 
 #[test]
