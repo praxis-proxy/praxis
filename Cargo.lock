@@ -2505,6 +2505,7 @@ dependencies = [
  "dashmap",
  "pingora-core",
  "praxis-proxy-tls",
+ "rand 0.9.4",
  "regex",
  "serde",
  "thiserror 2.0.18",

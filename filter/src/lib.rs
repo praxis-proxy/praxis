@@ -241,9 +241,15 @@ mod macro_tests {
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "test utilities")]
 pub(crate) mod test_utils {
+    use std::sync::LazyLock;
+
     use http::{HeaderMap, Method, Uri};
+    use praxis_core::id::IdGenerator;
 
     use crate::{HttpFilterContext, Request};
+
+    /// Deterministic ID generator for tests (seed=0).
+    static TEST_ID_GENERATOR: LazyLock<IdGenerator> = LazyLock::new(|| IdGenerator::with_seed(0));
 
     pub(crate) fn make_request(method: Method, path: &str) -> Request {
         Request {
@@ -267,6 +273,7 @@ pub(crate) mod test_utils {
             filter_metadata: std::collections::HashMap::new(),
             filter_results: std::collections::HashMap::new(),
             health_registry: None,
+            id_generator: &TEST_ID_GENERATOR,
             kv_stores: None,
             request: req,
             request_body_bytes: 0,

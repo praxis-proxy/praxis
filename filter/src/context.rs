@@ -6,7 +6,9 @@
 use std::{borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
 
 use http::{HeaderMap, Method, StatusCode, Uri};
-use praxis_core::{connectivity::Upstream, health::HealthRegistry, kv::KvStoreRegistry, time::TimeSource};
+use praxis_core::{
+    connectivity::Upstream, health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, time::TimeSource,
+};
 
 use crate::{body::BodyMode, pipeline::body::merge_body_mode, results::FilterResultSet};
 
@@ -78,6 +80,9 @@ pub struct HttpFilterContext<'a> {
 
     /// Shared health registry for endpoint health lookups.
     pub health_registry: Option<&'a HealthRegistry>,
+
+    /// Shared request ID generator.
+    pub id_generator: &'a IdGenerator,
 
     /// Named key-value stores for runtime mappings.
     pub kv_stores: Option<&'a KvStoreRegistry>,

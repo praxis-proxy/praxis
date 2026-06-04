@@ -3,13 +3,7 @@
 
 //! Request correlation ID filter.
 
-use std::{
-    borrow::Cow,
-    sync::{
-        Arc,
-        atomic::{AtomicU64, Ordering},
-    },
-};
+use std::{borrow::Cow, sync::Arc};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -69,9 +63,6 @@ fn default_header_name() -> String {
 /// assert_eq!(filter.name(), "request_id");
 /// ```
 pub struct RequestIdFilter {
-    /// Monotone counter for the sequential component of generated IDs.
-    counter: AtomicU64,
-
     /// Header name used for reading, generating, and forwarding the ID.
     header_name: Arc<str>,
 }
@@ -88,23 +79,8 @@ impl RequestIdFilter {
         let cfg: RequestIdFilterConfig = parse_filter_config("request_id", config)?;
 
         Ok(Box::new(Self {
-            counter: AtomicU64::new(0),
             header_name: Arc::from(cfg.header_name.as_str()),
         }))
-    }
-
-    /// Generate a new request ID.
-    ///
-    /// Combines the current time in microseconds with a per-instance
-    /// monotone counter. Not cryptographically random but unique
-    /// within a filter instance for any realistic request rate.
-    fn generate_id(&self, time_source: &dyn praxis_core::time::TimeSource) -> String {
-        #[allow(clippy::cast_possible_truncation, reason = "micros fit u64")]
-        let micros = time_source.now().as_micros().min(u128::from(u64::MAX)) as u64;
-
-        let seq = self.counter.fetch_add(1, Ordering::Relaxed);
-
-        format!("{micros:016x}{seq:016x}")
     }
 
     /// Resolve the request ID to echo on the response.
@@ -163,7 +139,7 @@ impl HttpFilter for RequestIdFilter {
             .headers
             .get(&*self.header_name)
             .and_then(|v| v.to_str().ok())
-            .map_or_else(|| self.generate_id(ctx.time_source), str::to_owned);
+            .map_or_else(|| ctx.id_generator.generate(ctx.time_source), str::to_owned);
 
         debug!(request_id = %id, header = %self.header_name, "forwarding request ID");
 
@@ -302,27 +278,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn generated_ids_are_unique() {
-        let ts = praxis_core::time::FixedTimeSource::new(std::time::Duration::from_secs(1_700_000_000));
-        let filter = make_filter("");
-        let id1 = filter.generate_id(&ts);
-        let id2 = filter.generate_id(&ts);
-        assert_ne!(id1, id2, "consecutive generated IDs must be unique");
-    }
-
-    #[test]
-    fn generate_id_uses_time_source() {
-        let ts = praxis_core::time::FixedTimeSource::new(std::time::Duration::from_micros(0x0011_2233_4455_6677));
-        let filter = make_filter("");
-        let id = filter.generate_id(&ts);
-        assert!(
-            id.starts_with("00112233"),
-            "ID should start with hex-encoded fixed micros, got: {id}"
-        );
-        assert_eq!(id.len(), 32, "generated ID should be 32 hex chars");
-    }
-
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -332,7 +287,6 @@ mod tests {
         let config: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let cfg: RequestIdFilterConfig = parse_filter_config("request_id", &config).unwrap();
         RequestIdFilter {
-            counter: AtomicU64::new(0),
             header_name: Arc::from(cfg.header_name.as_str()),
         }
     }
