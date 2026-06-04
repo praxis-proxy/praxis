@@ -356,13 +356,15 @@ facts to internal headers, and the operator
 configures routes that direct traffic to the
 appropriate pipeline.
 
-For passthrough backends (vLLM, `Anthropic` API):
-the operator configures a route that sends
-`/v1/messages` traffic to a passthrough filter
-chain. For OpenAI-only backends: the operator
-configures a route to a transformation filter
-chain. The router selects the cluster; the
-listener selects the filter chain.
+The operator deploys separate configs (or separate
+listeners) for passthrough vs transformation. The
+passthrough config includes `anthropic_passthrough`
+in the pipeline; the transformation config includes
+`anthropic_to_openai`. In Praxis, listeners flatten
+filter chains at startup and the router selects
+clusters, not chains — so the translation decision
+is a deployment-time config choice, not a runtime
+routing decision.
 
 This is the same pattern used by `openai_responses_format`
 for Responses API vs Chat Completions routing. See
@@ -482,10 +484,6 @@ orchestration.
 - `messages` array exists and is non-empty
 - `max_tokens` is present and > 0
 - `model` is present and non-empty
-- Content blocks (when arrays) have valid `type`
-  fields
-- Tool definitions (when present) have `name` and
-  `input_schema`
 
 **Validation principle:** Only validate what the
 proxy needs for its own operation. Let the inference
@@ -514,9 +512,10 @@ SDK clients to reach OpenAI-compatible backends
 - `on_request_body`: rewrite JSON body
 - `request_body_mode` → `StreamBuffer`
   (read-write)
-- `on_response_body`: transform response body
-  (non-streaming) or SSE chunks (streaming) from
-  OpenAI format back to Anthropic format
+- `on_response_body`: transform non-streaming
+  response body from OpenAI format back to
+  Anthropic format (streaming SSE transformation
+  is handled separately by `anthropic_stream_events`)
 
 **Request transformation (Anthropic → OpenAI):**
 
@@ -659,134 +658,156 @@ endpoint). No body transformation: only header
 management and credential injection coordination.
 
 **Praxis trait methods:**
-- `on_request`: manage headers, set upstream path
-- `on_response`: forward rate-limit headers
+- `on_request`: inject `anthropic-version` header
+  if absent
 
 **Behavior:**
 
 Request:
-- Preserve `anthropic-version` header (inject
-  default `2023-06-01` if absent)
+- Inject `anthropic-version` header with configured
+  default if the client did not send one
 - Preserve `cache_control` blocks in body as-is
 - Preserve `thinking` parameter as-is
 - Coordinate with `credential_injection` filter
   for `x-api-key` header injection
-- Set upstream path to `/v1/messages`
 
 Response:
-- Forward Anthropic rate-limit headers to client:
-  `x-ratelimit-limit-requests`,
-  `x-ratelimit-limit-tokens`,
-  `x-ratelimit-remaining-requests`,
-  `x-ratelimit-remaining-tokens`,
-  `x-ratelimit-reset-requests`,
-  `x-ratelimit-reset-tokens`
-- Forward `request-id` header
-- Pass through SSE events unchanged (native
-  Anthropic streaming)
+- Pass through unchanged (no body or header
+  transformation)
+
+**Future:** Rate-limit header forwarding
+(`x-ratelimit-*`) and `request-id` passthrough
+are deferred to a follow-up.
 
 **Config:**
 
 ```yaml
 filter: anthropic_passthrough
 default_version: "2023-06-01"
-forward_rate_limits: true
 ```
 
 ---
 
 ### Filter Chain Configuration
 
-#### Anthropic client → OpenAI backend (vLLM/llm-d):
+These examples are from the implementation branch
+at `examples/configs/ai/anthropic/`.
+
+#### Anthropic client → native backend (passthrough):
+
+From `messages-passthrough.yaml`:
 
 ```yaml
-filter_chains:
-  - name: anthropic-to-openai
-    filters:
-      - filter: anthropic_messages_format
-        name: classify
+listeners:
+  - name: anthropic-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [anthropic-native]
 
-      - filter: anthropic_request_validate
-
-      - filter: anthropic_to_openai
-        name: transform
-
-      - filter: anthropic_stream_events
-
-    cluster: vllm-backend
-```
-
-#### Anthropic client → Anthropic backend:
-
-```yaml
 filter_chains:
   - name: anthropic-native
     filters:
       - filter: anthropic_messages_format
-        name: classify
-
-      - filter: anthropic_request_validate
+        on_invalid: continue
 
       - filter: anthropic_passthrough
-        name: passthrough
+        default_version: "2023-06-01"
 
-      - filter: credential_injection
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "anthropic-backend"
+
+      - filter: load_balancer
         clusters:
-          - name: anthropic
-            header: x-api-key
-            env_var: ANTHROPIC_API_KEY
-
-    cluster: anthropic-backend
+          - name: "anthropic-backend"
+            endpoints:
+              - "127.0.0.1:3001"
 ```
 
-#### Unified gateway (separate filter chains per format):
+#### Anthropic client → OpenAI backend (transform):
 
-Note: branch chains cannot be used for transformation
-because body hooks (`on_request_body`, `on_response_body`)
-are not executed for filters inside branch chains. Use
-separate filter chains with path-based routing instead.
+From `messages-to-openai.yaml`:
 
 ```yaml
 listeners:
-  - name: gateway
-    address: "0.0.0.0:8080"
-    filter_chains:
-      - anthropic-passthrough
-      - openai
+  - name: anthropic-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [anthropic-transform]
 
 filter_chains:
-  - name: anthropic-passthrough
+  - name: anthropic-transform
     filters:
       - filter: anthropic_messages_format
         on_invalid: continue
-      - filter: anthropic_request_validate
-      - filter: anthropic_passthrough
-        default_version: "2023-06-01"
+
+      - filter: anthropic_to_openai
+        max_body_bytes: 1048576
+
       - filter: router
         routes:
-          - path_prefix: "/v1/messages"
-            cluster: anthropic-backend
+          - path_prefix: "/"
+            cluster: "openai-backend"
+
       - filter: load_balancer
         clusters:
-          - name: anthropic-backend
+          - name: "openai-backend"
             endpoints:
-              - "api.anthropic.com:443"
-            tls:
-              sni: "api.anthropic.com"
+              - "127.0.0.1:3001"
+```
 
-  - name: openai
+#### Unified gateway (route by format):
+
+From `unified-gateway.yaml`. Uses a single filter
+chain with both classifiers; the router selects
+clusters by path. Note: branch chains cannot be
+used for transformation because body hooks
+(`on_request_body`, `on_response_body`) are not
+executed for filters inside branch chains.
+
+```yaml
+listeners:
+  - name: unified-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [unified-routing]
+
+filter_chains:
+  - name: unified-routing
     filters:
+      - filter: anthropic_messages_format
+        on_invalid: continue
+        headers:
+          format: x-praxis-ai-format
+          model: x-praxis-ai-model
+          stream: x-praxis-ai-stream
+
       - filter: openai_responses_format
         on_invalid: continue
+
       - filter: router
         routes:
-          - path_prefix: "/v1/"
-            cluster: vllm-backend
+          - path: "/v1/messages"
+            cluster: "anthropic-backend"
+          - path: "/v1/chat/completions"
+            cluster: "openai-backend"
+          - path: "/v1/responses"
+            cluster: "responses-backend"
+          - path_prefix: "/"
+            cluster: "default-backend"
+
       - filter: load_balancer
         clusters:
-          - name: vllm-backend
+          - name: "anthropic-backend"
             endpoints:
-              - "127.0.0.1:8000"
+              - "127.0.0.1:3001"
+          - name: "openai-backend"
+            endpoints:
+              - "127.0.0.1:3002"
+          - name: "responses-backend"
+            endpoints:
+              - "127.0.0.1:3003"
+          - name: "default-backend"
+            endpoints:
+              - "127.0.0.1:3004"
 ```
 
 ---
@@ -797,9 +818,9 @@ Build order; each tier produces a working system:
 
 | Tier | Filter | What works after |
 |------|--------|------------------|
-| 0 | `anthropic_messages_format` | Classification and routing. Anthropic requests detected and promoted to headers/metadata for branch-chain routing. |
+| 0 | `anthropic_messages_format` | Classification and routing. Anthropic requests detected and promoted to headers/metadata for downstream routing. |
 | 1 | `anthropic_request_validate` | Request validation. Malformed requests rejected at the proxy with consistent error format. |
-| 2 | `anthropic_passthrough` | Native Anthropic backend routing. Clients reach `Anthropic` API through Praxis with credential injection and rate-limit forwarding. |
+| 2 | `anthropic_passthrough` | Native Anthropic backend routing. Clients reach `Anthropic` API through Praxis with `anthropic-version` header injection. |
 | 3 | `anthropic_to_openai` (request + non-streaming response) | `Anthropic` SDK clients can reach vLLM/llm-d backends. Non-streaming responses translated back. |
 | 4 | `anthropic_stream_events` | Per-chunk SSE streaming. `OpenAI` chunks translated to `Anthropic` events incrementally as they arrive. Conformant with [Inference Proxy Conformance Guidelines](https://docs.google.com/document/d/1yDzs9ehHFxqYbufOmY-sEXiEtn9nhXUKHx4uKjasC5Q/edit?tab=t.0). |
 
@@ -844,11 +865,12 @@ filter/src/builtins/http/ai/
    the same classifier. One enum, one classification
    function.
 
-2. **Path rewriting.** When transforming Anthropic →
-   OpenAI, the upstream path must change from
-   `/v1/messages` to `/v1/chat/completions`. Should
-   this be done in the transformation filter or via
-   Praxis route configuration?
+2. **Path rewriting.** Resolved: use the dedicated
+   `path_rewrite` filter for URL translation. The
+   transformation filter should not set
+   `ctx.rewritten_path` directly (see CLAUDE.md
+   Key Patterns: "Use `path_rewrite` filter for
+   URL translation").
 
 3. **Token counting.** Anthropic uses different
    tokenization than OpenAI. When transforming
