@@ -198,6 +198,7 @@ lint:
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo +nightly fmt --all -- --check
 	cargo xtask lint-deps
+	cargo xtask lint-example-tests
 
 fmt:
 	cargo +nightly fmt --all
