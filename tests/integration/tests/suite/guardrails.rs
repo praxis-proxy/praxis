@@ -328,6 +328,166 @@ fn mixed_positive_and_negated_rules() {
 }
 
 // -----------------------------------------------------------------------------
+// PII — body
+// -----------------------------------------------------------------------------
+
+#[test]
+fn pii_ssn_in_body_is_blocked() {
+    let backend_port_guard = start_backend_with_shutdown("ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    let yaml = pii_body_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let payload = "my ssn is 123-45-6789";
+    let raw = http_send(
+        proxy.addr(),
+        &format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        ),
+    );
+    assert_eq!(parse_status(&raw), 403, "SSN in body should be blocked");
+}
+
+#[test]
+fn pii_credit_card_in_body_is_blocked() {
+    let backend_port_guard = start_backend_with_shutdown("ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    let yaml = pii_body_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let payload = "card: 4111-1111-1111-1111";
+    let raw = http_send(
+        proxy.addr(),
+        &format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        ),
+    );
+    assert_eq!(parse_status(&raw), 403, "credit card number in body should be blocked");
+}
+
+#[test]
+fn pii_phone_in_body_is_blocked() {
+    let backend_port_guard = start_backend_with_shutdown("ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    let yaml = pii_body_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let payload = "call me at (555) 867-5309";
+    let raw = http_send(
+        proxy.addr(),
+        &format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        ),
+    );
+    assert_eq!(parse_status(&raw), 403, "phone number in body should be blocked");
+}
+
+#[test]
+fn pii_email_in_body_is_blocked() {
+    let backend_port_guard = start_backend_with_shutdown("ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    let yaml = pii_body_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let payload = "contact user@example.com for support";
+    let raw = http_send(
+        proxy.addr(),
+        &format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        ),
+    );
+    assert_eq!(parse_status(&raw), 403, "email address in body should be blocked");
+}
+
+#[test]
+fn pii_body_clean_content_passes() {
+    let backend_port_guard = start_backend_with_shutdown("ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    let yaml = pii_body_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let payload = r#"{"query":"SELECT count FROM orders WHERE id = 42"}"#;
+    let raw = http_send(
+        proxy.addr(),
+        &format!(
+            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            payload.len()
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "body without PII should pass through");
+}
+
+// -----------------------------------------------------------------------------
+// PII — header
+// -----------------------------------------------------------------------------
+
+#[test]
+fn pii_ssn_in_header_is_blocked() {
+    let backend_port_guard = start_backend_with_shutdown("ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    let yaml = pii_header_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nX-Secret: 123-45-6789\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 403, "SSN in X-Secret header should be blocked");
+}
+
+#[test]
+fn pii_credit_card_in_header_is_blocked() {
+    let backend_port_guard = start_backend_with_shutdown("ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    let yaml = pii_header_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nX-Secret: 4111-1111-1111-1111\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        403,
+        "credit card number in X-Secret header should be blocked"
+    );
+}
+
+#[test]
+fn pii_header_clean_content_passes() {
+    let backend_port_guard = start_backend_with_shutdown("ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+    let yaml = pii_header_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nX-Secret: safe-token-value\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "header without PII should pass through");
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
@@ -415,6 +575,29 @@ fn mixed_yaml(proxy_port: u16, backend_port: u16) -> String {
             negate: true
           - target: body
             contains: "evilmonkey""#,
+    )
+}
+
+/// YAML config with PII detection rules targeting the request body.
+fn pii_body_yaml(proxy_port: u16, backend_port: u16) -> String {
+    guardrails_pipeline(
+        proxy_port,
+        backend_port,
+        r#"
+          - target: body
+            contains: [ssn, credit_card, phone, email]"#,
+    )
+}
+
+/// YAML config with PII detection rules targeting the `X-Secret` header.
+fn pii_header_yaml(proxy_port: u16, backend_port: u16) -> String {
+    guardrails_pipeline(
+        proxy_port,
+        backend_port,
+        r#"
+          - target: header
+            name: "X-Secret"
+            contains: [ssn, credit_card, phone, email]"#,
     )
 }
 
