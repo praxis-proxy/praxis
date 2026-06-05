@@ -39,6 +39,8 @@ mod payload_processing;
 mod prompt_enrichment;
 mod protocols;
 mod redirect;
+#[cfg(feature = "ai-inference")]
+mod responses_routing;
 mod round_robin;
 mod session_affinity;
 mod static_response;

@@ -58,6 +58,10 @@ pub(crate) struct ResponsesFormatHeaders {
     /// Header name for the extracted stream flag.
     #[serde(default = "default_stream_header")]
     pub stream: Option<String>,
+
+    /// Header name for the computed mode (`stateless` or `stateful`).
+    #[serde(default = "default_mode_header")]
+    pub mode: Option<String>,
 }
 
 impl Default for ResponsesFormatHeaders {
@@ -66,6 +70,7 @@ impl Default for ResponsesFormatHeaders {
             format: default_format_header(),
             model: default_model_header(),
             stream: default_stream_header(),
+            mode: default_mode_header(),
         }
     }
 }
@@ -95,6 +100,15 @@ fn default_model_header() -> Option<String> {
 )]
 fn default_stream_header() -> Option<String> {
     Some("x-praxis-ai-stream".to_owned())
+}
+
+/// Default mode header name.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "serde default functions require Option return type"
+)]
+fn default_mode_header() -> Option<String> {
+    Some("x-praxis-responses-mode".to_owned())
 }
 
 // -----------------------------------------------------------------------------
@@ -146,6 +160,7 @@ pub(crate) fn build_config(cfg: ResponsesFormatConfig) -> Result<ResponsesFormat
     validate_header_name("format", cfg.headers.format.as_deref())?;
     validate_header_name("model", cfg.headers.model.as_deref())?;
     validate_header_name("stream", cfg.headers.stream.as_deref())?;
+    validate_header_name("mode", cfg.headers.mode.as_deref())?;
 
     Ok(cfg)
 }

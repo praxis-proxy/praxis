@@ -263,6 +263,7 @@ async fn promotes_headers_for_full_responses_request() {
         !headers.contains_key("x-praxis-ai-background"),
         "background should not have a default header"
     );
+    assert_eq!(headers.get("x-praxis-responses-mode"), Some(&"stateful"), "mode header");
 }
 
 #[tokio::test]
@@ -311,6 +312,24 @@ async fn promotes_metadata_for_full_responses_request() {
             .map(String::as_str),
         Some("true")
     );
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.has_tools")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.has_prompt_id")
+            .map(String::as_str),
+        Some("true")
+    );
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.mode")
+            .map(String::as_str),
+        Some("stateful")
+    );
 }
 
 #[tokio::test]
@@ -325,6 +344,9 @@ async fn promotes_filter_results_for_full_responses_request() {
     assert_eq!(results.get("background"), Some("true"));
     assert_eq!(results.get("has_previous_response_id"), Some("true"));
     assert_eq!(results.get("has_conversation"), Some("true"));
+    assert_eq!(results.get("has_tools"), Some("true"));
+    assert_eq!(results.get("has_prompt_id"), Some("true"));
+    assert_eq!(results.get("mode"), Some("stateful"));
 }
 
 #[tokio::test]
@@ -364,6 +386,22 @@ async fn missing_optional_facts_not_promoted() {
         !ctx.filter_metadata
             .contains_key("openai_responses_format.has_conversation"),
         "conversation metadata absent"
+    );
+    assert!(
+        !ctx.filter_metadata.contains_key("openai_responses_format.has_tools"),
+        "tools metadata absent"
+    );
+    assert!(
+        !ctx.filter_metadata
+            .contains_key("openai_responses_format.has_prompt_id"),
+        "prompt_id metadata absent"
+    );
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.mode")
+            .map(String::as_str),
+        Some("stateful"),
+        "mode should be stateful when store is omitted (defaults to true)"
     );
 }
 
@@ -410,7 +448,7 @@ async fn custom_headers_emitted_at_runtime() {
 
 #[tokio::test]
 async fn null_headers_suppress_emission() {
-    let cfg = "headers:\n  format: null\n  model: null\n  stream: null";
+    let cfg = "headers:\n  format: null\n  model: null\n  stream: null\n  mode: null";
     let ctx = run_filter(cfg, r#"{"model":"gpt-4.1","input":"test","stream":true}"#).await;
 
     assert!(
@@ -616,11 +654,163 @@ async fn post_v1_responses_classifies_body_normally() {
 }
 
 // -----------------------------------------------------------------------------
+// Mode Computation
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn mode_stateless_when_store_false_no_stateful_markers() {
+    let ctx = run_filter("{}", r#"{"input":"test","store":false}"#).await;
+    let results = ctx.filter_results.get("openai_responses_format").unwrap();
+
+    assert_eq!(results.get("mode"), Some("stateless"));
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.mode")
+            .map(String::as_str),
+        Some("stateless")
+    );
+    let headers = collect_headers(&ctx);
+    assert_eq!(headers.get("x-praxis-responses-mode"), Some(&"stateless"));
+}
+
+#[tokio::test]
+async fn mode_stateful_when_store_omitted() {
+    let ctx = run_filter("{}", r#"{"input":"test"}"#).await;
+    let results = ctx.filter_results.get("openai_responses_format").unwrap();
+
+    assert_eq!(
+        results.get("mode"),
+        Some("stateful"),
+        "omitted store defaults to true (stateful)"
+    );
+}
+
+#[tokio::test]
+async fn mode_stateful_when_store_true() {
+    let ctx = run_filter("{}", r#"{"input":"test","store":true}"#).await;
+    let results = ctx.filter_results.get("openai_responses_format").unwrap();
+
+    assert_eq!(results.get("mode"), Some("stateful"));
+}
+
+#[tokio::test]
+async fn mode_stateful_when_previous_response_id() {
+    let ctx = run_filter(
+        "{}",
+        r#"{"input":"test","store":false,"previous_response_id":"resp_1"}"#,
+    )
+    .await;
+    let results = ctx.filter_results.get("openai_responses_format").unwrap();
+
+    assert_eq!(results.get("mode"), Some("stateful"));
+}
+
+#[tokio::test]
+async fn mode_stateful_when_tools_present() {
+    let ctx = run_filter("{}", r#"{"input":"test","store":false,"tools":[{"type":"function"}]}"#).await;
+    let results = ctx.filter_results.get("openai_responses_format").unwrap();
+
+    assert_eq!(results.get("mode"), Some("stateful"));
+}
+
+#[tokio::test]
+async fn mode_stateful_when_background_true() {
+    let ctx = run_filter("{}", r#"{"input":"test","store":false,"background":true}"#).await;
+    let results = ctx.filter_results.get("openai_responses_format").unwrap();
+
+    assert_eq!(results.get("mode"), Some("stateful"));
+}
+
+#[tokio::test]
+async fn mode_stateful_when_conversation_present() {
+    let ctx = run_filter("{}", r#"{"input":"test","store":false,"conversation":{"id":"conv_1"}}"#).await;
+    let results = ctx.filter_results.get("openai_responses_format").unwrap();
+
+    assert_eq!(results.get("mode"), Some("stateful"));
+}
+
+#[tokio::test]
+async fn mode_stateful_when_prompt_id_present() {
+    let ctx = run_filter(
+        "{}",
+        r#"{"input":"test","store":false,"prompt":{"prompt_id":"pmpt_123"}}"#,
+    )
+    .await;
+    let results = ctx.filter_results.get("openai_responses_format").unwrap();
+
+    assert_eq!(results.get("mode"), Some("stateful"));
+}
+
+#[tokio::test]
+async fn mode_not_set_for_chat_completions() {
+    let ctx = run_filter("{}", r#"{"messages":[{"role":"user","content":"Hi"}]}"#).await;
+    let results = ctx.filter_results.get("openai_responses_format").unwrap();
+
+    assert!(
+        results.get("mode").is_none(),
+        "mode should not be set for chat_completions"
+    );
+    assert!(
+        !ctx.filter_metadata.contains_key("openai_responses_format.mode"),
+        "mode metadata absent for chat_completions"
+    );
+    let headers = collect_headers(&ctx);
+    assert!(
+        !headers.contains_key("x-praxis-responses-mode"),
+        "mode header absent for chat_completions"
+    );
+}
+
+#[tokio::test]
+async fn mode_stateless_with_store_false_and_empty_tools() {
+    let ctx = run_filter("{}", r#"{"input":"test","store":false,"tools":[]}"#).await;
+    let results = ctx.filter_results.get("openai_responses_format").unwrap();
+
+    assert_eq!(
+        results.get("mode"),
+        Some("stateless"),
+        "empty tools should not trigger stateful"
+    );
+}
+
+#[tokio::test]
+async fn mode_header_uses_custom_name() {
+    let cfg = "headers:\n  mode: x-custom-mode";
+    let ctx = run_filter(cfg, r#"{"input":"test","store":false}"#).await;
+    let headers = collect_headers(&ctx);
+
+    assert_eq!(headers.get("x-custom-mode"), Some(&"stateless"));
+    assert!(
+        !headers.contains_key("x-praxis-responses-mode"),
+        "default mode header should not be emitted when overridden"
+    );
+}
+
+#[tokio::test]
+async fn mode_header_suppressed_when_null() {
+    let cfg = "headers:\n  mode: null";
+    let ctx = run_filter(cfg, r#"{"input":"test","store":false}"#).await;
+    let headers = collect_headers(&ctx);
+
+    assert!(
+        !headers.contains_key("x-praxis-responses-mode"),
+        "null mode header should suppress emission"
+    );
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_format.mode")
+            .map(String::as_str),
+        Some("stateless"),
+        "metadata still written with null mode header"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
 /// Full Responses body with all optional fields for promotion tests.
-const FULL_RESPONSES_BODY: &str = r#"{"model":"gpt-4.1","input":"test","stream":true,"store":false,"background":true,"previous_response_id":"resp_abc","conversation":{"id":"conv_1"}}"#;
+const FULL_RESPONSES_BODY: &str = r#"{"model":"gpt-4.1","input":"test","stream":true,"store":false,"background":true,"previous_response_id":"resp_abc","conversation":{"id":"conv_1"},"tools":[{"type":"function"}],"prompt":{"prompt_id":"pmpt_123"}}"#;
 
 /// Run the filter's `on_request_body` and return the resulting context.
 async fn run_filter(config_yaml: &str, body_str: &str) -> HttpFilterContext<'static> {
