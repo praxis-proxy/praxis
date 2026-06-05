@@ -15,6 +15,7 @@ mod context;
 mod factory;
 mod filter;
 pub(crate) mod load_balancing;
+pub(crate) mod path_match;
 mod pipeline;
 mod registry;
 mod results;

@@ -1,8 +1,3 @@
----
-sidebar_position: 4
-title: Release Process
----
-
 # Release Process
 
 ## Versioning

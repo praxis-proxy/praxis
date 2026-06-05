@@ -252,5 +252,5 @@ jobs:
         if: steps.cache-llvm-cov.outputs.cache-hit != 'true'
         run: cargo install cargo-llvm-cov --locked
 
-      - name: Check coverage (≥90% lines)
+      - name: Check coverage (≥95% lines)
         run: make coverage-check

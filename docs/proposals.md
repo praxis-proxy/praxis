@@ -1,8 +1,3 @@
----
-sidebar_position: 5
-title: Proposals
----
-
 # Proposals
 
 Proposals for new capabilities and refinements in Praxis.
@@ -78,7 +73,7 @@ CI will close PRs that:
 - Have no `stakeholders` listed
 - Include the `How?` section in a new proposal
 
-[template]: https://github.com/praxis-proxy/praxis/blob/main/docs/proposals/template.md
+[template]: proposals/template.md
 
 ### 5. Iteration
 

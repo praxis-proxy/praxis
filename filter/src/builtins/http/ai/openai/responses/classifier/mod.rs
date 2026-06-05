@@ -59,7 +59,42 @@ pub(crate) struct ClassifiedRequest {
 }
 
 // -----------------------------------------------------------------------------
-// Classification
+// Path Classification
+// -----------------------------------------------------------------------------
+
+/// Check whether a method + path pair matches a known Responses API endpoint.
+///
+/// Returns `true` for:
+/// - `GET    /v1/responses/{id}`
+/// - `GET    /v1/responses/{id}/input_items`
+/// - `POST   /v1/responses/{id}/cancel`
+/// - `POST   /v1/responses/input_tokens`
+/// - `POST   /v1/responses/compact`
+/// - `DELETE /v1/responses/{id}`
+pub(crate) fn is_responses_path(method: &http::Method, path: &str) -> bool {
+    let path = path.strip_suffix('/').filter(|p| !p.is_empty()).unwrap_or(path);
+    let segments: Vec<&str> = path.split('/').collect();
+
+    match (method, segments.as_slice()) {
+        // POST /v1/responses/input_tokens
+        // POST /v1/responses/compact
+        // Both have `input` in their body so body classification would also
+        // work, but path-matching is explicit about recognising these as
+        // Responses API endpoints regardless of payload shape.
+        (&http::Method::POST, ["", "v1", "responses", "input_tokens" | "compact"]) => true,
+        // GET /v1/responses/{id}
+        // DELETE /v1/responses/{id}
+        (&http::Method::GET | &http::Method::DELETE, ["", "v1", "responses", id]) if !id.is_empty() => true,
+        // GET /v1/responses/{id}/input_items
+        (&http::Method::GET, ["", "v1", "responses", id, "input_items"]) if !id.is_empty() => true,
+        // POST /v1/responses/{id}/cancel
+        (&http::Method::POST, ["", "v1", "responses", id, "cancel"]) if !id.is_empty() => true,
+        _ => false,
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Body Classification
 // -----------------------------------------------------------------------------
 
 /// Classify a request body and extract routing facts.
@@ -109,7 +144,7 @@ fn classify_format(obj: &serde_json::Map<String, serde_json::Value>) -> AiReques
 // -----------------------------------------------------------------------------
 
 /// Build a result with no extracted facts.
-fn empty_result(format: AiRequestFormat) -> ClassifiedRequest {
+pub(crate) fn empty_result(format: AiRequestFormat) -> ClassifiedRequest {
     ClassifiedRequest {
         background: None,
         format,
@@ -405,6 +440,130 @@ mod tests {
             result.format,
             AiRequestFormat::Responses,
             "input takes precedence when both input and messages are present"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Path Classification
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn get_v1_responses_list_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::GET, "/v1/responses"),
+            "GET /v1/responses is not a public API endpoint"
+        );
+    }
+
+    #[test]
+    fn get_v1_responses_with_id_matches() {
+        assert!(
+            is_responses_path(&http::Method::GET, "/v1/responses/resp_abc123"),
+            "GET /v1/responses/{{id}} should match"
+        );
+    }
+
+    #[test]
+    fn get_v1_responses_input_items_matches() {
+        assert!(
+            is_responses_path(&http::Method::GET, "/v1/responses/resp_abc123/input_items"),
+            "GET /v1/responses/{{id}}/input_items should match"
+        );
+    }
+
+    #[test]
+    fn delete_v1_responses_with_id_matches() {
+        assert!(
+            is_responses_path(&http::Method::DELETE, "/v1/responses/resp_abc123"),
+            "DELETE /v1/responses/{{id}} should match"
+        );
+    }
+
+    #[test]
+    fn post_v1_responses_cancel_matches() {
+        assert!(
+            is_responses_path(&http::Method::POST, "/v1/responses/resp_abc123/cancel"),
+            "POST /v1/responses/{{id}}/cancel should match"
+        );
+    }
+
+    #[test]
+    fn post_v1_responses_input_tokens_matches() {
+        assert!(
+            is_responses_path(&http::Method::POST, "/v1/responses/input_tokens"),
+            "POST /v1/responses/input_tokens should match"
+        );
+    }
+
+    #[test]
+    fn post_v1_responses_compact_matches() {
+        assert!(
+            is_responses_path(&http::Method::POST, "/v1/responses/compact"),
+            "POST /v1/responses/compact should match"
+        );
+    }
+
+    #[test]
+    fn post_v1_responses_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::POST, "/v1/responses"),
+            "POST /v1/responses (create) should not match path classification"
+        );
+    }
+
+    #[test]
+    fn get_v1_responses_cancel_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::GET, "/v1/responses/resp_abc/cancel"),
+            "GET /v1/responses/{{id}}/cancel should not match"
+        );
+    }
+
+    #[test]
+    fn delete_v1_responses_list_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::DELETE, "/v1/responses"),
+            "DELETE /v1/responses (no id) should not match"
+        );
+    }
+
+    #[test]
+    fn get_v1_responses_unknown_sub_resource_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::GET, "/v1/responses/resp_abc/other"),
+            "GET /v1/responses/{{id}}/other should not match"
+        );
+    }
+
+    #[test]
+    fn get_unrelated_path_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::GET, "/v1/chat/completions"),
+            "GET /v1/chat/completions should not match"
+        );
+    }
+
+    #[test]
+    fn get_v1_responses_trailing_slash_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::GET, "/v1/responses/"),
+            "GET /v1/responses/ is not a public API endpoint"
+        );
+    }
+
+    #[test]
+    fn delete_v1_responses_input_items_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::DELETE, "/v1/responses/resp_abc/input_items"),
+            "DELETE /v1/responses/{{id}}/input_items should not match"
+        );
+    }
+
+    #[test]
+    fn get_v1_responses_double_slash_input_items_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::GET, "/v1/responses//input_items"),
+            "GET /v1/responses//input_items should not collapse empty id segment"
         );
     }
 

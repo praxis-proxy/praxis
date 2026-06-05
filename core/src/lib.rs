@@ -17,6 +17,8 @@ pub mod health;
 pub mod kv;
 /// Tracing subscriber setup.
 pub mod logging;
+/// Process-wide memory pressure monitoring.
+pub mod memory;
 /// Server factory and runtime options.
 pub mod server;
 

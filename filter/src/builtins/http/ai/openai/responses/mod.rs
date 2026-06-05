@@ -3,10 +3,16 @@
 
 //! Responses API format classifier filter.
 //!
-//! Classifies request bodies as Responses API, Chat Completions,
-//! unknown JSON, invalid JSON, or non-JSON. Promotes classification
-//! facts to configurable headers, durable metadata, and filter
-//! results for routing. Does not mutate the request body.
+//! Classifies requests as Responses API, Chat Completions, unknown
+//! JSON, invalid JSON, or non-JSON. Requests matching Responses API
+//! sub-resource paths (`/v1/responses/{id}`,
+//! `/v1/responses/{id}/input_items`, `/v1/responses/{id}/cancel`,
+//! `/v1/responses/input_tokens`, `/v1/responses/compact`) are
+//! classified by method and path without inspecting the body.
+//! `POST /v1/responses` (create) is classified by body content.
+//! Promotes classification facts to configurable headers, durable
+//! metadata, and filter results for routing. Does not mutate the
+//! request body.
 
 pub(crate) mod classifier;
 mod config;
@@ -31,7 +37,7 @@ use bytes::Bytes;
 use tracing::{debug, trace};
 
 use self::{
-    classifier::{AiRequestFormat, classify_request_body},
+    classifier::{AiRequestFormat, classify_request_body, is_responses_path},
     config::{OnInvalidBehavior, ResponsesFormatConfig, build_config},
 };
 
@@ -128,7 +134,16 @@ impl HttpFilter for ResponsesFormatFilter {
             None => &[],
         };
 
-        let classified = classify_request_body(bytes);
+        let classified = if is_responses_path(&ctx.request.method, ctx.request.uri.path()) {
+            debug!(
+                method = %ctx.request.method,
+                path = ctx.request.uri.path(),
+                "classified request by method and path"
+            );
+            classifier::empty_result(AiRequestFormat::Responses)
+        } else {
+            classify_request_body(bytes)
+        };
 
         debug!(
             format = classified.format.as_str(),

@@ -18,6 +18,7 @@ mod benchmark;
 mod debug;
 mod echo;
 mod lint_deps;
+mod lint_example_tests;
 mod port;
 
 use clap::{Parser, Subcommand};
@@ -52,6 +53,10 @@ enum Command {
     /// Check that workspace dependency versions use
     /// three-component semver.
     LintDeps(lint_deps::Args),
+
+    /// Check that every example config has a corresponding
+    /// integration test.
+    LintExampleTests(lint_example_tests::Args),
 }
 
 // -----------------------------------------------------------------------------
@@ -66,6 +71,7 @@ fn main() {
         Command::Debug(args) => debug::run(&args),
         Command::Benchmark(args) => benchmark::run(*args),
         Command::LintDeps(args) => lint_deps::run(args),
+        Command::LintExampleTests(args) => lint_example_tests::run(args),
     }
 }
 

@@ -32,7 +32,7 @@ mod tcp;
 mod tests;
 
 use praxis_core::{
-    config::{FailureMode, InsecureOptions},
+    config::{ABSOLUTE_MAX_BODY_BYTES, FailureMode, InsecureOptions},
     health::HealthRegistry,
     kv::KvStoreRegistry,
 };
@@ -115,8 +115,16 @@ impl FilterPipeline {
             self.body_capabilities.needs_response_body = true;
         }
 
-        check_unbounded_stream_buffer("request", self.body_capabilities.request_body_mode, allow_unbounded)?;
-        check_unbounded_stream_buffer("response", self.body_capabilities.response_body_mode, allow_unbounded)?;
+        check_unbounded_stream_buffer(
+            "request",
+            &mut self.body_capabilities.request_body_mode,
+            allow_unbounded,
+        )?;
+        check_unbounded_stream_buffer(
+            "response",
+            &mut self.body_capabilities.response_body_mode,
+            allow_unbounded,
+        )?;
 
         Ok(())
     }
@@ -205,9 +213,10 @@ fn clamp_body_mode(mode: BodyMode, ceiling: usize, filter_declared: bool) -> Bod
     }
 }
 
-/// Reject unbounded [`StreamBuffer`] body modes unless explicitly allowed.
+/// Reject or clamp unbounded [`StreamBuffer`] body modes.
 ///
-/// When `allow_unbounded` is `true`, the error is demoted to a warning.
+/// When `allow_unbounded` is `true`, the mode is clamped to
+/// [`ABSOLUTE_MAX_BODY_BYTES`] and a warning is emitted.
 ///
 /// # Errors
 ///
@@ -215,14 +224,22 @@ fn clamp_body_mode(mode: BodyMode, ceiling: usize, filter_declared: bool) -> Bod
 /// and `allow_unbounded` is `false`.
 ///
 /// [`StreamBuffer`]: BodyMode::StreamBuffer
-fn check_unbounded_stream_buffer(direction: &str, mode: BodyMode, allow_unbounded: bool) -> Result<(), FilterError> {
-    if matches!(mode, BodyMode::StreamBuffer { max_bytes: None }) {
+/// [`ABSOLUTE_MAX_BODY_BYTES`]: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
+fn check_unbounded_stream_buffer(
+    direction: &str,
+    mode: &mut BodyMode,
+    allow_unbounded: bool,
+) -> Result<(), FilterError> {
+    if let BodyMode::StreamBuffer { max_bytes: max @ None } = mode {
         if allow_unbounded {
             warn!(
                 direction = direction,
-                "StreamBuffer body mode has no size limit; \
-                 allowed by insecure_options.allow_unbounded_body"
+                ceiling = ABSOLUTE_MAX_BODY_BYTES,
+                "StreamBuffer body mode has no per-filter size limit; \
+                 clamped to absolute ceiling ({} MiB)",
+                ABSOLUTE_MAX_BODY_BYTES / 1_048_576
             );
+            *max = Some(ABSOLUTE_MAX_BODY_BYTES);
         } else {
             return Err(format!(
                 "StreamBuffer {direction} body mode has no size limit; \

@@ -5,8 +5,8 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown,
-    start_echo_backend_with_shutdown, start_header_echo_backend_with_shutdown, start_proxy,
+    free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown, start_echo_backend,
+    start_header_echo_backend, start_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -292,7 +292,7 @@ fn stream_header_routes_streaming_traffic() {
 
 #[test]
 fn reserved_headers_stripped_before_upstream() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
 
     let yaml = header_echo_yaml(proxy_port, backend_guard.port());
@@ -440,12 +440,174 @@ fn background_filter_result_enables_branch_routing() {
 }
 
 // -----------------------------------------------------------------------------
+// Path-Based Classification (GET / DELETE)
+// -----------------------------------------------------------------------------
+
+#[test]
+fn get_v1_responses_with_id_routes_to_responses_cluster() {
+    let responses_guard = start_backend_with_shutdown("responses-backend");
+    let chat_guard = start_backend_with_shutdown("chat-backend");
+    let default_guard = start_backend_with_shutdown("default-backend");
+    let proxy_port = free_port();
+
+    let yaml = routing_yaml(
+        proxy_port,
+        responses_guard.port(),
+        chat_guard.port(),
+        default_guard.port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let request = format!(
+        "GET /v1/responses/resp_abc123 HTTP/1.1\r\n\
+         Host: localhost:{proxy_port}\r\n\
+         Connection: close\r\n\
+         \r\n"
+    );
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(parse_status(&raw), 200, "GET /v1/responses/{{id}} should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "responses-backend",
+        "GET /v1/responses/{{id}} should route to responses cluster"
+    );
+}
+
+#[test]
+fn get_v1_responses_input_items_routes_to_responses_cluster() {
+    let responses_guard = start_backend_with_shutdown("responses-backend");
+    let chat_guard = start_backend_with_shutdown("chat-backend");
+    let default_guard = start_backend_with_shutdown("default-backend");
+    let proxy_port = free_port();
+
+    let yaml = routing_yaml(
+        proxy_port,
+        responses_guard.port(),
+        chat_guard.port(),
+        default_guard.port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let request = format!(
+        "GET /v1/responses/resp_abc123/input_items HTTP/1.1\r\n\
+         Host: localhost:{proxy_port}\r\n\
+         Connection: close\r\n\
+         \r\n"
+    );
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "GET /v1/responses/{{id}}/input_items should return 200"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "responses-backend",
+        "GET /v1/responses/{{id}}/input_items should route to responses cluster"
+    );
+}
+
+#[test]
+fn delete_v1_responses_with_id_routes_to_responses_cluster() {
+    let responses_guard = start_backend_with_shutdown("responses-backend");
+    let chat_guard = start_backend_with_shutdown("chat-backend");
+    let default_guard = start_backend_with_shutdown("default-backend");
+    let proxy_port = free_port();
+
+    let yaml = routing_yaml(
+        proxy_port,
+        responses_guard.port(),
+        chat_guard.port(),
+        default_guard.port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let request = format!(
+        "DELETE /v1/responses/resp_abc123 HTTP/1.1\r\n\
+         Host: localhost:{proxy_port}\r\n\
+         Connection: close\r\n\
+         \r\n"
+    );
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(parse_status(&raw), 200, "DELETE /v1/responses/{{id}} should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "responses-backend",
+        "DELETE /v1/responses/{{id}} should route to responses cluster"
+    );
+}
+
+#[test]
+fn get_v1_responses_branch_routes_correctly() {
+    let responses_guard = start_backend_with_shutdown("responses-branch-hit");
+    let default_guard = start_backend_with_shutdown("default-branch-miss");
+    let proxy_port = free_port();
+
+    let yaml = branch_yaml(proxy_port, responses_guard.port(), default_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let request = format!(
+        "GET /v1/responses/resp_abc123 HTTP/1.1\r\n\
+         Host: localhost:{proxy_port}\r\n\
+         Connection: close\r\n\
+         \r\n"
+    );
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(parse_status(&raw), 200, "GET branch should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "responses-branch-hit",
+        "GET path-classified request should trigger branch on format=responses"
+    );
+}
+
+#[test]
+fn get_unrelated_path_routes_to_default() {
+    let responses_guard = start_backend_with_shutdown("responses-backend");
+    let chat_guard = start_backend_with_shutdown("chat-backend");
+    let default_guard = start_backend_with_shutdown("default-backend");
+    let proxy_port = free_port();
+
+    let yaml = routing_yaml(
+        proxy_port,
+        responses_guard.port(),
+        chat_guard.port(),
+        default_guard.port(),
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let request = format!(
+        "GET /v1/models HTTP/1.1\r\n\
+         Host: localhost:{proxy_port}\r\n\
+         Connection: close\r\n\
+         \r\n"
+    );
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(parse_status(&raw), 200, "unrelated GET should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        "default-backend",
+        "GET /v1/models should route to default cluster"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Body Preservation Tests
 // -----------------------------------------------------------------------------
 
 #[test]
 fn body_unchanged_after_classification() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let proxy_port = free_port();
 
     let yaml = echo_yaml(proxy_port, backend_guard.port());
@@ -465,7 +627,7 @@ fn body_unchanged_after_classification() {
 
 #[test]
 fn large_body_over_64k_classified_and_forwarded() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let proxy_port = free_port();
 
     let yaml = echo_yaml(proxy_port, backend_guard.port());
@@ -500,11 +662,11 @@ filter_chains:
         on_invalid: continue
       - filter: router
         routes:
-          - path: "/v1/responses"
+          - path_prefix: "/"
             headers:
               x-praxis-ai-format: "openai_responses"
             cluster: "responses"
-          - path: "/v1/chat/completions"
+          - path_prefix: "/"
             headers:
               x-praxis-ai-format: "openai_chat_completions"
             cluster: "chat"

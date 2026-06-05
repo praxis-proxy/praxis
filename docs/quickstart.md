@@ -1,8 +1,3 @@
----
-sidebar_position: 2
-title: Quickstart
----
-
 # Quickstart
 
 Build the release binary:
@@ -67,9 +62,9 @@ curl http://127.0.0.1:8080/
 
 ## Next steps
 
-- [Configuration](/docs/configuration/overview): filter chains,
-  routing, load balancing, TLS, and all options.
-- [Example configs](https://github.com/praxis-proxy/praxis/tree/main/examples/configs): working YAML
+- [Configuration](operating/configuration.md): filter
+  chains, routing, load balancing, TLS, and all options.
+- [Example configs](../examples/configs/): working YAML
   for every feature.
-- [Filters](/docs/filters/filter-model): built-in filters and how to
-  write your own.
+- [Filters](filters/README.md): built-in filters and
+  how to write your own.

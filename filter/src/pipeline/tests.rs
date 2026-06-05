@@ -1346,7 +1346,7 @@ fn apply_body_limits_rejects_unbounded_stream_buffer() {
 }
 
 #[test]
-fn apply_body_limits_allows_unbounded_stream_buffer_with_override() {
+fn apply_body_limits_clamps_unbounded_stream_buffer_with_override() {
     let caps = BodyCapabilities {
         request_body_mode: BodyMode::StreamBuffer { max_bytes: None },
         needs_request_body: true,
@@ -1362,6 +1362,13 @@ fn apply_body_limits_allows_unbounded_stream_buffer_with_override() {
     pipeline
         .apply_body_limits(None, None, true)
         .expect("allow_unbounded_body should demote error to warning");
+    assert_eq!(
+        pipeline.body_capabilities().request_body_mode,
+        BodyMode::StreamBuffer {
+            max_bytes: Some(praxis_core::config::ABSOLUTE_MAX_BODY_BYTES)
+        },
+        "unbounded StreamBuffer should be clamped to absolute ceiling"
+    );
 }
 
 #[test]

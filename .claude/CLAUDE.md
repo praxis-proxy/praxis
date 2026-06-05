@@ -21,7 +21,7 @@ make fmt            # format with nightly rustfmt
 make lint           # clippy + nightly fmt check + xtask lint-deps
 make doc            # rustdoc with -D warnings, including private items
 make audit          # cargo audit + cargo deny check
-make coverage-check # fail if line coverage < 90%
+make coverage-check # fail if line coverage < 95%
 make container      # container image build
 cargo run -p praxis # run the proxy
 ```

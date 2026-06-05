@@ -1,8 +1,3 @@
----
-sidebar_position: 3
-title: Benchmarks
----
-
 # Benchmarks
 
 Praxis has two benchmark systems:
