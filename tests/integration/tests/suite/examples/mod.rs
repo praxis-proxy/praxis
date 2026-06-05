@@ -19,6 +19,7 @@ mod credential_injection;
 mod csrf;
 mod default_config;
 mod grpc_detection;
+mod guardrails;
 mod header_manipulation;
 mod health_checks;
 mod hostname_upstream;

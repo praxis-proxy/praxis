@@ -21,8 +21,8 @@ pub use ai::{A2aFilter, JsonRpcFilter, McpFilter};
 pub use observability::{AccessLogFilter, RequestIdFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter};
 pub use security::{
-    CorsFilter, CredentialInjectionFilter, CsrfFilter, DisallowedOriginMode, ForwardedHeadersFilter, GuardrailsAction,
-    GuardrailsFilter, IpAclFilter, RuleTargetKind,
+    ContainsValue, CorsFilter, CredentialInjectionFilter, CsrfFilter, DisallowedOriginMode, ForwardedHeadersFilter,
+    GuardrailsAction, GuardrailsFilter, IpAclFilter, PiiKind, RuleTargetKind,
 };
 pub use traffic_management::{
     CircuitBreakerFilter, GrpcDetectionFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter,
