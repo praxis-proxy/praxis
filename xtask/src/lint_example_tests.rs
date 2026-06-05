@@ -187,7 +187,7 @@ mod tests {
     #[test]
     fn skip_list_entries_are_sorted() {
         let mut sorted = SKIP.to_vec();
-        sorted.sort();
+        sorted.sort_unstable();
         assert_eq!(SKIP, sorted.as_slice(), "SKIP allowlist must be sorted");
     }
 
