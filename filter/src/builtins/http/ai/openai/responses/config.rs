@@ -47,7 +47,7 @@ pub(crate) enum OnInvalidBehavior {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ResponsesFormatHeaders {
-    /// Header name for the detected format (e.g. `responses`, `chat_completions`).
+    /// Header name for the detected format (e.g. `openai_responses`, `openai_chat_completions`).
     #[serde(default = "default_format_header")]
     pub format: Option<String>,
 
@@ -132,7 +132,7 @@ fn default_max_body_bytes() -> usize {
 /// Validate the parsed configuration.
 pub(crate) fn build_config(cfg: ResponsesFormatConfig) -> Result<ResponsesFormatConfig, FilterError> {
     if cfg.max_body_bytes == 0 {
-        return Err("responses_format: 'max_body_bytes' must be greater than 0".into());
+        return Err("openai_responses_format: 'max_body_bytes' must be greater than 0".into());
     }
 
     if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
@@ -156,10 +156,10 @@ fn validate_header_name(field: &str, header_name: Option<&str>) -> Result<(), Fi
         return Ok(());
     };
     if header_name.is_empty() {
-        return Err(format!("responses_format: {field} header name must not be empty").into());
+        return Err(format!("openai_responses_format: {field} header name must not be empty").into());
     }
     if http::HeaderName::from_bytes(header_name.as_bytes()).is_err() {
-        return Err(format!("responses_format: {field} header name is not a valid HTTP header name").into());
+        return Err(format!("openai_responses_format: {field} header name is not a valid HTTP header name").into());
     }
     Ok(())
 }

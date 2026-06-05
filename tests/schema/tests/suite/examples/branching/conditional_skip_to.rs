@@ -15,7 +15,8 @@ use praxis_test_utils::{
 
 #[test]
 fn clean_request_skips_middleware_and_gets_tagged() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let config = crate::example_utils::load_example_config(
         "branching/conditional-skip-to.yaml",

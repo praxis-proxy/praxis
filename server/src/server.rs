@@ -76,6 +76,8 @@ pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
 pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config_path: Option<PathBuf>) -> ! {
     enforce_root_check(&config);
+    warn_insecure_options(&config);
+    init_runtime_limits(&config.runtime);
     info!("building filter pipelines");
     warn_insecure_key_permissions(&config);
 
@@ -152,6 +154,66 @@ fn spawn_watcher(
         shutdown: CancellationToken::new(),
     });
     Some(handle)
+}
+
+// -----------------------------------------------------------------------------
+// Runtime Limits
+// -----------------------------------------------------------------------------
+
+/// Initialize global connection and memory limits from runtime config.
+fn init_runtime_limits(runtime: &praxis_core::config::RuntimeConfig) {
+    if let Some(max) = runtime.max_connections {
+        praxis_protocol::connections::init_global_limit(max as usize);
+        info!(max_connections = max, "global connection limit enabled");
+    }
+    if let Some(threshold) = runtime.max_memory_bytes {
+        praxis_core::memory::init(threshold);
+        info!(
+            threshold_mib = threshold / 1_048_576,
+            "memory pressure monitoring enabled"
+        );
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Insecure Options Warnings
+// -----------------------------------------------------------------------------
+
+/// Emit startup warnings for every active insecure option.
+fn warn_insecure_options(config: &Config) {
+    let o = &config.insecure_options;
+    insecure_warn(
+        o.allow_unbounded_body,
+        "allow_unbounded_body: body size ceiling relaxed",
+    );
+    insecure_warn(
+        o.allow_open_security_filters,
+        "allow_open_security_filters: open failure_mode allowed",
+    );
+    insecure_warn(
+        o.allow_public_admin,
+        "allow_public_admin: admin may bind all interfaces",
+    );
+    insecure_warn(
+        o.allow_tls_without_sni,
+        "allow_tls_without_sni: TLS hostname verification weakened",
+    );
+    insecure_warn(
+        o.allow_private_health_checks,
+        "allow_private_health_checks: loopback health checks allowed",
+    );
+    insecure_warn(o.csrf_log_only, "csrf_log_only: CSRF violations logged, not rejected");
+    insecure_warn(
+        o.skip_pipeline_validation,
+        "skip_pipeline_validation: pipeline errors demoted to warnings",
+    );
+}
+
+/// Log a warning if an insecure option is active.
+fn insecure_warn(active: bool, msg: &str) {
+    if active {
+        tracing::warn!("insecure_options.{msg}");
+    }
 }
 
 // -----------------------------------------------------------------------------

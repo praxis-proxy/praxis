@@ -5,7 +5,7 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_send, json_post, parse_body, parse_status, start_header_echo_backend_with_shutdown, start_proxy,
+    free_port, http_send, json_post, parse_body, parse_status, start_header_echo_backend, start_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -14,7 +14,7 @@ use praxis_test_utils::{
 
 #[test]
 fn extracts_string_field_to_header() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = proxy_yaml(proxy_port, backend_port, "model", "X-Model");
@@ -34,7 +34,7 @@ fn extracts_string_field_to_header() {
 
 #[test]
 fn custom_field_and_header_names() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = proxy_yaml(proxy_port, backend_port, "provider", "X-Provider");
@@ -51,7 +51,7 @@ fn custom_field_and_header_names() {
 
 #[test]
 fn numeric_value_promoted_as_string() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = proxy_yaml(proxy_port, backend_port, "count", "X-Count");
@@ -68,7 +68,7 @@ fn numeric_value_promoted_as_string() {
 
 #[test]
 fn boolean_value_promoted_as_string() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = proxy_yaml(proxy_port, backend_port, "enabled", "X-Enabled");
@@ -85,7 +85,7 @@ fn boolean_value_promoted_as_string() {
 
 #[test]
 fn missing_field_passes_through_without_header() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = proxy_yaml(proxy_port, backend_port, "model", "X-Model");
@@ -102,7 +102,7 @@ fn missing_field_passes_through_without_header() {
 
 #[test]
 fn invalid_json_passes_through_without_error() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = proxy_yaml(proxy_port, backend_port, "model", "X-Model");
@@ -119,7 +119,7 @@ fn invalid_json_passes_through_without_error() {
 
 #[test]
 fn empty_body_passes_through_without_error() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = proxy_yaml(proxy_port, backend_port, "model", "X-Model");
@@ -139,7 +139,7 @@ fn empty_body_passes_through_without_error() {
 
 #[test]
 fn nested_object_value_promoted_as_json_string() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = proxy_yaml(proxy_port, backend_port, "model", "X-Model");
@@ -163,7 +163,7 @@ fn nested_object_value_promoted_as_json_string() {
 
 #[test]
 fn promoted_header_visible_alongside_routing() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 

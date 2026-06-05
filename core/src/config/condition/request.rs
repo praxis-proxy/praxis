@@ -67,7 +67,8 @@ pub struct ConditionMatch {
     #[serde(default)]
     pub path: Option<String>,
 
-    /// Request URI must start with this prefix.
+    /// Request URI must match this prefix at a segment boundary.
+    /// `/api` matches `/api`, `/api/`, `/api/v1` but NOT `/apikeys`.
     #[serde(default)]
     pub path_prefix: Option<String>,
 

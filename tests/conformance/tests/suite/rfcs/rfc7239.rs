@@ -21,7 +21,8 @@ use super::test_utils::{forwarded_standard_trusted_yaml, forwarded_standard_yaml
 /// [RFC 7239 Section 4]: https://datatracker.ietf.org/doc/html/rfc7239#section-4
 #[test]
 fn rfc7239_standard_forwarded_header_injected() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = forwarded_standard_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -58,7 +59,8 @@ fn rfc7239_standard_forwarded_header_injected() {
 /// [RFC 7239 Section 4]: https://datatracker.ietf.org/doc/html/rfc7239#section-4
 #[test]
 fn rfc7239_forwarded_header_format() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = forwarded_standard_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -108,7 +110,8 @@ fn rfc7239_ipv6_address_quoted_correctly() {
 /// [RFC 7239 Section 4]: https://datatracker.ietf.org/doc/html/rfc7239#section-4
 #[test]
 fn rfc7239_forwarded_header_appended_when_trusted() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = forwarded_standard_trusted_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -143,7 +146,8 @@ fn rfc7239_forwarded_header_appended_when_trusted() {
 /// [Section 5.4]: https://datatracker.ietf.org/doc/html/rfc7239#section-5.4
 #[test]
 fn rfc7239_forwarded_header_includes_for_proto_host() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = forwarded_standard_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();

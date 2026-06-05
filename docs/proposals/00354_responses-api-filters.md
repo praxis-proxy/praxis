@@ -76,7 +76,7 @@ need to support this protocol whether their backends
 speak it natively or only support Chat Completions.
 
 Praxis already classifies Responses API requests via
-the `responses_format` filter (#372). The next step
+the `openai_responses_format` filter (#372). The next step
 is processing them: parsing requests, managing
 conversation state, calling inference, transforming
 streaming responses, dispatching tools, and looping
@@ -174,7 +174,7 @@ Request arrives at POST /v1/responses
 **Pass-through is the fast path.** A simple `POST /v1/responses` with `store=false` and a string input hits vLLM directly with sub-millisecond proxy overhead. The filter chain only activates when the request actually needs stateful processing.
 
 **What #361 promotes to headers for downstream routing:**
-- `x-praxis-api-format: responses | chat_completions` — detected API format
+- `x-praxis-api-format: openai_responses | openai_chat_completions` — detected API format
 - `x-praxis-responses-mode: passthrough | stateful` — routing decision
 - Model name extracted from body for cluster routing
 
@@ -255,7 +255,7 @@ struct ResponsesState {
 
 Filters access the orchestrator state via a well-known handle. Since filters run sequentially within a request, a full `Mutex` may not be necessary — simpler interior mutability (e.g., `RefCell` or just `&mut` access) could suffice. The exact synchronization primitive can be determined during implementation.
 
-**Relationship to #372 (`responses_format` classifier):** The #372 classifier runs upstream of our filter chain. It uses `StreamBuffer` in read-only mode to classify the request format (Responses vs Chat Completions) and promotes routing facts to metadata/headers/filter_results, but does NOT retain the parsed body. Our `request_validate` filter parses the body independently via its own `StreamBuffer`, creates `ResponsesState`, and makes it available to the rest of the chain. This means the JSON body is parsed twice (once by #372 for classification, once by `request_validate` for validation) — sub-millisecond cost, clean separation of concerns.
+**Relationship to #372 (`openai_responses_format` classifier):** The #372 classifier runs upstream of our filter chain. It uses `StreamBuffer` in read-only mode to classify the request format (Responses vs Chat Completions) and promotes routing facts to metadata/headers/filter_results, but does NOT retain the parsed body. Our `request_validate` filter parses the body independently via its own `StreamBuffer`, creates `ResponsesState`, and makes it available to the rest of the chain. This means the JSON body is parsed twice (once by #372 for classification, once by `request_validate` for validation) — sub-millisecond cost, clean separation of concerns.
 
 ### Filter Specifications
 
