@@ -11,8 +11,8 @@ use super::pii::PiiKind;
 // ContainsValue
 // -----------------------------------------------------------------------------
 
-/// The value of a `contains` rule field — either a literal substring or a
-/// list of built-in PII categories.
+/// The value of a `contains` rule field (either a literal substring or a
+/// list of built-in PII categories).
 ///
 /// In YAML the value is untagged: a plain string becomes a [`Literal`] match
 /// and a sequence of PII kind names becomes a [`Pii`] match.
@@ -47,6 +47,25 @@ pub enum ContainsValue {
 
     /// Built-in PII category detection.
     Pii(Vec<PiiKind>),
+}
+
+impl ContainsValue {
+    /// Validate the value of a `contains` rule field.
+    ///
+    /// Returns an error if a bare string matches a PII kind name (case-insensitive).
+    pub(super) fn validate(&self) -> Result<(), String> {
+        if let ContainsValue::Literal(s) = self
+            && serde_yaml::from_str::<PiiKind>(&s.to_lowercase()).is_ok()
+        {
+            return Err(format!(
+                "'{s}' is a PII category name — \
+                 use 'contains: [{s}]' for PII detection, \
+                 or use a quoted string (e.g. contains: \"{s}\") \
+                 for a literal substring match"
+            ));
+        }
+        Ok(())
+    }
 }
 
 // -----------------------------------------------------------------------------

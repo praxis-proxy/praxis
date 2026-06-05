@@ -69,8 +69,8 @@ static CREDIT_CARD_RE: LazyLock<Regex> = LazyLock::new(|| {
             4\d{3}[\ \-]?\d{4}[\ \-]?\d{4}[\ \-]?\d{4}
             # Mastercard 16-digit traditional range (51–55xx)
           | 5[1-5]\d{2}[\ \-]?\d{4}[\ \-]?\d{4}[\ \-]?\d{4}
-            # Mastercard 16-digit 2021+ range (2221–2720)
-          | 2[2-7]\d{2}[\ \-]?\d{4}[\ \-]?\d{4}[\ \-]?\d{4}
+            # Mastercard 16-digit 2021+ range (2221 to 2720)
+          | (?:222[1-9]|22[3-9]\d|2[3-6]\d{2}|27[01]\d|2720)[\ \-]?\d{4}[\ \-]?\d{4}[\ \-]?\d{4}
             # Amex 15-digit (34xx / 37xx)
           | 3[47]\d{2}[\ \-]?\d{6}[\ \-]?\d{5}
             # Discover 16-digit (6011 / 64x / 65xx)

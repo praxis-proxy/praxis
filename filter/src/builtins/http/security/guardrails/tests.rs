@@ -477,6 +477,36 @@ async fn pii_credit_card_rejects_mastercard() {
 }
 
 #[tokio::test]
+async fn pii_credit_card_rejects_mastercard_2series_low_boundary() {
+    let f = make_filter(vec![body_pii(&[PiiKind::CreditCard])]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/api");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    // 2221 is the lowest valid 2-series Mastercard prefix.
+    let mut body = Some(Bytes::from_static(b"card: 2221-0000-0000-0000"));
+    let action = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        "Mastercard 2-series lower boundary (2221) should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn pii_credit_card_rejects_mastercard_2series_high_boundary() {
+    let f = make_filter(vec![body_pii(&[PiiKind::CreditCard])]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/api");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    // 2720 is the highest valid 2-series Mastercard prefix.
+    let mut body = Some(Bytes::from_static(b"card: 2720-0000-0000-0000"));
+    let action = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        "Mastercard 2-series upper boundary (2720) should be rejected"
+    );
+}
+
+#[tokio::test]
 async fn pii_credit_card_rejects_discover() {
     let f = make_filter(vec![body_pii(&[PiiKind::CreditCard])]);
     let req = crate::test_utils::make_request(http::Method::POST, "/api");

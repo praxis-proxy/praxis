@@ -152,24 +152,30 @@ impl GuardrailsFilter {
                 continue;
             };
 
-            // Retain the matching value for PII kind logging.
-            let matching_value = ctx
+            // find_map returns the RuleEval from the first matching value,
+            // pii::matches_any is called at most once across all values.
+            let is_rule_match = ctx
                 .request
                 .headers
                 .get_all(header_name.as_str())
                 .iter()
                 .filter_map(|val| val.to_str().ok())
-                .find(|s| rule.matches(s));
+                .find_map(|s| {
+                    let ev = rule.eval(s);
+                    ev.matched.then_some(ev)
+                });
 
-            let matched = matching_value.is_some();
-            let triggered = if rule.negate { !matched } else { matched };
+            let rule_matches = if rule.negate {
+                is_rule_match.is_none()
+            } else {
+                is_rule_match.is_some()
+            };
 
-            if triggered {
-                let pii_kind = matching_value.and_then(|s| rule.matched_pii(s));
+            if rule_matches {
                 tracing::info!(
                     header = %header_name,
                     negate = rule.negate,
-                    pii_kind = ?pii_kind,
+                    pii_kind = ?is_rule_match.and_then(|ev| ev.pii_kind),
                     "guardrails: header rule triggered"
                 );
                 return true;
@@ -185,14 +191,17 @@ impl GuardrailsFilter {
                 continue;
             }
 
-            let matched = rule.matches(body);
-            let triggered = if rule.negate { !matched } else { matched };
+            let is_rule_match = rule.eval(body);
+            let rule_matches = if rule.negate {
+                !is_rule_match.matched
+            } else {
+                is_rule_match.matched
+            };
 
-            if triggered {
-                let pii_kind = if matched { rule.matched_pii(body) } else { None };
+            if rule_matches {
                 tracing::info!(
                     negate = rule.negate,
-                    pii_kind = ?pii_kind,
+                    pii_kind = ?is_rule_match.pii_kind,
                     "guardrails: body rule triggered"
                 );
                 return true;
