@@ -79,6 +79,7 @@ rustls = "0.23.40"
 rustls-pemfile = "2.2.0"
 # NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.
 serde_yaml = { package = "yaml_serde", version = "0.10.4" }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
 tempfile = "3.27.0"
 tokio-rustls = "0.26.4"
 tokio-tungstenite = "0.29.0"
