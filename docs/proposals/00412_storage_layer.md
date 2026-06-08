@@ -9,7 +9,7 @@ graduation_criteria:
   - Reference schema for conversation/response storage
 stakeholders:
   - shaneutt
-  - tbd
+  - twghu
 ---
 
 # Storage Layer
