@@ -271,6 +271,184 @@ fn a2a_batch_input_returns_400() {
 }
 
 // -----------------------------------------------------------------------------
+// Task Routing Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn a2a_task_route_capture_then_lookup() {
+    let json_body = r#"{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"task-123","contextId":"ctx-1","status":{"state":"TASK_STATE_WORKING"}}}}"#;
+    let agent_a_guard = Backend::fixed(json_body)
+        .header("content-type", "application/json")
+        .start_with_shutdown();
+    let agent_b_guard = start_backend_with_shutdown("agent-b");
+    let proxy_port = free_port();
+
+    let yaml = a2a_task_routing_enabled_yaml(proxy_port, agent_a_guard.port(), agent_b_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let send_body = r#"{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":"Hello"}}"#;
+    let request = json_post_with_a2a_headers("/a2a/", send_body, &[]);
+    let raw = http_send(proxy.addr(), &request);
+    assert_eq!(parse_status(&raw), 200, "SendMessage should succeed");
+
+    let get_body = r#"{"jsonrpc":"2.0","id":2,"method":"GetTask","params":{"id":"task-123"}}"#;
+    let request = json_post_with_a2a_headers("/a2a/", get_body, &[]);
+    let raw = http_send(proxy.addr(), &request);
+    assert_eq!(parse_status(&raw), 200);
+    assert_eq!(
+        parse_body(&raw),
+        json_body,
+        "GetTask should route to agent-a (which created the task), not fallback agent-b"
+    );
+}
+
+#[test]
+fn a2a_message_only_response_does_not_create_mapping() {
+    let msg_body = r#"{"jsonrpc":"2.0","id":1,"result":{"message":{"messageId":"msg-1","role":"ROLE_AGENT","parts":[{"text":"done"}]}}}"#;
+    let agent_a_guard = Backend::fixed(msg_body)
+        .header("content-type", "application/json")
+        .start_with_shutdown();
+    let agent_b_guard = start_backend_with_shutdown("agent-b");
+    let proxy_port = free_port();
+
+    let yaml = a2a_task_routing_enabled_yaml(proxy_port, agent_a_guard.port(), agent_b_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let send_body = r#"{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":"Hello"}}"#;
+    let request = json_post_with_a2a_headers("/a2a/", send_body, &[]);
+    let raw = http_send(proxy.addr(), &request);
+    assert_eq!(parse_status(&raw), 200, "SendMessage should succeed");
+
+    let get_body = r#"{"jsonrpc":"2.0","id":2,"method":"GetTask","params":{"id":"task-123"}}"#;
+    let request = json_post_with_a2a_headers("/a2a/", get_body, &[]);
+    let raw = http_send(proxy.addr(), &request);
+    assert_eq!(parse_status(&raw), 200);
+    assert_eq!(
+        parse_body(&raw),
+        "agent-b",
+        "GetTask should follow fallback because message-only response did not create a mapping"
+    );
+}
+
+#[test]
+fn a2a_task_route_miss_continues() {
+    let agent_a_guard = start_backend_with_shutdown("agent-a");
+    let agent_b_guard = start_backend_with_shutdown("agent-b");
+    let proxy_port = free_port();
+
+    let yaml = a2a_task_routing_enabled_yaml(proxy_port, agent_a_guard.port(), agent_b_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let get_body = r#"{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"unknown-task"}}"#;
+    let request = json_post_with_a2a_headers("/a2a/", get_body, &[]);
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(parse_status(&raw), 200);
+    assert_eq!(parse_body(&raw), "agent-b", "unknown task should follow fallback route");
+}
+
+#[test]
+fn a2a_internal_route_header_cannot_be_spoofed() {
+    let agent_a_guard = start_backend_with_shutdown("agent-a");
+    let agent_b_guard = start_backend_with_shutdown("agent-b");
+    let proxy_port = free_port();
+
+    let yaml = a2a_task_routing_enabled_yaml(proxy_port, agent_a_guard.port(), agent_b_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let get_body = r#"{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"no-mapping"}}"#;
+    let request = json_post_with_a2a_headers("/a2a/", get_body, &[("x-praxis-a2a-route-cluster", "agent-a")]);
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(
+        parse_status(&raw),
+        400,
+        "client-supplied reserved internal headers should be rejected before reaching the filter pipeline"
+    );
+}
+
+#[test]
+fn a2a_task_route_captured_from_direct_result_shape() {
+    let json_body =
+        r#"{"jsonrpc":"2.0","id":1,"result":{"id":"task-direct-1","status":{"state":"TASK_STATE_WORKING"}}}"#;
+    let agent_a_guard = Backend::fixed(json_body)
+        .header("content-type", "application/json")
+        .start_with_shutdown();
+    let agent_b_guard = start_backend_with_shutdown("agent-b");
+    let proxy_port = free_port();
+
+    let yaml = a2a_task_routing_enabled_yaml(proxy_port, agent_a_guard.port(), agent_b_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let send_body = r#"{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":"Hello"}}"#;
+    let request = json_post_with_a2a_headers("/a2a/", send_body, &[]);
+    let raw = http_send(proxy.addr(), &request);
+    assert_eq!(parse_status(&raw), 200, "SendMessage should succeed");
+    assert_eq!(
+        parse_body(&raw),
+        json_body,
+        "SendMessage response should come from agent-a"
+    );
+
+    let get_body = r#"{"jsonrpc":"2.0","id":2,"method":"GetTask","params":{"id":"task-direct-1"}}"#;
+    let request = json_post_with_a2a_headers("/a2a/", get_body, &[]);
+    let raw = http_send(proxy.addr(), &request);
+    assert_eq!(parse_status(&raw), 200);
+    assert_eq!(
+        parse_body(&raw),
+        json_body,
+        "direct result.id shape should also capture task route"
+    );
+}
+
+#[test]
+fn a2a_sse_response_unchanged_with_task_routing_enabled() {
+    let sse_body = "data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"status\":\"working\"}}\n\n\
+                    data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"status\":\"completed\"}}\n\n";
+    let sse_guard = Backend::fixed(sse_body)
+        .header("content-type", "text/event-stream")
+        .header("cache-control", "no-cache")
+        .start_with_shutdown();
+    let default_guard = start_backend_with_shutdown("default-backend");
+    let proxy_port = free_port();
+
+    let yaml = a2a_task_routing_sse_yaml(proxy_port, sse_guard.port(), default_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let _proxy = start_proxy(&config);
+
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"SendStreamingMessage","params":{"message":"Hello"}}"#;
+    let request = json_post_with_a2a_headers("/a2a/", body, &[]);
+
+    let mut stream = std::net::TcpStream::connect(format!("127.0.0.1:{proxy_port}")).unwrap();
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    stream.write_all(request.as_bytes()).unwrap();
+    stream.flush().unwrap();
+
+    let mut response = Vec::new();
+    let _bytes = stream.read_to_end(&mut response);
+    let raw = String::from_utf8_lossy(&response);
+
+    assert_eq!(parse_status(&raw), 200);
+    assert!(
+        raw.contains("text/event-stream"),
+        "SSE content-type should reach client with task routing enabled: {raw}"
+    );
+
+    let response_body = parse_body(&raw);
+    assert_eq!(
+        response_body, sse_body,
+        "SSE response body should pass through unchanged with task routing enabled"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
@@ -459,6 +637,91 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+"#,
+    )
+}
+
+fn a2a_task_routing_enabled_yaml(proxy_port: u16, agent_a_port: u16, agent_b_port: u16) -> String {
+    format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: a2a
+        max_body_bytes: 65536
+        on_invalid: continue
+        headers:
+          method: x-praxis-a2a-method
+          task_id: x-praxis-a2a-task-id
+        task_routing:
+          enabled: true
+          route_cluster_header: x-praxis-a2a-route-cluster
+      - filter: router
+        routes:
+          - path_prefix: "/a2a/"
+            headers:
+              x-praxis-a2a-route-cluster: "agent-a"
+            cluster: "agent-a"
+          - path_prefix: "/a2a/"
+            headers:
+              x-praxis-a2a-route-cluster: "agent-b"
+            cluster: "agent-b"
+          - path_prefix: "/a2a/"
+            headers:
+              x-praxis-a2a-method: "SendMessage"
+            cluster: "agent-a"
+          - path_prefix: "/a2a/"
+            cluster: "agent-b"
+      - filter: load_balancer
+        clusters:
+          - name: "agent-a"
+            endpoints:
+              - "127.0.0.1:{agent_a_port}"
+          - name: "agent-b"
+            endpoints:
+              - "127.0.0.1:{agent_b_port}"
+"#,
+    )
+}
+
+fn a2a_task_routing_sse_yaml(proxy_port: u16, streaming_port: u16, default_port: u16) -> String {
+    format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: a2a
+        max_body_bytes: 65536
+        on_invalid: continue
+        headers:
+          method: x-praxis-a2a-method
+          streaming: x-praxis-a2a-streaming
+        task_routing:
+          enabled: true
+      - filter: router
+        routes:
+          - path_prefix: "/a2a/"
+            headers:
+              x-praxis-a2a-streaming: "true"
+            cluster: "streaming"
+          - path_prefix: "/a2a/"
+            cluster: "default"
+      - filter: load_balancer
+        clusters:
+          - name: "streaming"
+            endpoints:
+              - "127.0.0.1:{streaming_port}"
+          - name: "default"
+            endpoints:
+              - "127.0.0.1:{default_port}"
 "#,
     )
 }

@@ -3,7 +3,7 @@
 
 //! Unit tests for the A2A classifier filter.
 
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, sync::Arc};
 
 use bytes::Bytes;
 use http::HeaderMap;
@@ -12,6 +12,7 @@ use super::{
     A2aFilter,
     config::{A2aConfig, build_config},
     envelope::{A2aFamily, A2aMethod, extract_a2a_envelope},
+    task_routing::LocalTaskRouteStore,
 };
 use crate::{FilterAction, filter::HttpFilter};
 
@@ -1123,6 +1124,492 @@ async fn canonical_method_stores_same_in_json_rpc_method() {
 }
 
 // -----------------------------------------------------------------------------
+// Task Routing Config Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn task_routing_disabled_by_default() {
+    let cfg: A2aConfig = serde_yaml::from_str("{}").unwrap();
+    assert!(!cfg.task_routing.enabled, "task routing should be disabled by default");
+}
+
+#[test]
+fn task_routing_enabled_parses_defaults() {
+    let cfg: A2aConfig = serde_yaml::from_str(
+        r#"
+        task_routing:
+          enabled: true
+        "#,
+    )
+    .unwrap();
+    let validated = build_config(cfg).unwrap();
+    assert!(validated.task_routing.enabled, "task routing should be enabled");
+    assert_eq!(
+        validated.task_routing.route_cluster_header, "x-praxis-a2a-route-cluster",
+        "default route cluster header"
+    );
+    assert_eq!(validated.task_routing.ttl_seconds, 3600, "default TTL is 1 hour");
+    assert_eq!(
+        validated.task_routing.terminal_ttl_seconds, 300,
+        "default terminal TTL is 5 minutes"
+    );
+    assert_eq!(
+        validated.task_routing.max_response_body_bytes, 65_536,
+        "default max response body bytes is 64 KiB"
+    );
+}
+
+#[test]
+fn task_routing_rejects_unknown_store() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+        task_routing:
+          enabled: true
+          store: redis
+        "#,
+    )
+    .unwrap();
+    let err = A2aFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("unknown variant"),
+        "unknown store should be rejected: {err}"
+    );
+}
+
+#[test]
+fn task_routing_rejects_invalid_route_cluster_header() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+        task_routing:
+          enabled: true
+          route_cluster_header: "invalid header with spaces"
+        "#,
+    )
+    .unwrap();
+    let err = A2aFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("not a valid HTTP header name"),
+        "invalid header name should be rejected: {err}"
+    );
+}
+
+#[test]
+fn task_routing_rejects_zero_ttl() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+        task_routing:
+          enabled: true
+          ttl_seconds: 0
+        "#,
+    )
+    .unwrap();
+    let err = A2aFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("ttl_seconds must be greater than 0"),
+        "zero TTL should be rejected: {err}"
+    );
+}
+
+#[test]
+fn task_routing_rejects_zero_max_response_body_bytes() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+        task_routing:
+          enabled: true
+          max_response_body_bytes: 0
+        "#,
+    )
+    .unwrap();
+    let err = A2aFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string()
+            .contains("max_response_body_bytes must be greater than 0"),
+        "zero max_response_body_bytes should be rejected: {err}"
+    );
+}
+
+#[test]
+fn task_routing_rejects_non_reserved_route_cluster_header() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+        task_routing:
+          enabled: true
+          route_cluster_header: "x-custom-route"
+        "#,
+    )
+    .unwrap();
+    let err = A2aFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("must start with 'x-praxis-a2a-'"),
+        "non-reserved route cluster header should be rejected: {err}"
+    );
+}
+
+#[test]
+fn task_routing_allows_zero_terminal_ttl() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+        task_routing:
+          enabled: true
+          terminal_ttl_seconds: 0
+        "#,
+    )
+    .unwrap();
+    let filter = A2aFilter::from_config(&yaml).unwrap();
+    assert_eq!(filter.name(), "a2a", "zero terminal_ttl_seconds should be valid");
+}
+
+// -----------------------------------------------------------------------------
+// Task Route Lookup Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn task_route_hit_injects_route_cluster_header() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+    store.put("task-123", "agent-a", std::time::Duration::from_secs(60));
+
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"task-123"}}"#;
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(matches!(action, FilterAction::Release), "should release");
+
+    let headers: std::collections::HashMap<_, _> = ctx
+        .extra_request_headers
+        .iter()
+        .map(|(k, v)| (k.as_ref(), v.as_str()))
+        .collect();
+
+    assert_eq!(
+        headers.get("x-praxis-a2a-route-cluster"),
+        Some(&"agent-a"),
+        "task route hit should inject route cluster header"
+    );
+}
+
+#[tokio::test]
+async fn task_route_miss_continues_without_route_cluster_header() {
+    let filter = make_task_routing_filter();
+
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"unknown-task"}}"#;
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(matches!(action, FilterAction::Release), "should release");
+
+    let headers: std::collections::HashMap<_, _> = ctx
+        .extra_request_headers
+        .iter()
+        .map(|(k, v)| (k.as_ref(), v.as_str()))
+        .collect();
+
+    assert!(
+        !headers.contains_key("x-praxis-a2a-route-cluster"),
+        "task route miss should not inject route cluster header"
+    );
+}
+
+#[tokio::test]
+async fn task_route_hit_records_bounded_route_metadata() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+    store.put("task-abc", "agent-b", std::time::Duration::from_secs(60));
+
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"task-abc"}}"#;
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    drop(filter.on_request_body(&mut ctx, &mut body, true).await.unwrap());
+
+    assert_eq!(
+        ctx.get_metadata("a2a.route_decision"),
+        Some("task_route_hit"),
+        "route decision metadata should be set"
+    );
+    assert_eq!(
+        ctx.get_metadata("a2a.route_cluster"),
+        Some("agent-b"),
+        "route cluster metadata should be set"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Response Body Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn json_response_split_across_chunks_captures_opportunistically() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_response_capture(&mut ctx);
+
+    let json =
+        r#"{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"task-split","status":{"state":"TASK_STATE_WORKING"}}}}"#;
+    let (chunk1, chunk2) = json.split_at(40);
+
+    let mut body1 = Some(Bytes::from(chunk1.to_owned()));
+    drop(filter.on_response_body(&mut ctx, &mut body1, false).unwrap());
+    assert!(
+        store.get_by_task_id("task-split").is_none(),
+        "incomplete JSON should not capture"
+    );
+
+    let mut body2 = Some(Bytes::from(chunk2.to_owned()));
+    drop(filter.on_response_body(&mut ctx, &mut body2, false).unwrap());
+
+    assert_eq!(
+        store.get_by_task_id("task-split").as_deref(),
+        Some("agent-a"),
+        "route should be captured as soon as JSON is complete, before EOS"
+    );
+    assert_capture_scratch_cleared(&ctx);
+}
+
+#[tokio::test]
+async fn multibyte_char_split_across_chunks_still_captures_route() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_response_capture(&mut ctx);
+
+    // "é" is U+00E9, encoded as [0xC3, 0xA9] in UTF-8.
+    // Split the chunk boundary inside that two-byte sequence.
+    let json_bytes: Vec<u8> = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":{{"task":{{"id":"task-mb","status":{{"state":"TASK_STATE_WORKING"}},"note":"caf{}"}}}}}}"#,
+        "é"
+    ).into_bytes();
+
+    let split = json_bytes.iter().position(|&b| b == 0xA9).expect("should contain 0xA9");
+
+    let mut body1 = Some(Bytes::from(json_bytes[..split].to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body1, false).unwrap());
+
+    let mut body2 = Some(Bytes::from(json_bytes[split..].to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body2, true).unwrap());
+
+    assert_eq!(
+        store.get_by_task_id("task-mb").as_deref(),
+        Some("agent-a"),
+        "chunk split inside multibyte UTF-8 character should not prevent route capture"
+    );
+}
+
+#[tokio::test]
+async fn oversized_response_passes_through_without_route_capture() {
+    let filter = make_task_routing_filter_with_config(
+        r#"{"on_invalid": "continue", "task_routing": {"enabled": true, "max_response_body_bytes": 32}}"#,
+    );
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_response_capture(&mut ctx);
+
+    let large_json = format!(
+        r#"{{"jsonrpc":"2.0","id":1,"result":{{"task":{{"id":"task-big","status":{{"state":"TASK_STATE_WORKING"}}}},"padding":"{}"}}}}"#,
+        "x".repeat(64)
+    );
+    let mut body = Some(Bytes::from(large_json));
+    drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+
+    assert!(
+        store.get_by_task_id("task-big").is_none(),
+        "oversized response should skip route capture"
+    );
+    assert_capture_scratch_cleared(&ctx);
+}
+
+#[tokio::test]
+async fn invalid_json_response_body_does_not_error() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_response_capture(&mut ctx);
+
+    let mut body = Some(Bytes::from("not valid json at all"));
+    let action = filter.on_response_body(&mut ctx, &mut body, true).unwrap();
+
+    assert!(matches!(action, FilterAction::Continue), "should continue");
+    assert_eq!(
+        body.as_deref(),
+        Some(b"not valid json at all".as_slice()),
+        "response bytes should not be modified"
+    );
+    assert!(store.get_by_task_id("anything").is_none(), "no route should be stored");
+    assert_capture_scratch_cleared(&ctx);
+}
+
+#[tokio::test]
+async fn on_response_enables_capture_for_success_non_sse_send_message() {
+    let filter = make_task_routing_filter();
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("agent-a"));
+    ctx.filter_metadata
+        .insert("a2a.method".to_owned(), "SendMessage".to_owned());
+
+    let mut resp = crate::context::Response {
+        status: http::StatusCode::OK,
+        headers: HeaderMap::new(),
+    };
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    assert_eq!(
+        ctx.get_metadata("a2a.response.capture_enabled"),
+        Some("true"),
+        "capture enabled"
+    );
+    assert_eq!(
+        ctx.get_metadata("a2a.response.cluster"),
+        Some("agent-a"),
+        "cluster recorded"
+    );
+}
+
+#[tokio::test]
+async fn sse_response_skips_task_route_capture() {
+    let filter = make_task_routing_filter();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("agent-a"));
+    ctx.filter_metadata
+        .insert("a2a.method".to_owned(), "SendMessage".to_owned());
+
+    let mut resp = crate::context::Response {
+        status: http::StatusCode::OK,
+        headers: HeaderMap::new(),
+    };
+    resp.headers
+        .insert("content-type", "text/event-stream".parse().unwrap());
+    ctx.response_header = Some(&mut resp);
+
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    assert_eq!(
+        ctx.get_metadata("a2a.response.is_sse"),
+        Some("true"),
+        "SSE response should be flagged"
+    );
+    assert!(
+        ctx.get_metadata("a2a.response.capture_enabled").is_none(),
+        "SSE response should not enable capture"
+    );
+}
+
+#[tokio::test]
+async fn mixed_case_sse_content_type_skips_capture() {
+    let filter = make_task_routing_filter();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("agent-a"));
+    ctx.filter_metadata
+        .insert("a2a.method".to_owned(), "SendMessage".to_owned());
+
+    let mut resp = crate::context::Response {
+        status: http::StatusCode::OK,
+        headers: HeaderMap::new(),
+    };
+    resp.headers
+        .insert("content-type", "Text/Event-Stream; charset=utf-8".parse().unwrap());
+    ctx.response_header = Some(&mut resp);
+
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    assert_eq!(
+        ctx.get_metadata("a2a.response.is_sse"),
+        Some("true"),
+        "mixed-case SSE content-type should be detected"
+    );
+    assert!(
+        ctx.get_metadata("a2a.response.capture_enabled").is_none(),
+        "mixed-case SSE should not enable capture"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Task Routable Method Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn task_routable_methods() {
+    let routable = [
+        A2aMethod::GetTask,
+        A2aMethod::CancelTask,
+        A2aMethod::SubscribeToTask,
+        A2aMethod::CreateTaskPushNotificationConfig,
+        A2aMethod::GetTaskPushNotificationConfig,
+        A2aMethod::ListTaskPushNotificationConfigs,
+        A2aMethod::DeleteTaskPushNotificationConfig,
+    ];
+    for method in &routable {
+        assert!(method.is_task_routable(), "{} should be task-routable", method.as_str());
+    }
+}
+
+#[test]
+fn non_task_routable_methods() {
+    let non_routable = [
+        A2aMethod::SendMessage,
+        A2aMethod::SendStreamingMessage,
+        A2aMethod::ListTasks,
+        A2aMethod::GetExtendedAgentCard,
+        A2aMethod::Unknown("custom".to_owned()),
+    ];
+    for method in &non_routable {
+        assert!(
+            !method.is_task_routable(),
+            "{} should not be task-routable",
+            method.as_str()
+        );
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Push Notification Task ID Extraction Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn list_task_push_notification_configs_extracts_task_id() {
+    let json = serde_json::json!({
+        "jsonrpc": "2.0", "method": "ListTaskPushNotificationConfigs",
+        "params": { "taskId": "task-pn-list" }, "id": 1
+    });
+    let envelope = extract_a2a_envelope(
+        &json,
+        "ListTaskPushNotificationConfigs",
+        &BTreeMap::new(),
+        &HeaderMap::new(),
+    );
+    assert_eq!(
+        envelope.task_id,
+        Some("task-pn-list".to_owned()),
+        "ListTaskPushNotificationConfigs requires params.taskId per A2A spec"
+    );
+    assert!(
+        envelope.method.is_task_routable(),
+        "ListTaskPushNotificationConfigs should be task-routable"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
@@ -1139,6 +1626,7 @@ fn make_filter(yaml: &str) -> A2aFilter {
         config: validated_config,
         json_rpc_config,
         max_body_bytes,
+        task_route_store: None,
     }
 }
 
@@ -1168,6 +1656,54 @@ fn canonical_method_cases() -> Vec<(&'static str, A2aMethod)> {
         ),
         ("GetExtendedAgentCard", A2aMethod::GetExtendedAgentCard),
     ]
+}
+
+fn seed_response_capture(ctx: &mut crate::filter::HttpFilterContext<'_>) {
+    ctx.filter_metadata
+        .insert("a2a.response.capture_enabled".to_owned(), "true".to_owned());
+    ctx.filter_metadata
+        .insert("a2a.response.cluster".to_owned(), "agent-a".to_owned());
+}
+
+fn assert_capture_scratch_cleared(ctx: &crate::filter::HttpFilterContext<'_>) {
+    assert!(
+        !ctx.filter_metadata.contains_key("a2a.response.capture_enabled"),
+        "capture_enabled not cleared"
+    );
+    assert!(
+        !ctx.filter_metadata.contains_key("a2a.response.buffer_hex"),
+        "buffer_hex not cleared"
+    );
+    assert!(
+        !ctx.filter_metadata.contains_key("a2a.response.buffer_bytes"),
+        "buffer_bytes not cleared"
+    );
+    assert!(
+        !ctx.filter_metadata.contains_key("a2a.response.cluster"),
+        "cluster not cleared"
+    );
+}
+
+fn make_task_routing_filter() -> A2aFilter {
+    make_task_routing_filter_with_config(r#"{"on_invalid": "continue", "task_routing": {"enabled": true}}"#)
+}
+
+fn make_task_routing_filter_with_config(yaml: &str) -> A2aFilter {
+    let cfg: A2aConfig = serde_yaml::from_str(yaml).unwrap();
+    let validated_config = build_config(cfg).unwrap();
+    let max_body_bytes = validated_config.max_body_bytes;
+    let json_rpc_config = super::build_json_rpc_config(max_body_bytes);
+    let task_route_store = if validated_config.task_routing.enabled {
+        Some(Arc::new(LocalTaskRouteStore::new()))
+    } else {
+        None
+    };
+    A2aFilter {
+        config: validated_config,
+        json_rpc_config,
+        max_body_bytes,
+        task_route_store,
+    }
 }
 
 fn make_a2a_request(extra_headers: &[(&str, &str)]) -> crate::context::Request {

@@ -138,6 +138,21 @@ impl A2aMethod {
         matches!(self, Self::GetTask | Self::CancelTask | Self::SubscribeToTask)
     }
 
+    /// Whether a follow-up request with this method should be routed
+    /// by stored task ownership.
+    pub(crate) fn is_task_routable(&self) -> bool {
+        matches!(
+            self,
+            Self::GetTask
+                | Self::CancelTask
+                | Self::SubscribeToTask
+                | Self::CreateTaskPushNotificationConfig
+                | Self::GetTaskPushNotificationConfig
+                | Self::ListTaskPushNotificationConfigs
+                | Self::DeleteTaskPushNotificationConfig
+        )
+    }
+
     /// Whether this method should extract task ID from `params.taskId`.
     pub(crate) fn extracts_task_id_from_params(&self) -> bool {
         matches!(

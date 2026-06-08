@@ -5,6 +5,7 @@
 
 pub(crate) mod config;
 pub(crate) mod envelope;
+pub(crate) mod task_routing;
 
 #[cfg(test)]
 #[allow(
@@ -19,15 +20,16 @@ pub(crate) mod envelope;
 )]
 mod tests;
 
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tracing::trace;
+use tracing::{debug, trace};
 
 use self::{
     config::{A2aConfig, InvalidA2aBehavior, build_config},
     envelope::{A2aEnvelope, extract_a2a_envelope},
+    task_routing::LocalTaskRouteStore,
 };
 use crate::{
     FilterAction, FilterError, Rejection,
@@ -89,6 +91,9 @@ pub struct A2aFilter {
 
     /// Maximum body bytes for `StreamBuffer`.
     max_body_bytes: usize,
+
+    /// Local task route store, present only when task routing is enabled.
+    task_route_store: Option<Arc<LocalTaskRouteStore>>,
 }
 
 impl A2aFilter {
@@ -105,10 +110,17 @@ impl A2aFilter {
         let max_body_bytes = validated_config.max_body_bytes;
         let json_rpc_config = build_json_rpc_config(max_body_bytes);
 
+        let task_route_store = if validated_config.task_routing.enabled {
+            Some(Arc::new(LocalTaskRouteStore::new()))
+        } else {
+            None
+        };
+
         Ok(Box::new(Self {
             config: validated_config,
             json_rpc_config,
             max_body_bytes,
+            task_route_store,
         }))
     }
 }
@@ -127,6 +139,18 @@ impl HttpFilter for A2aFilter {
         BodyMode::StreamBuffer {
             max_bytes: Some(self.max_body_bytes),
         }
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        if self.task_route_store.is_some() {
+            BodyAccess::ReadOnly
+        } else {
+            BodyAccess::None
+        }
+    }
+
+    fn response_body_mode(&self) -> BodyMode {
+        BodyMode::Stream
     }
 
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
@@ -172,6 +196,10 @@ impl HttpFilter for A2aFilter {
         promote_a2a_headers(&a2a_envelope, &envelope, &self.config, &mut ctx.extra_request_headers);
         promote_filter_results(ctx, &envelope, &a2a_envelope)?;
 
+        if let Some(store) = &self.task_route_store {
+            lookup_task_route(ctx, &a2a_envelope, store, &self.config);
+        }
+
         trace!(
             a2a_method = a2a_envelope.method.as_str(),
             a2a_family = a2a_envelope.family.as_str(),
@@ -183,11 +211,262 @@ impl HttpFilter for A2aFilter {
 
         Ok(FilterAction::Release)
     }
+
+    #[allow(clippy::too_many_lines, reason = "sequential guard-clause pipeline")]
+    async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if self.task_route_store.is_none() {
+            return Ok(FilterAction::Continue);
+        }
+
+        // Task route capture only runs for non-streaming SendMessage
+        // responses. Terminal TTL only applies here; GetTask and other
+        // task-routable methods do not update stored TTLs. SSE response
+        // capture is a follow-up.
+        let is_send_message = ctx.get_metadata("a2a.method").is_some_and(|m| m == "SendMessage");
+
+        if !is_send_message {
+            return Ok(FilterAction::Continue);
+        }
+
+        let is_success = ctx.response_header.as_ref().is_some_and(|r| r.status.is_success());
+
+        if !is_success {
+            return Ok(FilterAction::Continue);
+        }
+
+        let is_sse = ctx
+            .response_header
+            .as_ref()
+            .and_then(|r| r.headers.get("content-type"))
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(is_event_stream_content_type);
+
+        if is_sse {
+            ctx.filter_metadata
+                .insert("a2a.response.is_sse".to_owned(), "true".to_owned());
+            return Ok(FilterAction::Continue);
+        }
+
+        if let Some(cluster) = ctx.cluster_name() {
+            ctx.filter_metadata
+                .insert("a2a.response.cluster".to_owned(), cluster.to_owned());
+            ctx.filter_metadata
+                .insert("a2a.response.capture_enabled".to_owned(), "true".to_owned());
+        }
+
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        let Some(store) = &self.task_route_store else {
+            return Ok(FilterAction::Continue);
+        };
+
+        if ctx.get_metadata("a2a.response.capture_enabled") != Some("true") {
+            return Ok(FilterAction::Continue);
+        }
+
+        if let Some(chunk) = body.as_ref()
+            && !accumulate_response_hex(ctx, chunk, self.config.task_routing.max_response_body_bytes)
+        {
+            return Ok(FilterAction::Continue);
+        }
+
+        try_capture_from_buffer(ctx, store, &self.config.task_routing, end_of_stream);
+
+        Ok(FilterAction::Continue)
+    }
 }
 
 // -----------------------------------------------------------------------------
 // Private Utilities
 // -----------------------------------------------------------------------------
+
+/// Look up a task route and inject the route cluster header on hit.
+#[allow(clippy::too_many_lines, reason = "sequential lookup-inject-trace pipeline")]
+fn lookup_task_route(
+    ctx: &mut HttpFilterContext<'_>,
+    a2a_envelope: &A2aEnvelope,
+    store: &LocalTaskRouteStore,
+    config: &A2aConfig,
+) {
+    if !a2a_envelope.method.is_task_routable() {
+        return;
+    }
+
+    let Some(task_id) = &a2a_envelope.task_id else {
+        return;
+    };
+
+    if let Some(cluster) = store.get_by_task_id(task_id) {
+        ctx.extra_request_headers.push((
+            Cow::Owned(config.task_routing.route_cluster_header.clone()),
+            cluster.to_string(),
+        ));
+        ctx.set_metadata("a2a.route_decision", "task_route_hit");
+        ctx.set_metadata("a2a.route_cluster", &*cluster);
+        debug!(
+            has_task_id = true,
+            task_id_len = task_id.len(),
+            lookup_hit = true,
+            cluster = %cluster,
+            method = a2a_envelope.method.as_str(),
+            "task route lookup hit"
+        );
+    } else {
+        ctx.set_metadata("a2a.route_decision", "task_route_miss");
+        debug!(
+            has_task_id = true,
+            task_id_len = task_id.len(),
+            lookup_hit = false,
+            method = a2a_envelope.method.as_str(),
+            "task route lookup miss"
+        );
+    }
+}
+
+/// Pingora may not deliver a separate EOS callback after the final data
+/// chunk, so we attempt to parse after every append rather than waiting
+/// for `end_of_stream`.
+fn try_capture_from_buffer(
+    ctx: &mut HttpFilterContext<'_>,
+    store: &LocalTaskRouteStore,
+    config: &config::TaskRoutingConfig,
+    end_of_stream: bool,
+) {
+    let parsed = ctx
+        .filter_metadata
+        .get("a2a.response.buffer_hex")
+        .and_then(|hex| decode_hex(hex))
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok());
+
+    if let Some(value) = parsed {
+        if let Some(cluster) = ctx.filter_metadata.get("a2a.response.cluster") {
+            store_task_route(&value, cluster, store, config);
+        }
+        clear_capture_metadata(ctx);
+    } else if end_of_stream {
+        clear_capture_metadata(ctx);
+    }
+}
+
+/// Uses terminal TTL when the task state is final.
+fn store_task_route(
+    value: &serde_json::Value,
+    cluster: &str,
+    store: &LocalTaskRouteStore,
+    config: &config::TaskRoutingConfig,
+) {
+    let Some(extracted) = task_routing::extract_task_route(value) else {
+        return;
+    };
+
+    let ttl = task_routing::route_ttl(extracted.terminal, config);
+
+    if extracted.terminal && config.terminal_ttl_seconds == 0 {
+        store.remove(&extracted.task_id);
+        debug!(
+            has_task_id = true,
+            task_id_len = extracted.task_id.len(),
+            cluster = %cluster,
+            "terminal task route removed (terminal_ttl_seconds=0)"
+        );
+    } else {
+        store.put(&extracted.task_id, cluster, ttl);
+        debug!(
+            has_task_id = true,
+            task_id_len = extracted.task_id.len(),
+            cluster = %cluster,
+            terminal = extracted.terminal,
+            "stored task route from response"
+        );
+    }
+}
+
+/// Removes `a2a.response.*` keys from `filter_metadata`.
+fn clear_capture_metadata(ctx: &mut HttpFilterContext<'_>) {
+    ctx.filter_metadata.remove("a2a.response.capture_enabled");
+    ctx.filter_metadata.remove("a2a.response.buffer_hex");
+    ctx.filter_metadata.remove("a2a.response.buffer_bytes");
+    ctx.filter_metadata.remove("a2a.response.cluster");
+}
+
+/// Accumulate raw bytes as hex to avoid corruption when chunk boundaries
+/// split multibyte UTF-8 code points. Returns `false` if the byte limit
+/// was exceeded and capture state was cleared.
+fn accumulate_response_hex(ctx: &mut HttpFilterContext<'_>, chunk: &[u8], max_bytes: usize) -> bool {
+    let existing_bytes: usize = ctx
+        .filter_metadata
+        .get("a2a.response.buffer_bytes")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    if existing_bytes.saturating_add(chunk.len()) > max_bytes {
+        debug!(
+            existing_bytes,
+            chunk_len = chunk.len(),
+            max_bytes,
+            "response body exceeds capture limit, skipping route capture"
+        );
+        ctx.filter_metadata.remove("a2a.response.capture_enabled");
+        ctx.filter_metadata.remove("a2a.response.buffer_hex");
+        ctx.filter_metadata.remove("a2a.response.buffer_bytes");
+        ctx.filter_metadata.remove("a2a.response.cluster");
+        return false;
+    }
+
+    let hex_buf = ctx
+        .filter_metadata
+        .entry("a2a.response.buffer_hex".to_owned())
+        .or_default();
+    for byte in chunk {
+        use std::fmt::Write;
+        let _ = write!(hex_buf, "{byte:02x}");
+    }
+
+    let new_total = existing_bytes + chunk.len();
+    ctx.filter_metadata
+        .insert("a2a.response.buffer_bytes".to_owned(), new_total.to_string());
+
+    true
+}
+
+/// Inverse of the hex encoding in [`accumulate_response_hex`].
+fn decode_hex(hex: &str) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+
+    hex.as_bytes()
+        .chunks_exact(2)
+        .map(|pair| {
+            let hi = hex_digit(*pair.first()?)?;
+            let lo = hex_digit(*pair.last()?)?;
+            Some(hi << 4 | lo)
+        })
+        .collect()
+}
+
+/// Supports lowercase `a`-`f` only (our encoder writes lowercase).
+fn hex_digit(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        _ => None,
+    }
+}
+
+/// Whether a content-type header value indicates `text/event-stream`.
+fn is_event_stream_content_type(ct: &str) -> bool {
+    ct.split(';')
+        .next()
+        .is_some_and(|media| media.trim().eq_ignore_ascii_case("text/event-stream"))
+}
 
 /// Build a `JsonRpcConfig` for the shared parser with A2A-appropriate defaults.
 fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
