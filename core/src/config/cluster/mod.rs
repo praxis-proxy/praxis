@@ -56,6 +56,24 @@ pub struct Cluster {
     #[serde(default)]
     pub idle_timeout_ms: Option<u64>,
 
+    /// Maximum concurrent in-flight requests to this cluster.
+    ///
+    /// When set, excess requests receive 503. Prevents a single
+    /// slow upstream from consuming all available capacity.
+    ///
+    /// ```
+    /// # use praxis_core::config::Cluster;
+    /// let yaml = r#"
+    /// name: backend
+    /// endpoints: ["10.0.0.1:80"]
+    /// max_connections: 100
+    /// "#;
+    /// let cluster: Cluster = serde_yaml::from_str(yaml).unwrap();
+    /// assert_eq!(cluster.max_connections, Some(100));
+    /// ```
+    #[serde(default)]
+    pub max_connections: Option<u32>,
+
     /// Load-balancing algorithm for this cluster. Defaults to `round_robin`.
     #[serde(default)]
     pub load_balancer_strategy: LoadBalancerStrategy,
@@ -103,6 +121,7 @@ impl Cluster {
             health_check: None,
             idle_timeout_ms: None,
             load_balancer_strategy: LoadBalancerStrategy::default(),
+            max_connections: None,
             name: Arc::from(name),
             read_timeout_ms: None,
             tls: None,

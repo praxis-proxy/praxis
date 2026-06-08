@@ -20,7 +20,8 @@ use crate::throughput_utils::{BenchConfig, assert_performance, report_results, r
 
 #[test]
 fn bench_body_passthrough() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -35,7 +36,8 @@ fn bench_body_passthrough() {
 
 #[test]
 fn bench_body_readonly_stream() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = custom_filter_yaml(proxy_port, backend_port, "noop_body");
     let config = Config::from_yaml(&yaml).unwrap();
@@ -51,7 +53,8 @@ fn bench_body_readonly_stream() {
 
 #[test]
 fn bench_body_medium_payload() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -66,7 +69,8 @@ fn bench_body_medium_payload() {
 
 #[test]
 fn bench_body_large_payload() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();

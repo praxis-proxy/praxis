@@ -394,6 +394,46 @@ a JSON-RPC error if the selector is missing and
 and `json_rpc.*` entries to the filter result set for
 branch chain conditions.
 
+### MCP Broker Mode
+
+When the `mcp` filter config includes a `servers`
+block, broker mode activates. The broker aggregates
+tool catalogs from configured backends and handles
+`initialize`, `tools/list`, `ping`, and notifications
+directly as synthetic responses.
+
+```yaml
+- filter: mcp
+  path: /mcp
+  max_body_bytes: 65536
+  protocol_profile: current
+  default_version: "2025-03-26"
+  supported_versions: ["2025-03-26"]
+  servers:
+    - name: weather
+      cluster: weather-mcp
+      path: /mcp
+      tool_prefix: "weather_"
+      tools:
+        - name: get_weather
+          description: Get current weather
+```
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `path` | string | `"/mcp"` | Public endpoint path |
+| `max_body_bytes` | integer | 65536 | Maximum body size to buffer (64 KiB) |
+| `protocol_profile` | string | `"current"` | Protocol profile governing session semantics |
+| `default_version` | string | `"2025-03-26"` | Protocol version used in `initialize` responses when the client's requested version is not supported |
+| `supported_versions` | list | `["2025-03-26"]` | Protocol versions accepted during `initialize` negotiation; every entry must be implemented by this build |
+| `invalid_tool_policy` | string | `"reject_server"` | `"reject_server"` or `"filter_out"` for tools with invalid schemas |
+| `servers` | list | `[]` | Backend MCP server definitions |
+
+Each server entry supports `name`, `cluster`, `path`
+(default `"/mcp"`), `tool_prefix`, and `tools`. Tool
+definitions include `name`, optional `description`,
+optional `inputSchema`, and optional `annotations`.
+
 ## Static Response
 
 Returns a fixed response without contacting any upstream.

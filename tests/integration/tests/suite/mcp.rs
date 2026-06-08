@@ -7,8 +7,8 @@ use std::{io::Write, net::TcpStream};
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_send, parse_body, parse_status, start_backend_with_shutdown, start_echo_backend_with_shutdown,
-    start_header_echo_backend_with_shutdown, start_proxy,
+    free_port, http_send, parse_body, parse_status, start_backend_with_shutdown, start_echo_backend,
+    start_header_echo_backend, start_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -39,7 +39,7 @@ fn mcp_tools_call_routes_by_name() {
 
 #[test]
 fn mcp_tools_call_params_forwarded_to_backend() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let proxy_port = free_port();
 
     let yaml = mcp_default_yaml(proxy_port, backend_guard.port());
@@ -190,7 +190,7 @@ fn mcp_on_invalid_continue_passes_non_json() {
 
 #[test]
 fn mcp_synthesize_injects_standard_headers_when_missing() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
 
     let yaml = mcp_synthesize_yaml(proxy_port, backend_guard.port());
@@ -224,7 +224,7 @@ fn mcp_synthesize_injects_standard_headers_when_missing() {
 
 #[test]
 fn mcp_standard_headers_preserved_internal_stripped() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
 
     let yaml = mcp_passthrough_yaml(proxy_port, backend_guard.port());

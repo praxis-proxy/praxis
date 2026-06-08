@@ -34,6 +34,11 @@ pub struct PingoraRequestCtx {
     /// including error and timeout paths.
     pub _connection_permit: Option<OwnedSemaphorePermit>,
 
+    /// Permit from the process-wide connection semaphore.
+    ///
+    /// Present only when `runtime.max_connections` is configured.
+    pub _global_connection_permit: Option<OwnedSemaphorePermit>,
+
     /// Downstream client IP address.
     pub client_addr: Option<IpAddr>,
 
@@ -86,6 +91,14 @@ pub struct PingoraRequestCtx {
     /// `logging()` hook, after `cluster` has been consumed by filter
     /// context construction.
     pub metrics_cluster: Option<Arc<str>>,
+
+    /// Pre-built [`SharedString`] for the metrics cluster label.
+    ///
+    /// Cached when `metrics_cluster` is set so that
+    /// `emit_request_metrics` avoids an `Arc` clone per request.
+    ///
+    /// [`SharedString`]: ::metrics::SharedString
+    pub metrics_cluster_shared: Option<::metrics::SharedString>,
 
     /// Pre-read body chunks (`StreamBuffer` mode). When `StreamBuffer` is
     /// active, the body is read during `request_filter` (before upstream
@@ -288,6 +301,7 @@ impl Default for PingoraRequestCtx {
     fn default() -> Self {
         Self {
             _connection_permit: None,
+            _global_connection_permit: None,
             client_addr: None,
             client_http_version: None,
             cluster: None,
@@ -297,6 +311,7 @@ impl Default for PingoraRequestCtx {
             mutated_request_body_len: None,
             filter_results: std::collections::HashMap::new(),
             metrics_cluster: None,
+            metrics_cluster_shared: None,
             pre_read_body: None,
             request_body_buffer: None,
             request_body_bytes: 0,

@@ -13,7 +13,8 @@ use praxis_test_utils::{free_port, start_header_echo_backend, start_proxy};
 
 #[test]
 fn unconditional_branch_injects_headers() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let config = crate::example_utils::load_example_config(
         "branching/unconditional-branch.yaml",

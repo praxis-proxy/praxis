@@ -11,6 +11,8 @@ use tokio::sync::watch;
 mod pipelines;
 pub use pipelines::ListenerPipelines;
 
+/// Process-wide connection limit.
+pub mod connections;
 /// HTTP protocol implementations.
 pub mod http;
 /// Raw TCP/L4 forwarding protocol.

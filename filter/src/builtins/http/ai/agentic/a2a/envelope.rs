@@ -170,12 +170,12 @@ impl A2aFamily {
 /// Extracted A2A envelope metadata.
 #[derive(Debug, Clone)]
 pub(crate) struct A2aEnvelope {
+    /// Method family classification.
+    pub family: A2aFamily,
     /// Classified A2A method (canonical after alias resolution).
     pub method: A2aMethod,
     /// Original method string before alias resolution (if different).
     pub original_method: Option<String>,
-    /// Method family classification.
-    pub family: A2aFamily,
     /// Whether the method supports streaming.
     pub streaming: bool,
     /// Task ID extracted from params, when present.
@@ -206,9 +206,9 @@ pub(crate) fn extract_a2a_envelope(
     let version = extract_version(request_headers);
 
     A2aEnvelope {
+        family,
         method,
         original_method,
-        family,
         streaming,
         task_id,
         version,

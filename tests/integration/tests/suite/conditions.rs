@@ -3,8 +3,7 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    RoutedBackend, free_port, http_get, http_send, parse_body, parse_status, start_header_echo_backend_with_shutdown,
-    start_proxy,
+    RoutedBackend, free_port, http_get, http_send, parse_body, parse_status, start_header_echo_backend, start_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -201,7 +200,7 @@ filter_chains:
 
 #[test]
 fn request_condition_when_matches_adds_header() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 
@@ -261,7 +260,7 @@ filter_chains:
 
 #[test]
 fn request_condition_unless_skips_filter() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 

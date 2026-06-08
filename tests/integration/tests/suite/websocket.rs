@@ -6,8 +6,8 @@
 use futures::{SinkExt, StreamExt};
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_send, parse_body, parse_status, simple_proxy_yaml, start_header_echo_backend_with_shutdown,
-    start_proxy, start_websocket_echo_backend,
+    free_port, http_send, parse_body, parse_status, simple_proxy_yaml, start_header_echo_backend, start_proxy,
+    start_websocket_echo_backend,
 };
 use tokio_tungstenite::{
     MaybeTlsStream, WebSocketStream, connect_async,
@@ -101,7 +101,7 @@ async fn websocket_message_ordering_preserved() {
 
 #[test]
 fn non_upgrade_request_strips_all_hop_by_hop() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
@@ -130,7 +130,7 @@ fn non_upgrade_request_strips_all_hop_by_hop() {
 
 #[test]
 fn upgrade_request_preserves_upgrade_headers() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
@@ -165,7 +165,7 @@ fn upgrade_request_preserves_upgrade_headers() {
 
 #[test]
 fn upgrade_rejected_by_upstream_returns_normal_response() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
@@ -188,7 +188,7 @@ fn upgrade_rejected_by_upstream_returns_normal_response() {
 
 #[test]
 fn h2c_upgrade_headers_stripped() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();

@@ -5,6 +5,7 @@
 
 mod config;
 mod filter;
+mod pii;
 mod rule;
 
 #[cfg(test)]
@@ -19,6 +20,7 @@ mod rule;
 mod tests;
 
 pub use self::{
-    config::{GuardrailsAction, RuleTargetKind},
+    config::{ContainsValue, GuardrailsAction, RuleTargetKind},
     filter::GuardrailsFilter,
+    pii::PiiKind,
 };

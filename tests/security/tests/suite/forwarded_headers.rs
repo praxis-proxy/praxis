@@ -12,7 +12,8 @@ use praxis_test_utils::{free_port, http_send, parse_body, start_header_echo_back
 
 #[test]
 fn untrusted_client_cannot_spoof_xff() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &[]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -42,7 +43,8 @@ fn untrusted_client_cannot_spoof_xff() {
 
 #[test]
 fn untrusted_cannot_spoof_x_forwarded_proto() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &[]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -68,7 +70,8 @@ fn untrusted_cannot_spoof_x_forwarded_proto() {
 
 #[test]
 fn untrusted_cannot_spoof_x_forwarded_host() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &[]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -94,7 +97,8 @@ fn untrusted_cannot_spoof_x_forwarded_host() {
 
 #[test]
 fn xff_chain_injection_prevented() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &[]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -124,7 +128,8 @@ fn xff_chain_injection_prevented() {
 
 #[test]
 fn trusted_proxy_preserves_chain() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &["127.0.0.0/8"]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -157,7 +162,8 @@ fn trusted_proxy_preserves_chain() {
 
 #[test]
 fn trusted_proxy_with_long_xff_chain() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &["127.0.0.0/8"]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -182,7 +188,8 @@ fn trusted_proxy_with_long_xff_chain() {
 
 #[test]
 fn multiple_xff_headers_from_untrusted_overwritten() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &[]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -207,7 +214,8 @@ fn multiple_xff_headers_from_untrusted_overwritten() {
 
 #[test]
 fn multiple_xfp_headers_from_untrusted_overwritten() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &[]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -233,7 +241,8 @@ fn multiple_xfp_headers_from_untrusted_overwritten() {
 
 #[test]
 fn multiple_xfh_headers_from_untrusted_overwritten() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &[]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -259,7 +268,8 @@ fn multiple_xfh_headers_from_untrusted_overwritten() {
 
 #[test]
 fn empty_xff_from_untrusted_replaced() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &[]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -284,7 +294,8 @@ fn empty_xff_from_untrusted_replaced() {
 
 #[test]
 fn ipv6_xff_from_untrusted_overwritten() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &[]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -307,7 +318,8 @@ fn ipv6_xff_from_untrusted_overwritten() {
 
 #[test]
 fn ipv6_loopback_in_xff_chain_from_trusted_proxy_preserved() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &["127.0.0.0/8"]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -340,7 +352,8 @@ fn ipv6_loopback_in_xff_chain_from_trusted_proxy_preserved() {
 
 #[test]
 fn ipv6_full_address_in_xff_from_trusted_proxy_preserved() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &["127.0.0.0/8"]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -369,7 +382,8 @@ fn ipv6_full_address_in_xff_from_trusted_proxy_preserved() {
 
 #[test]
 fn mixed_ipv4_and_ipv6_in_xff_from_trusted_proxy_preserved() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &["127.0.0.0/8"]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -402,7 +416,8 @@ fn mixed_ipv4_and_ipv6_in_xff_from_trusted_proxy_preserved() {
 
 #[test]
 fn trusted_proxy_proto_reflects_actual_scheme() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &["127.0.0.0/8"]);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -427,7 +442,8 @@ fn trusted_proxy_proto_reflects_actual_scheme() {
 
 #[test]
 fn trusted_proxy_host_reflects_actual_host_header() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = fwd_yaml(proxy_port, backend_port, &["127.0.0.0/8"]);
     let config = Config::from_yaml(&yaml).unwrap();

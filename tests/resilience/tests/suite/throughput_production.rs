@@ -19,7 +19,8 @@ use crate::throughput_utils::{
 
 #[test]
 fn bench_production_pipeline_get() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = production_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -35,7 +36,8 @@ fn bench_production_pipeline_get() {
 
 #[test]
 fn bench_production_pipeline_post() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = production_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -53,7 +55,8 @@ fn bench_production_pipeline_post() {
 
 #[test]
 fn bench_production_pipeline_mixed() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = production_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();

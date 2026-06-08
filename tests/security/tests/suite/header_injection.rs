@@ -14,7 +14,8 @@ use praxis_test_utils::{
 
 #[test]
 fn crlf_in_header_value_rejected_or_sanitized() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -50,7 +51,8 @@ fn crlf_in_header_value_rejected_or_sanitized() {
 
 #[test]
 fn crlf_in_header_value_with_tab_fold() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -84,7 +86,8 @@ fn crlf_in_header_value_with_tab_fold() {
 
 #[test]
 fn crlf_in_header_name_rejected() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -104,7 +107,8 @@ fn crlf_in_header_name_rejected() {
 
 #[test]
 fn connection_header_cannot_strip_security_headers() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = format!(
         r#"
@@ -150,7 +154,8 @@ filter_chains:
 
 #[test]
 fn oversized_header_handled_gracefully() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -172,7 +177,8 @@ fn oversized_header_handled_gracefully() {
 
 #[test]
 fn null_bytes_in_headers_handled() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
