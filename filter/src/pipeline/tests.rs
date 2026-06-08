@@ -538,7 +538,7 @@ fn body_capabilities_buffer_overrides_stream_buffer() {
 }
 
 #[test]
-fn body_capabilities_multiple_stream_buffer_takes_min() {
+fn body_capabilities_multiple_stream_buffer_merges() {
     let pipeline = make_pipeline(vec![
         Box::new(StreamBufferReleaseFilter { marker: b"A" }),
         Box::new(StreamBufferReleaseFilter { marker: b"B" }),
@@ -549,6 +549,23 @@ fn body_capabilities_multiple_stream_buffer_takes_min() {
         caps.request_body_mode,
         BodyMode::StreamBuffer { max_bytes: None },
         "multiple StreamBuffer filters should still yield StreamBuffer"
+    );
+}
+
+#[test]
+fn body_capabilities_multiple_stream_buffer_largest_wins() {
+    let pipeline = make_pipeline(vec![
+        Box::new(BoundedStreamBufferFilter { max_bytes: 1024 }),
+        Box::new(BoundedStreamBufferFilter { max_bytes: 65_536 }),
+    ]);
+    let caps = pipeline.body_capabilities();
+
+    assert_eq!(
+        caps.request_body_mode,
+        BodyMode::StreamBuffer {
+            max_bytes: Some(65_536)
+        },
+        "largest StreamBuffer limit should win when merging finite limits"
     );
 }
 
@@ -2479,6 +2496,41 @@ impl HttpFilter for StreamBufferReleaseFilter {
         {
             return Ok(FilterAction::Release);
         }
+        Ok(FilterAction::Continue)
+    }
+}
+
+/// A filter that declares StreamBuffer mode with a finite byte limit.
+struct BoundedStreamBufferFilter {
+    max_bytes: usize,
+}
+
+#[async_trait]
+impl HttpFilter for BoundedStreamBufferFilter {
+    fn name(&self) -> &'static str {
+        "bounded_stream_buffer"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer {
+            max_bytes: Some(self.max_bytes),
+        }
+    }
+
+    async fn on_request_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
         Ok(FilterAction::Continue)
     }
 }
