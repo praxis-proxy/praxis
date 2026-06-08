@@ -30,7 +30,7 @@ pub(super) fn route_matches_request(
             }
         },
         PathMatch::Prefix { path_prefix } => {
-            if !path.starts_with(path_prefix.as_str()) {
+            if !crate::path_match::path_prefix_matches(path, path_prefix) {
                 return false;
             }
         },
@@ -52,7 +52,10 @@ pub(super) type Specificity = (bool, usize, usize);
 /// Computes the specificity of a route for comparison.
 fn route_specificity(route: &Route) -> Specificity {
     let is_exact = route.path_match.is_exact();
-    let path_len = route.path_match.len();
+    let path_len = match &route.path_match {
+        PathMatch::Exact { path } => path.len(),
+        PathMatch::Prefix { path_prefix } => crate::path_match::path_prefix_specificity(path_prefix),
+    };
     let constraints = usize::from(route.host.is_some()) + route.headers.as_ref().map_or(0, HashMap::len);
     (is_exact, path_len, constraints)
 }
@@ -72,7 +75,10 @@ pub(super) fn update_best_match<'a>(
 
 /// Return `true` if shorter prefixes cannot improve on the current best.
 pub(super) fn should_stop_early(best: Option<(Specificity, &Route)>, route: &Route) -> bool {
-    let route_len = route.path_match.len();
+    let route_len = match &route.path_match {
+        PathMatch::Exact { path } => path.len(),
+        PathMatch::Prefix { path_prefix } => crate::path_match::path_prefix_specificity(path_prefix),
+    };
     best.is_some_and(|((_, bp, _), _)| route_len < bp)
 }
 

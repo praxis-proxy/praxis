@@ -34,6 +34,11 @@ pub struct PingoraRequestCtx {
     /// including error and timeout paths.
     pub _connection_permit: Option<OwnedSemaphorePermit>,
 
+    /// Permit from the process-wide connection semaphore.
+    ///
+    /// Present only when `runtime.max_connections` is configured.
+    pub _global_connection_permit: Option<OwnedSemaphorePermit>,
+
     /// Downstream client IP address.
     pub client_addr: Option<IpAddr>,
 
@@ -295,6 +300,7 @@ impl Default for PingoraRequestCtx {
     fn default() -> Self {
         Self {
             _connection_permit: None,
+            _global_connection_permit: None,
             client_addr: None,
             client_http_version: None,
             cluster: None,

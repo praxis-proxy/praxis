@@ -10,7 +10,7 @@ use std::time::Duration;
 use praxis_core::config::Config;
 use praxis_test_utils::{
     free_port, http_get, http_send, parse_body, parse_header, parse_status, simple_proxy_yaml, start_backend,
-    start_header_echo_backend, start_header_echo_backend_with_shutdown, start_slow_backend, wait_for_http2,
+    start_header_echo_backend, start_slow_backend, wait_for_http2,
 };
 
 use super::test_utils::{
@@ -288,7 +288,7 @@ fn rfc9110_upstream_within_timeout_succeeds() {
 /// [RFC 9110 Section 5.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-5.1
 #[test]
 fn rfc9110_custom_header_forwarded_to_upstream() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
@@ -346,7 +346,8 @@ fn rfc9110_custom_response_header_forwarded_to_client() {
 /// [RFC 9110 Section 5.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-5.1
 #[test]
 fn rfc9110_connection_listed_header_stripped() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -375,7 +376,8 @@ fn rfc9110_connection_listed_header_stripped() {
 /// [RFC 9110 Section 5.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-5.1
 #[test]
 fn rfc9110_multiple_custom_headers_all_forwarded() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -415,7 +417,8 @@ fn rfc9110_multiple_custom_headers_all_forwarded() {
 /// [RFC 9110 Section 5.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-5.1
 #[test]
 fn rfc9110_uncommon_standard_header_forwarded() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -448,7 +451,8 @@ fn rfc9110_uncommon_standard_header_forwarded() {
 /// [RFC 9110 Section 13.1.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-13.1.2
 #[test]
 fn rfc9110_if_none_match_forwarded_to_upstream() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -477,7 +481,8 @@ fn rfc9110_if_none_match_forwarded_to_upstream() {
 /// [RFC 9110 Section 13.1.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-13.1.3
 #[test]
 fn rfc9110_if_modified_since_forwarded_to_upstream() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -568,7 +573,8 @@ fn rfc9110_304_not_modified_forwarded() {
 /// [RFC 9110 Section 14.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-14.2
 #[test]
 fn rfc9110_range_header_forwarded_to_upstream() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -746,7 +752,8 @@ fn rfc9110_308_redirect_forwarded() {
 /// [RFC 9110 Section 7.6.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.3
 #[test]
 fn rfc9110_via_header_added_to_request() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -803,7 +810,8 @@ fn rfc9110_via_header_added_to_response() {
 /// [RFC 9110 Section 7.6.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.3
 #[test]
 fn rfc9110_via_header_appended_not_replaced() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -858,7 +866,8 @@ fn rfc9110_via_header_h2_client_gets_2_0() {
 /// [RFC 9110 Section 7.6.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.2
 #[test]
 fn rfc9110_max_forwards_decremented_on_options() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -953,7 +962,8 @@ fn rfc9110_no_max_forwards_forwarded_normally() {
 /// [RFC 9110 Section 10.1.4]: https://datatracker.ietf.org/doc/html/rfc9110#section-10.1.4
 #[test]
 fn rfc9110_te_header_stripped_from_upstream_request() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -1068,7 +1078,8 @@ fn rfc9110_max_forwards_ignored_on_get() {
 /// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
 #[test]
 fn rfc9110_multiple_connection_headers_all_tokens_stripped() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();

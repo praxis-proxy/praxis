@@ -67,6 +67,15 @@ filter_chains:
             pattern: "^\\{.*\\}$"
             negate: true
 
+          # Block PII in body
+          - target: body
+            contains: [ssn, credit_card, phone, email]
+
+          # Block PII in header
+          - target: header
+            name: "X-Secret"
+            contains: [ssn, credit_card, phone, email]
+
       - filter: router
         routes:
           - path_prefix: "/"

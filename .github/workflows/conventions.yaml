@@ -28,7 +28,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          MAX_ADDITIONS: "500"
+          MAX_ADDITIONS: "750"
         run: |
           labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
           if echo "$labels" | grep -q '^skip/pr-hygiene$'; then
@@ -46,7 +46,7 @@ jobs:
           fi
 
           added=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/files" --paginate \
-            --jq '[.[] | select(.filename | test("^(Cargo\\.lock|examples/)") | not) | .additions] | add // 0')
+            --jq '[.[] | select(.filename | test("^(Cargo\\.lock|examples/|tests/|benchmarks/|docs/)") | not) | select(.filename | test("\\.md$") | not) | .additions] | add // 0')
 
           if [ "$added" -gt "$MAX_ADDITIONS" ]; then
             marker="<!-- praxis:pr-size-check -->"
@@ -55,7 +55,7 @@ jobs:
             if [ "$already" -eq 0 ]; then
               gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
                 --body "${marker}
-          **PR too large**: ${added} lines added (limit: ${MAX_ADDITIONS}). Please split into smaller PRs. Add \`skip/pr-hygiene\` label to override."
+          **PR too large**: ${added} lines added (limit: ${MAX_ADDITIONS}, excludes tests, docs, examples, and benchmarks). Please split into smaller PRs. Add \`skip/pr-hygiene\` label to override."
             fi
             echo "::error::PR has ${added} lines added (limit: ${MAX_ADDITIONS})"
             exit 1

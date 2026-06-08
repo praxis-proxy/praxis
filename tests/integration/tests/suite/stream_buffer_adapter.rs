@@ -6,14 +6,13 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    filters::BodyMutatingStreamBufferFilter, free_port, http_send, parse_body, parse_status,
-    start_echo_backend_with_shutdown, start_header_echo_backend_with_shutdown, start_proxy_with_registry,
-    start_uri_echo_backend_with_shutdown,
+    filters::BodyMutatingStreamBufferFilter, free_port, http_send, parse_body, parse_status, start_echo_backend,
+    start_header_echo_backend, start_proxy_with_registry, start_uri_echo_backend,
 };
 
 #[test]
 fn stream_buffer_readwrite_mutated_body_reaches_backend() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let proxy_port = free_port();
 
     let yaml = mutator_yaml(proxy_port, backend_guard.port());
@@ -41,7 +40,7 @@ fn stream_buffer_readwrite_mutated_body_reaches_backend() {
 
 #[test]
 fn stream_buffer_readwrite_rewritten_path_reaches_backend() {
-    let backend_guard = start_uri_echo_backend_with_shutdown();
+    let backend_guard = start_uri_echo_backend();
     let proxy_port = free_port();
 
     let yaml = mutator_yaml(proxy_port, backend_guard.port());
@@ -69,7 +68,7 @@ fn stream_buffer_readwrite_rewritten_path_reaches_backend() {
 
 #[test]
 fn stream_buffer_readwrite_content_length_repaired() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
 
     let yaml = mutator_yaml(proxy_port, backend_guard.port());

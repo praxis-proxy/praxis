@@ -129,7 +129,8 @@ fn acl_applies_to_all_methods() {
 
 #[test]
 fn acl_before_router_means_no_routing_on_denied() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = acl_yaml(proxy_port, backend_port, &[], &["0.0.0.0/0"]);
     let config = Config::from_yaml(&yaml).unwrap();

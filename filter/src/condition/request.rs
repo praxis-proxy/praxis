@@ -76,7 +76,7 @@ fn matches_request(m: &ConditionMatch, req: &Request) -> bool {
     }
 
     if let Some(ref prefix) = m.path_prefix
-        && !req.uri.path().starts_with(prefix)
+        && !crate::path_match::path_prefix_matches(req.uri.path(), prefix)
     {
         return false;
     }
@@ -372,6 +372,15 @@ mod tests {
             &[when(header_match(&[("x-a", "1"), ("x-b", "2")]))],
             &req
         ));
+    }
+
+    #[test]
+    fn when_path_prefix_rejects_non_segment_boundary() {
+        let req = make_request(Method::GET, "/apikeys", HeaderMap::new());
+        assert!(
+            !should_execute(&[when(path_match("/api"))], &req),
+            "path prefix /api must not match /apikeys (non-segment boundary)"
+        );
     }
 
     #[test]

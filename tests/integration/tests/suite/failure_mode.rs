@@ -18,7 +18,8 @@ use praxis_test_utils::{free_port, http_post, registry_with, start_echo_backend,
 
 #[test]
 fn failure_mode_closed_returns_500() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = format!(
         r#"
@@ -56,7 +57,8 @@ filter_chains:
 
 #[test]
 fn failure_mode_open_continues_to_backend() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = format!(
         r#"
@@ -95,7 +97,8 @@ filter_chains:
 
 #[test]
 fn failure_mode_default_is_closed() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = format!(
         r#"
@@ -132,7 +135,8 @@ filter_chains:
 
 #[test]
 fn failure_mode_open_on_response_error_still_returns_200() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = make_yaml(proxy_port, backend_port, "response_error", "open");
     let config = Config::from_yaml(&yaml).unwrap();
@@ -150,7 +154,8 @@ fn failure_mode_open_on_response_error_still_returns_200() {
 
 #[test]
 fn mixed_chain_open_skipped_closed_blocks() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = format!(
         r#"
@@ -192,7 +197,8 @@ filter_chains:
 
 #[test]
 fn failure_mode_open_on_request_body_error_still_succeeds() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = make_yaml(proxy_port, backend_port, "body_error", "open");
     let config = Config::from_yaml(&yaml).unwrap();
@@ -210,7 +216,8 @@ fn failure_mode_open_on_request_body_error_still_succeeds() {
 
 #[test]
 fn failure_mode_open_on_response_body_error_still_succeeds() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = make_yaml(proxy_port, backend_port, "resp_body_error", "open");
     let config = Config::from_yaml(&yaml).unwrap();

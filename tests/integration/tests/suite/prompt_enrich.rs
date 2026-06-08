@@ -5,8 +5,8 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_send, json_post, parse_body, parse_status, start_echo_backend_with_shutdown,
-    start_header_echo_backend_with_shutdown, start_proxy,
+    free_port, http_send, json_post, parse_body, parse_status, start_echo_backend, start_header_echo_backend,
+    start_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -15,7 +15,7 @@ use praxis_test_utils::{
 
 #[test]
 fn prompt_enrichment_prepends_system_message() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = prepend_yaml(proxy_port, backend_port);
@@ -47,7 +47,7 @@ fn prompt_enrichment_prepends_system_message() {
 
 #[test]
 fn prompt_enrichment_appends_user_message() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = append_yaml(proxy_port, backend_port);
@@ -77,7 +77,7 @@ fn prompt_enrichment_appends_user_message() {
 
 #[test]
 fn prompt_enrichment_preserves_non_chat_traffic_when_continue() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = prepend_yaml(proxy_port, backend_port);
@@ -104,7 +104,7 @@ fn prompt_enrichment_preserves_non_chat_traffic_when_continue() {
 
 #[test]
 fn prompt_enrichment_rejects_invalid_json_when_configured() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = reject_yaml(proxy_port, backend_port);
@@ -130,9 +130,9 @@ fn prompt_enrichment_rejects_invalid_json_when_configured() {
 
 #[test]
 fn prompt_enrichment_updates_content_length() {
-    let echo_guard = start_echo_backend_with_shutdown();
+    let echo_guard = start_echo_backend();
     let echo_port = echo_guard.port();
-    let header_guard = start_header_echo_backend_with_shutdown();
+    let header_guard = start_header_echo_backend();
     let header_port = header_guard.port();
     let proxy_port_echo = free_port();
     let proxy_port_header = free_port();
@@ -175,7 +175,7 @@ fn prompt_enrichment_updates_content_length() {
 
 #[test]
 fn prompt_enrichment_conditions_enable_per_route_behavior() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = conditions_yaml(proxy_port, backend_port);
@@ -214,7 +214,7 @@ fn prompt_enrichment_conditions_enable_per_route_behavior() {
 
 #[test]
 fn prompt_enrichment_before_model_to_header_composes() {
-    let header_guard = start_header_echo_backend_with_shutdown();
+    let header_guard = start_header_echo_backend();
     let header_port = header_guard.port();
     let proxy_port = free_port();
     let yaml = compose_yaml(proxy_port, header_port);

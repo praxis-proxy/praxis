@@ -33,7 +33,8 @@ fn blocked_request_gets_403() {
 
 #[test]
 fn passed_request_gets_tagged() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let config = crate::example_utils::load_example_config(
         "branching/multiple-branches.yaml",

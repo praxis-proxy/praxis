@@ -11,7 +11,7 @@ use praxis_filter::{
 };
 use praxis_test_utils::{
     free_port, free_port_guard, http_post, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown,
-    start_echo_backend_with_shutdown, start_proxy_with_registry, wait_for_tcp,
+    start_echo_backend, start_proxy_with_registry, wait_for_tcp,
 };
 
 // -----------------------------------------------------------------------------
@@ -20,7 +20,7 @@ use praxis_test_utils::{
 
 #[test]
 fn stream_pipeline_transforms_body_through_three_filters() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&stream_pipeline_yaml(proxy_port, backend_port)).unwrap();
@@ -38,7 +38,7 @@ fn stream_pipeline_transforms_body_through_three_filters() {
 
 #[test]
 fn stream_pipeline_rejects_blocked_content() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&stream_pipeline_yaml(proxy_port, backend_port)).unwrap();
@@ -52,7 +52,7 @@ fn stream_pipeline_rejects_blocked_content() {
 
 #[test]
 fn stream_pipeline_allows_clean_content() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&stream_pipeline_yaml(proxy_port, backend_port)).unwrap();
@@ -67,7 +67,7 @@ fn stream_pipeline_allows_clean_content() {
 
 #[test]
 fn buffer_pipeline_transforms_complete_body() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&buffer_pipeline_yaml(proxy_port, backend_port)).unwrap();
@@ -85,7 +85,7 @@ fn buffer_pipeline_transforms_complete_body() {
 
 #[test]
 fn buffer_pipeline_rejects_oversized_body() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&buffer_pipeline_yaml(proxy_port, backend_port)).unwrap();
@@ -100,7 +100,7 @@ fn buffer_pipeline_rejects_oversized_body() {
 
 #[test]
 fn buffer_pipeline_exact_boundary_succeeds() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&buffer_pipeline_yaml(proxy_port, backend_port)).unwrap();
@@ -116,7 +116,7 @@ fn buffer_pipeline_exact_boundary_succeeds() {
 
 #[test]
 fn buffer_pipeline_rejects_forbidden_content() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&buffer_pipeline_yaml(proxy_port, backend_port)).unwrap();
@@ -181,7 +181,7 @@ fn stream_buffer_pipeline_fallback_routing() {
 
 #[test]
 fn multi_listener_each_mode_processes_independently() {
-    let echo_port_guard = start_echo_backend_with_shutdown();
+    let echo_port_guard = start_echo_backend();
     let echo_port = echo_port_guard.port();
     let stream_guard = free_port_guard();
     let buffer_guard = free_port_guard();
@@ -239,7 +239,7 @@ filter_chains:
 
 #[test]
 fn multi_listener_per_listener_filter_chains() {
-    let echo_port_guard = start_echo_backend_with_shutdown();
+    let echo_port_guard = start_echo_backend();
     let echo_port = echo_port_guard.port();
     let claude_port_guard = start_backend_with_shutdown("claude-routed");
     let claude_port = claude_port_guard.port();
