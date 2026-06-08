@@ -137,7 +137,7 @@ pub(crate) fn build_config(cfg: ResponsesFormatConfig) -> Result<ResponsesFormat
 
     if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
         return Err(format!(
-            "responses_format: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
+            "openai_responses_format: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
             cfg.max_body_bytes
         )
         .into());

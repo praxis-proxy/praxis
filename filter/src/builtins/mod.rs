@@ -9,6 +9,8 @@ mod tcp;
 #[cfg(feature = "ai-inference")]
 pub use http::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
+pub use http::OpenaiResponsesValidateFilter;
+#[cfg(feature = "ai-inference")]
 pub use http::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::ResponsesFormatFilter;
