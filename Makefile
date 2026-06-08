@@ -5,6 +5,7 @@
 VERSION          ?= $(shell perl -ne 'print $$1 if /^version\s*=\s*"(.+)"/' Cargo.toml)
 IMAGE            ?= praxis
 CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || command -v docker 2>/dev/null)
+NIGHTLY_VERSION  := $(shell grep -m1 'rust-toolchain@' .github/actions/install-nightly-rust/action.yml | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}')
 V                ?=
 
 UNAME_S := $(shell uname -s | tr A-Z a-z)
@@ -70,8 +71,12 @@ check-prereqs-cmake: check-prereqs
 		exit 1; \
 	}
 check-prereqs-nightly: check-prereqs
-	@cargo +nightly --version >/dev/null 2>&1 || { \
-		echo "Rust nightly toolchain is not installed — run \"rustup toolchain install nightly\" (see docs/development.md)" >&2; \
+	@test -n "$(NIGHTLY_VERSION)" || { \
+		echo "Could not determine NIGHTLY_VERSION from .github/actions/install-nightly-rust/action.yml" >&2; \
+		exit 1; \
+	}
+	@cargo +$(NIGHTLY_VERSION) --version >/dev/null 2>&1 || { \
+		echo "Rust $(NIGHTLY_VERSION) is not installed — run \"rustup toolchain install $(NIGHTLY_VERSION)\" (see docs/development.md)" >&2; \
 		exit 1; \
 	}
 
@@ -182,13 +187,13 @@ bench: $(VEGETA) $(FORTIO_DEP)
 FUZZ_DURATION ?= 120
 
 fuzz:
-	cargo +nightly fuzz run --fuzz-dir tests/fuzz fuzz_sni -- -max_total_time=$(FUZZ_DURATION)
-	cargo +nightly fuzz run --fuzz-dir tests/fuzz fuzz_path_sanitize -- -max_total_time=$(FUZZ_DURATION)
-	cargo +nightly fuzz run --fuzz-dir tests/fuzz fuzz_config_parse -- -max_total_time=$(FUZZ_DURATION)
-	cargo +nightly fuzz run --fuzz-dir tests/fuzz fuzz_filter_pipeline -- -max_total_time=$(FUZZ_DURATION)
+	cargo +$(NIGHTLY_VERSION) fuzz run --fuzz-dir tests/fuzz fuzz_sni -- -max_total_time=$(FUZZ_DURATION)
+	cargo +$(NIGHTLY_VERSION) fuzz run --fuzz-dir tests/fuzz fuzz_path_sanitize -- -max_total_time=$(FUZZ_DURATION)
+	cargo +$(NIGHTLY_VERSION) fuzz run --fuzz-dir tests/fuzz fuzz_config_parse -- -max_total_time=$(FUZZ_DURATION)
+	cargo +$(NIGHTLY_VERSION) fuzz run --fuzz-dir tests/fuzz fuzz_filter_pipeline -- -max_total_time=$(FUZZ_DURATION)
 
 fuzz-build:
-	cargo +nightly fuzz build --fuzz-dir tests/fuzz
+	cargo +$(NIGHTLY_VERSION) fuzz build --fuzz-dir tests/fuzz
 
 # -------------------------------------------------------------------
 # Quality
@@ -196,12 +201,12 @@ fuzz-build:
 
 lint:
 	cargo clippy --workspace --all-targets -- -D warnings
-	cargo +nightly fmt --all -- --check
+	cargo +$(NIGHTLY_VERSION) fmt --all -- --check
 	cargo xtask lint-deps
 	cargo xtask lint-example-tests
 
 fmt:
-	cargo +nightly fmt --all
+	cargo +$(NIGHTLY_VERSION) fmt --all
 
 doc:
 	RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items

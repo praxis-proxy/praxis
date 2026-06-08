@@ -21,6 +21,8 @@ pub mod logging;
 pub mod memory;
 /// Server factory and runtime options.
 pub mod server;
+/// Wall-clock time abstraction for filters.
+pub mod time;
 
 pub use errors::ProxyError;
 pub use server::{PingoraServerRuntime, RuntimeOptions};

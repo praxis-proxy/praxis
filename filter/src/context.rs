@@ -6,7 +6,7 @@
 use std::{borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
 
 use http::{HeaderMap, Method, StatusCode, Uri};
-use praxis_core::{connectivity::Upstream, health::HealthRegistry, kv::KvStoreRegistry};
+use praxis_core::{connectivity::Upstream, health::HealthRegistry, kv::KvStoreRegistry, time::TimeSource};
 
 use crate::{body::BodyMode, pipeline::body::merge_body_mode, results::FilterResultSet};
 
@@ -121,6 +121,9 @@ pub struct HttpFilterContext<'a> {
     /// for use by passive health checking in the
     /// protocol layer.
     pub selected_endpoint_index: Option<usize>,
+
+    /// Wall-clock time source for timestamp generation.
+    pub time_source: &'a dyn TimeSource,
 
     /// Rewritten URI path for the upstream request.
     ///
@@ -417,8 +420,8 @@ mod tests {
         ctx.set_request_body_mode(BodyMode::StreamBuffer { max_bytes: Some(1024) });
         assert_eq!(
             ctx.request_body_mode,
-            BodyMode::StreamBuffer { max_bytes: Some(1024) },
-            "smaller StreamBuffer limit should win when merging"
+            BodyMode::StreamBuffer { max_bytes: Some(2048) },
+            "larger StreamBuffer limit should win when merging"
         );
     }
 

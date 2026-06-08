@@ -218,6 +218,7 @@ macro_rules! filter_context {
             response_headers_modified: false,
             rewritten_path: $ctx.rewritten_path.take(),
             selected_endpoint_index: $ctx.selected_endpoint_index,
+            time_source: $pipeline.time_source(),
             upstream: $ctx.upstream.take(),
         }
     };
