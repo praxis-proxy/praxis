@@ -86,7 +86,7 @@ impl TimeSource for FixedTimeSource {
 }
 
 // -----------------------------------------------------------------------------
-// Helpers
+// Utilities
 // -----------------------------------------------------------------------------
 
 /// Extract duration since epoch, warning once on pre-epoch clocks.
