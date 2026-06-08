@@ -55,10 +55,16 @@ as a PR. File naming convention:
 ```
 
 The first PR must contain only the **What?** and **Why?**
-sections. The **How?** section is almost always contentious
-and must be added in a follow-up PR after the goals and
-motivation are accepted. See the [template] for the full
-structure.
+sections. The **How?** section must be added after the
+goals and motivation are accepted. See the [template]
+for the full structure.
+
+> **v0.x.x simplification**: During pre-1.0 development,
+> the **How?** section does not require an upfront design
+> document. Once the **What?** and **Why?** are agreed on,
+> the **How?** can simply list the PRs that implement the
+> solution. A full requirements and design writeup is
+> welcome but not required until 1.0.
 
 CI will close PRs that:
 
@@ -72,8 +78,9 @@ CI will close PRs that:
 ### 5. Iteration
 
 Iterate on the proposal in subsequent PRs. Add the
-**How?** section with requirements and design details.
-Refine until a maintainer marks the proposal as accepted.
+**How?** section: either a list of implementing PRs
+or a full requirements and design writeup. Refine
+until a maintainer marks the proposal as accepted.
 
 ### 6. Experimental
 

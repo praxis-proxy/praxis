@@ -7,8 +7,8 @@ use std::io::{Read, Write};
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    Backend, free_port, http_send, parse_body, parse_status, start_backend_with_shutdown,
-    start_header_echo_backend_with_shutdown, start_proxy,
+    Backend, free_port, http_send, parse_body, parse_status, start_backend_with_shutdown, start_header_echo_backend,
+    start_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -196,7 +196,7 @@ fn a2a_alias_resolves_to_canonical_method() {
 
 #[test]
 fn a2a_internal_headers_not_leaked_upstream() {
-    let header_echo_guard = start_header_echo_backend_with_shutdown();
+    let header_echo_guard = start_header_echo_backend();
     let proxy_port = free_port();
 
     let yaml = a2a_header_leakage_yaml(proxy_port, header_echo_guard.port());

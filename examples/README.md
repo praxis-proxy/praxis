@@ -129,6 +129,8 @@ page.
 | [model-to-header-routing.yaml](configs/ai/model-to-header-routing.yaml) | Route by model field in JSON body via X-Model header |
 | [prompt-enrichment.yaml](configs/ai/prompt-enrichment.yaml) | Inject system messages into chat completion requests |
 | [format-routing.yaml](configs/ai/openai/responses/format-routing.yaml) | Route by AI API format (Responses vs Chat Completions) |
+| [responses-routing.yaml](configs/ai/openai/responses/responses-routing.yaml) | Route Responses API by mode (stateless vs stateful) |
+| [request-validate.yaml](configs/ai/openai/responses/request-validate.yaml) | Validate Responses API requests and reject invalid parameter combinations |
 
 ### Branching
 

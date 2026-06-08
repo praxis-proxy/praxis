@@ -6,9 +6,10 @@
 
 **Secure by default.** Security is a primary design goal.
 
-**Composable.** Everything is a filter. Routing, load
-balancing, rate limiting, AI model selection: all filters,
-all using the same traits, all assembled through chains.
+**Composable.** Everything is a filter. Cluster routing,
+load balancing, rate limiting, AI model selection: all
+filters, all using the same traits, all assembled into
+pipelines through named chains.
 
 **Extensible.** Your filters implement the same [`HttpFilter`]
 and [`TcpFilter`] traits as built-in filters. Register with
@@ -105,8 +106,12 @@ flowchart LR
 
 Each listener has a `name` and a list of `filter_chains`.
 At startup, the referenced chains are resolved and
-concatenated into a single pipeline per listener. Different
-listeners can compose different subsets of chains.
+concatenated into a single pipeline per listener
+(**pipelining**). Different listeners can compose
+different subsets of chains. This is distinct from
+**routing**, where the `router` filter selects an
+upstream cluster at request time based on path, host,
+and headers.
 
 ### Filters
 
@@ -120,12 +125,12 @@ flowchart LR
     subgraph "Listener: public"
         direction LR
         S["security chain"] --> O["observability chain"]
-        O --> R["routing chain"]
+        O --> R["traffic chain"]
     end
 
     subgraph "Listener: internal"
         direction LR
-        O2["observability chain"] --> R2["routing chain"]
+        O2["observability chain"] --> R2["traffic chain"]
     end
 ```
 

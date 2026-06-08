@@ -87,6 +87,7 @@ fn make_cluster(strategy: LoadBalancerStrategy, n: usize) -> Cluster {
         health_check: None,
         idle_timeout_ms: None,
         load_balancer_strategy: strategy,
+        max_connections: None,
         name: "bench".into(),
         read_timeout_ms: None,
         tls: None,

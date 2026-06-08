@@ -6,6 +6,7 @@
 mod broker;
 pub(crate) mod config;
 pub(crate) mod envelope;
+pub(crate) mod protocol;
 
 #[cfg(test)]
 #[allow(
@@ -92,12 +93,13 @@ impl McpFilter {
 
         let cfg: McpConfig = parse_filter_config("mcp", config)?;
         let validated_config = build_config(cfg)?;
-        let json_rpc_config = build_json_rpc_config(validated_config.max_body_bytes);
+        let max_body_bytes = validated_config.max_body_bytes;
+        let json_rpc_config = build_json_rpc_config(max_body_bytes);
 
         Ok(Box::new(Self {
-            max_body_bytes: validated_config.max_body_bytes,
             config: validated_config,
             json_rpc_config,
+            max_body_bytes,
         }))
     }
 }
@@ -189,14 +191,14 @@ fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
     use super::json_rpc::config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders};
 
     JsonRpcConfig {
-        max_body_bytes,
         batch_policy: BatchPolicy::Reject,
-        on_invalid: InvalidJsonRpcBehavior::Continue,
         headers: JsonRpcHeaders {
-            method: None,
             id: None,
             kind: None,
+            method: None,
         },
+        max_body_bytes,
+        on_invalid: InvalidJsonRpcBehavior::Continue,
     }
 }
 

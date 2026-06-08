@@ -15,7 +15,8 @@ use praxis_test_utils::{
 
 #[test]
 fn single_chunk_body_proxied() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -74,7 +75,8 @@ fn multiple_chunks_proxied() {
 
 #[test]
 fn empty_chunked_body_returns_200() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();

@@ -223,7 +223,8 @@ filter_chains:
 
 #[test]
 fn reentrance_e2e_branch_executes_and_reaches_backend() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = format!(
         r#"
@@ -282,7 +283,8 @@ filter_chains:
 
 #[test]
 fn reentrance_e2e_no_match_passes_through() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = format!(
         r#"

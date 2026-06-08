@@ -103,68 +103,16 @@ const DEFAULT_DEFERRED_CLOSE_TIMEOUT_MS: u64 = 5000;
     reason = "mirrors Envoy ExternalProcessor proto fields"
 )]
 struct ExtProcConfig {
-    /// gRPC endpoint URI of the external processing server.
-    target: String,
-
-    /// Per-message timeout in milliseconds.
-    /// Maps to Envoy's `message_timeout`.
-    #[serde(default = "default_message_timeout_ms")]
-    message_timeout_ms: u64,
-
-    /// Controls which parts of the request/response are sent to the
-    /// external processor. Maps to Envoy's `processing_mode`.
-    #[serde(default)]
-    processing_mode: ProcessingModeConfig,
-
-    /// Whether the external processor may override the processing
-    /// mode via `mode_override` in its responses.
-    #[serde(default)]
-    allow_mode_override: bool,
-
-    /// Upper bound in milliseconds for `override_message_timeout`
-    /// values sent by the external processor. When set, the server
-    /// may extend the per-message timeout up to this limit.
-    #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
-    max_message_timeout_ms: Option<u64>,
-
-    /// Observation-only mode. When enabled, request/response data is
-    /// sent to the processor but the pipeline does not wait for a
-    /// response before continuing.
-    #[serde(default)]
-    observability_mode: bool,
-
-    /// When `true`, `ImmediateResponse` messages from the processor
-    /// are ignored.
-    #[serde(default)]
-    disable_immediate_response: bool,
-
-    /// Restricts which headers the external processor is allowed to
-    /// mutate. When unset, all headers may be modified except
-    /// pseudo-headers and `host`.
-    #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
-    mutation_rules: Option<MutationRulesConfig>,
-
-    /// Controls which request/response headers are forwarded to the
-    /// external processor. When unset, all headers are forwarded.
-    #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
-    forward_rules: Option<ForwardRulesConfig>,
-
-    /// HTTP status code returned to the downstream client when the
-    /// external processor returns an error, fails to respond, or
-    /// cannot be reached. Default: 500.
-    #[serde(default = "default_status_on_error")]
-    status_on_error: u16,
-
     /// When `true`, the content-length header is preserved after
     /// external processing body mutation. Only relevant for body
     /// send modes that enable mutation.
     #[serde(default)]
     allow_content_length_header: bool,
 
-    /// Send body to the processor as it arrives without waiting for
-    /// the header response. Only applies to `streamed` body mode.
+    /// Whether the external processor may override the processing
+    /// mode via `mode_override` in its responses.
     #[serde(default)]
-    send_body_without_waiting_for_header_response: bool,
+    allow_mode_override: bool,
 
     /// Allowlist of processing modes the processor may override to.
     /// Only evaluated when `allow_mode_override` is `true`.
@@ -177,6 +125,58 @@ struct ExtProcConfig {
     #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
     #[serde(default = "default_deferred_close_timeout_ms")]
     deferred_close_timeout_ms: u64,
+
+    /// When `true`, `ImmediateResponse` messages from the processor
+    /// are ignored.
+    #[serde(default)]
+    disable_immediate_response: bool,
+
+    /// Controls which request/response headers are forwarded to the
+    /// external processor. When unset, all headers are forwarded.
+    #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
+    forward_rules: Option<ForwardRulesConfig>,
+
+    /// Upper bound in milliseconds for `override_message_timeout`
+    /// values sent by the external processor. When set, the server
+    /// may extend the per-message timeout up to this limit.
+    #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
+    max_message_timeout_ms: Option<u64>,
+
+    /// Per-message timeout in milliseconds.
+    /// Maps to Envoy's `message_timeout`.
+    #[serde(default = "default_message_timeout_ms")]
+    message_timeout_ms: u64,
+
+    /// Restricts which headers the external processor is allowed to
+    /// mutate. When unset, all headers may be modified except
+    /// pseudo-headers and `host`.
+    #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
+    mutation_rules: Option<MutationRulesConfig>,
+
+    /// Observation-only mode. When enabled, request/response data is
+    /// sent to the processor but the pipeline does not wait for a
+    /// response before continuing.
+    #[serde(default)]
+    observability_mode: bool,
+
+    /// Controls which parts of the request/response are sent to the
+    /// external processor. Maps to Envoy's `processing_mode`.
+    #[serde(default)]
+    processing_mode: ProcessingModeConfig,
+
+    /// Send body to the processor as it arrives without waiting for
+    /// the header response. Only applies to `streamed` body mode.
+    #[serde(default)]
+    send_body_without_waiting_for_header_response: bool,
+
+    /// HTTP status code returned to the downstream client when the
+    /// external processor returns an error, fails to respond, or
+    /// cannot be reached. Default: 500.
+    #[serde(default = "default_status_on_error")]
+    status_on_error: u16,
+
+    /// gRPC endpoint URI of the external processing server.
+    target: String,
 }
 
 /// Returns the default message timeout in milliseconds.
@@ -397,6 +397,13 @@ fn validate_core_fields(cfg: &ExtProcConfig) -> Result<(), FilterError> {
     }
     if cfg.message_timeout_ms == 0 {
         return Err("ext_proc: message_timeout_ms must be greater than 0".into());
+    }
+    if cfg.deferred_close_timeout_ms > 0 && cfg.deferred_close_timeout_ms < cfg.message_timeout_ms {
+        let close = cfg.deferred_close_timeout_ms;
+        let msg = cfg.message_timeout_ms;
+        return Err(
+            format!("ext_proc: deferred_close_timeout_ms ({close}) must be >= message_timeout_ms ({msg})").into(),
+        );
     }
     if let Some(max) = cfg.max_message_timeout_ms {
         if max == 0 {

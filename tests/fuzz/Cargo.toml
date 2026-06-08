@@ -37,3 +37,18 @@ doc = false
 name = "fuzz_filter_pipeline"
 path = "fuzz_targets/fuzz_filter_pipeline.rs"
 doc = false
+
+[[bin]]
+name = "fuzz_cidr_parse"
+path = "fuzz_targets/fuzz_cidr_parse.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_header_name"
+path = "fuzz_targets/fuzz_header_name.rs"
+doc = false
+
+[[bin]]
+name = "fuzz_body_buffer"
+path = "fuzz_targets/fuzz_body_buffer.rs"
+doc = false

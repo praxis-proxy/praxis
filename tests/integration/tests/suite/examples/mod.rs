@@ -19,6 +19,7 @@ mod credential_injection;
 mod csrf;
 mod default_config;
 mod grpc_detection;
+mod guardrails;
 mod header_manipulation;
 mod health_checks;
 mod hostname_upstream;
@@ -29,6 +30,10 @@ mod max_connections;
 #[cfg(feature = "ai-inference")]
 mod model_to_header;
 mod multi_listener;
+#[cfg(feature = "ai-inference")]
+mod openai_responses_format;
+#[cfg(feature = "ai-inference")]
+mod openai_responses_validate;
 mod p2c;
 mod path_based_routing;
 mod path_rewriting;
@@ -38,7 +43,7 @@ mod prompt_enrichment;
 mod protocols;
 mod redirect;
 #[cfg(feature = "ai-inference")]
-mod responses_format;
+mod responses_routing;
 mod round_robin;
 mod session_affinity;
 mod static_response;

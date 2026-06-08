@@ -693,7 +693,8 @@ fn update_best_match_keeps_current_when_dominated() {
 fn should_stop_early_true_when_prefix_shorter_than_best() {
     let best_route = prefix_route("/api/v2/", "best");
     let shorter = prefix_route("/api/", "shorter");
-    let best = Some(((false, best_route.path_match.len(), 0), &best_route));
+    let best_specificity = crate::path_match::path_prefix_specificity("/api/v2/");
+    let best = Some(((false, best_specificity, 0), &best_route));
     assert!(
         should_stop_early(best, &shorter),
         "should stop when current route prefix is shorter than best"
@@ -704,7 +705,8 @@ fn should_stop_early_true_when_prefix_shorter_than_best() {
 fn should_stop_early_false_when_prefix_equal_to_best() {
     let best_route = prefix_route("/api/", "best");
     let same = prefix_route("/api/", "same");
-    let best = Some(((false, best_route.path_match.len(), 0), &best_route));
+    let best_specificity = crate::path_match::path_prefix_specificity("/api/");
+    let best = Some(((false, best_specificity, 0), &best_route));
     assert!(
         !should_stop_early(best, &same),
         "should not stop when prefix lengths are equal"
@@ -721,20 +723,49 @@ fn should_stop_early_false_when_no_best() {
 }
 
 #[test]
-fn non_segment_boundary_prefix_rejected() {
-    let err = RouterFilter::new(vec![Route {
-        path_match: PathMatch::Prefix {
-            path_prefix: "/api".to_owned(),
-        },
-        host: None,
-        headers: None,
-        cluster: "api".into(),
-    }])
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("must end with '/'"),
-        "path_prefix without trailing slash should be rejected: {err}"
+fn prefix_without_trailing_slash_accepted() {
+    let router = make_router(vec![prefix_route("/api", "api"), prefix_route("/", "default")]);
+    let route = router.match_route("/api/v1", None, &HeaderMap::new()).unwrap();
+    assert_eq!(
+        &*route.cluster, "api",
+        "/api/v1 should match /api prefix without trailing slash"
     );
+}
+
+#[test]
+fn segment_boundary_rejects_non_segment_continuation() {
+    let router = make_router(vec![prefix_route("/api", "api"), prefix_route("/", "default")]);
+    let route = router.match_route("/apikeys", None, &HeaderMap::new()).unwrap();
+    assert_eq!(&*route.cluster, "default", "/apikeys must NOT match /api prefix");
+}
+
+#[test]
+fn segment_boundary_exact_path_match() {
+    let router = make_router(vec![prefix_route("/api", "api"), prefix_route("/", "default")]);
+    let route = router.match_route("/api", None, &HeaderMap::new()).unwrap();
+    assert_eq!(&*route.cluster, "api", "/api should match /api prefix exactly");
+}
+
+#[test]
+fn segment_boundary_trailing_slash_on_path() {
+    let router = make_router(vec![prefix_route("/api", "api"), prefix_route("/", "default")]);
+    let route = router.match_route("/api/", None, &HeaderMap::new()).unwrap();
+    assert_eq!(&*route.cluster, "api", "/api/ should match /api prefix");
+}
+
+#[test]
+fn prefix_with_and_without_trailing_slash_equivalent() {
+    let r1 = make_router(vec![prefix_route("/api", "api"), prefix_route("/", "default")]);
+    let r2 = make_router(vec![prefix_route("/api/", "api"), prefix_route("/", "default")]);
+
+    for path in &["/api", "/api/", "/api/v1", "/apikeys"] {
+        let m1 = r1.match_route(path, None, &HeaderMap::new()).unwrap();
+        let m2 = r2.match_route(path, None, &HeaderMap::new()).unwrap();
+        assert_eq!(
+            &*m1.cluster, &*m2.cluster,
+            "prefix /api and /api/ should behave identically for path {path}"
+        );
+    }
 }
 
 #[test]

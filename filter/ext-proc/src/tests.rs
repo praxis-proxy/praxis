@@ -542,6 +542,24 @@ max_message_timeout_ms: 100
 }
 
 #[tokio::test]
+async fn rejects_deferred_close_timeout_less_than_message_timeout() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+message_timeout_ms: 500
+deferred_close_timeout_ms: 100
+"#,
+    )
+    .unwrap();
+
+    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("deferred_close_timeout_ms"),
+        "error should reject deferred_close_timeout_ms < message_timeout_ms: {err}"
+    );
+}
+
+#[tokio::test]
 async fn rejects_allowed_override_modes_with_entries() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
