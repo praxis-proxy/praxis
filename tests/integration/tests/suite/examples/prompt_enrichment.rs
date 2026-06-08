@@ -5,9 +5,7 @@
 
 use std::collections::HashMap;
 
-use praxis_test_utils::{
-    free_port, http_send, json_post, parse_body, parse_status, start_echo_backend_with_shutdown, start_proxy,
-};
+use praxis_test_utils::{free_port, http_send, json_post, parse_body, parse_status, start_echo_backend, start_proxy};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -27,7 +25,7 @@ fn prompt_enrichment_config_parses() {
 
 #[test]
 fn prompt_enrichment_prepends_and_appends() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 
@@ -68,7 +66,7 @@ fn prompt_enrichment_prepends_and_appends() {
 
 #[test]
 fn prompt_enrichment_passes_non_chat_traffic() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 

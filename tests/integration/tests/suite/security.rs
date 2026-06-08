@@ -7,7 +7,7 @@ use praxis_core::config::Config;
 use praxis_filter::{FilterAction, FilterError, HttpFilter, HttpFilterContext};
 use praxis_test_utils::{
     free_port, http_send, parse_body, parse_header, parse_status, simple_proxy_yaml, start_backend_with_shutdown,
-    start_header_echo_backend_with_shutdown, start_hop_by_hop_response_backend, start_proxy, start_proxy_with_registry,
+    start_header_echo_backend, start_hop_by_hop_response_backend, start_proxy, start_proxy_with_registry,
     start_reserved_header_response_backend,
 };
 
@@ -17,7 +17,7 @@ use praxis_test_utils::{
 
 #[test]
 fn hop_by_hop_headers_stripped_before_upstream() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
@@ -55,7 +55,7 @@ fn hop_by_hop_headers_stripped_before_upstream() {
 
 #[test]
 fn hop_by_hop_preserves_all_end_to_end_headers() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
@@ -79,7 +79,7 @@ fn hop_by_hop_preserves_all_end_to_end_headers() {
 
 #[test]
 fn forwarded_headers_injected_upstream() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = format!(
@@ -130,7 +130,7 @@ filter_chains:
 
 #[test]
 fn forwarded_headers_untrusted_overwrites_spoofed_xff() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = format!(
@@ -244,7 +244,7 @@ fn hop_by_hop_response_preserves_end_to_end_headers() {
 
 #[test]
 fn filter_injected_headers_do_not_leak_to_client_or_reserved_upstream() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let yaml = format!(
@@ -527,7 +527,7 @@ filter_chains:
 
 #[test]
 fn filter_generated_internal_header_does_not_reach_backend() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
 
     let yaml = format!(
@@ -585,7 +585,7 @@ filter_chains:
 
 #[test]
 fn reserved_x_praxis_headers_rejected_from_client() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
@@ -611,7 +611,7 @@ fn reserved_x_praxis_headers_rejected_from_client() {
 
 #[test]
 fn reserved_x_mcp_headers_rejected_from_client() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
@@ -635,7 +635,7 @@ fn reserved_x_mcp_headers_rejected_from_client() {
 
 #[test]
 fn reserved_x_a2a_headers_rejected_from_client() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();
@@ -659,7 +659,7 @@ fn reserved_x_a2a_headers_rejected_from_client() {
 
 #[test]
 fn standard_mcp_protocol_headers_preserved() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
     let config = Config::from_yaml(&yaml).unwrap();

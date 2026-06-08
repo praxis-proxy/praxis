@@ -8,7 +8,7 @@ use praxis_core::config::Config;
 use praxis_filter::{BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection};
 use praxis_test_utils::{
     custom_filter_yaml, free_port, http_post, http_send, parse_status, registry_with, simple_proxy_yaml,
-    start_backend_with_shutdown, start_echo_backend_with_shutdown, start_proxy, start_proxy_with_registry,
+    start_backend_with_shutdown, start_echo_backend, start_proxy, start_proxy_with_registry,
 };
 
 // -----------------------------------------------------------------------------
@@ -17,7 +17,7 @@ use praxis_test_utils::{
 
 #[test]
 fn body_passthrough_without_body_filters() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&simple_proxy_yaml(proxy_port, backend_port)).unwrap();
@@ -31,7 +31,7 @@ fn body_passthrough_without_body_filters() {
 
 #[test]
 fn body_uppercase_filter_transforms_request_body() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend_port, "body_uppercase")).unwrap();
@@ -45,7 +45,7 @@ fn body_uppercase_filter_transforms_request_body() {
 
 #[test]
 fn body_reject_filter_blocks_forbidden_content() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend_port, "body_reject")).unwrap();
@@ -59,7 +59,7 @@ fn body_reject_filter_blocks_forbidden_content() {
 
 #[test]
 fn body_reject_filter_allows_clean_content() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend_port, "body_reject")).unwrap();
@@ -74,7 +74,7 @@ fn body_reject_filter_allows_clean_content() {
 
 #[test]
 fn body_buffer_mode_delivers_complete_body() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend_port, "body_buffered_uppercase")).unwrap();
@@ -91,7 +91,7 @@ fn body_buffer_mode_delivers_complete_body() {
 
 #[test]
 fn body_size_limit_returns_413() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend_port, "body_tiny_buffer")).unwrap();
@@ -105,7 +105,7 @@ fn body_size_limit_returns_413() {
 
 #[test]
 fn async_body_filter_performs_async_work() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend_port, "async_body")).unwrap();
@@ -169,7 +169,7 @@ fn body_uppercase_filter_transforms_response_body() {
 
 #[test]
 fn filter_error_in_on_request_returns_500() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend_port, "error_on_request")).unwrap();
@@ -186,7 +186,7 @@ fn filter_error_in_on_request_returns_500() {
 
 #[test]
 fn filter_error_in_request_body_returns_500() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend_port, "error_on_body")).unwrap();
@@ -203,7 +203,7 @@ fn filter_error_in_request_body_returns_500() {
 
 #[test]
 fn filter_rejection_with_custom_status_propagates() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend_port, "reject_418")).unwrap();
@@ -220,7 +220,7 @@ fn filter_rejection_with_custom_status_propagates() {
 
 #[test]
 fn body_size_limit_without_content_length_enforced() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&body_limit_yaml(proxy_port, backend_port, 16)).unwrap();
@@ -269,7 +269,7 @@ fn response_body_over_limit_returns_error() {
 
 #[test]
 fn body_size_limit_under_limit_succeeds() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&body_limit_yaml(proxy_port, backend_port, 64)).unwrap();
@@ -284,7 +284,7 @@ fn body_size_limit_under_limit_succeeds() {
 
 #[test]
 fn body_size_limit_exact_boundary_succeeds() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&body_limit_yaml(proxy_port, backend_port, 64)).unwrap();
@@ -299,7 +299,7 @@ fn body_size_limit_exact_boundary_succeeds() {
 
 #[test]
 fn body_size_limit_one_byte_over_rejected() {
-    let backend_port_guard = start_echo_backend_with_shutdown();
+    let backend_port_guard = start_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&body_limit_yaml(proxy_port, backend_port, 64)).unwrap();
@@ -702,7 +702,7 @@ filter_chains:
 
 #[test]
 fn stream_buffer_body_above_64kib_forwarded_intact() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let proxy_port = free_port();
 
     let yaml = format!(

@@ -56,6 +56,8 @@ mod json_body_field;
 mod json_rpc;
 mod mcp;
 mod mcp_broker;
+#[cfg(feature = "ai-inference")]
+mod openai_responses_format;
 mod path_rewrite;
 mod payload_processing;
 mod per_listener_pipeline;
@@ -63,7 +65,7 @@ mod per_listener_pipeline;
 mod prompt_enrich;
 mod rate_limit;
 #[cfg(feature = "ai-inference")]
-mod responses_format;
+mod responses_routing;
 mod retry;
 mod routing;
 mod security;

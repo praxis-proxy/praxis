@@ -1,8 +1,8 @@
 # Responses Format Routing
 #
-# Routes AI API traffic by detected body format. The `responses_format`
-# filter parses JSON request bodies and classifies them as `responses`
-# (Responses API), `chat_completions` (Chat Completions API), or
+# Routes AI API traffic by detected body format. The `openai_responses_format`
+# filter parses JSON request bodies and classifies them as `openai_responses`
+# (Responses API), `openai_chat_completions` (Chat Completions API), or
 # `unknown` (valid JSON but unrecognized format).
 #
 # Classification facts are promoted to internal routing headers
@@ -22,7 +22,7 @@ listeners:
 filter_chains:
   - name: ai-routing
     filters:
-      - filter: responses_format
+      - filter: openai_responses_format
         on_invalid: continue
         max_body_bytes: 67108864
         headers:
@@ -34,11 +34,11 @@ filter_chains:
         routes:
           - path: "/v1/responses"
             headers:
-              x-praxis-ai-format: "responses"
+              x-praxis-ai-format: "openai_responses"
             cluster: "responses-backend"
           - path: "/v1/chat/completions"
             headers:
-              x-praxis-ai-format: "chat_completions"
+              x-praxis-ai-format: "openai_chat_completions"
             cluster: "chat-backend"
           - path_prefix: "/"
             cluster: "default-backend"

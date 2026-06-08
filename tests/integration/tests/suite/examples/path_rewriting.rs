@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use praxis_test_utils::{free_port, http_get, start_proxy, start_uri_echo_backend_with_shutdown};
+use praxis_test_utils::{free_port, http_get, start_proxy, start_uri_echo_backend};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -13,7 +13,7 @@ use praxis_test_utils::{free_port, http_get, start_proxy, start_uri_echo_backend
 
 #[test]
 fn path_rewriting_strip_prefix() {
-    let backend_port_guard = start_uri_echo_backend_with_shutdown();
+    let backend_port_guard = start_uri_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = super::load_example_config(
@@ -30,7 +30,7 @@ fn path_rewriting_strip_prefix() {
 
 #[test]
 fn path_rewriting_regex_replace() {
-    let backend_port_guard = start_uri_echo_backend_with_shutdown();
+    let backend_port_guard = start_uri_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = super::load_example_config(
@@ -47,7 +47,7 @@ fn path_rewriting_regex_replace() {
 
 #[test]
 fn path_rewriting_no_match_passes_through() {
-    let backend_port_guard = start_uri_echo_backend_with_shutdown();
+    let backend_port_guard = start_uri_echo_backend();
     let backend_port = backend_port_guard.port();
     let proxy_port = free_port();
     let config = super::load_example_config(

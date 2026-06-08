@@ -15,7 +15,7 @@ use praxis_test_utils::{
 // -----------------------------------------------------------------------------
 
 #[test]
-fn responses_format_routing_example_routes_responses_input() {
+fn openai_responses_format_routing_example_routes_responses_input() {
     let responses_guard = start_backend_with_shutdown("responses-backend");
     let chat_guard = start_backend_with_shutdown("chat-backend");
     let default_guard = start_backend_with_shutdown("default-backend");
@@ -44,7 +44,7 @@ fn responses_format_routing_example_routes_responses_input() {
 }
 
 #[test]
-fn responses_format_routing_example_routes_chat_completions() {
+fn openai_responses_format_routing_example_routes_chat_completions() {
     let responses_guard = start_backend_with_shutdown("responses-backend");
     let chat_guard = start_backend_with_shutdown("chat-backend");
     let default_guard = start_backend_with_shutdown("default-backend");
@@ -73,7 +73,7 @@ fn responses_format_routing_example_routes_chat_completions() {
 }
 
 #[test]
-fn responses_format_routing_example_unknown_falls_to_default() {
+fn openai_responses_format_routing_example_unknown_falls_to_default() {
     let responses_guard = start_backend_with_shutdown("responses-backend");
     let chat_guard = start_backend_with_shutdown("chat-backend");
     let default_guard = start_backend_with_shutdown("default-backend");

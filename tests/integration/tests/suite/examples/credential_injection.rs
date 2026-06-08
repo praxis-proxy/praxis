@@ -5,7 +5,7 @@
 
 use std::collections::HashMap;
 
-use praxis_test_utils::{free_port, http_send, parse_body, parse_status, start_header_echo_backend_with_shutdown};
+use praxis_test_utils::{free_port, http_send, parse_body, parse_status, start_header_echo_backend};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -25,7 +25,7 @@ fn credential_injection_config_parses() {
 
 #[test]
 fn credential_injection_injects_bearer_token() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 
@@ -53,7 +53,7 @@ fn credential_injection_injects_bearer_token() {
 
 #[test]
 fn credential_injection_strips_client_credential() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 
@@ -86,7 +86,7 @@ fn credential_injection_strips_client_credential() {
 
 #[test]
 fn credential_injection_internal_cluster() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 

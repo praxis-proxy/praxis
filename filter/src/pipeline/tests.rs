@@ -538,7 +538,7 @@ fn body_capabilities_buffer_overrides_stream_buffer() {
 }
 
 #[test]
-fn body_capabilities_multiple_stream_buffer_takes_min() {
+fn body_capabilities_multiple_stream_buffer_merges() {
     let pipeline = make_pipeline(vec![
         Box::new(StreamBufferReleaseFilter { marker: b"A" }),
         Box::new(StreamBufferReleaseFilter { marker: b"B" }),
@@ -549,6 +549,23 @@ fn body_capabilities_multiple_stream_buffer_takes_min() {
         caps.request_body_mode,
         BodyMode::StreamBuffer { max_bytes: None },
         "multiple StreamBuffer filters should still yield StreamBuffer"
+    );
+}
+
+#[test]
+fn body_capabilities_multiple_stream_buffer_largest_wins() {
+    let pipeline = make_pipeline(vec![
+        Box::new(BoundedStreamBufferFilter { max_bytes: 1024 }),
+        Box::new(BoundedStreamBufferFilter { max_bytes: 65_536 }),
+    ]);
+    let caps = pipeline.body_capabilities();
+
+    assert_eq!(
+        caps.request_body_mode,
+        BodyMode::StreamBuffer {
+            max_bytes: Some(65_536)
+        },
+        "largest StreamBuffer limit should win when merging finite limits"
     );
 }
 
@@ -623,6 +640,7 @@ fn apply_body_limits_no_limits_leaves_stream_mode() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline.apply_body_limits(None, None, false).unwrap();
 
@@ -655,6 +673,7 @@ fn apply_body_limits_converts_default_stream_to_size_limit() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline
         .apply_body_limits(Some(1_048_576), Some(524_288), false)
@@ -696,6 +715,7 @@ fn apply_body_limits_preserves_filter_declared_stream() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline
         .apply_body_limits(Some(1_048_576), Some(524_288), false)
@@ -1268,6 +1288,7 @@ fn apply_body_limits_default_stream_becomes_size_limit() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline.apply_body_limits(Some(4096), Some(8192), false).unwrap();
     assert_eq!(
@@ -1293,6 +1314,7 @@ fn apply_body_limits_filter_stricter_than_config() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline.apply_body_limits(Some(1000), None, false).unwrap();
     assert_eq!(
@@ -1315,6 +1337,7 @@ fn apply_body_limits_config_stricter_than_filter() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline.apply_body_limits(Some(1000), None, false).unwrap();
     assert_eq!(
@@ -1337,6 +1360,7 @@ fn apply_body_limits_rejects_unbounded_stream_buffer() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     let err = pipeline.apply_body_limits(None, None, false).unwrap_err();
     assert!(
@@ -1346,7 +1370,7 @@ fn apply_body_limits_rejects_unbounded_stream_buffer() {
 }
 
 #[test]
-fn apply_body_limits_allows_unbounded_stream_buffer_with_override() {
+fn apply_body_limits_clamps_unbounded_stream_buffer_with_override() {
     let caps = BodyCapabilities {
         request_body_mode: BodyMode::StreamBuffer { max_bytes: None },
         needs_request_body: true,
@@ -1358,10 +1382,18 @@ fn apply_body_limits_allows_unbounded_stream_buffer_with_override() {
         filters: vec![],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
     pipeline
         .apply_body_limits(None, None, true)
         .expect("allow_unbounded_body should demote error to warning");
+    assert_eq!(
+        pipeline.body_capabilities().request_body_mode,
+        BodyMode::StreamBuffer {
+            max_bytes: Some(praxis_core::config::ABSOLUTE_MAX_BODY_BYTES)
+        },
+        "unbounded StreamBuffer should be clamped to absolute ceiling"
+    );
 }
 
 #[test]
@@ -1565,6 +1597,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         filters: vec![filter_a, filter_b, filter_c],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -1608,6 +1641,7 @@ async fn all_executed_filters_run_on_response() {
         ],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -1658,6 +1692,7 @@ async fn skipped_filter_skips_its_branches() {
         filters: vec![parent],
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
 
     let req = crate::test_utils::make_request(Method::GET, "/other");
@@ -2476,6 +2511,41 @@ impl HttpFilter for StreamBufferReleaseFilter {
     }
 }
 
+/// A filter that declares StreamBuffer mode with a finite byte limit.
+struct BoundedStreamBufferFilter {
+    max_bytes: usize,
+}
+
+#[async_trait]
+impl HttpFilter for BoundedStreamBufferFilter {
+    fn name(&self) -> &'static str {
+        "bounded_stream_buffer"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer {
+            max_bytes: Some(self.max_bytes),
+        }
+    }
+
+    async fn on_request_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+}
+
 /// A filter that removes one header and adds another (net count stays the same).
 struct SwapHeaderFilter;
 
@@ -2671,6 +2741,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         filters,
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }
 }
 
@@ -2690,6 +2761,7 @@ fn make_pipeline_with_conditions(
         filters,
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }
 }
 
@@ -2709,6 +2781,7 @@ fn make_pipeline_with_response_conditions(
         filters,
         health_registry: None,
         kv_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }
 }
 

@@ -26,8 +26,8 @@ impl AiRequestFormat {
     /// Stable string representation for headers, metadata, and filter results.
     pub(crate) fn as_str(self) -> &'static str {
         match self {
-            Self::Responses => "responses",
-            Self::ChatCompletions => "chat_completions",
+            Self::Responses => "openai_responses",
+            Self::ChatCompletions => "openai_chat_completions",
             Self::UnknownJson => "unknown",
             Self::InvalidJson => "invalid_json",
             Self::NonJson => "non_json",
@@ -41,6 +41,7 @@ impl AiRequestFormat {
 
 /// Extracted facts from a classified request body.
 #[derive(Debug)]
+#[allow(clippy::struct_excessive_bools, reason = "independent presence flags from JSON body")]
 pub(crate) struct ClassifiedRequest {
     /// Extracted `background` field value, if present.
     pub background: Option<bool>,
@@ -50,6 +51,10 @@ pub(crate) struct ClassifiedRequest {
     pub has_conversation: bool,
     /// Whether `previous_response_id` is present and non-null.
     pub has_previous_response_id: bool,
+    /// Whether `prompt.id` is present and non-null.
+    pub has_prompt_id: bool,
+    /// Whether `tools` is a non-empty array.
+    pub has_tools: bool,
     /// Extracted `model` field value, if present.
     pub model: Option<String>,
     /// Extracted `store` field value, if present.
@@ -59,7 +64,42 @@ pub(crate) struct ClassifiedRequest {
 }
 
 // -----------------------------------------------------------------------------
-// Classification
+// Path Classification
+// -----------------------------------------------------------------------------
+
+/// Check whether a method + path pair matches a known Responses API endpoint.
+///
+/// Returns `true` for:
+/// - `GET    /v1/responses/{id}`
+/// - `GET    /v1/responses/{id}/input_items`
+/// - `POST   /v1/responses/{id}/cancel`
+/// - `POST   /v1/responses/input_tokens`
+/// - `POST   /v1/responses/compact`
+/// - `DELETE /v1/responses/{id}`
+pub(crate) fn is_responses_path(method: &http::Method, path: &str) -> bool {
+    let path = path.strip_suffix('/').filter(|p| !p.is_empty()).unwrap_or(path);
+    let segments: Vec<&str> = path.split('/').collect();
+
+    match (method, segments.as_slice()) {
+        // POST /v1/responses/input_tokens
+        // POST /v1/responses/compact
+        // Both have `input` in their body so body classification would also
+        // work, but path-matching is explicit about recognising these as
+        // Responses API endpoints regardless of payload shape.
+        (&http::Method::POST, ["", "v1", "responses", "input_tokens" | "compact"]) => true,
+        // GET /v1/responses/{id}
+        // DELETE /v1/responses/{id}
+        (&http::Method::GET | &http::Method::DELETE, ["", "v1", "responses", id]) if !id.is_empty() => true,
+        // GET /v1/responses/{id}/input_items
+        (&http::Method::GET, ["", "v1", "responses", id, "input_items"]) if !id.is_empty() => true,
+        // POST /v1/responses/{id}/cancel
+        (&http::Method::POST, ["", "v1", "responses", id, "cancel"]) if !id.is_empty() => true,
+        _ => false,
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Body Classification
 // -----------------------------------------------------------------------------
 
 /// Classify a request body and extract routing facts.
@@ -86,6 +126,14 @@ pub(crate) fn classify_request_body(body: &[u8]) -> ClassifiedRequest {
         format,
         has_conversation: obj.get("conversation").is_some_and(|v| !v.is_null()),
         has_previous_response_id: obj.get("previous_response_id").is_some_and(|v| !v.is_null()),
+        has_prompt_id: obj
+            .get("prompt")
+            .and_then(serde_json::Value::as_object)
+            .and_then(|prompt| prompt.get("prompt_id"))
+            .is_some_and(|v| !v.is_null()),
+        has_tools: obj
+            .get("tools")
+            .is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty())),
         model: extract_string(obj, "model"),
         store: obj.get("store").and_then(serde_json::Value::as_bool),
         stream: obj.get("stream").and_then(serde_json::Value::as_bool),
@@ -94,8 +142,10 @@ pub(crate) fn classify_request_body(body: &[u8]) -> ClassifiedRequest {
 
 /// Determine format from top-level keys. When both `input` and
 /// `messages` are present, `input` takes precedence (Responses API).
+/// A `prompt` object also indicates a Responses API request (prompt
+/// template usage per `OpenAI` Prompts guide).
 fn classify_format(obj: &serde_json::Map<String, serde_json::Value>) -> AiRequestFormat {
-    if obj.contains_key("input") {
+    if obj.contains_key("input") || obj.get("prompt").is_some_and(serde_json::Value::is_object) {
         AiRequestFormat::Responses
     } else if obj.contains_key("messages") {
         AiRequestFormat::ChatCompletions
@@ -109,12 +159,14 @@ fn classify_format(obj: &serde_json::Map<String, serde_json::Value>) -> AiReques
 // -----------------------------------------------------------------------------
 
 /// Build a result with no extracted facts.
-fn empty_result(format: AiRequestFormat) -> ClassifiedRequest {
+pub(crate) fn empty_result(format: AiRequestFormat) -> ClassifiedRequest {
     ClassifiedRequest {
         background: None,
         format,
         has_conversation: false,
         has_previous_response_id: false,
+        has_prompt_id: false,
+        has_tools: false,
         model: None,
         store: None,
         stream: None,
@@ -226,7 +278,7 @@ mod tests {
         assert_eq!(
             result.format,
             AiRequestFormat::ChatCompletions,
-            "messages array should classify as chat_completions"
+            "messages array should classify as openai_chat_completions"
         );
         assert_eq!(result.model.as_deref(), Some("gpt-4"), "model should be extracted");
     }
@@ -239,7 +291,7 @@ mod tests {
         assert_eq!(
             result.format,
             AiRequestFormat::ChatCompletions,
-            "should be chat_completions"
+            "should be openai_chat_completions"
         );
         assert_eq!(result.stream, Some(true), "stream should be extracted");
     }
@@ -362,6 +414,119 @@ mod tests {
     }
 
     #[test]
+    fn tools_non_empty_array_detected() {
+        let body = br#"{"model":"gpt-4.1","input":"test","tools":[{"type":"function"}]}"#;
+        let result = classify_request_body(body);
+
+        assert!(result.has_tools, "non-empty tools array should be detected");
+    }
+
+    #[test]
+    fn tools_empty_array_not_detected() {
+        let body = br#"{"model":"gpt-4.1","input":"test","tools":[]}"#;
+        let result = classify_request_body(body);
+
+        assert!(!result.has_tools, "empty tools array should not be detected");
+    }
+
+    #[test]
+    fn tools_absent_not_detected() {
+        let body = br#"{"model":"gpt-4.1","input":"test"}"#;
+        let result = classify_request_body(body);
+
+        assert!(!result.has_tools, "absent tools should not be detected");
+    }
+
+    #[test]
+    fn tools_null_not_detected() {
+        let body = br#"{"model":"gpt-4.1","input":"test","tools":null}"#;
+        let result = classify_request_body(body);
+
+        assert!(!result.has_tools, "null tools should not be detected");
+    }
+
+    #[test]
+    fn prompt_id_nested_detected() {
+        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"prompt_id":"pmpt_123"}}"#;
+        let result = classify_request_body(body);
+
+        assert!(result.has_prompt_id, "nested prompt.prompt_id should be detected");
+    }
+
+    #[test]
+    fn prompt_id_absent_not_detected() {
+        let body = br#"{"model":"gpt-4.1","input":"test"}"#;
+        let result = classify_request_body(body);
+
+        assert!(!result.has_prompt_id, "absent prompt should not be detected");
+    }
+
+    #[test]
+    fn prompt_id_null_not_detected() {
+        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"prompt_id":null}}"#;
+        let result = classify_request_body(body);
+
+        assert!(!result.has_prompt_id, "null prompt_id should not be detected");
+    }
+
+    #[test]
+    fn prompt_object_without_prompt_id_not_detected() {
+        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"variables":{"city":"SF"}}}"#;
+        let result = classify_request_body(body);
+
+        assert!(
+            !result.has_prompt_id,
+            "prompt object without id should not set has_prompt_id"
+        );
+    }
+
+    #[test]
+    fn prompt_object_prompt_id_field_detected() {
+        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"prompt_id":"pmpt_123"}}"#;
+        let result = classify_request_body(body);
+
+        assert!(
+            result.has_prompt_id,
+            "prompt.prompt_id should be detected as the prompt identifier"
+        );
+    }
+
+    #[test]
+    fn prompt_string_not_detected_as_prompt_id() {
+        let body = br#"{"model":"gpt-4.1","input":"test","prompt":"some string"}"#;
+        let result = classify_request_body(body);
+
+        assert!(
+            !result.has_prompt_id,
+            "string prompt should not be treated as prompt object"
+        );
+    }
+
+    #[test]
+    fn prompt_object_classifies_as_responses() {
+        let body = br#"{"model":"gpt-4.1","prompt":{"prompt_id":"pmpt_123","variables":{"city":"SF"}}}"#;
+        let result = classify_request_body(body);
+
+        assert_eq!(
+            result.format,
+            AiRequestFormat::Responses,
+            "prompt object should classify as responses even without input"
+        );
+        assert!(result.has_prompt_id, "prompt_id should be detected");
+    }
+
+    #[test]
+    fn top_level_prompt_id_not_detected() {
+        let body = br#"{"model":"gpt-4.1","input":"test","prompt_id":"pmpt_123"}"#;
+        let result = classify_request_body(body);
+
+        assert!(
+            !result.has_prompt_id,
+            "top-level prompt_id should not be detected (must be nested in prompt object)"
+        );
+    }
+
+    #[test]
     fn non_boolean_background_not_detected() {
         let body = br#"{"model":"gpt-4.1","input":"test","background":"true"}"#;
         let result = classify_request_body(body);
@@ -405,6 +570,130 @@ mod tests {
             result.format,
             AiRequestFormat::Responses,
             "input takes precedence when both input and messages are present"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Path Classification
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn get_v1_responses_list_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::GET, "/v1/responses"),
+            "GET /v1/responses is not a public API endpoint"
+        );
+    }
+
+    #[test]
+    fn get_v1_responses_with_id_matches() {
+        assert!(
+            is_responses_path(&http::Method::GET, "/v1/responses/resp_abc123"),
+            "GET /v1/responses/{{id}} should match"
+        );
+    }
+
+    #[test]
+    fn get_v1_responses_input_items_matches() {
+        assert!(
+            is_responses_path(&http::Method::GET, "/v1/responses/resp_abc123/input_items"),
+            "GET /v1/responses/{{id}}/input_items should match"
+        );
+    }
+
+    #[test]
+    fn delete_v1_responses_with_id_matches() {
+        assert!(
+            is_responses_path(&http::Method::DELETE, "/v1/responses/resp_abc123"),
+            "DELETE /v1/responses/{{id}} should match"
+        );
+    }
+
+    #[test]
+    fn post_v1_responses_cancel_matches() {
+        assert!(
+            is_responses_path(&http::Method::POST, "/v1/responses/resp_abc123/cancel"),
+            "POST /v1/responses/{{id}}/cancel should match"
+        );
+    }
+
+    #[test]
+    fn post_v1_responses_input_tokens_matches() {
+        assert!(
+            is_responses_path(&http::Method::POST, "/v1/responses/input_tokens"),
+            "POST /v1/responses/input_tokens should match"
+        );
+    }
+
+    #[test]
+    fn post_v1_responses_compact_matches() {
+        assert!(
+            is_responses_path(&http::Method::POST, "/v1/responses/compact"),
+            "POST /v1/responses/compact should match"
+        );
+    }
+
+    #[test]
+    fn post_v1_responses_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::POST, "/v1/responses"),
+            "POST /v1/responses (create) should not match path classification"
+        );
+    }
+
+    #[test]
+    fn get_v1_responses_cancel_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::GET, "/v1/responses/resp_abc/cancel"),
+            "GET /v1/responses/{{id}}/cancel should not match"
+        );
+    }
+
+    #[test]
+    fn delete_v1_responses_list_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::DELETE, "/v1/responses"),
+            "DELETE /v1/responses (no id) should not match"
+        );
+    }
+
+    #[test]
+    fn get_v1_responses_unknown_sub_resource_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::GET, "/v1/responses/resp_abc/other"),
+            "GET /v1/responses/{{id}}/other should not match"
+        );
+    }
+
+    #[test]
+    fn get_unrelated_path_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::GET, "/v1/chat/completions"),
+            "GET /v1/chat/completions should not match"
+        );
+    }
+
+    #[test]
+    fn get_v1_responses_trailing_slash_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::GET, "/v1/responses/"),
+            "GET /v1/responses/ is not a public API endpoint"
+        );
+    }
+
+    #[test]
+    fn delete_v1_responses_input_items_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::DELETE, "/v1/responses/resp_abc/input_items"),
+            "DELETE /v1/responses/{{id}}/input_items should not match"
+        );
+    }
+
+    #[test]
+    fn get_v1_responses_double_slash_input_items_does_not_match() {
+        assert!(
+            !is_responses_path(&http::Method::GET, "/v1/responses//input_items"),
+            "GET /v1/responses//input_items should not collapse empty id segment"
         );
     }
 

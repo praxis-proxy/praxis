@@ -42,7 +42,7 @@ impl TokenUsage {
     pub fn total_tokens(&self) -> u64;  // from response, or computed: input + output
 }
 
-pub enum Provider {
+pub enum TokenUsageProvider {
     OpenAi,
     Anthropic,
     Google,
@@ -52,7 +52,7 @@ pub enum Provider {
 
 /// Extracts token usage from a provider's JSON response body.
 /// Returns `None` if usage data is missing or malformed.
-pub fn extract_token_usage(provider: Provider, body: &[u8]) -> Option<TokenUsage>;
+pub fn extract_token_usage(provider: TokenUsageProvider, body: &[u8]) -> Option<TokenUsage>;
 ```
 
 ### Goals
@@ -100,6 +100,53 @@ that enables:
 - As a **logging/metrics system**, I need token data in a
   predictable structure, so that I can track usage across all
   providers consistently.
+
+## How?
+
+### Module Location
+
+The module lives at `filter/src/builtins/http/ai/token_usage/` with the
+following structure:
+
+```text
+token_usage/
+├── mod.rs       # Public API: TokenUsage, Provider, extract_token_usage()
+├── providers.rs # Internal parsing logic per provider
+└── tests.rs     # Unit tests
+```
+
+### Implementation Approach
+
+1. **Private fields with public getters** - `TokenUsage` fields are private
+   to allow internal representation changes without breaking the API.
+   The `total_tokens()` getter returns the provider's value if present,
+   otherwise computes `input + output`.
+
+2. **Serde for JSON parsing** - Each provider has internal structs with
+   `#[derive(Deserialize)]` that map to their specific JSON format.
+   Field renaming (e.g., `camelCase`) is handled via serde attributes.
+
+3. **Bedrock dual-format support** - The parser tries Converse API format
+   first (`usage.inputTokens`), then falls back to InvokeModel format
+   (`inputTokenCount` at root level).
+
+4. **All-or-nothing parsing** - `extract_token_usage()` returns
+   `Option<TokenUsage>`. If parsing succeeds, all fields are present.
+   If any required field is missing or JSON is malformed, returns `None`.
+
+### Public API
+
+Exported from `praxis_filter` crate:
+
+```rust
+use praxis_filter::{TokenUsage, TokenUsageProvider, extract_token_usage};
+
+let usage = extract_token_usage(TokenUsageProvider::OpenAi, response_body);
+if let Some(u) = usage {
+    // Access token counts via getters:
+    // u.input_tokens(), u.output_tokens(), u.total_tokens()
+}
+```
 
 ## Open Question
 

@@ -1,12 +1,21 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Responses API format classifier filter.
+//! Responses API filters: format classifier and request validation.
 //!
-//! Classifies request bodies as Responses API, Chat Completions,
-//! unknown JSON, invalid JSON, or non-JSON. Promotes classification
-//! facts to configurable headers, durable metadata, and filter
-//! results for routing. Does not mutate the request body.
+//! Classifies requests as Responses API, Chat Completions, unknown
+//! JSON, invalid JSON, or non-JSON. Requests matching Responses API
+//! sub-resource paths (`/v1/responses/{id}`,
+//! `/v1/responses/{id}/input_items`, `/v1/responses/{id}/cancel`,
+//! `/v1/responses/input_tokens`, `/v1/responses/compact`) are
+//! classified by method and path without inspecting the body.
+//! `POST /v1/responses` (create) is classified by body content.
+//! Promotes classification facts to configurable headers, durable
+//! metadata, and filter results for routing. Does not mutate the
+//! request body.
+//!
+//! The `openai_responses_validate` filter runs after the classifier
+//! to validate parameter combinations and extract additional fields.
 
 pub(crate) mod classifier;
 mod config;
@@ -31,7 +40,7 @@ use bytes::Bytes;
 use tracing::{debug, trace};
 
 use self::{
-    classifier::{AiRequestFormat, classify_request_body},
+    classifier::{AiRequestFormat, classify_request_body, is_responses_path},
     config::{OnInvalidBehavior, ResponsesFormatConfig, build_config},
 };
 
@@ -59,19 +68,20 @@ use crate::{
 /// # YAML
 ///
 /// ```yaml
-/// filter: responses_format
+/// filter: openai_responses_format
 /// ```
 ///
 /// # Full YAML
 ///
 /// ```yaml
-/// filter: responses_format
+/// filter: openai_responses_format
 /// on_invalid: continue
 /// max_body_bytes: 67108864
 /// headers:
 ///   format: x-praxis-ai-format
 ///   model: x-praxis-ai-model
 ///   stream: x-praxis-ai-stream
+///   mode: x-praxis-responses-mode
 /// ```
 pub struct ResponsesFormatFilter {
     /// Parsed and validated configuration.
@@ -87,7 +97,7 @@ impl ResponsesFormatFilter {
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
-        let cfg: ResponsesFormatConfig = parse_filter_config("responses_format", config)?;
+        let cfg: ResponsesFormatConfig = parse_filter_config("openai_responses_format", config)?;
         let validated = build_config(cfg)?;
         Ok(Box::new(Self { config: validated }))
     }
@@ -96,7 +106,7 @@ impl ResponsesFormatFilter {
 #[async_trait]
 impl HttpFilter for ResponsesFormatFilter {
     fn name(&self) -> &'static str {
-        "responses_format"
+        "openai_responses_format"
     }
 
     fn request_body_access(&self) -> BodyAccess {
@@ -128,7 +138,16 @@ impl HttpFilter for ResponsesFormatFilter {
             None => &[],
         };
 
-        let classified = classify_request_body(bytes);
+        let classified = if is_responses_path(&ctx.request.method, ctx.request.uri.path()) {
+            debug!(
+                method = %ctx.request.method,
+                path = ctx.request.uri.path(),
+                "classified request by method and path"
+            );
+            classifier::empty_result(AiRequestFormat::Responses)
+        } else {
+            classify_request_body(bytes)
+        };
 
         debug!(
             format = classified.format.as_str(),
@@ -140,9 +159,11 @@ impl HttpFilter for ResponsesFormatFilter {
             return Ok(action);
         }
 
-        write_metadata(ctx, &classified);
-        promote_headers(ctx, &classified, &self.config);
-        promote_filter_results(ctx, &classified)?;
+        let mode = compute_mode(&classified);
+
+        write_metadata(ctx, &classified, mode);
+        promote_headers(ctx, &classified, &self.config, mode);
+        promote_filter_results(ctx, &classified, mode)?;
 
         Ok(FilterAction::Release)
     }
@@ -176,35 +197,74 @@ fn handle_invalid_format(format: AiRequestFormat, config: &ResponsesFormatConfig
     }
 }
 
-/// Write durable metadata that persists across all Pingora lifecycle phases.
-fn write_metadata(ctx: &mut HttpFilterContext<'_>, classified: &classifier::ClassifiedRequest) {
-    let format_str = classified.format.as_str();
-    ctx.set_metadata("responses_format.format", format_str);
+/// Determine the routing mode for a Responses API request.
+///
+/// Returns `Some("stateful")` when the request needs orchestration
+/// (conversation history, tools, persistence, or background processing)
+/// and `Some("stateless")` when it can be forwarded directly to a
+/// native Responses backend. Returns `None` for non-Responses formats.
+fn compute_mode(classified: &classifier::ClassifiedRequest) -> Option<&'static str> {
+    if classified.format != AiRequestFormat::Responses {
+        return None;
+    }
+    // OpenAI spec: store defaults to true when omitted
+    let stateful = classified.has_previous_response_id
+        || classified.has_tools
+        || classified.store.unwrap_or(true)
+        || classified.background == Some(true)
+        || classified.has_conversation
+        || classified.has_prompt_id;
+    Some(if stateful { "stateful" } else { "stateless" })
+}
 
+/// Write durable metadata that persists across all Pingora lifecycle phases.
+fn write_metadata(ctx: &mut HttpFilterContext<'_>, classified: &classifier::ClassifiedRequest, mode: Option<&str>) {
+    ctx.set_metadata("openai_responses_format.format", classified.format.as_str());
+    write_optional_metadata(ctx, classified);
+    write_boolean_metadata(ctx, classified);
+
+    if let Some(m) = mode {
+        ctx.set_metadata("openai_responses_format.mode", m);
+    }
+}
+
+/// Write optional string and boolean-option metadata fields.
+fn write_optional_metadata(ctx: &mut HttpFilterContext<'_>, classified: &classifier::ClassifiedRequest) {
     if let Some(model) = &classified.model
         && is_safe_promoted_value(model)
     {
-        ctx.set_metadata("responses_format.model", model.clone());
+        ctx.set_metadata("openai_responses_format.model", model.clone());
     }
 
     if let Some(stream) = classified.stream {
-        ctx.set_metadata("responses_format.stream", if stream { "true" } else { "false" });
+        ctx.set_metadata("openai_responses_format.stream", if stream { "true" } else { "false" });
     }
 
     if let Some(store) = classified.store {
-        ctx.set_metadata("responses_format.store", if store { "true" } else { "false" });
+        ctx.set_metadata("openai_responses_format.store", if store { "true" } else { "false" });
     }
 
     if let Some(background) = classified.background {
-        ctx.set_metadata("responses_format.background", if background { "true" } else { "false" });
+        ctx.set_metadata(
+            "openai_responses_format.background",
+            if background { "true" } else { "false" },
+        );
     }
+}
 
+/// Write boolean presence flags to metadata.
+fn write_boolean_metadata(ctx: &mut HttpFilterContext<'_>, classified: &classifier::ClassifiedRequest) {
     if classified.has_previous_response_id {
-        ctx.set_metadata("responses_format.has_previous_response_id", "true");
+        ctx.set_metadata("openai_responses_format.has_previous_response_id", "true");
     }
-
     if classified.has_conversation {
-        ctx.set_metadata("responses_format.has_conversation", "true");
+        ctx.set_metadata("openai_responses_format.has_conversation", "true");
+    }
+    if classified.has_tools {
+        ctx.set_metadata("openai_responses_format.has_tools", "true");
+    }
+    if classified.has_prompt_id {
+        ctx.set_metadata("openai_responses_format.has_prompt_id", "true");
     }
 }
 
@@ -213,6 +273,7 @@ fn promote_headers(
     ctx: &mut HttpFilterContext<'_>,
     classified: &classifier::ClassifiedRequest,
     config: &ResponsesFormatConfig,
+    mode: Option<&str>,
 ) {
     if let Some(header) = &config.headers.format {
         let format_str = classified.format.as_str();
@@ -236,17 +297,39 @@ fn promote_headers(
         ctx.extra_request_headers
             .push((Cow::Owned(header.clone()), val.to_owned()));
     }
+
+    if let Some(header) = &config.headers.mode
+        && let Some(m) = mode
+    {
+        ctx.extra_request_headers
+            .push((Cow::Owned(header.clone()), m.to_owned()));
+    }
 }
 
 /// Promote classification facts to filter results for branch conditions.
 fn promote_filter_results(
     ctx: &mut HttpFilterContext<'_>,
     classified: &classifier::ClassifiedRequest,
+    mode: Option<&'static str>,
 ) -> Result<(), FilterError> {
-    let results = ctx.filter_results.entry("responses_format").or_default();
+    let results = ctx.filter_results.entry("openai_responses_format").or_default();
 
     results.set("format", classified.format.as_str())?;
+    promote_optional_results(results, classified)?;
+    promote_boolean_results(results, classified)?;
 
+    if let Some(m) = mode {
+        results.set("mode", m)?;
+    }
+
+    Ok(())
+}
+
+/// Promote optional string and boolean-option fields to filter results.
+fn promote_optional_results(
+    results: &mut crate::results::FilterResultSet,
+    classified: &classifier::ClassifiedRequest,
+) -> Result<(), FilterError> {
     if let Some(model) = &classified.model
         && is_safe_promoted_value(model)
         && model.len() <= MAX_PROMOTED_VALUE_LEN
@@ -266,13 +349,32 @@ fn promote_filter_results(
         results.set("background", if background { "true" } else { "false" })?;
     }
 
+    Ok(())
+}
+
+/// Promote boolean presence flags to filter results.
+fn promote_boolean_results(
+    results: &mut crate::results::FilterResultSet,
+    classified: &classifier::ClassifiedRequest,
+) -> Result<(), FilterError> {
     if classified.has_previous_response_id {
         results.set("has_previous_response_id", "true")?;
     }
-
     if classified.has_conversation {
         results.set("has_conversation", "true")?;
+    }
+    if classified.has_tools {
+        results.set("has_tools", "true")?;
+    }
+    if classified.has_prompt_id {
+        results.set("has_prompt_id", "true")?;
     }
 
     Ok(())
 }
+
+#[cfg(feature = "ai-inference")]
+pub(crate) mod request_validate;
+
+#[cfg(feature = "ai-inference")]
+pub use request_validate::OpenaiResponsesValidateFilter;
