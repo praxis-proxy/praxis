@@ -1,6 +1,6 @@
 ---
 issue: https://github.com/praxis-proxy/praxis/issues/412
-status: proposed
+status: holding # WIP but no priority yet, we expect to come back to this soon
 authors:
   - rikatz
 graduation_criteria:
