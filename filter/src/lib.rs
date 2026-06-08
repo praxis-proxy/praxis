@@ -25,6 +25,8 @@ pub use actions::{FilterAction, Rejection};
 pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
 #[cfg(feature = "ai-inference")]
+pub use builtins::OpenaiResponsesValidateFilter;
+#[cfg(feature = "ai-inference")]
 pub use builtins::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
 pub use builtins::ResponsesFormatFilter;
@@ -276,6 +278,7 @@ pub(crate) mod test_utils {
             response_headers_modified: false,
             rewritten_path: None,
             selected_endpoint_index: None,
+            time_source: &praxis_core::time::SystemTimeSource,
             upstream: None,
         }
     }

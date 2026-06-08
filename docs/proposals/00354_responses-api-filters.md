@@ -1,5 +1,6 @@
 ---
 issue: https://github.com/praxis-proxy/praxis/issues/354
+discussion: https://github.com/praxis-proxy/praxis/pull/445
 status: proposed
 authors:
   - leseb
@@ -161,8 +162,8 @@ Request arrives at POST /v1/responses
     - tools array is non-empty
     - store = true (default)
     - background = true
-    - conversation_id is set
-    - prompt_id is set
+    - conversation is set
+    - prompt.id is set
 
   IF none are true AND backend speaks Responses API → PASS-THROUGH:
     - Forward request body unchanged to backend /v1/responses
@@ -175,7 +176,7 @@ Request arrives at POST /v1/responses
 
 **What #361 promotes to headers for downstream routing:**
 - `x-praxis-api-format: openai_responses | openai_chat_completions` — detected API format
-- `x-praxis-responses-mode: passthrough | stateful` — routing decision
+- `x-praxis-responses-mode: stateless | stateful` — routing decision
 - Model name extracted from body for cluster routing
 
 **Pass-through config example:**
@@ -198,7 +199,7 @@ routes:
     cluster: vllm-backend
 ```
 
-When `mode=stateful`, traffic enters our filter chain. When `mode=passthrough` (default/no match), Praxis proxies directly to the vLLM cluster — no filters touch the request or response.
+When `mode=stateful`, traffic enters our filter chain. When `mode=stateless` (default/no match), Praxis proxies directly to the vLLM cluster — no filters touch the request or response.
 
 ---
 
@@ -290,7 +291,7 @@ Proxy-needed fields (read and act upon):
 - `store` + `background` — reject `background=true && store=false`
 - `model` — read for routing decisions (use default if null/omitted)
 - `previous_response_id` — triggers rehydration in downstream filters
-- `conversation_id` — triggers conversation context loading
+- `conversation` — triggers conversation context loading
 - `tools` — proxy needs to read tool types to know which tool backends to invoke
 - `tool_choice` — proxy reads to determine tool dispatch behavior
 - `instructions` — preserved in state (do NOT inject as system message — in pass-through mode the inference server handles it; in conversion mode `responses_proxy` injects it during Responses → Chat Completions transformation)
@@ -365,7 +366,7 @@ database_url: ${DATABASE_URL}  # e.g. postgres://user:pass@host:5432/db or sqlit
 
 #### Filter 2: `rehydrate`
 
-**Purpose:** Load conversation context from `previous_response_id` or `conversation_id`. Reconstruct message history. Recover MCP tool listings from previous responses.
+**Purpose:** Load conversation context from `previous_response_id` or `conversation`. Reconstruct message history. Recover MCP tool listings from previous responses.
 
 **Praxis trait methods:**
 - `on_request` — read metadata, fetch from store, write enriched messages
@@ -378,7 +379,7 @@ database_url: ${DATABASE_URL}  # e.g. postgres://user:pass@host:5432/db or sqlit
   - Extract `previous_usage` for auto-compaction
   - Recover MCP tool listings from previous output items
   - Concatenate previous input + output, then append current input — the inference server sees exactly the same items it produced as output on the previous turn, plus the new user content
-- If `conversation_id` (no previous_response_id): fetch stored conversation messages, append current input
+- If `conversation` (no previous_response_id): fetch stored conversation messages, append current input
 - If neither: pass current input through as-is
 - Fallback: if stored messages missing (backward compat), reconstruct from public objects
 
@@ -998,7 +999,7 @@ Build order, each tier produces a working system:
 | Tier | Filters | What works after | External deps |
 |------|---------|-----------------|---------------|
 | 0 | `request_validate`, `response_store`, `responses_proxy`, `stream_events` | Stateless proxy with persistence. Text streaming. CRUD works. | Inference backend, SQL |
-| 1 | + `rehydrate` | Multi-turn via `previous_response_id` and `conversation_id`. | None (reads from response_store) |
+| 1 | + `rehydrate` | Multi-turn via `previous_response_id` and `conversation`. | None (reads from response_store) |
 | 2 | + `tool_parse`, `tool_dispatch` | Tool definitions parsed, loop control. Client-side function tools. | None |
 | 3 | + `web_search` | Server-side web search tool execution. | Search API (Brave/Tavily) |
 | 4 | + `mcp_tool` | MCP server-side tool execution with session reuse and approval. | MCP servers, #24 foundation |
@@ -1189,7 +1190,7 @@ The following filters are part of the full Responses API vision but require back
 
 #### `prompt_resolve`
 
-**Purpose:** Resolve `prompt_id` (with optional version) to system instructions. Handle variable substitution and media variables.
+**Purpose:** Resolve `prompt.id` (with optional version) to system instructions. Handle variable substitution and media variables.
 
 **Requires:** A Prompts API service that stores prompt templates with versions, variables, and media content. Praxis needs either a built-in prompt store or an external Prompts API endpoint.
 
@@ -1201,7 +1202,7 @@ The following filters are part of the full Responses API vision but require back
 - For media variables: insert `[Image: var_name]` placeholder in system message, append actual media as separate user message
 - Prompt system message prepended before `instructions` system message
 
-**MVP workaround:** Users pass `instructions` directly in the request instead of referencing a `prompt_id`. The `request_validate` filter already handles `instructions` injection as a system message.
+**MVP workaround:** Users pass `instructions` directly in the request instead of referencing `prompt.id`. The `request_validate` filter already handles `instructions` injection as a system message.
 
 
 

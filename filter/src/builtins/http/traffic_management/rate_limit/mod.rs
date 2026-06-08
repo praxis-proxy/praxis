@@ -197,7 +197,7 @@ impl HttpFilter for RateLimitFilter {
                     client = ?ctx.client_addr,
                     "rate_limit: rejecting request (429)"
                 );
-                let (headers, retry_secs) = self.rate_limit_headers(remaining);
+                let (headers, retry_secs) = self.rate_limit_headers(remaining, ctx.time_source);
 
                 let mut rejection = Rejection::status(429).with_header("Retry-After", format!("{retry_secs}"));
                 for (name, value) in headers {
@@ -210,7 +210,7 @@ impl HttpFilter for RateLimitFilter {
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let remaining = self.current_remaining(ctx.client_addr);
-        let (headers, _retry_secs) = self.rate_limit_headers(remaining);
+        let (headers, _retry_secs) = self.rate_limit_headers(remaining, ctx.time_source);
 
         if let Some(ref mut resp) = ctx.response_header {
             for (name, value) in &headers {

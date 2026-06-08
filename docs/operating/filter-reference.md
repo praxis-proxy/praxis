@@ -40,12 +40,18 @@ and the [extensions guide](../filters/extensions.md).
 
 ## Router
 
-Routes requests to clusters by path prefix. Longest prefix
-wins. Optional `host` restricts matching to a specific
-`Host` header. Optional `headers` restricts matching to
-requests with all specified header values present (AND
-semantics, case-sensitive). Routes without `host` match
-any host.
+Selects a cluster by matching path prefix, host, and
+headers. It sets `ctx.cluster` but does not pick an
+endpoint or forward the request. The `load_balancer`
+filter (below) reads `ctx.cluster` to select an endpoint
+and set `ctx.upstream`. Together: the router decides
+*where*, the load balancer decides *which one*.
+
+Longest prefix wins. Optional `host` restricts matching
+to a specific `Host` header. Optional `headers` restricts
+matching to requests with all specified header values
+present (AND semantics, case-sensitive). Routes without
+`host` match any host.
 
 Example configs: [path-based-routing.yaml],
 [hosts.yaml], [canary-routing.yaml].
@@ -55,6 +61,11 @@ Example configs: [path-based-routing.yaml],
 [canary-routing.yaml]: ../../examples/configs/traffic-management/canary-routing.yaml
 
 ## Load Balancing
+
+Reads `ctx.cluster` (set by the `router` filter) and
+selects a specific endpoint within that cluster, writing
+`ctx.upstream`. The protocol adapter layer then forwards
+the request to the selected endpoint.
 
 Strategies:
 

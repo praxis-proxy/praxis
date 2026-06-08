@@ -100,7 +100,10 @@ coding style guide. Key points:
 - Prefer `to_owned()` over `to_string()` for
   `&str` to `String`
 - Use inline format args: `format!("{var}")`
-- Use let-chains, `is_some_and()`, `strip_prefix()`
+- Use let-chains, `is_some_and()`, `strip_prefix()`,
+  `filter()`, `map()`; prefer `Option`/`Result`
+  combinator chains over `if/else` blocks when the
+  logic is a linear transform
 - Reference-style rustdoc links, not inline
 - Do not document memory efficiency in rustdoc
   (e.g. "avoids allocation", "zero-copy", "cheap
@@ -220,12 +223,28 @@ Branches rejoin at configurable points (next,
 terminal, named filter, re-entrance with iteration
 limits).
 
+## Terminology: Routing vs Pipelining
+
+These two concepts are distinct, take care to not conflate them.
+
+- **Routing** (runtime): the `router` filter selects
+  an upstream cluster at request time based on path,
+  host, and headers. This decides *where* a request
+  goes.
+- **Pipelining** (config-time): the operator composes
+  named filter chains per listener; chains are
+  resolved and concatenated into a single
+  `FilterPipeline` at startup. This decides *what
+  processing* a request receives. Branch chains add
+  conditional paths within a pipeline.
+
 ## Key Patterns
 
-- **Classify → route**: classifier filters promote
-  facts to internal headers (`x-praxis-ai-*`) and
-  the router matches those headers to select
-  clusters. See
+- **Classify → route → branch**: classifier filters
+  promote facts to internal headers
+  (`x-praxis-ai-*`) and the router matches those
+  headers to select clusters (routing). Branch
+  chains split pipelines (pipelining). See
   `examples/configs/ai/openai/responses/format-routing.yaml`.
 - **Branch on filter results**: branch chains split
   or rejoin request-phase pipelines based on filter

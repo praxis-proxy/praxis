@@ -452,6 +452,20 @@ fn eviction_reclaims_below_soft_cap() {
     );
 }
 
+#[test]
+fn rate_limit_headers_saturate_near_u64_max() {
+    let ts = praxis_core::time::FixedTimeSource::new(std::time::Duration::from_secs(u64::MAX - 1));
+    let filter = make_filter("global", 10.0, 10);
+    let (headers, _retry_secs) = filter.rate_limit_headers(0.0, &ts);
+    let reset_val = &headers.iter().find(|(n, _)| *n == "X-RateLimit-Reset").unwrap().1;
+    let reset_unix: u64 = reset_val.parse().expect("X-RateLimit-Reset should be numeric");
+    assert_eq!(
+        reset_unix,
+        u64::MAX,
+        "reset should saturate to u64::MAX instead of wrapping"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------

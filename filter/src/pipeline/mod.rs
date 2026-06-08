@@ -31,10 +31,13 @@ mod tcp;
 )]
 mod tests;
 
+use std::sync::Arc;
+
 use praxis_core::{
     config::{ABSOLUTE_MAX_BODY_BYTES, FailureMode, InsecureOptions},
     health::HealthRegistry,
     kv::KvStoreRegistry,
+    time::TimeSource,
 };
 use tracing::warn;
 
@@ -73,6 +76,9 @@ pub struct FilterPipeline {
 
     /// Named key-value stores for runtime mappings.
     kv_stores: Option<KvStoreRegistry>,
+
+    /// Wall-clock time source for filters that need timestamps.
+    time_source: Arc<dyn TimeSource>,
 }
 
 impl FilterPipeline {
@@ -172,6 +178,16 @@ impl FilterPipeline {
     /// Set the shared [`KvStoreRegistry`] for this pipeline.
     pub fn set_kv_stores(&mut self, stores: KvStoreRegistry) {
         self.kv_stores = Some(stores);
+    }
+
+    /// The wall-clock time source.
+    pub fn time_source(&self) -> &dyn TimeSource {
+        &*self.time_source
+    }
+
+    /// Override the [`TimeSource`] for this pipeline.
+    pub fn set_time_source(&mut self, source: Arc<dyn TimeSource>) {
+        self.time_source = source;
     }
 
     /// Apply [`InsecureOptions`] to all filters in the pipeline.

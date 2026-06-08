@@ -18,3 +18,8 @@ updates:
     directory: "/"
     schedule:
       interval: "weekly"
+
+  - package-ecosystem: "github-actions"
+    directory: ".github/actions/install-nightly-rust"
+    schedule:
+      interval: "weekly"

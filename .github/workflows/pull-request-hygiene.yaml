@@ -62,12 +62,12 @@ jobs:
       issues: read
       pull-requests: write
     steps:
-      - name: Close draft PRs inactive for 7 days
+      - name: Close draft PRs inactive for 5 days
         env:
           GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
           GH_REPO: ${{ github.repository }}
         run: |
-          threshold=$(date -u -d "7 days ago" +%Y-%m-%dT%H:%M:%SZ)
+          threshold=$(date -u -d "5 days ago" +%Y-%m-%dT%H:%M:%SZ)
 
           prs=$(gh pr list --base main --state open --limit 100 \
             --json number,isDraft,labels \
@@ -88,7 +88,7 @@ jobs:
             fi
 
             if [[ "$last_activity" < "$threshold" ]]; then
-              gh pr close "$number" --comment "Closed: inactive for 7 days. Please re-open if there's more to do."
+              gh pr close "$number" --comment "Closed: inactive for 5 days. Please re-open if there's more to do."
             fi
           done
 
@@ -102,12 +102,12 @@ jobs:
       issues: read
       pull-requests: write
     steps:
-      - name: Close non-draft PRs inactive for 14 days
+      - name: Close non-draft PRs inactive for 7 days
         env:
           GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
           GH_REPO: ${{ github.repository }}
         run: |
-          threshold=$(date -u -d "14 days ago" +%Y-%m-%dT%H:%M:%SZ)
+          threshold=$(date -u -d "7 days ago" +%Y-%m-%dT%H:%M:%SZ)
 
           prs=$(gh pr list --base main --state open --limit 100 \
             --json number,isDraft,labels \
@@ -128,6 +128,6 @@ jobs:
             fi
 
             if [[ "$last_activity" < "$threshold" ]]; then
-              gh pr close "$number" --comment "Closed: inactive for 14 days. Please re-open if there's more to do."
+              gh pr close "$number" --comment "Closed: inactive for 7 days. Please re-open if there's more to do."
             fi
           done

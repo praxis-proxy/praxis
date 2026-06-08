@@ -88,24 +88,28 @@ pattern. A few highlights:
 [conditional-filters.yaml]: ../../examples/configs/pipeline/conditional-filters.yaml
 [production-gateway.yaml]: ../../examples/configs/operations/production-gateway.yaml
 
-## Filter Chains
+## Filter Chains (Pipelining)
 
 Filter chains are named, reusable groups of filters defined
 at the top level of the config. A listener references one or
 more chains by name; the filters are concatenated in order
-to form that listener's pipeline.
+to form that listener's pipeline. This config-time assembly
+is called **pipelining** — it decides *what processing* a
+request receives. It is distinct from **routing**, where
+the `router` filter selects an upstream cluster at request
+time.
 
 ```mermaid
 flowchart LR
     subgraph "Listener: public"
         direction LR
         S["security chain"] --> O["observability chain"]
-        O --> R["routing chain"]
+        O --> R["traffic chain"]
     end
 
     subgraph "Listener: internal"
         direction LR
-        O1["observability chain"] --> R2["routing chain"]
+        O1["observability chain"] --> R2["traffic chain"]
     end
 ```
 

@@ -5,7 +5,7 @@
 
 use std::{collections::HashMap, mem, sync::Arc};
 
-use praxis_core::config::FilterEntry;
+use praxis_core::{config::FilterEntry, time::SystemTimeSource};
 use tracing::{debug, warn};
 
 use super::{FilterPipeline, body::compute_body_capabilities, filter::PipelineFilter};
@@ -53,6 +53,7 @@ impl FilterPipeline {
             filters,
             health_registry: None,
             kv_stores: None,
+            time_source: Arc::new(SystemTimeSource),
         })
     }
 
@@ -82,6 +83,7 @@ impl FilterPipeline {
             filters,
             health_registry: None,
             kv_stores: None,
+            time_source: Arc::new(SystemTimeSource),
         })
     }
 

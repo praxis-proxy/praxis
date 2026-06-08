@@ -445,6 +445,7 @@ mod tests {
             filters,
             health_registry: None,
             kv_stores: None,
+            time_source: Arc::new(praxis_core::time::SystemTimeSource),
         }
     }
 
