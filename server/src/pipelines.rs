@@ -77,6 +77,7 @@ pub fn resolve_pipelines(
 
 /// Run pipeline ordering validation; either fail or warn depending
 /// on the `skip` flag.
+#[allow(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
 fn validate_pipeline(
     pipeline: &FilterPipeline,
     entries: &[praxis_core::config::FilterEntry],

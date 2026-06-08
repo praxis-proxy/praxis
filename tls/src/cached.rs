@@ -52,17 +52,7 @@ impl CachedCaCerts {
     ///
     /// [`TlsError`]: crate::TlsError
     pub fn from_pem_file(ca_path: &str) -> Result<Self, TlsError> {
-        tracing::debug!(ca_path, "loading CA certificates");
-
-        let certs = parse_cert_pem(ca_path)?;
-
-        if certs.is_empty() {
-            return Err(TlsError::FileLoadError {
-                path: ca_path.to_owned(),
-                detail: "no certificates found in CA file".to_owned(),
-            });
-        }
-
+        let certs = load_and_validate_certs(ca_path, "CA")?;
         tracing::info!(ca_path, count = certs.len(), "cached CA certificates");
         Ok(Self::new(certs))
     }
@@ -121,19 +111,8 @@ impl CachedClientCert {
     ///
     /// [`TlsError`]: crate::TlsError
     pub fn from_pem_files(cert_path: &str, key_path: &str) -> Result<Self, TlsError> {
-        tracing::debug!(cert_path, key_path, "loading client certificate");
-
-        let cert_der = parse_cert_pem(cert_path)?;
-
-        if cert_der.is_empty() {
-            return Err(TlsError::FileLoadError {
-                path: cert_path.to_owned(),
-                detail: "no certificates found in client cert file".to_owned(),
-            });
-        }
-
+        let cert_der = load_and_validate_certs(cert_path, "client cert")?;
         let key_der = parse_key_pem(key_path)?;
-
         tracing::info!(cert_path, "cached client certificate");
         Ok(Self::new(cert_der, key_der))
     }
@@ -236,6 +215,20 @@ impl CachedClusterTls {
 // -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
+
+/// Read a PEM certificate file, parse its certificates, and validate
+/// that at least one is present.
+fn load_and_validate_certs(path: &str, context: &str) -> Result<Vec<Vec<u8>>, TlsError> {
+    tracing::debug!(path, context, "loading certificates");
+    let certs = parse_cert_pem(path)?;
+    if certs.is_empty() {
+        return Err(TlsError::FileLoadError {
+            path: path.to_owned(),
+            detail: format!("no certificates found in {context} file"),
+        });
+    }
+    Ok(certs)
+}
 
 /// Read a PEM certificate file and return DER-encoded certificate bytes.
 fn parse_cert_pem(cert_path: &str) -> Result<Vec<Vec<u8>>, TlsError> {

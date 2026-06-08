@@ -149,15 +149,7 @@ async fn watch_loop(
 ///
 /// [`RecommendedWatcher`]: notify::RecommendedWatcher
 fn setup_watcher(tx: mpsc::Sender<()>, cert_dir: &Path, key_dir: &Path) -> Result<RecommendedWatcher, notify::Error> {
-    let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| match res {
-        Ok(event) if is_relevant_event(event.kind) && tx.try_send(()).is_err() => {
-            tracing::trace!("cert watcher channel full, event coalesced by debounce");
-        },
-        Err(e) => {
-            tracing::warn!(error = %e, "file watcher error");
-        },
-        _ => {},
-    })?;
+    let mut watcher = notify::recommended_watcher(move |res| handle_watch_event(res, &tx))?;
 
     watcher.watch(cert_dir, RecursiveMode::NonRecursive)?;
     if cert_dir != key_dir {
@@ -165,6 +157,23 @@ fn setup_watcher(tx: mpsc::Sender<()>, cert_dir: &Path, key_dir: &Path) -> Resul
     }
 
     Ok(watcher)
+}
+
+/// Dispatch a filesystem watcher event, forwarding relevant changes
+/// to the reload channel.
+fn handle_watch_event(res: Result<notify::Event, notify::Error>, tx: &mpsc::Sender<()>) {
+    match res {
+        Ok(event) if is_relevant_event(event.kind) => try_notify(tx),
+        Err(e) => tracing::warn!(error = %e, "file watcher error"),
+        _ => {},
+    }
+}
+
+/// Send a notification to the reload channel, logging if full.
+fn try_notify(tx: &mpsc::Sender<()>) {
+    if tx.try_send(()).is_err() {
+        tracing::trace!("cert watcher channel full, event coalesced by debounce");
+    }
 }
 
 /// Drain pending events and sleep for the debounce window.

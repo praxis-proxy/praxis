@@ -92,19 +92,28 @@ fn build_server_conf(shutdown_timeout_secs: u64, threads: usize, runtime: &Runti
         conf.upstream_keepalive_pool_size = pool_size;
     }
 
+    apply_upstream_ca(&mut conf, runtime);
+    warn_unsupported_global_queue_interval(runtime);
+
+    conf
+}
+
+/// Apply the upstream CA file to the server config, if configured.
+fn apply_upstream_ca(conf: &mut ServerConf, runtime: &RuntimeOptions) {
     if let Some(ref ca_file) = runtime.upstream_ca_file {
         info!(ca_file, "setting global upstream CA file (replaces system trust store)");
         conf.ca_file = Some(ca_file.clone());
     }
+}
 
+/// Warn if `global_queue_interval` is configured but unsupported.
+fn warn_unsupported_global_queue_interval(runtime: &RuntimeOptions) {
     if runtime.global_queue_interval.is_some_and(|v| v != 61) {
         tracing::warn!(
             interval = ?runtime.global_queue_interval,
             "global_queue_interval is configured but not yet supported by Pingora's ServerConf"
         );
     }
-
-    conf
 }
 
 // -----------------------------------------------------------------------------

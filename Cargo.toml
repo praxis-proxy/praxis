@@ -40,13 +40,13 @@ arc-swap = "1.9.1"
 async-trait = "0.1.89"
 benchmarks = { path = "benchmarks" }
 bytes = "1.11.1"
-chrono = { version = "0.4.44", default-features = false, features = ["clock"] }
+chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 dashmap = "6.2.1"
 clap = { version = "4.6.1", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 futures = "0.3.32"
 h2 = "0.4.14"
-http = "1.4.1"
+http = "1.4.2"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "user"] }
@@ -58,9 +58,9 @@ pingora-proxy = { version = "0.8.0", git = "https://github.com/praxis-proxy/ping
 percent-encoding = "2.3.2"
 praxis-ext-proc = { version = "0.3.1", path = "filter/ext-proc", package = "praxis-proxy-ext-proc" }
 praxis-proto = { version = "0.3.1", path = "filter/proto", package = "praxis-proxy-proto" }
-prost = "0.14.3"
-prost-build = "0.14.3"
-prost-types = "0.14.3"
+prost = "0.14.4"
+prost-build = "0.14.4"
+prost-types = "0.14.4"
 prost-wkt-types = { version = "0.7.1", features = ["vendored-protox"] }
 protox = "0.9.1"
 rand = "0.9.4"
@@ -79,6 +79,7 @@ rustls = "0.23.40"
 rustls-pemfile = "2.2.0"
 # NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.
 serde_yaml = { package = "yaml_serde", version = "0.10.4" }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
 tempfile = "3.27.0"
 tokio-rustls = "0.26.4"
 tokio-tungstenite = "0.29.0"
