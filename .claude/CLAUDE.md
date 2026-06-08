@@ -100,7 +100,10 @@ coding style guide. Key points:
 - Prefer `to_owned()` over `to_string()` for
   `&str` to `String`
 - Use inline format args: `format!("{var}")`
-- Use let-chains, `is_some_and()`, `strip_prefix()`
+- Use let-chains, `is_some_and()`, `strip_prefix()`,
+  `filter()`, `map()`; prefer `Option`/`Result`
+  combinator chains over `if/else` blocks when the
+  logic is a linear transform
 - Reference-style rustdoc links, not inline
 - Do not document memory efficiency in rustdoc
   (e.g. "avoids allocation", "zero-copy", "cheap
