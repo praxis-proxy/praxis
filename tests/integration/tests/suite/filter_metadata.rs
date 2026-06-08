@@ -7,8 +7,7 @@ use bytes::Bytes;
 use praxis_core::config::Config;
 use praxis_filter::{BodyAccess, FilterAction, FilterError, HttpFilter, HttpFilterContext};
 use praxis_test_utils::{
-    custom_filter_yaml, free_port, parse_header, registry_with, start_echo_backend_with_shutdown,
-    start_proxy_with_registry,
+    custom_filter_yaml, free_port, parse_header, registry_with, start_echo_backend, start_proxy_with_registry,
 };
 
 // ---------------------------------------------------------------------------
@@ -17,7 +16,7 @@ use praxis_test_utils::{
 
 #[test]
 fn metadata_written_in_request_body_survives_to_response_phase() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend_port, "test_metadata_writer")).unwrap();
@@ -41,7 +40,7 @@ fn metadata_written_in_request_body_survives_to_response_phase() {
 
 #[test]
 fn metadata_not_set_when_no_body_sent() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
     let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend_port, "test_metadata_writer")).unwrap();

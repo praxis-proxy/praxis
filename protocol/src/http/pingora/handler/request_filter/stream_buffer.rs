@@ -135,23 +135,21 @@ pub(super) async fn pre_read_body(
         // size even when a ReadWrite filter shrinks or grows the body.
         original_body_bytes += downstream_chunk_len;
 
-        if !released
-            && let Some(ref b) = body
+        if let Some(ref b) = body
             && buffer.push(b.clone()).is_err()
         {
             return Err(PreReadError::Rejected(Rejection::status(413)));
         }
 
-        // At EOS, deliver the accumulated body to filters so they
-        // can inspect or transform the complete payload.
-        if end_of_stream && !released {
+        // At EOS, deliver the accumulated body to filters so
+        // body writers receive the complete payload — even when
+        // a read-only filter returned Release before EOS.
+        if end_of_stream {
             body = Some(buffer.freeze());
             buffer = BodyBuffer::new(max_bytes);
         }
 
-        // Seed body byte accounting so filters see accumulated downstream
-        // bytes during pre-read without double-counting the synthetic EOS body.
-        ctx.request_body_bytes = if end_of_stream && !released {
+        ctx.request_body_bytes = if end_of_stream {
             0
         } else {
             original_body_bytes.saturating_sub(downstream_chunk_len)

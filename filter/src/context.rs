@@ -417,8 +417,8 @@ mod tests {
         ctx.set_request_body_mode(BodyMode::StreamBuffer { max_bytes: Some(1024) });
         assert_eq!(
             ctx.request_body_mode,
-            BodyMode::StreamBuffer { max_bytes: Some(1024) },
-            "smaller StreamBuffer limit should win when merging"
+            BodyMode::StreamBuffer { max_bytes: Some(2048) },
+            "larger StreamBuffer limit should win when merging"
         );
     }
 

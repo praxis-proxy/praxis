@@ -30,7 +30,8 @@ fn cross_chain_flat_pipeline_builds() {
 
 #[test]
 fn cross_chain_flat_preprocessing_adds_header() {
-    let backend_port = start_header_echo_backend();
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let config = crate::example_utils::load_example_config(
         "branching/cross-chain-flat.yaml",

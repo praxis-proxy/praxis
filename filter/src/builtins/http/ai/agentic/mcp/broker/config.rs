@@ -5,6 +5,7 @@
 
 use serde::Deserialize;
 
+use super::super::protocol::{self, ProtocolProfile};
 use crate::{FilterError, builtins::http::transformation::has_dot_dot_traversal};
 
 // -----------------------------------------------------------------------------
@@ -79,6 +80,12 @@ pub(super) struct McpServerConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct McpBrokerConfig {
+    /// Fallback MCP protocol version returned in broker `initialize`
+    /// responses when the client's requested version is not supported.
+    /// Must be present in `supported_versions` and implemented by this
+    /// build. Defaults to [`protocol::DEFAULT_VERSION`].
+    #[serde(default = "default_version")]
+    pub default_version: String,
     /// Behavior when a tool has an invalid schema.
     #[serde(default)]
     pub invalid_tool_policy: InvalidToolPolicy,
@@ -88,9 +95,19 @@ pub(super) struct McpBrokerConfig {
     /// Public MCP path handled by Praxis.
     #[serde(default = "default_path")]
     pub path: String,
+    /// Protocol profile governing session semantics and header
+    /// requirements for this broker instance.
+    #[serde(default)]
+    pub protocol_profile: ProtocolProfile,
     /// Backend server definitions.
     #[serde(default)]
     pub servers: Vec<McpServerConfig>,
+    /// Protocol versions accepted during `initialize` negotiation.
+    /// Every entry must be implemented by this build (present in
+    /// [`protocol::SUPPORTED_VERSIONS`]). Defaults to the versions
+    /// this build implements.
+    #[serde(default = "default_supported_versions")]
+    pub supported_versions: Vec<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -133,6 +150,16 @@ fn default_max_body_bytes() -> usize {
     DEFAULT_MAX_BODY_BYTES
 }
 
+/// Default protocol version from the centralized constant.
+fn default_version() -> String {
+    protocol::DEFAULT_VERSION.to_owned()
+}
+
+/// Default supported versions from the centralized constant.
+fn default_supported_versions() -> Vec<String> {
+    protocol::SUPPORTED_VERSIONS.iter().map(|s| (*s).to_owned()).collect()
+}
+
 // -----------------------------------------------------------------------------
 // Validation
 // -----------------------------------------------------------------------------
@@ -143,6 +170,7 @@ pub(super) fn build_config(cfg: McpBrokerConfig) -> Result<(McpBrokerConfig, Vec
         return Err("mcp: max_body_bytes must be greater than 0".into());
     }
 
+    validate_versions(&cfg)?;
     validate_path("mcp", &cfg.path)?;
     validate_unique_server_names(&cfg.servers)?;
     validate_server_clusters(&cfg.servers)?;
@@ -153,6 +181,29 @@ pub(super) fn build_config(cfg: McpBrokerConfig) -> Result<(McpBrokerConfig, Vec
     validate_unique_exposed_names(&catalog)?;
 
     Ok((cfg, catalog))
+}
+
+/// Validate that every configured version is implemented by this build
+/// and that `default_version` appears in `supported_versions`.
+fn validate_versions(cfg: &McpBrokerConfig) -> Result<(), FilterError> {
+    if cfg.supported_versions.is_empty() {
+        return Err("mcp: supported_versions must not be empty".into());
+    }
+    for v in &cfg.supported_versions {
+        if !protocol::is_supported_version(v) {
+            return Err(
+                format!("mcp: supported_versions contains '{v}' which is not implemented by this build").into(),
+            );
+        }
+    }
+    if !cfg.supported_versions.iter().any(|v| v == &cfg.default_version) {
+        return Err(format!(
+            "mcp: default_version '{}' must appear in supported_versions",
+            cfg.default_version,
+        )
+        .into());
+    }
+    Ok(())
 }
 
 /// Validate that all server names are unique and non-empty.

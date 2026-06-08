@@ -39,7 +39,8 @@ pub enum PathMatch {
         path: String,
     },
 
-    /// Prefix-based path match.
+    /// Segment-boundary prefix match (Gateway API semantics).
+    /// `/api` matches `/api`, `/api/`, `/api/v1` but NOT `/apikeys`.
     Prefix {
         /// Path prefix. The longest matching prefix wins.
         path_prefix: String,

@@ -1138,11 +1138,280 @@ async fn delete_with_query_param_matches_configured_mcp_path() {
 }
 
 // -----------------------------------------------------------------------------
+// Protocol Profile Config Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn default_profile_config_preserves_current_behavior() {
+    let filter = make_broker_filter();
+    assert_eq!(
+        filter.protocol_profile,
+        protocol::ProtocolProfile::Current,
+        "default profile should be Current"
+    );
+    assert_eq!(
+        filter.default_version,
+        protocol::PROTOCOL_VERSION_CURRENT,
+        "default version should match centralized constant"
+    );
+    assert!(
+        !filter.supported_versions.is_empty(),
+        "supported versions should not be empty"
+    );
+    assert!(
+        filter.supported_versions.contains(&filter.default_version),
+        "default version should appear in supported versions"
+    );
+}
+
+#[test]
+fn explicit_current_profile_parses() {
+    let yaml = r#"
+protocol_profile: current
+servers:
+  - name: s
+    cluster: c
+    tools: []
+"#;
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
+    let (validated, _catalog) = build_config(cfg).unwrap();
+    assert_eq!(
+        validated.protocol_profile,
+        protocol::ProtocolProfile::Current,
+        "explicit 'current' should parse"
+    );
+}
+
+#[test]
+fn unsupported_profile_rejects_at_config_load() {
+    let yaml = r#"
+protocol_profile: nonexistent
+servers:
+  - name: s
+    cluster: c
+    tools: []
+"#;
+    let result = serde_yaml::from_str::<McpBrokerConfig>(yaml);
+    assert!(result.is_err(), "unknown protocol_profile should reject at parse time");
+}
+
+#[test]
+fn explicit_supported_versions_parses() {
+    let yaml = r#"
+supported_versions: ["2025-03-26"]
+default_version: "2025-03-26"
+servers:
+  - name: s
+    cluster: c
+    tools: []
+"#;
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
+    let (validated, _catalog) = build_config(cfg).unwrap();
+    assert_eq!(
+        validated.supported_versions,
+        vec!["2025-03-26"],
+        "explicit supported_versions should parse"
+    );
+    assert_eq!(
+        validated.default_version, "2025-03-26",
+        "explicit default_version should parse"
+    );
+}
+
+#[test]
+fn default_version_not_in_supported_versions_rejected() {
+    let yaml = r#"
+supported_versions: ["2025-03-26"]
+default_version: "9999-12-31"
+servers: []
+"#;
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
+    let result = build_config(cfg);
+    assert!(result.is_err(), "default_version not in supported_versions should fail");
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("must appear in supported_versions"),
+        "error should mention supported_versions"
+    );
+}
+
+#[test]
+fn empty_supported_versions_rejected() {
+    let yaml = r#"
+supported_versions: []
+servers: []
+"#;
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
+    let result = build_config(cfg);
+    assert!(result.is_err(), "empty supported_versions should fail");
+    assert!(
+        result.err().unwrap().to_string().contains("must not be empty"),
+        "error should mention empty supported_versions"
+    );
+}
+
+#[test]
+fn unsupported_supported_version_rejected() {
+    let yaml = r#"
+supported_versions: ["9999-12-31"]
+default_version: "9999-12-31"
+servers: []
+"#;
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
+    let result = build_config(cfg);
+    assert!(result.is_err(), "version not implemented by this build should fail");
+    assert!(
+        result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("not implemented by this build"),
+        "error should mention build implementation"
+    );
+}
+
+#[test]
+fn unsupported_default_version_rejected_even_when_listed() {
+    let yaml = r#"
+supported_versions: ["2025-03-26", "9999-12-31"]
+default_version: "9999-12-31"
+servers: []
+"#;
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
+    let result = build_config(cfg);
+    assert!(
+        result.is_err(),
+        "unimplemented version in supported_versions should fail even if default_version matches"
+    );
+}
+
+#[tokio::test]
+async fn explicit_current_version_preserves_initialize_response() {
+    let filter = make_broker_filter_with_versions("2025-03-26");
+    let body_str =
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{}}}"#;
+    let req = make_mcp_request();
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    match action {
+        FilterAction::Reject(ref rejection) => {
+            assert_eq!(rejection.status, 200, "initialize should return 200");
+            let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(body_str).unwrap();
+            assert_eq!(
+                parsed["result"]["protocolVersion"], "2025-03-26",
+                "explicit default_version should appear in initialize response"
+            );
+            assert!(
+                rejection.headers.iter().any(|(k, _)| k == "mcp-session-id"),
+                "initialize should still return mcp-session-id"
+            );
+        },
+        _ => panic!("expected Reject with 200"),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Version Negotiation Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn initialize_echoes_supported_requested_version() {
+    let filter = make_broker_filter_with_versions("2025-03-26");
+    let body_str =
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26","capabilities":{}}}"#;
+    let req = make_mcp_request();
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    match action {
+        FilterAction::Reject(ref rejection) => {
+            let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(body_str).unwrap();
+            assert_eq!(
+                parsed["result"]["protocolVersion"], "2025-03-26",
+                "should echo the client's requested version when it is supported"
+            );
+        },
+        _ => panic!("expected Reject with 200"),
+    }
+}
+
+#[tokio::test]
+async fn initialize_unsupported_requested_version_falls_back_to_default() {
+    let filter = make_broker_filter_with_versions("2025-03-26");
+    let body_str =
+        r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"9999-12-31","capabilities":{}}}"#;
+    let req = make_mcp_request();
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    match action {
+        FilterAction::Reject(ref rejection) => {
+            let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(body_str).unwrap();
+            assert_eq!(
+                parsed["result"]["protocolVersion"], "2025-03-26",
+                "unsupported client version should fall back to default_version"
+            );
+        },
+        _ => panic!("expected Reject with 200"),
+    }
+}
+
+#[tokio::test]
+async fn initialize_missing_version_falls_back_to_default() {
+    let filter = make_broker_filter_with_versions("2025-03-26");
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{}}}"#;
+    let req = make_mcp_request();
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    match action {
+        FilterAction::Reject(ref rejection) => {
+            let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
+            let parsed: serde_json::Value = serde_json::from_str(body_str).unwrap();
+            assert_eq!(
+                parsed["result"]["protocolVersion"], "2025-03-26",
+                "missing client version should fall back to default_version"
+            );
+        },
+        _ => panic!("expected Reject with 200"),
+    }
+}
+
+#[test]
+fn default_version_only_config_uses_default_supported_versions() {
+    let yaml = r#"
+default_version: "2025-03-26"
+servers: []
+"#;
+    let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
+    let (validated, _catalog) = build_config(cfg).unwrap();
+    assert_eq!(
+        validated.supported_versions,
+        vec!["2025-03-26"],
+        "omitting supported_versions should default to implemented versions"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
-fn make_broker_filter() -> McpBrokerFilter {
-    let yaml = r#"
+const BROKER_SERVERS_YAML: &str = r#"
 servers:
   - name: weather
     cluster: weather-mcp
@@ -1160,14 +1429,28 @@ servers:
       - name: create_event
         description: Create a calendar event
 "#;
+
+fn make_broker_filter() -> McpBrokerFilter {
+    build_broker_filter_from_yaml(BROKER_SERVERS_YAML)
+}
+
+fn make_broker_filter_with_versions(version: &str) -> McpBrokerFilter {
+    let yaml = format!("default_version: \"{version}\"\nsupported_versions: [\"{version}\"]\n{BROKER_SERVERS_YAML}");
+    build_broker_filter_from_yaml(&yaml)
+}
+
+fn build_broker_filter_from_yaml(yaml: &str) -> McpBrokerFilter {
     let cfg: McpBrokerConfig = serde_yaml::from_str(yaml).unwrap();
     let (validated, catalog) = build_config(cfg).unwrap();
     let json_rpc_config = build_json_rpc_config(validated.max_body_bytes);
     McpBrokerFilter {
         catalog,
+        default_version: validated.default_version.clone(),
         json_rpc_config,
         max_body_bytes: validated.max_body_bytes,
+        protocol_profile: validated.protocol_profile,
         public_path: validated.path.clone(),
+        supported_versions: validated.supported_versions.clone(),
     }
 }
 

@@ -23,7 +23,7 @@ mod runtime;
 mod validate;
 
 pub use admin::AdminConfig;
-pub use body_limits::{BodyLimitsConfig, DEFAULT_MAX_BODY_BYTES};
+pub use body_limits::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, DEFAULT_MAX_BODY_BYTES};
 pub use bootstrap::{DEFAULT_CONFIG, load_config};
 pub use branch_chain::{BranchChainConfig, BranchCondition};
 pub use chain_ref::ChainRef;

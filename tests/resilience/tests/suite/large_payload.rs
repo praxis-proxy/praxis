@@ -12,7 +12,8 @@ use praxis_test_utils::{free_port, http_post, http_send, parse_status, start_ech
 
 #[test]
 fn body_under_limit_passes_through() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let limit = 128;
     let yaml = body_limit_yaml(proxy_port, backend_port, limit);
@@ -28,7 +29,8 @@ fn body_under_limit_passes_through() {
 
 #[test]
 fn exact_limit_body_passes_through() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let limit = 64;
     let yaml = body_limit_yaml(proxy_port, backend_port, limit);
@@ -44,7 +46,8 @@ fn exact_limit_body_passes_through() {
 
 #[test]
 fn one_byte_over_limit_returns_413() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let limit = 64;
     let yaml = body_limit_yaml(proxy_port, backend_port, limit);
@@ -59,7 +62,8 @@ fn one_byte_over_limit_returns_413() {
 
 #[test]
 fn much_larger_than_limit_returns_413() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let limit = 64;
     let yaml = body_limit_yaml(proxy_port, backend_port, limit);
@@ -74,7 +78,8 @@ fn much_larger_than_limit_returns_413() {
 
 #[test]
 fn no_limit_handles_large_body() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
 
     let yaml = format!(
@@ -114,7 +119,8 @@ filter_chains:
 
 #[test]
 fn empty_body_post_succeeds() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = body_limit_yaml(proxy_port, backend_port, 1024);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -152,7 +158,8 @@ fn response_body_over_limit_handled() {
 
 #[test]
 fn sequential_large_payloads_do_not_leak() {
-    let backend_port = start_echo_backend();
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
 
     let yaml = format!(

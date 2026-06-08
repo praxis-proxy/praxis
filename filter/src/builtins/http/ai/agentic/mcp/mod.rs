@@ -6,6 +6,7 @@
 mod broker;
 pub(crate) mod config;
 pub(crate) mod envelope;
+pub(crate) mod protocol;
 
 #[cfg(test)]
 #[allow(

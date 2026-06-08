@@ -12,6 +12,12 @@ use serde::Deserialize;
 /// Default body limit applied when the operator omits the field.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 10_485_760; // 10 MiB
 
+/// Absolute hard ceiling for body buffering (64 MiB).
+///
+/// Applied to any unbounded stream-buffer mode, even when
+/// `insecure_options.allow_unbounded_body` is set.
+pub const ABSOLUTE_MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
+
 /// Global hard ceilings on request and response body size.
 ///
 /// Both limits default to 10 MiB. Setting either to `null`

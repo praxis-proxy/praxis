@@ -33,6 +33,22 @@ Why this change is needed.
 
 ## How?
 
+> **Note:** do not include this section in the first PR.
+> Submit What? and Why? first. Add How? in a follow-up
+> PR after the proposal direction is accepted.
+
+<!-- During v0.x.x, choose one of the two formats below.
+     After 1.0, the full design format is required. -->
+
+<!-- Option A: PR list (v0.x.x only) -->
+
+### Implementation
+
+- [#NNN](link) — brief description
+- [#NNN](link) — brief description
+
+<!-- Option B: full design (always accepted) -->
+
 ### Requirements
 
 - Requirement 1
@@ -41,7 +57,3 @@ Why this change is needed.
 ### Design
 
 Technical design and architecture details.
-
-> **Note:** do not include this section in the first PR.
-> Submit What? and Why? first. Add How? in a follow-up
-> PR after the proposal direction is accepted.
