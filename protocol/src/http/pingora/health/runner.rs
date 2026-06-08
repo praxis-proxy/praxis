@@ -171,6 +171,7 @@ async fn spawn_probe(idx: usize, addr: String, params: &HealthCheckParams) -> (u
 
 /// Record a probe result, updating health state and logging transitions.
 #[allow(clippy::indexing_slicing, reason = "bounds checked")]
+#[allow(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
 fn record_probe_result(params: &HealthCheckParams, idx: usize, addr: &str, success: bool) {
     if idx >= params.state.endpoints().len() {
         return;
