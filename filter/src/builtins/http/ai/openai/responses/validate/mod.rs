@@ -20,14 +20,14 @@
 //! filter: openai_responses_validate
 //! ```
 
-mod validate;
+mod rules;
 
 use async_trait::async_trait;
 use bytes::Bytes;
 use rand::{TryRngCore, rngs::OsRng};
 use tracing::{debug, trace};
 
-use self::validate::validate_request;
+use self::rules::validate_request;
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
@@ -272,7 +272,7 @@ mod tests {
         assert_eq!(
             filter.name(),
             "openai_responses_validate",
-            "filter name should be request_validate"
+            "filter name should be validate"
         );
     }
 

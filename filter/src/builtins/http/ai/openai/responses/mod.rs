@@ -374,7 +374,7 @@ fn promote_boolean_results(
 }
 
 #[cfg(feature = "ai-inference")]
-pub(crate) mod request_validate;
+pub(crate) mod validate;
 
 #[cfg(feature = "ai-inference")]
-pub use request_validate::OpenaiResponsesValidateFilter;
+pub use validate::OpenaiResponsesValidateFilter;

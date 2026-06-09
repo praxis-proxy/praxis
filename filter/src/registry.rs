@@ -290,7 +290,7 @@ mod tests {
         #[cfg(feature = "ai-inference")]
         assert!(
             names.contains(&"openai_responses_validate"),
-            "request_validate should be registered"
+            "validate should be registered"
         );
     }
 
