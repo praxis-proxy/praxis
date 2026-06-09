@@ -77,9 +77,9 @@ impl IdGenerator {
     ///
     /// Format: `{micros:016x}{seed:04x}{counter:012x}`
     ///
-    /// - Bits 127-64: microseconds since epoch
-    /// - Bits 63-48: per-instance seed
-    /// - Bits 47-0: monotone counter (masked to 48 bits)
+    /// - Chars 0-15: microseconds since epoch (64-bit)
+    /// - Chars 16-19: per-instance seed (16-bit)
+    /// - Chars 20-31: monotone counter (48-bit, masked)
     #[must_use]
     pub fn generate(&self, time_source: &dyn TimeSource) -> String {
         #[allow(clippy::cast_possible_truncation, reason = "clamped to u64::MAX before cast")]
