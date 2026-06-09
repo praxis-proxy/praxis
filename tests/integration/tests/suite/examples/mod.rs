@@ -18,6 +18,8 @@ mod conditional_filters;
 mod credential_injection;
 mod csrf;
 mod default_config;
+#[cfg(feature = "ai-inference")]
+mod full_flow;
 mod grpc_detection;
 mod guardrails;
 mod header_manipulation;
