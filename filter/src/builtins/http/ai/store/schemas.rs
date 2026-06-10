@@ -29,7 +29,8 @@ pub(crate) struct TableNames {
 ///
 /// Each statement uses `IF NOT EXISTS` so it is safe to run on
 /// every startup. The schema uses TEXT for JSON columns (standard
-/// `SQLite` pattern).
+/// `SQLite` pattern) and BIGINT for timestamps so the same DDL is
+/// compatible with `PostgreSQL` `i64` decoding.
 ///
 /// # Errors
 ///
@@ -43,7 +44,7 @@ pub(crate) fn generate_ddl(tables: &TableNames) -> Result<Vec<String>, StoreErro
             "CREATE TABLE IF NOT EXISTS {r} (
                 tenant_id       TEXT NOT NULL,
                 id              TEXT NOT NULL,
-                created_at      INTEGER NOT NULL,
+                created_at      BIGINT NOT NULL,
                 model           TEXT NOT NULL,
                 response_object TEXT NOT NULL,
                 input           TEXT NOT NULL,
@@ -61,6 +62,25 @@ pub(crate) fn generate_ddl(tables: &TableNames) -> Result<Vec<String>, StoreErro
         ),
         format!("CREATE INDEX IF NOT EXISTS idx_{c}_tenant_id ON {c}(tenant_id)"),
     ])
+}
+
+/// Validate identifier lengths for `PostgreSQL` DDL.
+///
+/// `PostgreSQL` truncates identifiers above 63 bytes. The
+/// conversation table name is also embedded in the generated tenant
+/// index name, so it needs a smaller limit than table identifiers.
+///
+/// # Errors
+///
+/// Returns [`StoreError::Database`] when an identifier would exceed
+/// the `PostgreSQL` limit.
+pub(crate) fn validate_postgres_identifiers(tables: &TableNames) -> Result<(), StoreError> {
+    let (r, c) = validate_table_names(tables)?;
+
+    validate_postgres_identifier_len("response table name", r, POSTGRES_MAX_IDENTIFIER_LEN)?;
+    validate_postgres_identifier_len("conversation table name", c, POSTGRES_MAX_CONVERSATION_TABLE_LEN)?;
+
+    Ok(())
 }
 
 /// Validate the configured table names and return them as borrowed identifiers.
@@ -83,6 +103,13 @@ fn validate_table_names(tables: &TableNames) -> Result<(&str, &str), StoreError>
 /// to prevent pathological DDL strings from config input.
 const MAX_IDENTIFIER_LEN: usize = 128;
 
+/// Maximum identifier length accepted by `PostgreSQL`.
+const POSTGRES_MAX_IDENTIFIER_LEN: usize = 63;
+
+/// Maximum conversation table name length that leaves room for
+/// `idx_` and `_tenant_id` in the generated index name.
+const POSTGRES_MAX_CONVERSATION_TABLE_LEN: usize = POSTGRES_MAX_IDENTIFIER_LEN - 14;
+
 /// Reject identifiers that could cause SQL injection or invalid DDL.
 fn validate_identifier(name: &str) -> Result<(), StoreError> {
     if name.is_empty() {
@@ -104,6 +131,16 @@ fn validate_identifier(name: &str) -> Result<(), StoreError> {
     if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
         return Err(StoreError::Database(format!(
             "table name contains invalid characters: {name}"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject a `PostgreSQL` identifier that would be truncated.
+fn validate_postgres_identifier_len(kind: &str, name: &str, max_len: usize) -> Result<(), StoreError> {
+    if name.len() > max_len {
+        return Err(StoreError::Database(format!(
+            "{kind} exceeds PostgreSQL identifier limit of {max_len} bytes: {name}"
         )));
     }
     Ok(())
@@ -183,6 +220,21 @@ mod tests {
     }
 
     #[test]
+    fn generate_ddl_uses_bigint_for_created_at() {
+        let tables = TableNames {
+            responses: "test_responses".to_owned(),
+            conversations: "test_conversations".to_owned(),
+        };
+        let ddl = generate_ddl(&tables).expect("valid names should produce DDL");
+
+        assert!(
+            ddl[0].contains("created_at      BIGINT NOT NULL"),
+            "created_at should decode as i64 in Postgres: {}",
+            ddl[0]
+        );
+    }
+
+    #[test]
     fn generate_ddl_rejects_invalid_name() {
         let tables = TableNames {
             responses: "valid_name".to_owned(),
@@ -218,6 +270,34 @@ mod tests {
         assert!(
             err.to_string().contains("distinct"),
             "should reject case-insensitive duplicate table names: {err}"
+        );
+    }
+
+    #[test]
+    fn postgres_identifier_rejects_truncated_table_name() {
+        let tables = TableNames {
+            responses: "r".repeat(POSTGRES_MAX_IDENTIFIER_LEN + 1),
+            conversations: "test_conversations".to_owned(),
+        };
+        let err = validate_postgres_identifiers(&tables).unwrap_err();
+
+        assert!(
+            err.to_string().contains("PostgreSQL identifier limit"),
+            "should reject names PostgreSQL would truncate: {err}"
+        );
+    }
+
+    #[test]
+    fn postgres_identifier_rejects_truncated_index_name() {
+        let tables = TableNames {
+            responses: "test_responses".to_owned(),
+            conversations: "c".repeat(POSTGRES_MAX_CONVERSATION_TABLE_LEN + 1),
+        };
+        let err = validate_postgres_identifiers(&tables).unwrap_err();
+
+        assert!(
+            err.to_string().contains("PostgreSQL identifier limit"),
+            "should reject generated index names PostgreSQL would truncate: {err}"
         );
     }
 }
