@@ -662,8 +662,8 @@ async fn pg_nonexistent_ssl_root_cert_fails() {
         panic!("nonexistent ssl_root_cert should fail");
     };
     assert!(
-        err.to_string().contains("database error"),
-        "error should be a database error: {err}"
+        matches!(err, StoreError::Database(_)),
+        "error should be StoreError::Database: {err}"
     );
 }
 

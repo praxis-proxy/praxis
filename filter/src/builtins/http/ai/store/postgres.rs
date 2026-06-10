@@ -91,7 +91,8 @@ impl PostgresResponseStore {
     /// `ssl_mode`, when provided, overrides any `sslmode` in the
     /// URL. Use [`SslMode::VerifyCa`] or [`SslMode::VerifyFull`]
     /// with `ssl_root_cert` to verify the server against a custom
-    /// CA.
+    /// CA. Certificate path existence is validated at connection
+    /// time, not at construction.
     ///
     /// # Errors
     ///

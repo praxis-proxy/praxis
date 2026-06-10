@@ -107,7 +107,7 @@ const MAX_IDENTIFIER_LEN: usize = 128;
 const POSTGRES_MAX_IDENTIFIER_LEN: usize = 63;
 
 /// Maximum conversation table name length that leaves room for
-/// `idx_` and `_tenant_id` in the generated index name.
+/// `idx_` (4) and `_tenant_id` (10) in the generated index name.
 const POSTGRES_MAX_CONVERSATION_TABLE_LEN: usize = POSTGRES_MAX_IDENTIFIER_LEN - 14;
 
 /// Reject identifiers that could cause SQL injection or invalid DDL.
