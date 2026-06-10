@@ -800,8 +800,9 @@ fn make_filter(rules: Vec<CompiledRule>) -> GuardrailsFilter {
     let needs_body = rules.iter().any(|r| matches!(r.target, RuleTarget::Body));
     GuardrailsFilter {
         action: super::config::GuardrailsAction::Reject,
-        rules,
         needs_body,
+        reject_oversized: false,
+        rules,
     }
 }
 
@@ -810,8 +811,9 @@ fn make_flag_filter(rules: Vec<CompiledRule>) -> GuardrailsFilter {
     let needs_body = rules.iter().any(|r| matches!(r.target, RuleTarget::Body));
     GuardrailsFilter {
         action: super::config::GuardrailsAction::Flag,
-        rules,
         needs_body,
+        reject_oversized: false,
+        rules,
     }
 }
 

@@ -115,6 +115,30 @@ Require or request client certificates with
 `require`. See [tls-mtls-listener] and
 [tls-mtls-listener-request].
 
+### Certificate Revocation Lists (CRL)
+
+Add `crl_paths` to `client_ca` to reject client
+certificates that appear on a Certificate Revocation
+List. Each path must point to a PEM-encoded CRL file.
+Paths containing `..` are rejected at validation to
+prevent directory traversal.
+
+```yaml
+tls:
+  client_cert_mode: require
+  client_ca:
+    ca_path: /etc/praxis/tls/client-ca.pem
+    crl_paths:
+      - /etc/praxis/tls/client-ca.crl
+  certificates:
+    - cert_path: /etc/praxis/tls/cert.pem
+      key_path: /etc/praxis/tls/key.pem
+```
+
+CRL checking is also available for upstream
+connections via `tls.ca.crl_paths` on a cluster
+definition. See [Cluster TLS](#cluster-tls).
+
 ### Local dev with mkcert
 
 ```console
@@ -174,9 +198,49 @@ Don't store private keys in version control or
 unencrypted on disk. Use a secrets manager or
 encrypted storage solution.
 
-## Ciphers and Protocol
+## Cipher Suites
 
 Praxis uses rustls, which supports TLS 1.2 and 1.3
-only. No weak cipher suites are available. The cipher
-selection follows rustls defaults and is not
-configurable at this time.
+only. No weak cipher suites are available.
+
+By default, rustls selects cipher suites automatically.
+To restrict the set, specify `cipher_suites` on the
+listener TLS block. When set, only the listed suites
+are offered during the TLS handshake. An empty list is
+rejected at validation.
+
+### Available Suites
+
+**TLS 1.3:**
+
+| Config value | Suite |
+| ------------ | ----- |
+| `tls13_aes_128_gcm_sha256` | AES-128-GCM with SHA-256 |
+| `tls13_aes_256_gcm_sha384` | AES-256-GCM with SHA-384 |
+| `tls13_chacha20_poly1305_sha256` | ChaCha20-Poly1305 with SHA-256 |
+
+**TLS 1.2:**
+
+| Config value | Suite |
+| ------------ | ----- |
+| `tls12_ecdhe_ecdsa_with_aes_128_gcm_sha256` | ECDHE-ECDSA AES-128-GCM |
+| `tls12_ecdhe_ecdsa_with_aes_256_gcm_sha384` | ECDHE-ECDSA AES-256-GCM |
+| `tls12_ecdhe_ecdsa_with_chacha20_poly1305_sha256` | ECDHE-ECDSA ChaCha20-Poly1305 |
+| `tls12_ecdhe_rsa_with_aes_128_gcm_sha256` | ECDHE-RSA AES-128-GCM |
+| `tls12_ecdhe_rsa_with_aes_256_gcm_sha384` | ECDHE-RSA AES-256-GCM |
+| `tls12_ecdhe_rsa_with_chacha20_poly1305_sha256` | ECDHE-RSA ChaCha20-Poly1305 |
+
+TLS 1.2 suites cannot be used when `min_version` is
+`tls13`. See [tls-cipher-suites].
+
+```yaml
+tls:
+  cipher_suites:
+    - tls13_aes_256_gcm_sha384
+    - tls13_chacha20_poly1305_sha256
+  certificates:
+    - cert_path: /etc/praxis/tls/cert.pem
+      key_path: /etc/praxis/tls/key.pem
+```
+
+[tls-cipher-suites]: ../../examples/configs/protocols/tls-cipher-suites.yaml

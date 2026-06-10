@@ -224,6 +224,25 @@ rather than bolted-on external processors.
   variable sources. Pair with a source discriminator
   (IP ACL, client auth) to control which clients get
   credential upgrades.
+- **Prompt enrichment** (`prompt_enrich`): inject system
+  or user messages into OpenAI-compatible chat
+  completion request bodies at the proxy layer. Static
+  configured messages are prepended or appended to the
+  `messages` array before forwarding upstream.
+- **Responses API classification**
+  (`openai_responses_format`): classifies OpenAI
+  Responses API and Chat Completions API requests by
+  inspecting the request body. Promotes format, model,
+  stream, and routing mode (stateless/stateful) to
+  configurable headers, metadata, and filter results
+  for downstream routing via branch chains.
+- **Responses API validation**
+  (`openai_responses_validate`): validates Responses
+  API parameter combinations (stream/background,
+  background/store conflicts), extracts conversation
+  IDs, and generates cryptographically random response
+  and conversation IDs with `resp_` and `conv_`
+  prefixes.
 
 ### Planned
 
@@ -245,8 +264,6 @@ filter pipeline.
   for streaming responses
 - **Semantic caching**: prompt deduplication via vector
   similarity search
-- **AI guardrails**: prompt validation, content
-  filtering, and policy enforcement
 
 ### StreamBuffer as AI Primitive
 
@@ -275,23 +292,25 @@ Praxis targets first-class support for AI agent
 protocols, positioning MCP and A2A as headline
 capabilities alongside HTTP and TCP proxying.
 
-### JSON-RPC Support
+### Current
 
-- **JSON-RPC 2.0 foundation**: request envelope parsing
-  and method/id extraction for HTTP POST bodies, enabling
-  method-based routing for MCP/A2A-style traffic via the
-  `json_rpc` filter
+- **JSON-RPC 2.0 foundation** (`json_rpc`): request
+  envelope parsing and method/id extraction for HTTP
+  POST bodies, enabling method-based routing for
+  MCP/A2A-style traffic
+- **MCP proxying** (`mcp`): Model Context Protocol
+  broker with tool discovery and routing via the
+  filter pipeline
+- **A2A proxying** (`a2a`): Agent-to-Agent protocol
+  support with task routing via the filter pipeline
+- **gRPC detection** (`grpc_detection`): classifies
+  gRPC requests by content-type variant (protobuf,
+  JSON, other codec) and promotes the classification
+  to metadata and filter results for branch-based
+  routing
 
 ### Planned
 
-The following capabilities are on the roadmap and not
-yet implemented:
-
-- **MCP proxying**: session management, tool discovery
-  and routing, session lifecycle, auth and rate limiting
-  for Model Context Protocol connections
-- **A2A proxying**: agent card discovery, task lifecycle
-  management, SSE streaming for Agent-to-Agent protocol
 - **Stateful agent sessions**: shared session storage,
   affinity, and lifecycle hooks for MCP and A2A
 
@@ -300,9 +319,9 @@ yet implemented:
 AI filters are controlled via Cargo features (enabled
 by default):
 
-- `ai-inference`: model routing (`model_to_header`
-  filter)
-- `ai-agentic`: MCP, A2A, agent orchestration (planned)
+- `ai-inference`: model routing, prompt enrichment,
+  Responses API classification and validation
+- `ai-agentic`: MCP, A2A, JSON-RPC, gRPC detection
 
 To disable AI features:
 

@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use crate::FilterError;
+use crate::{FilterError, body::MAX_JSON_BODY_BYTES};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -176,6 +176,13 @@ fn default_max_body_bytes() -> usize {
 pub(crate) fn build_config(cfg: McpConfig) -> Result<McpConfig, FilterError> {
     if cfg.max_body_bytes == 0 {
         return Err("mcp: 'max_body_bytes' must be greater than 0".into());
+    }
+    if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
+        return Err(format!(
+            "mcp: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
+            cfg.max_body_bytes
+        )
+        .into());
     }
     validate_header_name("method", cfg.headers.method.as_deref())?;
     validate_header_name("name", cfg.headers.name.as_deref())?;

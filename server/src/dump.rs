@@ -91,8 +91,7 @@ pub(crate) fn build_dump(
     })
 }
 
-/// Clone a [`Config`] and replace credential injection literal values with
-/// `"[REDACTED]"`.
+/// Clone a [`Config`] and redact sensitive values.
 fn redact_secrets(config: &Config) -> Config {
     let mut redacted = config.clone();
     for chain in &mut redacted.filter_chains {
@@ -100,13 +99,14 @@ fn redact_secrets(config: &Config) -> Config {
             if entry.filter_type == "credential_injection" {
                 redact_credential_values(&mut entry.config);
             }
+            redact_sensitive_keys(&mut entry.config);
         }
     }
     redacted
 }
 
 /// Walk the flattened config YAML for a `credential_injection` filter
-/// and replace any `value` keys inside `clusters` entries.
+/// and replace `value` and `env_var` keys inside `clusters` entries.
 fn redact_credential_values(config: &mut serde_yaml::Value) {
     let Some(mapping) = config.as_mapping_mut() else {
         return;
@@ -119,15 +119,47 @@ fn redact_credential_values(config: &mut serde_yaml::Value) {
         return;
     };
     let value_key = serde_yaml::Value::String("value".to_owned());
+    let env_var_key = serde_yaml::Value::String("env_var".to_owned());
     let redacted = serde_yaml::Value::String("[REDACTED]".to_owned());
     for entry in seq {
-        if let Some(m) = entry.as_mapping_mut()
-            && m.contains_key(&value_key)
-        {
-            m.insert(value_key.clone(), redacted.clone());
+        if let Some(m) = entry.as_mapping_mut() {
+            if m.contains_key(&value_key) {
+                m.insert(value_key.clone(), redacted.clone());
+            }
+            if m.contains_key(&env_var_key) {
+                m.insert(env_var_key.clone(), redacted.clone());
+            }
         }
     }
 }
+
+/// Recursively redact known sensitive field names in any filter config.
+fn redact_sensitive_keys(value: &mut serde_yaml::Value) {
+    let Some(mapping) = value.as_mapping_mut() else {
+        return;
+    };
+    let redacted = serde_yaml::Value::String("[REDACTED]".to_owned());
+    for key_name in SENSITIVE_FIELD_NAMES {
+        let key = serde_yaml::Value::String((*key_name).to_owned());
+        if mapping.contains_key(&key) {
+            mapping.insert(key, redacted.clone());
+        }
+    }
+    for (_, v) in mapping.iter_mut() {
+        match v {
+            serde_yaml::Value::Mapping(_) => redact_sensitive_keys(v),
+            serde_yaml::Value::Sequence(seq) => {
+                for item in seq {
+                    redact_sensitive_keys(item);
+                }
+            },
+            _ => {},
+        }
+    }
+}
+
+/// Field names that should be redacted in config dumps.
+const SENSITIVE_FIELD_NAMES: &[&str] = &["key_path", "password", "secret", "token"];
 
 /// Resolve all listeners into their dump representations.
 fn build_resolved_listeners(

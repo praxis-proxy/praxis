@@ -178,6 +178,12 @@ pub(super) struct GuardrailsConfig {
     #[serde(default)]
     pub action: GuardrailsAction,
 
+    /// Reject requests whose body exceeds the inspection buffer limit
+    /// (1 MiB) when body rules are active, instead of silently
+    /// truncating inspection.
+    #[serde(default)]
+    pub reject_oversized: bool,
+
     /// List of rules to evaluate.
     pub rules: Vec<RuleConfig>,
 }

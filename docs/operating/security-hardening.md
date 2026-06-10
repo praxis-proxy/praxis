@@ -63,6 +63,10 @@ ambiguous configuration:
   a restart.
 - Use separate certificate entries with `server_names`
   for multi-domain deployments (SNI routing).
+- Enable CRL checking for mTLS listeners by adding
+  `crl_paths` to the `client_ca` block. CRL paths
+  reject directory traversal (`..`). See
+  [tls.md](tls.md) for configuration details.
 
 ## Access Control
 
@@ -77,6 +81,26 @@ ambiguous configuration:
   `allow_origins` rather than wildcards. Restrict
   `allow_methods` and `allow_headers` to what
   your application requires.
+- **CSRF**: Use the `csrf` filter with explicit
+  `trusted_origins`. The `enforce_percentage` field
+  enables gradual rollout; enforcement sampling is
+  randomized per-request to prevent attackers from
+  predicting unenforced windows.
+- **Connection limits**: Set `max_connections` on
+  listeners to cap concurrent connections. HTTP
+  listeners reject excess requests with 503 and
+  `Retry-After`; TCP listeners close immediately.
+
+## Resource Limits
+
+- **Memory pressure**: Set `runtime.max_memory_bytes`
+  to a process RSS ceiling. When exceeded, the proxy
+  rejects new requests with 503 to prevent OOM. See
+  [configuration.md](configuration.md) for details.
+- **Payload size**: Set `body_limits.max_request_bytes`
+  and `body_limits.max_response_bytes` to bound
+  buffered payload sizes. Requests exceeding the
+  limit receive 413.
 
 ## Deployment
 
