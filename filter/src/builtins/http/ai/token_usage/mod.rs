@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2026 Praxis Contributors
 
 //! Unified token usage extraction from AI provider responses.
 //!
@@ -35,8 +35,10 @@ use providers::{parse_anthropic, parse_bedrock, parse_google, parse_openai};
 pub struct TokenUsage {
     /// Tokens in the input/prompt.
     input: u64,
+
     /// Tokens in the output/completion.
     output: u64,
+
     /// Total tokens (input + output).
     total: u64,
 }

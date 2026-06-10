@@ -25,8 +25,10 @@ struct OpenAiResponse {
 struct OpenAiUsage {
     /// Tokens in the prompt.
     prompt_tokens: u64,
+
     /// Tokens in the completion.
     completion_tokens: u64,
+
     /// Total tokens (optional, can be calculated).
     total_tokens: Option<u64>,
 }
@@ -60,10 +62,13 @@ struct AnthropicResponse {
 struct AnthropicUsage {
     /// Tokens in the input (excludes cached tokens when caching is active).
     input_tokens: u64,
+
     /// Tokens in the output.
     output_tokens: u64,
+
     /// Tokens written to cache (prompt caching).
     cache_creation_input_tokens: Option<u64>,
+
     /// Tokens read from cache (prompt caching).
     cache_read_input_tokens: Option<u64>,
 }
@@ -102,8 +107,10 @@ struct GoogleResponse {
 struct GoogleUsageMetadata {
     /// Tokens in the prompt.
     prompt_token_count: u64,
+
     /// Tokens in the candidates (output).
     candidates_token_count: u64,
+
     /// Total tokens (optional, can be calculated).
     total_token_count: Option<u64>,
 }
@@ -139,8 +146,10 @@ struct BedrockConverseResponse {
 struct BedrockConverseUsage {
     /// Tokens in the input.
     input_tokens: u64,
+
     /// Tokens in the output.
     output_tokens: u64,
+
     /// Total tokens (optional).
     total_tokens: Option<u64>,
 }
