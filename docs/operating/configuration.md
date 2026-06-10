@@ -431,6 +431,11 @@ runtime:
   upstream connections kept per thread. `Option<usize>`,
   defaults to `Some(64)`. Set to `null` to disable
   keepalive pooling.
+- `max_memory_bytes`: process-wide RSS memory limit for
+  load shedding. When set, the proxy monitors resident
+  memory and rejects new requests with `503 Service
+  Unavailable` when usage exceeds the threshold.
+  `Option<usize>`, defaults to `None` (disabled).
 
 ```yaml
 runtime:
@@ -438,6 +443,7 @@ runtime:
   work_stealing: true
   global_queue_interval: 61
   upstream_keepalive_pool_size: 64
+  max_memory_bytes: 1073741824   # 1 GiB
 ```
 
 ### Upstream CA

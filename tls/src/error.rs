@@ -37,6 +37,16 @@ pub enum TlsError {
         path: String,
     },
 
+    /// A `server_name` appears more than once across certificates.
+    #[error("duplicate server_name '{name}' in certificate {path}")]
+    DuplicateServerName {
+        /// The duplicated server name.
+        name: String,
+
+        /// The certificate path that introduced the duplicate.
+        path: String,
+    },
+
     /// Cannot enable hot-reload with multiple certificates (SNI).
     #[error("hot_reload requires exactly one certificate; multi-cert SNI configs are not supported")]
     HotReloadMultipleCerts,
@@ -136,6 +146,23 @@ mod tests {
         assert!(
             e.to_string().contains("at least one certificate"),
             "should mention certificate requirement"
+        );
+    }
+
+    #[test]
+    fn error_display_duplicate_server_name() {
+        let e = TlsError::DuplicateServerName {
+            name: "api.example.com".to_owned(),
+            path: "/certs/server.pem".to_owned(),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("duplicate server_name"),
+            "should mention duplicate server_name: {msg}"
+        );
+        assert!(
+            msg.contains("api.example.com"),
+            "should mention the duplicated name: {msg}"
         );
     }
 

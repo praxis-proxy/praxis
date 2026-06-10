@@ -266,6 +266,14 @@ mod tests {
     }
 
     #[test]
+    fn is_relevant_event_remove() {
+        assert!(
+            is_relevant_event(EventKind::Remove(notify::event::RemoveKind::File)),
+            "remove events should be relevant"
+        );
+    }
+
+    #[test]
     fn watcher_exits_on_cancellation() {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("praxis.yaml");

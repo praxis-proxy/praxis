@@ -1,7 +1,13 @@
 #![no_main]
 
+use std::sync::LazyLock;
+
 use libfuzzer_sys::fuzz_target;
+use praxis_core::id::IdGenerator;
 use praxis_filter::{FailureMode, FilterEntry, FilterPipeline, FilterRegistry};
+
+/// Deterministic ID generator for fuzz targets.
+static FUZZ_ID_GENERATOR: LazyLock<IdGenerator> = LazyLock::new(|| IdGenerator::with_seed(0));
 
 fuzz_target!(|data: &str| {
     let registry = FilterRegistry::with_builtins();
@@ -58,6 +64,7 @@ fuzz_target!(|data: &str| {
             filter_metadata: std::collections::HashMap::new(),
             filter_results: std::collections::HashMap::new(),
             health_registry: None,
+            id_generator: &FUZZ_ID_GENERATOR,
             kv_stores: None,
             response_stores: None,
             request: &request,

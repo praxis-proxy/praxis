@@ -150,20 +150,20 @@ pub(super) struct RuleConfig {
     /// [`Header`]: RuleTargetKind::Header
     pub name: Option<String>,
 
-    /// What to inspect: header or body.
-    pub target: RuleTargetKind,
-
     /// Literal substring (case-insensitive) or PII category list.
     pub contains: Option<ContainsValue>,
-
-    /// Regex pattern match.
-    pub pattern: Option<String>,
 
     /// Invert the match: reject when the content does NOT
     /// match. For negated header rules, a missing header
     /// also triggers rejection. Defaults to `false`.
     #[serde(default)]
     pub negate: bool,
+
+    /// Regex pattern match.
+    pub pattern: Option<String>,
+
+    /// What to inspect: header or body.
+    pub target: RuleTargetKind,
 }
 
 // -----------------------------------------------------------------------------
@@ -177,6 +177,12 @@ pub(super) struct GuardrailsConfig {
     /// What to do when a rule matches (default: reject).
     #[serde(default)]
     pub action: GuardrailsAction,
+
+    /// Reject requests whose body exceeds the inspection buffer limit
+    /// (1 MiB) when body rules are active, instead of silently
+    /// truncating inspection.
+    #[serde(default)]
+    pub reject_oversized: bool,
 
     /// List of rules to evaluate.
     pub rules: Vec<RuleConfig>,

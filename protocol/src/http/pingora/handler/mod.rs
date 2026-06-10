@@ -56,7 +56,7 @@ const MAX_RETRIES: usize = 3;
 /// `StreamBuffer` initial forwarding uses Praxis-owned `pre_read_body`, but
 /// retry replay cannot safely cover bodies larger than Pingora's retry
 /// buffer.
-const RETRY_BODY_LIMIT: u64 = 64 * 1024;
+const RETRY_BODY_LIMIT: u64 = 65_536; // 64 KiB
 
 // -----------------------------------------------------------------------------
 // Load Handler

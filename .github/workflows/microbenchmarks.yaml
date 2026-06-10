@@ -7,12 +7,10 @@ name: Microbenchmarks
 on:
   push:
     branches: [main]
-  pull_request:
-    branches: [main]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions: {}
 
@@ -26,9 +24,8 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      pull-requests: write
     steps:
-      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@10c3493d811a9096cee4fdf287e41e852f6a51ba # 1.94.0
@@ -42,128 +39,10 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-bench-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install critcmp
-        if: github.event_name == 'pull_request'
-        run: |
-          command -v critcmp || cargo install critcmp --locked
+      - name: Run microbenchmarks
+        run: cargo bench -p benchmarks
 
-      - name: Download baseline
-        if: github.event_name == 'pull_request'
-        id: baseline
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          run_id=$(gh api "repos/${{ github.repository }}/actions/workflows/microbenchmarks.yaml/runs?branch=main&status=success&per_page=1" \
-            --jq '.workflow_runs[0].id // empty')
-          if [ -z "$run_id" ]; then
-            echo "status=missing" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          artifact_id=$(gh api "repos/${{ github.repository }}/actions/runs/${run_id}/artifacts" \
-            --jq '.artifacts[] | select(.name == "microbenchmark-baseline") | .id // empty')
-          if [ -z "$artifact_id" ]; then
-            echo "status=missing" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          gh api "repos/${{ github.repository }}/actions/artifacts/${artifact_id}/zip" > baseline.zip
-          mkdir -p target/criterion
-          unzip -o baseline.zip -d target/criterion
-          echo "status=ok" >> "$GITHUB_OUTPUT"
-
-      # On push to main: save as named baseline and upload
-      - name: Run microbenchmarks (baseline)
-        if: github.event_name == 'push'
-        run: cargo bench -p benchmarks -- --save-baseline main
-
-      # On PR: save under a different name so critcmp can compare
-      - name: Run microbenchmarks (PR)
-        if: github.event_name == 'pull_request'
-        run: cargo bench -p benchmarks -- --save-baseline pr
-
-      - name: Compare against baseline
-        if: >-
-          github.event_name == 'pull_request' &&
-          steps.baseline.outputs.status == 'ok'
-        id: compare
-        run: |
-          output=$(critcmp main pr --threshold 15 2>&1) || true
-          {
-            echo "comparison<<CRITCMP_EOF"
-            echo "$output"
-            echo "CRITCMP_EOF"
-          } >> "$GITHUB_OUTPUT"
-
-          if echo "$output" | grep -q "Regressed"; then
-            echo "has_regression=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "has_regression=false" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Post comparison comment
-        if: >-
-          github.event_name == 'pull_request' &&
-          steps.baseline.outputs.status == 'ok'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          COMPARISON: ${{ steps.compare.outputs.comparison }}
-          HAS_REGRESSION: ${{ steps.compare.outputs.has_regression }}
-        run: |
-          marker="<!-- praxis:microbenchmark-comparison -->"
-          existing_id=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
-            --jq "[.[] | select(.body | contains(\"${marker}\"))] | .[0].id // empty")
-          if [ -n "$existing_id" ]; then
-            gh api -X DELETE "repos/${{ github.repository }}/issues/comments/${existing_id}"
-          fi
-
-          if [ "$HAS_REGRESSION" = "true" ]; then
-            status="**Regressions detected** (threshold: 15%)"
-          else
-            status="No regressions (threshold: 15%)"
-          fi
-
-          gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
-            --body "${marker}
-          ### Microbenchmarks
-          ${status}
-          \`\`\`
-          ${COMPARISON}
-          \`\`\`"
-
-      - name: Post comment (no baseline)
-        if: >-
-          github.event_name == 'pull_request' &&
-          steps.baseline.outputs.status == 'missing'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          marker="<!-- praxis:microbenchmark-comparison -->"
-          existing_id=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
-            --jq "[.[] | select(.body | contains(\"${marker}\"))] | .[0].id // empty")
-          if [ -n "$existing_id" ]; then
-            gh api -X DELETE "repos/${{ github.repository }}/issues/comments/${existing_id}"
-          fi
-
-          gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
-            --body "${marker}
-          ### Microbenchmarks
-          No baseline from \`main\`. Results recorded; comparison skipped."
-
-      - name: Upload baseline
-        if: github.event_name == 'push'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: microbenchmark-baseline
-          path: target/criterion/
-          overwrite: true
-
-      - name: Upload PR results
-        if: github.event_name == 'pull_request'
+      - name: Upload results
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: microbenchmark-results

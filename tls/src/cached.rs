@@ -320,6 +320,30 @@ mod tests {
     }
 
     #[test]
+    fn cached_ca_from_pem_file_multi_cert() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("multi-ca.pem");
+
+        let key1 = rcgen::KeyPair::generate().unwrap();
+        let mut params1 = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params1.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params1.distinguished_name.push(rcgen::DnType::CommonName, "CA One");
+        let cert1 = params1.self_signed(&key1).unwrap();
+
+        let key2 = rcgen::KeyPair::generate().unwrap();
+        let mut params2 = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params2.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params2.distinguished_name.push(rcgen::DnType::CommonName, "CA Two");
+        let cert2 = params2.self_signed(&key2).unwrap();
+
+        let pem = format!("{}{}", cert1.pem(), cert2.pem());
+        std::fs::write(&path, pem).unwrap();
+
+        let cached = CachedCaCerts::from_pem_file(path.to_str().unwrap()).expect("multi-cert PEM should parse");
+        assert_eq!(cached.der_certs().len(), 2, "should parse two CA certs");
+    }
+
+    #[test]
     fn cached_client_cert_from_pem_nonexistent() {
         let err = CachedClientCert::from_pem_files("/no/cert.pem", "/no/key.pem");
         assert!(err.is_err(), "nonexistent files should fail");

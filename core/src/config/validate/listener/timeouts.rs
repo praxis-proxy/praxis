@@ -245,6 +245,24 @@ listeners:
     }
 
     #[test]
+    fn accept_tcp_idle_timeout_at_maximum() {
+        let yaml = r#"
+listeners:
+  - name: db
+    address: "0.0.0.0:5432"
+    protocol: tcp
+    upstream: "10.0.0.1:5432"
+    tcp_idle_timeout_ms: 3600000
+"#;
+        let config = Config::from_yaml(yaml).unwrap();
+        assert_eq!(
+            config.listeners[0].tcp_idle_timeout_ms,
+            Some(3_600_000),
+            "TCP idle timeout at maximum should be accepted"
+        );
+    }
+
+    #[test]
     fn reject_tcp_max_duration_exceeding_24h() {
         let yaml = r#"
 listeners:

@@ -29,10 +29,11 @@ pub fn init_global_limit(max: usize) {
 
 /// Try to acquire a global connection permit.
 ///
-/// Returns `None` when no global limit is configured or the
-/// permit was acquired. Returns `Some(permit)` on success.
-/// Callers check `is_none()` after filtering out the
-/// "no limit configured" case via the two-field tuple.
+/// Returns one of three states:
+///
+/// - `(false, None)` — no global limit is configured.
+/// - `(false, Some(permit))` — permit was acquired.
+/// - `(true, None)` — limit is exhausted.
 pub fn try_acquire_global() -> (bool, Option<OwnedSemaphorePermit>) {
     let Some(sem) = GLOBAL_LIMIT.get() else {
         return (false, None);
@@ -54,9 +55,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_init_returns_not_exceeded() {
+    fn global_limit_lifecycle() {
         let (exceeded, permit) = try_acquire_global();
-        assert!(!exceeded, "uninitialized global should not exceed");
+        assert!(!exceeded, "uninitialized global should not report exceeded");
         assert!(permit.is_none(), "uninitialized global should return no permit");
+
+        init_global_limit(2);
+
+        let (exceeded, first) = try_acquire_global();
+        assert!(!exceeded, "first acquire should not exceed limit");
+        let first = first.expect("first acquire should return a permit");
+
+        let (exceeded, second) = try_acquire_global();
+        assert!(!exceeded, "second acquire should not exceed limit");
+        let second = second.expect("second acquire should return a permit");
+
+        let (exceeded, permit) = try_acquire_global();
+        assert!(exceeded, "third acquire should exceed limit of 2");
+        assert!(permit.is_none(), "exhausted limit should return no permit");
+
+        drop(first);
+
+        let (exceeded, reclaimed) = try_acquire_global();
+        assert!(!exceeded, "acquire after drop should not exceed limit");
+        assert!(reclaimed.is_some(), "released slot should yield a permit");
+
+        drop(second);
     }
 }

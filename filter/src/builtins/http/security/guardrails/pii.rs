@@ -1,4 +1,12 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Praxis Contributors
+
 //! Built-in PII detection patterns used by guardrail rules.
+//!
+//! Detection is heuristic and format-specific: patterns match common
+//! delimited formats (e.g. `123-45-6789` for SSN) but will not catch
+//! reformatted data (e.g. `123456789`). For compliance-critical use
+//! cases, use a dedicated DLP solution.
 
 use std::sync::LazyLock;
 

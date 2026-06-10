@@ -73,6 +73,9 @@ impl CertKeyPair {
             }
             warn_if_symlink(field, path);
         }
+        for name in &self.server_names {
+            validate_server_name(name)?;
+        }
         Ok(())
     }
 }
@@ -134,6 +137,40 @@ impl CaConfig {
         }
         Ok(())
     }
+}
+
+// -----------------------------------------------------------------------------
+// Server Name Validation
+// -----------------------------------------------------------------------------
+
+/// Validate a `server_names` entry as a DNS hostname or wildcard.
+fn validate_server_name(name: &str) -> Result<(), TlsError> {
+    if name.is_empty() {
+        return Err(TlsError::ServerConfigError {
+            detail: "server_names entry must not be empty".to_owned(),
+        });
+    }
+    for (i, label) in name.split('.').enumerate() {
+        if label.is_empty() || label.len() > 63 {
+            return Err(TlsError::ServerConfigError {
+                detail: format!("server_names '{name}': label has invalid length"),
+            });
+        }
+        if label == "*" && i == 0 {
+            continue;
+        }
+        if label.contains('*') {
+            return Err(TlsError::ServerConfigError {
+                detail: format!("server_names '{name}': wildcard only permitted as the complete leftmost label"),
+            });
+        }
+        if !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            return Err(TlsError::ServerConfigError {
+                detail: format!("server_names '{name}': contains invalid characters"),
+            });
+        }
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------

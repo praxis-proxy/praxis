@@ -40,12 +40,12 @@ use crate::{
 /// assert_eq!(filter.name(), "access_log");
 /// ```
 pub struct AccessLogFilter {
+    /// Monotonic counter for deterministic sampling.
+    counter: AtomicU64,
+
     /// Sampling denominator: log 1 out of every N requests.
     /// 1 means log everything (default).
     sample_every: u64,
-
-    /// Monotonic counter for deterministic sampling.
-    counter: AtomicU64,
 }
 
 // -----------------------------------------------------------------------------

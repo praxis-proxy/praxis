@@ -36,6 +36,7 @@ use std::sync::Arc;
 use praxis_core::{
     config::{ABSOLUTE_MAX_BODY_BYTES, FailureMode, InsecureOptions},
     health::HealthRegistry,
+    id::IdGenerator,
     kv::KvStoreRegistry,
     time::TimeSource,
 };
@@ -75,6 +76,9 @@ pub struct FilterPipeline {
 
     /// Shared health registry for endpoint health lookups.
     health_registry: Option<HealthRegistry>,
+
+    /// Shared ID generator for request correlation IDs.
+    id_generator: Arc<IdGenerator>,
 
     /// Named key-value stores for runtime mappings.
     kv_stores: Option<KvStoreRegistry>,
@@ -174,6 +178,16 @@ impl FilterPipeline {
     /// The shared health registry, if set.
     pub fn health_registry(&self) -> Option<&HealthRegistry> {
         self.health_registry.as_ref()
+    }
+
+    /// The shared request ID generator.
+    pub fn id_generator(&self) -> &IdGenerator {
+        &self.id_generator
+    }
+
+    /// Override the [`IdGenerator`] for this pipeline.
+    pub fn set_id_generator(&mut self, generator: Arc<IdGenerator>) {
+        self.id_generator = generator;
     }
 
     /// The shared KV store registry, if set.

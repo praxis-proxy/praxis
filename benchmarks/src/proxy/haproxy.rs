@@ -14,11 +14,11 @@ use super::ProxyConfig;
 /// Built-in [`ProxyConfig`] for `HAProxy` via Docker.
 #[derive(Debug)]
 pub struct HaproxyConfig {
-    /// Path to the `HAProxy` config file.
-    pub config: PathBuf,
-
     /// Listen address on the host (e.g. "127.0.0.1:8080").
     pub address: String,
+
+    /// Path to the `HAProxy` config file.
+    pub config: PathBuf,
 
     /// Docker container name.
     pub container_name: String,
@@ -30,8 +30,8 @@ pub struct HaproxyConfig {
 impl Default for HaproxyConfig {
     fn default() -> Self {
         Self {
-            config: PathBuf::from("benchmarks/comparison/configs/haproxy.cfg"),
             address: "127.0.0.1:18093".into(),
+            config: PathBuf::from("benchmarks/comparison/configs/haproxy.cfg"),
             container_name: "praxis-bench-haproxy".into(),
             image: None,
         }
@@ -74,5 +74,25 @@ impl ProxyConfig for HaproxyConfig {
 
     fn container_name(&self) -> Option<&str> {
         Some(&self.container_name)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn haproxy_config_defaults() {
+        let config = HaproxyConfig::default();
+
+        assert_eq!(config.name(), "haproxy");
+        assert_eq!(config.listen_address(), "127.0.0.1:18093");
+        assert_eq!(config.container_name(), Some("praxis-bench-haproxy"));
+        assert_eq!(config.health_url(), None, "haproxy has no built-in health URL");
     }
 }

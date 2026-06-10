@@ -567,6 +567,33 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_get_or_create_same_name() {
+        let registry = Arc::new(KvStoreRegistry::new());
+
+        let handles: Vec<_> = (0..10)
+            .map(|_| {
+                let reg = Arc::clone(&registry);
+                std::thread::spawn(move || reg.get_or_create("race"))
+            })
+            .collect();
+
+        let stores: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+
+        assert_eq!(
+            registry.len(),
+            1,
+            "only one store should exist after concurrent creation"
+        );
+
+        stores[0].set("k", Arc::from("v"));
+        assert_eq!(
+            stores[9].get("k").as_deref(),
+            Some("v"),
+            "all handles should reference the same underlying store"
+        );
+    }
+
+    #[test]
     fn kv_lookup_into_value() {
         assert_eq!(
             KvLookup::Value(Arc::from("x")).into_value(),

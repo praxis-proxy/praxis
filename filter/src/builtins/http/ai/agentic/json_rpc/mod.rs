@@ -133,7 +133,10 @@ impl HttpFilter for JsonRpcFilter {
         let envelope = match parse_json_rpc_envelope(chunk, &self.config) {
             Ok(Some(envelope)) => envelope,
             Ok(None) => return Ok(FilterAction::Continue),
-            Err(_) if !end_of_stream => return Ok(FilterAction::Continue),
+            Err(_) if !end_of_stream => {
+                trace!("JSON-RPC parse failed on partial body; waiting for EOS");
+                return Ok(FilterAction::Continue);
+            },
             Err(e) => return handle_parse_error(e, &self.config),
         };
 
@@ -177,11 +180,11 @@ fn promote_to_headers(
     headers: &mut Vec<(std::borrow::Cow<'static, str>, String)>,
 ) {
     if let (Some(method), Some(header_name)) = (&envelope.method, &config.headers.method) {
-        if contains_control_chars(method) {
+        if contains_control_chars(method) || method.len() > super::MAX_DYNAMIC_VALUE_LEN {
             warn!(
                 header = %header_name,
                 method_len = method.len(),
-                "skipping header injection: method contains control characters"
+                "skipping header injection: method contains control characters or exceeds length limit"
             );
         } else {
             headers.push((std::borrow::Cow::Owned(header_name.clone()), method.clone()));
@@ -189,11 +192,11 @@ fn promote_to_headers(
     }
 
     if let (Some(id), Some(header_name)) = (&envelope.id, &config.headers.id) {
-        if contains_control_chars(id) {
+        if contains_control_chars(id) || id.len() > super::MAX_DYNAMIC_VALUE_LEN {
             warn!(
                 header = %header_name,
                 id_len = id.len(),
-                "skipping header injection: id contains control characters"
+                "skipping header injection: id contains control characters or exceeds length limit"
             );
         } else {
             headers.push((std::borrow::Cow::Owned(header_name.clone()), id.clone()));

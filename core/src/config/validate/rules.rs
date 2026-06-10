@@ -474,6 +474,24 @@ filter_chains:
     }
 
     #[test]
+    fn accept_threads_at_max() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  threads: 1024
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
     fn reject_invalid_yaml() {
         let err = Config::from_yaml("not: [valid: yaml: {{").unwrap_err();
         assert!(err.to_string().contains("invalid YAML"));

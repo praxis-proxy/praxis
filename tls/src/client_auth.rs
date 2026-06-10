@@ -34,7 +34,7 @@ use crate::{ClientCertMode, TlsError};
 ///
 /// let verifier = build_client_verifier(
 ///     "/etc/ssl/client-ca.pem",
-///     &ClientCertMode::Require,
+///     ClientCertMode::Require,
 ///     &[],
 /// )
 /// .expect("valid CA file");
@@ -45,7 +45,7 @@ use crate::{ClientCertMode, TlsError};
 /// [`ClientCertMode::None`]: crate::ClientCertMode::None
 pub(crate) fn build_client_verifier(
     ca_path: &str,
-    mode: &ClientCertMode,
+    mode: ClientCertMode,
     crl_paths: &[String],
 ) -> Result<Arc<dyn ClientCertVerifier>, TlsError> {
     let root_store = load_ca_root_store(ca_path)?;
@@ -152,7 +152,7 @@ mod tests {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
-        let verifier = build_client_verifier(ca_path, &ClientCertMode::Require, &[])
+        let verifier = build_client_verifier(ca_path, ClientCertMode::Require, &[])
             .expect("require mode with valid CA should succeed");
         assert!(
             verifier.client_auth_mandatory(),
@@ -166,7 +166,7 @@ mod tests {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
-        let verifier = build_client_verifier(ca_path, &ClientCertMode::Request, &[])
+        let verifier = build_client_verifier(ca_path, ClientCertMode::Request, &[])
             .expect("request mode with valid CA should succeed");
         assert!(
             !verifier.client_auth_mandatory(),
@@ -180,8 +180,7 @@ mod tests {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
-        let err =
-            build_client_verifier(ca_path, &ClientCertMode::None, &[]).expect_err("mode=None should return error");
+        let err = build_client_verifier(ca_path, ClientCertMode::None, &[]).expect_err("mode=None should return error");
         assert!(
             matches!(err, TlsError::ClientVerifierNotRequired),
             "error should be ClientVerifierNotRequired, got: {err}"
@@ -190,7 +189,7 @@ mod tests {
 
     #[test]
     fn build_client_verifier_invalid_ca_path_returns_error() {
-        let err = build_client_verifier("/nonexistent/ca.pem", &ClientCertMode::Require, &[])
+        let err = build_client_verifier("/nonexistent/ca.pem", ClientCertMode::Require, &[])
             .expect_err("nonexistent CA should fail");
         assert!(
             matches!(err, TlsError::FileLoadError { .. }),
@@ -227,6 +226,32 @@ mod tests {
         assert!(
             matches!(err, TlsError::FileLoadError { .. }),
             "error should be FileLoadError, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_crls_nonexistent_file_returns_error() {
+        let err = load_crls(&["/nonexistent/crl.pem".to_owned()]).expect_err("nonexistent CRL file should fail");
+        assert!(
+            matches!(err, TlsError::FileLoadError { .. }),
+            "error should be FileLoadError, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("load"),
+            "error should mention file loading, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_crls_empty_pem_returns_error() {
+        let temp = tempfile::NamedTempFile::new().expect("tempfile creation should succeed");
+        std::fs::write(temp.path(), "").expect("write empty file should succeed");
+        let path = temp.path().to_str().expect("path should be valid UTF-8").to_owned();
+
+        let err = load_crls(&[path]).expect_err("empty PEM should fail");
+        assert!(
+            err.to_string().contains("no CRLs found"),
+            "error should mention no CRLs found, got: {err}"
         );
     }
 }

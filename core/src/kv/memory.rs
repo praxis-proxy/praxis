@@ -83,8 +83,14 @@ impl InMemoryKvBackend {
     }
 }
 
+/// Maximum number of compiled regex patterns to cache.
+const MAX_REGEX_CACHE_SIZE: usize = 10_000;
+
 impl InMemoryKvBackend {
     /// Retrieve a cached compiled regex or compile and cache it.
+    ///
+    /// The cache is bounded at [`MAX_REGEX_CACHE_SIZE`] entries. When
+    /// the cap is reached, new patterns compile but are not cached.
     ///
     /// # Errors
     ///
@@ -95,7 +101,9 @@ impl InMemoryKvBackend {
             return Ok(entry.value().clone());
         }
         let compiled = Regex::new(pattern).map_err(|e| format!("invalid regex pattern '{pattern}': {e}"))?;
-        self.regex_cache.entry(pattern.to_owned()).or_insert(compiled.clone());
+        if self.regex_cache.len() < MAX_REGEX_CACHE_SIZE {
+            self.regex_cache.entry(pattern.to_owned()).or_insert(compiled.clone());
+        }
         Ok(compiled)
     }
 }

@@ -24,7 +24,8 @@ RUST_TARGETS := all build release check \
 	bench \
 	lint fmt doc audit coverage coverage-check \
 	run-echo run-debug
-NIGHTLY_TARGETS := lint fmt fuzz fuzz-build
+NIGHTLY_FMT_TARGETS  := lint fmt
+NIGHTLY_FUZZ_TARGETS := fuzz fuzz-build
 CMAKE_TARGETS := all build release check \
 	test test-unit \
 	test-schema test-integration test-conformance \
@@ -54,6 +55,7 @@ endif
 	check-prereqs \
 	check-prereqs-cmake \
 	check-prereqs-nightly \
+	check-prereqs-nightly-toolchain \
 	setup-hooks \
 	help
 
@@ -70,7 +72,7 @@ check-prereqs-cmake: check-prereqs
 		echo "\"cmake\" is not installed or broken — install/reinstall it before running make (see docs/development.md)" >&2; \
 		exit 1; \
 	}
-check-prereqs-nightly: check-prereqs
+check-prereqs-nightly-toolchain: check-prereqs
 	@test -n "$(NIGHTLY_VERSION)" || { \
 		echo "Could not determine NIGHTLY_VERSION from .github/actions/install-nightly-rust/action.yml" >&2; \
 		exit 1; \
@@ -79,10 +81,16 @@ check-prereqs-nightly: check-prereqs
 		echo "Rust $(NIGHTLY_VERSION) is not installed — run \"rustup toolchain install $(NIGHTLY_VERSION)\" (see docs/development.md)" >&2; \
 		exit 1; \
 	}
+check-prereqs-nightly: check-prereqs-nightly-toolchain
+	@cargo +$(NIGHTLY_VERSION) fmt --version >/dev/null 2>&1 || { \
+		echo "rustfmt is not installed for $(NIGHTLY_VERSION) — run \"rustup component add --toolchain $(NIGHTLY_VERSION) rustfmt\"" >&2; \
+		exit 1; \
+	}
 
 $(RUST_TARGETS): check-prereqs
 $(CMAKE_TARGETS): check-prereqs-cmake
-$(NIGHTLY_TARGETS): check-prereqs-nightly
+$(NIGHTLY_FMT_TARGETS): check-prereqs-nightly
+$(NIGHTLY_FUZZ_TARGETS): check-prereqs-nightly-toolchain
 
 # -------------------------------------------------------------------
 # All

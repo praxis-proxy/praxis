@@ -16,11 +16,11 @@ use super::ProxyConfig;
 /// Starts an Envoy container with resource limits matching the comparison benchmark constraints.
 #[derive(Debug)]
 pub struct EnvoyConfig {
-    /// Path to the Envoy YAML config file.
-    pub config: PathBuf,
-
     /// Listen address on the host (e.g. "127.0.0.1:8080").
     pub address: String,
+
+    /// Path to the Envoy YAML config file.
+    pub config: PathBuf,
 
     /// Docker container name.
     pub container_name: String,
@@ -32,8 +32,8 @@ pub struct EnvoyConfig {
 impl Default for EnvoyConfig {
     fn default() -> Self {
         Self {
-            config: PathBuf::from("benchmarks/comparison/configs/envoy.yaml"),
             address: "127.0.0.1:18091".into(),
+            config: PathBuf::from("benchmarks/comparison/configs/envoy.yaml"),
             container_name: "praxis-bench-envoy".into(),
             image: None,
         }
@@ -79,5 +79,25 @@ impl ProxyConfig for EnvoyConfig {
 
     fn container_name(&self) -> Option<&str> {
         Some(&self.container_name)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn envoy_config_defaults() {
+        let config = EnvoyConfig::default();
+
+        assert_eq!(config.name(), "envoy");
+        assert_eq!(config.listen_address(), "127.0.0.1:18091");
+        assert_eq!(config.container_name(), Some("praxis-bench-envoy"));
+        assert_eq!(config.health_url(), None, "envoy has no built-in health URL");
     }
 }

@@ -104,6 +104,22 @@ listeners:
     }
 
     #[test]
+    fn accept_ipv6_listener_address() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "[::1]:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
     fn accept_valid_tcp_upstream_address() {
         let yaml = r#"
 listeners:

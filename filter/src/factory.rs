@@ -189,6 +189,63 @@ mod tests {
         assert!(matches!(filter, AnyFilter::Tcp(_)));
     }
 
+    #[test]
+    fn strip_structural_keys_removes_known_keys() {
+        let mut mapping = serde_yaml::Mapping::new();
+        mapping.insert("filter".into(), "router".into());
+        mapping.insert("conditions".into(), serde_yaml::Value::Sequence(vec![]));
+        mapping.insert("name".into(), "my_filter".into());
+        mapping.insert("my_config_field".into(), "value".into());
+
+        let cleaned = strip_structural_keys(&serde_yaml::Value::Mapping(mapping));
+
+        let result = cleaned.as_mapping().expect("should be mapping");
+        assert!(
+            result.get("filter").is_none(),
+            "structural key 'filter' should be stripped"
+        );
+        assert!(
+            result.get("conditions").is_none(),
+            "structural key 'conditions' should be stripped"
+        );
+        assert!(result.get("name").is_none(), "structural key 'name' should be stripped");
+        assert_eq!(
+            result.get("my_config_field").and_then(|v| v.as_str()),
+            Some("value"),
+            "non-structural key should be preserved"
+        );
+    }
+
+    #[test]
+    fn strip_structural_keys_non_mapping_passes_through() {
+        let input = serde_yaml::Value::String("hello".to_owned());
+        let output = strip_structural_keys(&input);
+        assert_eq!(
+            output.as_str(),
+            Some("hello"),
+            "non-mapping value should pass through unchanged"
+        );
+    }
+
+    #[test]
+    fn strip_structural_keys_only_structural_produces_empty_mapping() {
+        let mut mapping = serde_yaml::Mapping::new();
+        mapping.insert("filter".into(), "router".into());
+        mapping.insert("conditions".into(), serde_yaml::Value::Null);
+        mapping.insert("name".into(), "x".into());
+        mapping.insert("failure_mode".into(), "open".into());
+        mapping.insert("response_conditions".into(), serde_yaml::Value::Null);
+        mapping.insert("branch_chains".into(), serde_yaml::Value::Null);
+
+        let cleaned = strip_structural_keys(&serde_yaml::Value::Mapping(mapping));
+
+        let result = cleaned.as_mapping().expect("should be mapping");
+        assert!(
+            result.is_empty(),
+            "mapping with only structural keys should be empty after stripping"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------

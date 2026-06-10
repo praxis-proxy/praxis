@@ -155,6 +155,93 @@ clusters:
     }
 
     #[test]
+    fn reject_zero_total_connection_timeout() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:80"]
+    total_connection_timeout_ms: 0
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("total_connection_timeout_ms is 0"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_zero_idle_timeout() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:80"]
+    idle_timeout_ms: 0
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("idle_timeout_ms is 0"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_zero_read_timeout() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:80"]
+    read_timeout_ms: 0
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("read_timeout_ms is 0"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_zero_write_timeout() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:80"]
+    write_timeout_ms: 0
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("write_timeout_ms is 0"), "got: {err}");
+    }
+
+    #[test]
     fn accept_valid_timeouts() {
         let yaml = r#"
 listeners:

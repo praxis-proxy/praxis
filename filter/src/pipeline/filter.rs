@@ -20,6 +20,9 @@ use crate::any_filter::AnyFilter;
 /// named struct that also carries branch chains and an
 /// optional user-assigned name.
 pub(crate) struct PipelineFilter {
+    /// Optional user-assigned name for rejoin targeting.
+    pub name: Option<Arc<str>>,
+
     /// Branches evaluated after this filter.
     pub branches: Vec<ResolvedBranch>,
 
@@ -31,9 +34,6 @@ pub(crate) struct PipelineFilter {
 
     /// The filter implementation.
     pub filter: AnyFilter,
-
-    /// Optional user-assigned name for rejoin targeting.
-    pub name: Option<Arc<str>>,
 
     /// Response-phase conditions.
     pub response_conditions: Vec<ResponseCondition>,

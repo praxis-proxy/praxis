@@ -31,6 +31,7 @@ use self::{
     envelope::{A2aEnvelope, extract_a2a_envelope},
     task_routing::LocalTaskRouteStore,
 };
+use super::MAX_DYNAMIC_VALUE_LEN;
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
@@ -41,13 +42,6 @@ use crate::{
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Maximum length for dynamic values before promotion (256 bytes to match durable metadata limit).
-const MAX_DYNAMIC_VALUE_LEN: usize = 256;
 
 // -----------------------------------------------------------------------------
 // A2aFilter

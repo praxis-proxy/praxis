@@ -35,8 +35,11 @@ and the [extensions guide](../filters/extensions.md).
 | `url_rewrite` | Transformation | HTTP |
 | `sni_router` | Traffic Management | TCP |
 | `tcp_load_balancer` | Traffic Management | TCP |
+| `grpc_detection` | Traffic Management | HTTP |
 | `model_to_header` | AI / Inference | HTTP (requires `ai-inference` feature) |
 | `prompt_enrich` | AI / Inference | HTTP (requires `ai-inference` feature) |
+| `openai_responses_format` | AI / Inference | HTTP (requires `ai-inference` feature) |
+| `openai_responses_validate` | AI / Inference | HTTP (requires `ai-inference` feature) |
 
 ## Router
 
@@ -510,6 +513,50 @@ circuit closes. See [circuit-breaker.yaml].
 
 [circuit-breaker.yaml]: ../../examples/configs/traffic-management/circuit-breaker.yaml
 
+## gRPC Detection
+
+Classifies gRPC requests by examining the
+`content-type` header and promotes the variant to
+metadata and filter results for branch-based routing.
+No configuration fields. See [grpc-detection.yaml].
+
+```yaml
+- filter: grpc_detection
+```
+
+The filter writes `grpc_detection.kind` to both
+metadata and filter results with one of:
+
+| Value | Content-Type |
+| ----- | ------------ |
+| `grpc` | `application/grpc` (implicit protobuf) |
+| `grpc+proto` | `application/grpc+proto` |
+| `grpc+json` | `application/grpc+json` |
+| `grpc+other` | Unrecognized codec (e.g. `application/grpc+flatbuffers`) |
+| `none` | Not a gRPC request |
+
+Use with branch chains to route gRPC and HTTP traffic
+differently on the same listener:
+
+```yaml
+- filter: grpc_detection
+  branch_chains:
+    - name: grpc_route
+      on_result:
+        filter: grpc_detection
+        key: kind
+        result: grpc
+      rejoin: terminal
+      chains:
+        - name: grpc_handling
+          filters:
+            - filter: static_response
+              status: 200
+              body: "grpc-detected"
+```
+
+[grpc-detection.yaml]: ../../examples/configs/traffic-management/grpc-detection.yaml
+
 ## Guardrails
 
 Rejects requests matching string or regex rules against
@@ -692,6 +739,128 @@ non-empty `content` string. JSON is re-serialized, so
 byte-for-byte body identity is not preserved. In chains
 that also use `json_body_field` or `model_to_header`,
 place `prompt_enrich` first.
+
+## OpenAI Responses Format
+
+Classifies OpenAI Responses API and Chat Completions
+API requests by inspecting the JSON request body.
+Promotes format, model, stream flag, and routing mode
+to configurable request headers, metadata, and filter
+results. Does not mutate the body. Requires the
+`ai-inference` feature. See [format-routing.yaml].
+
+[format-routing.yaml]: ../../examples/configs/ai/openai/responses/format-routing.yaml
+
+```yaml
+- filter: openai_responses_format
+  on_invalid: continue
+  max_body_bytes: 67108864
+  headers:
+    format: x-praxis-ai-format
+    model: x-praxis-ai-model
+    stream: x-praxis-ai-stream
+    mode: x-praxis-responses-mode
+```
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `on_invalid` | string | `"continue"` | `"continue"` passes unclassifiable requests through; `"reject"` returns 400 |
+| `max_body_bytes` | integer | 67108864 | Maximum body size to buffer (64 MiB) |
+| `headers.format` | string | `"x-praxis-ai-format"` | Header for classification format |
+| `headers.model` | string | `"x-praxis-ai-model"` | Header for extracted model name |
+| `headers.stream` | string | `"x-praxis-ai-stream"` | Header for stream flag |
+| `headers.mode` | string | `"x-praxis-responses-mode"` | Header for routing mode |
+
+Classification formats written to
+`openai_responses_format.format`:
+
+| Format | Meaning |
+| ------ | ------- |
+| `openai_responses` | Responses API (body contains `input`) |
+| `openai_chat_completions` | Chat Completions API (body contains `messages`) |
+| `unknown_json` | Valid JSON without recognized format |
+| `invalid_json` | Malformed JSON |
+| `non_json` | Body is not JSON |
+
+For Responses API requests, the filter computes a
+routing mode written to
+`openai_responses_format.mode`:
+
+- **`stateful`**: request has `previous_response_id`,
+  non-empty `tools`, `store=true` (default when
+  omitted), `background=true`, `conversation`, or
+  `prompt_id`
+- **`stateless`**: `store=false` with no other stateful
+  markers
+
+Use with branch chains to route stateful and stateless
+Responses API requests to different clusters:
+
+```yaml
+- filter: openai_responses_format
+  on_invalid: reject
+  branch_chains:
+    - name: stateful
+      on_result:
+        filter: openai_responses_format
+        key: mode
+        result: stateful
+      rejoin: terminal
+      chains:
+        - name: stateful_routing
+          filters:
+            - filter: router
+              routes:
+                - path: "/v1/responses"
+                  cluster: orchestration
+```
+
+## OpenAI Responses Validate
+
+Validates Responses API parameter combinations and
+generates cryptographically random response and
+conversation IDs. Must be placed after
+`openai_responses_format` in the filter chain. Skips
+non-Responses API requests. No configuration fields.
+Requires the `ai-inference` feature. See
+[request-validate.yaml].
+
+[request-validate.yaml]: ../../examples/configs/ai/openai/responses/request-validate.yaml
+
+```yaml
+- filter: openai_responses_validate
+```
+
+**Validation rules:**
+
+| Condition | Result |
+| --------- | ------ |
+| `stream=true` + `background=true` | 400 Bad Request |
+| `background=true` + `store=false` | 400 Bad Request |
+| All other combinations | Valid |
+
+On rejection, returns a JSON error body:
+
+```json
+{
+  "error": {
+    "message": "stream and background cannot both be true",
+    "type": "invalid_request_error"
+  }
+}
+```
+
+**Generated metadata:**
+
+| Key | Value |
+| --- | ----- |
+| `responses.response_id` | `resp_` + 32 random hex digits |
+| `responses.conversation_id` | Extracted from body or `conv_` + 32 random hex digits |
+| `responses.store` | `"true"` or `"false"` (defaults to `"true"` per OpenAI spec) |
+| `responses.background` | `"true"` or `"false"` (defaults to `"false"`) |
+| `responses.stream` | `"true"` or `"false"` (defaults to `"false"`) |
+
+IDs use CSPRNG for cryptographic randomness.
 
 ## Conditions
 
