@@ -259,12 +259,14 @@ mod tests {
         assert!(
             ctx.filter_metadata
                 .get("responses.response_id")
-                .is_some_and(|v| v.starts_with("resp_")),
-            "response_id should be set with resp_ prefix"
+                .is_some_and(|v| v.starts_with("resp_") && v.len() == 37),
+            "response_id should be resp_ + 32 hex chars"
         );
         assert!(
-            ctx.filter_metadata.contains_key("responses.conversation_id"),
-            "conversation_id should be set"
+            ctx.filter_metadata
+                .get("responses.conversation_id")
+                .is_some_and(|v| v.starts_with("conv_") && v.len() == 37),
+            "conversation_id should be conv_ + 32 hex chars"
         );
         assert_eq!(
             ctx.filter_metadata.get("responses.store").map(String::as_str),
@@ -334,8 +336,8 @@ mod tests {
         assert!(
             ctx.filter_metadata
                 .get("responses.conversation_id")
-                .is_some_and(|v| v.starts_with("conv_")),
-            "conversation_id should be generated with conv_ prefix"
+                .is_some_and(|v| v.starts_with("conv_") && v.len() == 37),
+            "conversation_id should be conv_ + 32 hex chars"
         );
     }
 
