@@ -5,7 +5,7 @@
 
 use std::{
     path::PathBuf,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
@@ -230,7 +230,7 @@ fn response_body_mode_is_bounded_stream_buffer() {
 // on_request Bypass
 // -----------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_request_skips_when_format_metadata_absent() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -247,7 +247,7 @@ async fn on_request_skips_when_format_metadata_absent() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_request_skips_when_format_is_openai_chat_completions() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
@@ -265,7 +265,7 @@ async fn on_request_skips_when_format_is_openai_chat_completions() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_request_skips_when_store_is_false() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -284,7 +284,7 @@ async fn on_request_skips_when_store_is_false() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_request_skips_when_stream_is_true() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -303,7 +303,7 @@ async fn on_request_skips_when_stream_is_true() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_request_skips_for_get_method() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::GET, "/v1/responses/resp_123");
@@ -318,7 +318,7 @@ async fn on_request_skips_for_get_method() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_request_skips_for_delete_method() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_123");
@@ -336,7 +336,7 @@ async fn on_request_skips_for_delete_method() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_request_initializes_store_for_openai_responses_format() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -359,7 +359,7 @@ async fn on_request_initializes_store_for_openai_responses_format() {
 // on_response
 // -----------------------------------------------------------------------------
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_skips_when_format_metadata_absent() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -377,7 +377,7 @@ async fn on_response_skips_when_format_metadata_absent() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_sets_skip_persist_for_non_2xx() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -398,7 +398,7 @@ async fn on_response_sets_skip_persist_for_non_2xx() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_sets_skip_persist_for_non_json_content_type() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -423,7 +423,7 @@ async fn on_response_sets_skip_persist_for_non_json_content_type() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_continues_for_json_200() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -440,7 +440,7 @@ async fn on_response_continues_for_json_200() {
     assert!(matches!(action, FilterAction::Continue), "should continue for JSON 200");
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_accepts_mixed_case_json_content_type() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -462,7 +462,7 @@ async fn on_response_accepts_mixed_case_json_content_type() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_does_not_buffer_when_store_unavailable() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
@@ -522,7 +522,7 @@ fn on_response_body_releases_skipped_non_end_of_stream() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_body_releases_when_skip_persist_is_true() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -539,7 +539,7 @@ async fn on_response_body_releases_when_skip_persist_is_true() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_body_releases_streaming_request_before_eos() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -560,7 +560,7 @@ async fn on_response_body_releases_streaming_request_before_eos() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_body_buffers_persistable_non_end_of_stream() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -576,7 +576,7 @@ async fn on_response_body_buffers_persistable_non_end_of_stream() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_body_skips_when_body_is_none() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -592,7 +592,7 @@ async fn on_response_body_skips_when_body_is_none() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_body_continues_when_terminal_body_is_none() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -615,7 +615,7 @@ async fn on_response_body_continues_when_terminal_body_is_none() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_body_skips_when_body_is_empty() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -631,7 +631,7 @@ async fn on_response_body_skips_when_body_is_empty() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_body_skips_when_body_is_invalid_json() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -647,7 +647,7 @@ async fn on_response_body_skips_when_body_is_invalid_json() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_body_skips_when_id_field_missing() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -664,7 +664,7 @@ async fn on_response_body_skips_when_id_field_missing() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_body_skips_when_created_at_field_missing() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -681,7 +681,7 @@ async fn on_response_body_skips_when_created_at_field_missing() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_body_skips_when_model_field_missing() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -698,7 +698,7 @@ async fn on_response_body_skips_when_model_field_missing() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_body_persists_valid_response() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
@@ -726,7 +726,6 @@ async fn on_response_body_persists_valid_response() {
         "should continue after spawning persist task"
     );
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let store = store_opt.as_ref().unwrap();
     let record = store
@@ -753,7 +752,7 @@ async fn on_response_body_persists_valid_response() {
     );
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn pipeline_persists_after_format_request_body_classification() {
     let (db_url, db_path) = temp_sqlite_url("pipeline_persists_after_format_request_body_classification");
 
@@ -827,7 +826,6 @@ async fn pipeline_persists_after_format_request_body_classification() {
         "response body phase should persist and continue"
     );
 
-    tokio::time::sleep(Duration::from_millis(100)).await;
 
     let store = SqliteResponseStore::new(&db_url, "test_responses", "test_conversations")
         .await
@@ -845,7 +843,7 @@ async fn pipeline_persists_after_format_request_body_classification() {
     cleanup_sqlite_file(&db_path);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn store_init_failure_is_permanent() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"

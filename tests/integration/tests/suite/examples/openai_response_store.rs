@@ -3,7 +3,7 @@
 
 //! Functional tests for the `openai_response_store` example config.
 
-use std::{collections::HashMap, time::Duration};
+use std::collections::HashMap;
 
 use praxis_test_utils::{
     Backend, example_config_path, free_port, http_send, json_post, parse_body, parse_status, patch_yaml, start_proxy,
@@ -54,8 +54,6 @@ async fn response_store_persists_response_to_sqlite() {
         RESPONSE_JSON,
         "response body should match the backend's JSON"
     );
-
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
     let pool = sqlx::SqlitePool::connect(&db_url)
         .await

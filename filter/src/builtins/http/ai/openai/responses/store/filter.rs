@@ -16,9 +16,13 @@
 //! - **`on_response`**: re-checks skip conditions, then inspects the response status and content-type. Non-2xx or
 //!   non-JSON responses set `responses.skip_persist` and bail early.
 //!
-//! - **`on_response_body`**: at end-of-stream, extracts the record from the buffered response JSON and spawns an async
-//!   persist task. Non-persistable exchanges release chunks immediately via [`FilterAction::Release`] to avoid holding
-//!   pass-through traffic in the `StreamBuffer`.
+//! - **`on_response_body`**: at end-of-stream, extracts the record from the buffered response JSON and persists it
+//!   synchronously via [`block_in_place`] before returning to Pingora. This guarantees the record is durable before the
+//!   client observes the completed response, preventing races with subsequent operations like `DELETE
+//!   /v1/responses/{id}`. Non-persistable exchanges release chunks immediately via [`FilterAction::Release`] to avoid
+//!   holding pass-through traffic in the `StreamBuffer`.
+//!
+//! [`block_in_place`]: tokio::task::block_in_place
 //!
 //! The repeated `should_skip_persist()` calls at each phase are
 //! intentional. Each phase learns something new (request metadata,
@@ -306,23 +310,26 @@ fn parse_response_record(bytes: &[u8], tenant_id: &str) -> Option<ResponseRecord
     })
 }
 
-/// Persist a response record asynchronously.
-fn spawn_persist_response(store: Arc<dyn ResponseStore>, record: ResponseRecord) {
+/// Persist a response record synchronously via [`block_in_place`].
+///
+/// Uses the current Tokio runtime handle to drive the async
+/// `upsert_response` call without yielding back to Pingora's
+/// synchronous `response_body_filter`. This guarantees the record
+/// is durable before the response reaches the client, preventing
+/// races where a subsequent `DELETE /v1/responses/{id}` arrives
+/// before the upsert completes.
+///
+/// [`block_in_place`]: tokio::task::block_in_place
+fn persist_response_blocking(store: &Arc<dyn ResponseStore>, record: &ResponseRecord) -> Result<(), FilterError> {
     debug!(
         id = %record.id,
         model = %record.model,
         "persisting response"
     );
 
-    tokio::spawn(async move {
-        if let Err(e) = store.upsert_response(&record).await {
-            warn!(
-                id = %record.id,
-                error = %e,
-                "response store: upsert failed"
-            );
-        }
-    });
+    let handle = tokio::runtime::Handle::current();
+    tokio::task::block_in_place(|| handle.block_on(store.upsert_response(record)))
+        .map_err(|e| -> FilterError { Box::new(e) })
 }
 
 // -----------------------------------------------------------------------------
@@ -417,7 +424,7 @@ impl HttpFilter for ResponseStoreFilter {
             return Ok(FilterAction::Continue);
         };
 
-        spawn_persist_response(store, record);
+        persist_response_blocking(&store, &record)?;
         Ok(FilterAction::Continue)
     }
 }
