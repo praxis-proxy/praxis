@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Praxis Contributors
+
 //! Built-in PII detection patterns used by guardrail rules.
 //!
 //! Detection is heuristic and format-specific: patterns match common

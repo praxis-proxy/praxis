@@ -75,6 +75,15 @@ mod tests {
     }
 
     #[test]
+    fn accept_exactly_max_endpoints() {
+        let endpoints: Vec<_> = (0..10_000)
+            .map(|i| format!("10.{}.{}.{}:80", i / 65536, (i / 256) % 256, i % 256).into())
+            .collect();
+        let clusters = vec![Cluster::with_defaults("big", endpoints)];
+        validate_clusters(&clusters, &InsecureOptions::default()).expect("exactly MAX_ENDPOINTS should be accepted");
+    }
+
+    #[test]
     fn reject_zero_weight_endpoint() {
         let yaml = r#"
 listeners:

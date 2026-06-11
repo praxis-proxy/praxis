@@ -740,6 +740,50 @@ filter_chains:
     }
 
     #[test]
+    fn accept_nesting_at_exact_max_depth() {
+        fn nested_yaml(depth: usize) -> String {
+            let mut yaml = String::from(
+                r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+"#,
+            );
+
+            fn write_level(yaml: &mut String, depth: usize, current: usize, indent: usize) {
+                let pad = " ".repeat(indent);
+                let filter_name = format!("branch_{current}");
+                let chain_name = format!("inline_{current}");
+                yaml.push_str(&format!("{pad}- filter: headers\n"));
+                if current < depth {
+                    yaml.push_str(&format!("{pad}  branch_chains:\n"));
+                    yaml.push_str(&format!("{pad}    - name: {filter_name}\n"));
+                    yaml.push_str(&format!("{pad}      chains:\n"));
+                    yaml.push_str(&format!("{pad}        - name: {chain_name}\n"));
+                    yaml.push_str(&format!("{pad}          filters:\n"));
+                    write_level(yaml, depth, current + 1, indent + 12);
+                }
+            }
+
+            write_level(&mut yaml, depth, 0, 6);
+
+            yaml.push_str(
+                r#"      - filter: static_response
+        status: 200
+"#,
+            );
+            yaml
+        }
+
+        let yaml = nested_yaml(super::super::branch_chain::MAX_BRANCH_DEPTH);
+        Config::from_yaml(&yaml).expect("nesting at exactly MAX_BRANCH_DEPTH should pass");
+    }
+
+    #[test]
     fn accept_valid_on_result_filter() {
         let yaml = r#"
 listeners:

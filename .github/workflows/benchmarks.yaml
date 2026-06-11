@@ -5,8 +5,8 @@ name: Benchmarks
 # ------------------------------------------------------------------------------
 
 on:
-  push:
-    branches: [main]
+  schedule:
+    - cron: "17 3 * * *" # 11:17 PM ET
   workflow_dispatch:
     inputs:
       threshold:

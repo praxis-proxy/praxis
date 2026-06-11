@@ -207,6 +207,23 @@ mod tests {
     }
 
     #[test]
+    fn zero_size_buffer_rejects_nonempty_push() {
+        let mut buf = BodyBuffer::new(0);
+
+        let err = buf.push(Bytes::from_static(b"x")).unwrap_err();
+        assert_eq!(err.limit, 0, "zero-size buffer limit should be 0");
+        assert_eq!(err.attempted, 1, "attempted size should be 1 byte");
+
+        let mut buf2 = BodyBuffer::new(0);
+        buf2.push(Bytes::new()).unwrap();
+        assert_eq!(
+            buf2.total_bytes(),
+            0,
+            "pushing empty bytes into zero-size buffer should succeed"
+        );
+    }
+
+    #[test]
     fn buffer_overflow_display_message() {
         let err = BodyBufferOverflow {
             limit: 100,

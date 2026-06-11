@@ -157,17 +157,17 @@ pub struct Route {
     #[serde(flatten)]
     pub path_match: PathMatch,
 
-    /// Host to match. If set, the route only applies to this host.
-    #[serde(default)]
-    pub host: Option<String>,
+    /// Name of the cluster to route matched requests to.
+    pub cluster: Arc<str>,
 
     /// Request headers to match. All specified headers must be present
     /// with matching values (AND semantics, case-sensitive).
     #[serde(default)]
     pub headers: Option<HashMap<String, String>>,
 
-    /// Name of the cluster to route matched requests to.
-    pub cluster: Arc<str>,
+    /// Host to match. If set, the route only applies to this host.
+    #[serde(default)]
+    pub host: Option<String>,
 }
 
 // -----------------------------------------------------------------------------

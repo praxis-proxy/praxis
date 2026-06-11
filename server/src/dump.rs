@@ -328,6 +328,31 @@ filter_chains:
         assert_filter(&filters[2], "second", 1, 2, "router");
     }
 
+    const CREDENTIAL_INJECTION_ENV_VAR_YAML: &str = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: credential_injection
+        clusters:
+          - name: backend
+            header: Authorization
+            env_var: "SECRET_TOKEN"
+            header_prefix: "Bearer "
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:9090"
+"#;
+
     /// Assert a resolved filter's chain, indices, and type name.
     fn assert_filter(f: &ResolvedFilterDump, chain: &str, chain_idx: usize, pipeline_idx: usize, filter: &str) {
         assert_eq!(f.chain, chain, "chain mismatch for filter {filter}");
@@ -498,6 +523,47 @@ filter_chains:
                 .unwrap()
                 .contains_key(serde_yaml::Value::String("clusters".to_owned())),
             "config without clusters key should remain unchanged"
+        );
+    }
+
+    #[test]
+    fn credential_injection_env_var_redacted_in_dump() {
+        let config = Config::from_yaml(CREDENTIAL_INJECTION_ENV_VAR_YAML).unwrap();
+        let dump = build_dump(&config, "test.yaml").unwrap();
+        let output = serde_yaml::to_string(&dump).unwrap();
+        assert!(
+            !output.contains("SECRET_TOKEN"),
+            "env_var credential must be redacted: {output}"
+        );
+        assert!(output.contains("[REDACTED]"), "redaction marker must appear: {output}");
+        assert!(
+            output.contains("header_prefix"),
+            "non-sensitive fields must remain: {output}"
+        );
+    }
+
+    #[test]
+    fn redact_sensitive_keys_nested_password() {
+        let mut value: serde_yaml::Value =
+            serde_yaml::from_str("some_filter:\n  config:\n    password: secret123").expect("test YAML must parse");
+        redact_sensitive_keys(&mut value);
+        let nested_password = value
+            .as_mapping()
+            .unwrap()
+            .get(serde_yaml::Value::String("some_filter".to_owned()))
+            .unwrap()
+            .as_mapping()
+            .unwrap()
+            .get(serde_yaml::Value::String("config".to_owned()))
+            .unwrap()
+            .as_mapping()
+            .unwrap()
+            .get(serde_yaml::Value::String("password".to_owned()))
+            .unwrap();
+        assert_eq!(
+            nested_password.as_str(),
+            Some("[REDACTED]"),
+            "nested password field must be redacted"
         );
     }
 

@@ -133,7 +133,10 @@ impl HttpFilter for JsonRpcFilter {
         let envelope = match parse_json_rpc_envelope(chunk, &self.config) {
             Ok(Some(envelope)) => envelope,
             Ok(None) => return Ok(FilterAction::Continue),
-            Err(_) if !end_of_stream => return Ok(FilterAction::Continue),
+            Err(_) if !end_of_stream => {
+                trace!("JSON-RPC parse failed on partial body; waiting for EOS");
+                return Ok(FilterAction::Continue);
+            },
             Err(e) => return handle_parse_error(e, &self.config),
         };
 

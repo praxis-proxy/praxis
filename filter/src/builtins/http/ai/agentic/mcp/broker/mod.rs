@@ -371,7 +371,6 @@ fn initialize_response_body(envelope: &JsonRpcEnvelope, protocol_version: &str) 
             },
             "serverInfo": {
                 "name": SERVER_NAME,
-                "version": env!("CARGO_PKG_VERSION"),
             },
         },
     })

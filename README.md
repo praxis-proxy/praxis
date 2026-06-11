@@ -31,6 +31,7 @@ Full documentation index: [docs/README.md](docs/README.md)
 with the following documentation first:
 
 - [Architecture](docs/architecture/overview.md)
+  ([interactive diagram](docs/architecture/diagram.html))
 - [Conventions](docs/developing/conventions.md)
 - [Development](docs/developing/getting-started.md)
 - [Benchmarks](docs/benchmarks.md)

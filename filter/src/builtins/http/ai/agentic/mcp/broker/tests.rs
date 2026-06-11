@@ -528,7 +528,10 @@ async fn initialize_returns_session_and_id() {
             );
             let parsed: serde_json::Value = serde_json::from_str(body_str).unwrap();
             assert_eq!(parsed["result"]["serverInfo"]["name"], "praxis");
-            assert_eq!(parsed["result"]["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+            assert!(
+                parsed["result"]["serverInfo"].get("version").is_none(),
+                "serverInfo should not leak version"
+            );
             assert!(
                 rejection.headers.iter().any(|(k, _)| k == "mcp-session-id"),
                 "should contain mcp-session-id header"

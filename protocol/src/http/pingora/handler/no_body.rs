@@ -2,6 +2,10 @@
 // Copyright (c) 2024 Shane Utt
 
 //! Pingora HTTP handler that skips body filter hooks for zero-overhead forwarding.
+//!
+//! Currently unused. This handler does not enforce memory pressure
+//! checks or global connection limits. If activated, those guards
+//! must be added before use in production.
 
 use std::{sync::Arc, time::Duration};
 
@@ -15,7 +19,7 @@ use pingora_core::{
 use pingora_proxy::{ProxyHttp, Session};
 use praxis_filter::{CompressionConfig, FilterPipeline};
 use tokio::sync::Semaphore;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::{
     adjust_compression, emit_request_metrics, handle_connect_failure, logging_cleanup, record_passive_health,
@@ -97,18 +101,21 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
     where
         Self::CTX: Send + Sync,
     {
+        if praxis_core::memory::is_exceeded() {
+            return reject_503(session, "5", "memory pressure exceeded").await;
+        }
+
+        let (exceeded, permit) = crate::connections::try_acquire_global();
+        ctx._global_connection_permit = permit;
+        if exceeded {
+            return reject_503(session, "1", "global max connections exceeded").await;
+        }
+
         if let Some(ref sem) = self.connection_semaphore {
             if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
                 ctx._connection_permit = Some(permit);
             } else {
-                warn!("max connections reached, rejecting request");
-                let mut header = pingora_http::ResponseHeader::build(503, None)?;
-                header.append_header("Retry-After", "1")?;
-                session.write_response_header(Box::new(header), true).await?;
-                return Err(pingora_core::Error::explain(
-                    pingora_core::ErrorType::HTTPStatus(503),
-                    "max connections exceeded",
-                ));
+                return reject_503(session, "1", "max connections exceeded").await;
             }
         }
 
@@ -184,4 +191,20 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
         record_passive_health(&pipeline, e, ctx);
         logging_cleanup(&pipeline, ctx).await;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+/// Write a 503 response with `Retry-After` and return the corresponding error.
+async fn reject_503(session: &mut Session, retry_after: &'static str, reason: &'static str) -> Result<()> {
+    tracing::warn!(reason, "rejecting request");
+    let mut header = pingora_http::ResponseHeader::build(503, None)?;
+    header.append_header("Retry-After", retry_after)?;
+    session.write_response_header(Box::new(header), true).await?;
+    Err(pingora_core::Error::explain(
+        pingora_core::ErrorType::HTTPStatus(503),
+        reason,
+    ))
 }

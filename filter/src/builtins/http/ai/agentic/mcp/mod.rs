@@ -48,8 +48,9 @@ use crate::{
 // -----------------------------------------------------------------------------
 
 /// Extracts MCP protocol metadata from JSON-RPC request bodies and promotes
-/// method, tool/resource/prompt name, session ID, and protocol version to
-/// request headers, filter results, and durable metadata for routing.
+/// method, tool/resource/prompt name, JSON-RPC kind, protocol version, and
+/// session presence to request headers/filter results; stores session ID in
+/// durable metadata.
 ///
 /// # YAML
 ///
@@ -70,6 +71,7 @@ use crate::{
 ///   method: x-praxis-mcp-method
 ///   name: x-praxis-mcp-name
 ///   kind: x-praxis-mcp-kind
+///   protocol_version: x-praxis-mcp-protocol-version
 ///   session_present: x-praxis-mcp-session-present
 /// ```
 pub struct McpFilter {
@@ -424,6 +426,13 @@ fn promote_mcp_headers(
         headers.push((Cow::Owned(header_name.clone()), name.clone()));
     }
 
+    if let Some(header_name) = &config.headers.protocol_version
+        && let Some(pv) = &mcp.protocol_version
+        && !contains_control_chars(pv)
+    {
+        headers.push((Cow::Owned(header_name.clone()), pv.clone()));
+    }
+
     if let Some(header_name) = &config.headers.kind {
         headers.push((Cow::Owned(header_name.clone()), envelope.kind.as_str().to_owned()));
     }
@@ -450,6 +459,12 @@ fn promote_filter_results(
         && !contains_control_chars(name)
     {
         results.set("name", name.clone())?;
+    }
+
+    if let Some(pv) = &mcp.protocol_version
+        && !contains_control_chars(pv)
+    {
+        results.set("protocol_version", pv.clone())?;
     }
 
     let session_present = if mcp.session_id.is_some() { "true" } else { "false" };

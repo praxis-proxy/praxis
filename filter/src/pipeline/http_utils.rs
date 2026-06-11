@@ -199,6 +199,7 @@ mod tests {
     use bytes::Bytes;
 
     use super::*;
+    use crate::HttpFilter;
 
     #[test]
     fn accumulate_body_bytes_some_adds_to_counter() {
@@ -299,5 +300,47 @@ mod tests {
         let err: FilterError = "test error".into();
         let result = dispatch_body_result(Err(err), "test", "request", FailureMode::Closed);
         assert!(result.is_err(), "error with FailureMode::Closed should propagate");
+    }
+
+    #[test]
+    fn skip_by_response_conditions_unless_match_skips() {
+        use http::StatusCode;
+        use praxis_core::config::{ResponseCondition, ResponseConditionMatch};
+
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut resp = crate::test_utils::make_response();
+        resp.status = StatusCode::BAD_REQUEST;
+
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.response_header = Some(&mut resp);
+
+        let conditions = vec![ResponseCondition::Unless(ResponseConditionMatch {
+            status: Some(vec![400]),
+            headers: None,
+        })];
+
+        let filter = StubFilter;
+        assert!(
+            skip_by_response_conditions(&filter, &conditions, &ctx),
+            "Unless with matching status should cause skip"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// Minimal HTTP filter stub for unit tests.
+    struct StubFilter;
+
+    #[async_trait::async_trait]
+    impl HttpFilter for StubFilter {
+        fn name(&self) -> &'static str {
+            "stub"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
     }
 }

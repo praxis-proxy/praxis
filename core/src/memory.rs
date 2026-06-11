@@ -117,9 +117,15 @@ impl MemoryPressure {
         if now.saturating_sub(last) < CHECK_INTERVAL_MS {
             return;
         }
+        if self
+            .last_check_ms
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_err()
+        {
+            return;
+        }
         if let Some(rss) = sample_rss() {
             self.cached_rss.store(rss, Ordering::Relaxed);
-            self.last_check_ms.store(now, Ordering::Relaxed);
         }
     }
 }

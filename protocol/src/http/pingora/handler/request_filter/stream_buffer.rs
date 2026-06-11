@@ -15,6 +15,11 @@ use crate::http::pingora::context::PingoraRequestCtx;
 // Constants
 // -----------------------------------------------------------------------------
 
+/// Defense-in-depth fallback when `StreamBuffer { max_bytes: None }`
+/// reaches the body filter layer (64 MiB, matching the filter crate's
+/// `MAX_JSON_BODY_BYTES` ceiling).
+const BODY_FALLBACK_LIMIT: usize = 67_108_864; // 64 MiB
+
 /// Headers allowed in TRACE echo responses.
 ///
 /// Only headers known to be non-sensitive are echoed. All others
@@ -41,7 +46,11 @@ const TRACE_ALLOWED_HEADERS: &[&str] = &[
 /// Build a TRACE echo response containing the request headers as the body.
 ///
 /// Per [RFC 9110 Section 9.3.8], a TRACE response echoes the request
-/// message with content-type `message/http`.
+/// message with content-type `message/http`. Only headers in
+/// [`TRACE_ALLOWED_HEADERS`] are echoed; all others are redacted.
+///
+/// TRACE is enabled by default per RFC. Deployments concerned about
+/// TRACE-based reconnaissance should block it via filter conditions.
 ///
 /// [RFC 9110 Section 9.3.8]: https://datatracker.ietf.org/doc/html/rfc9110#section-9.3.8
 pub(super) fn build_trace_response(session: &Session) -> Rejection {
@@ -98,11 +107,8 @@ pub(super) async fn pre_read_body(
     request: &Request,
 ) -> Result<Vec<(Cow<'static, str>, String)>, PreReadError> {
     let caps = pipeline.body_capabilities();
-    // Config validation enforces reasonable limits on `max_bytes`.
-    // `usize::MAX` here means "no limit at this layer"; the
-    // configured cap (or its absence) was already validated.
     let max_bytes = match caps.request_body_mode {
-        BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(usize::MAX),
+        BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(BODY_FALLBACK_LIMIT),
         _ => return Ok(Vec::new()),
     };
 

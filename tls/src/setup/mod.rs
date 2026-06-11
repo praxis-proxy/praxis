@@ -55,7 +55,6 @@ fn alpn_protocols() -> Vec<Vec<u8>> {
 ///
 /// [`TlsError`]: crate::TlsError
 /// [`ListenerTls`]: crate::ListenerTls
-#[allow(clippy::too_many_lines, reason = "sequential branches")]
 pub fn build_server_config(tls: &ListenerTls) -> Result<Arc<ServerConfig>, TlsError> {
     let builder = build_server_config_base(tls)?;
 
@@ -134,10 +133,10 @@ fn build_server_config_base(
     if tls.client_cert_mode == ClientCertMode::None {
         Ok(builder.with_no_client_auth())
     } else {
-        let ca_cfg = tls.client_ca.as_ref().ok_or_else(|| TlsError::MissingClientCa {
-            mode: tls.client_cert_mode.clone(),
+        let ca_cfg = tls.client_ca.as_ref().ok_or(TlsError::MissingClientCa {
+            mode: tls.client_cert_mode,
         })?;
-        let verifier = client_auth::build_client_verifier(&ca_cfg.ca_path, &tls.client_cert_mode, &ca_cfg.crl_paths)?;
+        let verifier = client_auth::build_client_verifier(&ca_cfg.ca_path, tls.client_cert_mode, &ca_cfg.crl_paths)?;
         Ok(builder.with_client_cert_verifier(verifier))
     }
 }
@@ -518,6 +517,32 @@ mod tests {
             min_version: None,
         };
         assert!(needs_custom_config(&tls), "cipher_suites should need custom config");
+    }
+
+    #[test]
+    #[cfg(feature = "hot-reload")]
+    fn build_reloadable_server_config_single_cert() {
+        let certs = gen_test_certs();
+        let tls = ListenerTls {
+            certificates: vec![CertKeyPair {
+                cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+                default: false,
+                key_path: certs.key_path.to_str().expect("key path").to_owned(),
+                server_names: Vec::new(),
+            }],
+            cipher_suites: None,
+            client_ca: None,
+            client_cert_mode: ClientCertMode::None,
+            hot_reload: None,
+            min_version: None,
+        };
+
+        let (config, _swap) = build_reloadable_server_config(&tls).expect("reloadable build should succeed");
+        assert_eq!(
+            config.alpn_protocols,
+            vec![b"h2".to_vec(), b"http/1.1".to_vec()],
+            "ALPN should include h2 and http/1.1"
+        );
     }
 
     // -----------------------------------------------------------------------------

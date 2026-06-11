@@ -23,11 +23,11 @@ use std::{
 /// assert!(bucket.try_acquire(10.0, 5.0, 0).is_some());
 /// ```
 pub(crate) struct TokenBucket {
-    /// Current tokens stored as `f64::to_bits`.
-    tokens: AtomicU64,
-
     /// Last refill timestamp in nanoseconds since epoch.
     last_refill: AtomicU64,
+
+    /// Current tokens stored as `f64::to_bits`.
+    tokens: AtomicU64,
 }
 
 impl TokenBucket {

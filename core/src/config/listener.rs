@@ -35,6 +35,14 @@ pub struct Listener {
     /// Address to bind to (e.g. "0.0.0.0:8080").
     pub address: String,
 
+    /// Cluster name for TCP load balancing.
+    ///
+    /// When set, the TCP listener routes connections via a load
+    /// balancer strategy across the named cluster's endpoints.
+    /// Mutually exclusive with `upstream`.
+    #[serde(default)]
+    pub cluster: Option<String>,
+
     /// Downstream read timeout in milliseconds for HTTP listeners.
     ///
     /// Only applies to `protocol: http` listeners.
@@ -107,14 +115,6 @@ pub struct Listener {
     /// exclusive with `cluster`.
     #[serde(default)]
     pub upstream: Option<String>,
-
-    /// Cluster name for TCP load balancing.
-    ///
-    /// When set, the TCP listener routes connections via a load
-    /// balancer strategy across the named cluster's endpoints.
-    /// Mutually exclusive with `upstream`.
-    #[serde(default)]
-    pub cluster: Option<String>,
 }
 
 // -----------------------------------------------------------------------------

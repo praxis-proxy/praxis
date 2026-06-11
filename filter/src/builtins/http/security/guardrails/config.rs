@@ -150,20 +150,20 @@ pub(super) struct RuleConfig {
     /// [`Header`]: RuleTargetKind::Header
     pub name: Option<String>,
 
-    /// What to inspect: header or body.
-    pub target: RuleTargetKind,
-
     /// Literal substring (case-insensitive) or PII category list.
     pub contains: Option<ContainsValue>,
-
-    /// Regex pattern match.
-    pub pattern: Option<String>,
 
     /// Invert the match: reject when the content does NOT
     /// match. For negated header rules, a missing header
     /// also triggers rejection. Defaults to `false`.
     #[serde(default)]
     pub negate: bool,
+
+    /// Regex pattern match.
+    pub pattern: Option<String>,
+
+    /// What to inspect: header or body.
+    pub target: RuleTargetKind,
 }
 
 // -----------------------------------------------------------------------------

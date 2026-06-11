@@ -91,10 +91,6 @@ mod tests {
         assert_eq!(path_prefix_specificity("/api/v1"), 7);
     }
 
-    /// `"//"` strips to `"/"` which is non-empty, so it enters the
-    /// `starts_with` + segment-boundary check instead of the early
-    /// "empty means match everything" return. This means `"//"` only
-    /// matches paths whose second byte is `/`.
     #[test]
     fn double_slash_prefix() {
         assert!(!path_prefix_matches("/foo", "//"), "/foo must not match // prefix");

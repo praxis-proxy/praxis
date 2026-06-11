@@ -94,11 +94,11 @@ impl EndpointHealth {
     /// assert!(ep.is_healthy());
     /// ```
     #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[allow(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
     pub fn mark_healthy(&self) {
         let mut inner = self.inner.lock().expect("health lock poisoned");
         inner.healthy = true;
         inner.consecutive_failures = 0;
-        drop(inner);
         self.healthy_cache.store(true, Ordering::Release);
     }
 
@@ -116,11 +116,11 @@ impl EndpointHealth {
     /// assert!(!ep.is_healthy());
     /// ```
     #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[allow(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
     pub fn mark_unhealthy(&self) {
         let mut inner = self.inner.lock().expect("health lock poisoned");
         inner.healthy = false;
         inner.consecutive_successes = 0;
-        drop(inner);
         self.healthy_cache.store(false, Ordering::Release);
     }
 
@@ -240,18 +240,21 @@ pub type HealthRegistry = Arc<HashMap<Arc<str>, ClusterHealthState>>;
 /// assert!(registry.is_empty());
 /// ```
 pub fn build_health_registry(clusters: &[crate::config::Cluster]) -> HealthRegistry {
-    let mut map = HashMap::new();
-    for cluster in clusters {
-        if cluster.health_check.is_some() {
+    let map = clusters
+        .iter()
+        .filter_map(|cluster| {
+            let hc = cluster.health_check.as_ref()?;
             let endpoints: Vec<EndpointHealth> = cluster.endpoints.iter().map(|_| EndpointHealth::new()).collect();
             let addresses: Vec<Arc<str>> = cluster.endpoints.iter().map(|ep| Arc::from(ep.address())).collect();
-            let (passive_unhealthy, passive_healthy) = cluster.health_check.as_ref().map_or((None, None), |hc| {
-                (hc.passive_unhealthy_threshold, hc.passive_healthy_threshold)
-            });
-            let entry = ClusterHealthEntry::new(endpoints, addresses, passive_unhealthy, passive_healthy);
-            map.insert(Arc::clone(&cluster.name), Arc::new(entry));
-        }
-    }
+            let entry = ClusterHealthEntry::new(
+                endpoints,
+                addresses,
+                hc.passive_unhealthy_threshold,
+                hc.passive_healthy_threshold,
+            );
+            Some((Arc::clone(&cluster.name), Arc::new(entry)))
+        })
+        .collect();
     Arc::new(map)
 }
 
@@ -627,6 +630,33 @@ mod tests {
             inner.healthy,
             ep.is_healthy(),
             "cache must match inner state after concurrent mixed probes"
+        );
+    }
+
+    #[test]
+    fn record_failure_zero_threshold_transitions() {
+        let ep = EndpointHealth::new();
+        assert!(
+            ep.record_failure(0),
+            "record_failure(0) should transition from healthy to unhealthy"
+        );
+        assert!(
+            !ep.is_healthy(),
+            "endpoint should be unhealthy after zero-threshold failure"
+        );
+    }
+
+    #[test]
+    fn record_success_zero_threshold_transitions() {
+        let ep = EndpointHealth::new();
+        ep.mark_unhealthy();
+        assert!(
+            ep.record_success(0),
+            "record_success(0) should transition from unhealthy to healthy"
+        );
+        assert!(
+            ep.is_healthy(),
+            "endpoint should be healthy after zero-threshold success"
         );
     }
 

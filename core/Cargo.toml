@@ -20,6 +20,7 @@ workspace = true
 dashmap = { workspace = true }
 pingora-core = { workspace = true }
 praxis-tls = { workspace = true }
+rand = { workspace = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }

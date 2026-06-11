@@ -42,16 +42,13 @@ pub(super) struct ClusterCredentialConfig {
     /// Cluster name this rule applies to.
     pub name: String,
 
-    /// Header name to inject (e.g. `"Authorization"`, `"x-api-key"`).
-    pub header: String,
-
-    /// Literal credential value. Mutually exclusive with `env_var`.
-    pub value: Option<String>,
-
     /// Environment variable name containing the credential.
     /// Resolved at filter construction time.
     /// Mutually exclusive with `value`.
     pub env_var: Option<String>,
+
+    /// Header name to inject (e.g. `"Authorization"`, `"x-api-key"`).
+    pub header: String,
 
     /// Optional prefix prepended to the credential value
     /// before injection (e.g. `"Bearer "`).
@@ -63,6 +60,9 @@ pub(super) struct ClusterCredentialConfig {
     #[serde(default = "default_strip")]
     #[allow(dead_code, reason = "parsed by serde for config compatibility")]
     pub strip_client_credential: bool,
+
+    /// Literal credential value. Mutually exclusive with `env_var`.
+    pub value: Option<String>,
 }
 
 /// Default for `strip_client_credential`.

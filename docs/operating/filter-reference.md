@@ -376,10 +376,10 @@ to the filter result set for branch chain conditions.
 
 Extracts Model Context Protocol metadata from JSON-RPC
 request bodies and promotes method, tool/resource/prompt
-name, session ID, and protocol version to request
-headers and filter results for routing. Validates MCP
-headers against body-derived values when
-`header_validation` is configured.
+name, JSON-RPC kind, protocol version, and session
+presence to request headers/filter results; stores session
+ID in durable metadata. Validates MCP headers against
+body-derived values when `header_validation` is configured.
 
 ```yaml
 - filter: mcp
@@ -396,6 +396,7 @@ headers against body-derived values when
 | `headers.method` | string | `"x-praxis-mcp-method"` | Header name for MCP method |
 | `headers.name` | string | `"x-praxis-mcp-name"` | Header name for tool/resource/prompt name |
 | `headers.kind` | string | `"x-praxis-mcp-kind"` | Header name for JSON-RPC kind |
+| `headers.protocol_version` | string | `"x-praxis-mcp-protocol-version"` | Header name for MCP protocol version |
 | `headers.session_present` | string | `"x-praxis-mcp-session-present"` | Header name for session presence |
 
 Recognized MCP methods include `initialize`,

@@ -10,12 +10,11 @@ use crate::{
     errors::ProxyError,
 };
 
+use super::super::cluster::MAX_TIMEOUT_MS;
+
 // -----------------------------------------------------------------------------
 // Timeout Constants
 // -----------------------------------------------------------------------------
-
-/// Maximum allowed timeout value in milliseconds (1 hour).
-const MAX_TIMEOUT_MS: u64 = 3_600_000;
 
 /// Default TCP idle timeout in milliseconds (5 minutes).
 const DEFAULT_TCP_IDLE_TIMEOUT_MS: u64 = 300_000;
@@ -241,6 +240,24 @@ listeners:
         assert!(
             err.to_string().contains("tcp_max_duration_secs must be > 0"),
             "got: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_tcp_idle_timeout_at_maximum() {
+        let yaml = r#"
+listeners:
+  - name: db
+    address: "0.0.0.0:5432"
+    protocol: tcp
+    upstream: "10.0.0.1:5432"
+    tcp_idle_timeout_ms: 3600000
+"#;
+        let config = Config::from_yaml(yaml).unwrap();
+        assert_eq!(
+            config.listeners[0].tcp_idle_timeout_ms,
+            Some(3_600_000),
+            "TCP idle timeout at maximum should be accepted"
         );
     }
 

@@ -29,10 +29,13 @@ use crate::{CertKeyPair, setup::loader};
 // -----------------------------------------------------------------------------
 
 /// Debounce window for filesystem events.
-const DEBOUNCE_MS: u64 = 500;
+const DEBOUNCE_MS: u64 = 500; // 500 ms
+
+/// Minimum cooldown after a successful reload to prevent rapid churn.
+const MIN_SUCCESS_COOLDOWN_MS: u64 = 5_000; // 5 seconds
 
 /// Maximum backoff delay on consecutive reload failures.
-const MAX_BACKOFF_MS: u64 = 60_000;
+const MAX_BACKOFF_MS: u64 = 60_000; // 60 seconds
 
 // -----------------------------------------------------------------------------
 // CertWatcher
@@ -125,7 +128,7 @@ async fn watch_loop(
                 }
 
                 if reload_cert(&current, &pair) {
-                    backoff_ms = DEBOUNCE_MS;
+                    backoff_ms = MIN_SUCCESS_COOLDOWN_MS;
                 } else {
                     backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
                     tracing::warn!(
@@ -292,6 +295,14 @@ mod tests {
                 notify::event::DataChange::Content
             ))),
             "Modify events should be relevant"
+        );
+    }
+
+    #[test]
+    fn is_relevant_event_remove() {
+        assert!(
+            is_relevant_event(EventKind::Remove(notify::event::RemoveKind::File)),
+            "Remove events should be relevant"
         );
     }
 

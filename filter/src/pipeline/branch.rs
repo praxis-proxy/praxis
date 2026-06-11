@@ -52,6 +52,9 @@ pub(crate) struct ResolvedBranchCondition {
 
 /// A resolved branch chain ready for execution.
 pub(crate) struct ResolvedBranch {
+    /// Globally unique branch name.
+    pub name: Arc<str>,
+
     /// Result-based condition (None = unconditional).
     pub condition: Option<ResolvedBranchCondition>,
 
@@ -62,9 +65,6 @@ pub(crate) struct ResolvedBranch {
     ///
     /// [`ReEnter`]: RejoinTarget::ReEnter
     pub max_iterations: Option<u32>,
-
-    /// Globally unique branch name.
-    pub name: Arc<str>,
 
     /// Where to resume after the branch.
     pub rejoin: RejoinTarget,

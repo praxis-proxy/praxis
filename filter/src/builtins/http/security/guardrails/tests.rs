@@ -719,6 +719,26 @@ rules:
 }
 
 // -----------------------------------------------------------------------------
+// Oversized Body Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn reject_oversized_body_returns_413() {
+    let f = make_oversized_filter(vec![body_contains("needle")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/api");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let oversized = Bytes::from(vec![b'x'; DEFAULT_MAX_BODY_BYTES]);
+    let mut body = Some(oversized);
+    let action = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 413),
+        "body at the inspection limit with reject_oversized should return 413"
+    );
+    assert_result(&ctx.filter_results, "blocked");
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
@@ -813,6 +833,17 @@ fn make_flag_filter(rules: Vec<CompiledRule>) -> GuardrailsFilter {
         action: super::config::GuardrailsAction::Flag,
         needs_body,
         reject_oversized: false,
+        rules,
+    }
+}
+
+/// Build a guardrails filter with `reject_oversized` enabled.
+fn make_oversized_filter(rules: Vec<CompiledRule>) -> GuardrailsFilter {
+    let needs_body = rules.iter().any(|r| matches!(r.target, RuleTarget::Body));
+    GuardrailsFilter {
+        action: super::config::GuardrailsAction::Reject,
+        needs_body,
+        reject_oversized: true,
         rules,
     }
 }

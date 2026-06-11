@@ -286,6 +286,40 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn http_probe_marks_healthy_with_matching_status() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new()],
+            vec![Arc::from("placeholder:80")],
+            None,
+            None,
+        ));
+        state.endpoints()[0].mark_unhealthy();
+
+        let mut params = test_params(vec![addr], Arc::clone(&state), (1, 1));
+        params.check_type = HealthCheckType::Http;
+
+        let probe = tokio::spawn(async move {
+            probe_all_endpoints(&params).await;
+        });
+
+        let (mut socket, _peer) = listener.accept().await.unwrap();
+        let mut buf = [0u8; 512];
+        let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await.unwrap();
+        tokio::io::AsyncWriteExt::write_all(&mut socket, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+            .await
+            .unwrap();
+
+        probe.await.unwrap();
+        assert!(
+            state.endpoints()[0].is_healthy(),
+            "HTTP probe with matching 200 status should mark endpoint healthy"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
