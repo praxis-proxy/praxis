@@ -69,7 +69,10 @@ filter_chains:
 
       - filter: openai_response_store
         backend: sqlite
-        database_url: "sqlite::memory:"
+        # In-memory:
+        #   database_url: "sqlite::memory:"
+        # File-backed:
+        database_url: "sqlite://responses.db?mode=rwc"
         responses_table: openai_responses
         conversations_table: openai_conversations
         # Future #354 orchestration filters would follow here:
