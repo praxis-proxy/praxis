@@ -45,13 +45,13 @@ impl Config {
         validate_branch_chains(&self.filter_chains)?;
         validate_admin_address(self.admin.address.as_deref(), self.insecure_options.allow_public_admin)?;
 
-        let all_tcp = self.listeners.iter().all(|l| l.protocol == ProtocolKind::Tcp);
-        let has_chains = self.listeners.iter().any(|l| !l.filter_chains.is_empty());
-
-        if !all_tcp && !has_chains {
-            return Err(ProxyError::Config(
-                "at least one filter chain required for HTTP listeners".into(),
-            ));
+        for listener in &self.listeners {
+            if listener.protocol != ProtocolKind::Tcp && listener.filter_chains.is_empty() {
+                return Err(ProxyError::Config(format!(
+                    "listener '{}': at least one filter chain required for HTTP listeners",
+                    listener.name
+                )));
+            }
         }
 
         validate_body_limits(&self.body_limits, self.insecure_options.allow_unbounded_body)?;
@@ -368,7 +368,34 @@ listeners:
     address: "0.0.0.0:80"
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
-        assert!(err.to_string().contains("at least one filter chain"));
+        assert!(
+            err.to_string().contains("at least one filter chain"),
+            "should reject HTTP listener without chains: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_http_listener_without_chains_when_sibling_has_chains() {
+        let yaml = r#"
+listeners:
+  - name: db
+    address: "0.0.0.0:5432"
+    protocol: tcp
+    upstream: "10.0.0.1:5432"
+    filter_chains: [tcp_chain]
+  - name: web
+    address: "0.0.0.0:8080"
+filter_chains:
+  - name: tcp_chain
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("listener 'web'"),
+            "should name the HTTP listener without chains: {err}"
+        );
     }
 
     #[test]

@@ -1,0 +1,1426 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Praxis Proxy — Architecture</title>
+<style>
+/* ---------------------------------------------------------------------------
+   Custom Properties
+   --------------------------------------------------------------------------- */
+:root {
+  --c-server: #ea580c;
+  --c-server-light: #fb923c;
+  --c-protocol: #4f46e5;
+  --c-protocol-light: #818cf8;
+  --c-filter: #2563eb;
+  --c-filter-light: #60a5fa;
+  --c-core: #0891b2;
+  --c-core-light: #22d3ee;
+  --c-tls: #0d9488;
+  --c-tls-light: #2dd4bf;
+  --c-proto: #7c3aed;
+  --c-proto-light: #a78bfa;
+  --c-external: #64748b;
+  --c-external-light: #94a3b8;
+  --c-test: #16a34a;
+  --c-test-light: #4ade80;
+  --c-test-utils: #15803d;
+  --c-bench: #9333ea;
+  --c-bench-light: #c084fc;
+  --c-xtask: #d97706;
+  --c-xtask-light: #fbbf24;
+  --c-bg: #f8fafc;
+  --c-surface: #ffffff;
+  --c-text: #0f172a;
+  --c-text-secondary: #475569;
+  --c-border: #e2e8f0;
+  --c-arrow: #94a3b8;
+  --c-dot: #3b82f6;
+  --shadow-sm: 0 1px 3px rgba(0,0,0,.08);
+  --shadow-md: 0 4px 12px rgba(0,0,0,.1);
+  --radius: 10px;
+  --font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "SF Mono", "Cascadia Code", "Fira Code", monospace;
+}
+
+/* ---------------------------------------------------------------------------
+   Reset & Base
+   --------------------------------------------------------------------------- */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: var(--font);
+  background: var(--c-bg);
+  color: var(--c-text);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ---------------------------------------------------------------------------
+   Navigation
+   --------------------------------------------------------------------------- */
+.nav {
+  position: sticky; top: 0; z-index: 100;
+  background: rgba(255,255,255,.88);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--c-border);
+  padding: 0 24px;
+  display: flex; align-items: center; gap: 24px;
+  height: 48px;
+}
+.nav-brand {
+  font-weight: 700; font-size: 14px; color: var(--c-text);
+  letter-spacing: -.02em;
+}
+.nav-brand span { color: var(--c-server); }
+.nav a {
+  font-size: 13px; color: var(--c-text-secondary);
+  text-decoration: none; font-weight: 500;
+  padding: 4px 0;
+  border-bottom: 2px solid transparent;
+  transition: color .2s, border-color .2s;
+}
+.nav a:hover, .nav a.active {
+  color: var(--c-filter);
+  border-bottom-color: var(--c-filter);
+}
+
+/* ---------------------------------------------------------------------------
+   Header
+   --------------------------------------------------------------------------- */
+.page-header {
+  text-align: center;
+  padding: 48px 24px 20px;
+}
+.page-header h1 {
+  font-size: 32px; font-weight: 800;
+  letter-spacing: -.03em;
+  background: linear-gradient(135deg, var(--c-filter), var(--c-protocol));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+.page-header .subtitle {
+  font-size: 14px; color: var(--c-text-secondary);
+  margin-top: 4px;
+}
+
+/* ---------------------------------------------------------------------------
+   Sections
+   --------------------------------------------------------------------------- */
+.section {
+  max-width: 1200px;
+  margin: 0 auto;
+  padding: 0 24px 48px;
+}
+.section-title {
+  font-size: 20px; font-weight: 700;
+  margin-bottom: 16px;
+  padding-left: 12px;
+  border-left: 3px solid var(--c-filter);
+}
+
+/* ---------------------------------------------------------------------------
+   Diagram Containers
+   --------------------------------------------------------------------------- */
+.diagram-box {
+  background: var(--c-surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  padding: 16px;
+  overflow: hidden;
+}
+.diagram-box svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+/* ---------------------------------------------------------------------------
+   Legend
+   --------------------------------------------------------------------------- */
+.legend {
+  display: flex; flex-wrap: wrap; gap: 16px;
+  justify-content: center;
+  margin-top: 16px;
+  font-size: 12px; color: var(--c-text-secondary);
+}
+.legend-item {
+  display: flex; align-items: center; gap: 5px;
+}
+.legend-dot {
+  width: 10px; height: 10px;
+  border-radius: 3px;
+}
+
+/* ---------------------------------------------------------------------------
+   SVG Interactive States
+   --------------------------------------------------------------------------- */
+.hl-box { cursor: pointer; }
+.hl-box:hover .box-rect { filter: brightness(1.1); }
+svg.dimmed .hl-box { opacity: .12; transition: opacity .3s; }
+svg.dimmed .hl-box.highlighted { opacity: 1; }
+svg.dimmed .dep-line { opacity: .06; transition: opacity .3s; }
+svg.dimmed .dep-line.highlighted { opacity: 1; }
+
+/* ---------------------------------------------------------------------------
+   Flow Dot Animations
+   --------------------------------------------------------------------------- */
+.flow-dot {
+  animation: dot-fade 2.4s ease-in-out infinite;
+}
+@keyframes dot-fade {
+  0%, 100% { opacity: .25; }
+  50% { opacity: .85; }
+}
+
+/* ---------------------------------------------------------------------------
+   Request Flow Banner
+   --------------------------------------------------------------------------- */
+.flow-banner {
+  background: var(--c-surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 16px;
+  margin-bottom: 24px;
+}
+.flow-banner h3 {
+  font-size: 14px; font-weight: 600;
+  margin-bottom: 10px;
+  color: var(--c-text-secondary);
+}
+.flow-banner svg { display: block; width: 100%; height: auto; }
+
+/* ---------------------------------------------------------------------------
+   Crate Detail Cards
+   --------------------------------------------------------------------------- */
+.crate-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+  gap: 20px;
+  margin-bottom: 24px;
+}
+.crate-card {
+  background: var(--c-surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+  transition: box-shadow .25s, transform .2s;
+}
+.crate-card:hover {
+  box-shadow: var(--shadow-md);
+  transform: translateY(-2px);
+}
+.crate-card.span-full { grid-column: 1 / -1; }
+.card-header {
+  padding: 12px 16px;
+  display: flex; align-items: center; gap: 10px;
+}
+.card-header h3 {
+  font-size: 15px; font-weight: 700; color: #fff;
+}
+.card-header .pkg {
+  font-size: 11px; color: rgba(255,255,255,.7);
+  font-family: var(--font-mono);
+}
+.card-header .badge {
+  font-size: 10px; font-weight: 600;
+  background: rgba(255,255,255,.2);
+  color: #fff;
+  padding: 2px 8px;
+  border-radius: 20px;
+  margin-left: auto;
+}
+.card-body { padding: 14px 16px 16px; }
+.card-body .desc {
+  font-size: 12px; color: var(--c-text-secondary);
+  margin-bottom: 10px;
+}
+.module-row {
+  display: flex; flex-wrap: wrap; gap: 6px;
+  margin-bottom: 8px;
+}
+.mod-chip {
+  font-size: 11px; font-weight: 500;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: var(--c-bg);
+  border: 1px solid var(--c-border);
+  color: var(--c-text);
+  font-family: var(--font-mono);
+}
+.mod-chip.accent {
+  border-color: currentColor;
+  font-weight: 600;
+}
+
+/* ---------------------------------------------------------------------------
+   Filter Grid
+   --------------------------------------------------------------------------- */
+.filter-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 10px;
+}
+.filter-cat {
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--c-bg);
+}
+.filter-cat-header {
+  font-size: 11px; font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+  margin-bottom: 6px;
+  display: flex; align-items: center; gap: 6px;
+}
+.filter-cat-header .count {
+  font-weight: 400;
+  opacity: .6;
+}
+.filter-cat-dot {
+  width: 7px; height: 7px; border-radius: 2px;
+}
+.filter-tags {
+  display: flex; flex-wrap: wrap; gap: 4px;
+}
+.filter-tag {
+  font-size: 10px;
+  font-family: var(--font-mono);
+  padding: 2px 7px;
+  border-radius: 4px;
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-secondary);
+}
+
+/* ---------------------------------------------------------------------------
+   Hot-Reload Flow
+   --------------------------------------------------------------------------- */
+.reload-banner {
+  background: var(--c-surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 16px;
+  margin-bottom: 24px;
+}
+.reload-banner h3 {
+  font-size: 14px; font-weight: 600;
+  margin-bottom: 10px;
+  color: var(--c-text-secondary);
+}
+
+/* ---------------------------------------------------------------------------
+   Infrastructure Panels
+   --------------------------------------------------------------------------- */
+.infra-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(340px, 1fr));
+  gap: 20px;
+}
+.infra-panel {
+  background: var(--c-surface);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-sm);
+  padding: 16px;
+}
+.infra-panel h3 {
+  font-size: 15px; font-weight: 700;
+  margin-bottom: 12px;
+  display: flex; align-items: center; gap: 8px;
+}
+.infra-panel h3 .dot {
+  width: 8px; height: 8px; border-radius: 3px;
+}
+.infra-item {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 5px 0;
+  font-size: 13px;
+}
+.infra-item .name {
+  font-family: var(--font-mono);
+  font-weight: 600; font-size: 12px;
+  min-width: 110px;
+}
+.infra-item .detail {
+  color: var(--c-text-secondary);
+  font-size: 12px;
+}
+.infra-sub {
+  font-size: 12px; font-weight: 600;
+  color: var(--c-text-secondary);
+  margin: 10px 0 4px;
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+/* ---------------------------------------------------------------------------
+   Tooltip
+   --------------------------------------------------------------------------- */
+.tooltip {
+  position: fixed; z-index: 200;
+  background: var(--c-text);
+  color: #fff;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  max-width: 280px;
+  pointer-events: none;
+  opacity: 0;
+  transform: translateY(4px);
+  transition: opacity .15s, transform .15s;
+  line-height: 1.4;
+}
+.tooltip.visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+.tooltip .tt-name {
+  font-weight: 700; font-size: 13px;
+  margin-bottom: 2px;
+}
+.tooltip .tt-pkg {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  opacity: .6;
+  margin-bottom: 4px;
+}
+
+/* ---------------------------------------------------------------------------
+   Responsive
+   --------------------------------------------------------------------------- */
+@media (max-width: 768px) {
+  .page-header h1 { font-size: 24px; }
+  .crate-grid { grid-template-columns: 1fr; }
+  .crate-card.span-full { grid-column: 1; }
+  .filter-grid { grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); }
+  .infra-grid { grid-template-columns: 1fr; }
+  .nav { gap: 16px; }
+}
+
+/* ---------------------------------------------------------------------------
+   Reduced Motion
+   --------------------------------------------------------------------------- */
+@media (prefers-reduced-motion: reduce) {
+  .flow-dot, .req-dot, .reload-icon { animation: none !important; }
+  .flow-dot { opacity: .5; }
+  .crate-card { transition: none; }
+  html { scroll-behavior: auto; }
+}
+</style>
+</head>
+<body>
+
+<!-- ======================================================================= -->
+<!-- Navigation                                                              -->
+<!-- ======================================================================= -->
+<nav class="nav">
+  <div class="nav-brand"><span>&#9670;</span> Praxis</div>
+  <a href="#high-level" class="active">High-Level</a>
+  <a href="#detailed">Detailed</a>
+</nav>
+
+<!-- ======================================================================= -->
+<!-- Header                                                                  -->
+<!-- ======================================================================= -->
+<header class="page-header">
+  <h1>Praxis Proxy</h1>
+  <p class="subtitle">Architecture Overview &mdash; v0.3.1</p>
+</header>
+
+<!-- ======================================================================= -->
+<!-- Section 1: High-Level Architecture                                      -->
+<!-- ======================================================================= -->
+<section class="section" id="high-level">
+  <h2 class="section-title">High-Level Architecture</h2>
+  <div class="diagram-box">
+    <svg id="hl-svg" viewBox="0 0 1100 470" xmlns="http://www.w3.org/2000/svg"
+         role="img" aria-label="High-level architecture diagram of Praxis proxy">
+      <defs>
+        <!-- Gradients -->
+        <linearGradient id="g-server" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#fb923c"/><stop offset="100%" stop-color="#ea580c"/>
+        </linearGradient>
+        <linearGradient id="g-protocol" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#818cf8"/><stop offset="100%" stop-color="#4f46e5"/>
+        </linearGradient>
+        <linearGradient id="g-filter" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#2563eb"/>
+        </linearGradient>
+        <linearGradient id="g-core" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#22d3ee"/><stop offset="100%" stop-color="#0891b2"/>
+        </linearGradient>
+        <linearGradient id="g-tls" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#2dd4bf"/><stop offset="100%" stop-color="#0d9488"/>
+        </linearGradient>
+        <linearGradient id="g-test" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#4ade80"/><stop offset="100%" stop-color="#16a34a"/>
+        </linearGradient>
+        <linearGradient id="g-bench" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#c084fc"/><stop offset="100%" stop-color="#9333ea"/>
+        </linearGradient>
+        <linearGradient id="g-xtask" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#fbbf24"/><stop offset="100%" stop-color="#d97706"/>
+        </linearGradient>
+        <linearGradient id="g-proto" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stop-color="#a78bfa"/><stop offset="100%" stop-color="#7c3aed"/>
+        </linearGradient>
+        <!-- Arrow marker -->
+        <marker id="arr" viewBox="0 0 10 7" refX="10" refY="3.5"
+                markerWidth="8" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0 0 L10 3.5 L0 7z" fill="#94a3b8"/>
+        </marker>
+        <marker id="arr-dash" viewBox="0 0 10 7" refX="10" refY="3.5"
+                markerWidth="8" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0 0 L10 3.5 L0 7z" fill="#cbd5e1"/>
+        </marker>
+      </defs>
+
+      <!-- ── Clients ── -->
+      <text x="550" y="18" text-anchor="middle" font-size="12" fill="#64748b"
+            font-weight="600">CLIENTS</text>
+      <line x1="550" y1="24" x2="550" y2="40" stroke="#94a3b8" stroke-width="1.5"
+            marker-end="url(#arr)"/>
+
+      <!-- ── Server (Binary) ── -->
+      <g class="hl-box" data-crate="server"
+         data-deps="" data-rdeps="protocol,filter,core"
+         data-tt="praxis|praxis|Binary entry point. CLI parsing, config loading, pipeline resolution, hot-reload watcher. Depends on protocol, filter, and core.">
+        <rect class="box-rect" x="415" y="42" width="270" height="56" rx="8"
+              fill="url(#g-server)"/>
+        <text x="550" y="63" text-anchor="middle" font-size="15" fill="#fff"
+              font-weight="700">praxis</text>
+        <text x="550" y="78" text-anchor="middle" font-size="10" fill="rgba(255,255,255,.75)">
+          server binary &middot; CLI &middot; Config &middot; Hot-Reload</text>
+        <text x="672" y="56" font-size="9" fill="rgba(255,255,255,.5)"
+              font-weight="600">BIN</text>
+      </g>
+
+      <!-- ── Arrow: server → framework ── -->
+      <line class="dep-line" data-from="server" data-to="framework"
+            x1="550" y1="98" x2="550" y2="126" stroke="#94a3b8" stroke-width="1.5"
+            marker-end="url(#arr)"/>
+      <!-- flow dots -->
+      <circle class="flow-dot" r="3" fill="#fb923c" opacity=".6">
+        <animate attributeName="cy" from="100" to="124" dur="2s" repeatCount="indefinite"/>
+        <animate attributeName="cx" values="550;550" dur="2s" repeatCount="indefinite"/>
+      </circle>
+      <circle class="flow-dot" r="2.5" fill="#fb923c" opacity=".4">
+        <animate attributeName="cy" from="100" to="124" dur="2s" begin=".7s"
+                 repeatCount="indefinite"/>
+        <animate attributeName="cx" values="550;550" dur="2s" begin=".7s"
+                 repeatCount="indefinite"/>
+      </circle>
+
+      <!-- ── Framework Boundary ── -->
+      <rect x="328" y="126" width="444" height="248" rx="12"
+            fill="none" stroke="#cbd5e1" stroke-width="1.5"
+            stroke-dasharray="6 4"/>
+      <text x="550" y="143" text-anchor="middle" font-size="11" fill="#94a3b8"
+            font-weight="600" letter-spacing=".06em">PRAXIS FRAMEWORK</text>
+
+      <!-- ── Protocol ── -->
+      <g class="hl-box" data-crate="protocol"
+         data-deps="filter,core,tls" data-rdeps="server"
+         data-tt="praxis-protocol|praxis_protocol|Protocol trait, Pingora HTTP/TCP adapters, ListenerPipelines (ArcSwap), health checks, admin endpoints, Prometheus metrics.">
+        <rect class="box-rect" x="365" y="153" width="370" height="46" rx="6"
+              fill="url(#g-protocol)"/>
+        <text x="550" y="173" text-anchor="middle" font-size="14" fill="#fff"
+              font-weight="700">protocol</text>
+        <text x="550" y="188" text-anchor="middle" font-size="10"
+              fill="rgba(255,255,255,.7)">
+          HTTP/TCP Adapters &middot; Health &middot; Admin &middot; Metrics</text>
+      </g>
+
+      <!-- Arrow: protocol → filter -->
+      <line class="dep-line" data-from="protocol" data-to="filter"
+            x1="550" y1="199" x2="550" y2="213" stroke="#94a3b8" stroke-width="1.5"
+            marker-end="url(#arr)"/>
+      <circle class="flow-dot" r="2.5" fill="#818cf8" opacity=".5">
+        <animate attributeName="cy" from="200" to="212" dur="1.6s"
+                 repeatCount="indefinite"/>
+        <animate attributeName="cx" values="550;550" dur="1.6s"
+                 repeatCount="indefinite"/>
+      </circle>
+
+      <!-- ── Filter ── -->
+      <g class="hl-box" data-crate="filter"
+         data-deps="core" data-rdeps="protocol,server"
+         data-tt="praxis-filter|praxis_filter|HttpFilter/TcpFilter traits, FilterPipeline engine, FilterRegistry, condition evaluation, body access/buffering, 32 built-in filters across 7 categories.">
+        <rect class="box-rect" x="355" y="213" width="390" height="50" rx="6"
+              fill="url(#g-filter)"/>
+        <text x="550" y="234" text-anchor="middle" font-size="14" fill="#fff"
+              font-weight="700">filter</text>
+        <text x="550" y="250" text-anchor="middle" font-size="10"
+              fill="rgba(255,255,255,.7)">
+          Pipeline &middot; Registry &middot; 32 Built-in Filters</text>
+      </g>
+
+      <!-- Arrow: filter → core -->
+      <line class="dep-line" data-from="filter" data-to="core"
+            x1="490" y1="263" x2="490" y2="282" stroke="#94a3b8" stroke-width="1.5"
+            marker-end="url(#arr)"/>
+      <circle class="flow-dot" r="2.5" fill="#60a5fa" opacity=".5">
+        <animate attributeName="cy" from="264" to="280" dur="1.8s"
+                 repeatCount="indefinite"/>
+        <animate attributeName="cx" values="490;490" dur="1.8s"
+                 repeatCount="indefinite"/>
+      </circle>
+
+      <!-- ── Core ── -->
+      <g class="hl-box" data-crate="core"
+         data-deps="tls" data-rdeps="filter,protocol,server"
+         data-tt="praxis-core|praxis_core|YAML config (serde), validation, error types, health state, KV store registry, IdGenerator, TimeSource, PingoraServerRuntime.">
+        <rect class="box-rect" x="365" y="282" width="210" height="46" rx="6"
+              fill="url(#g-core)"/>
+        <text x="470" y="301" text-anchor="middle" font-size="14" fill="#fff"
+              font-weight="700">core</text>
+        <text x="470" y="316" text-anchor="middle" font-size="10"
+              fill="rgba(255,255,255,.7)">
+          Config &middot; Health &middot; KV &middot; Errors</text>
+      </g>
+
+      <!-- Arrow: core → tls -->
+      <line class="dep-line" data-from="core" data-to="tls"
+            x1="575" y1="305" x2="596" y2="305" stroke="#94a3b8" stroke-width="1.5"
+            marker-end="url(#arr)"/>
+      <circle class="flow-dot" r="2" fill="#22d3ee" opacity=".5">
+        <animate attributeName="cx" from="576" to="594" dur="1.5s"
+                 repeatCount="indefinite"/>
+        <animate attributeName="cy" values="305;305" dur="1.5s"
+                 repeatCount="indefinite"/>
+      </circle>
+
+      <!-- ── TLS ── -->
+      <g class="hl-box" data-crate="tls"
+         data-deps="" data-rdeps="core,protocol"
+         data-tt="praxis-tls|praxis_tls|TLS config types, SNI resolution (wildcards), cert loading, hot-reload via ArcSwap, mTLS client auth, CRL checking.">
+        <rect class="box-rect" x="596" y="282" width="148" height="46" rx="6"
+              fill="url(#g-tls)"/>
+        <text x="670" y="301" text-anchor="middle" font-size="14" fill="#fff"
+              font-weight="700">tls</text>
+        <text x="670" y="316" text-anchor="middle" font-size="10"
+              fill="rgba(255,255,255,.7)">
+          SNI &middot; Certs &middot; Reload</text>
+      </g>
+
+      <!-- Arrow: protocol → tls (diagonal) -->
+      <line class="dep-line" data-from="protocol" data-to="tls"
+            x1="700" y1="199" x2="700" y2="282" stroke="#94a3b8" stroke-width="1"
+            stroke-dasharray="4 3" marker-end="url(#arr-dash)"/>
+
+      <!-- ── External Dependencies ── -->
+      <line x1="550" y1="374" x2="550" y2="392" stroke="#94a3b8" stroke-width="1.5"
+            marker-end="url(#arr)"/>
+
+      <rect x="370" y="394" width="360" height="40" rx="8" fill="#f1f5f9"
+            stroke="#e2e8f0" stroke-width="1"/>
+      <text x="550" y="404" text-anchor="middle" font-size="9" fill="#94a3b8"
+            font-weight="600" letter-spacing=".05em">EXTERNAL FOUNDATIONS</text>
+
+      <g class="hl-box" data-crate="pingora"
+         data-tt="Pingora||Cloudflare's HTTP/TCP framework. Connection pooling, request smuggling prevention, H2 backpressure.">
+        <rect class="box-rect" x="382" y="410" width="105" height="18" rx="4"
+              fill="#e2e8f0"/>
+        <text x="434" y="423" text-anchor="middle" font-size="11" fill="#64748b"
+              font-weight="600">Pingora</text>
+      </g>
+      <g class="hl-box" data-crate="rustls"
+         data-tt="Rustls||Modern TLS implementation in pure Rust. No unsafe code.">
+        <rect class="box-rect" x="497" y="410" width="105" height="18" rx="4"
+              fill="#e2e8f0"/>
+        <text x="549" y="423" text-anchor="middle" font-size="11" fill="#64748b"
+              font-weight="600">Rustls</text>
+      </g>
+      <g class="hl-box" data-crate="tokio"
+         data-tt="Tokio||Asynchronous runtime for Rust. Powers all async I/O.">
+        <rect class="box-rect" x="612" y="410" width="105" height="18" rx="4"
+              fill="#e2e8f0"/>
+        <text x="664" y="423" text-anchor="middle" font-size="11" fill="#64748b"
+              font-weight="600">Tokio</text>
+      </g>
+
+      <!-- ================================================================= -->
+      <!-- Left Satellite: Tests                                             -->
+      <!-- ================================================================= -->
+      <text x="152" y="140" text-anchor="middle" font-size="11" fill="#16a34a"
+            font-weight="700" letter-spacing=".04em">TESTING</text>
+
+      <g class="hl-box" data-crate="test-utils"
+         data-tt="test-utils|praxis_test_utils|Shared test harness: ProxyGuard, free_port, mock backends, HTTP clients, TLS cert generation, agentic protocol mocks (MCP, A2A).">
+        <rect class="box-rect" x="20" y="150" width="264" height="30" rx="5"
+              fill="url(#g-test)"/>
+        <text x="152" y="170" text-anchor="middle" font-size="11" fill="#fff"
+              font-weight="600">test-utils &middot; Shared Harness</text>
+      </g>
+
+      <!-- test crate grid -->
+      <g class="hl-box" data-crate="integration"
+         data-tt="integration||94 test files. End-to-end filter and proxy behavior tests covering routing, compression, WebSocket, hot-reload, AI inference, agentic protocols.">
+        <rect class="box-rect" x="20" y="189" width="128" height="26" rx="4"
+              fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+        <text x="84" y="207" text-anchor="middle" font-size="10" fill="#15803d"
+              font-weight="600">integration (94)</text>
+      </g>
+      <g class="hl-box" data-crate="conformance"
+         data-tt="conformance||HTTP/2 spec compliance via h2spec, HTTP semantics, RFC conformance, CORS specification testing.">
+        <rect class="box-rect" x="156" y="189" width="128" height="26" rx="4"
+              fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+        <text x="220" y="207" text-anchor="middle" font-size="10" fill="#15803d"
+              font-weight="600">conformance</text>
+      </g>
+      <g class="hl-box" data-crate="security"
+         data-tt="security||Request smuggling prevention, header injection, filter isolation, info leakage, Host validation, IP ACL enforcement.">
+        <rect class="box-rect" x="20" y="221" width="128" height="26" rx="4"
+              fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+        <text x="84" y="239" text-anchor="middle" font-size="10" fill="#15803d"
+              font-weight="600">security</text>
+      </g>
+      <g class="hl-box" data-crate="resilience"
+         data-tt="resilience||Throughput benchmarks, concurrent load, fault tolerance, backend failure/recovery, multi-listener isolation.">
+        <rect class="box-rect" x="156" y="221" width="128" height="26" rx="4"
+              fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+        <text x="220" y="239" text-anchor="middle" font-size="10" fill="#15803d"
+              font-weight="600">resilience</text>
+      </g>
+      <g class="hl-box" data-crate="schema"
+         data-tt="schema||Config parsing and example validation. Validates all example YAML configs across 8 categories.">
+        <rect class="box-rect" x="20" y="253" width="128" height="26" rx="4"
+              fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+        <text x="84" y="271" text-anchor="middle" font-size="10" fill="#15803d"
+              font-weight="600">schema</text>
+      </g>
+      <g class="hl-box" data-crate="smoke"
+         data-tt="smoke||Quick startup and round-trip sanity checks. Server startup, admin endpoint health, protocol availability.">
+        <rect class="box-rect" x="156" y="253" width="128" height="26" rx="4"
+              fill="#dcfce7" stroke="#16a34a" stroke-width="1"/>
+        <text x="220" y="271" text-anchor="middle" font-size="10" fill="#15803d"
+              font-weight="600">smoke</text>
+      </g>
+      <g class="hl-box" data-crate="fuzz"
+         data-tt="fuzz||7 fuzz targets: config parsing, filter pipeline, body buffer, path sanitize, SNI, header names, CIDR parsing.">
+        <rect class="box-rect" x="20" y="287" width="264" height="26" rx="4"
+              fill="none" stroke="#16a34a" stroke-width="1"
+              stroke-dasharray="5 3"/>
+        <text x="152" y="305" text-anchor="middle" font-size="10" fill="#15803d"
+              font-weight="600">fuzz (7 targets)</text>
+      </g>
+
+      <!-- dashed connector: tests → framework -->
+      <line x1="284" y1="205" x2="328" y2="205" stroke="#bbf7d0"
+            stroke-width="1.5" stroke-dasharray="4 3"/>
+      <line x1="284" y1="270" x2="328" y2="310" stroke="#bbf7d0"
+            stroke-width="1.5" stroke-dasharray="4 3"/>
+
+      <!-- ================================================================= -->
+      <!-- Right Satellite: Benchmarks & Tooling                             -->
+      <!-- ================================================================= -->
+      <text x="948" y="140" text-anchor="middle" font-size="11" fill="#9333ea"
+            font-weight="700" letter-spacing=".04em">PERFORMANCE &amp; TOOLING</text>
+
+      <g class="hl-box" data-crate="microbench"
+         data-tt="Microbenchmarks||Criterion-based: condition_eval, config_parsing, filter_pipeline, headers, load_balancer, router_lookup.">
+        <rect class="box-rect" x="816" y="150" width="264" height="30" rx="5"
+              fill="url(#g-bench)"/>
+        <text x="948" y="170" text-anchor="middle" font-size="11" fill="#fff"
+              font-weight="600">Microbenchmarks (6)</text>
+      </g>
+      <g class="hl-box" data-crate="comparison"
+         data-tt="Comparison Benchmarks||Docker-orchestrated load testing vs Envoy, NGINX, HAProxy. Uses Vegeta and Fortio for workload generation.">
+        <rect class="box-rect" x="816" y="188" width="264" height="30" rx="5"
+              fill="#f3e8ff" stroke="#9333ea" stroke-width="1"/>
+        <text x="948" y="208" text-anchor="middle" font-size="10" fill="#7c3aed"
+              font-weight="600">Comparison (vs Envoy &middot; NGINX &middot; HAProxy)</text>
+      </g>
+
+      <g class="hl-box" data-crate="xtask"
+         data-tt="xtask||Dev task runner: echo server, debug runner, benchmark orchestration, lint-deps (semver), lint-example-tests (coverage).">
+        <rect class="box-rect" x="816" y="234" width="264" height="38" rx="5"
+              fill="url(#g-xtask)"/>
+        <text x="948" y="250" text-anchor="middle" font-size="12" fill="#fff"
+              font-weight="700">xtask</text>
+        <text x="948" y="264" text-anchor="middle" font-size="9"
+              fill="rgba(255,255,255,.75)">
+          echo &middot; debug &middot; benchmark &middot; lint-deps</text>
+      </g>
+
+      <g class="hl-box" data-crate="proto"
+         data-deps="" data-rdeps="filter"
+         data-tt="praxis-proto|praxis_proto|Vendored Envoy ext_proc protobuf definitions. Optional, behind the ext-proc feature flag.">
+        <rect class="box-rect" x="816" y="288" width="264" height="28" rx="5"
+              fill="none" stroke="#7c3aed" stroke-width="1.2"
+              stroke-dasharray="5 3"/>
+        <text x="948" y="307" text-anchor="middle" font-size="10" fill="#7c3aed"
+              font-weight="600">proto &mdash; Envoy ExtProc (optional)</text>
+      </g>
+
+      <!-- dashed connector: proto → filter -->
+      <line class="dep-line" data-from="proto" data-to="filter"
+            x1="816" y1="302" x2="745" y2="240" stroke="#c4b5fd"
+            stroke-width="1.2" stroke-dasharray="5 3"
+            marker-end="url(#arr-dash)"/>
+
+      <!-- dashed connector: benchmarks → framework -->
+      <line x1="816" y1="200" x2="772" y2="200" stroke="#e9d5ff"
+            stroke-width="1.5" stroke-dasharray="4 3"/>
+      <line x1="816" y1="253" x2="772" y2="310" stroke="#fef3c7"
+            stroke-width="1.5" stroke-dasharray="4 3"/>
+    </svg>
+  </div>
+
+  <!-- Legend -->
+  <div class="legend">
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--c-server)"></div> Server (binary)
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--c-protocol)"></div> Protocol
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--c-filter)"></div> Filter
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--c-core)"></div> Core
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--c-tls)"></div> TLS
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--c-test)"></div> Tests
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--c-bench)"></div> Benchmarks
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--c-xtask)"></div> xtask
+    </div>
+    <div class="legend-item">
+      <div class="legend-dot" style="background:var(--c-external);opacity:.5"></div> External
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================================= -->
+<!-- Section 2: Detailed Architecture                                        -->
+<!-- ======================================================================= -->
+<section class="section" id="detailed">
+  <h2 class="section-title">Detailed Architecture</h2>
+
+  <!-- ── Request Flow ── -->
+  <div class="flow-banner">
+    <h3>HTTP Request Lifecycle</h3>
+    <svg viewBox="0 0 980 90" xmlns="http://www.w3.org/2000/svg"
+         role="img" aria-label="HTTP request lifecycle flow">
+      <defs>
+        <marker id="fa" viewBox="0 0 10 7" refX="10" refY="3.5"
+                markerWidth="7" markerHeight="5" orient="auto">
+          <path d="M0 0 L10 3.5 L0 7z" fill="#94a3b8"/>
+        </marker>
+      </defs>
+      <!-- boxes -->
+      <rect x="5" y="25" width="100" height="40" rx="6" fill="#f1f5f9"
+            stroke="#cbd5e1" stroke-width="1"/>
+      <text x="55" y="50" text-anchor="middle" font-size="11" fill="#475569"
+            font-weight="600">Client</text>
+
+      <rect x="135" y="25" width="110" height="40" rx="6" fill="#fef3c7"
+            stroke="#f59e0b" stroke-width="1"/>
+      <text x="190" y="46" text-anchor="middle" font-size="11" fill="#92400e"
+            font-weight="600">Listener</text>
+      <text x="190" y="58" text-anchor="middle" font-size="8" fill="#b45309">TCP accept</text>
+
+      <rect x="275" y="25" width="110" height="40" rx="6"
+            fill="#ede9fe" stroke="#7c3aed" stroke-width="1"/>
+      <text x="330" y="46" text-anchor="middle" font-size="11" fill="#5b21b6"
+            font-weight="600">Protocol</text>
+      <text x="330" y="58" text-anchor="middle" font-size="8"
+            fill="#6d28d9">HTTP/TCP adapter</text>
+
+      <rect x="415" y="25" width="120" height="40" rx="6"
+            fill="#dbeafe" stroke="#2563eb" stroke-width="1"/>
+      <text x="475" y="46" text-anchor="middle" font-size="11" fill="#1e40af"
+            font-weight="600">on_request</text>
+      <text x="475" y="58" text-anchor="middle" font-size="8"
+            fill="#2563eb">filter pipeline</text>
+
+      <rect x="565" y="25" width="100" height="40" rx="6"
+            fill="#f0fdf4" stroke="#16a34a" stroke-width="1"/>
+      <text x="615" y="46" text-anchor="middle" font-size="11" fill="#166534"
+            font-weight="600">Upstream</text>
+      <text x="615" y="58" text-anchor="middle" font-size="8"
+            fill="#15803d">connect + proxy</text>
+
+      <rect x="695" y="25" width="120" height="40" rx="6"
+            fill="#dbeafe" stroke="#2563eb" stroke-width="1"/>
+      <text x="755" y="46" text-anchor="middle" font-size="11" fill="#1e40af"
+            font-weight="600">on_response</text>
+      <text x="755" y="58" text-anchor="middle" font-size="8"
+            fill="#2563eb">filter pipeline</text>
+
+      <rect x="845" y="25" width="100" height="40" rx="6" fill="#f1f5f9"
+            stroke="#cbd5e1" stroke-width="1"/>
+      <text x="895" y="50" text-anchor="middle" font-size="11" fill="#475569"
+            font-weight="600">Client</text>
+
+      <!-- arrows -->
+      <line x1="105" y1="45" x2="133" y2="45" stroke="#94a3b8"
+            stroke-width="1.5" marker-end="url(#fa)"/>
+      <line x1="245" y1="45" x2="273" y2="45" stroke="#94a3b8"
+            stroke-width="1.5" marker-end="url(#fa)"/>
+      <line x1="385" y1="45" x2="413" y2="45" stroke="#94a3b8"
+            stroke-width="1.5" marker-end="url(#fa)"/>
+      <line x1="535" y1="45" x2="563" y2="45" stroke="#94a3b8"
+            stroke-width="1.5" marker-end="url(#fa)"/>
+      <line x1="665" y1="45" x2="693" y2="45" stroke="#94a3b8"
+            stroke-width="1.5" marker-end="url(#fa)"/>
+      <line x1="815" y1="45" x2="843" y2="45" stroke="#94a3b8"
+            stroke-width="1.5" marker-end="url(#fa)"/>
+
+      <!-- animated request dot -->
+      <circle class="req-dot" r="5" fill="#3b82f6" opacity=".7">
+        <animate attributeName="cx" values="55;190;330;475;615;755;895;895"
+                 dur="6s" repeatCount="indefinite"
+                 keyTimes="0;0.14;0.28;0.43;0.57;0.72;0.86;1"
+                 calcMode="spline"
+                 keySplines="0.4 0 0.2 1;0.4 0 0.2 1;0.4 0 0.2 1;0.4 0 0.2 1;0.4 0 0.2 1;0.4 0 0.2 1;0 0 1 1"/>
+        <animate attributeName="cy" values="45;45;45;45;45;45;45;45"
+                 dur="6s" repeatCount="indefinite"/>
+        <animate attributeName="fill"
+                 values="#94a3b8;#f59e0b;#7c3aed;#2563eb;#16a34a;#2563eb;#94a3b8;#94a3b8"
+                 dur="6s" repeatCount="indefinite"/>
+        <animate attributeName="r" values="4;5;5;6;5;6;5;4"
+                 dur="6s" repeatCount="indefinite"/>
+      </circle>
+
+      <!-- phase labels -->
+      <text x="475" y="82" text-anchor="middle" font-size="9" fill="#94a3b8"
+            font-style="italic">request phase</text>
+      <text x="755" y="82" text-anchor="middle" font-size="9" fill="#94a3b8"
+            font-style="italic">response phase</text>
+    </svg>
+  </div>
+
+  <!-- ── Crate Detail Cards ── -->
+  <div class="crate-grid">
+
+    <!-- Server Card -->
+    <div class="crate-card">
+      <div class="card-header" style="background:var(--c-server)">
+        <h3>server</h3>
+        <span class="pkg">praxis</span>
+        <span class="badge">binary</span>
+      </div>
+      <div class="card-body">
+        <p class="desc">Entry point. CLI parsing, config loading, pipeline resolution,
+          and runtime orchestration.</p>
+        <div class="module-row">
+          <span class="mod-chip accent" style="color:var(--c-server)">main</span>
+          <span class="mod-chip accent" style="color:var(--c-server)">run_server</span>
+          <span class="mod-chip">commands</span>
+          <span class="mod-chip">pipelines</span>
+          <span class="mod-chip">reload</span>
+          <span class="mod-chip">watcher</span>
+          <span class="mod-chip">dump</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Protocol Card -->
+    <div class="crate-card">
+      <div class="card-header" style="background:var(--c-protocol)">
+        <h3>protocol</h3>
+        <span class="pkg">praxis_protocol</span>
+        <span class="badge">lib</span>
+      </div>
+      <div class="card-body">
+        <p class="desc">Thin adapters translating Pingora callbacks into filter
+          pipeline invocations. ArcSwap for hot-reload.</p>
+        <div class="module-row">
+          <span class="mod-chip accent" style="color:var(--c-protocol)">Protocol trait</span>
+          <span class="mod-chip accent" style="color:var(--c-protocol)">ListenerPipelines</span>
+        </div>
+        <div class="module-row">
+          <span class="mod-chip">http/pingora</span>
+          <span class="mod-chip">handler</span>
+          <span class="mod-chip">health</span>
+          <span class="mod-chip">metrics</span>
+          <span class="mod-chip">listener</span>
+        </div>
+        <div class="module-row">
+          <span class="mod-chip">tcp/proxy</span>
+          <span class="mod-chip">tls_setup</span>
+          <span class="mod-chip">connections</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Filter Card (full width) -->
+    <div class="crate-card span-full">
+      <div class="card-header" style="background:var(--c-filter)">
+        <h3>filter</h3>
+        <span class="pkg">praxis_filter</span>
+        <span class="badge">lib</span>
+      </div>
+      <div class="card-body">
+        <p class="desc">Filter pipeline engine, condition evaluation, body access, and
+          all 32 built-in filter implementations.</p>
+        <div class="module-row">
+          <span class="mod-chip accent" style="color:var(--c-filter)">HttpFilter trait</span>
+          <span class="mod-chip accent" style="color:var(--c-filter)">TcpFilter trait</span>
+          <span class="mod-chip accent" style="color:var(--c-filter)">FilterPipeline</span>
+          <span class="mod-chip accent" style="color:var(--c-filter)">FilterRegistry</span>
+          <span class="mod-chip">FilterAction</span>
+          <span class="mod-chip">HttpFilterContext</span>
+          <span class="mod-chip">Rejection</span>
+        </div>
+        <div class="module-row">
+          <span class="mod-chip">pipeline/evaluate</span>
+          <span class="mod-chip">pipeline/branch</span>
+          <span class="mod-chip">pipeline/body</span>
+          <span class="mod-chip">condition</span>
+          <span class="mod-chip">factory</span>
+          <span class="mod-chip">results</span>
+        </div>
+
+        <!-- Filter Category Grid -->
+        <div class="filter-grid" style="margin-top:12px">
+          <div class="filter-cat">
+            <div class="filter-cat-header">
+              <div class="filter-cat-dot" style="background:#f59e0b"></div>
+              Traffic Mgmt <span class="count">(8)</span>
+            </div>
+            <div class="filter-tags">
+              <span class="filter-tag">router</span>
+              <span class="filter-tag">load_balancer</span>
+              <span class="filter-tag">rate_limit</span>
+              <span class="filter-tag">circuit_breaker</span>
+              <span class="filter-tag">timeout</span>
+              <span class="filter-tag">redirect</span>
+              <span class="filter-tag">static_response</span>
+              <span class="filter-tag">grpc_detection</span>
+            </div>
+          </div>
+          <div class="filter-cat">
+            <div class="filter-cat-header">
+              <div class="filter-cat-dot" style="background:#ef4444"></div>
+              Security <span class="count">(6)</span>
+            </div>
+            <div class="filter-tags">
+              <span class="filter-tag">cors</span>
+              <span class="filter-tag">csrf</span>
+              <span class="filter-tag">ip_acl</span>
+              <span class="filter-tag">forwarded_headers</span>
+              <span class="filter-tag">credential_injection</span>
+              <span class="filter-tag">guardrails</span>
+            </div>
+          </div>
+          <div class="filter-cat">
+            <div class="filter-cat-header">
+              <div class="filter-cat-dot" style="background:#8b5cf6"></div>
+              AI / Inference <span class="count">(8)</span>
+            </div>
+            <div class="filter-tags">
+              <span class="filter-tag">a2a</span>
+              <span class="filter-tag">mcp</span>
+              <span class="filter-tag">mcp_broker</span>
+              <span class="filter-tag">json_rpc</span>
+              <span class="filter-tag">model_to_header</span>
+              <span class="filter-tag">prompt_enrich</span>
+              <span class="filter-tag">responses_format</span>
+              <span class="filter-tag">responses_validate</span>
+            </div>
+          </div>
+          <div class="filter-cat">
+            <div class="filter-cat-header">
+              <div class="filter-cat-dot" style="background:#06b6d4"></div>
+              Observability <span class="count">(2)</span>
+            </div>
+            <div class="filter-tags">
+              <span class="filter-tag">access_log</span>
+              <span class="filter-tag">request_id</span>
+            </div>
+          </div>
+          <div class="filter-cat">
+            <div class="filter-cat-header">
+              <div class="filter-cat-dot" style="background:#10b981"></div>
+              Payload <span class="count">(2)</span>
+            </div>
+            <div class="filter-tags">
+              <span class="filter-tag">compression</span>
+              <span class="filter-tag">json_body_field</span>
+            </div>
+          </div>
+          <div class="filter-cat">
+            <div class="filter-cat-header">
+              <div class="filter-cat-dot" style="background:#f97316"></div>
+              Transform <span class="count">(3)</span>
+            </div>
+            <div class="filter-tags">
+              <span class="filter-tag">header</span>
+              <span class="filter-tag">path_rewrite</span>
+              <span class="filter-tag">url_rewrite</span>
+            </div>
+          </div>
+          <div class="filter-cat">
+            <div class="filter-cat-header">
+              <div class="filter-cat-dot" style="background:#64748b"></div>
+              TCP <span class="count">(3)</span>
+            </div>
+            <div class="filter-tags">
+              <span class="filter-tag">sni_router</span>
+              <span class="filter-tag">tcp_load_balancer</span>
+              <span class="filter-tag">tcp_access_log</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Core Card -->
+    <div class="crate-card">
+      <div class="card-header" style="background:var(--c-core)">
+        <h3>core</h3>
+        <span class="pkg">praxis_core</span>
+        <span class="badge">lib</span>
+      </div>
+      <div class="card-body">
+        <p class="desc">Shared foundation: YAML config, validation, error types,
+          health state, KV stores, ID generation.</p>
+        <div class="module-row">
+          <span class="mod-chip accent" style="color:var(--c-core)">Config</span>
+          <span class="mod-chip accent" style="color:var(--c-core)">ProxyError</span>
+          <span class="mod-chip accent" style="color:var(--c-core)">KvStoreRegistry</span>
+        </div>
+        <div class="module-row">
+          <span class="mod-chip">config/listener</span>
+          <span class="mod-chip">config/cluster</span>
+          <span class="mod-chip">config/filter_chain</span>
+          <span class="mod-chip">config/branch_chain</span>
+        </div>
+        <div class="module-row">
+          <span class="mod-chip">validate</span>
+          <span class="mod-chip">health</span>
+          <span class="mod-chip">kv</span>
+          <span class="mod-chip">errors</span>
+          <span class="mod-chip">id</span>
+          <span class="mod-chip">time</span>
+          <span class="mod-chip">logging</span>
+          <span class="mod-chip">connectivity</span>
+        </div>
+      </div>
+    </div>
+
+    <!-- TLS Card -->
+    <div class="crate-card">
+      <div class="card-header" style="background:var(--c-tls)">
+        <h3>tls</h3>
+        <span class="pkg">praxis_tls</span>
+        <span class="badge">lib</span>
+      </div>
+      <div class="card-body">
+        <p class="desc">TLS configuration, certificate loading, SNI-based selection,
+          mTLS, and certificate hot-reload.</p>
+        <div class="module-row">
+          <span class="mod-chip accent" style="color:var(--c-tls)">ListenerTls</span>
+          <span class="mod-chip accent" style="color:var(--c-tls)">ClusterTls</span>
+          <span class="mod-chip accent" style="color:var(--c-tls)">CachedClusterTls</span>
+        </div>
+        <div class="module-row">
+          <span class="mod-chip">sni</span>
+          <span class="mod-chip">setup</span>
+          <span class="mod-chip">watcher</span>
+          <span class="mod-chip">cached</span>
+          <span class="mod-chip">client_auth</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Hot-Reload Flow ── -->
+  <div class="reload-banner">
+    <h3>Dynamic Configuration Reload</h3>
+    <svg viewBox="0 0 880 80" xmlns="http://www.w3.org/2000/svg"
+         role="img" aria-label="Hot-reload pipeline flow">
+      <defs>
+        <marker id="ra" viewBox="0 0 10 7" refX="10" refY="3.5"
+                markerWidth="7" markerHeight="5" orient="auto">
+          <path d="M0 0 L10 3.5 L0 7z" fill="#94a3b8"/>
+        </marker>
+      </defs>
+
+      <rect x="10" y="20" width="130" height="42" rx="6"
+            fill="#fef3c7" stroke="#f59e0b" stroke-width="1"/>
+      <text x="75" y="38" text-anchor="middle" font-size="11" fill="#92400e"
+            font-weight="600">File Watcher</text>
+      <text x="75" y="52" text-anchor="middle" font-size="8"
+            fill="#b45309">notify (500ms debounce)</text>
+
+      <line x1="140" y1="41" x2="168" y2="41" stroke="#94a3b8"
+            stroke-width="1.5" marker-end="url(#ra)"/>
+
+      <rect x="170" y="20" width="130" height="42" rx="6"
+            fill="#e0f2fe" stroke="#0891b2" stroke-width="1"/>
+      <text x="235" y="38" text-anchor="middle" font-size="11" fill="#155e75"
+            font-weight="600">Config Parse</text>
+      <text x="235" y="52" text-anchor="middle" font-size="8"
+            fill="#0e7490">serde_yaml</text>
+
+      <line x1="300" y1="41" x2="328" y2="41" stroke="#94a3b8"
+            stroke-width="1.5" marker-end="url(#ra)"/>
+
+      <rect x="330" y="20" width="130" height="42" rx="6"
+            fill="#e0f2fe" stroke="#0891b2" stroke-width="1"/>
+      <text x="395" y="38" text-anchor="middle" font-size="11" fill="#155e75"
+            font-weight="600">Validate</text>
+      <text x="395" y="52" text-anchor="middle" font-size="8"
+            fill="#0e7490">reject invalid</text>
+
+      <line x1="460" y1="41" x2="488" y2="41" stroke="#94a3b8"
+            stroke-width="1.5" marker-end="url(#ra)"/>
+
+      <rect x="490" y="20" width="150" height="42" rx="6"
+            fill="#dbeafe" stroke="#2563eb" stroke-width="1"/>
+      <text x="565" y="38" text-anchor="middle" font-size="11" fill="#1e40af"
+            font-weight="600">Pipeline Rebuild</text>
+      <text x="565" y="52" text-anchor="middle" font-size="8"
+            fill="#2563eb">FilterRegistry</text>
+
+      <line x1="640" y1="41" x2="668" y2="41" stroke="#94a3b8"
+            stroke-width="1.5" marker-end="url(#ra)"/>
+
+      <rect x="670" y="20" width="150" height="42" rx="6"
+            fill="#f0fdf4" stroke="#16a34a" stroke-width="1"/>
+      <text x="745" y="38" text-anchor="middle" font-size="11" fill="#166534"
+            font-weight="600">ArcSwap</text>
+      <text x="745" y="52" text-anchor="middle" font-size="8"
+            fill="#15803d">atomic pointer swap</text>
+
+      <!-- reload pulse dot -->
+      <circle r="4" fill="#f59e0b" opacity=".6">
+        <animate attributeName="cx"
+                 values="75;235;395;565;745;745"
+                 dur="4s" repeatCount="indefinite"
+                 keyTimes="0;0.2;0.4;0.6;0.8;1"
+                 calcMode="spline"
+                 keySplines="0.4 0 0.2 1;0.4 0 0.2 1;0.4 0 0.2 1;0.4 0 0.2 1;0 0 1 1"/>
+        <animate attributeName="cy" values="41;41;41;41;41;41"
+                 dur="4s" repeatCount="indefinite"/>
+        <animate attributeName="r" values="3;4;4;5;6;3"
+                 dur="4s" repeatCount="indefinite"/>
+        <animate attributeName="fill"
+                 values="#f59e0b;#0891b2;#0891b2;#2563eb;#16a34a;#f59e0b"
+                 dur="4s" repeatCount="indefinite"/>
+      </circle>
+
+      <text x="440" y="75" text-anchor="middle" font-size="9" fill="#94a3b8"
+            font-style="italic">
+        in-flight requests use old pipeline &middot; new requests use new pipeline
+      </text>
+    </svg>
+  </div>
+
+  <!-- ── Test & Benchmark Infrastructure ── -->
+  <div class="infra-grid">
+
+    <!-- Tests Panel -->
+    <div class="infra-panel">
+      <h3><span class="dot" style="background:var(--c-test)"></span>
+        Test Infrastructure</h3>
+
+      <div class="infra-sub">Shared Harness</div>
+      <div class="infra-item">
+        <span class="name" style="color:var(--c-test-utils)">test-utils</span>
+        <span class="detail">ProxyGuard &middot; free_port &middot; backends
+          &middot; HTTP clients &middot; TLS certs &middot; agentic mocks</span>
+      </div>
+
+      <div class="infra-sub">Test Suites</div>
+      <div class="infra-item">
+        <span class="name">integration</span>
+        <span class="detail">94 test files &mdash; end-to-end filter + proxy behavior</span>
+      </div>
+      <div class="infra-item">
+        <span class="name">conformance</span>
+        <span class="detail">HTTP/2 (h2spec) &middot; RFC semantics &middot; CORS spec</span>
+      </div>
+      <div class="infra-item">
+        <span class="name">security</span>
+        <span class="detail">Smuggling &middot; header injection &middot; filter isolation</span>
+      </div>
+      <div class="infra-item">
+        <span class="name">resilience</span>
+        <span class="detail">Throughput &middot; fault tolerance &middot; recovery</span>
+      </div>
+      <div class="infra-item">
+        <span class="name">schema</span>
+        <span class="detail">Config parsing &middot; example validation (8 categories)</span>
+      </div>
+      <div class="infra-item">
+        <span class="name">smoke</span>
+        <span class="detail">Quick startup + round-trip sanity</span>
+      </div>
+
+      <div class="infra-sub">Fuzzing</div>
+      <div class="infra-item">
+        <span class="name">fuzz</span>
+        <span class="detail">7 targets: config &middot; pipeline &middot; body &middot;
+          path &middot; SNI &middot; headers &middot; CIDR</span>
+      </div>
+    </div>
+
+    <!-- Benchmarks Panel -->
+    <div class="infra-panel">
+      <h3><span class="dot" style="background:var(--c-bench)"></span>
+        Performance &amp; Tooling</h3>
+
+      <div class="infra-sub">Microbenchmarks (Criterion)</div>
+      <div class="infra-item">
+        <span class="name" style="color:var(--c-bench)">6 benches</span>
+        <span class="detail">condition_eval &middot; config_parsing &middot;
+          filter_pipeline &middot; headers &middot; load_balancer &middot;
+          router_lookup</span>
+      </div>
+
+      <div class="infra-sub">Comparison Benchmarks</div>
+      <div class="infra-item">
+        <span class="name" style="color:var(--c-bench)">Docker</span>
+        <span class="detail">vs Envoy &middot; NGINX &middot; HAProxy
+          (Vegeta + Fortio)</span>
+      </div>
+
+      <div class="infra-sub">Dev Tooling (xtask)</div>
+      <div class="infra-item">
+        <span class="name" style="color:var(--c-xtask)">echo</span>
+        <span class="detail">Quick HTTP test server for manual testing</span>
+      </div>
+      <div class="infra-item">
+        <span class="name" style="color:var(--c-xtask)">debug</span>
+        <span class="detail">Run proxy single-threaded with debug logging</span>
+      </div>
+      <div class="infra-item">
+        <span class="name" style="color:var(--c-xtask)">benchmark</span>
+        <span class="detail">Orchestrate &middot; compare &middot; visualize
+          &middot; flamegraph</span>
+      </div>
+      <div class="infra-item">
+        <span class="name" style="color:var(--c-xtask)">lint-deps</span>
+        <span class="detail">Verify three-component semver in workspace</span>
+      </div>
+      <div class="infra-item">
+        <span class="name" style="color:var(--c-xtask)">lint-examples</span>
+        <span class="detail">Ensure every example config has an integration test</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================================================================= -->
+<!-- Tooltip                                                                 -->
+<!-- ======================================================================= -->
+<div class="tooltip" id="tooltip">
+  <div class="tt-name"></div>
+  <div class="tt-pkg"></div>
+  <div class="tt-desc"></div>
+</div>
+
+<!-- ======================================================================= -->
+<!-- JavaScript                                                              -->
+<!-- ======================================================================= -->
+<script>
+(function () {
+  "use strict";
+
+  var tooltip = document.getElementById("tooltip");
+  var ttName = tooltip.querySelector(".tt-name");
+  var ttPkg = tooltip.querySelector(".tt-pkg");
+  var ttDesc = tooltip.querySelector(".tt-desc");
+  var svg = document.getElementById("hl-svg");
+  var boxes = svg.querySelectorAll(".hl-box");
+  var lines = svg.querySelectorAll(".dep-line");
+  var highlighted = null;
+
+  /* ── Tooltip ── */
+  boxes.forEach(function (box) {
+    var data = (box.getAttribute("data-tt") || "").split("|");
+    if (data.length < 3) return;
+
+    box.addEventListener("mouseenter", function (e) {
+      ttName.textContent = data[0];
+      ttPkg.textContent = data[1] || "";
+      ttPkg.style.display = data[1] ? "block" : "none";
+      ttDesc.textContent = data[2];
+      tooltip.classList.add("visible");
+    });
+
+    box.addEventListener("mousemove", function (e) {
+      var x = e.clientX + 14;
+      var y = e.clientY + 14;
+      if (x + 290 > window.innerWidth) x = e.clientX - 290;
+      if (y + 120 > window.innerHeight) y = e.clientY - 120;
+      tooltip.style.left = x + "px";
+      tooltip.style.top = y + "px";
+    });
+
+    box.addEventListener("mouseleave", function () {
+      tooltip.classList.remove("visible");
+    });
+  });
+
+  /* ── Click-to-highlight ── */
+  boxes.forEach(function (box) {
+    box.addEventListener("click", function (e) {
+      e.stopPropagation();
+      var crate = box.getAttribute("data-crate");
+      if (highlighted === crate) {
+        clearHighlight();
+        return;
+      }
+      highlighted = crate;
+      var deps = (box.getAttribute("data-deps") || "").split(",").filter(Boolean);
+      var rdeps = (box.getAttribute("data-rdeps") || "").split(",").filter(Boolean);
+      var related = new Set([crate].concat(deps).concat(rdeps));
+
+      svg.classList.add("dimmed");
+      boxes.forEach(function (b) {
+        b.classList.toggle("highlighted", related.has(b.getAttribute("data-crate")));
+      });
+      lines.forEach(function (l) {
+        var from = l.getAttribute("data-from");
+        var to = l.getAttribute("data-to");
+        l.classList.toggle("highlighted",
+          related.has(from) && related.has(to));
+      });
+    });
+  });
+
+  svg.addEventListener("click", function (e) {
+    if (!e.target.closest(".hl-box")) clearHighlight();
+  });
+
+  function clearHighlight() {
+    highlighted = null;
+    svg.classList.remove("dimmed");
+    boxes.forEach(function (b) { b.classList.remove("highlighted"); });
+    lines.forEach(function (l) { l.classList.remove("highlighted"); });
+  }
+
+  /* ── Nav active state ── */
+  var navLinks = document.querySelectorAll(".nav a");
+  var sections = document.querySelectorAll(".section");
+  var observer = new IntersectionObserver(function (entries) {
+    entries.forEach(function (entry) {
+      if (entry.isIntersecting) {
+        navLinks.forEach(function (link) {
+          link.classList.toggle("active",
+            link.getAttribute("href") === "#" + entry.target.id);
+        });
+      }
+    });
+  }, { rootMargin: "-30% 0px -60% 0px" });
+  sections.forEach(function (s) { observer.observe(s); });
+})();
+</script>
+
+</body>
+</html>
