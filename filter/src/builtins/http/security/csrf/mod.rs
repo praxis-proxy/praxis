@@ -16,10 +16,11 @@ mod origin;
 )]
 mod tests;
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use praxis_core::config::InsecureOptions;
+use rand::Rng;
 use tracing::{debug, trace, warn};
 
 use self::{
@@ -80,9 +81,6 @@ pub struct CsrfFilter {
     /// requests are allowed through.
     log_only: AtomicBool,
 
-    /// Monotonic counter for deterministic enforcement sampling.
-    request_counter: AtomicU64,
-
     /// Pre-computed set of safe HTTP methods (uppercase).
     safe_methods: Vec<String>,
 
@@ -127,7 +125,6 @@ impl CsrfFilter {
             enable_sec_fetch_site: cfg.enable_sec_fetch_site,
             enforce_percentage: cfg.enforce_percentage,
             log_only: AtomicBool::new(false),
-            request_counter: AtomicU64::new(0),
             safe_methods,
             trusted,
         }))
@@ -172,6 +169,14 @@ impl CsrfFilter {
         FilterAction::Reject(Rejection::status(403).with_body(b"CSRF rejected".as_slice()))
     }
 
+    /// Returns `true` if the `Origin` header is the literal `"null"`.
+    fn has_null_origin(headers: &http::HeaderMap) -> bool {
+        headers
+            .get("origin")
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|o| o == "null")
+    }
+
     /// Check whether this request should be enforced
     /// based on the enforcement percentage.
     fn should_enforce(&self) -> bool {
@@ -183,9 +188,7 @@ impl CsrfFilter {
             return false;
         }
 
-        let count = self.request_counter.fetch_add(1, Ordering::Relaxed);
-
-        (count % 100) < u64::from(self.enforce_percentage)
+        rand::rng().random_range(0u8..100) < self.enforce_percentage
     }
 }
 
@@ -210,26 +213,21 @@ impl HttpFilter for CsrfFilter {
             return Ok(FilterAction::Continue);
         }
 
+        if Self::has_null_origin(&ctx.request.headers) {
+            return Ok(self.reject_or_log(method, Some("null"), "null origin"));
+        }
+
+        if self.fails_sec_fetch_site(&ctx.request.headers) {
+            let origin = extract_origin(&ctx.request.headers);
+            return Ok(self.reject_or_log(method, origin.as_deref(), "sec-fetch-site cross-site"));
+        }
+
         if !self.should_enforce() {
             trace!("CSRF check skipped (enforcement sampling)");
             return Ok(FilterAction::Continue);
         }
 
-        if ctx
-            .request
-            .headers
-            .get("origin")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|o| o == "null")
-        {
-            return Ok(self.reject_or_log(method, Some("null"), "null origin"));
-        }
-
         let origin = extract_origin(&ctx.request.headers);
-
-        if self.fails_sec_fetch_site(&ctx.request.headers) {
-            return Ok(self.reject_or_log(method, origin.as_deref(), "sec-fetch-site cross-site"));
-        }
 
         let Some(origin) = origin else {
             return Ok(self.reject_or_log(method, None, "missing origin"));

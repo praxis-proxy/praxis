@@ -17,6 +17,11 @@ use tracing::debug;
 // -----------------------------------------------------------------------------
 
 /// Proxy pseudonym used in Via header values.
+///
+/// Hardcoded per [RFC 9110 Section 7.6.3]. Consider making
+/// configurable if fingerprinting is a concern.
+///
+/// [RFC 9110 Section 7.6.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.3
 const PSEUDONYM: &str = "praxis";
 
 // -----------------------------------------------------------------------------

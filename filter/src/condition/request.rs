@@ -76,7 +76,7 @@ fn matches_request(m: &ConditionMatch, req: &Request) -> bool {
     }
 
     if let Some(ref prefix) = m.path_prefix
-        && !req.uri.path().starts_with(prefix)
+        && !crate::path_match::path_prefix_matches(req.uri.path(), prefix)
     {
         return false;
     }
@@ -375,6 +375,15 @@ mod tests {
     }
 
     #[test]
+    fn when_path_prefix_rejects_non_segment_boundary() {
+        let req = make_request(Method::GET, "/apikeys", HeaderMap::new());
+        assert!(
+            !should_execute(&[when(path_match("/api"))], &req),
+            "path prefix /api must not match /apikeys (non-segment boundary)"
+        );
+    }
+
+    #[test]
     fn multiple_headers_one_missing_fails() {
         let mut headers = HeaderMap::new();
         headers.insert("x-a", HeaderValue::from_static("1"));
@@ -383,6 +392,15 @@ mod tests {
             &[when(header_match(&[("x-a", "1"), ("x-b", "2")]))],
             &req
         ));
+    }
+
+    #[test]
+    fn path_shorter_than_prefix_does_not_match() {
+        let req = make_request(Method::GET, "/api", HeaderMap::new());
+        assert!(
+            !should_execute(&[when(path_match("/api/v1"))], &req),
+            "path /api should not match prefix /api/v1"
+        );
     }
 
     // -------------------------------------------------------------------------

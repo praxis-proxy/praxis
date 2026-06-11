@@ -51,6 +51,15 @@ impl Backend {
         }
     }
 
+    /// Create a backend returning a chunked transfer-encoded response
+    /// where each entry becomes a separate chunk.
+    pub fn chunked(chunks: Vec<String>) -> ChunkedBackend {
+        ChunkedBackend {
+            chunks,
+            headers: Vec::new(),
+        }
+    }
+
     /// Add a response header.
     #[must_use]
     pub fn header(mut self, name: &str, value: &str) -> Self {
@@ -120,6 +129,65 @@ impl Backend {
             resp.push_str("\r\n");
             resp.push_str(&body);
             let _sent = stream.write_all(resp.as_bytes());
+        })
+    }
+}
+
+// -----------------------------------------------------------------------------
+// ChunkedBackend
+// -----------------------------------------------------------------------------
+
+/// A backend that sends a chunked transfer-encoded response.
+pub struct ChunkedBackend {
+    /// Response body chunks.
+    chunks: Vec<String>,
+
+    /// Extra response headers as `(name, value)` pairs.
+    headers: Vec<(String, String)>,
+}
+
+impl ChunkedBackend {
+    /// Add a response header.
+    #[must_use]
+    pub fn header(mut self, name: &str, value: &str) -> Self {
+        self.headers.push((name.to_owned(), value.to_owned()));
+        self
+    }
+
+    /// Start the backend and return a [`BackendGuard`].
+    ///
+    /// # Panics
+    ///
+    /// Panics if the server fails to bind.
+    pub fn start_with_shutdown(self) -> BackendGuard {
+        let chunks = self.chunks;
+        let headers = self.headers;
+
+        spawn_tcp_server_with_shutdown(move |mut stream| {
+            stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+            let _headers = read_until_headers_complete(&mut stream);
+
+            let mut resp =
+                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nServer: praxis-test-backend\r\n"
+                    .to_owned();
+            for (name, value) in &headers {
+                use std::fmt::Write;
+                let _written = write!(resp, "{name}: {value}\r\n");
+            }
+            resp.push_str("\r\n");
+            let _sent = stream.write_all(resp.as_bytes());
+            let _flushed = stream.flush();
+
+            for chunk in &chunks {
+                let hex_len = format!("{:x}\r\n", chunk.len());
+                let _sent = stream.write_all(hex_len.as_bytes());
+                let _sent = stream.write_all(chunk.as_bytes());
+                let _sent = stream.write_all(b"\r\n");
+                let _flushed = stream.flush();
+            }
+
+            let _sent = stream.write_all(b"0\r\n\r\n");
+            let _flushed = stream.flush();
         })
     }
 }

@@ -35,17 +35,26 @@ and the [extensions guide](../filters/extensions.md).
 | `url_rewrite` | Transformation | HTTP |
 | `sni_router` | Traffic Management | TCP |
 | `tcp_load_balancer` | Traffic Management | TCP |
+| `grpc_detection` | Traffic Management | HTTP |
 | `model_to_header` | AI / Inference | HTTP (requires `ai-inference` feature) |
 | `prompt_enrich` | AI / Inference | HTTP (requires `ai-inference` feature) |
+| `openai_responses_format` | AI / Inference | HTTP (requires `ai-inference` feature) |
+| `openai_responses_validate` | AI / Inference | HTTP (requires `ai-inference` feature) |
 
 ## Router
 
-Routes requests to clusters by path prefix. Longest prefix
-wins. Optional `host` restricts matching to a specific
-`Host` header. Optional `headers` restricts matching to
-requests with all specified header values present (AND
-semantics, case-sensitive). Routes without `host` match
-any host.
+Selects a cluster by matching path prefix, host, and
+headers. It sets `ctx.cluster` but does not pick an
+endpoint or forward the request. The `load_balancer`
+filter (below) reads `ctx.cluster` to select an endpoint
+and set `ctx.upstream`. Together: the router decides
+*where*, the load balancer decides *which one*.
+
+Longest prefix wins. Optional `host` restricts matching
+to a specific `Host` header. Optional `headers` restricts
+matching to requests with all specified header values
+present (AND semantics, case-sensitive). Routes without
+`host` match any host.
 
 Example configs: [path-based-routing.yaml],
 [hosts.yaml], [canary-routing.yaml].
@@ -55,6 +64,11 @@ Example configs: [path-based-routing.yaml],
 [canary-routing.yaml]: ../../examples/configs/traffic-management/canary-routing.yaml
 
 ## Load Balancing
+
+Reads `ctx.cluster` (set by the `router` filter) and
+selects a specific endpoint within that cluster, writing
+`ctx.upstream`. The protocol adapter layer then forwards
+the request to the selected endpoint.
 
 Strategies:
 
@@ -362,10 +376,10 @@ to the filter result set for branch chain conditions.
 
 Extracts Model Context Protocol metadata from JSON-RPC
 request bodies and promotes method, tool/resource/prompt
-name, session ID, and protocol version to request
-headers and filter results for routing. Validates MCP
-headers against body-derived values when
-`header_validation` is configured.
+name, JSON-RPC kind, protocol version, and session
+presence to request headers/filter results; stores session
+ID in durable metadata. Validates MCP headers against
+body-derived values when `header_validation` is configured.
 
 ```yaml
 - filter: mcp
@@ -382,6 +396,7 @@ headers against body-derived values when
 | `headers.method` | string | `"x-praxis-mcp-method"` | Header name for MCP method |
 | `headers.name` | string | `"x-praxis-mcp-name"` | Header name for tool/resource/prompt name |
 | `headers.kind` | string | `"x-praxis-mcp-kind"` | Header name for JSON-RPC kind |
+| `headers.protocol_version` | string | `"x-praxis-mcp-protocol-version"` | Header name for MCP protocol version |
 | `headers.session_present` | string | `"x-praxis-mcp-session-present"` | Header name for session presence |
 
 Recognized MCP methods include `initialize`,
@@ -393,6 +408,46 @@ a JSON-RPC error if the selector is missing and
 `on_invalid` is `"reject"`. The filter writes `mcp.*`
 and `json_rpc.*` entries to the filter result set for
 branch chain conditions.
+
+### MCP Broker Mode
+
+When the `mcp` filter config includes a `servers`
+block, broker mode activates. The broker aggregates
+tool catalogs from configured backends and handles
+`initialize`, `tools/list`, `ping`, and notifications
+directly as synthetic responses.
+
+```yaml
+- filter: mcp
+  path: /mcp
+  max_body_bytes: 65536
+  protocol_profile: current
+  default_version: "2025-03-26"
+  supported_versions: ["2025-03-26"]
+  servers:
+    - name: weather
+      cluster: weather-mcp
+      path: /mcp
+      tool_prefix: "weather_"
+      tools:
+        - name: get_weather
+          description: Get current weather
+```
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `path` | string | `"/mcp"` | Public endpoint path |
+| `max_body_bytes` | integer | 65536 | Maximum body size to buffer (64 KiB) |
+| `protocol_profile` | string | `"current"` | Protocol profile governing session semantics |
+| `default_version` | string | `"2025-03-26"` | Protocol version used in `initialize` responses when the client's requested version is not supported |
+| `supported_versions` | list | `["2025-03-26"]` | Protocol versions accepted during `initialize` negotiation; every entry must be implemented by this build |
+| `invalid_tool_policy` | string | `"reject_server"` | `"reject_server"` or `"filter_out"` for tools with invalid schemas |
+| `servers` | list | `[]` | Backend MCP server definitions |
+
+Each server entry supports `name`, `cluster`, `path`
+(default `"/mcp"`), `tool_prefix`, and `tools`. Tool
+definitions include `name`, optional `description`,
+optional `inputSchema`, and optional `annotations`.
 
 ## Static Response
 
@@ -458,6 +513,50 @@ circuit closes. See [circuit-breaker.yaml].
 | `clusters[].recovery_window_secs` | integer | yes | Seconds before half-open probe |
 
 [circuit-breaker.yaml]: ../../examples/configs/traffic-management/circuit-breaker.yaml
+
+## gRPC Detection
+
+Classifies gRPC requests by examining the
+`content-type` header and promotes the variant to
+metadata and filter results for branch-based routing.
+No configuration fields. See [grpc-detection.yaml].
+
+```yaml
+- filter: grpc_detection
+```
+
+The filter writes `grpc_detection.kind` to both
+metadata and filter results with one of:
+
+| Value | Content-Type |
+| ----- | ------------ |
+| `grpc` | `application/grpc` (implicit protobuf) |
+| `grpc+proto` | `application/grpc+proto` |
+| `grpc+json` | `application/grpc+json` |
+| `grpc+other` | Unrecognized codec (e.g. `application/grpc+flatbuffers`) |
+| `none` | Not a gRPC request |
+
+Use with branch chains to route gRPC and HTTP traffic
+differently on the same listener:
+
+```yaml
+- filter: grpc_detection
+  branch_chains:
+    - name: grpc_route
+      on_result:
+        filter: grpc_detection
+        key: kind
+        result: grpc
+      rejoin: terminal
+      chains:
+        - name: grpc_handling
+          filters:
+            - filter: static_response
+              status: 200
+              body: "grpc-detected"
+```
+
+[grpc-detection.yaml]: ../../examples/configs/traffic-management/grpc-detection.yaml
 
 ## Guardrails
 
@@ -641,6 +740,128 @@ non-empty `content` string. JSON is re-serialized, so
 byte-for-byte body identity is not preserved. In chains
 that also use `json_body_field` or `model_to_header`,
 place `prompt_enrich` first.
+
+## OpenAI Responses Format
+
+Classifies OpenAI Responses API and Chat Completions
+API requests by inspecting the JSON request body.
+Promotes format, model, stream flag, and routing mode
+to configurable request headers, metadata, and filter
+results. Does not mutate the body. Requires the
+`ai-inference` feature. See [format-routing.yaml].
+
+[format-routing.yaml]: ../../examples/configs/ai/openai/responses/format-routing.yaml
+
+```yaml
+- filter: openai_responses_format
+  on_invalid: continue
+  max_body_bytes: 67108864
+  headers:
+    format: x-praxis-ai-format
+    model: x-praxis-ai-model
+    stream: x-praxis-ai-stream
+    mode: x-praxis-responses-mode
+```
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `on_invalid` | string | `"continue"` | `"continue"` passes unclassifiable requests through; `"reject"` returns 400 |
+| `max_body_bytes` | integer | 67108864 | Maximum body size to buffer (64 MiB) |
+| `headers.format` | string | `"x-praxis-ai-format"` | Header for classification format |
+| `headers.model` | string | `"x-praxis-ai-model"` | Header for extracted model name |
+| `headers.stream` | string | `"x-praxis-ai-stream"` | Header for stream flag |
+| `headers.mode` | string | `"x-praxis-responses-mode"` | Header for routing mode |
+
+Classification formats written to
+`openai_responses_format.format`:
+
+| Format | Meaning |
+| ------ | ------- |
+| `openai_responses` | Responses API (body contains `input`) |
+| `openai_chat_completions` | Chat Completions API (body contains `messages`) |
+| `unknown_json` | Valid JSON without recognized format |
+| `invalid_json` | Malformed JSON |
+| `non_json` | Body is not JSON |
+
+For Responses API requests, the filter computes a
+routing mode written to
+`openai_responses_format.mode`:
+
+- **`stateful`**: request has `previous_response_id`,
+  non-empty `tools`, `store=true` (default when
+  omitted), `background=true`, `conversation`, or
+  `prompt_id`
+- **`stateless`**: `store=false` with no other stateful
+  markers
+
+Use with branch chains to route stateful and stateless
+Responses API requests to different clusters:
+
+```yaml
+- filter: openai_responses_format
+  on_invalid: reject
+  branch_chains:
+    - name: stateful
+      on_result:
+        filter: openai_responses_format
+        key: mode
+        result: stateful
+      rejoin: terminal
+      chains:
+        - name: stateful_routing
+          filters:
+            - filter: router
+              routes:
+                - path: "/v1/responses"
+                  cluster: orchestration
+```
+
+## OpenAI Responses Validate
+
+Validates Responses API parameter combinations and
+generates cryptographically random response and
+conversation IDs. Must be placed after
+`openai_responses_format` in the filter chain. Skips
+non-Responses API requests. No configuration fields.
+Requires the `ai-inference` feature. See
+[request-validate.yaml].
+
+[request-validate.yaml]: ../../examples/configs/ai/openai/responses/request-validate.yaml
+
+```yaml
+- filter: openai_responses_validate
+```
+
+**Validation rules:**
+
+| Condition | Result |
+| --------- | ------ |
+| `stream=true` + `background=true` | 400 Bad Request |
+| `background=true` + `store=false` | 400 Bad Request |
+| All other combinations | Valid |
+
+On rejection, returns a JSON error body:
+
+```json
+{
+  "error": {
+    "message": "stream and background cannot both be true",
+    "type": "invalid_request_error"
+  }
+}
+```
+
+**Generated metadata:**
+
+| Key | Value |
+| --- | ----- |
+| `responses.response_id` | `resp_` + 32 random hex digits |
+| `responses.conversation_id` | Extracted from body or `conv_` + 32 random hex digits |
+| `responses.store` | `"true"` or `"false"` (defaults to `"true"` per OpenAI spec) |
+| `responses.background` | `"true"` or `"false"` (defaults to `"false"`) |
+| `responses.stream` | `"true"` or `"false"` (defaults to `"false"`) |
+
+IDs use CSPRNG for cryptographic randomness.
 
 ## Conditions
 

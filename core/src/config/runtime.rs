@@ -31,15 +31,19 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
-    /// Number of worker threads per service.
+    /// Fixed global queue interval for the tokio scheduler.
     ///
-    /// Auto-detected by default.
-    #[serde(default)]
-    pub threads: usize,
-
-    /// Allow work-stealing between worker threads of the same service.
-    #[serde(default = "default_work_stealing")]
-    pub work_stealing: bool,
+    /// ```
+    /// use praxis_core::config::RuntimeConfig;
+    ///
+    /// let cfg = RuntimeConfig::default();
+    /// assert_eq!(cfg.global_queue_interval, Some(61));
+    ///
+    /// let cfg: RuntimeConfig = serde_yaml::from_str("global_queue_interval: 128").unwrap();
+    /// assert_eq!(cfg.global_queue_interval, Some(128));
+    /// ```
+    #[serde(default = "default_global_queue_interval")]
+    pub global_queue_interval: Option<u32>,
 
     /// Per-module log level overrides.
     ///
@@ -58,19 +62,47 @@ pub struct RuntimeConfig {
     #[serde(default)]
     pub log_overrides: HashMap<String, String>,
 
-    /// Fixed global queue interval for the tokio scheduler.
+    /// Process-wide maximum concurrent connections across all listeners.
+    ///
+    /// When set, new connections beyond this limit are rejected
+    /// (HTTP 503 / TCP close), regardless of per-listener limits.
+    /// `None` (the default) means no global limit.
     ///
     /// ```
     /// use praxis_core::config::RuntimeConfig;
     ///
-    /// let cfg = RuntimeConfig::default();
-    /// assert_eq!(cfg.global_queue_interval, Some(61));
+    /// let cfg: RuntimeConfig = serde_yaml::from_str("max_connections: 10000").unwrap();
+    /// assert_eq!(cfg.max_connections, Some(10_000));
     ///
-    /// let cfg: RuntimeConfig = serde_yaml::from_str("global_queue_interval: 128").unwrap();
-    /// assert_eq!(cfg.global_queue_interval, Some(128));
+    /// let cfg = RuntimeConfig::default();
+    /// assert!(cfg.max_connections.is_none());
     /// ```
-    #[serde(default = "default_global_queue_interval")]
-    pub global_queue_interval: Option<u32>,
+    #[serde(default)]
+    pub max_connections: Option<u32>,
+
+    /// Maximum resident memory (RSS) in bytes before shedding load.
+    ///
+    /// When set, Praxis monitors process RSS and rejects new
+    /// requests with 503 when the threshold is exceeded. `None`
+    /// (the default) disables memory pressure monitoring.
+    ///
+    /// ```
+    /// use praxis_core::config::RuntimeConfig;
+    ///
+    /// let cfg: RuntimeConfig = serde_yaml::from_str("max_memory_bytes: 1073741824").unwrap();
+    /// assert_eq!(cfg.max_memory_bytes, Some(1_073_741_824));
+    ///
+    /// let cfg = RuntimeConfig::default();
+    /// assert!(cfg.max_memory_bytes.is_none());
+    /// ```
+    #[serde(default)]
+    pub max_memory_bytes: Option<usize>,
+
+    /// Number of worker threads per service.
+    ///
+    /// Auto-detected by default.
+    #[serde(default)]
+    pub threads: usize,
 
     /// Path to a PEM CA file used as the root certificate store for all upstream TLS connections.
     ///
@@ -107,11 +139,17 @@ pub struct RuntimeConfig {
     /// ```
     #[serde(default = "default_upstream_keepalive_pool_size")]
     pub upstream_keepalive_pool_size: Option<usize>,
+
+    /// Allow work-stealing between worker threads of the same service.
+    #[serde(default = "default_work_stealing")]
+    pub work_stealing: bool,
 }
 
 impl Default for RuntimeConfig {
     fn default() -> Self {
         Self {
+            max_connections: None,
+            max_memory_bytes: None,
             threads: 0,
             work_stealing: default_work_stealing(),
             global_queue_interval: default_global_queue_interval(),

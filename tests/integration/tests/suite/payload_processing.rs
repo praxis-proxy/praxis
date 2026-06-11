@@ -5,8 +5,8 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown,
-    start_header_echo_backend_with_shutdown, start_proxy,
+    free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown, start_header_echo_backend,
+    start_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -101,7 +101,7 @@ fn stream_buffer_missing_action_routes_to_default() {
 
 #[test]
 fn multi_field_extracts_both_fields() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 
@@ -128,7 +128,7 @@ fn multi_field_extracts_both_fields() {
 
 #[test]
 fn multi_field_missing_one_still_extracts_other() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 
@@ -191,7 +191,7 @@ fn multi_field_routes_by_extracted_model() {
 
 #[test]
 fn conditional_extraction_fires_on_matching_path() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 
@@ -213,7 +213,7 @@ fn conditional_extraction_fires_on_matching_path() {
 
 #[test]
 fn conditional_extraction_skips_on_non_matching_path() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 
@@ -235,7 +235,7 @@ fn conditional_extraction_skips_on_non_matching_path() {
 
 #[test]
 fn body_limit_allows_small_body_with_extraction() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 
@@ -257,7 +257,7 @@ fn body_limit_allows_small_body_with_extraction() {
 
 #[test]
 fn body_limit_rejects_oversized_body() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 
@@ -272,7 +272,7 @@ fn body_limit_rejects_oversized_body() {
 
 #[test]
 fn body_limit_exact_boundary_succeeds() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 

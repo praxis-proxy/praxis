@@ -43,6 +43,7 @@ pub(crate) fn default_true() -> bool {
 }
 
 /// Serde skip predicate: true when [`ClientCertMode`] is the default (`None`).
+#[allow(clippy::trivially_copy_pass_by_ref, reason = "serde skip_serializing_if requires &T")]
 pub(crate) fn is_default_cert_mode(mode: &ClientCertMode) -> bool {
     *mode == ClientCertMode::None
 }

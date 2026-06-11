@@ -29,10 +29,13 @@ use crate::{CertKeyPair, setup::loader};
 // -----------------------------------------------------------------------------
 
 /// Debounce window for filesystem events.
-const DEBOUNCE_MS: u64 = 500;
+const DEBOUNCE_MS: u64 = 500; // 500 ms
+
+/// Minimum cooldown after a successful reload to prevent rapid churn.
+const MIN_SUCCESS_COOLDOWN_MS: u64 = 5_000; // 5 seconds
 
 /// Maximum backoff delay on consecutive reload failures.
-const MAX_BACKOFF_MS: u64 = 60_000;
+const MAX_BACKOFF_MS: u64 = 60_000; // 60 seconds
 
 // -----------------------------------------------------------------------------
 // CertWatcher
@@ -125,7 +128,7 @@ async fn watch_loop(
                 }
 
                 if reload_cert(&current, &pair) {
-                    backoff_ms = DEBOUNCE_MS;
+                    backoff_ms = MIN_SUCCESS_COOLDOWN_MS;
                 } else {
                     backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
                     tracing::warn!(
@@ -149,15 +152,7 @@ async fn watch_loop(
 ///
 /// [`RecommendedWatcher`]: notify::RecommendedWatcher
 fn setup_watcher(tx: mpsc::Sender<()>, cert_dir: &Path, key_dir: &Path) -> Result<RecommendedWatcher, notify::Error> {
-    let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| match res {
-        Ok(event) if is_relevant_event(event.kind) && tx.try_send(()).is_err() => {
-            tracing::trace!("cert watcher channel full, event coalesced by debounce");
-        },
-        Err(e) => {
-            tracing::warn!(error = %e, "file watcher error");
-        },
-        _ => {},
-    })?;
+    let mut watcher = notify::recommended_watcher(move |res| handle_watch_event(res, &tx))?;
 
     watcher.watch(cert_dir, RecursiveMode::NonRecursive)?;
     if cert_dir != key_dir {
@@ -165,6 +160,23 @@ fn setup_watcher(tx: mpsc::Sender<()>, cert_dir: &Path, key_dir: &Path) -> Resul
     }
 
     Ok(watcher)
+}
+
+/// Dispatch a filesystem watcher event, forwarding relevant changes
+/// to the reload channel.
+fn handle_watch_event(res: Result<notify::Event, notify::Error>, tx: &mpsc::Sender<()>) {
+    match res {
+        Ok(event) if is_relevant_event(event.kind) => try_notify(tx),
+        Err(e) => tracing::warn!(error = %e, "file watcher error"),
+        _ => {},
+    }
+}
+
+/// Send a notification to the reload channel, logging if full.
+fn try_notify(tx: &mpsc::Sender<()>) {
+    if tx.try_send(()).is_err() {
+        tracing::trace!("cert watcher channel full, event coalesced by debounce");
+    }
 }
 
 /// Drain pending events and sleep for the debounce window.
@@ -283,6 +295,14 @@ mod tests {
                 notify::event::DataChange::Content
             ))),
             "Modify events should be relevant"
+        );
+    }
+
+    #[test]
+    fn is_relevant_event_remove() {
+        assert!(
+            is_relevant_event(EventKind::Remove(notify::event::RemoveKind::File)),
+            "Remove events should be relevant"
         );
     }
 

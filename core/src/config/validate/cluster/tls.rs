@@ -30,21 +30,7 @@ pub(super) fn validate_tls_settings(cluster: &Cluster, insecure_options: &Insecu
         validate_sni(sni, &cluster.name)?;
     }
 
-    if tls.sni.is_none() && tls.verify {
-        if insecure_options.allow_tls_without_sni {
-            warn!(
-                cluster = %cluster.name,
-                "upstream TLS enabled without SNI; hostname verification will be degraded \
-                 (allowed by insecure_options.allow_tls_without_sni)"
-            );
-        } else {
-            return Err(ProxyError::Config(format!(
-                "cluster '{}': upstream TLS with verification enabled but no sni configured; \
-                 set tls.sni or set insecure_options.allow_tls_without_sni: true to allow degraded verification",
-                cluster.name
-            )));
-        }
-    }
+    check_sni_verify_requirement(tls.sni.is_some(), tls.verify, &cluster.name, insecure_options)?;
 
     if !tls.verify {
         warn!(
@@ -54,6 +40,30 @@ pub(super) fn validate_tls_settings(cluster: &Cluster, insecure_options: &Insecu
     }
 
     Ok(())
+}
+
+/// Require SNI when verification is enabled, unless explicitly opted out.
+fn check_sni_verify_requirement(
+    has_sni: bool,
+    verify: bool,
+    cluster_name: &str,
+    insecure_options: &InsecureOptions,
+) -> Result<(), ProxyError> {
+    if has_sni || !verify {
+        return Ok(());
+    }
+    if insecure_options.allow_tls_without_sni {
+        warn!(
+            cluster = %cluster_name,
+            "upstream TLS enabled without SNI; hostname verification will be degraded \
+             (allowed by insecure_options.allow_tls_without_sni)"
+        );
+        return Ok(());
+    }
+    Err(ProxyError::Config(format!(
+        "cluster '{cluster_name}': upstream TLS with verification enabled but no sni configured; \
+         set tls.sni or set insecure_options.allow_tls_without_sni: true to allow degraded verification"
+    )))
 }
 
 // -----------------------------------------------------------------------------

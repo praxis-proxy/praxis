@@ -73,6 +73,9 @@ impl CertKeyPair {
             }
             warn_if_symlink(field, path);
         }
+        for name in &self.server_names {
+            validate_server_name(name)?;
+        }
         Ok(())
     }
 }
@@ -88,20 +91,29 @@ impl CertKeyPair {
 ///
 /// let ca: CaConfig = serde_yaml::from_str("ca_path: /etc/ssl/ca.pem\n").unwrap();
 /// assert_eq!(ca.ca_path, "/etc/ssl/ca.pem");
+/// assert!(ca.crl_paths.is_empty());
 /// ```
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaConfig {
     /// Path to the PEM CA certificate file.
     pub ca_path: String,
+
+    /// Paths to PEM-encoded certificate revocation list (CRL) files.
+    ///
+    /// When provided, the mTLS client verifier checks presented
+    /// client certificates against these CRLs and rejects revoked
+    /// certificates.
+    #[serde(default)]
+    pub crl_paths: Vec<String>,
 }
 
 impl CaConfig {
-    /// Validate the CA path: reject `..` traversal.
+    /// Validate the CA and CRL paths: reject `..` traversal.
     ///
     /// # Errors
     ///
-    /// Returns [`TlsError::PathTraversal`] if the path contains `..`.
+    /// Returns [`TlsError::PathTraversal`] if any path contains `..`.
     ///
     /// [`TlsError::PathTraversal`]: crate::TlsError::PathTraversal
     pub fn validate(&self) -> Result<(), TlsError> {
@@ -112,8 +124,53 @@ impl CaConfig {
             });
         }
         warn_if_symlink("ca_path", &self.ca_path);
+
+        for (i, crl_path) in self.crl_paths.iter().enumerate() {
+            let field = format!("crl_paths[{i}]");
+            if has_parent_dir_component(crl_path) {
+                return Err(TlsError::PathTraversal {
+                    field,
+                    path: crl_path.clone(),
+                });
+            }
+            warn_if_symlink(&field, crl_path);
+        }
         Ok(())
     }
+}
+
+// -----------------------------------------------------------------------------
+// Server Name Validation
+// -----------------------------------------------------------------------------
+
+/// Validate a `server_names` entry as a DNS hostname or wildcard.
+fn validate_server_name(name: &str) -> Result<(), TlsError> {
+    if name.is_empty() {
+        return Err(TlsError::ServerConfigError {
+            detail: "server_names entry must not be empty".to_owned(),
+        });
+    }
+    for (i, label) in name.split('.').enumerate() {
+        if label.is_empty() || label.len() > 63 {
+            return Err(TlsError::ServerConfigError {
+                detail: format!("server_names '{name}': label has invalid length"),
+            });
+        }
+        if label == "*" && i == 0 {
+            continue;
+        }
+        if label.contains('*') {
+            return Err(TlsError::ServerConfigError {
+                detail: format!("server_names '{name}': wildcard only permitted as the complete leftmost label"),
+            });
+        }
+        if !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+            return Err(TlsError::ServerConfigError {
+                detail: format!("server_names '{name}': contains invalid characters"),
+            });
+        }
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -178,6 +235,7 @@ mod tests {
         let tmp = temp_cert_key_ca();
         let ca = CaConfig {
             ca_path: tmp.ca.clone(),
+            crl_paths: Vec::new(),
         };
         assert!(ca.validate().is_ok(), "existing ca_path should validate");
     }
@@ -186,8 +244,22 @@ mod tests {
     fn ca_config_rejects_traversal() {
         let ca = CaConfig {
             ca_path: "/etc/../../evil.pem".to_owned(),
+            crl_paths: Vec::new(),
         };
         assert!(ca.validate().is_err(), "traversal in ca_path should fail validation");
+    }
+
+    #[test]
+    fn ca_config_rejects_crl_traversal() {
+        let ca = CaConfig {
+            ca_path: "/etc/ssl/ca.pem".to_owned(),
+            crl_paths: vec!["/etc/../../evil.crl".to_owned()],
+        };
+        let err = ca.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("crl_paths[0]"),
+            "should mention crl_paths: {err}"
+        );
     }
 
     // ---------------------------------------------------------------------------

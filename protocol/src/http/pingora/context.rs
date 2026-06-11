@@ -34,6 +34,11 @@ pub struct PingoraRequestCtx {
     /// including error and timeout paths.
     pub _connection_permit: Option<OwnedSemaphorePermit>,
 
+    /// Permit from the process-wide connection semaphore.
+    ///
+    /// Present only when `runtime.max_connections` is configured.
+    pub _global_connection_permit: Option<OwnedSemaphorePermit>,
+
     /// Downstream client IP address.
     pub client_addr: Option<IpAddr>,
 
@@ -86,6 +91,14 @@ pub struct PingoraRequestCtx {
     /// `logging()` hook, after `cluster` has been consumed by filter
     /// context construction.
     pub metrics_cluster: Option<Arc<str>>,
+
+    /// Pre-built [`SharedString`] for the metrics cluster label.
+    ///
+    /// Cached when `metrics_cluster` is set so that
+    /// `emit_request_metrics` avoids an `Arc` clone per request.
+    ///
+    /// [`SharedString`]: ::metrics::SharedString
+    pub metrics_cluster_shared: Option<::metrics::SharedString>,
 
     /// Pre-read body chunks (`StreamBuffer` mode). When `StreamBuffer` is
     /// active, the body is read during `request_filter` (before upstream
@@ -194,7 +207,10 @@ macro_rules! filter_context {
             filter_metadata: std::mem::take(&mut $ctx.filter_metadata),
             filter_results: std::mem::take(&mut $ctx.filter_results),
             health_registry: $pipeline.health_registry(),
+            id_generator: $pipeline.id_generator(),
             kv_stores: $pipeline.kv_stores(),
+            #[cfg(feature = "ai-inference")]
+            response_stores: $pipeline.response_stores(),
             request: $request,
             request_body_bytes: $ctx.request_body_bytes,
             request_body_mode: $ctx.request_body_mode,
@@ -205,6 +221,7 @@ macro_rules! filter_context {
             response_headers_modified: false,
             rewritten_path: $ctx.rewritten_path.take(),
             selected_endpoint_index: $ctx.selected_endpoint_index,
+            time_source: $pipeline.time_source(),
             upstream: $ctx.upstream.take(),
         }
     };
@@ -287,6 +304,7 @@ impl Default for PingoraRequestCtx {
     fn default() -> Self {
         Self {
             _connection_permit: None,
+            _global_connection_permit: None,
             client_addr: None,
             client_http_version: None,
             cluster: None,
@@ -296,6 +314,7 @@ impl Default for PingoraRequestCtx {
             mutated_request_body_len: None,
             filter_results: std::collections::HashMap::new(),
             metrics_cluster: None,
+            metrics_cluster_shared: None,
             pre_read_body: None,
             request_body_buffer: None,
             request_body_bytes: 0,
@@ -341,7 +360,7 @@ mod tests {
     use bytes::Bytes;
     use http::{HeaderMap, Method, Uri};
     use praxis_core::connectivity::Upstream;
-    use praxis_filter::{BodyBuffer, BodyMode};
+    use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, FilterRegistry};
 
     use super::*;
 
@@ -578,6 +597,71 @@ mod tests {
             BodyMode::StreamBuffer { max_bytes: Some(8192) },
             "response_body_mode should match assigned value"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Token Usage Metadata Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn token_metadata_absent_by_default() {
+        let registry = FilterRegistry::with_builtins();
+        let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+        let request = Request {
+            method: Method::GET,
+            uri: "/".parse::<Uri>().unwrap(),
+            headers: HeaderMap::new(),
+        };
+
+        let mut ctx = default_ctx();
+        let fctx = ctx.build_filter_context(&pipeline, &request, None);
+        assert!(fctx.get_metadata("token.input").is_none());
+        assert!(fctx.get_metadata("token.output").is_none());
+        assert!(fctx.get_metadata("token.total").is_none());
+    }
+
+    #[test]
+    fn token_metadata_roundtrip_through_filter_context() {
+        let registry = FilterRegistry::with_builtins();
+        let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+        let request = Request {
+            method: Method::GET,
+            uri: "/".parse::<Uri>().unwrap(),
+            headers: HeaderMap::new(),
+        };
+
+        let mut ctx = default_ctx();
+        ctx.filter_metadata.insert("token.input".to_owned(), "150".to_owned());
+        ctx.filter_metadata.insert("token.output".to_owned(), "80".to_owned());
+        ctx.filter_metadata.insert("token.total".to_owned(), "230".to_owned());
+
+        let fctx = ctx.build_filter_context(&pipeline, &request, None);
+        assert_eq!(fctx.get_metadata("token.input"), Some("150"));
+        assert_eq!(fctx.get_metadata("token.output"), Some("80"));
+        assert_eq!(fctx.get_metadata("token.total"), Some("230"));
+    }
+
+    #[test]
+    fn set_token_usage_persists_via_filter_metadata() {
+        let registry = FilterRegistry::with_builtins();
+        let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+        let request = Request {
+            method: Method::GET,
+            uri: "/".parse::<Uri>().unwrap(),
+            headers: HeaderMap::new(),
+        };
+
+        let mut ctx = default_ctx();
+        let mut fctx = ctx.build_filter_context(&pipeline, &request, None);
+        fctx.set_token_usage(42, 18, None);
+
+        assert_eq!(fctx.get_metadata("token.input"), Some("42"));
+        assert_eq!(fctx.get_metadata("token.output"), Some("18"));
+        assert_eq!(fctx.get_metadata("token.total"), Some("60"));
+
+        ctx.filter_metadata = fctx.filter_metadata;
+        assert_eq!(ctx.filter_metadata.get("token.input").map(String::as_str), Some("42"));
+        assert_eq!(ctx.filter_metadata.get("token.total").map(String::as_str), Some("60"));
     }
 
     // -------------------------------------------------------------------------

@@ -31,9 +31,9 @@
 
 use thiserror::Error;
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// TLS `ContentType` for Handshake records.
 const CONTENT_TYPE_HANDSHAKE: u8 = 22;
@@ -59,9 +59,9 @@ const HANDSHAKE_HEADER_LEN: usize = 4;
 /// Version(2) + Random(32).
 const CLIENT_HELLO_FIXED_LEN: usize = 34;
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // ClientHelloInfo
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Information extracted from a TLS `ClientHello` message.
 ///
@@ -79,9 +79,9 @@ pub struct ClientHelloInfo {
     pub sni: Option<String>,
 }
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // SniParseError
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Errors from parsing TLS `ClientHello` SNI.
 ///
@@ -126,9 +126,9 @@ pub enum SniParseError {
     InvalidHostname,
 }
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Public API
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Parse the SNI hostname from a TLS `ClientHello` in `buf`.
 ///
@@ -154,9 +154,9 @@ pub fn parse_sni(buf: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
     parse_client_hello(hello_body)
 }
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Record Layer
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Parse the TLS record header, returning the fragment payload.
 #[allow(clippy::indexing_slicing, reason = "bounds checked before access")]
@@ -200,9 +200,9 @@ fn parse_handshake_header(fragment: &[u8]) -> Result<&[u8], SniParseError> {
     Ok(&fragment[HANDSHAKE_HEADER_LEN..end])
 }
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // ClientHello Parsing Utilities
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Parse a `ClientHello` body and extract the SNI hostname.
 fn parse_client_hello(data: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
@@ -256,9 +256,9 @@ fn read_variable_u16(data: &[u8], pos: usize) -> Result<&[u8], SniParseError> {
     data.get(start..end).ok_or(SniParseError::MalformedExtension)
 }
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // SNI Extension Parsing Utilities
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Walk extensions looking for the SNI extension (type 0).
 fn parse_extensions(mut ext: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
@@ -321,9 +321,9 @@ fn parse_sni_extension(data: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
     Ok(ClientHelloInfo { sni: None })
 }
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Binary Utilities
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Read a big-endian `u16` from `data` at `offset`.
 fn read_u16(data: &[u8], offset: usize) -> Result<u16, SniParseError> {
@@ -340,9 +340,9 @@ fn read_u24(data: &[u8], offset: usize) -> Result<u32, SniParseError> {
     Ok(u32::from_be_bytes([0, a, b, c]))
 }
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Validation
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Reject IP address literals per [RFC 6066 Section 3].
 ///
@@ -364,9 +364,9 @@ fn reject_ip_literal(hostname: &str) -> Result<(), SniParseError> {
     Ok(())
 }
 
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(
@@ -381,12 +381,20 @@ mod tests {
 
     #[test]
     fn empty_buffer_returns_too_short() {
-        assert_eq!(parse_sni(&[]), Err(SniParseError::TooShort));
+        assert_eq!(
+            parse_sni(&[]),
+            Err(SniParseError::TooShort),
+            "empty buffer should be too short"
+        );
     }
 
     #[test]
     fn short_buffer_returns_too_short() {
-        assert_eq!(parse_sni(&[22, 3, 3]), Err(SniParseError::TooShort));
+        assert_eq!(
+            parse_sni(&[22, 3, 3]),
+            Err(SniParseError::TooShort),
+            "3-byte buffer should be too short"
+        );
     }
 
     #[test]
@@ -530,13 +538,34 @@ mod tests {
 
     #[test]
     fn error_display_messages() {
-        assert!(SniParseError::TooShort.to_string().contains("too short"));
-        assert!(SniParseError::NotHandshake.to_string().contains("not a TLS"));
-        assert!(SniParseError::NotClientHello.to_string().contains("not a ClientHello"));
-        assert!(SniParseError::NeedMoreData.to_string().contains("need more data"));
-        assert!(SniParseError::MalformedExtension.to_string().contains("malformed"));
-        assert!(SniParseError::EmptyHostname.to_string().contains("must not be empty"));
-        assert!(SniParseError::InvalidHostname.to_string().contains("IP address"));
+        assert!(
+            SniParseError::TooShort.to_string().contains("too short"),
+            "TooShort display mismatch"
+        );
+        assert!(
+            SniParseError::NotHandshake.to_string().contains("not a TLS"),
+            "NotHandshake display mismatch"
+        );
+        assert!(
+            SniParseError::NotClientHello.to_string().contains("not a ClientHello"),
+            "NotClientHello display mismatch"
+        );
+        assert!(
+            SniParseError::NeedMoreData.to_string().contains("need more data"),
+            "NeedMoreData display mismatch"
+        );
+        assert!(
+            SniParseError::MalformedExtension.to_string().contains("malformed"),
+            "MalformedExtension display mismatch"
+        );
+        assert!(
+            SniParseError::EmptyHostname.to_string().contains("must not be empty"),
+            "EmptyHostname display mismatch"
+        );
+        assert!(
+            SniParseError::InvalidHostname.to_string().contains("IP address"),
+            "InvalidHostname display mismatch"
+        );
     }
 
     #[test]
@@ -623,6 +652,34 @@ mod tests {
             read_u24(&[0x01, 0x00, 0x00], 0).expect("valid u24"),
             65536,
             "read_u24 high byte"
+        );
+    }
+
+    #[test]
+    fn non_utf8_hostname_returns_invalid_hostname() {
+        let name_data: &[u8] = &[0xFF, 0xFE];
+
+        #[allow(clippy::cast_possible_truncation, reason = "test data is small")]
+        let name_len = name_data.len() as u16;
+        let entry_len: u16 = 1 + 2 + name_len;
+        let list_len: u16 = entry_len;
+        let ext_data_len: u16 = 2 + list_len;
+
+        let mut sni_ext = Vec::new();
+        sni_ext.extend_from_slice(&0u16.to_be_bytes());
+        sni_ext.extend_from_slice(&ext_data_len.to_be_bytes());
+        sni_ext.extend_from_slice(&list_len.to_be_bytes());
+        sni_ext.push(SNI_NAME_TYPE_HOST);
+        sni_ext.extend_from_slice(&name_len.to_be_bytes());
+        sni_ext.extend_from_slice(name_data);
+
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &sni_ext);
+        let record = wrap_in_record(&hello);
+
+        assert_eq!(
+            parse_sni(&record),
+            Err(SniParseError::InvalidHostname),
+            "non-UTF-8 SNI hostname bytes should be rejected"
         );
     }
 

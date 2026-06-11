@@ -6,6 +6,7 @@
 mod broker;
 pub(crate) mod config;
 pub(crate) mod envelope;
+pub(crate) mod protocol;
 
 #[cfg(test)]
 #[allow(
@@ -30,7 +31,10 @@ use self::{
     config::{InvalidMcpBehavior, McpConfig, MismatchBehavior, MissingHeaderBehavior, build_config},
     envelope::{McpEnvelope, extract_mcp_envelope},
 };
-use super::json_rpc::{config::JsonRpcConfig, envelope::parse_json_rpc_value};
+use super::{
+    MAX_DYNAMIC_VALUE_LEN,
+    json_rpc::{config::JsonRpcConfig, envelope::parse_json_rpc_value},
+};
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
@@ -44,8 +48,9 @@ use crate::{
 // -----------------------------------------------------------------------------
 
 /// Extracts MCP protocol metadata from JSON-RPC request bodies and promotes
-/// method, tool/resource/prompt name, session ID, and protocol version to
-/// request headers, filter results, and durable metadata for routing.
+/// method, tool/resource/prompt name, JSON-RPC kind, protocol version, and
+/// session presence to request headers/filter results; stores session ID in
+/// durable metadata.
 ///
 /// # YAML
 ///
@@ -66,6 +71,7 @@ use crate::{
 ///   method: x-praxis-mcp-method
 ///   name: x-praxis-mcp-name
 ///   kind: x-praxis-mcp-kind
+///   protocol_version: x-praxis-mcp-protocol-version
 ///   session_present: x-praxis-mcp-session-present
 /// ```
 pub struct McpFilter {
@@ -92,12 +98,13 @@ impl McpFilter {
 
         let cfg: McpConfig = parse_filter_config("mcp", config)?;
         let validated_config = build_config(cfg)?;
-        let json_rpc_config = build_json_rpc_config(validated_config.max_body_bytes);
+        let max_body_bytes = validated_config.max_body_bytes;
+        let json_rpc_config = build_json_rpc_config(max_body_bytes);
 
         Ok(Box::new(Self {
-            max_body_bytes: validated_config.max_body_bytes,
             config: validated_config,
             json_rpc_config,
+            max_body_bytes,
         }))
     }
 }
@@ -189,14 +196,14 @@ fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
     use super::json_rpc::config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders};
 
     JsonRpcConfig {
-        max_body_bytes,
         batch_policy: BatchPolicy::Reject,
-        on_invalid: InvalidJsonRpcBehavior::Continue,
         headers: JsonRpcHeaders {
-            method: None,
             id: None,
             kind: None,
+            method: None,
         },
+        max_body_bytes,
+        on_invalid: InvalidJsonRpcBehavior::Continue,
     }
 }
 
@@ -311,7 +318,7 @@ fn validate_single_header(
                 return Err(FilterAction::Reject(Rejection::status(400)));
             },
             MissingHeaderBehavior::Synthesize => {
-                if !contains_control_chars(body_value) {
+                if !contains_control_chars(body_value) && body_value.len() <= MAX_DYNAMIC_VALUE_LEN {
                     ctx.extra_request_headers
                         .push((Cow::Owned(header_name.to_owned()), body_value.to_owned()));
                 }
@@ -368,8 +375,10 @@ fn write_metadata(
     envelope: &super::json_rpc::envelope::JsonRpcEnvelope,
     mcp: &McpEnvelope,
 ) {
+    let max_len = MAX_DYNAMIC_VALUE_LEN;
+
     let method_str = mcp.method.as_str();
-    if !contains_control_chars(method_str) {
+    if !contains_control_chars(method_str) && method_str.len() <= max_len {
         ctx.set_metadata("json_rpc.method", method_str);
         ctx.set_metadata("mcp.method", method_str);
     }
@@ -377,6 +386,7 @@ fn write_metadata(
 
     if let Some(name) = &mcp.name
         && !contains_control_chars(name)
+        && name.len() <= max_len
     {
         ctx.set_metadata("mcp.name", name.clone());
     }
@@ -399,9 +409,11 @@ fn promote_mcp_headers(
     config: &McpConfig,
     headers: &mut Vec<(Cow<'static, str>, String)>,
 ) {
+    let max_len = MAX_DYNAMIC_VALUE_LEN;
+
     if let Some(header_name) = &config.headers.method {
         let method_str = mcp.method.as_str();
-        if !contains_control_chars(method_str) {
+        if !contains_control_chars(method_str) && method_str.len() <= max_len {
             headers.push((Cow::Owned(header_name.clone()), method_str.to_owned()));
         }
     }
@@ -409,8 +421,16 @@ fn promote_mcp_headers(
     if let Some(header_name) = &config.headers.name
         && let Some(name) = &mcp.name
         && !contains_control_chars(name)
+        && name.len() <= max_len
     {
         headers.push((Cow::Owned(header_name.clone()), name.clone()));
+    }
+
+    if let Some(header_name) = &config.headers.protocol_version
+        && let Some(pv) = &mcp.protocol_version
+        && !contains_control_chars(pv)
+    {
+        headers.push((Cow::Owned(header_name.clone()), pv.clone()));
     }
 
     if let Some(header_name) = &config.headers.kind {
@@ -439,6 +459,12 @@ fn promote_filter_results(
         && !contains_control_chars(name)
     {
         results.set("name", name.clone())?;
+    }
+
+    if let Some(pv) = &mcp.protocol_version
+        && !contains_control_chars(pv)
+    {
+        results.set("protocol_version", pv.clone())?;
     }
 
     let session_present = if mcp.session_id.is_some() { "true" } else { "false" };

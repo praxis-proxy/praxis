@@ -138,6 +138,21 @@ impl A2aMethod {
         matches!(self, Self::GetTask | Self::CancelTask | Self::SubscribeToTask)
     }
 
+    /// Whether a follow-up request with this method should be routed
+    /// by stored task ownership.
+    pub(crate) fn is_task_routable(&self) -> bool {
+        matches!(
+            self,
+            Self::GetTask
+                | Self::CancelTask
+                | Self::SubscribeToTask
+                | Self::CreateTaskPushNotificationConfig
+                | Self::GetTaskPushNotificationConfig
+                | Self::ListTaskPushNotificationConfigs
+                | Self::DeleteTaskPushNotificationConfig
+        )
+    }
+
     /// Whether this method should extract task ID from `params.taskId`.
     pub(crate) fn extracts_task_id_from_params(&self) -> bool {
         matches!(
@@ -170,12 +185,12 @@ impl A2aFamily {
 /// Extracted A2A envelope metadata.
 #[derive(Debug, Clone)]
 pub(crate) struct A2aEnvelope {
+    /// Method family classification.
+    pub family: A2aFamily,
     /// Classified A2A method (canonical after alias resolution).
     pub method: A2aMethod,
     /// Original method string before alias resolution (if different).
     pub original_method: Option<String>,
-    /// Method family classification.
-    pub family: A2aFamily,
     /// Whether the method supports streaming.
     pub streaming: bool,
     /// Task ID extracted from params, when present.
@@ -206,9 +221,9 @@ pub(crate) fn extract_a2a_envelope(
     let version = extract_version(request_headers);
 
     A2aEnvelope {
+        family,
         method,
         original_method,
-        family,
         streaming,
         task_id,
         version,

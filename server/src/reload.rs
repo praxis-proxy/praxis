@@ -34,6 +34,7 @@ use crate::pipelines::resolve_pipelines;
 #[allow(
     clippy::too_many_arguments,
     clippy::too_many_lines,
+    clippy::cognitive_complexity,
     reason = "orchestration function"
 )]
 pub(crate) fn reload_pipelines(
@@ -144,6 +145,7 @@ fn log_restart_required_changes(old: &Config, new: &Config) {
 }
 
 /// Detect listener additions, removals, and address rebinds.
+#[allow(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
 fn detect_listener_topology_changes(old: &Config, new: &Config) {
     let old_names: std::collections::HashSet<&str> = old.listeners.iter().map(|l| l.name.as_str()).collect();
     let new_names: std::collections::HashSet<&str> = new.listeners.iter().map(|l| l.name.as_str()).collect();
@@ -194,6 +196,7 @@ fn detect_protocol_changes(old: &Config, new: &Config) {
 /// Detect compression being added to a previously uncompressed listener.
 fn detect_compression_additions(old: &Config, new: &Config) {
     let old_chains_with_compression = find_chains_with_compression(old);
+    let new_chains_with_compression = find_chains_with_compression(new);
 
     for new_l in &new.listeners {
         if let Some(old_l) = old.listeners.iter().find(|l| l.name == new_l.name) {
@@ -202,7 +205,6 @@ fn detect_compression_additions(old: &Config, new: &Config) {
                 .iter()
                 .any(|c| old_chains_with_compression.contains(c.as_str()));
 
-            let new_chains_with_compression = find_chains_with_compression(new);
             let new_has_compression = new_l
                 .filter_chains
                 .iter()

@@ -6,6 +6,7 @@
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use zeroize::Zeroizing;
 
 use super::config::{ClusterCredentialConfig, CredentialInjectionConfig};
 use crate::{
@@ -23,8 +24,8 @@ struct ClusterCredential {
     /// Header name to inject.
     header: String,
 
-    /// Full header value (prefix + credential).
-    header_value: String,
+    /// Full header value (prefix + credential), zeroized on drop.
+    header_value: Zeroizing<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -153,8 +154,12 @@ impl HttpFilter for CredentialInjectionFilter {
             header = %cred.header,
             "injecting credential header (replaces any client-provided value)"
         );
+        // Zeroizing<String> is cloned into a plain String here because
+        // http::HeaderValue does not support zeroize. The unzeroized copy
+        // persists in heap until deallocation. Accepted residual risk:
+        // exploitation requires a memory-read primitive on the proxy process.
         ctx.extra_request_headers
-            .push((Cow::Owned(cred.header.clone()), cred.header_value.clone()));
+            .push((Cow::Owned(cred.header.clone()), cred.header_value.as_str().to_owned()));
 
         Ok(FilterAction::Continue)
     }
@@ -166,6 +171,14 @@ impl HttpFilter for CredentialInjectionFilter {
 
 /// Resolve a cluster credential config into a ready-to-inject value.
 fn resolve_credential(cfg: &ClusterCredentialConfig) -> Result<ClusterCredential, FilterError> {
+    http::HeaderName::from_bytes(cfg.header.as_bytes()).map_err(|e| -> FilterError {
+        format!(
+            "credential_injection: invalid header name '{}' for cluster '{}': {e}",
+            cfg.header, cfg.name
+        )
+        .into()
+    })?;
+
     let raw_value = resolve_raw_value(cfg)?;
 
     let header_value = match &cfg.header_prefix {
@@ -173,9 +186,17 @@ fn resolve_credential(cfg: &ClusterCredentialConfig) -> Result<ClusterCredential
         None => raw_value,
     };
 
+    http::HeaderValue::from_str(&header_value).map_err(|e| -> FilterError {
+        format!(
+            "credential_injection: assembled header value is invalid for cluster '{}': {e}",
+            cfg.name
+        )
+        .into()
+    })?;
+
     Ok(ClusterCredential {
         header: cfg.header.clone(),
-        header_value,
+        header_value: Zeroizing::new(header_value),
     })
 }
 

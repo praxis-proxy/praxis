@@ -21,20 +21,29 @@ use crate::{
 // GuardrailsFilter
 // -----------------------------------------------------------------------------
 
-/// Rejects requests matching string or regex rules against headers and/or body content.
+/// Rejects requests matching string, regex, or PII rules against headers
+/// and/or body content.
 ///
 /// # YAML configuration
 ///
 /// ```yaml
 /// filter: guardrails
+/// action: flag            # or "reject" (default)
 /// rules:
+///   # Detect PII in a header
+///   - target: header
+///     name: "Authorization"
+///     contains: [ssn, credit_card, email]
+///   # Detect PII in body
+///   - target: body
+///     contains: [ssn, credit_card, phone, email]
+///   # Block SQL injection in body
+///   - target: body
+///     contains: "DROP TABLE"
 ///   # Block requests from bad bots
 ///   - target: header
 ///     name: "User-Agent"
 ///     pattern: "bad-bot.*"
-///   # Block SQL injection in body
-///   - target: body
-///     contains: "DROP TABLE"
 ///   # Require body to look like JSON (reject if NOT matching)
 ///   - target: body
 ///     pattern: "^\\{.*\\}$"
@@ -62,11 +71,14 @@ pub struct GuardrailsFilter {
     /// What to do when a rule matches.
     pub(super) action: GuardrailsAction,
 
-    /// Compiled rules for per-request evaluation.
-    pub(super) rules: Vec<CompiledRule>,
-
     /// Whether any rule targets the body (pre-computed at init).
     pub(super) needs_body: bool,
+
+    /// Reject bodies exceeding the inspection buffer limit.
+    pub(super) reject_oversized: bool,
+
+    /// Compiled rules for per-request evaluation.
+    pub(super) rules: Vec<CompiledRule>,
 }
 
 impl GuardrailsFilter {
@@ -123,8 +135,9 @@ impl GuardrailsFilter {
 
         Ok(Box::new(Self {
             action: cfg.action,
-            rules,
             needs_body,
+            reject_oversized: cfg.reject_oversized,
+            rules,
         }))
     }
 
@@ -143,21 +156,31 @@ impl GuardrailsFilter {
                 continue;
             };
 
-            let matched = ctx
+            // find_map returns the RuleEval from the first matching value,
+            // pii::matches_any is called at most once across all values.
+            let is_rule_match = ctx
                 .request
                 .headers
                 .get_all(header_name.as_str())
                 .iter()
                 .filter_map(|val| val.to_str().ok())
-                .any(|s| rule.matches(s));
+                .find_map(|s| {
+                    let ev = rule.eval(s);
+                    ev.matched.then_some(ev)
+                });
 
-            let triggered = if rule.negate { !matched } else { matched };
+            let rule_matches = if rule.negate {
+                is_rule_match.is_none()
+            } else {
+                is_rule_match.is_some()
+            };
 
-            if triggered {
+            if rule_matches {
                 tracing::info!(
                     header = %header_name,
                     negate = rule.negate,
-                    "guardrails: header rule triggered, rejecting"
+                    pii_kind = ?is_rule_match.and_then(|ev| ev.pii_kind),
+                    "guardrails: header rule triggered"
                 );
                 return true;
             }
@@ -172,11 +195,19 @@ impl GuardrailsFilter {
                 continue;
             }
 
-            let matched = rule.matches(body);
-            let triggered = if rule.negate { !matched } else { matched };
+            let is_rule_match = rule.eval(body);
+            let rule_matches = if rule.negate {
+                !is_rule_match.matched
+            } else {
+                is_rule_match.matched
+            };
 
-            if triggered {
-                tracing::info!(negate = rule.negate, "guardrails: body rule triggered, rejecting");
+            if rule_matches {
+                tracing::info!(
+                    negate = rule.negate,
+                    pii_kind = ?is_rule_match.pii_kind,
+                    "guardrails: body rule triggered"
+                );
                 return true;
             }
         }
@@ -235,6 +266,16 @@ impl HttpFilter for GuardrailsFilter {
             write_result(ctx, "passed");
             return Ok(FilterAction::Continue);
         };
+
+        if self.reject_oversized && self.needs_body && chunk.len() >= DEFAULT_MAX_BODY_BYTES {
+            tracing::info!(
+                body_len = chunk.len(),
+                limit = DEFAULT_MAX_BODY_BYTES,
+                "guardrails: rejecting oversized body (exceeds inspection limit)"
+            );
+            write_result(ctx, "blocked");
+            return Ok(FilterAction::Reject(Rejection::status(413)));
+        }
 
         let Ok(text) = std::str::from_utf8(chunk) else {
             tracing::info!("guardrails: rejecting non-UTF-8 body");

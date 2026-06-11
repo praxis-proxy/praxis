@@ -98,7 +98,6 @@ fn validate_and_build_directives(
     overrides: &std::collections::HashMap<String, String>,
 ) -> Result<String, ProxyError> {
     let mut errors: Vec<String> = Vec::new();
-    let mut directives = base.to_string();
 
     for (module, level) in overrides {
         if !is_valid_module_path(module) {
@@ -112,12 +111,6 @@ fn validate_and_build_directives(
                  (must be error, warn, info, debug, or trace)"
             ));
         }
-        if errors.is_empty() {
-            directives.push(',');
-            directives.push_str(module);
-            directives.push('=');
-            directives.push_str(level);
-        }
     }
 
     if !errors.is_empty() {
@@ -125,6 +118,14 @@ fn validate_and_build_directives(
             "invalid log_overrides: {}",
             errors.join("; ")
         )));
+    }
+
+    let mut directives = base.to_string();
+    for (module, level) in overrides {
+        directives.push(',');
+        directives.push_str(module);
+        directives.push('=');
+        directives.push_str(level);
     }
 
     Ok(directives)

@@ -7,8 +7,8 @@ use std::{io::Write, net::TcpStream};
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_send, parse_body, parse_status, start_backend_with_shutdown, start_echo_backend_with_shutdown,
-    start_header_echo_backend_with_shutdown, start_proxy,
+    free_port, http_send, parse_body, parse_status, start_backend_with_shutdown, start_echo_backend,
+    start_header_echo_backend, start_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -39,7 +39,7 @@ fn mcp_tools_call_routes_by_name() {
 
 #[test]
 fn mcp_tools_call_params_forwarded_to_backend() {
-    let backend_guard = start_echo_backend_with_shutdown();
+    let backend_guard = start_echo_backend();
     let proxy_port = free_port();
 
     let yaml = mcp_default_yaml(proxy_port, backend_guard.port());
@@ -82,6 +82,43 @@ fn mcp_tools_list_routes_to_default() {
         parse_body(&raw),
         "default-backend",
         "tools/list should route to default cluster"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Protocol Version Routing Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn mcp_protocol_version_routes_by_promoted_header() {
+    let versioned_guard = start_backend_with_shutdown("versioned-backend");
+    let default_guard = start_backend_with_shutdown("default-backend");
+    let proxy_port = free_port();
+
+    let yaml = mcp_protocol_version_routing_yaml(proxy_port, versioned_guard.port(), default_guard.port());
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    let request = json_post_with_mcp_headers("/mcp/", body, &[("MCP-Protocol-Version", "2025-03-26")]);
+    let raw = http_send(proxy.addr(), &request);
+
+    assert_eq!(parse_status(&raw), 200);
+    assert_eq!(
+        parse_body(&raw),
+        "versioned-backend",
+        "request with MCP-Protocol-Version should route to versioned cluster"
+    );
+
+    let body_no_ver = r#"{"jsonrpc":"2.0","id":2,"method":"tools/list"}"#;
+    let request_no_ver = json_post_with_mcp_headers("/mcp/", body_no_ver, &[]);
+    let raw_no_ver = http_send(proxy.addr(), &request_no_ver);
+
+    assert_eq!(parse_status(&raw_no_ver), 200);
+    assert_eq!(
+        parse_body(&raw_no_ver),
+        "default-backend",
+        "request without MCP-Protocol-Version should route to default cluster"
     );
 }
 
@@ -190,7 +227,7 @@ fn mcp_on_invalid_continue_passes_non_json() {
 
 #[test]
 fn mcp_synthesize_injects_standard_headers_when_missing() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
 
     let yaml = mcp_synthesize_yaml(proxy_port, backend_guard.port());
@@ -224,7 +261,7 @@ fn mcp_synthesize_injects_standard_headers_when_missing() {
 
 #[test]
 fn mcp_standard_headers_preserved_internal_stripped() {
-    let backend_guard = start_header_echo_backend_with_shutdown();
+    let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
 
     let yaml = mcp_passthrough_yaml(proxy_port, backend_guard.port());
@@ -611,6 +648,42 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+"#,
+    )
+}
+
+fn mcp_protocol_version_routing_yaml(proxy_port: u16, versioned_port: u16, default_port: u16) -> String {
+    format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: mcp
+        max_body_bytes: 65536
+        on_invalid: continue
+        headers:
+          method: x-praxis-mcp-method
+          protocol_version: x-praxis-mcp-protocol-version
+      - filter: router
+        routes:
+          - path_prefix: "/mcp/"
+            headers:
+              x-praxis-mcp-protocol-version: "2025-03-26"
+            cluster: "versioned"
+          - path_prefix: "/mcp/"
+            cluster: "default"
+      - filter: load_balancer
+        clusters:
+          - name: "versioned"
+            endpoints:
+              - "127.0.0.1:{versioned_port}"
+          - name: "default"
+            endpoints:
+              - "127.0.0.1:{default_port}"
 "#,
     )
 }

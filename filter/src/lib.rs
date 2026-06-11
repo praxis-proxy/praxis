@@ -15,6 +15,7 @@ mod context;
 mod factory;
 mod filter;
 pub(crate) mod load_balancing;
+pub(crate) mod path_match;
 mod pipeline;
 mod registry;
 mod results;
@@ -24,14 +25,20 @@ pub use actions::{FilterAction, Rejection};
 pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
 #[cfg(feature = "ai-inference")]
+pub use builtins::OpenaiResponsesValidateFilter;
+#[cfg(feature = "ai-inference")]
 pub use builtins::PromptEnrichFilter;
+#[cfg(feature = "ai-inference")]
+pub use builtins::ResponseStoreRegistry;
 #[cfg(feature = "ai-inference")]
 pub use builtins::ResponsesFormatFilter;
 pub use builtins::{
-    CircuitBreakerFilter, CredentialInjectionFilter, DisallowedOriginMode, GuardrailsAction, GuardrailsFilter,
-    LoadBalancerFilter, RateLimitMode, RedirectStatus, RouterFilter, RuleTargetKind, has_dot_dot_traversal,
-    http::payload_processing::compression_config::CompressionConfig, normalize_rewritten_path,
+    CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, GuardrailsAction,
+    GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode, RedirectStatus, RouterFilter, RuleTargetKind,
+    has_dot_dot_traversal, http::payload_processing::compression_config::CompressionConfig, normalize_rewritten_path,
 };
+#[cfg(feature = "ai-inference")]
+pub use builtins::{TokenUsage, TokenUsageProvider, extract_token_usage};
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{HttpFilterContext, Request, Response};
 pub use factory::{FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config, tcp_builtin};
@@ -238,9 +245,15 @@ mod macro_tests {
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "test utilities")]
 pub(crate) mod test_utils {
+    use std::sync::LazyLock;
+
     use http::{HeaderMap, Method, Uri};
+    use praxis_core::id::IdGenerator;
 
     use crate::{HttpFilterContext, Request};
+
+    /// Deterministic ID generator for tests (seed=0).
+    static TEST_ID_GENERATOR: LazyLock<IdGenerator> = LazyLock::new(|| IdGenerator::with_seed(0));
 
     pub(crate) fn make_request(method: Method, path: &str) -> Request {
         Request {
@@ -264,7 +277,10 @@ pub(crate) mod test_utils {
             filter_metadata: std::collections::HashMap::new(),
             filter_results: std::collections::HashMap::new(),
             health_registry: None,
+            id_generator: &TEST_ID_GENERATOR,
             kv_stores: None,
+            #[cfg(feature = "ai-inference")]
+            response_stores: None,
             request: req,
             request_body_bytes: 0,
             request_body_mode: crate::body::BodyMode::Stream,
@@ -275,6 +291,7 @@ pub(crate) mod test_utils {
             response_headers_modified: false,
             rewritten_path: None,
             selected_endpoint_index: None,
+            time_source: &praxis_core::time::SystemTimeSource,
             upstream: None,
         }
     }

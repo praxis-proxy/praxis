@@ -16,5 +16,5 @@ pub use cors::{CorsFilter, DisallowedOriginMode};
 pub use credential_injection::CredentialInjectionFilter;
 pub use csrf::CsrfFilter;
 pub use forwarded_headers::ForwardedHeadersFilter;
-pub use guardrails::{GuardrailsAction, GuardrailsFilter, RuleTargetKind};
+pub use guardrails::{ContainsValue, GuardrailsAction, GuardrailsFilter, PiiKind, RuleTargetKind};
 pub use ip_acl::IpAclFilter;

@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use rustls::{
     RootCertStore,
+    pki_types::CertificateRevocationListDer,
     server::{WebPkiClientVerifier, danger::ClientCertVerifier},
 };
 
@@ -18,18 +19,25 @@ use crate::{ClientCertMode, TlsError};
 
 /// Build a [`ClientCertVerifier`] from a CA PEM file and verification mode.
 ///
+/// When `crl_paths` is non-empty, the verifier checks presented client
+/// certificates against the provided CRLs and rejects revoked certificates.
+///
 /// # Errors
 ///
-/// Returns [`TlsError`] if the CA file cannot be read or parsed, or
-/// if `mode` is [`ClientCertMode::None`].
+/// Returns [`TlsError`] if the CA or CRL files cannot be read or parsed,
+/// or if `mode` is [`ClientCertMode::None`].
 ///
 /// ```ignore
 /// use std::sync::Arc;
 ///
 /// use crate::{ClientCertMode, client_auth::build_client_verifier};
 ///
-/// let verifier = build_client_verifier("/etc/ssl/client-ca.pem", &ClientCertMode::Require)
-///     .expect("valid CA file");
+/// let verifier = build_client_verifier(
+///     "/etc/ssl/client-ca.pem",
+///     ClientCertMode::Require,
+///     &[],
+/// )
+/// .expect("valid CA file");
 /// ```
 ///
 /// [`ClientCertVerifier`]: rustls::server::danger::ClientCertVerifier
@@ -37,10 +45,16 @@ use crate::{ClientCertMode, TlsError};
 /// [`ClientCertMode::None`]: crate::ClientCertMode::None
 pub(crate) fn build_client_verifier(
     ca_path: &str,
-    mode: &ClientCertMode,
+    mode: ClientCertMode,
+    crl_paths: &[String],
 ) -> Result<Arc<dyn ClientCertVerifier>, TlsError> {
     let root_store = load_ca_root_store(ca_path)?;
-    let builder = WebPkiClientVerifier::builder(Arc::new(root_store));
+    let mut builder = WebPkiClientVerifier::builder(Arc::new(root_store));
+
+    if !crl_paths.is_empty() {
+        let crls = load_crls(crl_paths)?;
+        builder = builder.with_crls(crls);
+    }
 
     let verifier_err = |detail: String| TlsError::FileLoadError {
         path: ca_path.to_owned(),
@@ -57,6 +71,35 @@ pub(crate) fn build_client_verifier(
             .map_err(|e| verifier_err(format!("failed to build verifier: {e}"))),
         ClientCertMode::None => Err(TlsError::ClientVerifierNotRequired),
     }
+}
+
+// -----------------------------------------------------------------------------
+// CRL Loading
+// -----------------------------------------------------------------------------
+
+/// Load CRL files from PEM-encoded paths.
+fn load_crls(paths: &[String]) -> Result<Vec<CertificateRevocationListDer<'static>>, TlsError> {
+    let mut crls = Vec::new();
+    for path in paths {
+        let pem = std::fs::read(path).map_err(|e| TlsError::FileLoadError {
+            path: path.clone(),
+            detail: e.to_string(),
+        })?;
+        let parsed: Vec<_> = rustls_pemfile::crls(&mut &pem[..])
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| TlsError::FileLoadError {
+                path: path.clone(),
+                detail: format!("failed to parse CRL PEM: {e}"),
+            })?;
+        if parsed.is_empty() {
+            return Err(TlsError::FileLoadError {
+                path: path.clone(),
+                detail: "no CRLs found in PEM file".to_owned(),
+            });
+        }
+        crls.extend(parsed);
+    }
+    Ok(crls)
 }
 
 /// Load CA certificates from a PEM file into a [`RootCertStore`].
@@ -109,7 +152,7 @@ mod tests {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
-        let verifier = build_client_verifier(ca_path, &ClientCertMode::Require)
+        let verifier = build_client_verifier(ca_path, ClientCertMode::Require, &[])
             .expect("require mode with valid CA should succeed");
         assert!(
             verifier.client_auth_mandatory(),
@@ -123,7 +166,7 @@ mod tests {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
-        let verifier = build_client_verifier(ca_path, &ClientCertMode::Request)
+        let verifier = build_client_verifier(ca_path, ClientCertMode::Request, &[])
             .expect("request mode with valid CA should succeed");
         assert!(
             !verifier.client_auth_mandatory(),
@@ -137,7 +180,7 @@ mod tests {
         let ca = gen_ca_file();
         let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
-        let err = build_client_verifier(ca_path, &ClientCertMode::None).expect_err("mode=None should return error");
+        let err = build_client_verifier(ca_path, ClientCertMode::None, &[]).expect_err("mode=None should return error");
         assert!(
             matches!(err, TlsError::ClientVerifierNotRequired),
             "error should be ClientVerifierNotRequired, got: {err}"
@@ -146,7 +189,7 @@ mod tests {
 
     #[test]
     fn build_client_verifier_invalid_ca_path_returns_error() {
-        let err = build_client_verifier("/nonexistent/ca.pem", &ClientCertMode::Require)
+        let err = build_client_verifier("/nonexistent/ca.pem", ClientCertMode::Require, &[])
             .expect_err("nonexistent CA should fail");
         assert!(
             matches!(err, TlsError::FileLoadError { .. }),
@@ -183,6 +226,32 @@ mod tests {
         assert!(
             matches!(err, TlsError::FileLoadError { .. }),
             "error should be FileLoadError, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_crls_nonexistent_file_returns_error() {
+        let err = load_crls(&["/nonexistent/crl.pem".to_owned()]).expect_err("nonexistent CRL file should fail");
+        assert!(
+            matches!(err, TlsError::FileLoadError { .. }),
+            "error should be FileLoadError, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("load"),
+            "error should mention file loading, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_crls_empty_pem_returns_error() {
+        let temp = tempfile::NamedTempFile::new().expect("tempfile creation should succeed");
+        std::fs::write(temp.path(), "").expect("write empty file should succeed");
+        let path = temp.path().to_str().expect("path should be valid UTF-8").to_owned();
+
+        let err = load_crls(&[path]).expect_err("empty PEM should fail");
+        assert!(
+            err.to_string().contains("no CRLs found"),
+            "error should mention no CRLs found, got: {err}"
         );
     }
 }

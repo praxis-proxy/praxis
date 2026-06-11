@@ -52,17 +52,7 @@ impl CachedCaCerts {
     ///
     /// [`TlsError`]: crate::TlsError
     pub fn from_pem_file(ca_path: &str) -> Result<Self, TlsError> {
-        tracing::debug!(ca_path, "loading CA certificates");
-
-        let certs = parse_cert_pem(ca_path)?;
-
-        if certs.is_empty() {
-            return Err(TlsError::FileLoadError {
-                path: ca_path.to_owned(),
-                detail: "no certificates found in CA file".to_owned(),
-            });
-        }
-
+        let certs = load_and_validate_certs(ca_path, "CA")?;
         tracing::info!(ca_path, count = certs.len(), "cached CA certificates");
         Ok(Self::new(certs))
     }
@@ -121,19 +111,8 @@ impl CachedClientCert {
     ///
     /// [`TlsError`]: crate::TlsError
     pub fn from_pem_files(cert_path: &str, key_path: &str) -> Result<Self, TlsError> {
-        tracing::debug!(cert_path, key_path, "loading client certificate");
-
-        let cert_der = parse_cert_pem(cert_path)?;
-
-        if cert_der.is_empty() {
-            return Err(TlsError::FileLoadError {
-                path: cert_path.to_owned(),
-                detail: "no certificates found in client cert file".to_owned(),
-            });
-        }
-
+        let cert_der = load_and_validate_certs(cert_path, "client cert")?;
         let key_der = parse_key_pem(key_path)?;
-
         tracing::info!(cert_path, "cached client certificate");
         Ok(Self::new(cert_der, key_der))
     }
@@ -237,6 +216,20 @@ impl CachedClusterTls {
 // Utilities
 // -----------------------------------------------------------------------------
 
+/// Read a PEM certificate file, parse its certificates, and validate
+/// that at least one is present.
+fn load_and_validate_certs(path: &str, context: &str) -> Result<Vec<Vec<u8>>, TlsError> {
+    tracing::debug!(path, context, "loading certificates");
+    let certs = parse_cert_pem(path)?;
+    if certs.is_empty() {
+        return Err(TlsError::FileLoadError {
+            path: path.to_owned(),
+            detail: format!("no certificates found in {context} file"),
+        });
+    }
+    Ok(certs)
+}
+
 /// Read a PEM certificate file and return DER-encoded certificate bytes.
 fn parse_cert_pem(cert_path: &str) -> Result<Vec<Vec<u8>>, TlsError> {
     let pem = read_pem_file(cert_path)?;
@@ -327,6 +320,30 @@ mod tests {
     }
 
     #[test]
+    fn cached_ca_from_pem_file_multi_cert() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("multi-ca.pem");
+
+        let key1 = rcgen::KeyPair::generate().unwrap();
+        let mut params1 = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params1.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params1.distinguished_name.push(rcgen::DnType::CommonName, "CA One");
+        let cert1 = params1.self_signed(&key1).unwrap();
+
+        let key2 = rcgen::KeyPair::generate().unwrap();
+        let mut params2 = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params2.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params2.distinguished_name.push(rcgen::DnType::CommonName, "CA Two");
+        let cert2 = params2.self_signed(&key2).unwrap();
+
+        let pem = format!("{}{}", cert1.pem(), cert2.pem());
+        std::fs::write(&path, pem).unwrap();
+
+        let cached = CachedCaCerts::from_pem_file(path.to_str().unwrap()).expect("multi-cert PEM should parse");
+        assert_eq!(cached.der_certs().len(), 2, "should parse two CA certs");
+    }
+
+    #[test]
     fn cached_client_cert_from_pem_nonexistent() {
         let err = CachedClientCert::from_pem_files("/no/cert.pem", "/no/key.pem");
         assert!(err.is_err(), "nonexistent files should fail");
@@ -385,6 +402,7 @@ mod tests {
         let tls = crate::ClusterTls {
             ca: Some(crate::CaConfig {
                 ca_path: ca.ca_path.to_str().unwrap().to_owned(),
+                crl_paths: Vec::new(),
             }),
             ..crate::ClusterTls::default()
         };
@@ -443,6 +461,7 @@ mod tests {
         let tls = crate::ClusterTls {
             ca: Some(crate::CaConfig {
                 ca_path: "/nonexistent/ca.pem".to_owned(),
+                crl_paths: Vec::new(),
             }),
             ..crate::ClusterTls::default()
         };
@@ -490,6 +509,7 @@ mod tests {
         let tls = crate::ClusterTls {
             ca: Some(crate::CaConfig {
                 ca_path: ca.ca_path.to_str().unwrap().to_owned(),
+                crl_paths: Vec::new(),
             }),
             ..crate::ClusterTls::default()
         };

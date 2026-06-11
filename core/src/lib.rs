@@ -13,12 +13,18 @@ pub mod connectivity;
 pub mod errors;
 /// Shared health state types for active health checking.
 pub mod health;
+/// Per-instance request ID generation.
+pub mod id;
 /// Key-value store trait and registry.
 pub mod kv;
 /// Tracing subscriber setup.
 pub mod logging;
+/// Process-wide memory pressure monitoring.
+pub mod memory;
 /// Server factory and runtime options.
 pub mod server;
+/// Wall-clock time abstraction for filters.
+pub mod time;
 
 pub use errors::ProxyError;
 pub use server::{PingoraServerRuntime, RuntimeOptions};

@@ -127,31 +127,7 @@ struct GeneratedCerts {
 
 /// Generate a CA and server cert in `dir` with the given CA common name.
 fn gen_certs_at(dir: &std::path::Path, ca_cn: &str) -> GeneratedCerts {
-    let ca_key = KeyPair::generate().expect("CA key generation");
-    let mut ca_params = CertificateParams::new(Vec::<String>::new()).expect("CA params");
-    ca_params.is_ca = IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-    ca_params.distinguished_name.push(DnType::CommonName, ca_cn);
-    let ca_cert = ca_params.self_signed(&ca_key).expect("CA self-sign");
-    let issuer = Issuer::from_params(&ca_params, &ca_key);
-
-    let server_key = KeyPair::generate().expect("server key generation");
-    let mut server_params = CertificateParams::new(vec!["localhost".to_owned()]).expect("server params");
-    server_params.distinguished_name.push(DnType::CommonName, "localhost");
-    let server_cert = server_params.signed_by(&server_key, &issuer).expect("server cert sign");
-
-    let cert_path = dir.join("server.pem");
-    let key_path = dir.join("server-key.pem");
-    let ca_cert_path = dir.join("ca.pem");
-
-    std::fs::write(&cert_path, server_cert.pem()).expect("write cert PEM");
-    std::fs::write(&key_path, server_key.serialize_pem()).expect("write key PEM");
-    std::fs::write(&ca_cert_path, ca_cert.pem()).expect("write CA PEM");
-
-    GeneratedCerts {
-        ca_cert_path,
-        cert_path,
-        key_path,
-    }
+    gen_certs_with_sans_at(dir, ca_cn, vec!["localhost".to_owned()])
 }
 
 /// Generate a CA and server cert with custom SANs in `dir`.

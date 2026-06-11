@@ -28,6 +28,7 @@ use crate::{
 
 /// Deserialization wrapper for the TCP load balancer's YAML config.
 #[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
 struct TcpLoadBalancerConfig {
     /// Cluster definitions.
     #[serde(default)]

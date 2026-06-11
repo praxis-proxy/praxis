@@ -104,6 +104,7 @@ pub(super) fn load_cert_and_key(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
+    use crate::test_utils::gen_test_certs;
 
     #[test]
     fn default_crypto_provider_returns_provider() {
@@ -111,6 +112,96 @@ mod tests {
         assert!(
             !provider.cipher_suites.is_empty(),
             "crypto provider should have at least one cipher suite"
+        );
+    }
+
+    #[test]
+    fn load_cert_and_key_valid_pair() {
+        let certs = gen_test_certs();
+        let pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+
+        let (chain, _key) = load_cert_and_key(&pair).expect("valid pair should load");
+        assert!(!chain.is_empty(), "certificate chain should not be empty");
+    }
+
+    #[test]
+    fn load_cert_and_key_missing_cert_file() {
+        let certs = gen_test_certs();
+        let pair = CertKeyPair {
+            cert_path: "/nonexistent/cert.pem".to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+
+        let err = load_cert_and_key(&pair).expect_err("missing cert should fail");
+        assert!(
+            matches!(err, TlsError::FileLoadError { ref path, .. } if path == "/nonexistent/cert.pem"),
+            "error should reference the cert path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_cert_and_key_missing_key_file() {
+        let certs = gen_test_certs();
+        let pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: "/nonexistent/key.pem".to_owned(),
+            server_names: Vec::new(),
+        };
+
+        let err = load_cert_and_key(&pair).expect_err("missing key should fail");
+        assert!(
+            matches!(err, TlsError::FileLoadError { ref path, .. } if path == "/nonexistent/key.pem"),
+            "error should reference the key path, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_cert_and_key_empty_cert_file() {
+        let certs = gen_test_certs();
+        let dir = tempfile::TempDir::new().expect("tempdir creation should succeed");
+        let empty_cert = dir.path().join("empty.pem");
+        std::fs::write(&empty_cert, "").expect("write empty cert should succeed");
+
+        let pair = CertKeyPair {
+            cert_path: empty_cert.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+
+        let err = load_cert_and_key(&pair).expect_err("empty cert should fail");
+        assert!(
+            err.to_string().contains("no certificates found"),
+            "error should mention no certificates found, got: {err}"
+        );
+    }
+
+    #[test]
+    fn load_cert_and_key_empty_key_file() {
+        let certs = gen_test_certs();
+        let dir = tempfile::TempDir::new().expect("tempdir creation should succeed");
+        let empty_key = dir.path().join("empty-key.pem");
+        std::fs::write(&empty_key, "").expect("write empty key should succeed");
+
+        let pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: empty_key.to_str().expect("key path").to_owned(),
+            server_names: Vec::new(),
+        };
+
+        let err = load_cert_and_key(&pair).expect_err("empty key should fail");
+        assert!(
+            err.to_string().contains("no private key found"),
+            "error should mention no private key found, got: {err}"
         );
     }
 }

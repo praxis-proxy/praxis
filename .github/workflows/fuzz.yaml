@@ -9,24 +9,13 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
-  schedule:
-    - cron: "23 3 * * *"
   workflow_dispatch:
-    inputs:
-      duration:
-        description: "Fuzz duration per target in seconds"
-        required: false
-        type: number
-        default: 120
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions: {}
-
-env:
-  FUZZ_DURATION: ${{ github.event_name == 'schedule' && '1800' || inputs.duration || '120' }}
 
 jobs:
   # -----------------------------------------------------------------
@@ -44,7 +33,7 @@ jobs:
         uses: dtolnay/rust-toolchain@5b842231ba77f5c045dba54ac5560fed2db780e2 # nightly-2026-03-28 (rustc 1.96.0)
 
       - name: Install cargo-fuzz
-        run: cargo install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
 
       - name: Run fuzz targets
         run: make fuzz

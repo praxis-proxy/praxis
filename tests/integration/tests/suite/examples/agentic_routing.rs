@@ -6,8 +6,8 @@
 use std::collections::HashMap;
 
 use praxis_test_utils::{
-    free_port, http_send, json_post, load_example_config, parse_body, parse_status, start_backend_with_shutdown,
-    start_proxy,
+    Backend, free_port, http_send, json_post, load_example_config, parse_body, parse_status,
+    start_backend_with_shutdown, start_proxy,
 };
 
 // ---------------------------------------------------------------------------
@@ -372,6 +372,120 @@ fn a2a_classifier_routing_default_fallback() {
         parse_body(&raw),
         "default-response",
         "non-A2A traffic should route to default-backend"
+    );
+}
+
+#[test]
+fn a2a_task_routing_example_routes_send_message_to_agent_a() {
+    let task_json =
+        r#"{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"task-example-1","status":{"state":"TASK_STATE_WORKING"}}}}"#;
+    let agent_a_guard = Backend::fixed(task_json)
+        .header("content-type", "application/json")
+        .start_with_shutdown();
+    let agent_b_guard = start_backend_with_shutdown("agent-b-response");
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "ai/a2a-task-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", agent_a_guard.port()),
+            ("127.0.0.1:9002", agent_b_guard.port()),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":"Hello"}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&raw), 200, "SendMessage should return 200");
+    assert_eq!(
+        parse_body(&raw),
+        task_json,
+        "SendMessage should route to agent-a cluster and return task JSON"
+    );
+}
+
+#[test]
+fn a2a_task_routing_example_routes_get_task_to_owning_cluster() {
+    let task_json =
+        r#"{"jsonrpc":"2.0","id":1,"result":{"task":{"id":"task-example-2","status":{"state":"TASK_STATE_WORKING"}}}}"#;
+    let agent_a_guard = Backend::fixed(task_json)
+        .header("content-type", "application/json")
+        .start_with_shutdown();
+    let agent_b_guard = start_backend_with_shutdown("agent-b-response");
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "ai/a2a-task-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", agent_a_guard.port()),
+            ("127.0.0.1:9002", agent_b_guard.port()),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+
+    let send_raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":1,"method":"SendMessage","params":{"message":"Hello"}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&send_raw), 200, "SendMessage should succeed");
+
+    let get_raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":2,"method":"GetTask","params":{"id":"task-example-2"}}"#,
+        ),
+    );
+    assert_eq!(parse_status(&get_raw), 200, "GetTask should succeed");
+    assert_eq!(
+        parse_body(&get_raw),
+        task_json,
+        "GetTask for task-example-2 should route back to agent-a (which created the task)"
+    );
+}
+
+#[test]
+fn a2a_task_routing_example_unknown_task_follows_fallback() {
+    let agent_a_guard = start_backend_with_shutdown("agent-a-response");
+    let agent_b_guard = start_backend_with_shutdown("agent-b-response");
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "ai/a2a-task-routing.yaml",
+        proxy_port,
+        HashMap::from([
+            ("127.0.0.1:9001", agent_a_guard.port()),
+            ("127.0.0.1:9002", agent_b_guard.port()),
+        ]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        &a2a_json_post(
+            "/",
+            r#"{"jsonrpc":"2.0","id":1,"method":"GetTask","params":{"id":"nonexistent"}}"#,
+        ),
+    );
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "GetTask for unknown should succeed via fallback"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "agent-b-response",
+        "unknown task should route to fallback (agent-b)"
     );
 }
 

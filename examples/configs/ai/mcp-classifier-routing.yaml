@@ -31,6 +31,7 @@ filter_chains:
           method: x-praxis-mcp-method
           name: x-praxis-mcp-name
           kind: x-praxis-mcp-kind
+          protocol_version: x-praxis-mcp-protocol-version
           session_present: x-praxis-mcp-session-present
 
       - filter: router

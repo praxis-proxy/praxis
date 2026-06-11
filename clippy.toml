@@ -1,5 +1,8 @@
 too-many-lines-threshold = 30
-cognitive-complexity-threshold = 10
+# Raised from 10 to 25 because recent clippy updates started counting macro
+# expansion toward cognitive complexity (each tracing call adds ~5-6 points).
+# Revert to 10 when https://github.com/rust-lang/rust-clippy/issues/14417 is fixed.
+cognitive-complexity-threshold = 25
 too-many-arguments-threshold = 5
 max-fn-params-bools = 2
 max-struct-bools = 2
@@ -8,4 +11,4 @@ future-size-threshold = 4096
 type-complexity-threshold = 200
 msrv = "1.94"
 avoid-breaking-exported-api = false
-doc-valid-idents = ["Praxis", "Pingora", "gRPC", "OpenTelemetry", "NGINX", "HAProxy", "Envoy", "Rustls", "XDP", "eBPF", "IPv4", "IPv6", "MiB"]
+doc-valid-idents = ["OpenAI", "Praxis", "Pingora", "SQLite", "gRPC", "OpenTelemetry", "NGINX", "HAProxy", "Envoy", "Rustls", "XDP", "eBPF", "IPv4", "IPv6", "MiB"]

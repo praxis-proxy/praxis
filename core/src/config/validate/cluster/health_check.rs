@@ -723,6 +723,102 @@ clusters:
     }
 
     #[test]
+    fn accept_expected_status_at_lower_bound() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:80"]
+    health_check:
+      type: http
+      expected_status: 100
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn reject_expected_status_below_lower_bound() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:80"]
+    health_check:
+      type: http
+      expected_status: 99
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("expected_status must be 100..=599"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_expected_status_at_upper_bound() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:80"]
+    health_check:
+      type: http
+      expected_status: 599
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn reject_expected_status_above_upper_bound() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:80"]
+    health_check:
+      type: http
+      expected_status: 600
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("expected_status must be 100..=599"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
     fn accept_valid_passive_thresholds() {
         let yaml = r#"
 listeners:

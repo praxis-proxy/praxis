@@ -134,6 +134,19 @@ mod tests {
     }
 
     #[test]
+    fn accept_yaml_at_exact_max_size() {
+        let exact = "x".repeat(MAX_YAML_BYTES);
+        check_yaml_size(&exact).expect("YAML at exactly MAX_YAML_BYTES should pass");
+    }
+
+    #[test]
+    fn reject_yaml_one_byte_over_max() {
+        let over = "x".repeat(MAX_YAML_BYTES + 1);
+        let err = check_yaml_size(&over).unwrap_err();
+        assert!(err.to_string().contains("too large"), "got: {err}");
+    }
+
+    #[test]
     fn safety_check_passes_valid_yaml() {
         check_yaml_safety("a: 1\n").expect("valid small YAML should pass all safety checks");
     }

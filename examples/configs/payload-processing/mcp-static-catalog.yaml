@@ -19,6 +19,9 @@ filter_chains:
       - filter: mcp
         path: /mcp
         max_body_bytes: 65536
+        protocol_profile: current
+        default_version: "2025-03-26"
+        supported_versions: ["2025-03-26"]
         servers:
           - name: weather
             cluster: weather-mcp

@@ -94,11 +94,11 @@ impl EndpointHealth {
     /// assert!(ep.is_healthy());
     /// ```
     #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[allow(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
     pub fn mark_healthy(&self) {
         let mut inner = self.inner.lock().expect("health lock poisoned");
         inner.healthy = true;
         inner.consecutive_failures = 0;
-        drop(inner);
         self.healthy_cache.store(true, Ordering::Release);
     }
 
@@ -116,11 +116,11 @@ impl EndpointHealth {
     /// assert!(!ep.is_healthy());
     /// ```
     #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[allow(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
     pub fn mark_unhealthy(&self) {
         let mut inner = self.inner.lock().expect("health lock poisoned");
         inner.healthy = false;
         inner.consecutive_successes = 0;
-        drop(inner);
         self.healthy_cache.store(false, Ordering::Release);
     }
 
@@ -627,6 +627,33 @@ mod tests {
             inner.healthy,
             ep.is_healthy(),
             "cache must match inner state after concurrent mixed probes"
+        );
+    }
+
+    #[test]
+    fn record_failure_zero_threshold_transitions() {
+        let ep = EndpointHealth::new();
+        assert!(
+            ep.record_failure(0),
+            "record_failure(0) should transition from healthy to unhealthy"
+        );
+        assert!(
+            !ep.is_healthy(),
+            "endpoint should be unhealthy after zero-threshold failure"
+        );
+    }
+
+    #[test]
+    fn record_success_zero_threshold_transitions() {
+        let ep = EndpointHealth::new();
+        ep.mark_unhealthy();
+        assert!(
+            ep.record_success(0),
+            "record_success(0) should transition from unhealthy to healthy"
+        );
+        assert!(
+            ep.is_healthy(),
+            "endpoint should be healthy after zero-threshold success"
         );
     }
 

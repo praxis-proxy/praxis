@@ -78,24 +78,9 @@ pub fn http_post(addr: &str, path: &str, body: &str) -> (u16, String) {
 // IPv6 Wrappers
 // -----------------------------------------------------------------------------
 
-/// Connect to an IPv6 address, send a raw HTTP request,
-/// and return the response.
-///
-/// # Panics
-///
-/// Panics if the TCP connection or write fails.
-fn http_send_v6(addr: &str, request: &str) -> String {
-    let mut stream = tcp_connect(addr);
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    stream.write_all(request.as_bytes()).unwrap();
-    let mut response = String::new();
-    let _bytes = stream.read_to_string(&mut response);
-    response
-}
-
 /// Send an HTTP GET to an IPv6 address and return `(status, body)`.
 pub fn http_get_v6(addr: &str, path: &str) -> (u16, String) {
-    let raw = http_send_v6(
+    let raw = http_send(
         addr,
         &format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n"),
     );
@@ -247,4 +232,101 @@ pub fn parse_header_all(raw: &str, name: &str) -> Vec<String> {
             }
         })
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_status_valid_http11() {
+        let raw = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(parse_status(raw), 200, "should extract 200 from status line");
+    }
+
+    #[test]
+    fn parse_status_not_found() {
+        let raw = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        assert_eq!(parse_status(raw), 404, "should extract 404 from status line");
+    }
+
+    #[test]
+    fn parse_status_empty_returns_zero() {
+        assert_eq!(parse_status(""), 0, "empty input should produce status 0");
+    }
+
+    #[test]
+    fn parse_body_extracts_after_separator() {
+        let raw = "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\nbody content";
+        assert_eq!(parse_body(raw), "body content", "should extract body after blank line");
+    }
+
+    #[test]
+    fn parse_body_no_separator_returns_empty() {
+        let raw = "HTTP/1.1 200 OK\r\nContent-Length: 0";
+        assert_eq!(parse_body(raw), "", "no CRLFCRLF separator should yield empty body");
+    }
+
+    #[test]
+    fn decode_chunked_valid() {
+        let input = "5\r\nhello\r\n0\r\n\r\n";
+        assert_eq!(decode_chunked(input), "hello", "single chunk should decode correctly");
+    }
+
+    #[test]
+    fn decode_chunked_multiple_chunks() {
+        let input = "5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+        assert_eq!(
+            decode_chunked(input),
+            "hello world",
+            "multiple chunks should concatenate"
+        );
+    }
+
+    #[test]
+    fn parse_header_found() {
+        let raw = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody";
+        assert_eq!(
+            parse_header(raw, "Content-Type"),
+            Some("text/plain".to_owned()),
+            "should find Content-Type header"
+        );
+    }
+
+    #[test]
+    fn parse_header_case_insensitive() {
+        let raw = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody";
+        assert_eq!(
+            parse_header(raw, "content-type"),
+            Some("text/plain".to_owned()),
+            "header lookup should be case-insensitive"
+        );
+    }
+
+    #[test]
+    fn parse_header_missing() {
+        let raw = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody";
+        assert_eq!(parse_header(raw, "X-Missing"), None, "absent header should return None");
+    }
+
+    #[test]
+    fn parse_header_all_multiple() {
+        let raw = "HTTP/1.1 200 OK\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\n\r\nbody";
+        let values = parse_header_all(raw, "Set-Cookie");
+        assert_eq!(values.len(), 2, "should find both Set-Cookie headers");
+        assert_eq!(values[0], "a=1", "first cookie value");
+        assert_eq!(values[1], "b=2", "second cookie value");
+    }
+
+    #[test]
+    fn parse_header_all_none() {
+        let raw = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nbody";
+        let values = parse_header_all(raw, "X-Missing");
+        assert!(values.is_empty(), "no matching headers should yield empty vec");
+    }
 }

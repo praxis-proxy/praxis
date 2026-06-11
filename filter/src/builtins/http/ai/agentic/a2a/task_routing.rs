@@ -1,0 +1,463 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Praxis Contributors
+
+//! Local in-process task route store for A2A task-ownership routing.
+
+use std::{
+    collections::HashMap,
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
+
+use serde_json::Value;
+
+use super::config::TaskRoutingConfig;
+use crate::builtins::http::value_safety::contains_control_chars;
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Maximum length for stored IDs, matching the existing A2A dynamic-value bound.
+const MAX_ID_LEN: usize = 256;
+
+// -----------------------------------------------------------------------------
+// TaskRoute
+// -----------------------------------------------------------------------------
+
+/// A stored mapping from a task (or context) ID to the cluster that owns it.
+#[derive(Debug, Clone)]
+struct TaskRoute {
+    /// Cluster name selected when the task was created.
+    cluster: Arc<str>,
+
+    /// When this entry expires and should be treated as a miss.
+    expires_at: Instant,
+}
+
+// -----------------------------------------------------------------------------
+// ExtractedTaskRoute
+// -----------------------------------------------------------------------------
+
+/// Task route information extracted from a JSON-RPC response body.
+#[derive(Debug, Clone)]
+pub(crate) struct ExtractedTaskRoute {
+    /// Whether the task is in a terminal state.
+    pub terminal: bool,
+
+    /// Task ID from the response.
+    pub task_id: String,
+}
+
+// -----------------------------------------------------------------------------
+// LocalTaskRouteStore
+// -----------------------------------------------------------------------------
+
+/// In-process task route store backed by `RwLock<HashMap>`.
+///
+/// Holds locks only for short synchronous map operations.
+/// Never held across `.await` boundaries.
+pub(crate) struct LocalTaskRouteStore {
+    /// Task ID → cluster mappings.
+    tasks: RwLock<HashMap<String, TaskRoute>>,
+}
+
+impl LocalTaskRouteStore {
+    /// Create an empty store.
+    pub(crate) fn new() -> Self {
+        Self {
+            tasks: RwLock::new(HashMap::new()),
+        }
+    }
+
+    /// Look up a cluster by task ID. Returns `None` if absent or expired.
+    /// Lazily removes expired entries on miss.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned.
+    #[allow(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
+    pub(crate) fn get_by_task_id(&self, task_id: &str) -> Option<Arc<str>> {
+        let expired = {
+            let tasks = self.tasks.read().expect("task route store lock poisoned");
+            match tasks.get(task_id) {
+                Some(r) if Instant::now() < r.expires_at => return Some(Arc::clone(&r.cluster)),
+                Some(_) => true,
+                None => false,
+            }
+        };
+
+        if expired {
+            let mut tasks = self.tasks.write().expect("task route store lock poisoned");
+            // Re-check under write lock: another request may have
+            // refreshed this task between the read and write locks.
+            if tasks.get(task_id).is_some_and(|r| Instant::now() >= r.expires_at) {
+                tasks.remove(task_id);
+            }
+        }
+        None
+    }
+
+    /// Store a task route mapping with the given TTL.
+    ///
+    /// Silently ignores task IDs that fail validation (control chars, too long).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned.
+    #[allow(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
+    pub(crate) fn put(&self, task_id: &str, cluster: &str, ttl: Duration) {
+        if !validate_id(task_id) {
+            return;
+        }
+
+        let route = TaskRoute {
+            cluster: Arc::from(cluster),
+            expires_at: Instant::now() + ttl,
+        };
+
+        self.tasks
+            .write()
+            .expect("task route store lock poisoned")
+            .insert(task_id.to_owned(), route);
+    }
+
+    /// Remove a task route immediately (for `terminal_ttl_seconds` == 0).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal lock is poisoned.
+    #[allow(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
+    pub(crate) fn remove(&self, task_id: &str) {
+        self.tasks
+            .write()
+            .expect("task route store lock poisoned")
+            .remove(task_id);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Response Extraction
+// -----------------------------------------------------------------------------
+
+/// Extract task route information from a parsed JSON-RPC response.
+///
+/// Supports two shapes:
+/// - `result.task.id` (task nested under result)
+/// - `result.id` with `result.status` (direct task object in result)
+///
+/// Returns `None` for message-only responses or malformed JSON.
+pub(crate) fn extract_task_route(value: &Value) -> Option<ExtractedTaskRoute> {
+    let result = value.get("result")?;
+
+    if let Some(task_obj) = result.get("task") {
+        return extract_from_task_object(task_obj);
+    }
+
+    if result.get("id").is_some() && result.get("status").is_some() {
+        return extract_from_task_object(result);
+    }
+
+    None
+}
+
+/// Extract route info from a task object (either `result.task` or `result` itself).
+fn extract_from_task_object(task: &Value) -> Option<ExtractedTaskRoute> {
+    let task_id = task.get("id")?.as_str()?;
+
+    if !validate_id(task_id) {
+        return None;
+    }
+
+    let terminal = task
+        .get("status")
+        .and_then(|s| s.get("state"))
+        .and_then(Value::as_str)
+        .is_some_and(is_terminal_state);
+
+    Some(ExtractedTaskRoute {
+        task_id: task_id.to_owned(),
+        terminal,
+    })
+}
+
+/// Compute the TTL to use for a task route entry.
+pub(crate) fn route_ttl(terminal: bool, config: &TaskRoutingConfig) -> Duration {
+    if terminal {
+        Duration::from_secs(config.terminal_ttl_seconds)
+    } else {
+        Duration::from_secs(config.ttl_seconds)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Private Utilities
+// -----------------------------------------------------------------------------
+
+/// Whether the given state string represents a terminal task state.
+fn is_terminal_state(state: &str) -> bool {
+    matches!(
+        state,
+        "TASK_STATE_COMPLETED"
+            | "TASK_STATE_FAILED"
+            | "TASK_STATE_CANCELED"
+            | "TASK_STATE_REJECTED"
+            | "completed"
+            | "failed"
+            | "canceled"
+            | "cancelled"
+            | "rejected"
+    )
+}
+
+/// Whether an ID is safe for storage: no control characters, bounded length.
+fn validate_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= MAX_ID_LEN && !contains_control_chars(id)
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    reason = "tests"
+)]
+mod tests {
+    use std::thread::sleep;
+
+    use super::*;
+
+    // ---- Store Tests ----
+
+    #[test]
+    fn local_store_put_then_get_task_route() {
+        let store = LocalTaskRouteStore::new();
+        store.put("task-1", "agent-a", Duration::from_secs(60));
+
+        let cluster = store.get_by_task_id("task-1");
+        assert_eq!(
+            cluster.as_deref(),
+            Some("agent-a"),
+            "stored task route should be retrievable"
+        );
+    }
+
+    #[test]
+    fn local_store_expired_task_route_misses_and_removes_entry() {
+        let store = LocalTaskRouteStore::new();
+        store.put("task-1", "agent-a", Duration::from_millis(1));
+
+        sleep(Duration::from_millis(10));
+
+        let cluster = store.get_by_task_id("task-1");
+        assert!(cluster.is_none(), "expired task route should miss");
+
+        let still_present = store.tasks.read().unwrap().contains_key("task-1");
+        assert!(!still_present, "expired entry should be lazily removed from the map");
+    }
+
+    #[test]
+    fn local_store_terminal_zero_ttl_removes_route() {
+        let store = LocalTaskRouteStore::new();
+        store.put("task-1", "agent-a", Duration::from_secs(60));
+        store.remove("task-1");
+
+        assert!(
+            store.get_by_task_id("task-1").is_none(),
+            "removed task route should miss"
+        );
+    }
+
+    #[test]
+    fn local_store_rejects_control_char_task_id() {
+        let store = LocalTaskRouteStore::new();
+        let bad_id = "task\n-1";
+        store.put(bad_id, "agent-a", Duration::from_secs(60));
+
+        assert!(
+            store.get_by_task_id(bad_id).is_none(),
+            "task ID with control chars should not be stored"
+        );
+    }
+
+    #[test]
+    fn local_store_rejects_too_long_task_id() {
+        let store = LocalTaskRouteStore::new();
+        let long_id = "x".repeat(257);
+        store.put(&long_id, "agent-a", Duration::from_secs(60));
+
+        assert!(
+            store.get_by_task_id(&long_id).is_none(),
+            "task ID exceeding 256 bytes should not be stored"
+        );
+    }
+
+    #[test]
+    fn local_store_replaces_existing_task_route() {
+        let store = LocalTaskRouteStore::new();
+        store.put("task-1", "agent-a", Duration::from_secs(60));
+        store.put("task-1", "agent-b", Duration::from_secs(60));
+
+        let cluster = store.get_by_task_id("task-1");
+        assert_eq!(
+            cluster.as_deref(),
+            Some("agent-b"),
+            "later put should replace earlier route"
+        );
+    }
+
+    // ---- Response Extraction Tests ----
+
+    #[test]
+    fn extract_task_route_from_result_task() {
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "task": {
+                    "id": "task-123",
+                    "contextId": "ctx-123",
+                    "status": {"state": "TASK_STATE_WORKING"}
+                }
+            }
+        });
+
+        let route = extract_task_route(&json).expect("should extract route");
+        assert_eq!(route.task_id, "task-123");
+        assert!(!route.terminal, "TASK_STATE_WORKING is not terminal");
+    }
+
+    #[test]
+    fn extract_task_route_from_direct_result_task() {
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "id": "task-456",
+                "contextId": "ctx-456",
+                "status": {"state": "TASK_STATE_COMPLETED"}
+            }
+        });
+
+        let route = extract_task_route(&json).expect("should extract route");
+        assert_eq!(route.task_id, "task-456");
+        assert!(route.terminal, "TASK_STATE_COMPLETED is terminal");
+    }
+
+    #[test]
+    fn message_only_response_does_not_create_route() {
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "message": {
+                    "messageId": "msg-1",
+                    "role": "ROLE_AGENT",
+                    "parts": [{"text": "done"}]
+                }
+            }
+        });
+
+        assert!(
+            extract_task_route(&json).is_none(),
+            "message-only response should not produce a route"
+        );
+    }
+
+    #[test]
+    fn invalid_json_response_does_not_error() {
+        let json = serde_json::json!({"not": "a valid response"});
+        assert!(
+            extract_task_route(&json).is_none(),
+            "malformed response should return None, not error"
+        );
+    }
+
+    #[test]
+    fn missing_cluster_does_not_store_route() {
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "task": {
+                    "contextId": "ctx-1",
+                    "status": {"state": "TASK_STATE_WORKING"}
+                }
+            }
+        });
+
+        assert!(
+            extract_task_route(&json).is_none(),
+            "task without id should not produce a route"
+        );
+    }
+
+    #[test]
+    fn terminal_state_uses_terminal_ttl() {
+        let config = TaskRoutingConfig {
+            ttl_seconds: 3600,
+            terminal_ttl_seconds: 300,
+            ..TaskRoutingConfig::default()
+        };
+
+        let ttl = route_ttl(true, &config);
+        assert_eq!(ttl, Duration::from_secs(300), "terminal tasks should use terminal TTL");
+    }
+
+    #[test]
+    fn input_required_state_keeps_normal_route_ttl() {
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "task": {
+                    "id": "task-1",
+                    "status": {"state": "TASK_STATE_INPUT_REQUIRED"}
+                }
+            }
+        });
+
+        let route = extract_task_route(&json).expect("should extract route");
+        assert!(!route.terminal, "TASK_STATE_INPUT_REQUIRED should not be terminal");
+    }
+
+    #[test]
+    fn all_terminal_states_detected() {
+        let terminal_states = [
+            "TASK_STATE_COMPLETED",
+            "TASK_STATE_FAILED",
+            "TASK_STATE_CANCELED",
+            "TASK_STATE_REJECTED",
+            "completed",
+            "failed",
+            "canceled",
+            "cancelled",
+            "rejected",
+        ];
+
+        for state in terminal_states {
+            assert!(is_terminal_state(state), "{state} should be terminal");
+        }
+    }
+
+    #[test]
+    fn non_terminal_states_not_detected() {
+        let non_terminal = [
+            "TASK_STATE_WORKING",
+            "TASK_STATE_INPUT_REQUIRED",
+            "TASK_STATE_AUTH_REQUIRED",
+            "TASK_STATE_SUBMITTED",
+            "working",
+            "submitted",
+        ];
+
+        for state in non_terminal {
+            assert!(!is_terminal_state(state), "{state} should not be terminal");
+        }
+    }
+}

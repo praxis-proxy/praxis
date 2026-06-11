@@ -15,21 +15,30 @@ use crate::{
 // Body Mode Merging
 // -----------------------------------------------------------------------------
 
-/// Merge two optional size limits, keeping the smallest `Some` value.
+/// Merge two optional size limits, keeping the largest value.
+///
+/// `None` represents unbounded buffering and is treated as larger
+/// than any finite limit. When both sides are `Some`, the larger
+/// value wins so that every filter in the pipeline gets enough
+/// buffer to do its job. The pipeline-level body ceiling (applied
+/// separately via [`apply_body_limits`]) remains the hard safety cap.
+///
+/// [`apply_body_limits`]: super::FilterPipeline::apply_body_limits
 pub(super) fn merge_optional_limits(a: Option<usize>, b: Option<usize>) -> Option<usize> {
     match (a, b) {
-        (Some(x), Some(y)) => Some(x.min(y)),
-        (Some(x), None) | (None, Some(x)) => Some(x),
-        (None, None) => None,
+        (Some(x), Some(y)) => Some(x.max(y)),
+        (None, _) | (_, None) => None,
+        // unreachable, but spelled out for clarity — both None is still None
     }
 }
 
 /// Merge a filter's body mode into the current accumulated mode.
 ///
 /// Precedence: `StreamBuffer` > `SizeLimit` > `Stream`.
-/// When two modes of the same variant merge, the stricter (smaller)
-/// limit wins. `SizeLimit` is treated as equivalent to `Stream`
-/// from a filter perspective (filters never request it directly).
+/// When two `StreamBuffer` modes merge, the **largest** limit wins
+/// so that every filter gets enough buffer to do its job. The
+/// pipeline-level body ceiling is applied separately and acts as the
+/// hard safety cap.
 pub(crate) fn merge_body_mode(current: &mut BodyMode, filter_mode: BodyMode) {
     match filter_mode {
         BodyMode::StreamBuffer { max_bytes } => {
@@ -172,8 +181,8 @@ mod tests {
         merge_body_mode(&mut mode, BodyMode::StreamBuffer { max_bytes: Some(1024) });
         assert_eq!(
             mode,
-            BodyMode::StreamBuffer { max_bytes: Some(1024) },
-            "smaller StreamBuffer limit should win"
+            BodyMode::StreamBuffer { max_bytes: Some(2048) },
+            "larger StreamBuffer limit should win"
         );
     }
 
@@ -183,8 +192,8 @@ mod tests {
         merge_body_mode(&mut mode, BodyMode::StreamBuffer { max_bytes: Some(1024) });
         assert_eq!(
             mode,
-            BodyMode::StreamBuffer { max_bytes: Some(1024) },
-            "Some limit should win over None"
+            BodyMode::StreamBuffer { max_bytes: None },
+            "None (unbounded) should win over Some"
         );
     }
 
@@ -200,11 +209,11 @@ mod tests {
     }
 
     #[test]
-    fn merge_optional_limits_both_some_picks_smaller() {
+    fn merge_optional_limits_both_some_picks_larger() {
         assert_eq!(
             merge_optional_limits(Some(100), Some(50)),
-            Some(50),
-            "should pick smaller of two Some values"
+            Some(100),
+            "should pick larger of two Some values"
         );
     }
 
@@ -212,13 +221,13 @@ mod tests {
     fn merge_optional_limits_one_none() {
         assert_eq!(
             merge_optional_limits(Some(100), None),
-            Some(100),
-            "Some should win over None (left)"
+            None,
+            "None (unbounded) should win over Some (left)"
         );
         assert_eq!(
             merge_optional_limits(None, Some(200)),
-            Some(200),
-            "Some should win over None (right)"
+            None,
+            "None (unbounded) should win over Some (right)"
         );
     }
 

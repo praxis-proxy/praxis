@@ -26,11 +26,11 @@ use super::ProxyConfig;
 /// ```
 #[derive(Debug)]
 pub struct PraxisConfig {
-    /// Path to the Praxis YAML config file.
-    pub config: PathBuf,
-
     /// Listen address on the host.
     pub address: String,
+
+    /// Path to the Praxis YAML config file.
+    pub config: PathBuf,
 
     /// Docker container name.
     pub container_name: String,
@@ -43,8 +43,8 @@ impl PraxisConfig {
     /// Create a config with the given locally-built image tag.
     pub fn new(image: String) -> Self {
         Self {
-            config: PathBuf::from("benchmarks/comparison/configs/praxis.yaml"),
             address: "127.0.0.1:18090".into(),
+            config: PathBuf::from("benchmarks/comparison/configs/praxis.yaml"),
             container_name: "praxis-bench-praxis".into(),
             image,
         }
@@ -110,6 +110,20 @@ mod tests {
         assert_eq!(config.listen_address(), "127.0.0.1:18090");
         assert_eq!(config.container_name(), Some("praxis-bench-praxis"));
         assert_eq!(config.image, "praxis-bench:latest");
+    }
+
+    #[test]
+    fn praxis_config_health_and_path() {
+        let config = PraxisConfig::new("praxis-bench:latest".into());
+
+        assert!(
+            config.health_url().as_deref().is_some_and(|url| url.contains("/ready")),
+            "health URL must contain /ready"
+        );
+        assert!(
+            config.config_path().ends_with("praxis.yaml"),
+            "config path must end with praxis.yaml"
+        );
     }
 
     #[test]

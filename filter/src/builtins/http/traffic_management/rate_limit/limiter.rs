@@ -34,17 +34,18 @@ impl RateLimitFilter {
         clippy::cast_sign_loss,
         reason = "token count truncation"
     )]
-    pub(super) fn rate_limit_headers(&self, remaining: f64) -> (Vec<(&'static str, String)>, u64) {
+    pub(super) fn rate_limit_headers(
+        &self,
+        remaining: f64,
+        time_source: &dyn praxis_core::time::TimeSource,
+    ) -> (Vec<(&'static str, String)>, u64) {
         let retry_secs = if remaining < 1.0 {
             ((1.0 - remaining) / self.rate).ceil().max(1.0) as u64
         } else {
             0
         };
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let reset_unix = now_unix + retry_secs;
+        let now_unix = time_source.now().as_secs();
+        let reset_unix = now_unix.saturating_add(retry_secs);
         let remaining_int = remaining.max(0.0) as u64;
 
         let headers = vec![

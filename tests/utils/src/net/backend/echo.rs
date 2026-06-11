@@ -7,7 +7,7 @@
 use std::{net::TcpStream, time::Duration};
 
 use super::specialized::{
-    BackendGuard, parse_content_length, read_until_headers_complete, spawn_tcp_server, spawn_tcp_server_with_shutdown,
+    BackendGuard, parse_content_length, read_until_headers_complete, spawn_tcp_server_with_shutdown,
     write_http_response,
 };
 
@@ -18,25 +18,13 @@ use super::specialized::{
 /// Start a mock backend that echoes the request body back
 /// as the response body.
 ///
-/// # Panics
-///
-/// Panics if the server fails to bind or accept connections.
-pub fn start_echo_backend() -> u16 {
-    spawn_tcp_server(|mut stream| {
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let body = read_request_body(&mut stream);
-        let _sent = write_http_response(&mut stream, &body);
-    })
-}
-
-/// Start a mock backend that echoes the request body back
-/// as the response body, with a [`BackendGuard`] that shuts
-/// down the listener thread when dropped.
+/// Returns a [`BackendGuard`] that shuts down the listener
+/// thread when dropped.
 ///
 /// # Panics
 ///
 /// Panics if the server fails to bind or accept connections.
-pub fn start_echo_backend_with_shutdown() -> BackendGuard {
+pub fn start_echo_backend() -> BackendGuard {
     spawn_tcp_server_with_shutdown(|mut stream| {
         stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let body = read_request_body(&mut stream);
@@ -47,34 +35,13 @@ pub fn start_echo_backend_with_shutdown() -> BackendGuard {
 /// Start a backend that echoes the request URI (path and query)
 /// as the response body.
 ///
-/// Extracts the URI from the HTTP request line (e.g.
-/// `GET /path?q=1 HTTP/1.1`).
+/// Returns a [`BackendGuard`] that shuts down the listener
+/// thread when dropped.
 ///
 /// # Panics
 ///
 /// Panics if the server fails to bind or accept connections.
-pub fn start_uri_echo_backend() -> u16 {
-    spawn_tcp_server(|mut stream| {
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let raw = read_until_headers_complete(&mut stream);
-        let uri = raw
-            .lines()
-            .next()
-            .and_then(|line| line.split_whitespace().nth(1))
-            .unwrap_or("/")
-            .to_owned();
-        let _sent = write_http_response(&mut stream, &uri);
-    })
-}
-
-/// Start a backend that echoes the request URI (path and
-/// query) as the response body, with a [`BackendGuard`]
-/// that shuts down the listener thread when dropped.
-///
-/// # Panics
-///
-/// Panics if the server fails to bind or accept connections.
-pub fn start_uri_echo_backend_with_shutdown() -> BackendGuard {
+pub fn start_uri_echo_backend() -> BackendGuard {
     spawn_tcp_server_with_shutdown(|mut stream| {
         stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let raw = read_until_headers_complete(&mut stream);
@@ -85,45 +52,20 @@ pub fn start_uri_echo_backend_with_shutdown() -> BackendGuard {
             .unwrap_or("/")
             .to_owned();
         let _sent = write_http_response(&mut stream, &uri);
-    })
-}
-
-/// Start a backend that echoes request headers as the
-/// response body (one per line), with a [`BackendGuard`]
-/// that shuts down the listener thread when dropped.
-///
-/// # Panics
-///
-/// Panics if the server fails to bind or accept connections.
-pub fn start_header_echo_backend_with_shutdown() -> BackendGuard {
-    spawn_tcp_server_with_shutdown(|mut stream| {
-        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-        let raw = read_until_headers_complete(&mut stream);
-
-        let headers: String = raw
-            .lines()
-            .skip(1)
-            .take_while(|l| !l.is_empty())
-            .fold(String::new(), |mut acc, line| {
-                if !acc.is_empty() {
-                    acc.push('\n');
-                }
-                acc.push_str(line);
-                acc
-            });
-
-        let _sent = write_http_response(&mut stream, &headers);
     })
 }
 
 /// Start a backend that echoes request headers as the
 /// response body (one per line).
 ///
+/// Returns a [`BackendGuard`] that shuts down the listener
+/// thread when dropped.
+///
 /// # Panics
 ///
 /// Panics if the server fails to bind or accept connections.
-pub fn start_header_echo_backend() -> u16 {
-    spawn_tcp_server(|mut stream| {
+pub fn start_header_echo_backend() -> BackendGuard {
+    spawn_tcp_server_with_shutdown(|mut stream| {
         stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
         let raw = read_until_headers_complete(&mut stream);
 

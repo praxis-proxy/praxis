@@ -10,8 +10,14 @@
     reason = "benchmarks"
 )]
 
+use std::sync::LazyLock;
+
 use http::{HeaderMap, Method, Uri};
+use praxis_core::id::IdGenerator;
 use praxis_filter::{HttpFilterContext, Request};
+
+/// Deterministic ID generator for benchmarks.
+static BENCH_ID_GENERATOR: LazyLock<IdGenerator> = LazyLock::new(|| IdGenerator::with_seed(0));
 
 // -----------------------------------------------------------------------------
 // Tokio Runtime
@@ -45,7 +51,9 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         filter_metadata: std::collections::HashMap::new(),
         filter_results: std::collections::HashMap::new(),
         health_registry: None,
+        id_generator: &BENCH_ID_GENERATOR,
         kv_stores: None,
+        response_stores: None,
         request: req,
         request_body_bytes: 0,
         request_body_mode: praxis_filter::BodyMode::Stream,
@@ -56,6 +64,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         response_headers_modified: false,
         rewritten_path: None,
         selected_endpoint_index: None,
+        time_source: &praxis_core::time::SystemTimeSource,
         upstream: None,
     }
 }

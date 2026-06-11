@@ -14,11 +14,11 @@ use super::ProxyConfig;
 /// Built-in [`ProxyConfig`] for NGINX via Docker.
 #[derive(Debug)]
 pub struct NginxConfig {
-    /// Path to the NGINX config file.
-    pub config: PathBuf,
-
     /// Listen address on the host (e.g. "127.0.0.1:8080").
     pub address: String,
+
+    /// Path to the NGINX config file.
+    pub config: PathBuf,
 
     /// Docker container name.
     pub container_name: String,
@@ -30,8 +30,8 @@ pub struct NginxConfig {
 impl Default for NginxConfig {
     fn default() -> Self {
         Self {
-            config: PathBuf::from("benchmarks/comparison/configs/nginx.conf"),
             address: "127.0.0.1:18092".into(),
+            config: PathBuf::from("benchmarks/comparison/configs/nginx.conf"),
             container_name: "praxis-bench-nginx".into(),
             image: None,
         }
@@ -74,5 +74,25 @@ impl ProxyConfig for NginxConfig {
 
     fn container_name(&self) -> Option<&str> {
         Some(&self.container_name)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nginx_config_defaults() {
+        let config = NginxConfig::default();
+
+        assert_eq!(config.name(), "nginx");
+        assert_eq!(config.listen_address(), "127.0.0.1:18092");
+        assert_eq!(config.container_name(), Some("praxis-bench-nginx"));
+        assert_eq!(config.health_url(), None, "nginx has no built-in health URL");
     }
 }

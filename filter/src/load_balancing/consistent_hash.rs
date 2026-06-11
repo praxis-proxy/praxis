@@ -19,13 +19,13 @@ pub(crate) struct ConsistentHash {
     /// Deduplicated endpoint list with weights and original indices.
     endpoints: Vec<WeightedEndpoint>,
 
-    /// Virtual-node ring: each entry is an index into `endpoints`.
-    /// Built by expanding each endpoint proportionally to its weight.
-    ring: Vec<usize>,
-
     /// Header whose value is hashed. Falls back to the URI path when `None`
     /// or when the header is absent from the request.
     header: Option<String>,
+
+    /// Virtual-node ring: each entry is an index into `endpoints`.
+    /// Built by expanding each endpoint proportionally to its weight.
+    ring: Vec<usize>,
 }
 
 impl ConsistentHash {
@@ -39,8 +39,8 @@ impl ConsistentHash {
         debug_assert!(!ring.is_empty(), "consistent-hash requires at least one endpoint");
         Self {
             endpoints,
-            ring,
             header,
+            ring,
         }
     }
 
@@ -238,6 +238,39 @@ mod tests {
             &*selected == "10.0.0.1:80" || &*selected == "10.0.0.2:80",
             "panic mode should still return an endpoint, got: {selected}"
         );
+    }
+
+    #[test]
+    fn select_with_none_hash_key_uses_fallback() {
+        let ch = ConsistentHash::new(
+            vec![
+                WeightedEndpoint {
+                    address: Arc::from("10.0.0.1:80"),
+                    weight: 1,
+                    index: 0,
+                },
+                WeightedEndpoint {
+                    address: Arc::from("10.0.0.2:80"),
+                    weight: 1,
+                    index: 1,
+                },
+                WeightedEndpoint {
+                    address: Arc::from("10.0.0.3:80"),
+                    weight: 1,
+                    index: 2,
+                },
+            ],
+            None,
+        );
+
+        let first = ch.select(None, None);
+        for _ in 0..10 {
+            let again = ch.select(None, None);
+            assert_eq!(
+                first, again,
+                "None hash key should consistently select the same endpoint"
+            );
+        }
     }
 
     #[test]

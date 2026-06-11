@@ -438,7 +438,7 @@ async fn sec_fetch_site_disabled_ignores_cross_site() {
 }
 
 #[tokio::test]
-async fn zero_enforcement_always_continues() {
+async fn zero_enforcement_skips_origin_check() {
     let f = make_filter(&["https://example.com"], 0, false);
     let mut req = crate::test_utils::make_request(http::Method::POST, "/submit");
     req.headers.insert("origin", "https://evil.com".parse().unwrap());
@@ -447,15 +447,44 @@ async fn zero_enforcement_always_continues() {
     let action = f.on_request(&mut ctx).await.unwrap();
     assert!(
         matches!(action, FilterAction::Continue),
-        "0% enforcement should always continue"
+        "0% enforcement should skip origin validation"
     );
 }
 
 #[tokio::test]
-async fn partial_enforcement_samples_correctly() {
+async fn zero_enforcement_still_rejects_null_origin() {
+    let f = make_filter(&["https://example.com"], 0, false);
+    let mut req = crate::test_utils::make_request(http::Method::POST, "/submit");
+    req.headers.insert("origin", "null".parse().unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = f.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        "null origin should be rejected regardless of enforce_percentage"
+    );
+}
+
+#[tokio::test]
+async fn zero_enforcement_still_rejects_cross_site_sec_fetch() {
+    let f = make_filter(&["https://example.com"], 0, true);
+    let mut req = crate::test_utils::make_request(http::Method::POST, "/submit");
+    req.headers.insert("origin", "https://example.com".parse().unwrap());
+    req.headers.insert("sec-fetch-site", "cross-site".parse().unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = f.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 403),
+        "sec-fetch-site cross-site should be rejected regardless of enforce_percentage"
+    );
+}
+
+#[tokio::test]
+async fn partial_enforcement_samples_statistically() {
     let f = make_filter(&["https://example.com"], 50, false);
     let mut enforced = 0u32;
-    let total = 200u32;
+    let total = 2000u32;
 
     for _ in 0..total {
         let mut req = crate::test_utils::make_request(http::Method::POST, "/submit");
@@ -468,9 +497,9 @@ async fn partial_enforcement_samples_correctly() {
         }
     }
 
-    assert_eq!(
-        enforced, 100,
-        "50% enforcement over 200 requests should reject exactly 100"
+    assert!(
+        (900..1100).contains(&enforced),
+        "50% enforcement over 2000 requests should reject ~1000 (got {enforced})"
     );
 }
 
@@ -709,41 +738,42 @@ async fn trace_is_not_safe_by_default() {
 }
 
 #[tokio::test]
-async fn enforcement_percentage_one_enforces_first_request() {
+async fn enforcement_percentage_one_enforces_rarely() {
     let f = make_filter(&["https://example.com"], 1, false);
-    let mut req = crate::test_utils::make_request(http::Method::POST, "/");
-    req.headers.insert("origin", "https://evil.com".parse().unwrap());
-    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut enforced = 0u32;
 
-    let action = f.on_request(&mut ctx).await.unwrap();
+    for _ in 0..1000 {
+        let mut req = crate::test_utils::make_request(http::Method::POST, "/");
+        req.headers.insert("origin", "https://evil.com".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        if matches!(f.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(_)) {
+            enforced += 1;
+        }
+    }
+
     assert!(
-        matches!(action, FilterAction::Reject(_)),
-        "enforce_percentage=1 should enforce the first request"
+        (1..30).contains(&enforced),
+        "1% enforcement over 1000 requests should enforce ~10 (got {enforced})"
     );
 }
 
 #[tokio::test]
-async fn enforcement_percentage_ninety_nine_skips_hundredth() {
+async fn enforcement_percentage_ninety_nine_enforces_almost_all() {
     let f = make_filter(&["https://example.com"], 99, false);
+    let mut enforced = 0u32;
 
-    for _ in 0..99 {
+    for _ in 0..1000 {
         let mut req = crate::test_utils::make_request(http::Method::POST, "/");
         req.headers.insert("origin", "https://evil.com".parse().unwrap());
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        let action = f.on_request(&mut ctx).await.unwrap();
-        assert!(
-            matches!(action, FilterAction::Reject(_)),
-            "first 99 requests should be enforced"
-        );
+        if matches!(f.on_request(&mut ctx).await.unwrap(), FilterAction::Reject(_)) {
+            enforced += 1;
+        }
     }
 
-    let mut req = crate::test_utils::make_request(http::Method::POST, "/");
-    req.headers.insert("origin", "https://evil.com".parse().unwrap());
-    let mut ctx = crate::test_utils::make_filter_context(&req);
-    let action = f.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Continue),
-        "100th request should be skipped at enforce_percentage=99"
+        (970..1000).contains(&enforced),
+        "99% enforcement over 1000 requests should enforce ~990 (got {enforced})"
     );
 }
 
@@ -901,7 +931,6 @@ fn make_filter(origins: &[&str], enforce_pct: u8, sec_fetch: bool) -> CsrfFilter
         enable_sec_fetch_site: sec_fetch,
         enforce_percentage: enforce_pct,
         log_only: std::sync::atomic::AtomicBool::new(false),
-        request_counter: std::sync::atomic::AtomicU64::new(0),
         safe_methods: vec!["GET".to_owned(), "HEAD".to_owned(), "OPTIONS".to_owned()],
         trusted,
     }

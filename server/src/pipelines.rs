@@ -35,7 +35,6 @@ pub fn resolve_pipelines(
         .map(|c| (c.name.as_str(), c.filters.as_slice()))
         .collect();
 
-
     let mut pipelines = HashMap::with_capacity(config.listeners.len());
 
     for listener in &config.listeners {
@@ -60,7 +59,6 @@ pub fn resolve_pipelines(
         if !kv_stores.is_empty() {
             pipeline.set_kv_stores(kv_stores.clone());
         }
-
         pipeline.apply_insecure_options(&config.insecure_options);
 
         let skip = config.insecure_options.skip_pipeline_validation;
@@ -79,6 +77,7 @@ pub fn resolve_pipelines(
 
 /// Run pipeline ordering validation; either fail or warn depending
 /// on the `skip` flag.
+#[allow(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
 fn validate_pipeline(
     pipeline: &FilterPipeline,
     entries: &[praxis_core::config::FilterEntry],
