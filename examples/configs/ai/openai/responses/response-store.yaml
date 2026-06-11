@@ -1,19 +1,32 @@
 # Response Store
 #
 # Persists non-streaming Responses API responses to a SQLite
-# database and serves stored data via GET endpoints:
+# database and serves stored data via GET endpoints and handles
+# DELETE /v1/responses/{id} locally:
 #
 #   POST /v1/responses          — proxied to backend, response persisted
 #   GET  /v1/responses/{id}     — served from local store (200 or 404)
 #   GET  /v1/responses/{id}/input_items — paginated input items
+#   DELETE /v1/responses/{id}   — deleted from local store (200 or 404)
 #
 # The `openai_responses_format` filter must run first to classify
 # the request body — `openai_response_store` reads its metadata
 # to decide whether to persist POST responses.
 #
-# Streaming responses (`stream: true`) are skipped; streaming
-# persistence will be handled by a separate filter. Non-2xx
-# responses and non-JSON content types are also skipped.
+# POST persistence:
+#   The `openai_responses_format` filter must run first to
+#   classify the request body — `openai_response_store` reads its
+#   metadata to decide whether to persist. Streaming responses
+#   (`stream: true`) are skipped; streaming persistence will be
+#   handled by a separate filter. Non-2xx responses and non-JSON
+#   content types are also skipped.
+#
+# DELETE handling:
+#   DELETE /v1/responses/{id} is intercepted during `on_request`
+#   and short-circuited with a 200 (deleted) or 404 (not found)
+#   JSON response. The request never reaches the backend.
+#
+#   curl -X DELETE http://127.0.0.1:8080/v1/responses/resp_abc
 #
 # The store is lazily initialized on the first qualifying
 # request. If initialization fails (bad URL, permissions),

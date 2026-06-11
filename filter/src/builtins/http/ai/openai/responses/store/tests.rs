@@ -1100,6 +1100,203 @@ async fn get_input_items_with_cursor() {
 }
 
 // -----------------------------------------------------------------------------
+// DELETE
+// -----------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_existing_response_returns_200() {
+    let filter = make_filter();
+    init_store_and_seed(&filter, "resp_del1", "default", json!([])).await;
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_del1");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(rejection.status, 200, "existing response should return 200");
+    assert_has_json_content_type(&rejection);
+
+    let body: serde_json::Value =
+        serde_json::from_slice(rejection.body.as_deref().expect("body should be present"))
+            .expect("body should be valid JSON");
+    assert_eq!(body["id"], "resp_del1", "body should contain the response id");
+    assert_eq!(
+        body["object"], "response.deleted",
+        "body should have object=response.deleted"
+    );
+    assert_eq!(body["deleted"], true, "body should have deleted=true");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_nonexistent_response_returns_404() {
+    let filter = make_filter();
+    init_store_and_seed(&filter, "resp_exists", "default", json!([])).await;
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_missing");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(rejection.status, 404, "nonexistent response should return 404");
+    assert_has_json_content_type(&rejection);
+
+    let body: serde_json::Value =
+        serde_json::from_slice(rejection.body.as_deref().expect("body should be present"))
+            .expect("body should be valid JSON");
+    assert_eq!(
+        body["error"]["type"], "invalid_request_error",
+        "error type should be invalid_request_error"
+    );
+    assert!(
+        body["error"]["message"].as_str().is_some_and(|m| m.contains("resp_missing")),
+        "error message should reference the missing id"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_is_idempotent() {
+    let filter = make_filter();
+    init_store_and_seed(&filter, "resp_idem", "default", json!([])).await;
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_idem");
+    let mut ctx1 = crate::test_utils::make_filter_context(&req);
+    let action1 = filter.on_request(&mut ctx1).await.unwrap();
+    let r1 = expect_reject(action1);
+    assert_eq!(r1.status, 200, "first delete should return 200");
+
+    let mut ctx2 = crate::test_utils::make_filter_context(&req);
+    let action2 = filter.on_request(&mut ctx2).await.unwrap();
+    let r2 = expect_reject(action2);
+    assert_eq!(r2.status, 404, "second delete should return 404");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_cross_tenant_returns_404() {
+    let filter = make_filter();
+    init_store_and_seed(&filter, "resp_tenant", "tenant_a", json!([])).await;
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_tenant");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(rejection.status, 404, "delete from wrong tenant should return 404");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_uses_tenant_metadata() {
+    let filter = make_filter();
+    init_store_and_seed(&filter, "resp_tmeta", "tenant_x", json!([])).await;
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_tmeta");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata("responses.tenant_id", "tenant_x");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(
+        rejection.status, 200,
+        "delete with matching tenant metadata should return 200"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_continues_when_store_unavailable() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: sqlite
+database_url: "sqlite:///nonexistent/path/that/will/fail.db"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let cfg: ResponseStoreConfig = parse_filter_config("openai_response_store", &yaml).unwrap();
+    validate_config(&cfg).unwrap();
+    let filter = ResponseStoreFilter::new(cfg);
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_gone");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "DELETE should continue when store is unavailable"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_response_has_json_content_type() {
+    let filter = make_filter();
+    init_store_and_seed(&filter, "resp_ct", "default", json!([])).await;
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_ct");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_has_json_content_type(&rejection);
+}
+
+// -----------------------------------------------------------------------------
+// extract_response_id
+// -----------------------------------------------------------------------------
+
+#[test]
+fn extract_response_id_valid() {
+    assert_eq!(
+        super::filter::extract_response_id("/v1/responses/resp_abc"),
+        Some("resp_abc"),
+        "should extract ID from valid path"
+    );
+}
+
+#[test]
+fn extract_response_id_trailing_slash() {
+    assert_eq!(
+        super::filter::extract_response_id("/v1/responses/resp_abc/"),
+        Some("resp_abc"),
+        "should extract ID with trailing slash"
+    );
+}
+
+#[test]
+fn extract_response_id_no_id() {
+    assert_eq!(
+        super::filter::extract_response_id("/v1/responses"),
+        None,
+        "should return None without ID segment"
+    );
+}
+
+#[test]
+fn extract_response_id_sub_resource() {
+    assert_eq!(
+        super::filter::extract_response_id("/v1/responses/resp_abc/input_items"),
+        None,
+        "should return None for sub-resource path"
+    );
+}
+
+#[test]
+fn extract_response_id_unrelated_path() {
+    assert_eq!(
+        super::filter::extract_response_id("/v1/chat/completions"),
+        None,
+        "should return None for unrelated path"
+    );
+}
+
+#[test]
+fn extract_response_id_empty_id_segment() {
+    assert_eq!(
+        super::filter::extract_response_id("/v1/responses/"),
+        None,
+        "should return None for empty ID segment"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // parse_query_params
 // -----------------------------------------------------------------------------
 
