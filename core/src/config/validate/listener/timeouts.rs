@@ -10,12 +10,11 @@ use crate::{
     errors::ProxyError,
 };
 
+use super::super::cluster::MAX_TIMEOUT_MS;
+
 // -----------------------------------------------------------------------------
 // Timeout Constants
 // -----------------------------------------------------------------------------
-
-/// Maximum allowed timeout value in milliseconds (1 hour).
-const MAX_TIMEOUT_MS: u64 = 3_600_000;
 
 /// Default TCP idle timeout in milliseconds (5 minutes).
 const DEFAULT_TCP_IDLE_TIMEOUT_MS: u64 = 300_000;

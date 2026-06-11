@@ -112,23 +112,7 @@ impl PingoraHealthService {
     /// assert!(body.contains("ok"));
     /// ```
     pub fn ready_response(&self) -> (u16, String) {
-        let Some(ref registry) = self.registry else {
-            return (200, r#"{"status":"ok"}"#.to_owned());
-        };
-
-        if registry.is_empty() {
-            return (
-                200,
-                r#"{"status":"ok","clusters":{"total":0,"healthy":0,"degraded":0}}"#.to_owned(),
-            );
-        }
-
-        let agg = aggregate_health(registry, self.verbose);
-        let status_str = if agg.any_down { "degraded" } else { "ok" };
-        let status_code: u16 = if agg.any_down { 503 } else { 200 };
-
-        let body = format_ready_body(status_str, &agg);
-        (status_code, body)
+        compute_ready_response(self.registry.as_ref(), self.verbose)
     }
 }
 
@@ -168,27 +152,8 @@ impl PingoraAdminService {
     }
 
     /// Build the `/ready` response status and body.
-    ///
-    /// Uses the same aggregation logic as [`PingoraHealthService`]
-    /// without constructing an intermediate struct.
     fn ready_response(&self) -> (u16, String) {
-        let Some(ref registry) = self.health_registry else {
-            return (200, r#"{"status":"ok"}"#.to_owned());
-        };
-
-        if registry.is_empty() {
-            return (
-                200,
-                r#"{"status":"ok","clusters":{"total":0,"healthy":0,"degraded":0}}"#.to_owned(),
-            );
-        }
-
-        let agg = aggregate_health(registry, self.verbose);
-        let status_str = if agg.any_down { "degraded" } else { "ok" };
-        let status_code: u16 = if agg.any_down { 503 } else { 200 };
-
-        let body = format_ready_body(status_str, &agg);
-        (status_code, body)
+        compute_ready_response(self.health_registry.as_ref(), self.verbose)
     }
 }
 
@@ -291,6 +256,33 @@ impl ServeHttp for PingoraHealthService {
             _ => json_response(404, br#"{"error":"not found"}"#),
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Ready Response
+// -----------------------------------------------------------------------------
+
+/// Build the `/ready` response status and body from a health registry.
+///
+/// Shared by [`PingoraHealthService`] and [`PingoraAdminService`].
+fn compute_ready_response(registry: Option<&HealthRegistry>, verbose: bool) -> (u16, String) {
+    let Some(registry) = registry else {
+        return (200, r#"{"status":"ok"}"#.to_owned());
+    };
+
+    if registry.is_empty() {
+        return (
+            200,
+            r#"{"status":"ok","clusters":{"total":0,"healthy":0,"degraded":0}}"#.to_owned(),
+        );
+    }
+
+    let agg = aggregate_health(registry, verbose);
+    let status_str = if agg.any_down { "degraded" } else { "ok" };
+    let status_code: u16 = if agg.any_down { 503 } else { 200 };
+
+    let body = format_ready_body(status_str, &agg);
+    (status_code, body)
 }
 
 // -----------------------------------------------------------------------------

@@ -240,18 +240,21 @@ pub type HealthRegistry = Arc<HashMap<Arc<str>, ClusterHealthState>>;
 /// assert!(registry.is_empty());
 /// ```
 pub fn build_health_registry(clusters: &[crate::config::Cluster]) -> HealthRegistry {
-    let mut map = HashMap::new();
-    for cluster in clusters {
-        if cluster.health_check.is_some() {
+    let map = clusters
+        .iter()
+        .filter_map(|cluster| {
+            let hc = cluster.health_check.as_ref()?;
             let endpoints: Vec<EndpointHealth> = cluster.endpoints.iter().map(|_| EndpointHealth::new()).collect();
             let addresses: Vec<Arc<str>> = cluster.endpoints.iter().map(|ep| Arc::from(ep.address())).collect();
-            let (passive_unhealthy, passive_healthy) = cluster.health_check.as_ref().map_or((None, None), |hc| {
-                (hc.passive_unhealthy_threshold, hc.passive_healthy_threshold)
-            });
-            let entry = ClusterHealthEntry::new(endpoints, addresses, passive_unhealthy, passive_healthy);
-            map.insert(Arc::clone(&cluster.name), Arc::new(entry));
-        }
-    }
+            let entry = ClusterHealthEntry::new(
+                endpoints,
+                addresses,
+                hc.passive_unhealthy_threshold,
+                hc.passive_healthy_threshold,
+            );
+            Some((Arc::clone(&cluster.name), Arc::new(entry)))
+        })
+        .collect();
     Arc::new(map)
 }
 

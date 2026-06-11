@@ -13,46 +13,27 @@ use http::Version;
 use tracing::debug;
 
 // -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Proxy pseudonym used in Via header values.
-///
-/// Hardcoded per [RFC 9110 Section 7.6.3]. Consider making
-/// configurable if fingerprinting is a concern.
-///
-/// [RFC 9110 Section 7.6.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.3
-const PSEUDONYM: &str = "praxis";
-
-// -----------------------------------------------------------------------------
 // Via Header Utilities
 // -----------------------------------------------------------------------------
 
-/// Format the protocol version token for a Via header value.
-///
-/// ```ignore
-/// assert_eq!(version_token(http::Version::HTTP_11), "1.1");
-/// assert_eq!(version_token(http::Version::HTTP_2), "2.0");
-/// ```
-fn version_token(version: Version) -> &'static str {
-    match version {
-        Version::HTTP_09 => "0.9",
-        Version::HTTP_10 => "1.0",
-        Version::HTTP_11 => "1.1",
-        Version::HTTP_2 => "2.0",
-        Version::HTTP_3 => "3.0",
-        _ => {
-            tracing::warn!(?version, "unknown HTTP version in Via header, defaulting to 1.1");
-            "1.1"
-        },
-    }
-}
-
 /// Build a Via header value for the given protocol version.
 ///
-/// Returns a string like `"1.1 praxis"` or `"2.0 praxis"`.
-fn via_value(version: Version) -> String {
-    format!("{} {PSEUDONYM}", version_token(version))
+/// Returns a static string like `"1.1 praxis"` or `"2.0 praxis"`.
+/// The pseudonym is hardcoded per [RFC 9110 Section 7.6.3].
+///
+/// [RFC 9110 Section 7.6.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.3
+fn via_value(version: Version) -> &'static str {
+    match version {
+        Version::HTTP_09 => "0.9 praxis",
+        Version::HTTP_10 => "1.0 praxis",
+        Version::HTTP_11 => "1.1 praxis",
+        Version::HTTP_2 => "2.0 praxis",
+        Version::HTTP_3 => "3.0 praxis",
+        _ => {
+            tracing::warn!(?version, "unknown HTTP version in Via header, defaulting to 1.1");
+            "1.1 praxis"
+        },
+    }
 }
 
 /// Append a Via entry to a Pingora request header.
@@ -62,17 +43,16 @@ fn via_value(version: Version) -> String {
 /// to avoid producing a malformed header.
 pub(crate) fn append_request_via(req: &mut pingora_http::RequestHeader, upstream_version: Version) {
     let entry = via_value(upstream_version);
-    let combined = match req.headers.get("via").and_then(|v| v.to_str().ok()) {
+    match req.headers.get("via").and_then(|v| v.to_str().ok()) {
         Some(existing) if !existing.is_empty() => {
             debug!(existing, new = %entry, "appending to existing request Via");
-            format!("{existing}, {entry}")
+            let _insert = req.insert_header("via", format!("{existing}, {entry}"));
         },
         _ => {
             debug!(via = %entry, "adding request Via header");
-            entry
+            let _insert = req.insert_header("via", entry);
         },
-    };
-    let _insert = req.insert_header("via", combined);
+    }
 }
 
 /// Append a Via entry to a Pingora response header.
@@ -82,17 +62,16 @@ pub(crate) fn append_request_via(req: &mut pingora_http::RequestHeader, upstream
 /// to avoid producing a malformed header.
 pub(crate) fn append_response_via(resp: &mut pingora_http::ResponseHeader, client_version: Version) {
     let entry = via_value(client_version);
-    let combined = match resp.headers.get("via").and_then(|v| v.to_str().ok()) {
+    match resp.headers.get("via").and_then(|v| v.to_str().ok()) {
         Some(existing) if !existing.is_empty() => {
             debug!(existing, new = %entry, "appending to existing response Via");
-            format!("{existing}, {entry}")
+            let _insert = resp.insert_header("via", format!("{existing}, {entry}"));
         },
         _ => {
             debug!(via = %entry, "adding response Via header");
-            entry
+            let _insert = resp.insert_header("via", entry);
         },
-    };
-    let _insert = resp.insert_header("via", combined);
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -111,29 +90,6 @@ mod tests {
     use http::HeaderValue;
 
     use super::*;
-
-    #[test]
-    fn version_token_http11() {
-        assert_eq!(
-            version_token(Version::HTTP_11),
-            "1.1",
-            "HTTP/1.1 should produce 1.1 token"
-        );
-    }
-
-    #[test]
-    fn version_token_http2() {
-        assert_eq!(version_token(Version::HTTP_2), "2.0", "HTTP/2 should produce 2.0 token");
-    }
-
-    #[test]
-    fn version_token_http10() {
-        assert_eq!(
-            version_token(Version::HTTP_10),
-            "1.0",
-            "HTTP/1.0 should produce 1.0 token"
-        );
-    }
 
     #[test]
     fn via_value_http11() {
