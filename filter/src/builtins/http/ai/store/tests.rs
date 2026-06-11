@@ -265,6 +265,48 @@ fn input_items_from_array_input() {
 }
 
 #[test]
+fn input_items_uses_item_id_cursor() {
+    let record = ResponseRecord {
+        input: json!([
+            {"id": "item_1", "type": "message", "role": "user", "content": "Hello"},
+            {"id": "item_2", "type": "message", "role": "user", "content": "World"},
+            {"id": "item_3", "type": "message", "role": "user", "content": "!"}
+        ]),
+        ..make_response_record("resp_1", "tenant_a", 1000)
+    };
+
+    let page = list_input_items(
+        &record,
+        &ListParams {
+            limit: 2,
+            order: Order::Ascending,
+            ..ListParams::default()
+        },
+    )
+    .expect("list should succeed");
+
+    assert_eq!(
+        page.next_cursor.as_deref(),
+        Some("item_2"),
+        "cursor should use the last item ID"
+    );
+
+    let page2 = list_input_items(
+        &record,
+        &ListParams {
+            cursor: page.next_cursor,
+            limit: 2,
+            order: Order::Ascending,
+        },
+    )
+    .expect("list should succeed");
+
+    assert_eq!(page2.data.len(), 1, "second page should return remaining item");
+    assert_eq!(page2.data[0]["id"], "item_3", "second page should start after item_2");
+    assert!(!page2.has_more, "second page should complete pagination");
+}
+
+#[test]
 fn input_items_from_string_input() {
     let record = ResponseRecord {
         input: json!("Hello, world!"),

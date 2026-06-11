@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 
 use praxis_test_utils::{
-    Backend, example_config_path, free_port, http_send, json_post, parse_body, parse_status, patch_yaml, start_proxy,
+    Backend, example_config_path, free_port, http_get, http_send, json_post, parse_body, parse_status, patch_yaml,
+    start_proxy,
 };
 use sqlx::Row;
 
@@ -123,6 +124,60 @@ fn response_store_passes_through_non_responses_traffic() {
         parse_status(&raw),
         200,
         "Chat Completions body should still route through"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// GET Retrieval
+// -----------------------------------------------------------------------------
+
+#[test]
+fn get_missing_response_returns_404() {
+    let proxy_port = free_port();
+
+    let yaml = std::fs::read_to_string(example_config_path("ai/openai/responses/response-store.yaml"))
+        .expect("example config should exist");
+    let patched = patch_yaml(
+        &yaml.replace("sqlite://responses.db?mode=rwc", "sqlite::memory:"),
+        proxy_port,
+        &HashMap::new(),
+    );
+    let config = praxis_core::config::Config::from_yaml(&patched).expect("patched config should parse");
+    let proxy = start_proxy(&config);
+    let (status, body) = http_get(proxy.addr(), "/v1/responses/resp_nonexistent", None);
+
+    assert_eq!(status, 404, "GET for missing response should return 404");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("body should be valid JSON");
+    assert_eq!(
+        parsed["error"]["type"].as_str(),
+        Some("invalid_request_error"),
+        "404 body should use invalid_request_error type"
+    );
+}
+
+#[test]
+fn get_missing_input_items_returns_404() {
+    let proxy_port = free_port();
+
+    let yaml = std::fs::read_to_string(example_config_path("ai/openai/responses/response-store.yaml"))
+        .expect("example config should exist");
+    let patched = patch_yaml(
+        &yaml.replace("sqlite://responses.db?mode=rwc", "sqlite::memory:"),
+        proxy_port,
+        &HashMap::new(),
+    );
+    let config = praxis_core::config::Config::from_yaml(&patched).expect("patched config should parse");
+    let proxy = start_proxy(&config);
+    let (status, body) = http_get(proxy.addr(), "/v1/responses/resp_nonexistent/input_items", None);
+
+    assert_eq!(status, 404, "input_items for missing response should return 404");
+    let parsed: serde_json::Value = serde_json::from_str(&body).expect("body should be valid JSON");
+    assert!(
+        parsed["error"]["message"]
+            .as_str()
+            .expect("error message should be a string")
+            .contains("resp_nonexistent"),
+        "error message should include the missing ID"
     );
 }
 
