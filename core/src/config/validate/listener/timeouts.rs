@@ -5,12 +5,11 @@
 
 use tracing::debug;
 
+use super::super::cluster::MAX_TIMEOUT_MS;
 use crate::{
     config::{Listener, ProtocolKind},
     errors::ProxyError,
 };
-
-use super::super::cluster::MAX_TIMEOUT_MS;
 
 // -----------------------------------------------------------------------------
 // Timeout Constants
