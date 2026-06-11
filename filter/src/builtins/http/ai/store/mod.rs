@@ -33,6 +33,8 @@ pub use self::{
     trait_def::ResponseStore,
     types::{ConversationRecord, ResponseRecord, StoreError},
 };
+/// Validate a response-store table identifier.
+pub(crate) use schemas::validate_identifier as validate_table_identifier;
 
 // -----------------------------------------------------------------------------
 // ResponseStoreRegistry

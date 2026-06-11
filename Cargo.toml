@@ -71,6 +71,7 @@ praxis-filter = { version = "0.3.1", path = "filter", package = "praxis-proxy-fi
 praxis-protocol = { version = "0.3.1", path = "protocol", package = "praxis-proxy-protocol" }
 praxis-tls = { version = "0.3.1", path = "tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
+secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.150"
 rcgen = "0.14.8"

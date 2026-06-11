@@ -9,10 +9,25 @@
 //!
 //! [`ResponseStore`]: crate::builtins::http::ai::store::ResponseStore
 
+mod config;
+mod filter;
 mod input_items;
 
+pub use self::filter::ResponseStoreFilter;
 #[allow(
     unused_imports,
     reason = "re-exports for GET (#458) and DELETE (#459) response endpoints"
 )]
 pub use input_items::{InputItemPage, ListParams, Order, list_input_items};
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::panic,
+    clippy::too_many_lines,
+    clippy::cognitive_complexity,
+    reason = "tests"
+)]
+mod tests;

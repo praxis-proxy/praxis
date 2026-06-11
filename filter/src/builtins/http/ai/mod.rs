@@ -14,7 +14,7 @@ mod prompt_enrich;
 #[cfg(feature = "ai-inference")]
 #[allow(
     dead_code,
-    reason = "store module is the foundation for upcoming response store filter"
+    reason = "store module provides foundation for response store filter and upcoming CRUD endpoints"
 )]
 pub(crate) mod store;
 #[cfg(feature = "ai-inference")]
@@ -25,6 +25,8 @@ pub use agentic::{A2aFilter, JsonRpcFilter, McpFilter};
 pub use inference::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
 pub use openai::OpenaiResponsesValidateFilter;
+#[cfg(feature = "ai-inference")]
+pub use openai::ResponseStoreFilter;
 #[cfg(feature = "ai-inference")]
 pub use openai::ResponsesFormatFilter;
 #[cfg(feature = "ai-inference")]

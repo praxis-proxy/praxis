@@ -84,7 +84,7 @@ fn validate_table_names(tables: &TableNames) -> Result<(&str, &str), StoreError>
 const MAX_IDENTIFIER_LEN: usize = 128;
 
 /// Reject identifiers that could cause SQL injection or invalid DDL.
-fn validate_identifier(name: &str) -> Result<(), StoreError> {
+pub(crate) fn validate_identifier(name: &str) -> Result<(), StoreError> {
     if name.is_empty() {
         return Err(StoreError::Database("table name must not be empty".to_owned()));
     }
