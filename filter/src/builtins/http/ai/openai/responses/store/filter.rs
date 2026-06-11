@@ -183,8 +183,8 @@ impl ResponseCapture {
     /// Extract input and output from a Responses API response object.
     fn from_response_json(json: &Value) -> Self {
         Self {
-            input: json.get("input").cloned().unwrap_or_else(|| json.clone()),
-            messages: json.get("output").cloned().unwrap_or_else(|| json.clone()),
+            input: json.get("input").cloned().unwrap_or(Value::Null),
+            messages: json.get("output").cloned().unwrap_or(Value::Null),
         }
     }
 }
