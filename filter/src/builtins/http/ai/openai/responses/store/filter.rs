@@ -9,20 +9,16 @@
 //! The filter spans three phases, each refining the "should we
 //! persist?" decision as new information becomes available:
 //!
-//! - **`on_request`**: reads classifier metadata to decide whether
-//!   the request is persistable (POST, responses format, store
-//!   enabled, non-streaming). Lazily initializes the store backend.
-//!   Sets `responses.skip_persist` metadata on store init failure.
+//! - **`on_request`**: reads classifier metadata to decide whether the request is persistable (POST, responses format,
+//!   store enabled, non-streaming). Lazily initializes the store backend. Sets `responses.skip_persist` metadata on
+//!   store init failure.
 //!
-//! - **`on_response`**: re-checks skip conditions, then inspects
-//!   the response status and content-type. Non-2xx or non-JSON
-//!   responses set `responses.skip_persist` and bail early.
+//! - **`on_response`**: re-checks skip conditions, then inspects the response status and content-type. Non-2xx or
+//!   non-JSON responses set `responses.skip_persist` and bail early.
 //!
-//! - **`on_response_body`**: at end-of-stream, extracts the record
-//!   from the buffered response JSON and spawns an async persist
-//!   task. Non-persistable exchanges release chunks immediately
-//!   via [`FilterAction::Release`] to avoid holding pass-through
-//!   traffic in the `StreamBuffer`.
+//! - **`on_response_body`**: at end-of-stream, extracts the record from the buffered response JSON and spawns an async
+//!   persist task. Non-persistable exchanges release chunks immediately via [`FilterAction::Release`] to avoid holding
+//!   pass-through traffic in the `StreamBuffer`.
 //!
 //! The repeated `should_skip_persist()` calls at each phase are
 //! intentional. Each phase learns something new (request metadata,
@@ -38,17 +34,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
+use secrecy::ExposeSecret;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 use tracing::{debug, trace, warn};
 
-use secrecy::ExposeSecret;
-
 use super::config::{ResponseStoreConfig, StorageBackend, validate_config};
-use crate::builtins::http::ai::store::{ResponseRecord, ResponseStore, SqliteResponseStore};
 use crate::{
     FilterAction, FilterError,
     body::{BodyAccess, BodyMode, limits::MAX_JSON_BODY_BYTES},
+    builtins::http::ai::store::{ResponseRecord, ResponseStore, SqliteResponseStore},
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -106,7 +101,11 @@ impl ResponseStoreFilter {
     }
 
     /// Initialize the store backend, returning `None` on failure.
-    #[allow(clippy::cognitive_complexity, reason = "tracing macros inflate complexity")]
+    #[allow(
+        clippy::cognitive_complexity,
+        clippy::too_many_lines,
+        reason = "tracing macros inflate complexity"
+    )]
     async fn init_store(&self) -> Option<Arc<dyn ResponseStore>> {
         match self.config.backend {
             StorageBackend::Sqlite => {

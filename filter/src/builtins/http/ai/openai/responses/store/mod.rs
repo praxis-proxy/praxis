@@ -13,12 +13,13 @@ mod config;
 mod filter;
 mod input_items;
 
-pub use self::filter::ResponseStoreFilter;
 #[allow(
     unused_imports,
     reason = "re-exports for GET (#458) and DELETE (#459) response endpoints"
 )]
 pub use input_items::{InputItemPage, ListParams, Order, list_input_items};
+
+pub use self::filter::ResponseStoreFilter;
 
 #[cfg(test)]
 #[allow(

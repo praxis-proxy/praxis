@@ -11,8 +11,10 @@ use std::{
 use bytes::Bytes;
 use serde_json::json;
 
-use super::ResponseStoreFilter;
-use super::config::{ResponseStoreConfig, validate_config};
+use super::{
+    ResponseStoreFilter,
+    config::{ResponseStoreConfig, validate_config},
+};
 use crate::{
     FilterAction, FilterEntry, FilterPipeline, FilterRegistry,
     body::{BodyAccess, BodyMode},

@@ -2669,6 +2669,7 @@ dependencies = [
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
  "tokio-rustls",
