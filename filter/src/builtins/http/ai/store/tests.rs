@@ -8,8 +8,8 @@ use std::sync::Arc;
 use serde_json::json;
 
 use super::{
-    ConversationRecord, ResponseRecord, ResponseStoreRegistry, SqliteResponseStore, StoreError,
-    trait_def::ResponseStore,
+    ConversationRecord, PostgresResponseStore, ResponseRecord, ResponseStoreRegistry, SqliteResponseStore, SslMode,
+    StoreError, trait_def::ResponseStore,
 };
 use crate::builtins::http::ai::openai::responses::store::{ListParams, Order, list_input_items};
 
@@ -588,6 +588,390 @@ fn registry_default_is_empty() {
         registry.get("anything").is_none(),
         "default registry should have no stores"
     );
+}
+
+// -----------------------------------------------------------------------------
+// PostgreSQL Backend (requires running instance, DATABASE_URL env var)
+// -----------------------------------------------------------------------------
+
+fn pg_database_url() -> String {
+    std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for Postgres tests")
+}
+
+fn pg_unique_suffix() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tid = std::thread::current().id();
+    format!("{id}_{tid:?}").replace(|c: char| !c.is_ascii_alphanumeric() && c != '_', "_")
+}
+
+#[test]
+fn pg_ssl_mode_deserializes_verified_modes() {
+    let verify_ca: SslMode = serde_json::from_str("\"verify-ca\"").expect("verify-ca should deserialize");
+    let verify_full: SslMode = serde_json::from_str("\"verify-full\"").expect("verify-full should deserialize");
+
+    assert!(matches!(verify_ca, SslMode::VerifyCa), "verify-ca should be supported");
+    assert!(
+        matches!(verify_full, SslMode::VerifyFull),
+        "verify-full should be supported"
+    );
+}
+
+#[test]
+fn pg_ssl_mode_converts_to_pg_ssl_mode() {
+    use sqlx::postgres::PgSslMode;
+
+    assert!(
+        matches!(PgSslMode::from(SslMode::Disable), PgSslMode::Disable),
+        "Disable should map"
+    );
+    assert!(
+        matches!(PgSslMode::from(SslMode::Prefer), PgSslMode::Prefer),
+        "Prefer should map"
+    );
+    assert!(
+        matches!(PgSslMode::from(SslMode::Require), PgSslMode::Require),
+        "Require should map"
+    );
+    assert!(
+        matches!(PgSslMode::from(SslMode::VerifyCa), PgSslMode::VerifyCa),
+        "VerifyCa should map"
+    );
+    assert!(
+        matches!(PgSslMode::from(SslMode::VerifyFull), PgSslMode::VerifyFull),
+        "VerifyFull should map"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_nonexistent_ssl_root_cert_fails() {
+    let url = pg_database_url();
+    let suffix = pg_unique_suffix();
+    let result = PostgresResponseStore::new(
+        &url,
+        &format!("test_responses_{suffix}"),
+        &format!("test_conversations_{suffix}"),
+        Some(SslMode::VerifyCa),
+        Some("/nonexistent/ca.pem"),
+    )
+    .await;
+
+    let Err(err) = result else {
+        panic!("nonexistent ssl_root_cert should fail");
+    };
+    assert!(
+        matches!(err, StoreError::Database(_)),
+        "error should be StoreError::Database: {err}"
+    );
+}
+
+async fn make_pg_store() -> PostgresResponseStore {
+    let url = pg_database_url();
+    let suffix = pg_unique_suffix();
+    PostgresResponseStore::new(
+        &url,
+        &format!("test_responses_{suffix}"),
+        &format!("test_conversations_{suffix}"),
+        Some(SslMode::Disable),
+        None,
+    )
+    .await
+    .expect("postgres store creation should succeed")
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_store_initializes_schema() {
+    let store = make_pg_store().await;
+
+
+    let result = store
+        .get_response("tenant_a", "nonexistent")
+        .await
+        .expect("get should succeed");
+
+    assert!(result.is_none(), "empty store should return None");
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_upsert_and_get_response() {
+    let store = make_pg_store().await;
+
+    let record = make_response_record("resp_1", "tenant_a", 1000);
+
+    store.upsert_response(&record).await.expect("upsert should succeed");
+
+    let fetched = store
+        .get_response("tenant_a", "resp_1")
+        .await
+        .expect("get should succeed")
+        .expect("record should exist");
+
+    assert_eq!(fetched.id, "resp_1", "ID should match");
+    assert_eq!(fetched.tenant_id, "tenant_a", "tenant should match");
+    assert_eq!(fetched.created_at, 1000, "created_at should match");
+    assert_eq!(fetched.model, "gpt-4.1", "model should match");
+    assert_eq!(
+        fetched.response_object,
+        json!({"status": "completed"}),
+        "response_object should match"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_upsert_overwrites_existing_response() {
+    let store = make_pg_store().await;
+
+    let record = make_response_record("resp_1", "tenant_a", 1000);
+    store
+        .upsert_response(&record)
+        .await
+        .expect("first upsert should succeed");
+
+    let updated = ResponseRecord {
+        model: "gpt-4.1-mini".to_owned(),
+        response_object: json!({"status": "incomplete"}),
+        ..make_response_record("resp_1", "tenant_a", 1000)
+    };
+    store
+        .upsert_response(&updated)
+        .await
+        .expect("second upsert should succeed");
+
+    let fetched = store
+        .get_response("tenant_a", "resp_1")
+        .await
+        .expect("get should succeed")
+        .expect("record should exist");
+
+    assert_eq!(fetched.model, "gpt-4.1-mini", "model should be updated");
+    assert_eq!(
+        fetched.response_object,
+        json!({"status": "incomplete"}),
+        "response_object should be updated"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_delete_existing_response() {
+    let store = make_pg_store().await;
+
+    let record = make_response_record("resp_1", "tenant_a", 1000);
+    store.upsert_response(&record).await.expect("upsert should succeed");
+
+    let deleted = store
+        .delete_response("tenant_a", "resp_1")
+        .await
+        .expect("delete should succeed");
+
+    assert!(deleted, "delete should return true for existing record");
+
+    let fetched = store
+        .get_response("tenant_a", "resp_1")
+        .await
+        .expect("get should succeed");
+
+    assert!(fetched.is_none(), "deleted record should not be retrievable");
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_delete_missing_response_returns_false() {
+    let store = make_pg_store().await;
+
+
+    let deleted = store
+        .delete_response("tenant_a", "nonexistent")
+        .await
+        .expect("delete should succeed");
+
+    assert!(!deleted, "delete should return false for missing record");
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_tenant_isolation_on_get() {
+    let store = make_pg_store().await;
+
+    let record = make_response_record("resp_1", "tenant_a", 1000);
+    store.upsert_response(&record).await.expect("upsert should succeed");
+
+    let result = store
+        .get_response("tenant_b", "resp_1")
+        .await
+        .expect("get should succeed");
+
+    assert!(result.is_none(), "tenant_b should not see tenant_a records");
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_tenant_isolation_on_delete() {
+    let store = make_pg_store().await;
+
+    let record = make_response_record("resp_1", "tenant_a", 1000);
+    store.upsert_response(&record).await.expect("upsert should succeed");
+
+    let deleted = store
+        .delete_response("tenant_b", "resp_1")
+        .await
+        .expect("delete should succeed");
+
+    assert!(!deleted, "tenant_b should not be able to delete tenant_a records");
+
+    let still_exists = store
+        .get_response("tenant_a", "resp_1")
+        .await
+        .expect("get should succeed");
+
+    assert!(
+        still_exists.is_some(),
+        "record should still exist after cross-tenant delete attempt"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_same_response_id_can_exist_in_multiple_tenants() {
+    let store = make_pg_store().await;
+
+    store
+        .upsert_response(&make_response_record("resp_shared", "tenant_a", 1000))
+        .await
+        .expect("tenant_a upsert should succeed");
+    store
+        .upsert_response(&make_response_record("resp_shared", "tenant_b", 2000))
+        .await
+        .expect("tenant_b upsert should succeed");
+
+    let tenant_a = store
+        .get_response("tenant_a", "resp_shared")
+        .await
+        .expect("tenant_a get should succeed")
+        .expect("tenant_a record should exist");
+    let tenant_b = store
+        .get_response("tenant_b", "resp_shared")
+        .await
+        .expect("tenant_b get should succeed")
+        .expect("tenant_b record should exist");
+
+    assert_eq!(tenant_a.tenant_id, "tenant_a", "tenant_a record should be isolated");
+    assert_eq!(tenant_b.tenant_id, "tenant_b", "tenant_b record should be isolated");
+    assert_eq!(tenant_a.created_at, 1000, "tenant_a record should not be overwritten");
+    assert_eq!(tenant_b.created_at, 2000, "tenant_b record should not be overwritten");
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_upsert_and_get_conversation() {
+    let store = make_pg_store().await;
+
+    let record = ConversationRecord {
+        conversation_id: "conv_1".to_owned(),
+        tenant_id: "tenant_a".to_owned(),
+        messages: json!([{"role": "user", "content": "Hi"}]),
+    };
+
+    store.upsert_conversation(&record).await.expect("upsert should succeed");
+
+    let fetched = store
+        .get_conversation("tenant_a", "conv_1")
+        .await
+        .expect("get should succeed")
+        .expect("record should exist");
+
+    assert_eq!(fetched.conversation_id, "conv_1", "conversation_id should match");
+    assert_eq!(
+        fetched.messages,
+        json!([{"role": "user", "content": "Hi"}]),
+        "messages should match"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_upsert_conversation_overwrites() {
+    let store = make_pg_store().await;
+
+    let record = ConversationRecord {
+        conversation_id: "conv_1".to_owned(),
+        tenant_id: "tenant_a".to_owned(),
+        messages: json!([{"role": "user", "content": "v1"}]),
+    };
+    store.upsert_conversation(&record).await.expect("upsert should succeed");
+
+    let updated = ConversationRecord {
+        messages: json!([{"role": "user", "content": "v2"}]),
+        ..record
+    };
+    store
+        .upsert_conversation(&updated)
+        .await
+        .expect("second upsert should succeed");
+
+    let fetched = store
+        .get_conversation("tenant_a", "conv_1")
+        .await
+        .expect("get should succeed")
+        .expect("record should exist");
+
+    assert_eq!(
+        fetched.messages,
+        json!([{"role": "user", "content": "v2"}]),
+        "messages should be updated"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_delete_existing_conversation() {
+    let store = make_pg_store().await;
+
+    let record = ConversationRecord {
+        conversation_id: "conv_1".to_owned(),
+        tenant_id: "tenant_a".to_owned(),
+        messages: json!([]),
+    };
+    store.upsert_conversation(&record).await.expect("upsert should succeed");
+
+    let deleted = store
+        .delete_conversation("tenant_a", "conv_1")
+        .await
+        .expect("delete should succeed");
+
+    assert!(deleted, "delete should return true for existing conversation");
+
+    let fetched = store
+        .get_conversation("tenant_a", "conv_1")
+        .await
+        .expect("get should succeed");
+
+    assert!(fetched.is_none(), "deleted conversation should not be retrievable");
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_conversation_tenant_isolation() {
+    let store = make_pg_store().await;
+
+    let record = ConversationRecord {
+        conversation_id: "conv_1".to_owned(),
+        tenant_id: "tenant_a".to_owned(),
+        messages: json!([]),
+    };
+    store.upsert_conversation(&record).await.expect("upsert should succeed");
+
+    let result = store
+        .get_conversation("tenant_b", "conv_1")
+        .await
+        .expect("get should succeed");
+
+    assert!(result.is_none(), "tenant_b should not see tenant_a conversation");
 }
 
 // -----------------------------------------------------------------------------

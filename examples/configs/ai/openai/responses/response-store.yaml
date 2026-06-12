@@ -1,0 +1,44 @@
+# Response Store
+#
+# Persists non-streaming Responses API responses to a SQLite
+# database. The `openai_responses_format` filter must run first to
+# classify the request body — `openai_response_store` reads its
+# metadata to decide whether to persist.
+#
+# Streaming responses (`stream: true`) are skipped; streaming
+# persistence will be handled by a separate filter. Non-2xx
+# responses and non-JSON content types are also skipped.
+#
+# The store is lazily initialized on the first qualifying
+# request. If initialization fails (bad URL, permissions),
+# the failure is permanent and the filter becomes a no-op.
+
+listeners:
+  - name: ai-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [responses-pipeline]
+
+filter_chains:
+  - name: responses-pipeline
+    filters:
+      - filter: openai_responses_format
+
+      - filter: openai_response_store
+        backend: sqlite
+        # In-memory:
+        #   database_url: "sqlite::memory:"
+        # File-backed:
+        database_url: "sqlite://responses.db?mode=rwc"
+        responses_table: openai_responses
+        conversations_table: openai_conversations
+
+      - filter: router
+        routes:
+          - path: "/v1/responses"
+            cluster: "inference-backend"
+
+      - filter: load_balancer
+        clusters:
+          - name: "inference-backend"
+            endpoints:
+              - "127.0.0.1:8000"

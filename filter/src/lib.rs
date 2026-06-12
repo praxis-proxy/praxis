@@ -263,6 +263,10 @@ pub(crate) mod test_utils {
         }
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "test context constructor mirrors all context fields"
+    )]
     pub(crate) fn make_filter_context(req: &Request) -> HttpFilterContext<'_> {
         HttpFilterContext {
             body_done_indices: Vec::new(),

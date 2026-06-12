@@ -25,6 +25,8 @@ mod config;
 )]
 pub(crate) mod store;
 
+pub use store::ResponseStoreFilter;
+
 #[cfg(test)]
 #[allow(
     clippy::unwrap_used,

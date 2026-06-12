@@ -5,6 +5,7 @@
 
 use tracing::debug;
 
+use super::super::cluster::MAX_TIMEOUT_MS;
 use crate::{
     config::{Listener, ProtocolKind},
     errors::ProxyError,
@@ -13,9 +14,6 @@ use crate::{
 // -----------------------------------------------------------------------------
 // Timeout Constants
 // -----------------------------------------------------------------------------
-
-/// Maximum allowed timeout value in milliseconds (1 hour).
-const MAX_TIMEOUT_MS: u64 = 3_600_000;
 
 /// Default TCP idle timeout in milliseconds (5 minutes).
 const DEFAULT_TCP_IDLE_TIMEOUT_MS: u64 = 300_000;
