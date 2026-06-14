@@ -27,8 +27,8 @@ fn via_value(version: Version) -> &'static str {
         Version::HTTP_09 => "0.9 praxis",
         Version::HTTP_10 => "1.0 praxis",
         Version::HTTP_11 => "1.1 praxis",
-        Version::HTTP_2 => "2.0 praxis",
-        Version::HTTP_3 => "3.0 praxis",
+        Version::HTTP_2 => "2 praxis",
+        Version::HTTP_3 => "3 praxis",
         _ => {
             tracing::warn!(?version, "unknown HTTP version in Via header, defaulting to 1.1");
             "1.1 praxis"
@@ -104,8 +104,8 @@ mod tests {
     fn via_value_http2() {
         assert_eq!(
             via_value(Version::HTTP_2),
-            "2.0 praxis",
-            "Via value for HTTP/2 should be '2.0 praxis'"
+            "2 praxis",
+            "Via value for HTTP/2 should be '2 praxis'"
         );
     }
 
@@ -185,8 +185,8 @@ mod tests {
         append_request_via(&mut req, Version::HTTP_2);
         assert_eq!(
             req.headers.get("via").unwrap(),
-            "2.0 praxis",
-            "HTTP/2 request Via should use 2.0 token"
+            "2 praxis",
+            "HTTP/2 request Via should use '2' token"
         );
     }
 
@@ -196,8 +196,8 @@ mod tests {
         append_response_via(&mut resp, Version::HTTP_2);
         assert_eq!(
             resp.headers.get("via").unwrap(),
-            "2.0 praxis",
-            "HTTP/2 response Via should use 2.0 token"
+            "2 praxis",
+            "HTTP/2 response Via should use '2' token"
         );
     }
 }

@@ -87,15 +87,9 @@ pub struct Listener {
     /// applies to `protocol: tcp` listeners. Defaults to 300,000 ms
     /// (5 minutes) for TCP listeners when not set.
     ///
-    /// Note: despite the name, this is a session ceiling, not an
-    /// idle timeout. Long-lived active transfers (database sessions,
-    /// file transfers) will be killed at this deadline. Use
-    /// [`tcp_max_duration_secs`] for an explicit session cap, or
-    /// increase this value for long-lived workloads.
-    ///
     /// [`tcp_max_duration_secs`]: Listener::tcp_max_duration_secs
     #[serde(default)]
-    pub tcp_idle_timeout_ms: Option<u64>,
+    pub tcp_session_timeout_ms: Option<u64>,
 
     /// Maximum total session duration in seconds for TCP listeners.
     ///
@@ -311,24 +305,41 @@ max_connections: 10000
     }
 
     #[test]
-    fn parse_tcp_listener_with_idle_timeout() {
+    fn parse_tcp_listener_with_session_timeout() {
         let yaml = r#"
 name: db
 address: "0.0.0.0:5432"
 protocol: tcp
 upstream: "10.0.0.1:5432"
-tcp_idle_timeout_ms: 30000
+tcp_session_timeout_ms: 30000
 "#;
         let listener: Listener = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
-            listener.tcp_idle_timeout_ms,
+            listener.tcp_session_timeout_ms,
             Some(30000),
-            "idle timeout should be 30000"
+            "session timeout should be 30000"
         );
     }
 
     #[test]
-    fn tcp_idle_timeout_defaults_to_none() {
+    fn tcp_session_timeout_accepts_legacy_name() {
+        let yaml = r#"
+name: db
+address: "0.0.0.0:5432"
+protocol: tcp
+upstream: "10.0.0.1:5432"
+tcp_session_timeout_ms: 30000
+"#;
+        let listener: Listener = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            listener.tcp_session_timeout_ms,
+            Some(30000),
+            "legacy tcp_session_timeout_ms alias should work"
+        );
+    }
+
+    #[test]
+    fn tcp_session_timeout_defaults_to_none() {
         let yaml = r#"
 name: db
 address: "0.0.0.0:5432"
@@ -337,8 +348,8 @@ upstream: "10.0.0.1:5432"
 "#;
         let listener: Listener = serde_yaml::from_str(yaml).unwrap();
         assert!(
-            listener.tcp_idle_timeout_ms.is_none(),
-            "idle timeout should default to None"
+            listener.tcp_session_timeout_ms.is_none(),
+            "session timeout should default to None"
         );
     }
 

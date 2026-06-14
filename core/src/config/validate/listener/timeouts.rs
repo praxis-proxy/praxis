@@ -15,8 +15,8 @@ use crate::{
 // Timeout Constants
 // -----------------------------------------------------------------------------
 
-/// Default TCP idle timeout in milliseconds (5 minutes).
-const DEFAULT_TCP_IDLE_TIMEOUT_MS: u64 = 300_000;
+/// Default TCP session timeout in milliseconds (5 minutes).
+const DEFAULT_TCP_SESSION_TIMEOUT_MS: u64 = 300_000;
 
 /// Maximum allowed TCP max duration in seconds (24 hours).
 const MAX_TCP_DURATION_SECS: u64 = 86_400;
@@ -25,15 +25,15 @@ const MAX_TCP_DURATION_SECS: u64 = 86_400;
 // Timeout Defaults
 // -----------------------------------------------------------------------------
 
-/// Apply default TCP idle timeout when not explicitly configured.
+/// Apply default TCP session timeout when not explicitly configured.
 pub(super) fn apply_tcp_defaults(listener: &mut Listener) {
-    if listener.protocol == ProtocolKind::Tcp && listener.tcp_idle_timeout_ms.is_none() {
+    if listener.protocol == ProtocolKind::Tcp && listener.tcp_session_timeout_ms.is_none() {
         debug!(
             listener = %listener.name,
-            default_ms = DEFAULT_TCP_IDLE_TIMEOUT_MS,
-            "applying default TCP idle timeout"
+            default_ms = DEFAULT_TCP_SESSION_TIMEOUT_MS,
+            "applying default TCP session timeout"
         );
-        listener.tcp_idle_timeout_ms = Some(DEFAULT_TCP_IDLE_TIMEOUT_MS);
+        listener.tcp_session_timeout_ms = Some(DEFAULT_TCP_SESSION_TIMEOUT_MS);
     }
 }
 
@@ -46,7 +46,7 @@ pub(super) fn validate_listener_timeouts(listener: &Listener) -> Result<(), Prox
     let name = &listener.name;
 
     for (field, value) in [
-        ("tcp_idle_timeout_ms", listener.tcp_idle_timeout_ms),
+        ("tcp_session_timeout_ms", listener.tcp_session_timeout_ms),
         ("downstream_read_timeout_ms", listener.downstream_read_timeout_ms),
     ] {
         if let Some(v) = value {
@@ -127,7 +127,7 @@ listeners:
     address: "0.0.0.0:5432"
     protocol: tcp
     upstream: "10.0.0.1:5432"
-    tcp_idle_timeout_ms: 7200000
+    tcp_session_timeout_ms: 7200000
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(
@@ -183,7 +183,7 @@ listeners:
 "#;
         let config = Config::from_yaml(yaml).unwrap();
         assert_eq!(
-            config.listeners[0].tcp_idle_timeout_ms,
+            config.listeners[0].tcp_session_timeout_ms,
             Some(300_000),
             "TCP listener should get default 5-minute idle timeout"
         );
@@ -197,11 +197,11 @@ listeners:
     address: "0.0.0.0:5432"
     protocol: tcp
     upstream: "10.0.0.1:5432"
-    tcp_idle_timeout_ms: 60000
+    tcp_session_timeout_ms: 60000
 "#;
         let config = Config::from_yaml(yaml).unwrap();
         assert_eq!(
-            config.listeners[0].tcp_idle_timeout_ms,
+            config.listeners[0].tcp_session_timeout_ms,
             Some(60000),
             "explicit idle timeout should be preserved"
         );
@@ -250,11 +250,11 @@ listeners:
     address: "0.0.0.0:5432"
     protocol: tcp
     upstream: "10.0.0.1:5432"
-    tcp_idle_timeout_ms: 3600000
+    tcp_session_timeout_ms: 3600000
 "#;
         let config = Config::from_yaml(yaml).unwrap();
         assert_eq!(
-            config.listeners[0].tcp_idle_timeout_ms,
+            config.listeners[0].tcp_session_timeout_ms,
             Some(3_600_000),
             "TCP idle timeout at maximum should be accepted"
         );

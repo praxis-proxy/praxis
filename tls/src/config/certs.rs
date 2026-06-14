@@ -150,11 +150,20 @@ fn validate_server_name(name: &str) -> Result<(), TlsError> {
             detail: "server_names entry must not be empty".to_owned(),
         });
     }
+    let mut has_wildcard = false;
+    let mut label_count: usize = 0;
     for (i, label) in name.split('.').enumerate() {
+        label_count += 1;
         if label == "*" && i == 0 {
+            has_wildcard = true;
             continue;
         }
         validate_dns_label(name, label)?;
+    }
+    if has_wildcard && label_count < 3 {
+        return Err(TlsError::ServerConfigError {
+            detail: format!("server_names '{name}': wildcard requires at least 3 labels (e.g. *.example.com)"),
+        });
     }
     Ok(())
 }
@@ -271,6 +280,29 @@ mod tests {
             err.to_string().contains("crl_paths[0]"),
             "should mention crl_paths: {err}"
         );
+    }
+
+    #[test]
+    fn reject_bare_wildcard() {
+        let err = validate_server_name("*").unwrap_err();
+        assert!(
+            err.to_string().contains("at least 3 labels"),
+            "bare wildcard should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_two_label_wildcard() {
+        let err = validate_server_name("*.com").unwrap_err();
+        assert!(
+            err.to_string().contains("at least 3 labels"),
+            "two-label wildcard should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_three_label_wildcard() {
+        validate_server_name("*.example.com").expect("three-label wildcard should be accepted");
     }
 
     #[test]

@@ -420,10 +420,10 @@ mod tests {
         backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
         assert!(backoff_ms > DEBOUNCE_MS, "backoff should have increased after failures");
 
-        backoff_ms = DEBOUNCE_MS;
+        backoff_ms = MIN_SUCCESS_COOLDOWN_MS;
         assert_eq!(
-            backoff_ms, DEBOUNCE_MS,
-            "backoff should reset to DEBOUNCE_MS on success"
+            backoff_ms, MIN_SUCCESS_COOLDOWN_MS,
+            "backoff should reset to MIN_SUCCESS_COOLDOWN_MS on success"
         );
     }
 

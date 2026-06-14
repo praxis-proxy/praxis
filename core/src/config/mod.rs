@@ -580,6 +580,28 @@ filter_chains:
         );
     }
 
+    #[test]
+    fn reject_unknown_insecure_options_field() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+insecure_options:
+  alow_root: true
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("alow_root"),
+            "typo in insecure_options should be rejected: {err}"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------

@@ -89,7 +89,7 @@ const RETRY_BODY_LIMIT: u64 = 65_536; // 64 KiB
 ///     filter_chains: vec![],
 ///     max_connections: None,
 ///     protocol: Default::default(),
-///     tcp_idle_timeout_ms: None,
+///     tcp_session_timeout_ms: None,
 ///     tcp_max_duration_secs: None,
 ///     tls: None,
 ///     upstream: None,

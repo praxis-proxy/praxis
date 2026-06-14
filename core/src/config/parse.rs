@@ -64,6 +64,8 @@ fn check_yaml_size(raw: &str) -> Result<(), ProxyError> {
 /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
 fn check_yaml_expansion(raw: &str, threshold: usize) -> Result<(), ProxyError> {
     let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(raw) else {
+        // Unparseable YAML cannot contain alias bombs; the real parse
+        // error is reported by the subsequent Config deserialization.
         return Ok(());
     };
     let Ok(expanded) = serde_yaml::to_string(&value) else {

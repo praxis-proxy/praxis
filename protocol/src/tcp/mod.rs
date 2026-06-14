@@ -39,6 +39,7 @@ impl Protocol for PingoraTcp {
         pipelines: &ListenerPipelines,
     ) -> Result<Vec<watch::Sender<bool>>, ProxyError> {
         let groups = tls_setup::group_tcp_listeners(config);
+        tls_setup::validate_tcp_group_consistency(&groups)?;
         #[allow(clippy::expect_used, reason = "empty pipeline is infallible")]
         let fallback_pipeline = Arc::new(ArcSwap::from_pointee(
             FilterPipeline::build(&mut [], &FilterRegistry::with_builtins()).expect("empty pipeline is valid"),

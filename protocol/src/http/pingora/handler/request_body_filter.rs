@@ -6,18 +6,11 @@
 use bytes::Bytes;
 use pingora_core::Result;
 use pingora_proxy::Session;
+use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
 use praxis_filter::{BodyBuffer, BodyMode, FilterAction, FilterPipeline, Rejection};
 use tracing::warn;
 
 use super::super::{context::PingoraRequestCtx, convert::send_rejection};
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Defense-in-depth fallback when `StreamBuffer { max_bytes: None }`
-/// reaches the body filter layer (64 MiB).
-const BODY_FALLBACK_LIMIT: usize = 67_108_864; // 64 MiB
 
 // -----------------------------------------------------------------------------
 // Request Body Filters
@@ -80,7 +73,7 @@ pub(super) async fn execute(
 
         BodyMode::StreamBuffer { max_bytes } if !ctx.request_body_released => {
             if let Some(ref chunk) = *body {
-                let limit = max_bytes.unwrap_or(BODY_FALLBACK_LIMIT);
+                let limit = max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES);
                 let buf = ctx.request_body_buffer.get_or_insert_with(|| BodyBuffer::new(limit));
 
                 if buf.push(chunk.clone()).is_err() {
