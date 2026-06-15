@@ -322,20 +322,19 @@ async fn on_request_skips_for_get_to_unrelated_path() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn on_request_skips_for_delete_method() {
+async fn on_request_skips_delete_on_unrelated_path() {
     let filter = make_filter();
-    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_123");
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/chat/completions");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata("openai_responses_format.format", "openai_responses");
 
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
         matches!(action, FilterAction::Continue),
-        "should skip for DELETE method"
+        "DELETE to unrelated path should continue"
     );
     assert!(
         filter.store.get().is_none(),
-        "store should not be initialized for non-POST requests"
+        "store should not be initialized for unrelated DELETE"
     );
 }
 
@@ -1116,9 +1115,8 @@ async fn delete_existing_response_returns_200() {
     assert_eq!(rejection.status, 200, "existing response should return 200");
     assert_has_json_content_type(&rejection);
 
-    let body: serde_json::Value =
-        serde_json::from_slice(rejection.body.as_deref().expect("body should be present"))
-            .expect("body should be valid JSON");
+    let body: serde_json::Value = serde_json::from_slice(rejection.body.as_deref().expect("body should be present"))
+        .expect("body should be valid JSON");
     assert_eq!(body["id"], "resp_del1", "body should contain the response id");
     assert_eq!(
         body["object"], "response.deleted",
@@ -1140,15 +1138,16 @@ async fn delete_nonexistent_response_returns_404() {
     assert_eq!(rejection.status, 404, "nonexistent response should return 404");
     assert_has_json_content_type(&rejection);
 
-    let body: serde_json::Value =
-        serde_json::from_slice(rejection.body.as_deref().expect("body should be present"))
-            .expect("body should be valid JSON");
+    let body: serde_json::Value = serde_json::from_slice(rejection.body.as_deref().expect("body should be present"))
+        .expect("body should be valid JSON");
     assert_eq!(
         body["error"]["type"], "invalid_request_error",
         "error type should be invalid_request_error"
     );
     assert!(
-        body["error"]["message"].as_str().is_some_and(|m| m.contains("resp_missing")),
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("resp_missing")),
         "error message should reference the missing id"
     );
 }
