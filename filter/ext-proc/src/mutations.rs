@@ -70,18 +70,10 @@ pub(crate) fn response_to_proto_headers(ctx: &HttpFilterContext<'_>) -> HttpHead
     let mut headers = Vec::new();
 
     if let Some(resp) = ctx.response_header.as_ref() {
-        headers.push(HeaderValue {
-            key: ":status".to_owned(),
-            value: resp.status.as_u16().to_string(),
-            raw_value: Vec::new(),
-        });
+        headers.push(proto_header(":status", &resp.status.as_u16().to_string()));
 
         for (name, value) in &resp.headers {
-            headers.push(HeaderValue {
-                key: name.as_str().to_owned(),
-                value: value.to_str().unwrap_or_default().to_owned(),
-                raw_value: Vec::new(),
-            });
+            headers.push(proto_header(name.as_str(), value.to_str().unwrap_or_default()));
         }
     }
 
