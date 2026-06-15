@@ -18,144 +18,144 @@ page.
 
 ## Configs
 
-### Traffic Management
+### AI / Inference
 
 | File | Description |
 | ------ | ------------- |
-| [basic-reverse-proxy.yaml](configs/traffic-management/basic-reverse-proxy.yaml) | Minimal single-listener, single-cluster proxy |
-| [path-based-routing.yaml](configs/traffic-management/path-based-routing.yaml) | Route by URL path prefix to separate clusters |
-| [hosts.yaml](configs/traffic-management/hosts.yaml) | Route by Host header; one listener, multiple domains |
-| [canary-routing.yaml](configs/traffic-management/canary-routing.yaml) | Weighted traffic split for canary deployments |
-| [circuit-breaker.yaml](configs/traffic-management/circuit-breaker.yaml) | Per-cluster circuit breaker with closed/open/half-open states |
-| [round-robin.yaml](configs/traffic-management/round-robin.yaml) | Default strategy: even distribution across backends |
-| [weighted-load-balancing.yaml](configs/traffic-management/weighted-load-balancing.yaml) | Proportional traffic split via per-endpoint weights |
-| [least-connections.yaml](configs/traffic-management/least-connections.yaml) | Route to backend with fewest in-flight requests |
-| [p2c.yaml](configs/traffic-management/p2c.yaml) | Power-of-two-choices: O(1) load-aware selection |
-| [session-affinity.yaml](configs/traffic-management/session-affinity.yaml) | consistent_hash to pin a user to one backend |
-| [health-checks.yaml](configs/traffic-management/health-checks.yaml) | Active HTTP and TCP health check probes per cluster |
-| [timeout.yaml](configs/traffic-management/timeout.yaml) | 504 when upstream exceeds a latency SLA |
-| [rate-limiting.yaml](configs/traffic-management/rate-limiting.yaml) | Token bucket rate limiter with per-IP and global modes |
-| [static-response.yaml](configs/traffic-management/static-response.yaml) | Fixed response without upstream |
-| [redirect.yaml](configs/traffic-management/redirect.yaml) | 3xx redirects with path/query template substitution |
-| [hostname-upstream.yaml](configs/traffic-management/hostname-upstream.yaml) | Resolve hostname upstream endpoints such as `localhost:9000` |
-| [grpc-detection.yaml](configs/traffic-management/grpc-detection.yaml) | Detect gRPC content-type and branch-route by variant |
+| [a2a-classifier-routing.yaml](configs/ai/a2a-classifier-routing.yaml) | Routes A2A requests by body-derived method, family, task ID, and streaming detection |
+| [a2a-task-routing.yaml](configs/ai/a2a-task-routing.yaml) | Captures task ownership from non-streaming JSON SendMessage responses and routes follow-up task operations back to the backend cluster that created the task |
+| [ai-inference-body-based-routing.yaml](configs/ai/ai-inference-body-based-routing.yaml) | Routes LLM API requests to different backends based on the `model` field in the JSON request body |
+| [credential-injection.yaml](configs/ai/credential-injection.yaml) | Injects per-cluster API credentials into upstream requests and strips client-provided credentials to prevent forwarding |
+| [json-rpc-routing.yaml](configs/ai/json-rpc-routing.yaml) | Routes JSON-RPC 2.0 requests to different backends based on the "method" field in the JSON request body |
+| [mcp-classifier-routing.yaml](configs/ai/mcp-classifier-routing.yaml) | Routes MCP requests by body-derived method and tool name |
+| [model-to-header-routing.yaml](configs/ai/model-to-header-routing.yaml) | Routes LLM API requests to different backends based on the "model" field in the JSON request body |
+| [format-routing.yaml](configs/ai/openai/responses/format-routing.yaml) | Routes AI API traffic by detected body format |
+| [full-flow.yaml](configs/ai/openai/responses/full-flow.yaml) | Combines format classification, request validation, and backend routing into a single pipeline |
+| [request-validate.yaml](configs/ai/openai/responses/request-validate.yaml) | Validates Responses API requests and rejects invalid parameter combinations |
+| [response-store.yaml](configs/ai/openai/responses/response-store.yaml) | Persists non-streaming Responses API responses to a SQLite database and serves stored data via GET endpoints and handles DELETE /v1/responses/{id} locally |
+| [responses-routing.yaml](configs/ai/openai/responses/responses-routing.yaml) | Routes Responses API traffic by detected mode |
+| [prompt-enrichment.yaml](configs/ai/prompt-enrichment.yaml) | Injects system messages into OpenAI-compatible chat completion requests before forwarding to the upstream provider |
 
-### Payload Processing
+### Branching
 
 | File | Description |
 | ------ | ------------- |
-| [mcp-static-catalog.yaml](configs/payload-processing/mcp-static-catalog.yaml) | MCP static catalog and broker; tools/call routing in a follow-up PR |
-| [stream-buffer.yaml](configs/payload-processing/stream-buffer.yaml) | Stream-buffered body inspection before forwarding |
-| [compression.yaml](configs/payload-processing/compression.yaml) | Gzip, brotli, and zstd response compression |
-| [multi-field-extraction.yaml](configs/payload-processing/multi-field-extraction.yaml) | Extract multiple JSON fields into headers in one pass |
-| [conditional-field-extraction.yaml](configs/payload-processing/conditional-field-extraction.yaml) | Apply json_body_field only on matching request paths |
-| [field-extraction-access-control.yaml](configs/payload-processing/field-extraction-access-control.yaml) | Extract tenant_id from body for header-based routing |
-| [body-size-limit-with-extraction.yaml](configs/payload-processing/body-size-limit-with-extraction.yaml) | Global body size ceiling with json_body_field extraction |
-| [multi-listener-body-pipeline.yaml](configs/payload-processing/multi-listener-body-pipeline.yaml) | Three listeners with different body processing strategies |
-
-### Security
-
-| File | Description |
-| ------ | ------------- |
-| [csrf.yaml](configs/security/csrf.yaml) | CSRF protection via origin validation |
-| [forwarded-headers.yaml](configs/security/forwarded-headers.yaml) | X-Forwarded-For/Proto/Host with trusted proxies |
-| [guardrails.yaml](configs/security/guardrails.yaml) | Reject requests matching header or body string/regex rules |
-| [ip-acl.yaml](configs/security/ip-acl.yaml) | Allow or deny by source IP/CIDR |
-| [downstream-read-timeout.yaml](configs/security/downstream-read-timeout.yaml) | Protect against slow client attacks with read timeouts |
-| [cors.yaml](configs/security/cors.yaml) | CORS preflight handling with origin validation |
+| [conditional-skip-to.yaml](configs/branching/conditional-skip-to.yaml) | Skips browser-facing middleware for clean requests |
+| [conditional-terminal.yaml](configs/branching/conditional-terminal.yaml) | Short-circuits the pipeline when guardrails detects a dangerous request header |
+| [cross-chain-flat.yaml](configs/branching/cross-chain-flat.yaml) | A listener references two chains: preprocessing and routing |
+| [multiple-branches.yaml](configs/branching/multiple-branches.yaml) | Multiple branches on a single filter, evaluated in order |
+| [named-chain-ref.yaml](configs/branching/named-chain-ref.yaml) | A branch references a top-level chain by name instead of defining filters inline |
+| [nested-branches.yaml](configs/branching/nested-branches.yaml) | Branch filters that themselves contain branches, forming a multi-level decision tree |
+| [reentrance.yaml](configs/branching/reentrance.yaml) | Loops back to a named filter up to N times |
+| [unconditional-branch.yaml](configs/branching/unconditional-branch.yaml) | Always runs a utility chain before continuing the main pipeline |
 
 ### Observability
 
 | File | Description |
 | ------ | ------------- |
-| [access-logging.yaml](configs/observability/access-logging.yaml) | Access log with sampling |
-| [logging.yaml](configs/observability/logging.yaml) | request_id + access_log: correlation IDs and structured logs |
-| [tcp-access-log.yaml](configs/observability/tcp-access-log.yaml) | Structured JSON TCP connection logging |
+| [access-logging.yaml](configs/observability/access-logging.yaml) | Structured JSON logging with sampling; logs ~10% of requests. request_id ensures each log line has a correlation ID. access_log emits method, path, status, and timing |
+| [logging.yaml](configs/observability/logging.yaml) | request_id — ensures every request has a correlation ID |
+| [tcp-access-log.yaml](configs/observability/tcp-access-log.yaml) | Structured JSON logging of TCP connection events (connect and disconnect) |
 
-### Transformation
-
-| File | Description |
-| ------ | ------------- |
-| [header-manipulation.yaml](configs/transformation/header-manipulation.yaml) | Add, overwrite, and remove request/response headers |
-| [path-rewriting.yaml](configs/transformation/path-rewriting.yaml) | Strip prefix, add prefix, or regex replace on request paths |
-| [url-rewriting.yaml](configs/transformation/url-rewriting.yaml) | Regex path transformation and query string manipulation |
-
-### Protocols
+### Operations
 
 | File | Description |
 | ------ | ------------- |
-| [tcp-proxy.yaml](configs/protocols/tcp-proxy.yaml) | L4 bidirectional TCP forwarding |
-| [tcp-timeouts.yaml](configs/protocols/tcp-timeouts.yaml) | TCP proxy with idle and max duration timeouts |
-| [tcp-consistent-hash.yaml](configs/protocols/tcp-consistent-hash.yaml) | TCP load balancing with consistent-hash client IP affinity |
-| [tcp-least-connections.yaml](configs/protocols/tcp-least-connections.yaml) | TCP load balancing via least-connections strategy |
-| [tcp-round-robin.yaml](configs/protocols/tcp-round-robin.yaml) | TCP round-robin load balancing across replicas |
-| [mixed-protocol.yaml](configs/protocols/mixed-protocol.yaml) | HTTP + TCP listeners on one server |
-| [tls-termination.yaml](configs/protocols/tls-termination.yaml) | HTTPS listener; plain HTTP to backends |
-| [tls-cipher-suites.yaml](configs/protocols/tls-cipher-suites.yaml) | Restrict accepted TLS cipher suites per listener |
-| [tls-sni-routing.yaml](configs/protocols/tls-sni-routing.yaml) | Route TLS connections by SNI hostname without termination |
-| [tcp-tls-mtls.yaml](configs/protocols/tcp-tls-mtls.yaml) | TCP proxy with mutual TLS |
-| [tcp-tls-termination.yaml](configs/protocols/tcp-tls-termination.yaml) | TCP proxy with TLS termination |
-| [tls-http-reencrypt.yaml](configs/protocols/tls-http-reencrypt.yaml) | TLS termination with re-encryption to upstream |
-| [tls-mtls-both.yaml](configs/protocols/tls-mtls-both.yaml) | mTLS on both listener and upstream |
-| [tls-mtls-listener.yaml](configs/protocols/tls-mtls-listener.yaml) | mTLS on listener (require client cert) |
-| [tls-mtls-listener-request.yaml](configs/protocols/tls-mtls-listener-request.yaml) | mTLS on listener (request client cert) |
-| [tls-mtls-upstream.yaml](configs/protocols/tls-mtls-upstream.yaml) | mTLS to upstream (client cert) |
-| [tls-multi-cert.yaml](configs/protocols/tls-multi-cert.yaml) | SNI-based multi-certificate selection |
-| [tls-verify-disabled.yaml](configs/protocols/tls-verify-disabled.yaml) | Upstream TLS with verification disabled |
-| [tls-version-constraint.yaml](configs/protocols/tls-version-constraint.yaml) | Minimum TLS version constraint |
-| [upstream-ca-file.yaml](configs/protocols/upstream-ca-file.yaml) | Global upstream CA file reference |
-| [upstream-tls.yaml](configs/protocols/upstream-tls.yaml) | Plain HTTP listener; TLS to upstream with SNI |
-| [websocket.yaml](configs/protocols/websocket.yaml) | Transparent WebSocket upgrade proxying over HTTP |
+| [admin-interface.yaml](configs/operations/admin-interface.yaml) | Exposes an admin endpoint for operational health checks, readiness probes, and Prometheus metrics |
+| [container-default.yaml](configs/operations/container-default.yaml) | Default config for containerized deployments |
+| [hot-reload.yaml](configs/operations/hot-reload.yaml) | Filter pipelines are swapped atomically at runtime when the config file changes |
+| [log-overrides.yaml](configs/operations/log-overrides.yaml) | Use `runtime.log_overrides` to raise or lower log verbosity for specific modules without flooding output from every subsystem |
+| [max-connections.yaml](configs/operations/max-connections.yaml) | HTTP listeners return 503 with Retry-After: 1. TCP listeners close the socket immediately |
+| [multi-listener.yaml](configs/operations/multi-listener.yaml) | Demonstrates multiple HTTP listeners, each with its own filter pipeline |
+| [production-gateway.yaml](configs/operations/production-gateway.yaml) | Combines TLS, logging, timeouts, security headers, path routing, and load balancing |
+
+### Payload Processing
+
+| File | Description |
+| ------ | ------------- |
+| [body-size-limit-with-extraction.yaml](configs/payload-processing/body-size-limit-with-extraction.yaml) | Combines body_limits.max_request_bytes with json_body_field to enforce a global body ceiling while still performing body-based routing |
+| [compression.yaml](configs/payload-processing/compression.yaml) | Enables transparent response compression using Pingora's built-in compression module |
+| [conditional-field-extraction.yaml](configs/payload-processing/conditional-field-extraction.yaml) | Uses the condition system to apply json_body_field only on specific request paths |
+| [field-extraction-access-control.yaml](configs/payload-processing/field-extraction-access-control.yaml) | Extracts the "tenant_id" field from the JSON request body and promotes it to an X-Tenant-Id header |
+| [mcp-static-catalog.yaml](configs/payload-processing/mcp-static-catalog.yaml) | Provides a static MCP catalog and broker for initialize, tools/list, ping, and notifications/initialized requests |
+| [multi-field-extraction.yaml](configs/payload-processing/multi-field-extraction.yaml) | A single json_body_field filter extracts multiple top-level JSON fields into separate request headers in one pass |
+| [multi-listener-body-pipeline.yaml](configs/payload-processing/multi-listener-body-pipeline.yaml) | Three listeners, each with a different body processing strategy |
+| [stream-buffer.yaml](configs/payload-processing/stream-buffer.yaml) | json_body_field inspects request body chunks as they arrive and defers upstream forwarding until the field is extracted (or end-of-stream) |
 
 ### Pipeline
 
 | File | Description |
 | ------ | ------------- |
 | [default.yaml](../core/src/config/default.yaml) | Built-in default config (static JSON on /) |
-| [composed-chains.yaml](configs/pipeline/composed-chains.yaml) | Multiple named chains composed per listener |
-| [conditional-filters.yaml](configs/pipeline/conditional-filters.yaml) | when/unless conditions on request and response phase |
-| [branch-chains.yaml](configs/pipeline/branch-chains.yaml) | All branch chain scenarios in one config (six patterns) |
-| [failure-mode.yaml](configs/pipeline/failure-mode.yaml) | Failure mode behavior (open continues, closed rejects on error) |
+| [branch-chains.yaml](configs/pipeline/branch-chains.yaml) | Filters write structured results to FilterResultSet |
+| [composed-chains.yaml](configs/pipeline/composed-chains.yaml) | Multiple named chains are composed per listener |
+| [conditional-filters.yaml](configs/pipeline/conditional-filters.yaml) | Filters support `conditions` (request phase) and `response_conditions` (response phase) to gate execution |
+| [failure-mode.yaml](configs/pipeline/failure-mode.yaml) | Demonstrates open and closed failure handling for filters |
 
-### AI / Inference
-
-| File | Description |
-| ------ | ------------- |
-| [a2a-classifier-routing.yaml](configs/ai/a2a-classifier-routing.yaml) | Route A2A requests by method, family, task ID, and streaming detection |
-| [a2a-task-routing.yaml](configs/ai/a2a-task-routing.yaml) | Local A2A task ownership routing from JSON responses |
-| [ai-inference-body-based-routing.yaml](configs/ai/ai-inference-body-based-routing.yaml) | Route LLM requests by model field in JSON body |
-| [credential-injection.yaml](configs/ai/credential-injection.yaml) | Inject per-cluster API credentials and strip client tokens |
-| [json-rpc-routing.yaml](configs/ai/json-rpc-routing.yaml) | Route JSON-RPC 2.0 requests by method for MCP and A2A protocols |
-| [mcp-classifier-routing.yaml](configs/ai/mcp-classifier-routing.yaml) | Route MCP requests by body-derived method and tool name |
-| [model-to-header-routing.yaml](configs/ai/model-to-header-routing.yaml) | Route by model field in JSON body via X-Model header |
-| [prompt-enrichment.yaml](configs/ai/prompt-enrichment.yaml) | Inject system messages into chat completion requests |
-| [full-flow.yaml](configs/ai/openai/responses/full-flow.yaml) | Full Responses API gateway flow |
-| [format-routing.yaml](configs/ai/openai/responses/format-routing.yaml) | Route by AI API format (Responses vs Chat Completions) |
-| [responses-routing.yaml](configs/ai/openai/responses/responses-routing.yaml) | Route Responses API by mode (stateless vs stateful) |
-| [request-validate.yaml](configs/ai/openai/responses/request-validate.yaml) | Validate Responses API requests and reject invalid parameter combinations |
-| [response-store.yaml](configs/ai/openai/responses/response-store.yaml) | Persist and retrieve responses via GET /v1/responses/{id} |
-
-### Branching
+### Protocols
 
 | File | Description |
 | ------ | ------------- |
-| [unconditional-branch.yaml](configs/branching/unconditional-branch.yaml) | Always-fire branch for injecting side-effect chains |
-| [conditional-terminal.yaml](configs/branching/conditional-terminal.yaml) | Short-circuit the pipeline with a static response on result match |
-| [conditional-skip-to.yaml](configs/branching/conditional-skip-to.yaml) | Skip filters by jumping to a named rejoin point on result match |
-| [multiple-branches.yaml](configs/branching/multiple-branches.yaml) | Multiple branches on one filter with first-match-wins evaluation |
-| [named-chain-ref.yaml](configs/branching/named-chain-ref.yaml) | Reference a top-level chain by name instead of inline definition |
-| [nested-branches.yaml](configs/branching/nested-branches.yaml) | Multi-level decision tree with branches inside branches |
-| [reentrance.yaml](configs/branching/reentrance.yaml) | Loop back to a named filter with max_iterations cap |
-| [cross-chain-flat.yaml](configs/branching/cross-chain-flat.yaml) | Branch across concatenated chains via flat pipeline name index |
+| [mixed-protocol.yaml](configs/protocols/mixed-protocol.yaml) | HTTP and TCP listeners run on a single server instance |
+| [tcp-consistent-hash.yaml](configs/protocols/tcp-consistent-hash.yaml) | TCP consistent-hash load balancing (client IP affinity) |
+| [tcp-least-connections.yaml](configs/protocols/tcp-least-connections.yaml) | TCP least-connections load balancing |
+| [tcp-proxy.yaml](configs/protocols/tcp-proxy.yaml) | Bidirectional TCP forwarding |
+| [tcp-round-robin.yaml](configs/protocols/tcp-round-robin.yaml) | TCP round-robin load balancing across database replicas |
+| [tcp-timeouts.yaml](configs/protocols/tcp-timeouts.yaml) | TCP proxy with session and max duration timeouts. `tcp_session_timeout_ms` wraps the entire TCP forwarding session in a hard deadline, terminating connections after the threshold regardless of activity. `tcp_max_duration_secs` caps the total session duration in seconds |
+| [tcp-tls-mtls.yaml](configs/protocols/tcp-tls-mtls.yaml) | The proxy requires TCP clients to present a valid TLS certificate signed by the trusted CA |
+| [tcp-tls-termination.yaml](configs/protocols/tcp-tls-termination.yaml) | TLS on the listener; plain TCP to the upstream backend |
+| [tls-cipher-suites.yaml](configs/protocols/tls-cipher-suites.yaml) | Restrict accepted cipher suites per listener |
+| [tls-http-reencrypt.yaml](configs/protocols/tls-http-reencrypt.yaml) | HTTPS on the listener; TLS to the upstream backend |
+| [tls-mtls-both.yaml](configs/protocols/tls-mtls-both.yaml) | Client mTLS to the proxy (client cert required), and proxy mTLS to the upstream backend (proxy presents its own client certificate) |
+| [tls-mtls-listener-request.yaml](configs/protocols/tls-mtls-listener-request.yaml) | The proxy requests a client certificate but does not require one |
+| [tls-mtls-listener.yaml](configs/protocols/tls-mtls-listener.yaml) | The proxy requires clients to present a valid TLS certificate signed by the trusted CA |
+| [tls-mtls-upstream.yaml](configs/protocols/tls-mtls-upstream.yaml) | Plain HTTP from clients; the proxy presents a client certificate to the upstream backend, which requires mutual TLS authentication |
+| [tls-multi-cert.yaml](configs/protocols/tls-multi-cert.yaml) | Multiple certificates on one listener; Praxis selects the certificate matching the client's SNI hostname |
+| [tls-sni-routing.yaml](configs/protocols/tls-sni-routing.yaml) | Routes TLS connections to different upstreams based on the Server Name Indication (SNI) hostname in the ClientHello |
+| [tls-termination.yaml](configs/protocols/tls-termination.yaml) | HTTPS on the listener; plain HTTP to the backend |
+| [tls-verify-disabled.yaml](configs/protocols/tls-verify-disabled.yaml) | Plain HTTP listener; TLS to the upstream with certificate verification disabled |
+| [tls-version-constraint.yaml](configs/protocols/tls-version-constraint.yaml) | Restrict accepted TLS versions via `min_version` |
+| [upstream-ca-file.yaml](configs/protocols/upstream-ca-file.yaml) | Sets a trusted CA bundle for all upstream TLS connections via `runtime.upstream_ca_file` |
+| [upstream-tls.yaml](configs/protocols/upstream-tls.yaml) | Plain HTTP on the listener; TLS to the upstream |
+| [websocket.yaml](configs/protocols/websocket.yaml) | HTTP listener that transparently proxies WebSocket upgrade requests |
 
-### Operations
+### Security
 
 | File | Description |
 | ------ | ------------- |
-| [production-gateway.yaml](configs/operations/production-gateway.yaml) | Full production setup with composed chains |
-| [multi-listener.yaml](configs/operations/multi-listener.yaml) | Multiple listeners sharing a filter chain |
-| [hot-reload.yaml](configs/operations/hot-reload.yaml) | Dynamic config reload without restart |
-| [admin-interface.yaml](configs/operations/admin-interface.yaml) | Admin interface with health endpoints |
-| [container-default.yaml](configs/operations/container-default.yaml) | Default containerized deployment with public binding |
-| [max-connections.yaml](configs/operations/max-connections.yaml) | Per-listener connection limit with 503 rejection |
-| [log-overrides.yaml](configs/operations/log-overrides.yaml) | Per-module log level tuning via runtime config |
+| [cors.yaml](configs/security/cors.yaml) | Spec-compliant CORS filter with preflight handling, origin validation, and credential support |
+| [csrf.yaml](configs/security/csrf.yaml) | Cross-site request forgery protection via origin validation |
+| [downstream-read-timeout.yaml](configs/security/downstream-read-timeout.yaml) | Protects against slow client attacks by limiting how long the proxy waits for data from downstream clients |
+| [forwarded-headers.yaml](configs/security/forwarded-headers.yaml) | Injects X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host into upstream requests |
+| [guardrails.yaml](configs/security/guardrails.yaml) | Reject requests that match header or body inspection rules |
+| [ip-acl.yaml](configs/security/ip-acl.yaml) | Allow or deny requests by source IP/CIDR |
+
+### Traffic Management
+
+| File | Description |
+| ------ | ------------- |
+| [basic-reverse-proxy.yaml](configs/traffic-management/basic-reverse-proxy.yaml) | Minimal config: one listener, one upstream, default filter chain |
+| [canary-routing.yaml](configs/traffic-management/canary-routing.yaml) | Sends ~10% of traffic to a canary backend while the stable backend handles the remaining ~90% |
+| [circuit-breaker.yaml](configs/traffic-management/circuit-breaker.yaml) | Prevents cascading failures by tracking consecutive upstream errors per cluster |
+| [grpc-detection.yaml](configs/traffic-management/grpc-detection.yaml) | Detects gRPC requests from the content-type header and promotes the variant to filter metadata and results |
+| [health-checks.yaml](configs/traffic-management/health-checks.yaml) | Per-cluster health checks probe endpoints on a timer and remove unhealthy backends from the load balancer rotation |
+| [hostname-upstream.yaml](configs/traffic-management/hostname-upstream.yaml) | Demonstrates using DNS hostnames instead of IP addresses for upstream endpoints |
+| [hosts.yaml](configs/traffic-management/hosts.yaml) | One listener serves multiple domains |
+| [least-connections.yaml](configs/traffic-management/least-connections.yaml) | Routes each request to the backend with the fewest in-flight requests |
+| [p2c.yaml](configs/traffic-management/p2c.yaml) | Samples two random endpoints and picks the one with fewer in-flight requests |
+| [path-based-routing.yaml](configs/traffic-management/path-based-routing.yaml) | Routes by URL path prefix |
+| [rate-limiting.yaml](configs/traffic-management/rate-limiting.yaml) | Token bucket rate limiter with per-IP or global modes |
+| [redirect.yaml](configs/traffic-management/redirect.yaml) | Returns a 3xx redirect without contacting any upstream |
+| [round-robin.yaml](configs/traffic-management/round-robin.yaml) | Default strategy |
+| [session-affinity.yaml](configs/traffic-management/session-affinity.yaml) | Hashes a request header to pin a user's requests to one backend |
+| [static-response.yaml](configs/traffic-management/static-response.yaml) | Returns a fixed response without contacting any upstream |
+| [timeout.yaml](configs/traffic-management/timeout.yaml) | Returns 504 if the upstream takes longer than timeout_ms to respond |
+| [weighted-load-balancing.yaml](configs/traffic-management/weighted-load-balancing.yaml) | Traffic split proportional to per-endpoint weights |
+
+### Transformation
+
+| File | Description |
+| ------ | ------------- |
+| [header-manipulation.yaml](configs/transformation/header-manipulation.yaml) | Add, overwrite, and remove headers on requests and responses |
+| [path-rewriting.yaml](configs/transformation/path-rewriting.yaml) | Rewrite request paths before forwarding to upstream |
+| [url-rewriting.yaml](configs/transformation/url-rewriting.yaml) | Regex-based path transformation and query string manipulation |
