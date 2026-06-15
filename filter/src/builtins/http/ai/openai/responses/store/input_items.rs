@@ -89,9 +89,8 @@ pub struct InputItemPage {
 /// Extract and paginate input items from a [`ResponseRecord`].
 ///
 /// Items are extracted from the stored `input` JSON column and
-/// paginated in memory using an offset-based cursor. This is
-/// specific to the `OpenAI` Responses API `/v1/responses/{id}/input_items`
-/// endpoint.
+/// paginated in memory using item ID cursors when available. Numeric
+/// offset cursors remain supported for stored inputs without item IDs.
 ///
 /// # Errors
 ///
@@ -111,9 +110,8 @@ pub fn list_input_items(record: &ResponseRecord, params: &ListParams) -> Result<
     let offset = params
         .cursor
         .as_deref()
-        .map(str::parse::<usize>)
-        .transpose()
-        .map_err(|e| StoreError::Database(format!("invalid input_items cursor: {e}")))?
+        .map(|cursor| cursor_offset(&items, cursor))
+        .transpose()?
         .unwrap_or(0);
 
     let limit = usize::try_from(params.effective_limit()).map_err(|e| StoreError::Database(e.to_string()))?;
@@ -123,13 +121,52 @@ pub fn list_input_items(record: &ResponseRecord, params: &ListParams) -> Result<
         .min(items.len());
     let has_more = end < items.len();
 
-    let data: Vec<serde_json::Value> = items.into_iter().skip(offset).take(limit).collect();
+    let data: Vec<serde_json::Value> = items.iter().skip(offset).take(limit).cloned().collect();
 
-    let next_cursor = if has_more { Some(end.to_string()) } else { None };
+    let next_cursor = page_next_cursor(&data, end, has_more);
 
     Ok(InputItemPage {
         data,
         next_cursor,
         has_more,
     })
+}
+
+/// Resolve an `after` cursor to the offset where the next page starts.
+/// ID-based lookup takes precedence: if an item's `id` field matches
+/// the cursor string, the offset is the position after that item.
+/// Numeric parsing is a fallback for inputs without item IDs.
+fn cursor_offset(items: &[serde_json::Value], cursor: &str) -> Result<usize, StoreError> {
+    if let Some(offset) = cursor_id_offset(items, cursor) {
+        return Ok(offset);
+    }
+
+    cursor
+        .parse::<usize>()
+        .map_err(|e| StoreError::Database(format!("invalid input_items cursor: {e}")))
+}
+
+/// Return the offset after the item whose `id` matches the cursor.
+fn cursor_id_offset(items: &[serde_json::Value], cursor: &str) -> Option<usize> {
+    items
+        .iter()
+        .position(|item| item_id(item) == Some(cursor))
+        .map(|index| index + 1)
+}
+
+/// Return the public item ID when the input item has one.
+fn item_id(item: &serde_json::Value) -> Option<&str> {
+    item.get("id").and_then(serde_json::Value::as_str)
+}
+
+/// Return the cursor clients should use to fetch the next page.
+fn page_next_cursor(data: &[serde_json::Value], end: usize, has_more: bool) -> Option<String> {
+    if !has_more {
+        return None;
+    }
+
+    data.last()
+        .and_then(item_id)
+        .map(str::to_owned)
+        .or_else(|| Some(end.to_string()))
 }

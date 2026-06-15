@@ -71,7 +71,9 @@ pub struct InsecureOptions {
     /// but log violations as warnings instead of rejecting requests.
     pub csrf_log_only: bool,
 
-    /// Skip pipeline ordering validation.
+    /// Skip pipeline ordering validation. This blanket-disables all
+    /// structural safety checks including conditional security filters
+    /// and `failure_mode: open` detection.
     pub skip_pipeline_validation: bool,
 }
 

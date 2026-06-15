@@ -312,6 +312,19 @@ mod tests {
     }
 
     #[test]
+    fn v6_range_at_96_matches_all_v4() {
+        let r = CidrRange::parse("::ffff:0.0.0.0/96").unwrap();
+        assert!(
+            r.contains(&"10.0.0.1".parse().unwrap()),
+            "/96 mapped range covers all IPv4 addresses"
+        );
+        assert!(
+            r.contains(&"192.168.1.1".parse().unwrap()),
+            "/96 mapped range covers all IPv4 addresses"
+        );
+    }
+
+    #[test]
     fn contains_v6_match() {
         let r = CidrRange::parse("fd00::/16").unwrap();
         assert!(r.contains(&"fd00::1".parse().unwrap()), "fd00::1 is within fd00::/16");

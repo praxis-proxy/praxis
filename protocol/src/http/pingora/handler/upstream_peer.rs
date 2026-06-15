@@ -83,6 +83,9 @@ async fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
 ///
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls, address: &str) {
+    // verify: false disables both cert and hostname verification as a
+    // single toggle. Splitting into verify_cert / verify_hostname would
+    // require a config schema change (accepted design limitation).
     if !tls.verify() {
         tracing::debug!(upstream = %address, "upstream TLS verification disabled for this peer");
         peer.options.verify_cert = false;
@@ -129,7 +132,10 @@ fn client_cert_from_cached(cached: &praxis_tls::CachedClientCert) -> pingora_cor
 fn derive_sni(address: &str) -> String {
     let host = address.rsplit_once(':').map_or(address, |(h, _)| h);
     if host.parse::<std::net::IpAddr>().is_ok() {
-        tracing::debug!(address, "upstream address is an IP; SNI left empty");
+        tracing::warn!(
+            address,
+            "upstream is an IP without explicit SNI; TLS hostname verification is meaningless"
+        );
         return String::new();
     }
     tracing::debug!(address, sni = host, "derived SNI from upstream address");
@@ -187,7 +193,10 @@ async fn resolve_address(address: &str) -> Result<SocketAddr> {
 
     dns_cache()
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(|e| {
+            tracing::warn!("DNS cache mutex poisoned; recovering");
+            e.into_inner()
+        })
         .insert(
             address.to_owned(),
             DnsCacheEntry {
@@ -200,8 +209,15 @@ async fn resolve_address(address: &str) -> Result<SocketAddr> {
 }
 
 /// Check the DNS cache for a non-expired entry.
+///
+/// Evicts expired entries on every 64th call to bound cache growth.
 fn lookup_cached(address: &str) -> Option<SocketAddr> {
-    let cache = dns_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    static CALL_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let mut cache = dns_cache().lock().unwrap_or_else(|e| {
+        tracing::warn!("DNS cache mutex poisoned; recovering");
+        e.into_inner()
+    });
     let result = cache.get(address).and_then(|entry| {
         if entry.resolved_at.elapsed().as_secs() >= DNS_TTL_SECS {
             return None;
@@ -213,6 +229,14 @@ fn lookup_cached(address: &str) -> Option<SocketAddr> {
             .or_else(|| entry.addrs.first())
             .copied()
     });
+
+    if CALL_COUNT
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        .is_multiple_of(64)
+    {
+        cache.retain(|_, entry| entry.resolved_at.elapsed().as_secs() < DNS_TTL_SECS);
+    }
+
     drop(cache);
     result
 }

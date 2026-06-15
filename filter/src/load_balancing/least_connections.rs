@@ -25,11 +25,11 @@ use super::endpoint::WeightedEndpoint;
 /// influences tie-breaking: when two endpoints have equal
 /// connection counts, the one with the higher weight wins.
 pub(crate) struct LeastConnections {
-    /// Deduplicated endpoint list with weights and original indices.
-    endpoints: Vec<WeightedEndpoint>,
-
     /// Per-endpoint active-request counter.
     pub(crate) counters: HashMap<Arc<str>, AtomicUsize>,
+
+    /// Deduplicated endpoint list with weights and original indices.
+    endpoints: Vec<WeightedEndpoint>,
 }
 
 impl LeastConnections {
@@ -39,7 +39,7 @@ impl LeastConnections {
             .iter()
             .map(|ep| (Arc::clone(&ep.address), AtomicUsize::new(0)))
             .collect();
-        Self { endpoints, counters }
+        Self { counters, endpoints }
     }
 
     /// Pick the healthy endpoint with the fewest in-flight requests.

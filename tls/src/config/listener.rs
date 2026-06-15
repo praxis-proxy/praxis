@@ -210,7 +210,7 @@ impl ListenerTls {
 
         if self.client_cert_mode != ClientCertMode::None && self.client_ca.is_none() {
             return Err(TlsError::MissingClientCa {
-                mode: self.client_cert_mode.clone(),
+                mode: self.client_cert_mode,
             });
         }
 
@@ -289,7 +289,7 @@ impl ListenerTls {
 /// let mode: ClientCertMode = serde_yaml::from_str("none").unwrap();
 /// assert!(matches!(mode, ClientCertMode::None));
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Default, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientCertMode {
     /// Do not request a client certificate (default).
@@ -318,7 +318,7 @@ pub enum ClientCertMode {
 /// let v: TlsVersion = serde_yaml::from_str("tls12").unwrap();
 /// assert!(matches!(v, TlsVersion::Tls12));
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsVersion {
     /// TLS 1.2 (allows both 1.2 and 1.3).

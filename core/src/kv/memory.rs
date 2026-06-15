@@ -83,8 +83,17 @@ impl InMemoryKvBackend {
     }
 }
 
+/// Maximum number of compiled regex patterns to cache.
+const MAX_REGEX_CACHE_SIZE: usize = 10_000;
+
+/// Maximum number of entries per store.
+const MAX_ENTRIES: usize = 100_000;
+
 impl InMemoryKvBackend {
     /// Retrieve a cached compiled regex or compile and cache it.
+    ///
+    /// The cache is bounded at [`MAX_REGEX_CACHE_SIZE`] entries. When
+    /// the cap is reached, new patterns compile but are not cached.
     ///
     /// # Errors
     ///
@@ -95,7 +104,9 @@ impl InMemoryKvBackend {
             return Ok(entry.value().clone());
         }
         let compiled = Regex::new(pattern).map_err(|e| format!("invalid regex pattern '{pattern}': {e}"))?;
-        self.regex_cache.entry(pattern.to_owned()).or_insert(compiled.clone());
+        if self.regex_cache.len() < MAX_REGEX_CACHE_SIZE {
+            self.regex_cache.entry(pattern.to_owned()).or_insert(compiled.clone());
+        }
         Ok(compiled)
     }
 }
@@ -112,6 +123,10 @@ impl KvBackend for InMemoryKvBackend {
     }
 
     fn set(&self, key: &str, value: Arc<str>) {
+        if self.data.len() >= MAX_ENTRIES && !self.data.contains_key(key) {
+            tracing::warn!(key, limit = MAX_ENTRIES, "KV store entry limit reached; insert skipped");
+            return;
+        }
         self.data.insert(Arc::from(key), value);
     }
 
@@ -413,6 +428,29 @@ mod tests {
     fn from_pairs_empty_vec() {
         let store = InMemoryKvBackend::from_pairs(vec![]);
         assert!(store.is_empty(), "from_pairs with empty vec should be empty");
+    }
+
+    #[test]
+    fn set_allows_overwrite_at_capacity() {
+        let store = InMemoryKvBackend::new();
+        store.set("existing", Arc::from("v1"));
+        for i in 1..MAX_ENTRIES {
+            store.set(&format!("k{i}"), Arc::from("v"));
+        }
+        assert_eq!(store.len(), MAX_ENTRIES, "store should be at capacity");
+
+        store.set("existing", Arc::from("v2"));
+        assert_eq!(
+            store.get("existing").as_deref(),
+            Some("v2"),
+            "overwrite of existing key should succeed at capacity"
+        );
+
+        store.set("new_key", Arc::from("rejected"));
+        assert!(
+            store.get("new_key").is_none(),
+            "new key insert should be rejected at capacity"
+        );
     }
 
     #[test]

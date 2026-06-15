@@ -143,6 +143,8 @@ impl CompressionFilter {
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: CompressionFilterConfig = parse_filter_config("compression", config)?;
 
+        validate_levels(&cfg)?;
+
         let gzip_enabled = cfg.gzip.as_ref().is_none_or(|g| g.enabled);
         let brotli_enabled = cfg.brotli.as_ref().is_none_or(|b| b.enabled);
         let zstd_enabled = cfg.zstd.as_ref().is_none_or(|z| z.enabled);
@@ -193,6 +195,47 @@ impl HttpFilter for CompressionFilter {
         debug!("compression filter active; per-response checks handled by handler");
         Ok(FilterAction::Continue)
     }
+}
+
+// -----------------------------------------------------------------------------
+// Validation
+// -----------------------------------------------------------------------------
+
+/// Maximum compression levels per algorithm.
+const MAX_GZIP_LEVEL: u32 = 9;
+/// Maximum brotli compression level.
+const MAX_BROTLI_LEVEL: u32 = 11;
+/// Maximum zstd compression level.
+const MAX_ZSTD_LEVEL: u32 = 22;
+
+/// Validate compression levels are within algorithm-defined bounds.
+fn validate_levels(cfg: &CompressionFilterConfig) -> Result<(), FilterError> {
+    if cfg.level > MAX_ZSTD_LEVEL {
+        return Err(format!(
+            "compression: default level ({}) exceeds maximum ({MAX_ZSTD_LEVEL})",
+            cfg.level
+        )
+        .into());
+    }
+    if let Some(g) = &cfg.gzip
+        && let Some(lvl) = g.level
+        && lvl > MAX_GZIP_LEVEL
+    {
+        return Err(format!("compression: gzip level ({lvl}) exceeds maximum ({MAX_GZIP_LEVEL})").into());
+    }
+    if let Some(b) = &cfg.brotli
+        && let Some(lvl) = b.level
+        && lvl > MAX_BROTLI_LEVEL
+    {
+        return Err(format!("compression: brotli level ({lvl}) exceeds maximum ({MAX_BROTLI_LEVEL})").into());
+    }
+    if let Some(z) = &cfg.zstd
+        && let Some(lvl) = z.level
+        && lvl > MAX_ZSTD_LEVEL
+    {
+        return Err(format!("compression: zstd level ({lvl}) exceeds maximum ({MAX_ZSTD_LEVEL})").into());
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -311,6 +354,50 @@ zstd:
         let config: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
         let filter = CompressionFilter::from_config(&config).unwrap();
         assert_eq!(filter.name(), "compression", "per-algorithm config should parse");
+    }
+
+    #[test]
+    fn from_config_rejects_excessive_default_level() {
+        let config: serde_yaml::Value = serde_yaml::from_str("level: 99").unwrap();
+        let err = CompressionFilter::from_config(&config).err().expect("should fail");
+        assert!(
+            err.to_string().contains("default level (99) exceeds maximum"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn from_config_rejects_excessive_gzip_level() {
+        let yaml = "gzip:\n  level: 10";
+        let config: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let err = CompressionFilter::from_config(&config).err().expect("should fail");
+        assert!(err.to_string().contains("gzip level (10)"), "got: {err}");
+    }
+
+    #[test]
+    fn from_config_rejects_excessive_brotli_level() {
+        let yaml = "brotli:\n  level: 12";
+        let config: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let err = CompressionFilter::from_config(&config).err().expect("should fail");
+        assert!(err.to_string().contains("brotli level (12)"), "got: {err}");
+    }
+
+    #[test]
+    fn from_config_rejects_excessive_zstd_level() {
+        let yaml = "zstd:\n  level: 23";
+        let config: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        let err = CompressionFilter::from_config(&config).err().expect("should fail");
+        assert!(err.to_string().contains("zstd level (23)"), "got: {err}");
+    }
+
+    #[test]
+    fn from_config_accepts_max_valid_levels() {
+        let yaml = "gzip:\n  level: 9\nbrotli:\n  level: 11\nzstd:\n  level: 22";
+        let config: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            CompressionFilter::from_config(&config).is_ok(),
+            "max valid levels should be accepted"
+        );
     }
 
     // -------------------------------------------------------------------------

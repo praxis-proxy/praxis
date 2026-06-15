@@ -56,6 +56,10 @@ pub struct Cluster {
     #[serde(default)]
     pub idle_timeout_ms: Option<u64>,
 
+    /// Load-balancing algorithm for this cluster. Defaults to `round_robin`.
+    #[serde(default)]
+    pub load_balancer_strategy: LoadBalancerStrategy,
+
     /// Maximum concurrent in-flight requests to this cluster.
     ///
     /// When set, excess requests receive 503. Prevents a single
@@ -73,10 +77,6 @@ pub struct Cluster {
     /// ```
     #[serde(default)]
     pub max_connections: Option<u32>,
-
-    /// Load-balancing algorithm for this cluster. Defaults to `round_robin`.
-    #[serde(default)]
-    pub load_balancer_strategy: LoadBalancerStrategy,
 
     /// Read timeout in milliseconds.
     #[serde(default)]
@@ -116,13 +116,13 @@ impl Cluster {
     /// ```
     pub fn with_defaults(name: &str, endpoints: Vec<Endpoint>) -> Self {
         Self {
+            name: Arc::from(name),
             connection_timeout_ms: None,
             endpoints,
             health_check: None,
             idle_timeout_ms: None,
             load_balancer_strategy: LoadBalancerStrategy::default(),
             max_connections: None,
-            name: Arc::from(name),
             read_timeout_ms: None,
             tls: None,
             total_connection_timeout_ms: None,

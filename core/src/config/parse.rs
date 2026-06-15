@@ -64,6 +64,8 @@ fn check_yaml_size(raw: &str) -> Result<(), ProxyError> {
 /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
 fn check_yaml_expansion(raw: &str, threshold: usize) -> Result<(), ProxyError> {
     let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(raw) else {
+        // Unparseable YAML cannot contain alias bombs; the real parse
+        // error is reported by the subsequent Config deserialization.
         return Ok(());
     };
     let Ok(expanded) = serde_yaml::to_string(&value) else {
@@ -131,6 +133,19 @@ mod tests {
         let huge = "x".repeat(5 * 1024 * 1024);
         let err = check_yaml_safety(&huge).unwrap_err();
         assert!(err.to_string().contains("too large"), "should reject oversized YAML");
+    }
+
+    #[test]
+    fn accept_yaml_at_exact_max_size() {
+        let exact = "x".repeat(MAX_YAML_BYTES);
+        check_yaml_size(&exact).expect("YAML at exactly MAX_YAML_BYTES should pass");
+    }
+
+    #[test]
+    fn reject_yaml_one_byte_over_max() {
+        let over = "x".repeat(MAX_YAML_BYTES + 1);
+        let err = check_yaml_size(&over).unwrap_err();
+        assert!(err.to_string().contains("too large"), "got: {err}");
     }
 
     #[test]

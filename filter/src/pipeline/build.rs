@@ -5,7 +5,7 @@
 
 use std::{collections::HashMap, mem, sync::Arc};
 
-use praxis_core::{config::FilterEntry, time::SystemTimeSource};
+use praxis_core::{config::FilterEntry, id::IdGenerator, time::SystemTimeSource};
 use tracing::{debug, warn};
 
 use super::{FilterPipeline, body::compute_body_capabilities, filter::PipelineFilter};
@@ -53,6 +53,7 @@ impl FilterPipeline {
             compression,
             filters,
             health_registry: None,
+            id_generator: Arc::new(IdGenerator::new()),
             kv_stores: None,
             #[cfg(feature = "ai-inference")]
             response_stores: None,
@@ -85,6 +86,7 @@ impl FilterPipeline {
             compression,
             filters,
             health_registry: None,
+            id_generator: Arc::new(IdGenerator::new()),
             kv_stores: None,
             #[cfg(feature = "ai-inference")]
             response_stores: None,

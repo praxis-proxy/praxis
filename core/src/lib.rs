@@ -13,6 +13,8 @@ pub mod connectivity;
 pub mod errors;
 /// Shared health state types for active health checking.
 pub mod health;
+/// Per-instance request ID generation.
+pub mod id;
 /// Key-value store trait and registry.
 pub mod kv;
 /// Tracing subscriber setup.

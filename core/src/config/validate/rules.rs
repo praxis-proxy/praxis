@@ -17,7 +17,7 @@ use super::{
     listener::{validate_listener_names, validate_listeners},
 };
 use crate::{
-    config::{BodyLimitsConfig, Config, ProtocolKind},
+    config::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, Config, ProtocolKind},
     errors::ProxyError,
 };
 
@@ -45,13 +45,13 @@ impl Config {
         validate_branch_chains(&self.filter_chains)?;
         validate_admin_address(self.admin.address.as_deref(), self.insecure_options.allow_public_admin)?;
 
-        let all_tcp = self.listeners.iter().all(|l| l.protocol == ProtocolKind::Tcp);
-        let has_chains = self.listeners.iter().any(|l| !l.filter_chains.is_empty());
-
-        if !all_tcp && !has_chains {
-            return Err(ProxyError::Config(
-                "at least one filter chain required for HTTP listeners".into(),
-            ));
+        for listener in &self.listeners {
+            if listener.protocol != ProtocolKind::Tcp && listener.filter_chains.is_empty() {
+                return Err(ProxyError::Config(format!(
+                    "listener '{}': at least one filter chain required for HTTP listeners",
+                    listener.name
+                )));
+            }
         }
 
         validate_body_limits(&self.body_limits, self.insecure_options.allow_unbounded_body)?;
@@ -70,6 +70,9 @@ impl Config {
 
 /// Require both body limits unless the operator opts out.
 fn validate_body_limits(limits: &BodyLimitsConfig, allow_unbounded: bool) -> Result<(), ProxyError> {
+    validate_body_limit_ceiling("max_request_bytes", limits.max_request_bytes)?;
+    validate_body_limit_ceiling("max_response_bytes", limits.max_response_bytes)?;
+
     let missing_request = limits.max_request_bytes.is_none();
     let missing_response = limits.max_response_bytes.is_none();
 
@@ -96,6 +99,18 @@ fn validate_body_limits(limits: &BodyLimitsConfig, allow_unbounded: bool) -> Res
             .max_response_bytes
             .map_or_else(|| "none".to_owned(), |v| v.to_string()),
     )))
+}
+
+/// Reject a body limit that exceeds the absolute ceiling.
+fn validate_body_limit_ceiling(field: &str, value: Option<usize>) -> Result<(), ProxyError> {
+    if let Some(v) = value
+        && v > ABSOLUTE_MAX_BODY_BYTES
+    {
+        return Err(ProxyError::Config(format!(
+            "body_limits.{field} ({v} bytes) exceeds maximum ({ABSOLUTE_MAX_BODY_BYTES} bytes / 64 MiB)"
+        )));
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -368,7 +383,34 @@ listeners:
     address: "0.0.0.0:80"
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
-        assert!(err.to_string().contains("at least one filter chain"));
+        assert!(
+            err.to_string().contains("at least one filter chain"),
+            "should reject HTTP listener without chains: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_http_listener_without_chains_when_sibling_has_chains() {
+        let yaml = r#"
+listeners:
+  - name: db
+    address: "0.0.0.0:5432"
+    protocol: tcp
+    upstream: "10.0.0.1:5432"
+    filter_chains: [tcp_chain]
+  - name: web
+    address: "0.0.0.0:8080"
+filter_chains:
+  - name: tcp_chain
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("listener 'web'"),
+            "should name the HTTP listener without chains: {err}"
+        );
     }
 
     #[test]
@@ -474,6 +516,24 @@ filter_chains:
     }
 
     #[test]
+    fn accept_threads_at_max() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  threads: 1024
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
     fn reject_invalid_yaml() {
         let err = Config::from_yaml("not: [valid: yaml: {{").unwrap_err();
         assert!(err.to_string().contains("invalid YAML"));
@@ -499,6 +559,46 @@ filter_chains:
             err.to_string().contains("allow_unbounded_body"),
             "should reject null body limits: {err}"
         );
+    }
+
+    #[test]
+    fn reject_body_limits_exceeding_ceiling() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+body_limits:
+  max_request_bytes: 100000000
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "body limit above 64 MiB should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_body_limits_at_ceiling() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+body_limits:
+  max_request_bytes: 67108864
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
     }
 
     #[test]

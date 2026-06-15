@@ -31,6 +31,37 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
+    /// Fixed global queue interval for the tokio scheduler.
+    ///
+    /// ```
+    /// use praxis_core::config::RuntimeConfig;
+    ///
+    /// let cfg = RuntimeConfig::default();
+    /// assert_eq!(cfg.global_queue_interval, Some(61));
+    ///
+    /// let cfg: RuntimeConfig = serde_yaml::from_str("global_queue_interval: 128").unwrap();
+    /// assert_eq!(cfg.global_queue_interval, Some(128));
+    /// ```
+    #[serde(default = "default_global_queue_interval")]
+    pub global_queue_interval: Option<u32>,
+
+    /// Per-module log level overrides.
+    ///
+    /// ```
+    /// use praxis_core::config::RuntimeConfig;
+    ///
+    /// let yaml = r#"
+    /// log_overrides:
+    ///   praxis_filter::pipeline: trace
+    ///   praxis_protocol: debug
+    /// "#;
+    /// let cfg: RuntimeConfig = serde_yaml::from_str(yaml).unwrap();
+    /// assert_eq!(cfg.log_overrides.len(), 2);
+    /// assert_eq!(cfg.log_overrides["praxis_filter::pipeline"], "trace");
+    /// ```
+    #[serde(default)]
+    pub log_overrides: HashMap<String, String>,
+
     /// Process-wide maximum concurrent connections across all listeners.
     ///
     /// When set, new connections beyond this limit are rejected
@@ -73,41 +104,6 @@ pub struct RuntimeConfig {
     #[serde(default)]
     pub threads: usize,
 
-    /// Allow work-stealing between worker threads of the same service.
-    #[serde(default = "default_work_stealing")]
-    pub work_stealing: bool,
-
-    /// Per-module log level overrides.
-    ///
-    /// ```
-    /// use praxis_core::config::RuntimeConfig;
-    ///
-    /// let yaml = r#"
-    /// log_overrides:
-    ///   praxis_filter::pipeline: trace
-    ///   praxis_protocol: debug
-    /// "#;
-    /// let cfg: RuntimeConfig = serde_yaml::from_str(yaml).unwrap();
-    /// assert_eq!(cfg.log_overrides.len(), 2);
-    /// assert_eq!(cfg.log_overrides["praxis_filter::pipeline"], "trace");
-    /// ```
-    #[serde(default)]
-    pub log_overrides: HashMap<String, String>,
-
-    /// Fixed global queue interval for the tokio scheduler.
-    ///
-    /// ```
-    /// use praxis_core::config::RuntimeConfig;
-    ///
-    /// let cfg = RuntimeConfig::default();
-    /// assert_eq!(cfg.global_queue_interval, Some(61));
-    ///
-    /// let cfg: RuntimeConfig = serde_yaml::from_str("global_queue_interval: 128").unwrap();
-    /// assert_eq!(cfg.global_queue_interval, Some(128));
-    /// ```
-    #[serde(default = "default_global_queue_interval")]
-    pub global_queue_interval: Option<u32>,
-
     /// Path to a PEM CA file used as the root certificate store for all upstream TLS connections.
     ///
     /// When set, this **replaces** the system trust store (not additive). If backends
@@ -143,6 +139,10 @@ pub struct RuntimeConfig {
     /// ```
     #[serde(default = "default_upstream_keepalive_pool_size")]
     pub upstream_keepalive_pool_size: Option<usize>,
+
+    /// Allow work-stealing between worker threads of the same service.
+    #[serde(default = "default_work_stealing")]
+    pub work_stealing: bool,
 }
 
 impl Default for RuntimeConfig {

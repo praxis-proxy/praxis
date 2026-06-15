@@ -1,0 +1,42 @@
+name: Feature Request
+description: Suggest a new feature or enhancement
+labels: ["enhancement", "triage/needs-triage"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What should be added or changed?
+    validations:
+      required: true
+  - type: textarea
+    id: motivation
+    attributes:
+      label: Motivation
+      description: Why is this needed?
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives Considered
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - AI / Inference
+        - Core / Config
+        - Filter Pipeline
+        - Observability
+        - Protocol
+        - Security / TLS
+        - Traffic Management
+        - Transformation
+        - Other
+  - type: input
+    id: parent-epic
+    attributes:
+      label: Parent Epic (optional)
+      description: "Issue number if this belongs under an epic"
+      placeholder: "#484"

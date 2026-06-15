@@ -36,7 +36,7 @@ pub(super) fn extract_fields(
             trace!(
                 field = %field,
                 header = %header,
-                value = %text,
+                value_len = text.len(),
                 "promoting JSON field to header"
             );
             headers.push((Cow::Owned(header.clone()), text));

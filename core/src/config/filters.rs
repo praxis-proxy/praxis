@@ -6,6 +6,7 @@
 //! Listeners reference chains by name, enabling per-listener pipelines.
 
 use serde::Deserialize;
+use tracing::warn;
 
 use super::{Condition, ResponseCondition};
 
@@ -117,6 +118,66 @@ pub struct FilterEntry {
     pub config: serde_yaml::Value,
 }
 
+// ---------------------------------------------------------------------------
+// FilterEntry Typo Detection
+// ---------------------------------------------------------------------------
+
+/// Fields handled by `FilterEntry`'s serde derives.
+const KNOWN_FILTER_FIELDS: &[&str] = &[
+    "filter",
+    "branch_chains",
+    "conditions",
+    "failure_mode",
+    "name",
+    "response_conditions",
+];
+
+impl FilterEntry {
+    /// Warn if `config` contains keys that look like typos of known fields.
+    ///
+    /// Because `FilterEntry` uses `#[serde(flatten)]`, a misspelled
+    /// known field (e.g. `failuremode` instead of `failure_mode`) is
+    /// silently absorbed into the catch-all `config: Value`. This
+    /// method detects near-matches and emits a warning.
+    pub fn warn_config_typos(&self) {
+        let Some(map) = self.config.as_mapping() else {
+            return;
+        };
+        for key in map.keys() {
+            let Some(key_str) = key.as_str() else {
+                continue;
+            };
+            for known in KNOWN_FILTER_FIELDS {
+                if edit_distance(key_str, known) <= 2 {
+                    warn!(
+                        filter = %self.filter_type,
+                        key = key_str,
+                        suggestion = *known,
+                        "filter config key resembles a known field; possible typo"
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// Levenshtein edit distance between two ASCII strings.
+#[allow(clippy::indexing_slicing, reason = "indices are bounded by input lengths")]
+fn edit_distance(a: &str, b: &str) -> usize {
+    let b_bytes = b.as_bytes();
+    let mut prev: Vec<usize> = (0..=b_bytes.len()).collect();
+    let mut curr = vec![0; b_bytes.len() + 1];
+    for (i, ca) in a.bytes().enumerate() {
+        curr[0] = i + 1;
+        for (j, &cb) in b_bytes.iter().enumerate() {
+            let cost = usize::from(ca != cb);
+            curr[j + 1] = (prev[j] + cost).min(prev[j + 1] + 1).min(curr[j] + 1);
+        }
+        std::mem::swap(&mut prev, &mut curr);
+    }
+    prev[b_bytes.len()]
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -132,6 +193,30 @@ pub struct FilterEntry {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn edit_distance_identical() {
+        assert_eq!(edit_distance("abc", "abc"), 0, "identical strings");
+    }
+
+    #[test]
+    fn edit_distance_one_char() {
+        assert_eq!(edit_distance("abc", "abd"), 1, "one substitution");
+        assert_eq!(edit_distance("abc", "ab"), 1, "one deletion");
+        assert_eq!(edit_distance("ab", "abc"), 1, "one insertion");
+    }
+
+    #[test]
+    fn edit_distance_typo_detection() {
+        assert!(
+            edit_distance("failuremode", "failure_mode") <= 2,
+            "common typo should be within threshold"
+        );
+        assert!(
+            edit_distance("routes", "failure_mode") > 2,
+            "unrelated key should exceed threshold"
+        );
+    }
 
     #[test]
     fn parse_filter_chain() {

@@ -33,6 +33,8 @@ mod max_connections;
 mod model_to_header;
 mod multi_listener;
 #[cfg(feature = "ai-inference")]
+mod openai_response_store;
+#[cfg(feature = "ai-inference")]
 mod openai_responses_format;
 #[cfg(feature = "ai-inference")]
 mod openai_responses_validate;

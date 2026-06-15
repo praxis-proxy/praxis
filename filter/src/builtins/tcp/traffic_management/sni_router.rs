@@ -603,6 +603,23 @@ default_upstream: "10.0.0.1:443"
         assert_eq!(filter.name(), "sni_router");
     }
 
+    #[tokio::test]
+    async fn trailing_dot_in_sni_matches() {
+        let filter = make_filter(&[("api.example.com", "10.0.0.1:443")], &[], None);
+        let mut ctx = make_ctx(Some("api.example.com."));
+
+        let action = filter.on_connect(&mut ctx).await.expect("on_connect should succeed");
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "trailing dot in SNI should still match after trim"
+        );
+        assert_eq!(
+            ctx.upstream_addr.as_deref(),
+            Some("10.0.0.1:443"),
+            "upstream should resolve despite trailing dot in SNI"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------

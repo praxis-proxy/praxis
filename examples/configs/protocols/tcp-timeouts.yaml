@@ -1,10 +1,11 @@
 # TCP Timeouts
 #
-# TCP proxy with idle and max duration timeouts.
-# `tcp_idle_timeout_ms` closes connections that have
-# been idle (no data in either direction) longer than
-# the threshold. `tcp_max_duration_secs` caps the total
-# session duration regardless of activity.
+# TCP proxy with session and max duration timeouts.
+# `tcp_session_timeout_ms` wraps the entire TCP
+# forwarding session in a hard deadline, terminating
+# connections after the threshold regardless of
+# activity. `tcp_max_duration_secs` caps the total
+# session duration in seconds.
 #
 # Both are optional. Without them, TCP sessions run
 # until either side closes the connection.
@@ -19,5 +20,5 @@ listeners:
     address: "127.0.0.1:5432"
     protocol: tcp
     upstream: "127.0.0.1:15432"
-    tcp_idle_timeout_ms: 300000 # 5 minutes
+    tcp_session_timeout_ms: 300000 # 5 minutes
     tcp_max_duration_secs: 3600 # 1 hour

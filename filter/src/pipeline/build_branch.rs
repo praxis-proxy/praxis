@@ -6,7 +6,7 @@
 use std::{collections::HashMap, mem, sync::Arc};
 
 use praxis_core::config::{BranchChainConfig, BranchCondition, ChainRef, FilterEntry, MAX_BRANCH_DEPTH};
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::{
     branch::{RejoinTarget, ResolvedBranch, ResolvedBranchCondition},
@@ -163,7 +163,7 @@ fn resolve_single_branch(
     depth: usize,
 ) -> Result<ResolvedBranch, FilterError> {
     let condition = config.on_result.as_ref().map(resolve_condition);
-    warn_unmatched_on_result_filter(config, &bctx.pipeline_filter_names);
+    check_on_result_filter(config, &bctx.pipeline_filter_names)?;
     let branch_filters = resolve_chain_refs(&config.chains, bctx, depth + 1)?;
     let rejoin = resolve_rejoin(&config.rejoin, name_index, current_idx)?;
     if matches!(rejoin, RejoinTarget::ReEnter(_)) && config.max_iterations.is_none() {
@@ -187,17 +187,17 @@ fn resolve_single_branch(
 // Condition Resolution
 // ---------------------------------------------------------------------------
 
-/// Emit a warning if `on_result.filter` does not match any filter name in the pipeline.
-fn warn_unmatched_on_result_filter(config: &BranchChainConfig, pipeline_filter_names: &[&str]) {
+/// Reject configs where `on_result.filter` does not match any filter type name in the pipeline.
+fn check_on_result_filter(config: &BranchChainConfig, pipeline_filter_names: &[&str]) -> Result<(), FilterError> {
     if let Some(cond) = &config.on_result
         && !on_result_filter_in_pipeline(&cond.filter, pipeline_filter_names)
     {
-        warn!(
-            branch = config.name,
-            filter = cond.filter,
-            "on_result references filter which is not in this pipeline; condition will never match"
-        );
+        return Err(FilterError::from(format!(
+            "branch '{}': on_result.filter '{}' does not match any filter type in this pipeline",
+            config.name, cond.filter,
+        )));
     }
+    Ok(())
 }
 
 /// Check if the `on_result.filter` name matches any filter type name in the pipeline.
@@ -537,7 +537,7 @@ mod tests {
                 max_iterations: None,
                 name: "cond_branch".to_owned(),
                 on_result: Some(BranchCondition {
-                    filter: "cache".to_owned(),
+                    filter: "request_id".to_owned(),
                     key: "status".to_owned(),
                     value: "hit".to_owned(),
                 }),
@@ -549,7 +549,7 @@ mod tests {
         let branch = &filters[0].branches[0];
         assert!(branch.condition.is_some(), "branch should have a condition");
         let cond = branch.condition.as_ref().unwrap();
-        assert_eq!(cond.filter_name.as_ref(), "cache", "condition filter mismatch");
+        assert_eq!(cond.filter_name.as_ref(), "request_id", "condition filter mismatch");
         assert!(
             matches!(branch.rejoin, RejoinTarget::Terminal),
             "rejoin should be Terminal"
@@ -635,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn resolve_branch_with_unmatched_on_result_succeeds() {
+    fn resolve_branch_with_unmatched_on_result_rejected() {
         let registry = FilterRegistry::with_builtins();
         let chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
         let mut entries = vec![FilterEntry {
@@ -655,11 +655,10 @@ mod tests {
             }]),
             ..make_entry("request_id", None)
         }];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
-        assert_eq!(filters[0].branches.len(), 1, "branch should still resolve");
+        let err = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap_err();
         assert!(
-            filters[0].branches[0].condition.is_some(),
-            "condition should be set despite unmatched filter name"
+            err.to_string().contains("does not match any filter type"),
+            "should report unmatched on_result.filter: {err}"
         );
     }
 

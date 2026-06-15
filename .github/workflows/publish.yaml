@@ -9,7 +9,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 permissions: {}
 
@@ -25,7 +25,6 @@ jobs:
   container:
     runs-on: ubuntu-24.04
     if: >-
-      github.event_name == 'workflow_dispatch' ||
       github.event_name == 'push' ||
       github.event.workflow_run.conclusion == 'success'
     permissions:
