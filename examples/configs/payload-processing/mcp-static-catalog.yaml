@@ -1,4 +1,7 @@
-# Praxis MCP static catalog and broker; tools/call routing follows in a later PR
+# MCP Static Catalog
+#
+# Provides a static MCP catalog and broker for initialize,
+# tools/list, ping, and notifications/initialized requests.
 #
 # Pipeline: mcp -> load_balancer (no router).
 # Praxis short-circuits initialize, tools/list, ping,

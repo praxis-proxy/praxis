@@ -1610,6 +1610,597 @@ fn list_task_push_notification_configs_extracts_task_id() {
 }
 
 // -----------------------------------------------------------------------------
+// SSE Streaming Capture Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sse_streaming_response_enables_capture_for_send_streaming_message() {
+    let filter = make_task_routing_filter();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("agent-a"));
+    ctx.filter_metadata
+        .insert("a2a.method".to_owned(), "SendStreamingMessage".to_owned());
+
+    let mut resp = crate::context::Response {
+        status: http::StatusCode::OK,
+        headers: HeaderMap::new(),
+    };
+    resp.headers
+        .insert("content-type", "text/event-stream".parse().unwrap());
+    ctx.response_header = Some(&mut resp);
+
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    assert_eq!(
+        ctx.get_metadata("a2a.response.sse_capture_enabled"),
+        Some("true"),
+        "SSE capture should be enabled for SendStreamingMessage"
+    );
+    assert_eq!(
+        ctx.get_metadata("a2a.response.cluster"),
+        Some("agent-a"),
+        "cluster should be recorded for SSE capture"
+    );
+    assert!(
+        ctx.get_metadata("a2a.response.capture_enabled").is_none(),
+        "non-streaming capture should NOT be enabled"
+    );
+}
+
+#[tokio::test]
+async fn sse_streaming_capture_single_frame() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    let sse_data = b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"task\":{\"id\":\"task-sse-1\",\"status\":{\"state\":\"TASK_STATE_WORKING\"}}}}\n\n";
+    let mut body = Some(Bytes::from(sse_data.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+
+    assert_eq!(
+        store.get_by_task_id("task-sse-1").as_deref(),
+        Some("agent-a"),
+        "SSE frame should capture task route"
+    );
+}
+
+#[tokio::test]
+async fn sse_streaming_capture_split_across_chunks() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    let full = b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"task\":{\"id\":\"task-split\",\"status\":{\"state\":\"TASK_STATE_WORKING\"}}}}\n\n";
+    let (chunk1, chunk2) = full.split_at(30);
+
+    let mut body1 = Some(Bytes::from(chunk1.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body1, false).unwrap());
+    assert!(
+        store.get_by_task_id("task-split").is_none(),
+        "incomplete SSE should not capture"
+    );
+
+    let mut body2 = Some(Bytes::from(chunk2.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body2, false).unwrap());
+    assert_eq!(
+        store.get_by_task_id("task-split").as_deref(),
+        Some("agent-a"),
+        "completed SSE frame should capture after second chunk"
+    );
+}
+
+#[tokio::test]
+async fn sse_streaming_capture_line_split_across_chunks() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    // Split in the middle of "data:" field name
+    let mut body1 = Some(Bytes::from("da"));
+    drop(filter.on_response_body(&mut ctx, &mut body1, false).unwrap());
+
+    let mut body2 = Some(Bytes::from(
+        "ta: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"task\":{\"id\":\"task-line-split\",\"status\":{\"state\":\"TASK_STATE_WORKING\"}}}}\n\n",
+    ));
+    drop(filter.on_response_body(&mut ctx, &mut body2, false).unwrap());
+
+    assert_eq!(
+        store.get_by_task_id("task-line-split").as_deref(),
+        Some("agent-a"),
+        "line split across chunks should still capture"
+    );
+}
+
+#[tokio::test]
+async fn sse_streaming_capture_multiline_data() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    // JSON split across multiple data: lines
+    let sse_data = b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\n\
+                     data: \"result\":{\"task\":{\"id\":\"task-multi\",\n\
+                     data: \"status\":{\"state\":\"TASK_STATE_WORKING\"}}}}\n\n";
+    let mut body = Some(Bytes::from(sse_data.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+
+    assert_eq!(
+        store.get_by_task_id("task-multi").as_deref(),
+        Some("agent-a"),
+        "multi-line data should be joined and parsed for task route"
+    );
+}
+
+#[tokio::test]
+async fn sse_streaming_capture_crlf_line_endings() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    let sse_data = b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"task\":{\"id\":\"task-crlf\",\"status\":{\"state\":\"TASK_STATE_WORKING\"}}}}\r\n\r\n";
+    let mut body = Some(Bytes::from(sse_data.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+
+    assert_eq!(
+        store.get_by_task_id("task-crlf").as_deref(),
+        Some("agent-a"),
+        "CRLF line endings should work for SSE capture"
+    );
+}
+
+#[tokio::test]
+async fn sse_streaming_capture_ignores_comments_and_unknown_fields() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    let sse_data = b": this is a comment\nevent: task_update\nid: 42\ndata: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"task\":{\"id\":\"task-ignore\",\"status\":{\"state\":\"TASK_STATE_WORKING\"}}}}\nretry: 5000\n\n";
+    let mut body = Some(Bytes::from(sse_data.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+
+    assert_eq!(
+        store.get_by_task_id("task-ignore").as_deref(),
+        Some("agent-a"),
+        "comments and unknown fields should be ignored"
+    );
+}
+
+#[tokio::test]
+async fn sse_streaming_capture_invalid_json_does_not_fail() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    let sse_data = b"data: not valid json at all\n\n";
+    let mut body = Some(Bytes::from(sse_data.to_vec()));
+    let action = filter.on_response_body(&mut ctx, &mut body, false).unwrap();
+
+    assert!(matches!(action, FilterAction::Continue), "invalid JSON should not fail");
+    assert!(
+        store.get_by_task_id("anything").is_none(),
+        "invalid JSON should not create mapping"
+    );
+    assert_eq!(
+        ctx.get_metadata("a2a.response.sse_capture_enabled"),
+        Some("true"),
+        "capture should remain enabled after invalid JSON"
+    );
+}
+
+#[tokio::test]
+async fn sse_streaming_capture_oversized_scratch_clears_state() {
+    let filter = make_task_routing_filter_with_config(
+        r#"{"on_invalid": "continue", "task_routing": {"enabled": true, "max_response_body_bytes": 32}}"#,
+    );
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    let sse_data = b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"task\":{\"id\":\"task-big\",\"status\":{\"state\":\"TASK_STATE_WORKING\"}}}}\n\n";
+    let mut body = Some(Bytes::from(sse_data.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+
+    assert!(
+        store.get_by_task_id("task-big").is_none(),
+        "oversized SSE scratch should skip capture"
+    );
+    assert_sse_capture_cleared(&ctx);
+}
+
+#[tokio::test]
+async fn sse_streaming_capture_terminal_state_uses_terminal_ttl() {
+    let filter = make_task_routing_filter_with_config(
+        r#"{"on_invalid": "continue", "task_routing": {"enabled": true, "terminal_ttl_seconds": 0}}"#,
+    );
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    // First, capture a working task
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    let working = b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"task\":{\"id\":\"task-term\",\"status\":{\"state\":\"TASK_STATE_WORKING\"}}}}\n\n";
+    let mut body = Some(Bytes::from(working.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+    assert!(
+        store.get_by_task_id("task-term").is_some(),
+        "working task should be stored"
+    );
+
+    // Then see a terminal state (terminal_ttl_seconds=0 means remove immediately)
+    let completed = b"data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"task\":{\"id\":\"task-term\",\"status\":{\"state\":\"TASK_STATE_COMPLETED\"}}}}\n\n";
+    let mut body = Some(Bytes::from(completed.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+    assert!(
+        store.get_by_task_id("task-term").is_none(),
+        "terminal task with ttl=0 should be removed"
+    );
+}
+
+#[tokio::test]
+async fn sse_streaming_capture_clears_on_eos() {
+    let filter = make_task_routing_filter();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    let mut body: Option<Bytes> = None;
+    drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+
+    assert_sse_capture_cleared(&ctx);
+}
+
+#[tokio::test]
+async fn non_sse_response_does_not_enter_sse_capture_path() {
+    let filter = make_task_routing_filter();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("agent-a"));
+    ctx.filter_metadata
+        .insert("a2a.method".to_owned(), "SendStreamingMessage".to_owned());
+
+    let mut resp = crate::context::Response {
+        status: http::StatusCode::OK,
+        headers: HeaderMap::new(),
+    };
+    resp.headers.insert("content-type", "application/json".parse().unwrap());
+    ctx.response_header = Some(&mut resp);
+
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    assert!(
+        ctx.get_metadata("a2a.response.sse_capture_enabled").is_none(),
+        "non-SSE response for SendStreamingMessage should not enable SSE capture"
+    );
+}
+
+#[tokio::test]
+async fn wrong_method_does_not_enter_sse_capture() {
+    let filter = make_task_routing_filter();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("agent-a"));
+    ctx.filter_metadata
+        .insert("a2a.method".to_owned(), "GetTask".to_owned());
+
+    let mut resp = crate::context::Response {
+        status: http::StatusCode::OK,
+        headers: HeaderMap::new(),
+    };
+    resp.headers
+        .insert("content-type", "text/event-stream".parse().unwrap());
+    ctx.response_header = Some(&mut resp);
+
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    assert!(
+        ctx.get_metadata("a2a.response.sse_capture_enabled").is_none(),
+        "GetTask with SSE should not enable SSE capture"
+    );
+}
+
+#[tokio::test]
+async fn error_sse_response_does_not_enable_capture() {
+    for method in ["SendStreamingMessage", "SubscribeToTask"] {
+        let filter = make_task_routing_filter();
+
+        let req = make_a2a_request(&[]);
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.cluster = Some(Arc::from("agent-a"));
+        ctx.filter_metadata.insert("a2a.method".to_owned(), method.to_owned());
+
+        let mut resp = crate::context::Response {
+            status: http::StatusCode::INTERNAL_SERVER_ERROR,
+            headers: HeaderMap::new(),
+        };
+        resp.headers
+            .insert("content-type", "text/event-stream".parse().unwrap());
+        ctx.response_header = Some(&mut resp);
+
+        drop(filter.on_response(&mut ctx).await.unwrap());
+        ctx.response_header = None;
+
+        assert!(
+            ctx.get_metadata("a2a.response.sse_capture_enabled").is_none(),
+            "{method} with 500 + text/event-stream should not enable SSE capture"
+        );
+        assert!(
+            ctx.get_metadata("a2a.response.cluster").is_none(),
+            "{method} with 500 should not record cluster"
+        );
+    }
+}
+
+#[tokio::test]
+async fn sse_streaming_bytes_pass_through_unchanged() {
+    let filter = make_task_routing_filter();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    let original = b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"task\":{\"id\":\"task-pass\",\"status\":{\"state\":\"TASK_STATE_WORKING\"}}}}\n\n";
+    let mut body = Some(Bytes::from(original.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+
+    assert_eq!(
+        body.as_deref(),
+        Some(original.as_slice()),
+        "SSE response bytes must pass through unchanged"
+    );
+}
+
+#[tokio::test]
+async fn sse_streaming_capture_mixed_case_content_type() {
+    let filter = make_task_routing_filter();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("agent-a"));
+    ctx.filter_metadata
+        .insert("a2a.method".to_owned(), "SendStreamingMessage".to_owned());
+
+    let mut resp = crate::context::Response {
+        status: http::StatusCode::OK,
+        headers: HeaderMap::new(),
+    };
+    resp.headers
+        .insert("content-type", "Text/Event-Stream; charset=utf-8".parse().unwrap());
+    ctx.response_header = Some(&mut resp);
+
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    assert_eq!(
+        ctx.get_metadata("a2a.response.sse_capture_enabled"),
+        Some("true"),
+        "mixed-case text/event-stream should enable SSE capture"
+    );
+}
+
+#[tokio::test]
+async fn sse_streaming_capture_direct_result_shape() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    let sse_data =
+        b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"id\":\"task-direct\",\"status\":{\"state\":\"TASK_STATE_WORKING\"}}}\n\n";
+    let mut body = Some(Bytes::from(sse_data.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+
+    assert_eq!(
+        store.get_by_task_id("task-direct").as_deref(),
+        Some("agent-a"),
+        "direct result shape (result.id + result.status) should also capture from SSE"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// SSE Stream Event Shape Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sse_streaming_capture_status_update_event() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    let sse_data =
+        b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"statusUpdate\":{\"taskId\":\"task-su\",\"status\":{\"state\":\"TASK_STATE_WORKING\"}}}}\n\n";
+    let mut body = Some(Bytes::from(sse_data.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+
+    assert_eq!(
+        store.get_by_task_id("task-su").as_deref(),
+        Some("agent-a"),
+        "statusUpdate event should capture task route"
+    );
+}
+
+#[tokio::test]
+async fn sse_streaming_capture_terminal_status_update() {
+    let filter = make_task_routing_filter_with_config(
+        r#"{"on_invalid": "continue", "task_routing": {"enabled": true, "terminal_ttl_seconds": 0}}"#,
+    );
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    // First event creates the route.
+    let working =
+        b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"task\":{\"id\":\"task-su-term\",\"status\":{\"state\":\"TASK_STATE_WORKING\"}}}}\n\n";
+    let mut body = Some(Bytes::from(working.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+    assert!(
+        store.get_by_task_id("task-su-term").is_some(),
+        "working task should be stored"
+    );
+
+    // Terminal statusUpdate removes it (terminal_ttl_seconds=0).
+    let completed =
+        b"data: {\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{\"statusUpdate\":{\"taskId\":\"task-su-term\",\"status\":{\"state\":\"TASK_STATE_COMPLETED\"}}}}\n\n";
+    let mut body = Some(Bytes::from(completed.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+    assert!(
+        store.get_by_task_id("task-su-term").is_none(),
+        "terminal statusUpdate with ttl=0 should remove the route"
+    );
+}
+
+#[tokio::test]
+async fn sse_streaming_capture_artifact_update_event() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    let sse_data =
+        b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"artifactUpdate\":{\"taskId\":\"task-au\",\"contextId\":\"ctx-1\",\"artifact\":{\"artifactId\":\"a1\",\"parts\":[{\"text\":\"chunk\"}]}}}}\n\n";
+    let mut body = Some(Bytes::from(sse_data.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+
+    assert_eq!(
+        store.get_by_task_id("task-au").as_deref(),
+        Some("agent-a"),
+        "artifactUpdate event should capture task route"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Overflow Payload Preservation Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn valid_task_before_oversized_sse_frame_stores_route_and_clears_capture() {
+    let filter = make_task_routing_filter_with_config(
+        r#"{"on_invalid": "continue", "task_routing": {"enabled": true, "max_response_body_bytes": 128}}"#,
+    );
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    // First event (~110 bytes) fits within 128-byte limit.
+    // Second event (~200+ bytes) overflows.
+    let padding = "x".repeat(100);
+    let sse = format!(
+        "data: {{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{{\"task\":{{\"id\":\"task-pre-overflow\",\"status\":{{\"state\":\"TASK_STATE_WORKING\"}}}}}}}}\n\n\
+         data: {{\"jsonrpc\":\"2.0\",\"id\":2,\"result\":{{\"task\":{{\"id\":\"task-big\",\"status\":{{\"state\":\"TASK_STATE_WORKING\"}},\"padding\":\"{padding}\"}}}}}}\n\n"
+    );
+    let sse_data = sse.as_bytes();
+    let mut body = Some(Bytes::from(sse_data.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+
+    assert_eq!(
+        store.get_by_task_id("task-pre-overflow").as_deref(),
+        Some("agent-a"),
+        "completed event before overflow should still be captured"
+    );
+    assert_sse_capture_cleared(&ctx);
+}
+
+// -----------------------------------------------------------------------------
+// SubscribeToTask SSE Capture Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn on_response_enables_capture_for_success_sse_subscribe_to_task() {
+    let filter = make_task_routing_filter();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("agent-a"));
+    ctx.filter_metadata
+        .insert("a2a.method".to_owned(), "SubscribeToTask".to_owned());
+
+    let mut resp = crate::context::Response {
+        status: http::StatusCode::OK,
+        headers: HeaderMap::new(),
+    };
+    resp.headers
+        .insert("content-type", "text/event-stream".parse().unwrap());
+    ctx.response_header = Some(&mut resp);
+
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    ctx.response_header = None;
+
+    assert_eq!(
+        ctx.get_metadata("a2a.response.sse_capture_enabled"),
+        Some("true"),
+        "SSE capture should be enabled for SubscribeToTask"
+    );
+    assert_eq!(
+        ctx.get_metadata("a2a.response.cluster"),
+        Some("agent-a"),
+        "cluster should be recorded for SubscribeToTask SSE capture"
+    );
+}
+
+#[tokio::test]
+async fn subscribe_to_task_sse_status_update_stores_route() {
+    let filter = make_task_routing_filter();
+    let store = filter.task_route_store.as_ref().unwrap();
+
+    let req = make_a2a_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    seed_sse_capture(&mut ctx);
+
+    let sse_data =
+        b"data: {\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"statusUpdate\":{\"taskId\":\"task-sub-1\",\"status\":{\"state\":\"TASK_STATE_WORKING\"}}}}\n\n";
+    let mut body = Some(Bytes::from(sse_data.to_vec()));
+    drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+
+    assert_eq!(
+        store.get_by_task_id("task-sub-1").as_deref(),
+        Some("agent-a"),
+        "SubscribeToTask SSE statusUpdate should capture/refresh task route"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
@@ -1716,4 +2307,42 @@ fn make_a2a_request(extra_headers: &[(&str, &str)]) -> crate::context::Request {
         );
     }
     req
+}
+
+fn seed_sse_capture(ctx: &mut crate::filter::HttpFilterContext<'_>) {
+    ctx.filter_metadata
+        .insert("a2a.response.sse_capture_enabled".to_owned(), "true".to_owned());
+    ctx.filter_metadata
+        .insert("a2a.response.cluster".to_owned(), "agent-a".to_owned());
+}
+
+fn assert_sse_capture_cleared(ctx: &crate::filter::HttpFilterContext<'_>) {
+    assert!(
+        !ctx.filter_metadata.contains_key("a2a.response.sse_capture_enabled"),
+        "sse_capture_enabled not cleared"
+    );
+    assert!(
+        !ctx.filter_metadata.contains_key("a2a.response.sse_line_buf_hex"),
+        "sse_line_buf_hex not cleared"
+    );
+    assert!(
+        !ctx.filter_metadata.contains_key("a2a.response.sse_data_hex"),
+        "sse_data_hex not cleared"
+    );
+    assert!(
+        !ctx.filter_metadata.contains_key("a2a.response.sse_has_data"),
+        "sse_has_data not cleared"
+    );
+    assert!(
+        !ctx.filter_metadata.contains_key("a2a.response.sse_prev_cr"),
+        "sse_prev_cr not cleared"
+    );
+    assert!(
+        !ctx.filter_metadata.contains_key("a2a.response.sse_scratch_bytes"),
+        "sse_scratch_bytes not cleared"
+    );
+    assert!(
+        !ctx.filter_metadata.contains_key("a2a.response.cluster"),
+        "cluster not cleared"
+    );
 }

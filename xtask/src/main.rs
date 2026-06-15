@@ -20,6 +20,7 @@ mod echo;
 mod lint_deps;
 mod lint_example_tests;
 mod port;
+mod sync_example_readme;
 
 use clap::{Parser, Subcommand};
 
@@ -57,6 +58,10 @@ enum Command {
     /// Check that every example config has a corresponding
     /// integration test.
     LintExampleTests(lint_example_tests::Args),
+
+    /// Verify or regenerate the `examples/README.md` table
+    /// from YAML config header comments.
+    SyncExampleReadme(sync_example_readme::Args),
 }
 
 // -----------------------------------------------------------------------------
@@ -72,6 +77,7 @@ fn main() {
         Command::Benchmark(args) => benchmark::run(*args),
         Command::LintDeps(args) => lint_deps::run(args),
         Command::LintExampleTests(args) => lint_example_tests::run(args),
+        Command::SyncExampleReadme(args) => sync_example_readme::run(&args),
     }
 }
 

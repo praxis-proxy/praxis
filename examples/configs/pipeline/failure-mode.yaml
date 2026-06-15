@@ -1,5 +1,7 @@
 # Per-Filter Failure Mode
 #
+# Demonstrates open and closed failure handling for filters.
+#
 # Each filter can specify `failure_mode` to control what happens when
 # the filter returns an error:
 #

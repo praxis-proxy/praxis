@@ -212,6 +212,7 @@ lint:
 	cargo +$(NIGHTLY_VERSION) fmt --all -- --check
 	cargo xtask lint-deps
 	cargo xtask lint-example-tests
+	cargo xtask sync-example-readme
 
 fmt:
 	cargo +$(NIGHTLY_VERSION) fmt --all

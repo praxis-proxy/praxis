@@ -90,6 +90,7 @@ tonic = "0.14.6"
 tonic-prost = "0.14.6"
 tonic-prost-build = { version = "0.14.6", features = ["transport"] }
 tokio = { version = "1.52.3", features = ["macros", "rt"] }
+tokio-stream = "0.1.18"
 tokio-util = "0.7.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
