@@ -163,22 +163,10 @@ impl ResponseStoreFilter {
 
         if deleted {
             debug!(id, tenant_id, "response deleted");
-            Ok(FilterAction::Reject(
-                Rejection::status(200)
-                    .with_header("content-type", "application/json")
-                    .with_body(Bytes::from(format!(
-                        r#"{{"id":"{id}","object":"response.deleted","deleted":true}}"#
-                    ))),
-            ))
+            Ok(FilterAction::Reject(delete_success_rejection(id)?))
         } else {
             debug!(id, tenant_id, "response not found for delete");
-            Ok(FilterAction::Reject(
-                Rejection::status(404)
-                    .with_header("content-type", "application/json")
-                    .with_body(Bytes::from(format!(
-                        r#"{{"error":{{"message":"No response found with id: '{id}'.","type":"invalid_request_error"}}}}"#
-                    ))),
-            ))
+            Ok(FilterAction::Reject(delete_not_found_rejection(id)?))
         }
     }
 
@@ -243,6 +231,39 @@ pub(super) fn extract_response_id(path: &str) -> Option<&str> {
         ["", "v1", "responses", id] if !id.is_empty() => Some(id),
         _ => None,
     }
+}
+
+// -----------------------------------------------------------------------------
+// Delete Response Helpers
+// -----------------------------------------------------------------------------
+
+/// Build the 200 rejection for a successful delete.
+fn delete_success_rejection(id: &str) -> Result<Rejection, FilterError> {
+    let body = serde_json::to_string(&serde_json::json!({
+        "id": id,
+        "object": "response.deleted",
+        "deleted": true,
+    }))
+    .map_err(|e| FilterError::from(format!("openai_response_store: serialize failed: {e}")))?;
+
+    Ok(Rejection::status(200)
+        .with_header("content-type", "application/json")
+        .with_body(Bytes::from(body)))
+}
+
+/// Build the 404 rejection for a missing response.
+fn delete_not_found_rejection(id: &str) -> Result<Rejection, FilterError> {
+    let body = serde_json::to_string(&serde_json::json!({
+        "error": {
+            "message": format!("No response found with id: '{id}'."),
+            "type": "invalid_request_error",
+        }
+    }))
+    .map_err(|e| FilterError::from(format!("openai_response_store: serialize failed: {e}")))?;
+
+    Ok(Rejection::status(404)
+        .with_header("content-type", "application/json")
+        .with_body(Bytes::from(body)))
 }
 
 // -----------------------------------------------------------------------------
