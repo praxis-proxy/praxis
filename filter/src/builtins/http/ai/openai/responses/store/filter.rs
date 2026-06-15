@@ -2,7 +2,8 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! [`ResponseStoreFilter`] persists non-streaming Responses API
-//! responses to the configured store backend.
+//! responses to the configured store backend and handles
+//! `DELETE /v1/responses/{id}` locally.
 //!
 //! # Lifecycle design
 //!
@@ -43,9 +44,13 @@ use serde_json::Value;
 use tokio::sync::OnceCell;
 use tracing::{debug, trace, warn};
 
-use super::config::{ResponseStoreConfig, StorageBackend, validate_config};
+use super::{
+    ListParams, Order,
+    config::{ResponseStoreConfig, StorageBackend, validate_config},
+    list_input_items,
+};
 use crate::{
-    FilterAction, FilterError,
+    FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode, limits::MAX_JSON_BODY_BYTES},
     builtins::http::ai::store::{ResponseRecord, ResponseStore, SqliteResponseStore},
     factory::parse_filter_config,
@@ -53,7 +58,7 @@ use crate::{
 };
 
 // -----------------------------------------------------------------------------
-// ResponseStoreFilter
+// Constants
 // -----------------------------------------------------------------------------
 
 /// Default tenant identifier for single-tenant deployments.
@@ -110,7 +115,7 @@ impl ResponseStoreFilter {
         clippy::too_many_lines,
         reason = "tracing macros inflate complexity"
     )]
-    async fn init_store(&self) -> Option<Arc<dyn ResponseStore>> {
+    pub(super) async fn init_store(&self) -> Option<Arc<dyn ResponseStore>> {
         match self.config.backend {
             StorageBackend::Sqlite => {
                 let result = SqliteResponseStore::new(
@@ -140,6 +145,28 @@ impl ResponseStoreFilter {
                     },
                 }
             },
+        }
+    }
+
+    /// Handle `DELETE /v1/responses/{id}` by deleting from the store.
+    async fn handle_delete(&self, tenant_id: &str, id: &str) -> Result<FilterAction, FilterError> {
+        let store = self.store.get_or_init(|| async { self.init_store().await }).await;
+
+        let Some(store) = store else {
+            return Ok(FilterAction::Continue);
+        };
+
+        let deleted = store
+            .delete_response(tenant_id, id)
+            .await
+            .map_err(|e| FilterError::from(format!("openai_response_store: delete failed: {e}")))?;
+
+        if deleted {
+            debug!(id, tenant_id, "response deleted");
+            Ok(FilterAction::Reject(delete_success_rejection(id)?))
+        } else {
+            debug!(id, tenant_id, "response not found for delete");
+            Ok(FilterAction::Reject(delete_not_found_rejection(id)?))
         }
     }
 
@@ -187,6 +214,56 @@ impl ResponseCapture {
             messages: json.get("output").cloned().unwrap_or(Value::Null),
         }
     }
+}
+
+// -----------------------------------------------------------------------------
+// Path Extraction
+// -----------------------------------------------------------------------------
+
+/// Extract the response ID from a `/v1/responses/{id}` path.
+///
+/// Returns `None` if the path does not match the expected pattern.
+pub(super) fn extract_response_id(path: &str) -> Option<&str> {
+    let path = path.strip_suffix('/').unwrap_or(path);
+    let segments: Vec<&str> = path.split('/').collect();
+
+    match segments.as_slice() {
+        ["", "v1", "responses", id] if !id.is_empty() => Some(id),
+        _ => None,
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Delete Response Helpers
+// -----------------------------------------------------------------------------
+
+/// Build the 200 rejection for a successful delete.
+fn delete_success_rejection(id: &str) -> Result<Rejection, FilterError> {
+    let body = serde_json::to_string(&serde_json::json!({
+        "id": id,
+        "object": "response.deleted",
+        "deleted": true,
+    }))
+    .map_err(|e| FilterError::from(format!("openai_response_store: serialize failed: {e}")))?;
+
+    Ok(Rejection::status(200)
+        .with_header("content-type", "application/json")
+        .with_body(Bytes::from(body)))
+}
+
+/// Build the 404 rejection for a missing response.
+fn delete_not_found_rejection(id: &str) -> Result<Rejection, FilterError> {
+    let body = serde_json::to_string(&serde_json::json!({
+        "error": {
+            "message": format!("No response found with id: '{id}'."),
+            "type": "invalid_request_error",
+        }
+    }))
+    .map_err(|e| FilterError::from(format!("openai_response_store: serialize failed: {e}")))?;
+
+    Ok(Rejection::status(404)
+        .with_header("content-type", "application/json")
+        .with_body(Bytes::from(body)))
 }
 
 // -----------------------------------------------------------------------------
@@ -362,6 +439,21 @@ impl HttpFilter for ResponseStoreFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if ctx.request.method == http::Method::GET {
+            if let Some(action) = self.try_get_retrieval(ctx).await? {
+                return Ok(action);
+            }
+            return Ok(FilterAction::Continue);
+        }
+
+        if ctx.request.method == http::Method::DELETE {
+            if let Some(id) = extract_response_id(ctx.request.uri.path()) {
+                let tenant_id = ctx.get_metadata(TENANT_METADATA_KEY).unwrap_or(DEFAULT_TENANT_ID);
+                return self.handle_delete(tenant_id, id).await;
+            }
+            return Ok(FilterAction::Continue);
+        }
+
         if should_skip(ctx) {
             return Ok(FilterAction::Continue);
         }
@@ -427,4 +519,190 @@ impl HttpFilter for ResponseStoreFilter {
         persist_response_blocking(&store, &record)?;
         Ok(FilterAction::Continue)
     }
+}
+
+// -----------------------------------------------------------------------------
+// GET Retrieval
+// -----------------------------------------------------------------------------
+
+impl ResponseStoreFilter {
+    /// Attempt to handle a GET request for a stored response or its
+    /// input items. Returns `Some(action)` when the path matches a
+    /// retrieval endpoint, or `None` for unrelated paths.
+    async fn try_get_retrieval(&self, ctx: &HttpFilterContext<'_>) -> Result<Option<FilterAction>, FilterError> {
+        let path = ctx.request.uri.path();
+        let path = path.strip_suffix('/').filter(|p| !p.is_empty()).unwrap_or(path);
+        let segments: Vec<&str> = path.split('/').collect();
+
+        match segments.as_slice() {
+            ["", "v1", "responses", id] if !id.is_empty() => Ok(Some(self.handle_get_response(ctx, id).await)),
+            ["", "v1", "responses", id, "input_items"] if !id.is_empty() => {
+                Ok(Some(self.handle_get_input_items(ctx, id).await))
+            },
+            _ => Ok(None),
+        }
+    }
+
+    /// Lazily initialize the store and return a clone of the `Arc`.
+    async fn ensure_store(&self) -> Option<Arc<dyn ResponseStore>> {
+        self.store
+            .get_or_init(|| async { self.init_store().await })
+            .await
+            .clone()
+    }
+
+    /// Serve `GET /v1/responses/{id}`.
+    async fn handle_get_response(&self, ctx: &HttpFilterContext<'_>, id: &str) -> FilterAction {
+        let Some(store) = self.ensure_store().await else {
+            return FilterAction::Reject(reject_store_error());
+        };
+
+        let tenant_id = ctx.get_metadata(TENANT_METADATA_KEY).unwrap_or(DEFAULT_TENANT_ID);
+        debug!(response_id = id, tenant_id, "retrieving stored response");
+
+        match store.get_response(tenant_id, id).await {
+            Ok(Some(record)) => {
+                let body = serde_json::to_vec(&record.response_object).unwrap_or_default();
+                FilterAction::Reject(
+                    Rejection::status(200)
+                        .with_header("content-type", "application/json")
+                        .with_body(body),
+                )
+            },
+            Ok(None) => {
+                debug!(response_id = id, "response not found");
+                FilterAction::Reject(reject_not_found(id))
+            },
+            Err(e) => {
+                warn!(response_id = id, error = %e, "store lookup failed");
+                FilterAction::Reject(reject_store_error())
+            },
+        }
+    }
+
+    /// Serve `GET /v1/responses/{id}/input_items`.
+    async fn handle_get_input_items(&self, ctx: &HttpFilterContext<'_>, id: &str) -> FilterAction {
+        let Some(store) = self.ensure_store().await else {
+            return FilterAction::Reject(reject_store_error());
+        };
+
+        let tenant_id = ctx.get_metadata(TENANT_METADATA_KEY).unwrap_or(DEFAULT_TENANT_ID);
+        debug!(response_id = id, tenant_id, "retrieving input items");
+
+        let record = match store.get_response(tenant_id, id).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                debug!(response_id = id, "response not found for input_items");
+                return FilterAction::Reject(reject_not_found(id));
+            },
+            Err(e) => {
+                warn!(response_id = id, error = %e, "store lookup failed");
+                return FilterAction::Reject(reject_store_error());
+            },
+        };
+
+        let params = parse_query_params(ctx.request.uri.query());
+        build_input_items_response(id, &record, &params)
+    }
+}
+
+// -----------------------------------------------------------------------------
+// GET Helpers
+// -----------------------------------------------------------------------------
+
+/// Build a paginated input items response from a stored record.
+fn build_input_items_response(id: &str, record: &ResponseRecord, params: &ListParams) -> FilterAction {
+    match list_input_items(record, params) {
+        Ok(page) => {
+            let first_id = page.data.first().and_then(|v| v.get("id")).and_then(|v| v.as_str());
+            let last_id = page.data.last().and_then(|v| v.get("id")).and_then(|v| v.as_str());
+
+            let body = serde_json::json!({
+                "object": "list",
+                "data": page.data,
+                "has_more": page.has_more,
+                "first_id": first_id,
+                "last_id": last_id,
+            });
+            debug!(
+                response_id = id,
+                count = page.data.len(),
+                has_more = page.has_more,
+                "serving input items"
+            );
+            let bytes = serde_json::to_vec(&body).unwrap_or_default();
+            FilterAction::Reject(
+                Rejection::status(200)
+                    .with_header("content-type", "application/json")
+                    .with_body(bytes),
+            )
+        },
+        Err(e) => {
+            warn!(response_id = id, error = %e, "input_items pagination failed");
+            FilterAction::Reject(reject_store_error())
+        },
+    }
+}
+
+/// Parse cursor-based pagination parameters from a query string.
+pub(super) fn parse_query_params(query: Option<&str>) -> ListParams {
+    let Some(qs) = query else {
+        return ListParams::default();
+    };
+
+    let mut params = ListParams::default();
+
+    for pair in qs.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        match key {
+            "after" => {
+                params.cursor = Some(
+                    percent_encoding::percent_decode_str(value)
+                        .decode_utf8_lossy()
+                        .into_owned(),
+                );
+            },
+            "limit" => {
+                if let Ok(n) = value.parse::<u32>() {
+                    params.limit = n;
+                }
+            },
+            "order" => match value {
+                "asc" => params.order = Order::Ascending,
+                "desc" => params.order = Order::Descending,
+                _ => {},
+            },
+            _ => {},
+        }
+    }
+
+    params
+}
+
+/// Build a 404 rejection with an `OpenAI`-style error body.
+fn reject_not_found(id: &str) -> Rejection {
+    let body = serde_json::json!({
+        "error": {
+            "message": format!("No response found with id '{id}'."),
+            "type": "invalid_request_error",
+        }
+    });
+    Rejection::status(404)
+        .with_header("content-type", "application/json")
+        .with_body(serde_json::to_vec(&body).unwrap_or_default())
+}
+
+/// Build a 500 rejection for internal store failures.
+fn reject_store_error() -> Rejection {
+    let body = serde_json::json!({
+        "error": {
+            "message": "Internal server error.",
+            "type": "server_error",
+        }
+    });
+    Rejection::status(500)
+        .with_header("content-type", "application/json")
+        .with_body(serde_json::to_vec(&body).unwrap_or_default())
 }

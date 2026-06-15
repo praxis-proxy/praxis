@@ -304,35 +304,37 @@ async fn on_request_skips_when_stream_is_true() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn on_request_skips_for_get_method() {
+async fn on_request_skips_for_get_to_unrelated_path() {
     let filter = make_filter();
-    let req = crate::test_utils::make_request(http::Method::GET, "/v1/responses/resp_123");
-    let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.set_metadata("openai_responses_format.format", "openai_responses");
-
-    let action = filter.on_request(&mut ctx).await.unwrap();
-    assert!(matches!(action, FilterAction::Continue), "should skip for GET method");
-    assert!(
-        filter.store.get().is_none(),
-        "store should not be initialized for non-POST requests"
-    );
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn on_request_skips_for_delete_method() {
-    let filter = make_filter();
-    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_123");
+    let req = crate::test_utils::make_request(http::Method::GET, "/v1/models");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     ctx.set_metadata("openai_responses_format.format", "openai_responses");
 
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
         matches!(action, FilterAction::Continue),
-        "should skip for DELETE method"
+        "should skip for GET to unrelated path"
     );
     assert!(
         filter.store.get().is_none(),
-        "store should not be initialized for non-POST requests"
+        "store should not be initialized for non-responses GET paths"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_request_skips_delete_on_unrelated_path() {
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "DELETE to unrelated path should continue"
+    );
+    assert!(
+        filter.store.get().is_none(),
+        "store should not be initialized for unrelated DELETE"
     );
 }
 
@@ -883,6 +885,475 @@ conversations_table: conversations
 }
 
 // -----------------------------------------------------------------------------
+// GET /v1/responses/{id}
+// -----------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_response_returns_200_when_found() {
+    let filter = make_filter();
+    init_store_and_seed(
+        &filter,
+        "resp_found",
+        "default",
+        json!([{"id": "item_1", "type": "message"}]),
+    )
+    .await;
+
+    let req = crate::test_utils::make_request(http::Method::GET, "/v1/responses/resp_found");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(rejection.status, 200, "should return 200 for found response");
+    assert_has_json_content_type(&rejection);
+
+    let body: serde_json::Value = serde_json::from_slice(rejection.body.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        body["status"], "completed",
+        "body should contain the stored response_object"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_response_returns_404_when_not_found() {
+    let filter = make_filter();
+    init_store(&filter).await;
+
+    let req = crate::test_utils::make_request(http::Method::GET, "/v1/responses/resp_nonexistent");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(rejection.status, 404, "should return 404 for missing response");
+    assert_has_json_content_type(&rejection);
+
+    let body: serde_json::Value = serde_json::from_slice(rejection.body.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        body["error"]["type"], "invalid_request_error",
+        "error type should be invalid_request_error"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_response_tenant_isolation() {
+    let filter = make_filter();
+    init_store_and_seed(&filter, "resp_tenant", "tenant_a", json!([])).await;
+
+    let req = crate::test_utils::make_request(http::Method::GET, "/v1/responses/resp_tenant");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(
+        rejection.status, 404,
+        "should return 404 when response belongs to a different tenant"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_response_trailing_slash_handled() {
+    let filter = make_filter();
+    init_store_and_seed(&filter, "resp_slash", "default", json!([])).await;
+
+    let req = crate::test_utils::make_request(http::Method::GET, "/v1/responses/resp_slash/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(
+        rejection.status, 200,
+        "trailing slash should be stripped and response found"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_unrelated_path_continues() {
+    let filter = make_filter();
+
+    let req = crate::test_utils::make_request(http::Method::GET, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "GET to unrelated path should continue"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// GET /v1/responses/{id}/input_items
+// -----------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_input_items_returns_200_when_found() {
+    let filter = make_filter();
+    init_store_and_seed(
+        &filter,
+        "resp_items",
+        "default",
+        json!([
+            {"id": "item_1", "type": "message", "content": "hello"},
+            {"id": "item_2", "type": "message", "content": "world"}
+        ]),
+    )
+    .await;
+
+    let req = crate::test_utils::make_request(http::Method::GET, "/v1/responses/resp_items/input_items");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(rejection.status, 200, "should return 200 for input items");
+    assert_has_json_content_type(&rejection);
+
+    let body: serde_json::Value = serde_json::from_slice(rejection.body.as_deref().unwrap()).unwrap();
+    assert_eq!(body["object"], "list", "should have list object type");
+    assert_eq!(body["data"].as_array().unwrap().len(), 2, "should have 2 items");
+    assert_eq!(body["has_more"], false, "should have no more items");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_input_items_returns_404_when_not_found() {
+    let filter = make_filter();
+    init_store(&filter).await;
+
+    let req = crate::test_utils::make_request(http::Method::GET, "/v1/responses/resp_missing/input_items");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(
+        rejection.status, 404,
+        "should return 404 when response not found for input_items"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_input_items_with_limit_and_order() {
+    let filter = make_filter();
+    init_store_and_seed(
+        &filter,
+        "resp_page",
+        "default",
+        json!([
+            {"id": "item_1", "type": "message"},
+            {"id": "item_2", "type": "message"},
+            {"id": "item_3", "type": "message"},
+            {"id": "item_4", "type": "message"}
+        ]),
+    )
+    .await;
+
+    let req = crate::test_utils::make_request(
+        http::Method::GET,
+        "/v1/responses/resp_page/input_items?limit=2&order=asc",
+    );
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(rejection.status, 200, "should return 200 for paginated input items");
+
+    let body: serde_json::Value = serde_json::from_slice(rejection.body.as_deref().unwrap()).unwrap();
+    assert_eq!(body["data"].as_array().unwrap().len(), 2, "should limit to 2 items");
+    assert_eq!(body["has_more"], true, "should indicate more items exist");
+    assert_eq!(
+        body["first_id"], "item_1",
+        "first_id should be item_1 in ascending order"
+    );
+    assert_eq!(body["last_id"], "item_2", "last_id should be item_2 in ascending order");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_input_items_with_cursor() {
+    let filter = make_filter();
+    init_store_and_seed(
+        &filter,
+        "resp_cursor",
+        "default",
+        json!([
+            {"id": "item_1", "type": "message"},
+            {"id": "item_2", "type": "message"},
+            {"id": "item_3", "type": "message"},
+            {"id": "item_4", "type": "message"}
+        ]),
+    )
+    .await;
+
+    let req = crate::test_utils::make_request(
+        http::Method::GET,
+        "/v1/responses/resp_cursor/input_items?after=item_2&limit=2&order=asc",
+    );
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(rejection.status, 200, "should return 200 for cursor-based pagination");
+
+    let body: serde_json::Value = serde_json::from_slice(rejection.body.as_deref().unwrap()).unwrap();
+    let data = body["data"].as_array().unwrap();
+    assert_eq!(data.len(), 2, "should return 2 items after cursor");
+    assert_eq!(data[0]["id"], "item_3", "first item should be item_3 after item_2");
+    assert_eq!(data[1]["id"], "item_4", "second item should be item_4");
+    assert_eq!(body["has_more"], false, "should indicate no more items after this page");
+}
+
+// -----------------------------------------------------------------------------
+// DELETE
+// -----------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_existing_response_returns_200() {
+    let filter = make_filter();
+    init_store_and_seed(&filter, "resp_del1", "default", json!([])).await;
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_del1");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(rejection.status, 200, "existing response should return 200");
+    assert_has_json_content_type(&rejection);
+
+    let body: serde_json::Value = serde_json::from_slice(rejection.body.as_deref().expect("body should be present"))
+        .expect("body should be valid JSON");
+    assert_eq!(body["id"], "resp_del1", "body should contain the response id");
+    assert_eq!(
+        body["object"], "response.deleted",
+        "body should have object=response.deleted"
+    );
+    assert_eq!(body["deleted"], true, "body should have deleted=true");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_nonexistent_response_returns_404() {
+    let filter = make_filter();
+    init_store_and_seed(&filter, "resp_exists", "default", json!([])).await;
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_missing");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(rejection.status, 404, "nonexistent response should return 404");
+    assert_has_json_content_type(&rejection);
+
+    let body: serde_json::Value = serde_json::from_slice(rejection.body.as_deref().expect("body should be present"))
+        .expect("body should be valid JSON");
+    assert_eq!(
+        body["error"]["type"], "invalid_request_error",
+        "error type should be invalid_request_error"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("resp_missing")),
+        "error message should reference the missing id"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_is_idempotent() {
+    let filter = make_filter();
+    init_store_and_seed(&filter, "resp_idem", "default", json!([])).await;
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_idem");
+    let mut ctx1 = crate::test_utils::make_filter_context(&req);
+    let action1 = filter.on_request(&mut ctx1).await.unwrap();
+    let r1 = expect_reject(action1);
+    assert_eq!(r1.status, 200, "first delete should return 200");
+
+    let mut ctx2 = crate::test_utils::make_filter_context(&req);
+    let action2 = filter.on_request(&mut ctx2).await.unwrap();
+    let r2 = expect_reject(action2);
+    assert_eq!(r2.status, 404, "second delete should return 404");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_cross_tenant_returns_404() {
+    let filter = make_filter();
+    init_store_and_seed(&filter, "resp_tenant", "tenant_a", json!([])).await;
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_tenant");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(rejection.status, 404, "delete from wrong tenant should return 404");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_uses_tenant_metadata() {
+    let filter = make_filter();
+    init_store_and_seed(&filter, "resp_tmeta", "tenant_x", json!([])).await;
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_tmeta");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata("responses.tenant_id", "tenant_x");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(
+        rejection.status, 200,
+        "delete with matching tenant metadata should return 200"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_continues_when_store_unavailable() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: sqlite
+database_url: "sqlite:///nonexistent/path/that/will/fail.db"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let cfg: ResponseStoreConfig = parse_filter_config("openai_response_store", &yaml).unwrap();
+    validate_config(&cfg).unwrap();
+    let filter = ResponseStoreFilter::new(cfg);
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_gone");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "DELETE should continue when store is unavailable"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn delete_response_has_json_content_type() {
+    let filter = make_filter();
+    init_store_and_seed(&filter, "resp_ct", "default", json!([])).await;
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_ct");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_has_json_content_type(&rejection);
+}
+
+// -----------------------------------------------------------------------------
+// extract_response_id
+// -----------------------------------------------------------------------------
+
+#[test]
+fn extract_response_id_valid() {
+    assert_eq!(
+        super::filter::extract_response_id("/v1/responses/resp_abc"),
+        Some("resp_abc"),
+        "should extract ID from valid path"
+    );
+}
+
+#[test]
+fn extract_response_id_trailing_slash() {
+    assert_eq!(
+        super::filter::extract_response_id("/v1/responses/resp_abc/"),
+        Some("resp_abc"),
+        "should extract ID with trailing slash"
+    );
+}
+
+#[test]
+fn extract_response_id_no_id() {
+    assert_eq!(
+        super::filter::extract_response_id("/v1/responses"),
+        None,
+        "should return None without ID segment"
+    );
+}
+
+#[test]
+fn extract_response_id_sub_resource() {
+    assert_eq!(
+        super::filter::extract_response_id("/v1/responses/resp_abc/input_items"),
+        None,
+        "should return None for sub-resource path"
+    );
+}
+
+#[test]
+fn extract_response_id_unrelated_path() {
+    assert_eq!(
+        super::filter::extract_response_id("/v1/chat/completions"),
+        None,
+        "should return None for unrelated path"
+    );
+}
+
+#[test]
+fn extract_response_id_empty_id_segment() {
+    assert_eq!(
+        super::filter::extract_response_id("/v1/responses/"),
+        None,
+        "should return None for empty ID segment"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// parse_query_params
+// -----------------------------------------------------------------------------
+
+#[test]
+fn parse_query_params_empty() {
+    let params = super::filter::parse_query_params(None);
+    assert!(params.cursor.is_none(), "cursor should be None for empty query");
+    assert_eq!(params.limit, 20, "limit should default to 20");
+    assert_eq!(
+        params.order,
+        super::Order::Descending,
+        "order should default to Descending"
+    );
+}
+
+#[test]
+fn parse_query_params_all_fields() {
+    let params = super::filter::parse_query_params(Some("after=5&limit=10&order=asc"));
+    assert_eq!(
+        params.cursor.as_deref(),
+        Some("5"),
+        "cursor should be parsed from after param"
+    );
+    assert_eq!(params.limit, 10, "limit should be parsed from query");
+    assert_eq!(
+        params.order,
+        super::Order::Ascending,
+        "order should be parsed as Ascending"
+    );
+}
+
+#[test]
+fn parse_query_params_invalid_limit_ignored() {
+    let params = super::filter::parse_query_params(Some("limit=abc"));
+    assert_eq!(params.limit, 20, "invalid limit should keep default");
+}
+
+#[test]
+fn parse_query_params_decodes_percent_encoded_cursor() {
+    let params = super::filter::parse_query_params(Some("after=item%5F1"));
+    assert_eq!(
+        params.cursor.as_deref(),
+        Some("item_1"),
+        "percent-encoded cursor should be decoded"
+    );
+}
+
+#[test]
+fn parse_query_params_unknown_order_ignored() {
+    let params = super::filter::parse_query_params(Some("order=random"));
+    assert_eq!(
+        params.order,
+        super::Order::Descending,
+        "unknown order value should keep default"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
@@ -922,4 +1393,41 @@ fn cleanup_sqlite_file(db_path: &PathBuf) {
     drop(std::fs::remove_file(db_path));
     drop(std::fs::remove_file(format!("{}-shm", db_path.display())));
     drop(std::fs::remove_file(format!("{}-wal", db_path.display())));
+}
+
+async fn init_store(filter: &ResponseStoreFilter) {
+    filter.store.get_or_init(|| async { filter.init_store().await }).await;
+}
+
+async fn init_store_and_seed(filter: &ResponseStoreFilter, id: &str, tenant_id: &str, input: serde_json::Value) {
+    let store_opt = filter.store.get_or_init(|| async { filter.init_store().await }).await;
+    let store = store_opt.as_ref().expect("store should be initialized");
+    let record = crate::builtins::http::ai::store::ResponseRecord {
+        id: id.to_owned(),
+        tenant_id: tenant_id.to_owned(),
+        created_at: 1000,
+        model: "gpt-4.1".to_owned(),
+        response_object: json!({"status": "completed"}),
+        input,
+        messages: json!([{"role": "user", "content": "hello"}]),
+    };
+    store
+        .upsert_response(&record)
+        .await
+        .expect("seed response should succeed");
+}
+
+fn expect_reject(action: FilterAction) -> crate::Rejection {
+    match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject, got {other:?}"),
+    }
+}
+
+fn assert_has_json_content_type(rejection: &crate::Rejection) {
+    let has_ct = rejection
+        .headers
+        .iter()
+        .any(|(k, v)| k == "content-type" && v == "application/json");
+    assert!(has_ct, "rejection should have application/json content-type");
 }

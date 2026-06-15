@@ -2591,9 +2591,17 @@ name = "praxis-proxy-ext-proc"
 version = "0.3.1"
 dependencies = [
  "async-trait",
+ "bytes",
+ "futures",
+ "http",
+ "praxis-proxy-core",
  "praxis-proxy-filter",
+ "praxis-proxy-proto",
+ "prost-types",
  "serde",
+ "thiserror 2.0.18",
  "tokio",
+ "tokio-stream",
  "tonic",
  "tracing",
  "yaml_serde",
