@@ -2865,6 +2865,7 @@ fn set_response_stores_is_accessible() {
         compression: None,
         filters: vec![],
         health_registry: None,
+        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         response_stores: None,
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
