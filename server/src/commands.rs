@@ -35,7 +35,16 @@ pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn
     let registry = praxis_filter::FilterRegistry::with_builtins();
     let health_registry = praxis_core::health::build_health_registry(&config.clusters);
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-    praxis::resolve_pipelines(config, &registry, &health_registry, &kv_stores)?;
+    #[cfg(feature = "ai-inference")]
+    let response_stores = praxis_filter::ResponseStoreRegistry::new();
+    praxis::resolve_pipelines(
+        config,
+        &registry,
+        &health_registry,
+        &kv_stores,
+        #[cfg(feature = "ai-inference")]
+        &response_stores,
+    )?;
     Ok(())
 }
 

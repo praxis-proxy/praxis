@@ -49,6 +49,7 @@ pub use self::{
 /// [`HttpFilterContext`].
 ///
 /// [`HttpFilterContext`]: crate::HttpFilterContext
+#[derive(Clone)]
 pub struct ResponseStoreRegistry {
     /// Named store backends.
     #[allow(clippy::type_complexity, reason = "DashMap of trait objects is inherently verbose")]
