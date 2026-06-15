@@ -224,7 +224,7 @@ impl ResponseCapture {
 ///
 /// Returns `None` if the path does not match the expected pattern.
 pub(super) fn extract_response_id(path: &str) -> Option<&str> {
-    let path = path.strip_suffix('/').filter(|p| !p.is_empty()).unwrap_or(path);
+    let path = path.strip_suffix('/').unwrap_or(path);
     let segments: Vec<&str> = path.split('/').collect();
 
     match segments.as_slice() {
