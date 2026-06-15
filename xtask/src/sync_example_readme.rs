@@ -264,7 +264,8 @@ fn description_from_header(content: &str) -> String {
 }
 
 /// Parse the leading comment block into paragraphs separated by blank
-/// comment lines (`#` with no text).
+/// comment lines (`#` with no text). Lines indented by two or more spaces
+/// (after `# `) are skipped to exclude embedded code examples.
 fn parse_comment_paragraphs(content: &str) -> Vec<Vec<String>> {
     let mut paragraphs: Vec<Vec<String>> = Vec::new();
     let mut current: Vec<String> = Vec::new();
@@ -299,12 +300,17 @@ fn is_skip_paragraph(para: &[String]) -> bool {
 
 /// Extract the first sentence from `s`. A sentence boundary is a period
 /// followed by a space and an uppercase letter, or a period at end of string.
+/// Periods immediately preceded by a digit are not treated as sentence
+/// endings to avoid splitting on decimals (e.g. `"Retry-After: 1. TCP …"`).
 fn first_sentence(s: &str) -> String {
     let s = s.trim();
     let bytes = s.as_bytes();
 
     for (i, &b) in bytes.iter().enumerate() {
         if b != b'.' {
+            continue;
+        }
+        if bytes.get(i.wrapping_sub(1)).is_some_and(u8::is_ascii_digit) {
             continue;
         }
         if i + 1 == bytes.len() {
@@ -340,7 +346,7 @@ fn split_at_marker(content: &str) -> (&str, &str) {
 
 /// Locate the workspace root directory.
 fn workspace_root() -> PathBuf {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set — run via `cargo xtask`");
     Path::new(&manifest_dir)
         .parent()
         .unwrap_or_else(|| Path::new("."))
@@ -477,6 +483,14 @@ listeners:
     #[test]
     fn first_sentence_preserves_abbreviations() {
         assert_eq!(first_sentence("e.g. this is an example."), "e.g. this is an example");
+    }
+
+    #[test]
+    fn first_sentence_skips_decimal_boundary() {
+        assert_eq!(
+            first_sentence("Returns 503 with Retry-After: 1. TCP listeners close immediately."),
+            "Returns 503 with Retry-After: 1. TCP listeners close immediately"
+        );
     }
 
     #[test]

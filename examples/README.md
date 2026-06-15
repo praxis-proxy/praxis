@@ -65,7 +65,7 @@ page.
 | [container-default.yaml](configs/operations/container-default.yaml) | Default config for containerized deployments |
 | [hot-reload.yaml](configs/operations/hot-reload.yaml) | Filter pipelines are swapped atomically at runtime when the config file changes |
 | [log-overrides.yaml](configs/operations/log-overrides.yaml) | Use `runtime.log_overrides` to raise or lower log verbosity for specific modules without flooding output from every subsystem |
-| [max-connections.yaml](configs/operations/max-connections.yaml) | HTTP listeners return 503 with Retry-After: 1 |
+| [max-connections.yaml](configs/operations/max-connections.yaml) | HTTP listeners return 503 with Retry-After: 1. TCP listeners close the socket immediately |
 | [multi-listener.yaml](configs/operations/multi-listener.yaml) | Demonstrates multiple HTTP listeners, each with its own filter pipeline |
 | [production-gateway.yaml](configs/operations/production-gateway.yaml) | Combines TLS, logging, timeouts, security headers, path routing, and load balancing |
 
