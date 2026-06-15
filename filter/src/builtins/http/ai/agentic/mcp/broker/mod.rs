@@ -21,7 +21,6 @@ mod tests;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use rand::{TryRngCore, rngs::OsRng};
 use tracing::{debug, trace};
 
 use self::config::{CatalogTool, McpBrokerConfig, build_config};
@@ -297,6 +296,7 @@ fn handle_delete(ctx: &HttpFilterContext<'_>) -> FilterAction {
 
 /// Generates a new MCP session and returns MCP capabilities.
 /// Does not initialize backends, that belongs to follow-up backend session work.
+#[allow(clippy::unnecessary_wraps, reason = "signature matches sibling handle_* fns")]
 fn handle_initialize(
     ctx: &mut HttpFilterContext<'_>,
     value: &serde_json::Value,
@@ -306,7 +306,7 @@ fn handle_initialize(
 ) -> Result<FilterAction, FilterError> {
     record_client_protocol_version(ctx, value);
     let response_version = negotiate_protocol_version(value, supported_versions, default_version);
-    let session_id = generate_session_id()?;
+    let session_id = format!("mcp-{}", ctx.id_generator.generate(ctx.time_source));
 
     debug!(session_id_len = session_id.len(), "MCP initialize");
     ctx.set_metadata("mcp.session_id", session_id.clone());
@@ -485,20 +485,6 @@ fn json_rpc_error_action_with_id(id_json: &str, code: i32, message: &str) -> Fil
 /// path. Uses exact match on the path component only.
 fn request_path_matches(uri: &http::Uri, public_path: &str) -> bool {
     uri.path() == public_path
-}
-
-// -----------------------------------------------------------------------------
-// Session ID
-// -----------------------------------------------------------------------------
-
-/// Generate a cryptographically random MCP session ID.
-fn generate_session_id() -> Result<String, FilterError> {
-    let mut bytes = [0u8; 16];
-    let mut rng = OsRng;
-    rng.try_fill_bytes(&mut bytes)
-        .map_err(|e| FilterError::from(format!("mcp: failed to generate session id: {e}")))?;
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
-    Ok(format!("mcp-{hex}"))
 }
 
 // -----------------------------------------------------------------------------

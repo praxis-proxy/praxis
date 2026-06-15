@@ -24,7 +24,6 @@ mod rules;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use rand::{TryRngCore, rngs::OsRng};
 use tracing::{debug, trace};
 
 use self::rules::validate_request;
@@ -72,39 +71,6 @@ impl OpenaiResponsesValidateFilter {
     pub fn from_config(_config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         Ok(Box::new(Self))
     }
-
-    /// Generate a response ID with `resp_` prefix.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FilterError`] if the system CSPRNG fails.
-    fn generate_response_id() -> Result<String, FilterError> {
-        let id = Self::generate_raw_id()?;
-        Ok(format!("resp_{id}"))
-    }
-
-    /// Generate a conversation ID with `conv_` prefix.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FilterError`] if the system CSPRNG fails.
-    fn generate_conversation_id() -> Result<String, FilterError> {
-        let id = Self::generate_raw_id()?;
-        Ok(format!("conv_{id}"))
-    }
-
-    /// Generate a cryptographically random hex ID (128 bits).
-    ///
-    /// # Errors
-    ///
-    /// Returns [`FilterError`] if the system CSPRNG fails.
-    fn generate_raw_id() -> Result<String, FilterError> {
-        let mut bytes = [0u8; 16];
-        OsRng
-            .try_fill_bytes(&mut bytes)
-            .map_err(|e| FilterError::from(format!("failed to generate ID: {e}")))?;
-        Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
-    }
 }
 
 #[async_trait]
@@ -147,12 +113,12 @@ impl HttpFilter for OpenaiResponsesValidateFilter {
             Err(action) => return Ok(action),
         };
 
-        let response_id = Self::generate_response_id()?;
+        let response_id = format!("resp_{}", ctx.id_generator.generate(ctx.time_source));
         let conversation_id = if let Some(id) = extract_conversation_id(&parsed) {
             trace!(conversation_id = %id, "conversation ID extracted from request");
             id
         } else {
-            let id = Self::generate_conversation_id()?;
+            let id = format!("conv_{}", ctx.id_generator.generate(ctx.time_source));
             trace!(conversation_id = %id, "conversation ID generated");
             id
         };
@@ -286,37 +252,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn response_id_has_prefix() {
-        let id = OpenaiResponsesValidateFilter::generate_response_id().unwrap();
-        assert!(id.starts_with("resp_"), "response ID should start with resp_");
-    }
-
-    #[test]
-    fn conversation_id_has_prefix() {
-        let id = OpenaiResponsesValidateFilter::generate_conversation_id().unwrap();
-        assert!(id.starts_with("conv_"), "conversation ID should start with conv_");
-    }
-
-    #[test]
-    fn raw_id_is_32_hex_chars() {
-        let id = OpenaiResponsesValidateFilter::generate_raw_id().unwrap();
-        assert_eq!(id.len(), 32, "raw ID should be 32 hex characters (128 bits)");
-        assert!(
-            id.chars().all(|c| c.is_ascii_hexdigit()),
-            "raw ID should contain only hex digits"
-        );
-    }
-
-    #[test]
-    fn generated_ids_are_unique() {
-        let ids: Vec<String> = (0..1000)
-            .map(|_| OpenaiResponsesValidateFilter::generate_raw_id().unwrap())
-            .collect();
-        let unique: std::collections::HashSet<&String> = ids.iter().collect();
-        assert_eq!(ids.len(), unique.len(), "all generated IDs should be unique");
-    }
-
     #[tokio::test]
     async fn valid_request_produces_metadata() {
         let ctx = run_filter(r#"{"model": "gpt-4.1", "input": "Hello"}"#, &[]).await;
@@ -324,12 +259,14 @@ mod tests {
         assert!(
             ctx.filter_metadata
                 .get("responses.response_id")
-                .is_some_and(|v| v.starts_with("resp_")),
-            "response_id should be set with resp_ prefix"
+                .is_some_and(|v| v.starts_with("resp_") && v.len() == 37),
+            "response_id should be resp_ + 32 hex chars"
         );
         assert!(
-            ctx.filter_metadata.contains_key("responses.conversation_id"),
-            "conversation_id should be set"
+            ctx.filter_metadata
+                .get("responses.conversation_id")
+                .is_some_and(|v| v.starts_with("conv_") && v.len() == 37),
+            "conversation_id should be conv_ + 32 hex chars"
         );
         assert_eq!(
             ctx.filter_metadata.get("responses.store").map(String::as_str),
@@ -399,8 +336,8 @@ mod tests {
         assert!(
             ctx.filter_metadata
                 .get("responses.conversation_id")
-                .is_some_and(|v| v.starts_with("conv_")),
-            "conversation_id should be generated with conv_ prefix"
+                .is_some_and(|v| v.starts_with("conv_") && v.len() == 37),
+            "conversation_id should be conv_ + 32 hex chars"
         );
     }
 

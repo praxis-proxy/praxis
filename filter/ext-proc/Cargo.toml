@@ -18,11 +18,20 @@ workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+bytes = { workspace = true }
+futures = { workspace = true }
+http = { workspace = true }
 praxis-filter = { workspace = true }
+praxis-proto = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true }
+praxis-core = { workspace = true }
+prost-types = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+tokio-stream = { workspace = true }

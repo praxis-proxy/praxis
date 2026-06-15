@@ -142,11 +142,15 @@ impl LocalTaskRouteStore {
 
 /// Extract task route information from a parsed JSON-RPC response.
 ///
-/// Supports two shapes:
-/// - `result.task.id` (task nested under result)
-/// - `result.id` with `result.status` (direct task object in result)
+/// Supports these [A2A core object] response/stream shapes:
+/// - `result.task.id` — full `Task` nested under result
+/// - `result.id` with `result.status` — direct `Task` object in result
+/// - `result.statusUpdate.taskId` — `TaskStatusUpdateEvent` (carries terminal state)
+/// - `result.artifactUpdate.taskId` — `TaskArtifactUpdateEvent` (never terminal)
 ///
 /// Returns `None` for message-only responses or malformed JSON.
+///
+/// [A2A core object]: https://a2a-protocol.org/latest/specification/#5-core-objects
 pub(crate) fn extract_task_route(value: &Value) -> Option<ExtractedTaskRoute> {
     let result = value.get("result")?;
 
@@ -156,6 +160,14 @@ pub(crate) fn extract_task_route(value: &Value) -> Option<ExtractedTaskRoute> {
 
     if result.get("id").is_some() && result.get("status").is_some() {
         return extract_from_task_object(result);
+    }
+
+    if let Some(status_update) = result.get("statusUpdate") {
+        return extract_from_status_update(status_update);
+    }
+
+    if let Some(artifact_update) = result.get("artifactUpdate") {
+        return extract_from_artifact_update(artifact_update);
     }
 
     None
@@ -178,6 +190,42 @@ fn extract_from_task_object(task: &Value) -> Option<ExtractedTaskRoute> {
     Some(ExtractedTaskRoute {
         task_id: task_id.to_owned(),
         terminal,
+    })
+}
+
+/// Extract route info from a `TaskStatusUpdateEvent` (`result.statusUpdate`).
+fn extract_from_status_update(update: &Value) -> Option<ExtractedTaskRoute> {
+    let task_id = update.get("taskId")?.as_str()?;
+
+    if !validate_id(task_id) {
+        return None;
+    }
+
+    let terminal = update
+        .get("status")
+        .and_then(|s| s.get("state"))
+        .and_then(Value::as_str)
+        .is_some_and(is_terminal_state);
+
+    Some(ExtractedTaskRoute {
+        task_id: task_id.to_owned(),
+        terminal,
+    })
+}
+
+/// Extract route info from a `TaskArtifactUpdateEvent` (`result.artifactUpdate`).
+///
+/// Artifact updates carry no status, so they are never terminal.
+fn extract_from_artifact_update(update: &Value) -> Option<ExtractedTaskRoute> {
+    let task_id = update.get("taskId")?.as_str()?;
+
+    if !validate_id(task_id) {
+        return None;
+    }
+
+    Some(ExtractedTaskRoute {
+        task_id: task_id.to_owned(),
+        terminal: false,
     })
 }
 
@@ -424,6 +472,106 @@ mod tests {
 
         let route = extract_task_route(&json).expect("should extract route");
         assert!(!route.terminal, "TASK_STATE_INPUT_REQUIRED should not be terminal");
+    }
+
+    // ---- Streaming Event Extraction Tests ----
+
+    #[test]
+    fn extract_from_status_update_event() {
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "statusUpdate": {
+                    "taskId": "task-su-1",
+                    "contextId": "ctx-1",
+                    "status": {"state": "TASK_STATE_WORKING"}
+                }
+            }
+        });
+
+        let route = extract_task_route(&json).expect("should extract from statusUpdate");
+        assert_eq!(route.task_id, "task-su-1");
+        assert!(!route.terminal, "TASK_STATE_WORKING is not terminal");
+    }
+
+    #[test]
+    fn extract_terminal_status_update_event() {
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "statusUpdate": {
+                    "taskId": "task-su-2",
+                    "status": {"state": "TASK_STATE_COMPLETED"}
+                }
+            }
+        });
+
+        let route = extract_task_route(&json).expect("should extract from terminal statusUpdate");
+        assert_eq!(route.task_id, "task-su-2");
+        assert!(
+            route.terminal,
+            "TASK_STATE_COMPLETED from statusUpdate should be terminal"
+        );
+    }
+
+    #[test]
+    fn extract_from_artifact_update_event() {
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "artifactUpdate": {
+                    "taskId": "task-au-1",
+                    "contextId": "ctx-1",
+                    "artifact": {
+                        "artifactId": "art-1",
+                        "parts": [{"text": "chunk"}]
+                    }
+                }
+            }
+        });
+
+        let route = extract_task_route(&json).expect("should extract from artifactUpdate");
+        assert_eq!(route.task_id, "task-au-1");
+        assert!(!route.terminal, "artifactUpdate is never terminal");
+    }
+
+    #[test]
+    fn status_update_without_task_id_returns_none() {
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "statusUpdate": {
+                    "status": {"state": "TASK_STATE_WORKING"}
+                }
+            }
+        });
+
+        assert!(
+            extract_task_route(&json).is_none(),
+            "statusUpdate without taskId should return None"
+        );
+    }
+
+    #[test]
+    fn artifact_update_without_task_id_returns_none() {
+        let json = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "artifactUpdate": {
+                    "artifact": {"parts": []}
+                }
+            }
+        });
+
+        assert!(
+            extract_task_route(&json).is_none(),
+            "artifactUpdate without taskId should return None"
+        );
     }
 
     #[test]
