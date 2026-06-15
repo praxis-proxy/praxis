@@ -71,6 +71,7 @@ praxis-filter = { version = "0.3.1", path = "filter", package = "praxis-proxy-fi
 praxis-protocol = { version = "0.3.1", path = "protocol", package = "praxis-proxy-protocol" }
 praxis-tls = { version = "0.3.1", path = "tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
+secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.150"
 rcgen = "0.14.8"
@@ -79,7 +80,7 @@ rustls = "0.23.40"
 rustls-pemfile = "2.2.0"
 # NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.
 serde_yaml = { package = "yaml_serde", version = "0.10.4" }
-sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio", "sqlite"] }
+sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres"] }
 tempfile = "3.27.0"
 tokio-rustls = "0.26.4"
 tokio-tungstenite = "0.29.0"
@@ -93,7 +94,7 @@ tokio-stream = "0.1.18"
 tokio-util = "0.7.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
-zeroize = "1.8.2"
+zeroize = "1.9.0"
 
 [profile.release]
 lto = true

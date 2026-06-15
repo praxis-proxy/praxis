@@ -85,7 +85,7 @@ fn echo_listener(address: &str) -> Listener {
         max_connections: None,
         name: "echo".into(),
         protocol: ProtocolKind::default(),
-        tcp_idle_timeout_ms: None,
+        tcp_session_timeout_ms: None,
         tcp_max_duration_secs: None,
         tls: None,
         upstream: None,

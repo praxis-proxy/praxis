@@ -61,6 +61,7 @@ fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
     if listener.name.is_empty() {
         return Err(ProxyError::Config("listener name must not be empty".into()));
     }
+    super::super::validate_name_chars(&listener.name, "listener")?;
     super::address::validate_address(&listener.address, &listener.name)?;
     validate_max_connections(listener)?;
 
@@ -286,7 +287,7 @@ filter_chains:
                 max_connections: None,
                 name: format!("l{i}"),
                 protocol: Default::default(),
-                tcp_idle_timeout_ms: None,
+                tcp_session_timeout_ms: None,
                 tcp_max_duration_secs: None,
                 tls: None,
                 upstream: None,

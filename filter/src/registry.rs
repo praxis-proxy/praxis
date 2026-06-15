@@ -167,6 +167,12 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
         "openai_responses_validate",
         crate::builtins::OpenaiResponsesValidateFilter::from_config,
     );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "openai_response_store",
+        crate::builtins::ResponseStoreFilter::from_config,
+    );
 }
 
 /// Register a single HTTP filter factory by name.
@@ -291,6 +297,11 @@ mod tests {
         assert!(
             names.contains(&"openai_responses_validate"),
             "validate should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"openai_response_store"),
+            "response_store should be registered"
         );
     }
 

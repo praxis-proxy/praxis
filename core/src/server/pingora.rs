@@ -108,7 +108,7 @@ fn apply_upstream_ca(conf: &mut ServerConf, runtime: &RuntimeOptions) {
 
 /// Warn if `global_queue_interval` is configured but unsupported.
 fn warn_unsupported_global_queue_interval(runtime: &RuntimeOptions) {
-    if runtime.global_queue_interval.is_some_and(|v| v != 61) {
+    if runtime.global_queue_interval.is_some() {
         tracing::warn!(
             interval = ?runtime.global_queue_interval,
             "global_queue_interval is configured but not yet supported by Pingora's ServerConf"

@@ -7,6 +7,7 @@
 //! backend, and supporting types. Used by AI API filters for
 //! persisting response records and conversation history.
 
+mod postgres;
 mod schemas;
 mod sqlite;
 mod trait_def;
@@ -26,9 +27,12 @@ mod tests;
 use std::sync::Arc;
 
 use dashmap::{DashMap, mapref::entry::Entry};
+/// Validate a response-store table identifier.
+pub(crate) use schemas::validate_identifier as validate_table_identifier;
 
 #[allow(unused_imports, reason = "re-exports for upcoming store filter")]
 pub use self::{
+    postgres::{PostgresResponseStore, SslMode},
     sqlite::SqliteResponseStore,
     trait_def::ResponseStore,
     types::{ConversationRecord, ResponseRecord, StoreError},

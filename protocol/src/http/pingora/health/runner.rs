@@ -120,6 +120,8 @@ fn build_health_params(
 async fn run_health_check_loop(params: &HealthCheckParams, shutdown: CancellationToken) {
     debug!(cluster = %params.cluster_name, "health check loop started");
 
+    probe_all_endpoints(params).await;
+
     loop {
         tokio::select! {
             () = shutdown.cancelled() => {

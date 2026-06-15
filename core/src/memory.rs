@@ -3,7 +3,7 @@
 
 //! Process-wide memory pressure monitoring.
 //!
-//! Tracks resident set size (RSS) via `/proc/self/statm` on
+//! Tracks resident set size (RSS) via `/proc/self/status` on
 //! Linux and sheds load when a configured threshold is exceeded.
 //! Sampling is cached: at most one `/proc` read per
 //! `CHECK_INTERVAL_MS`.
@@ -17,14 +17,8 @@ use std::sync::{
 // Constants
 // ---------------------------------------------------------------------------
 
-/// Minimum interval between `/proc/self/statm` reads.
+/// Minimum interval between `/proc/self/status` reads.
 const CHECK_INTERVAL_MS: u64 = 1000;
-
-/// Assumed page size for converting `/proc/self/statm` pages to bytes.
-///
-/// 4 `KiB` on all supported Linux architectures (`x86_64`, `aarch64`).
-#[cfg(target_os = "linux")]
-const PAGE_SIZE: usize = 4096;
 
 // ---------------------------------------------------------------------------
 // Process-wide singleton
@@ -143,14 +137,24 @@ fn epoch_ms() -> u64 {
         .unwrap_or(0)
 }
 
-/// Read current RSS from `/proc/self/statm`.
+/// Read current RSS from the `VmRSS` line in `/proc/self/status`.
+///
+/// Uses `VmRSS` (reported in kB) instead of `/proc/self/statm`
+/// (reported in pages) to avoid dependence on the kernel page
+/// size, which varies across architectures (4 `KiB` on `x86_64`,
+/// 4/16/64 `KiB` on `aarch64` depending on kernel config).
 ///
 /// Returns `None` on non-Linux or on parse failure.
 #[cfg(target_os = "linux")]
 fn sample_rss() -> Option<usize> {
-    let statm = std::fs::read_to_string("/proc/self/statm").ok()?;
-    let rss_pages: usize = statm.split_whitespace().nth(1)?.parse().ok()?;
-    rss_pages.checked_mul(PAGE_SIZE)
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            let kb: usize = rest.trim().strip_suffix("kB")?.trim().parse().ok()?;
+            return kb.checked_mul(1024);
+        }
+    }
+    None
 }
 
 /// No-op on non-Linux platforms.

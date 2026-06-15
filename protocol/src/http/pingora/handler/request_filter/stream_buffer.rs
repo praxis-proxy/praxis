@@ -6,19 +6,11 @@
 use std::{borrow::Cow, collections::VecDeque, fmt::Write};
 
 use pingora_proxy::Session;
+use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
 use praxis_filter::{BodyBuffer, BodyMode, FilterAction, FilterError, FilterPipeline, Rejection, Request};
 use tracing::debug;
 
 use crate::http::pingora::context::PingoraRequestCtx;
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Defense-in-depth fallback when `StreamBuffer { max_bytes: None }`
-/// reaches the body filter layer (64 MiB, matching the filter crate's
-/// `MAX_JSON_BODY_BYTES` ceiling).
-const BODY_FALLBACK_LIMIT: usize = 67_108_864; // 64 MiB
 
 /// Headers allowed in TRACE echo responses.
 ///
@@ -108,7 +100,7 @@ pub(super) async fn pre_read_body(
 ) -> Result<Vec<(Cow<'static, str>, String)>, PreReadError> {
     let caps = pipeline.body_capabilities();
     let max_bytes = match caps.request_body_mode {
-        BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(BODY_FALLBACK_LIMIT),
+        BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
         _ => return Ok(Vec::new()),
     };
 

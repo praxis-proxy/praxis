@@ -66,11 +66,16 @@ filter_chains:
           mode: x-praxis-responses-mode
 
       - filter: openai_responses_validate
-        # Future #354 orchestration filters would follow here
-        # for stateful requests (gated by filter conditions on the
-        # x-praxis-responses-mode header or responses.* metadata)
-        # before all valid requests route to the inference backend:
-        #   - filter: response_store
+
+      - filter: openai_response_store
+        backend: sqlite
+        # In-memory:
+        #   database_url: "sqlite::memory:"
+        # File-backed:
+        database_url: "sqlite://responses.db?mode=rwc"
+        responses_table: openai_responses
+        conversations_table: openai_conversations
+        # Future #354 orchestration filters would follow here:
         #   - filter: rehydrate
         #   - filter: compact
         #   - filter: tool_parse

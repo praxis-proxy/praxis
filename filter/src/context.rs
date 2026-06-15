@@ -20,6 +20,10 @@ use crate::{body::BodyMode, pipeline::body::merge_body_mode, results::FilterResu
 ///
 /// Created by the protocol layer for each incoming request. Filters read
 /// and mutate it to select clusters, choose upstreams, and inject headers.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "transport context tracks independent lifecycle flags across phases"
+)]
 pub struct HttpFilterContext<'a> {
     /// Per-filter body-done tracking. When `true` at index `i`,
     /// filter `i` is skipped for remaining body chunks.
