@@ -15,6 +15,7 @@ pub use server::{check_root_privilege, fatal, resolve_config_path, run_server, r
 // External Filter Discovery
 // -----------------------------------------------------------------------------
 
+// Provides: fn register_external_filters(&mut FilterRegistry)
 include!(concat!(env!("OUT_DIR"), "/external_filters.rs"));
 
 /// Build a [`FilterRegistry`] with built-in and auto-discovered external
