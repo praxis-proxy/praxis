@@ -2854,3 +2854,29 @@ fn when_status(codes: &[u16]) -> praxis_core::config::ResponseCondition {
         headers: None,
     })
 }
+
+#[cfg(feature = "ai-inference")]
+#[test]
+fn set_response_stores_is_accessible() {
+    use crate::builtins::http::ai::store::ResponseStoreRegistry;
+
+    let mut pipeline = FilterPipeline {
+        body_capabilities: BodyCapabilities::default(),
+        compression: None,
+        filters: vec![],
+        health_registry: None,
+        kv_stores: None,
+        response_stores: None,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
+    };
+    assert!(
+        pipeline.response_stores().is_none(),
+        "response_stores should be None by default"
+    );
+
+    pipeline.set_response_stores(ResponseStoreRegistry::new());
+    assert!(
+        pipeline.response_stores().is_some(),
+        "response_stores should be Some after set"
+    );
+}
