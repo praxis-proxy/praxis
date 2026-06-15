@@ -36,12 +36,15 @@ use std::sync::Arc;
 use praxis_core::{
     config::{ABSOLUTE_MAX_BODY_BYTES, FailureMode, InsecureOptions},
     health::HealthRegistry,
+    id::IdGenerator,
     kv::KvStoreRegistry,
     time::TimeSource,
 };
 use tracing::warn;
 
 use self::filter::PipelineFilter;
+#[cfg(feature = "ai-inference")]
+use crate::builtins::http::ai::store::ResponseStoreRegistry;
 use crate::{
     FilterError,
     body::{BodyCapabilities, BodyMode},
@@ -74,8 +77,15 @@ pub struct FilterPipeline {
     /// Shared health registry for endpoint health lookups.
     health_registry: Option<HealthRegistry>,
 
+    /// Shared ID generator for request correlation IDs.
+    id_generator: Arc<IdGenerator>,
+
     /// Named key-value stores for runtime mappings.
     kv_stores: Option<KvStoreRegistry>,
+
+    /// Named response store backends for AI API persistence.
+    #[cfg(feature = "ai-inference")]
+    response_stores: Option<ResponseStoreRegistry>,
 
     /// Wall-clock time source for filters that need timestamps.
     time_source: Arc<dyn TimeSource>,
@@ -170,6 +180,16 @@ impl FilterPipeline {
         self.health_registry.as_ref()
     }
 
+    /// The shared request ID generator.
+    pub fn id_generator(&self) -> &IdGenerator {
+        &self.id_generator
+    }
+
+    /// Override the [`IdGenerator`] for this pipeline.
+    pub fn set_id_generator(&mut self, generator: Arc<IdGenerator>) {
+        self.id_generator = generator;
+    }
+
     /// The shared KV store registry, if set.
     pub fn kv_stores(&self) -> Option<&KvStoreRegistry> {
         self.kv_stores.as_ref()
@@ -178,6 +198,18 @@ impl FilterPipeline {
     /// Set the shared [`KvStoreRegistry`] for this pipeline.
     pub fn set_kv_stores(&mut self, stores: KvStoreRegistry) {
         self.kv_stores = Some(stores);
+    }
+
+    /// The shared response store registry, if set.
+    #[cfg(feature = "ai-inference")]
+    pub fn response_stores(&self) -> Option<&ResponseStoreRegistry> {
+        self.response_stores.as_ref()
+    }
+
+    /// Set the shared [`ResponseStoreRegistry`] for this pipeline.
+    #[cfg(feature = "ai-inference")]
+    pub fn set_response_stores(&mut self, stores: ResponseStoreRegistry) {
+        self.response_stores = Some(stores);
     }
 
     /// The wall-clock time source.

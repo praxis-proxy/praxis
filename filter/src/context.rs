@@ -6,7 +6,9 @@
 use std::{borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
 
 use http::{HeaderMap, Method, StatusCode, Uri};
-use praxis_core::{connectivity::Upstream, health::HealthRegistry, kv::KvStoreRegistry, time::TimeSource};
+use praxis_core::{
+    connectivity::Upstream, health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, time::TimeSource,
+};
 
 use crate::{body::BodyMode, pipeline::body::merge_body_mode, results::FilterResultSet};
 
@@ -18,6 +20,10 @@ use crate::{body::BodyMode, pipeline::body::merge_body_mode, results::FilterResu
 ///
 /// Created by the protocol layer for each incoming request. Filters read
 /// and mutate it to select clusters, choose upstreams, and inject headers.
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "transport context tracks independent lifecycle flags across phases"
+)]
 pub struct HttpFilterContext<'a> {
     /// Per-filter body-done tracking. When `true` at index `i`,
     /// filter `i` is skipped for remaining body chunks.
@@ -29,6 +35,9 @@ pub struct HttpFilterContext<'a> {
 
     /// Downstream client IP address (from the TCP connection).
     pub client_addr: Option<IpAddr>,
+
+    /// The cluster name selected by the router filter.
+    pub cluster: Option<Arc<str>>,
 
     /// Whether the downstream connection uses TLS.
     ///
@@ -43,9 +52,6 @@ pub struct HttpFilterContext<'a> {
     /// during the request phase. The response phase skips
     /// filters that did not run (e.g. due to `SkipTo`).
     pub executed_filter_indices: Vec<bool>,
-
-    /// The cluster name selected by the router filter.
-    pub cluster: Option<Arc<str>>,
 
     /// Extra headers to inject into the upstream request.
     pub extra_request_headers: Vec<(Cow<'static, str>, String)>,
@@ -79,8 +85,15 @@ pub struct HttpFilterContext<'a> {
     /// Shared health registry for endpoint health lookups.
     pub health_registry: Option<&'a HealthRegistry>,
 
+    /// Shared request ID generator.
+    pub id_generator: &'a IdGenerator,
+
     /// Named key-value stores for runtime mappings.
     pub kv_stores: Option<&'a KvStoreRegistry>,
+
+    /// Named response store backends for AI API persistence.
+    #[cfg(feature = "ai-inference")]
+    pub response_stores: Option<&'a crate::builtins::http::ai::store::ResponseStoreRegistry>,
 
     /// Transport-agnostic request headers, URI, and method.
     pub request: &'a Request,
@@ -203,6 +216,22 @@ impl HttpFilterContext<'_> {
     /// [`set_request_body_mode`]: Self::set_request_body_mode
     pub fn set_response_body_mode(&mut self, mode: BodyMode) {
         merge_body_mode(&mut self.response_body_mode, mode);
+    }
+
+    /// Store token usage counts in [`filter_metadata`] so that downstream
+    /// filters, access log templates, and metrics can read them.
+    ///
+    /// Writes the well-known keys `token.input`, `token.output`, and
+    /// `token.total`. If `total` is `None`, it defaults to
+    /// `input.saturating_add(output)`.
+    ///
+    /// [`filter_metadata`]: Self::filter_metadata
+    pub fn set_token_usage(&mut self, input: u64, output: u64, total: Option<u64>) {
+        let total = total.unwrap_or_else(|| input.saturating_add(output));
+
+        self.set_metadata("token.input", input.to_string());
+        self.set_metadata("token.output", output.to_string());
+        self.set_metadata("token.total", total.to_string());
     }
 }
 
@@ -548,6 +577,48 @@ mod tests {
     }
 
     #[test]
+    fn set_metadata_rejects_empty_key() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_metadata("", "val");
+        assert!(ctx.get_metadata("").is_none(), "empty key should be silently rejected");
+    }
+
+    #[test]
+    fn set_metadata_rejects_long_key() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let long_key = "k".repeat(65);
+        ctx.set_metadata(long_key.as_str(), "val");
+        assert!(
+            ctx.get_metadata(long_key.as_str()).is_none(),
+            "65-byte key should be rejected"
+        );
+    }
+
+    #[test]
+    fn set_metadata_accepts_max_length_key() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let max_key = "k".repeat(64);
+        ctx.set_metadata(max_key.as_str(), "val");
+        assert_eq!(
+            ctx.get_metadata(max_key.as_str()),
+            Some("val"),
+            "64-byte key should be accepted"
+        );
+    }
+
+    #[test]
+    fn set_metadata_rejects_long_value() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let long_value = "v".repeat(257);
+        ctx.set_metadata("key", long_value.as_str());
+        assert!(ctx.get_metadata("key").is_none(), "257-byte value should be rejected");
+    }
+
+    #[test]
     fn kv_stores_lookup_with_match_types() {
         use praxis_core::kv::MatchType;
 
@@ -569,5 +640,71 @@ mod tests {
             store.lookup(".main", MatchType::Suffix).unwrap().is_some(),
             "suffix lookup should match route.web.main"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Token Usage Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn token_metadata_absent_by_default() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        assert!(ctx.get_metadata("token.input").is_none());
+        assert!(ctx.get_metadata("token.output").is_none());
+        assert!(ctx.get_metadata("token.total").is_none());
+    }
+
+    #[test]
+    fn set_token_usage_writes_all_metadata_keys() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_token_usage(150, 80, Some(230));
+        assert_eq!(ctx.get_metadata("token.input"), Some("150"));
+        assert_eq!(ctx.get_metadata("token.output"), Some("80"));
+        assert_eq!(ctx.get_metadata("token.total"), Some("230"));
+    }
+
+    #[test]
+    fn set_token_usage_computes_total_when_none() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_token_usage(100, 50, None);
+        assert_eq!(ctx.get_metadata("token.total"), Some("150"));
+    }
+
+    #[test]
+    fn set_token_usage_uses_explicit_total() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_token_usage(100, 50, Some(200));
+        assert_eq!(
+            ctx.get_metadata("token.total"),
+            Some("200"),
+            "explicit total should override computed sum"
+        );
+    }
+
+    #[test]
+    fn set_token_usage_saturates_on_overflow() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_token_usage(u64::MAX, 1, None);
+        assert_eq!(
+            ctx.get_metadata("token.total"),
+            Some(&u64::MAX.to_string()[..]),
+            "total should saturate instead of wrapping"
+        );
+    }
+
+    #[test]
+    fn set_token_usage_overwrites_previous() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_token_usage(100, 50, None);
+        ctx.set_token_usage(200, 80, Some(280));
+        assert_eq!(ctx.get_metadata("token.input"), Some("200"));
+        assert_eq!(ctx.get_metadata("token.output"), Some("80"));
+        assert_eq!(ctx.get_metadata("token.total"), Some("280"));
     }
 }

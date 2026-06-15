@@ -5,8 +5,6 @@ name: Pull Request Hygiene
 # ------------------------------------------------------------------------------
 
 on:
-  schedule:
-    - cron: "*/30 * * * *"
   workflow_dispatch:
 
 permissions: {}

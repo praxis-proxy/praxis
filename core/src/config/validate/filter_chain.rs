@@ -48,6 +48,9 @@ fn validate_chain_cardinality(chains: &[FilterChainConfig]) -> Result<(), ProxyE
                 chain.filters.len()
             )));
         }
+        for entry in &chain.filters {
+            entry.warn_config_typos();
+        }
     }
     Ok(())
 }
@@ -184,6 +187,28 @@ filter_chains:
             err.to_string().contains("too many filters"),
             "should reject exceeding MAX_FILTERS_PER_CHAIN: {err}"
         );
+    }
+
+    #[test]
+    fn accept_exactly_max_chains() {
+        let mut yaml = String::from(
+            "listeners:\n  - name: web\n    address: \"0.0.0.0:8080\"\n    filter_chains: [c0]\nfilter_chains:\n",
+        );
+        for i in 0..1_000 {
+            yaml.push_str(&format!("  - name: c{i}\n    filters:\n      - filter: headers\n"));
+        }
+        Config::from_yaml(&yaml).expect("exactly MAX_CHAINS should be accepted");
+    }
+
+    #[test]
+    fn accept_exactly_max_filters_per_chain() {
+        let mut yaml = String::from(
+            "listeners:\n  - name: web\n    address: \"0.0.0.0:8080\"\n    filter_chains: [main]\nfilter_chains:\n  - name: main\n    filters:\n",
+        );
+        for _ in 0..100 {
+            yaml.push_str("      - filter: headers\n");
+        }
+        Config::from_yaml(&yaml).expect("exactly MAX_FILTERS_PER_CHAIN should be accepted");
     }
 
     #[test]

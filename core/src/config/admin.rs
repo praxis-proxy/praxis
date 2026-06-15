@@ -28,6 +28,10 @@ use serde::Deserialize;
 #[serde(default, deny_unknown_fields)]
 pub struct AdminConfig {
     /// Admin endpoint bind address.
+    ///
+    /// Defaults to disabled. When enabled, binds to loopback only.
+    /// No authentication is performed; access control relies on
+    /// network-level restrictions (loopback binding, firewall).
     pub address: Option<String>,
 
     /// Include per-cluster detail in `/ready` response.

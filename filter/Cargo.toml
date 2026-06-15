@@ -15,7 +15,7 @@ name = "praxis_filter"
 
 [features]
 default = ["ai-inference"]
-ai-inference = ["dep:sqlx"]
+ai-inference = ["dep:secrecy", "dep:sqlx", "dep:tokio"]
 ext-proc = ["dep:praxis-proto", "dep:tonic", "dep:prost-wkt-types"]
 
 [lints]
@@ -32,11 +32,13 @@ praxis-proto = { workspace = true, optional = true }
 rand = { workspace = true }
 prost-wkt-types = { workspace = true, optional = true }
 regex = { workspace = true }
+secrecy = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 sqlx = { workspace = true, optional = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, optional = true }
 tonic = { workspace = true, optional = true }
 tracing = { workspace = true }
 zeroize = { workspace = true }

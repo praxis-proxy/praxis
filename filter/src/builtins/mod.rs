@@ -13,6 +13,10 @@ pub use http::OpenaiResponsesValidateFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
+pub use http::ResponseStoreFilter;
+#[cfg(feature = "ai-inference")]
+pub use http::ResponseStoreRegistry;
+#[cfg(feature = "ai-inference")]
 pub use http::ResponsesFormatFilter;
 pub use http::{
     A2aFilter, AccessLogFilter, CircuitBreakerFilter, CompressionFilter, ContainsValue, CorsFilter,
@@ -22,4 +26,6 @@ pub use http::{
     RedirectStatus, RequestIdFilter, RouterFilter, RuleTargetKind, StaticResponseFilter, TimeoutFilter,
     UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,
 };
+#[cfg(feature = "ai-inference")]
+pub use http::{TokenUsage, TokenUsageProvider, extract_token_usage};
 pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};

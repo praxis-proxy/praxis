@@ -42,6 +42,7 @@ pub(in crate::config::validate) fn validate_clusters(
         if cluster.name.is_empty() {
             return Err(ProxyError::Config("cluster name must not be empty".into()));
         }
+        super::validate_name_chars(&cluster.name, "cluster")?;
         endpoints::validate_endpoints(cluster)?;
         tls::validate_tls_settings(cluster, insecure_options)?;
         timeouts::validate_timeouts(cluster)?;

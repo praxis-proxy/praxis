@@ -7,6 +7,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use pingora_core::Result;
+use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
 use praxis_filter::{BodyBuffer, BodyMode, FilterAction, FilterPipeline};
 use tracing::{debug, warn};
 
@@ -61,7 +62,7 @@ pub(super) fn execute(
 
         BodyMode::StreamBuffer { max_bytes } if !ctx.response_body_released => {
             if let Some(ref chunk) = *body {
-                let limit = max_bytes.unwrap_or(usize::MAX);
+                let limit = max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES);
                 let buf = ctx.response_body_buffer.get_or_insert_with(|| BodyBuffer::new(limit));
 
                 if buf.push(chunk.clone()).is_err() {
@@ -80,7 +81,8 @@ pub(super) fn execute(
             }
         },
 
-        BodyMode::StreamBuffer { .. } | BodyMode::Stream | _ => {},
+        BodyMode::StreamBuffer { .. } | BodyMode::Stream => {},
+        _ => tracing::warn!("unhandled BodyMode variant in response body filter"),
     }
 
     let (result, body_bytes, cluster, upstream, filter_metadata) = {

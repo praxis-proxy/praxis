@@ -79,10 +79,6 @@ impl TryFrom<u16> for RedirectStatus {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RedirectConfig {
-    /// HTTP redirect status code (301, 302, 307, or 308).
-    #[serde(default = "default_status", deserialize_with = "deserialize_redirect_status")]
-    status: RedirectStatus,
-
     /// Location URL template. Supports `${path}`, `${query}`, `${host}`, and `${scheme}` placeholders.
     ///
     /// `${query}` expands to `?key=val` (with leading `?`) when a query string
@@ -91,6 +87,10 @@ struct RedirectConfig {
     /// inferred scheme (`http` or `https`). Templates should use
     /// `${path}${query}` without a literal `?` separator.
     location: String,
+
+    /// HTTP redirect status code (301, 302, 307, or 308).
+    #[serde(default = "default_status", deserialize_with = "deserialize_redirect_status")]
+    status: RedirectStatus,
 }
 
 /// Default redirect status: 301 Moved Permanently.
@@ -158,10 +158,10 @@ where
 /// assert!(result.is_err());
 /// ```
 pub struct RedirectFilter {
-    /// HTTP redirect status code.
-    status: RedirectStatus,
     /// Location URL template with `${path}`, `${query}`, `${host}`, and `${scheme}` placeholders.
     location: String,
+    /// HTTP redirect status code.
+    status: RedirectStatus,
 }
 
 impl RedirectFilter {
@@ -218,6 +218,12 @@ impl HttpFilter for RedirectFilter {
 ///
 /// `${query}` includes the `?` prefix when a query string is present,
 /// and expands to an empty string when absent.
+///
+/// # Security
+///
+/// `${host}` is populated from the request `Host` header without
+/// validation. Templates using `${host}` should only be deployed
+/// behind host-constrained listeners to prevent open redirect.
 fn expand_location(template: &str, path: &str, query: Option<&str>, host: Option<&str>, scheme: &str) -> String {
     let safe_path = crate::builtins::http::transformation::path_sanitize::normalize_rewritten_path(path);
     let mut result = template.replace("${path}", &safe_path);
@@ -246,14 +252,18 @@ fn strip_port(host: &str) -> &str {
 /// Checks `X-Forwarded-Proto` first, then `downstream_tls`, then
 /// falls back to the URI scheme. Defaults to `"http"`.
 fn infer_scheme(ctx: &HttpFilterContext<'_>) -> &'static str {
-    if ctx
+    if let Some(proto) = ctx
         .request
         .headers
         .get("x-forwarded-proto")
         .and_then(|v| v.to_str().ok())
-        .is_some_and(|s| s.eq_ignore_ascii_case("https"))
     {
-        return "https";
+        if proto.eq_ignore_ascii_case("https") {
+            return "https";
+        }
+        if proto.eq_ignore_ascii_case("http") {
+            return "http";
+        }
     }
     if ctx.downstream_tls {
         return "https";

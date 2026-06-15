@@ -73,6 +73,9 @@ impl CertKeyPair {
             }
             warn_if_symlink(field, path);
         }
+        for name in &self.server_names {
+            validate_server_name(name)?;
+        }
         Ok(())
     }
 }
@@ -134,6 +137,60 @@ impl CaConfig {
         }
         Ok(())
     }
+}
+
+// -----------------------------------------------------------------------------
+// Server Name Validation
+// -----------------------------------------------------------------------------
+
+/// Validate a `server_names` entry as a DNS hostname or wildcard.
+fn validate_server_name(name: &str) -> Result<(), TlsError> {
+    if name.is_empty() {
+        return Err(TlsError::ServerConfigError {
+            detail: "server_names entry must not be empty".to_owned(),
+        });
+    }
+    let mut has_wildcard = false;
+    let mut label_count: usize = 0;
+    for (i, label) in name.split('.').enumerate() {
+        label_count += 1;
+        if label == "*" && i == 0 {
+            has_wildcard = true;
+            continue;
+        }
+        validate_dns_label(name, label)?;
+    }
+    if has_wildcard && label_count < 3 {
+        return Err(TlsError::ServerConfigError {
+            detail: format!("server_names '{name}': wildcard requires at least 3 labels (e.g. *.example.com)"),
+        });
+    }
+    Ok(())
+}
+
+/// Validate a single DNS label within a server name.
+fn validate_dns_label(name: &str, label: &str) -> Result<(), TlsError> {
+    if label.is_empty() || label.len() > 63 {
+        return Err(TlsError::ServerConfigError {
+            detail: format!("server_names '{name}': label has invalid length"),
+        });
+    }
+    if label.contains('*') {
+        return Err(TlsError::ServerConfigError {
+            detail: format!("server_names '{name}': wildcard only permitted as the complete leftmost label"),
+        });
+    }
+    if !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return Err(TlsError::ServerConfigError {
+            detail: format!("server_names '{name}': contains invalid characters"),
+        });
+    }
+    if label.starts_with('-') || label.ends_with('-') {
+        return Err(TlsError::ServerConfigError {
+            detail: format!("server_names '{name}': label must not start or end with a hyphen"),
+        });
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -222,6 +279,59 @@ mod tests {
         assert!(
             err.to_string().contains("crl_paths[0]"),
             "should mention crl_paths: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_bare_wildcard() {
+        let err = validate_server_name("*").unwrap_err();
+        assert!(
+            err.to_string().contains("at least 3 labels"),
+            "bare wildcard should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_two_label_wildcard() {
+        let err = validate_server_name("*.com").unwrap_err();
+        assert!(
+            err.to_string().contains("at least 3 labels"),
+            "two-label wildcard should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_three_label_wildcard() {
+        validate_server_name("*.example.com").expect("three-label wildcard should be accepted");
+    }
+
+    #[test]
+    fn reject_server_name_with_leading_hyphen() {
+        let pair = CertKeyPair {
+            cert_path: "/tmp/cert.pem".to_owned(),
+            default: false,
+            key_path: "/tmp/key.pem".to_owned(),
+            server_names: vec!["-example.com".to_owned()],
+        };
+        let err = pair.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("must not start or end with a hyphen"),
+            "should reject leading hyphen: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_server_name_with_trailing_hyphen() {
+        let pair = CertKeyPair {
+            cert_path: "/tmp/cert.pem".to_owned(),
+            default: false,
+            key_path: "/tmp/key.pem".to_owned(),
+            server_names: vec!["example-.com".to_owned()],
+        };
+        let err = pair.validate().unwrap_err();
+        assert!(
+            err.to_string().contains("must not start or end with a hyphen"),
+            "should reject trailing hyphen in label: {err}"
         );
     }
 

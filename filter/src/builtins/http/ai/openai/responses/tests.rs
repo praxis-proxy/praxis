@@ -150,8 +150,8 @@ fn body_mode_is_stream_buffer() {
         BodyMode::StreamBuffer { max_bytes } => {
             assert_eq!(
                 max_bytes,
-                Some(67_108_864),
-                "StreamBuffer should default to a bounded 64 MiB limit"
+                Some(10_485_760),
+                "StreamBuffer should default to a bounded 10 MiB limit"
             );
         },
         other => panic!("expected StreamBuffer, got {other:?}"),

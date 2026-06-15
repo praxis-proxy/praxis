@@ -75,7 +75,7 @@ impl PowerOfTwoChoices {
         let candidates = self.healthy_candidates(health);
         let total_w: usize = candidates.iter().map(|ep| ep.weight as usize).sum();
 
-        if candidates.len() <= 1 || total_w == 0 {
+        if candidates.len() <= 1 || total_w <= 1 {
             let fallback = &self.endpoints[0];
             let ep = candidates.first().copied().unwrap_or(fallback);
             return Arc::clone(&ep.address);

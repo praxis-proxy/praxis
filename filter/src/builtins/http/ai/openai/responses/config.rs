@@ -11,11 +11,12 @@ use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
 // Constants
 // -----------------------------------------------------------------------------
 
-/// Default maximum request body size for `StreamBuffer` mode (64 MiB).
+/// Default maximum request body size for `StreamBuffer` mode (10 MiB).
 ///
-/// This keeps buffering bounded while covering common inline Responses
-/// payloads such as one large file and one large image data URL.
-const DEFAULT_MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
+/// Matches the shared default for JSON body inspection filters.
+/// Operators needing larger payloads (e.g. inline file data URLs) can
+/// override via `max_body_bytes` in config.
+const DEFAULT_MAX_BODY_BYTES: usize = 10_485_760; // 10 MiB
 
 // -----------------------------------------------------------------------------
 // Behavior Enums

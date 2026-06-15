@@ -1,0 +1,40 @@
+name: Epic
+description: Track a large body of related work
+labels: ["triage/needs-triage"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What does this epic accomplish?
+    validations:
+      required: true
+  - type: textarea
+    id: success-criteria
+    attributes:
+      label: Success Criteria
+      description: How do we know this is done?
+    validations:
+      required: true
+  - type: textarea
+    id: sub-tasks
+    attributes:
+      label: Sub-Tasks
+      description: Known work items (will become sub-issues)
+      placeholder: |
+        - [ ] Task 1
+        - [ ] Task 2
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - AI / Inference
+        - Core / Config
+        - Filter Pipeline
+        - Observability
+        - Protocol
+        - Security / TLS
+        - Traffic Management
+        - Transformation
+        - Other

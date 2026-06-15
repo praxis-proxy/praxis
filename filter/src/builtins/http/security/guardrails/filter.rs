@@ -71,11 +71,14 @@ pub struct GuardrailsFilter {
     /// What to do when a rule matches.
     pub(super) action: GuardrailsAction,
 
-    /// Compiled rules for per-request evaluation.
-    pub(super) rules: Vec<CompiledRule>,
-
     /// Whether any rule targets the body (pre-computed at init).
     pub(super) needs_body: bool,
+
+    /// Reject bodies exceeding the inspection buffer limit.
+    pub(super) reject_oversized: bool,
+
+    /// Compiled rules for per-request evaluation.
+    pub(super) rules: Vec<CompiledRule>,
 }
 
 impl GuardrailsFilter {
@@ -132,8 +135,9 @@ impl GuardrailsFilter {
 
         Ok(Box::new(Self {
             action: cfg.action,
-            rules,
             needs_body,
+            reject_oversized: cfg.reject_oversized,
+            rules,
         }))
     }
 
@@ -262,6 +266,16 @@ impl HttpFilter for GuardrailsFilter {
             write_result(ctx, "passed");
             return Ok(FilterAction::Continue);
         };
+
+        if self.reject_oversized && self.needs_body && chunk.len() >= DEFAULT_MAX_BODY_BYTES {
+            tracing::info!(
+                body_len = chunk.len(),
+                limit = DEFAULT_MAX_BODY_BYTES,
+                "guardrails: rejecting oversized body (exceeds inspection limit)"
+            );
+            write_result(ctx, "blocked");
+            return Ok(FilterAction::Reject(Rejection::status(413)));
+        }
 
         let Ok(text) = std::str::from_utf8(chunk) else {
             tracing::info!("guardrails: rejecting non-UTF-8 body");

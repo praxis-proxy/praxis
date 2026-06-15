@@ -209,3 +209,48 @@ pub(super) mod http {
             .and_then(|v| v.trim().parse().ok())
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
+mod tests {
+    use super::validate_config_path;
+
+    #[test]
+    fn validate_config_path_valid() {
+        validate_config_path("/foo/bar");
+    }
+
+    #[test]
+    #[should_panic(expected = "must start with '/'")]
+    fn validate_config_path_no_leading_slash() {
+        validate_config_path("foo");
+    }
+
+    #[test]
+    #[should_panic(expected = "must not contain an authority")]
+    fn validate_config_path_double_slash() {
+        validate_config_path("//foo");
+    }
+
+    #[test]
+    #[should_panic(expected = "must not contain a query string")]
+    fn validate_config_path_query_string() {
+        validate_config_path("/foo?bar");
+    }
+
+    #[test]
+    #[should_panic(expected = "must not contain a fragment")]
+    fn validate_config_path_fragment() {
+        validate_config_path("/foo#bar");
+    }
+
+    #[test]
+    #[should_panic(expected = "must not contain a scheme")]
+    fn validate_config_path_scheme() {
+        validate_config_path("/foo://bar");
+    }
+}

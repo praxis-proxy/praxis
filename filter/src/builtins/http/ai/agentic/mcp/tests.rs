@@ -852,6 +852,246 @@ async fn spurious_mcp_name_ignored_when_mismatch_ignore() {
 }
 
 // -----------------------------------------------------------------------------
+// Protocol Version Promotion Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn default_config_includes_protocol_version_header() {
+    let cfg: McpConfig = serde_yaml::from_str("{}").unwrap();
+    let validated = build_config(cfg).unwrap();
+    assert_eq!(
+        validated.headers.protocol_version.as_deref(),
+        Some("x-praxis-mcp-protocol-version"),
+        "default config should include x-praxis-mcp-protocol-version header"
+    );
+}
+
+#[test]
+fn custom_protocol_version_header_parses() {
+    let cfg: McpConfig = serde_yaml::from_str(
+        r#"
+        headers:
+          protocol_version: x-custom-mcp-ver
+        "#,
+    )
+    .unwrap();
+    let validated = build_config(cfg).unwrap();
+    assert_eq!(
+        validated.headers.protocol_version.as_deref(),
+        Some("x-custom-mcp-ver"),
+        "custom protocol_version header should be used"
+    );
+}
+
+#[tokio::test]
+async fn custom_protocol_version_header_is_promoted() {
+    let filter = make_filter(r#"{"headers": {"protocol_version": "x-custom-mcp-ver"}}"#);
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    let req = make_mcp_request(&[("mcp-protocol-version", "2025-03-26")]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(matches!(action, FilterAction::Release), "tools/list should release");
+    let headers: std::collections::HashMap<_, _> = ctx
+        .extra_request_headers
+        .iter()
+        .map(|(k, v)| (k.as_ref(), v.as_str()))
+        .collect();
+    assert_eq!(
+        headers.get("x-custom-mcp-ver"),
+        Some(&"2025-03-26"),
+        "custom protocol_version header should receive the extracted value"
+    );
+    assert!(
+        !headers.contains_key("x-praxis-mcp-protocol-version"),
+        "custom config should not also emit the default protocol version header"
+    );
+}
+
+#[test]
+fn null_protocol_version_header_disables_promotion() {
+    let cfg: McpConfig = serde_yaml::from_str(
+        r#"
+        headers:
+          protocol_version: null
+        "#,
+    )
+    .unwrap();
+    let validated = build_config(cfg).unwrap();
+    assert!(
+        validated.headers.protocol_version.is_none(),
+        "null protocol_version header should disable promotion"
+    );
+}
+
+#[test]
+fn invalid_protocol_version_header_name_rejects() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+        headers:
+          protocol_version: "bad header"
+        "#,
+    )
+    .unwrap();
+    let err = McpFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("not a valid HTTP header name"),
+        "error should mention invalid header name: {err}"
+    );
+}
+
+#[tokio::test]
+async fn initialize_promotes_protocol_version_header_and_result() {
+    let filter = make_default_filter();
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#;
+    let req = make_mcp_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(matches!(action, FilterAction::Release), "initialize should release");
+
+    assert_eq!(
+        ctx.get_metadata("mcp.protocol_version"),
+        Some("2025-03-26"),
+        "protocol version should be in metadata"
+    );
+
+    let headers: std::collections::HashMap<_, _> = ctx
+        .extra_request_headers
+        .iter()
+        .map(|(k, v)| (k.as_ref(), v.as_str()))
+        .collect();
+    assert_eq!(
+        headers.get("x-praxis-mcp-protocol-version"),
+        Some(&"2025-03-26"),
+        "protocol version should be promoted to internal header"
+    );
+
+    let results = ctx.filter_results.get("mcp").unwrap();
+    assert_eq!(
+        results.get("protocol_version"),
+        Some("2025-03-26"),
+        "protocol version should be in filter results"
+    );
+}
+
+#[tokio::test]
+async fn non_initialize_promotes_protocol_version_from_header() {
+    let filter = make_default_filter();
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#;
+    let req = make_mcp_request(&[("mcp-protocol-version", "2025-03-26")]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(matches!(action, FilterAction::Release), "tools/list should release");
+
+    assert_eq!(
+        ctx.get_metadata("mcp.protocol_version"),
+        Some("2025-03-26"),
+        "protocol version should be in metadata"
+    );
+
+    let headers: std::collections::HashMap<_, _> = ctx
+        .extra_request_headers
+        .iter()
+        .map(|(k, v)| (k.as_ref(), v.as_str()))
+        .collect();
+    assert_eq!(
+        headers.get("x-praxis-mcp-protocol-version"),
+        Some(&"2025-03-26"),
+        "protocol version should be promoted to internal header"
+    );
+
+    let results = ctx.filter_results.get("mcp").unwrap();
+    assert_eq!(
+        results.get("protocol_version"),
+        Some("2025-03-26"),
+        "protocol version should be in filter results"
+    );
+}
+
+#[tokio::test]
+async fn protocol_version_with_control_chars_not_promoted() {
+    let filter = make_default_filter();
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025\n03-26"}}"#;
+    let req = make_mcp_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should still release with control char version"
+    );
+
+    assert_eq!(
+        ctx.get_metadata("mcp.protocol_version"),
+        None,
+        "protocol version with control chars should not be in metadata"
+    );
+
+    let headers: std::collections::HashMap<_, _> = ctx
+        .extra_request_headers
+        .iter()
+        .map(|(k, v)| (k.as_ref(), v.as_str()))
+        .collect();
+    assert!(
+        !headers.contains_key("x-praxis-mcp-protocol-version"),
+        "protocol version with control chars should not be in headers"
+    );
+
+    let results = ctx.filter_results.get("mcp").unwrap();
+    assert_eq!(
+        results.get("protocol_version"),
+        None,
+        "protocol version with control chars should not be in filter results"
+    );
+}
+
+#[tokio::test]
+async fn null_protocol_version_header_skips_header_promotion() {
+    let filter = make_filter(r#"{"headers": {"protocol_version": null}}"#);
+    let body_str = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-03-26"}}"#;
+    let req = make_mcp_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from(body_str));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(matches!(action, FilterAction::Release), "should release");
+
+    assert_eq!(
+        ctx.get_metadata("mcp.protocol_version"),
+        Some("2025-03-26"),
+        "metadata should still be set even when header promotion is disabled"
+    );
+
+    let headers: std::collections::HashMap<_, _> = ctx
+        .extra_request_headers
+        .iter()
+        .map(|(k, v)| (k.as_ref(), v.as_str()))
+        .collect();
+    assert!(
+        !headers.contains_key("x-praxis-mcp-protocol-version"),
+        "header promotion should be skipped when protocol_version is null"
+    );
+
+    let results = ctx.filter_results.get("mcp").unwrap();
+    assert_eq!(
+        results.get("protocol_version"),
+        Some("2025-03-26"),
+        "filter results should still include protocol_version even when header is disabled"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 

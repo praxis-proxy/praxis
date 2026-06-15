@@ -528,11 +528,11 @@ async fn initialize_returns_session_and_id() {
             );
             let parsed: serde_json::Value = serde_json::from_str(body_str).unwrap();
             assert_eq!(parsed["result"]["serverInfo"]["name"], "praxis");
-            assert_eq!(parsed["result"]["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
             assert!(
-                rejection.headers.iter().any(|(k, _)| k == "mcp-session-id"),
-                "should contain mcp-session-id header"
+                parsed["result"]["serverInfo"].get("version").is_none(),
+                "serverInfo should not leak version"
             );
+            assert_session_id_format(rejection);
         },
         _ => panic!("expected Reject with 200"),
     }
@@ -1410,6 +1410,24 @@ servers: []
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+fn assert_session_id_format(rejection: &Rejection) {
+    let session_id = rejection
+        .headers
+        .iter()
+        .find(|(k, _)| k == "mcp-session-id")
+        .map(|(_, v)| v.as_str())
+        .expect("mcp-session-id header should be present");
+    assert!(
+        session_id.starts_with("mcp-"),
+        "session ID should have mcp- prefix: {session_id}"
+    );
+    assert_eq!(
+        session_id.len(),
+        36,
+        "session ID should be mcp- + 32 hex chars: {session_id}"
+    );
+}
 
 const BROKER_SERVERS_YAML: &str = r#"
 servers:

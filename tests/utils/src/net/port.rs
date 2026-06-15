@@ -108,3 +108,34 @@ pub fn ipv6_available() -> bool {
 pub fn free_port_v6() -> u16 {
     TcpListener::bind("[::1]:0").unwrap().local_addr().unwrap().port()
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bind_unique_port_returns_distinct_ports() {
+        let (listener_a, port_a) = bind_unique_port();
+        let (listener_b, port_b) = bind_unique_port();
+
+        assert_ne!(port_a, 0, "first port should be non-zero");
+        assert_ne!(port_b, 0, "second port should be non-zero");
+        assert_ne!(port_a, port_b, "two calls should return distinct ports");
+
+        assert_ne!(
+            listener_a.local_addr().unwrap().port(),
+            0,
+            "first listener should be bound to a valid port"
+        );
+        assert_ne!(
+            listener_b.local_addr().unwrap().port(),
+            0,
+            "second listener should be bound to a valid port"
+        );
+    }
+}

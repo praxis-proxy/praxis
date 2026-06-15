@@ -5,7 +5,10 @@
 
 use serde::Deserialize;
 
-use crate::{FilterError, body::DEFAULT_JSON_BODY_MAX_BYTES};
+use crate::{
+    FilterError,
+    body::{DEFAULT_JSON_BODY_MAX_BYTES, MAX_JSON_BODY_BYTES},
+};
 
 // -----------------------------------------------------------------------------
 // JsonBodyFieldMapping
@@ -72,6 +75,14 @@ fn validate_mapping(field: &str, header: &str) -> Result<(), FilterError> {
 /// Build the mappings vec from either single-field or multi-field
 /// config syntax.
 pub(super) fn build_mappings(cfg: JsonBodyFieldConfig) -> Result<Vec<(String, String)>, FilterError> {
+    if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
+        return Err(format!(
+            "json_body_field: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
+            cfg.max_body_bytes
+        )
+        .into());
+    }
+
     let has_single = cfg.field.is_some() || cfg.header.is_some();
     let has_multi = cfg.fields.is_some();
 

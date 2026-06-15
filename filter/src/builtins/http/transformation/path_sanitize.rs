@@ -11,10 +11,11 @@ use std::borrow::Cow;
 
 /// Normalize a rewritten path for defense-in-depth against traversal.
 ///
-/// Applies three transformations:
+/// Applies four transformations:
 /// 1. Strip `/./` segments (and leading `./`)
 /// 2. Strip `/../` segments (and leading `../`)
-/// 3. Collapse `//` to `/`
+/// 3. Strip percent-encoded traversal (`%2e%2e`, `.%2e`, `%2e.`)
+/// 4. Collapse `//` to `/`
 ///
 /// Ensures the result starts with `/`. Returns [`Cow::Borrowed`] when
 /// no normalization was needed.
@@ -55,6 +56,7 @@ fn needs_normalization(path: &str) -> bool {
         || path.contains("/../")
         || path.ends_with("/.")
         || path.ends_with("/..")
+        || has_dot_dot_traversal(path)
 }
 
 /// Normalize the path by resolving `.` and `..` segments and
@@ -66,6 +68,9 @@ fn normalize(path: &str) -> String {
         match seg {
             "" | "." => {},
             ".." => {
+                segments.pop();
+            },
+            s if is_traversal_segment(s) => {
                 segments.pop();
             },
             s => segments.push(s),
@@ -224,15 +229,25 @@ mod tests {
     }
 
     #[test]
-    fn percent_encoded_dot_dot_not_decoded() {
-        let result = normalize_rewritten_path("/a/%2e%2e/b");
-        assert!(
-            matches!(result, Cow::Borrowed(_)),
-            "percent-encoded .. should not be decoded"
+    fn percent_encoded_dot_dot_resolved() {
+        assert_eq!(
+            normalize_rewritten_path("/a/%2e%2e/b"),
+            "/b",
+            "percent-encoded .. should be resolved as traversal"
+        );
+    }
+
+    #[test]
+    fn mixed_encoded_dot_dot_resolved() {
+        assert_eq!(
+            normalize_rewritten_path("/a/.%2e/b"),
+            "/b",
+            "mixed dot + encoded dot should be resolved as traversal"
         );
         assert_eq!(
-            &*result, "/a/%2e%2e/b",
-            "percent-encoded traversal should pass through verbatim"
+            normalize_rewritten_path("/a/%2e./b"),
+            "/b",
+            "mixed encoded dot + dot should be resolved as traversal"
         );
     }
 

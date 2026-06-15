@@ -35,12 +35,45 @@ pub(super) fn group_tcp_listeners(config: &Config) -> HashMap<TcpGroupKey, Vec<&
         let key = (
             listener.upstream.clone(),
             listener.cluster.clone(),
-            listener.tcp_idle_timeout_ms,
+            listener.tcp_session_timeout_ms,
             listener.tcp_max_duration_secs,
         );
         groups.entry(key).or_default().push(listener);
     }
     groups
+}
+
+// -----------------------------------------------------------------------------
+// Group Consistency Validation
+// -----------------------------------------------------------------------------
+
+/// Reject TCP groups where listeners have inconsistent filter chains.
+///
+/// All listeners sharing the same `(upstream, cluster, timeout)`
+/// key are served by a single Pingora [`Service`], which uses
+/// one pipeline. Differing `filter_chains` would be silently
+/// discarded; this check surfaces the misconfiguration early.
+///
+/// [`Service`]: pingora_core::services::listening::Service
+pub(super) fn validate_tcp_group_consistency(
+    groups: &HashMap<TcpGroupKey, Vec<&praxis_core::config::Listener>>,
+) -> Result<(), ProxyError> {
+    for listeners in groups.values() {
+        let Some((first, rest)) = listeners.split_first() else {
+            continue;
+        };
+        for listener in rest {
+            if listener.filter_chains != first.filter_chains {
+                return Err(ProxyError::Config(format!(
+                    "TCP listeners '{}' and '{}' share the same upstream/timeout \
+                     group but have different filter_chains; grouped listeners \
+                     must use identical chains",
+                    first.name, listener.name
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 // -----------------------------------------------------------------------------
@@ -132,7 +165,7 @@ listeners:
         .unwrap();
         let groups = group_tcp_listeners(&config);
         assert_eq!(groups.len(), 1, "same upstream + timeout should produce one group");
-        let default_timeout = config.listeners[0].tcp_idle_timeout_ms;
+        let default_timeout = config.listeners[0].tcp_session_timeout_ms;
         let key = (Some("10.0.0.1:5432".to_owned()), None, default_timeout, None);
         assert_eq!(groups[&key].len(), 2, "both listeners should be in the same group");
     }
@@ -170,7 +203,7 @@ listeners:
     address: "0.0.0.0:5433"
     protocol: tcp
     upstream: "10.0.0.1:5432"
-    tcp_idle_timeout_ms: 30000
+    tcp_session_timeout_ms: 30000
 "#,
         )
         .unwrap();
@@ -192,7 +225,7 @@ listeners:
             .iter()
             .find(|l| l.protocol == ProtocolKind::Tcp)
             .unwrap()
-            .tcp_idle_timeout_ms;
+            .tcp_session_timeout_ms;
         let key = (Some("10.0.0.1:5432".to_owned()), None, timeout, None);
         assert!(groups.contains_key(&key), "only TCP listener should be grouped");
     }
@@ -296,7 +329,7 @@ filter_chains:
                 filter_chains: vec![],
                 max_connections: None,
                 protocol: ProtocolKind::Tcp,
-                tcp_idle_timeout_ms: None,
+                tcp_session_timeout_ms: None,
                 tcp_max_duration_secs: None,
                 tls: None,
                 upstream: None,

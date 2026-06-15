@@ -394,6 +394,15 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn path_shorter_than_prefix_does_not_match() {
+        let req = make_request(Method::GET, "/api", HeaderMap::new());
+        assert!(
+            !should_execute(&[when(path_match("/api/v1"))], &req),
+            "path /api should not match prefix /api/v1"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------

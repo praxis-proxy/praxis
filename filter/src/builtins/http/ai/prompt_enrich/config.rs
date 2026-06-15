@@ -5,7 +5,10 @@
 
 use serde::Deserialize;
 
-use crate::{FilterError, body::DEFAULT_JSON_BODY_MAX_BYTES};
+use crate::{
+    FilterError,
+    body::{DEFAULT_JSON_BODY_MAX_BYTES, MAX_JSON_BODY_BYTES},
+};
 
 // -----------------------------------------------------------------------------
 // PromptEnrichConfig
@@ -120,6 +123,13 @@ pub(super) fn validate_config(cfg: &PromptEnrichConfig) -> Result<(), FilterErro
 
     if cfg.max_body_bytes == 0 {
         return Err("prompt_enrich: 'max_body_bytes' must be greater than zero".into());
+    }
+    if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
+        return Err(format!(
+            "prompt_enrich: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
+            cfg.max_body_bytes
+        )
+        .into());
     }
 
     for msg in &cfg.prepend {

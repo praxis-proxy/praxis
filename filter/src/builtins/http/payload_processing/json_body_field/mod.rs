@@ -20,7 +20,7 @@ mod tests;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tracing::trace;
+use tracing::debug;
 
 use self::{
     config::{JsonBodyFieldConfig, build_mappings},
@@ -154,7 +154,7 @@ impl HttpFilter for JsonBodyFieldFilter {
         };
 
         let Ok(value) = serde_json::from_slice::<serde_json::Value>(chunk) else {
-            trace!("JSON parsing failed; skipping field extraction");
+            debug!(body_len = chunk.len(), "JSON parsing failed; skipping field extraction");
             return Ok(FilterAction::Continue);
         };
 

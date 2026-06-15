@@ -79,6 +79,12 @@ impl SniCertResolver {
     fn has_default(&self) -> bool {
         self.default.is_some()
     }
+
+    /// Whether the resolver has a wildcard mapping for `domain`.
+    fn has_wildcard_for(&self, domain: &str) -> bool {
+        let suffix = format!(".{domain}");
+        self.wildcard_certs.iter().any(|(s, _)| s == &suffix)
+    }
 }
 
 impl ResolvesServerCert for SniCertResolver {
@@ -152,9 +158,9 @@ fn register_server_names(
         if let Some(suffix) = lower.strip_prefix("*.") {
             let wildcard_suffix = format!(".{suffix}");
             if wildcard_certs.iter().any(|(s, _)| s == &wildcard_suffix) {
-                return Err(TlsError::FileLoadError {
+                return Err(TlsError::DuplicateServerName {
+                    name: format!("*.{suffix}"),
                     path: pair.cert_path.clone(),
-                    detail: format!("duplicate wildcard server_name '*.{suffix}'"),
                 });
             }
             wildcard_certs.push((wildcard_suffix, Arc::clone(certified)));
@@ -162,12 +168,9 @@ fn register_server_names(
             use std::collections::hash_map::Entry;
             match certs.entry(lower) {
                 Entry::Occupied(e) => {
-                    return Err(TlsError::FileLoadError {
+                    return Err(TlsError::DuplicateServerName {
+                        name: e.key().clone(),
                         path: pair.cert_path.clone(),
-                        detail: format!(
-                            "duplicate server_name '{}'; each hostname may only appear once",
-                            e.key()
-                        ),
                     });
                 },
                 Entry::Vacant(e) => {
@@ -365,8 +368,29 @@ mod tests {
 
         let err = build_sni_resolver(&certificates).unwrap_err();
         assert!(
-            err.to_string().contains("duplicate wildcard"),
+            err.to_string().contains("duplicate server_name"),
             "should reject duplicate wildcard: {err}"
+        );
+    }
+
+    #[test]
+    fn sni_resolver_wildcard_matches_correct_domain() {
+        let certs = gen_test_certs_with_sans(vec!["*.example.com".to_owned()]);
+        let certificates = vec![CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("cert path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("key path").to_owned(),
+            server_names: vec!["*.example.com".to_owned()],
+        }];
+
+        let resolver = build_sni_resolver(&certificates).expect("wildcard SNI should build");
+        assert!(
+            resolver.has_wildcard_for("example.com"),
+            "resolver should have wildcard for example.com"
+        );
+        assert!(
+            !resolver.has_wildcard_for("other.com"),
+            "resolver should not have wildcard for other.com"
         );
     }
 
