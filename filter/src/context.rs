@@ -10,7 +10,7 @@ use praxis_core::{
     connectivity::Upstream, health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, time::TimeSource,
 };
 
-use crate::{body::BodyMode, pipeline::body::merge_body_mode, results::FilterResultSet};
+use crate::{body::BodyMode, extensions::RequestExtensions, pipeline::body::merge_body_mode, results::FilterResultSet};
 
 // -----------------------------------------------------------------------------
 // HttpFilterContext
@@ -55,6 +55,18 @@ pub struct HttpFilterContext<'a> {
     /// rather than the request URI scheme (which is absent
     /// in HTTP/1.1).
     pub downstream_tls: bool,
+
+    /// Type-safe request-scoped extension container.
+    ///
+    /// Filters store and retrieve arbitrary typed values that
+    /// persist across all Pingora lifecycle phases (request,
+    /// request body, response, response body, logging). Keyed
+    /// by [`TypeId`], so only one value per concrete type. Use
+    /// private newtypes to avoid collisions between independent
+    /// filters.
+    ///
+    /// [`TypeId`]: std::any::TypeId
+    pub extensions: RequestExtensions,
 
     /// Tracks which pipeline filter indices actually executed
     /// during the request phase. The response phase skips

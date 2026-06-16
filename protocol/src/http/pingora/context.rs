@@ -66,6 +66,14 @@ pub struct PingoraRequestCtx {
     /// bytes are raw protocol frames (e.g. `WebSocket`), not HTTP bodies.
     pub connection_upgraded: bool,
 
+    /// Type-safe request-scoped extension container. Swapped into each
+    /// [`HttpFilterContext`] and written back after filter execution,
+    /// following the same lifecycle as [`filter_metadata`].
+    ///
+    /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+    /// [`filter_metadata`]: PingoraRequestCtx::filter_metadata
+    pub extensions: praxis_filter::RequestExtensions,
+
     /// Durable per-request metadata that persists across all lifecycle
     /// phases. Swapped into each [`HttpFilterContext`] and written back
     /// after filter execution.
@@ -223,6 +231,7 @@ macro_rules! filter_context {
             cluster: $ctx.cluster.take(),
             current_filter_id: None,
             downstream_tls: $ctx.downstream_tls,
+            extensions: std::mem::take(&mut $ctx.extensions),
             executed_filter_indices: Vec::new(),
             extra_request_headers: Vec::new(),
             request_headers_to_remove: Vec::new(),
@@ -373,6 +382,7 @@ impl Default for PingoraRequestCtx {
             cluster: None,
             connection_upgraded: false,
             downstream_tls: false,
+            extensions: praxis_filter::RequestExtensions::new(),
             filter_metadata: std::collections::HashMap::new(),
             mutated_request_body_len: None,
             pinned_pipeline: None,

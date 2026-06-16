@@ -12,6 +12,7 @@ mod body;
 mod builtins;
 mod condition;
 mod context;
+mod extensions;
 mod factory;
 mod filter;
 pub(crate) mod load_balancing;
@@ -43,6 +44,7 @@ pub use builtins::{
 pub use builtins::{TokenUsage, TokenUsageProvider, extract_token_usage};
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{HttpFilterContext, Request, Response};
+pub use extensions::RequestExtensions;
 pub use factory::{FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config, tcp_builtin};
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
 pub use pipeline::FilterPipeline;
@@ -280,6 +282,7 @@ pub(crate) mod test_utils {
             cluster: None,
             current_filter_id: None,
             downstream_tls: false,
+            extensions: crate::extensions::RequestExtensions::default(),
             executed_filter_indices: Vec::new(),
             extra_request_headers: Vec::new(),
             request_headers_to_remove: Vec::new(),

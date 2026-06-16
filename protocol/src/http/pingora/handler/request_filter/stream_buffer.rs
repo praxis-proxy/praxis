@@ -162,6 +162,7 @@ pub(super) async fn pre_read_body(
         ctx.cluster = filter_ctx.cluster;
         ctx.rewritten_path = filter_ctx.rewritten_path;
         ctx.upstream = filter_ctx.upstream;
+        ctx.extensions = filter_ctx.extensions;
         ctx.filter_metadata = filter_ctx.filter_metadata;
         ctx.filter_state = filter_ctx.filter_state;
         ctx.filter_results = filter_ctx.filter_results;

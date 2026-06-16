@@ -106,7 +106,7 @@ pub(super) async fn execute(
         _ => tracing::warn!("unhandled BodyMode variant in request body filter"),
     }
 
-    let (result, body_bytes, cluster, upstream, filter_metadata, filter_state) = {
+    let (result, body_bytes, cluster, upstream, extensions, filter_metadata, filter_state) = {
         let mut fctx = ctx.filter_context_for(pipeline, None).ok_or_else(|| {
             pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
@@ -119,6 +119,7 @@ pub(super) async fn execute(
             fctx.request_body_bytes,
             fctx.cluster,
             fctx.upstream,
+            fctx.extensions,
             fctx.filter_metadata,
             fctx.filter_state,
         )
@@ -126,6 +127,7 @@ pub(super) async fn execute(
     ctx.request_body_bytes = body_bytes;
     ctx.cluster = cluster;
     ctx.upstream = upstream;
+    ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;
     ctx.filter_state = filter_state;
 
