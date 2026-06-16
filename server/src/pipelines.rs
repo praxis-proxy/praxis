@@ -60,6 +60,7 @@ pub fn resolve_pipelines(
         if !kv_stores.is_empty() {
             pipeline.set_kv_stores(kv_stores.clone());
         }
+        // Always set: stores register lazily during on_request, so the registry is empty at build time.
         #[cfg(feature = "ai-inference")]
         pipeline.set_response_stores(response_stores.clone());
         pipeline.apply_insecure_options(&config.insecure_options);
@@ -532,6 +533,26 @@ filter_chains:
         assert!(
             pipeline.response_stores().is_some(),
             "pipeline should have response_stores set"
+        );
+    }
+
+    #[cfg(feature = "ai-inference")]
+    #[test]
+    fn resolve_pipelines_empty_response_stores_still_set() {
+        let config = valid_config();
+        let registry = FilterRegistry::with_builtins();
+        let pipelines = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_response_stores(),
+        )
+        .unwrap();
+        let pipeline = pipelines.get("web").unwrap().load();
+        assert!(
+            pipeline.response_stores().is_some(),
+            "empty response_stores should still be set (lazy registration)"
         );
     }
 
