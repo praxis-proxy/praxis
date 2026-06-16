@@ -1,8 +1,9 @@
 # Response Store
 #
-# Persists non-streaming Responses API responses to a SQLite
-# database and serves stored data via GET endpoints and handles
-# DELETE /v1/responses/{id} locally:
+# Persists non-streaming Responses API responses to a database
+# and serves stored data via GET endpoints and handles
+# DELETE /v1/responses/{id} locally. Supports SQLite
+# (file-backed or in-memory) and PostgreSQL backends:
 #
 #   POST /v1/responses          — proxied to backend, response persisted
 #   GET  /v1/responses/{id}     — served from local store (200 or 404)
@@ -50,6 +51,15 @@ filter_chains:
         database_url: "sqlite://responses.db?mode=rwc"
         responses_table: openai_responses
         conversations_table: openai_conversations
+        #
+        # PostgreSQL backend:
+        #   backend: postgres
+        #   database_url: "postgres://user:pass@db.example.com:5432/praxis"
+        #   responses_table: openai_responses
+        #   conversations_table: openai_conversations
+        #   allow_private_database_url: true  # required for DNS, local, or private DB targets
+        #   ssl_mode: prefer          # disable, prefer, require, verify-ca, verify-full
+        #   ssl_root_cert: /path/to/ca.pem  # optional, for verify-ca / verify-full
 
       - filter: router
         routes:

@@ -15,6 +15,9 @@ clusters:
     load_balancer_strategy:
       least_connections: ~
 
+insecure_options:
+  allow_private_endpoints: true
+
 filter_chains:
   - name: tcp_lb
     filters:

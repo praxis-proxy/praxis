@@ -122,12 +122,13 @@ impl KvBackend for InMemoryKvBackend {
         self.data.get(key).map(|v| Arc::clone(v.value()))
     }
 
-    fn set(&self, key: &str, value: Arc<str>) {
+    fn set(&self, key: &str, value: Arc<str>) -> bool {
         if self.data.len() >= MAX_ENTRIES && !self.data.contains_key(key) {
             tracing::warn!(key, limit = MAX_ENTRIES, "KV store entry limit reached; insert skipped");
-            return;
+            return false;
         }
         self.data.insert(Arc::from(key), value);
+        true
     }
 
     fn delete(&self, key: &str) -> bool {

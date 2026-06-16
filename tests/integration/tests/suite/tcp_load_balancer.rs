@@ -33,6 +33,9 @@ listeners:
     cluster: pool
     filter_chains: [lb]
 
+insecure_options:
+  allow_private_endpoints: true
+
 clusters:
   - name: pool
     endpoints:
@@ -88,6 +91,9 @@ listeners:
     protocol: tcp
     cluster: pool
     filter_chains: [lb]
+
+insecure_options:
+  allow_private_endpoints: true
 
 clusters:
   - name: pool
@@ -166,6 +172,9 @@ listeners:
     protocol: tcp
     cluster: pool
     filter_chains: [lb]
+
+insecure_options:
+  allow_private_endpoints: true
 
 clusters:
   - name: pool
@@ -252,6 +261,9 @@ listeners:
     protocol: tcp
     cluster: pool
     filter_chains: [lb]
+
+insecure_options:
+  allow_private_endpoints: true
 
 clusters:
   - name: pool
