@@ -1,5 +1,8 @@
 # Responses API Request Validation
 #
+# Validates Responses API requests and rejects invalid parameter
+# combinations.
+#
 # Requires the ai-inference feature:
 #   cargo build -p praxis --features ai-inference
 #

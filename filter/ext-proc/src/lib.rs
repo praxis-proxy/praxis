@@ -35,10 +35,12 @@
 
 #![deny(unreachable_pub)]
 
+mod callout;
+mod mutations;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use praxis_filter::{FilterAction, FilterError, HttpFilter, HttpFilterContext, parse_filter_config};
+use praxis_filter::{FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection, parse_filter_config};
 use serde::Deserialize;
 use tonic::transport::{Channel, Endpoint};
 
@@ -54,6 +56,29 @@ const DEFAULT_STATUS_ON_ERROR: u16 = 500;
 
 /// Default deferred close timeout in milliseconds (observability mode).
 const DEFAULT_DEFERRED_CLOSE_TIMEOUT_MS: u64 = 5000;
+
+// -----------------------------------------------------------------------------
+// Phase
+// -----------------------------------------------------------------------------
+
+/// Processing phase for dispatching mutations to the correct target.
+#[derive(Debug, Clone, Copy)]
+enum Phase {
+    /// Request headers phase.
+    Request,
+
+    /// Response headers phase.
+    Response,
+}
+
+impl std::fmt::Display for Phase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Request => f.write_str("request"),
+            Self::Response => f.write_str("response"),
+        }
+    }
+}
 
 // -----------------------------------------------------------------------------
 // ExtProcConfig
@@ -139,7 +164,6 @@ struct ExtProcConfig {
     /// Upper bound in milliseconds for `override_message_timeout`
     /// values sent by the external processor. When set, the server
     /// may extend the per-message timeout up to this limit.
-    #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
     max_message_timeout_ms: Option<u64>,
 
     /// Per-message timeout in milliseconds.
@@ -172,6 +196,12 @@ struct ExtProcConfig {
     /// HTTP status code returned to the downstream client when the
     /// external processor returns an error, fails to respond, or
     /// cannot be reached. Default: 500.
+    ///
+    /// This takes precedence over the pipeline-level `failure_mode`:
+    /// processor errors are converted to a rejection with this
+    /// status code before the pipeline sees the result, so
+    /// `failure_mode: open` does not produce fail-open behaviour
+    /// for `ext_proc` callout errors.
     #[serde(default = "default_status_on_error")]
     status_on_error: u16,
 
@@ -470,18 +500,15 @@ fn validate_processing_mode(pm: ProcessingModeConfig) -> Result<(), FilterError>
 #[derive(Debug)]
 pub struct ExtProcFilter {
     /// Lazily-connecting gRPC channel to the external processor.
-    ///
-    /// Drives `ExternalProcessorClient` from `praxis-proto` once the
-    /// gRPC callout is implemented.
-    #[allow(dead_code, reason = "used by ExternalProcessorClient in subsequent PRs")]
     channel: Channel,
 
     /// Per-message timeout for gRPC calls.
-    #[allow(dead_code, reason = "used by gRPC callout in subsequent PRs")]
     message_timeout: Duration,
 
+    /// Upper bound for processor-requested timeout overrides.
+    max_message_timeout: Option<Duration>,
+
     /// HTTP status code returned on processor errors.
-    #[allow(dead_code, reason = "used by gRPC callout in subsequent PRs")]
     status_on_error: u16,
 
     /// gRPC endpoint URI (retained for diagnostics).
@@ -512,10 +539,36 @@ impl ExtProcFilter {
 
         Ok(Box::new(Self {
             channel,
+            max_message_timeout: cfg.max_message_timeout_ms.map(Duration::from_millis),
             message_timeout: Duration::from_millis(cfg.message_timeout_ms),
             status_on_error: cfg.status_on_error,
             target: cfg.target,
         }))
+    }
+
+    /// Convert a callout error into a rejection with [`status_on_error`].
+    ///
+    /// On success the action passes through unchanged. On error the
+    /// processor failure is logged and a [`FilterAction::Reject`] is
+    /// returned with the configured status code, matching Envoy's
+    /// error-handling behaviour. Because the error is consumed here,
+    /// the pipeline always sees `Ok(Reject(...))` — the pipeline-level
+    /// `failure_mode` does not apply to `ext_proc` processor errors.
+    ///
+    /// [`status_on_error`]: ExtProcConfig::status_on_error
+    fn call_or_reject(&self, result: Result<FilterAction, FilterError>) -> FilterAction {
+        match result {
+            Ok(action) => action,
+            Err(e) => {
+                tracing::warn!(
+                    target = %self.target,
+                    status = self.status_on_error,
+                    error = %e,
+                    "ext_proc: processor error, rejecting with status_on_error"
+                );
+                FilterAction::Reject(Rejection::status(self.status_on_error))
+            },
+        }
     }
 }
 
@@ -525,12 +578,30 @@ impl HttpFilter for ExtProcFilter {
         "ext_proc"
     }
 
-    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        tracing::warn!(
-            target = %self.target,
-            "ext_proc on_request not yet implemented"
-        );
-        Ok(FilterAction::Continue)
+    async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(self.call_or_reject(
+            callout::process_request_headers(
+                self.channel.clone(),
+                &self.target,
+                self.message_timeout,
+                self.max_message_timeout,
+                ctx,
+            )
+            .await,
+        ))
+    }
+
+    async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(self.call_or_reject(
+            callout::process_response_headers(
+                self.channel.clone(),
+                &self.target,
+                self.message_timeout,
+                self.max_message_timeout,
+                ctx,
+            )
+            .await,
+        ))
     }
 }
 

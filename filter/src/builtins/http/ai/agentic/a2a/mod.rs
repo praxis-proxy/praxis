@@ -5,6 +5,7 @@
 
 pub(crate) mod config;
 pub(crate) mod envelope;
+pub(crate) mod sse;
 pub(crate) mod task_routing;
 
 #[cfg(test)]
@@ -20,7 +21,7 @@ pub(crate) mod task_routing;
 )]
 mod tests;
 
-use std::{borrow::Cow, sync::Arc};
+use std::{borrow::Cow, fmt::Write, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -212,13 +213,11 @@ impl HttpFilter for A2aFilter {
             return Ok(FilterAction::Continue);
         }
 
-        // Task route capture only runs for non-streaming SendMessage
-        // responses. Terminal TTL only applies here; GetTask and other
-        // task-routable methods do not update stored TTLs. SSE response
-        // capture is a follow-up.
-        let is_send_message = ctx.get_metadata("a2a.method").is_some_and(|m| m == "SendMessage");
+        let method = ctx.get_metadata("a2a.method");
+        let is_send_message = method.is_some_and(|m| m == "SendMessage");
+        let is_sse_capable = method.is_some_and(|m| m == "SendStreamingMessage" || m == "SubscribeToTask");
 
-        if !is_send_message {
+        if !is_send_message && !is_sse_capable {
             return Ok(FilterAction::Continue);
         }
 
@@ -234,6 +233,18 @@ impl HttpFilter for A2aFilter {
             .and_then(|r| r.headers.get("content-type"))
             .and_then(|v| v.to_str().ok())
             .is_some_and(is_event_stream_content_type);
+
+        if is_sse_capable {
+            if is_sse {
+                let cluster = ctx.cluster_name().map(str::to_owned);
+                if let Some(cluster) = cluster {
+                    ctx.filter_metadata
+                        .insert("a2a.response.sse_capture_enabled".to_owned(), "true".to_owned());
+                    ctx.filter_metadata.insert("a2a.response.cluster".to_owned(), cluster);
+                }
+            }
+            return Ok(FilterAction::Continue);
+        }
 
         if is_sse {
             ctx.filter_metadata
@@ -261,17 +272,25 @@ impl HttpFilter for A2aFilter {
             return Ok(FilterAction::Continue);
         };
 
-        if ctx.get_metadata("a2a.response.capture_enabled") != Some("true") {
+        if ctx.get_metadata("a2a.response.capture_enabled") == Some("true") {
+            if let Some(chunk) = body.as_ref()
+                && !accumulate_response_hex(ctx, chunk, self.config.task_routing.max_response_body_bytes)
+            {
+                return Ok(FilterAction::Continue);
+            }
+
+            try_capture_from_buffer(ctx, store, &self.config.task_routing, end_of_stream);
             return Ok(FilterAction::Continue);
         }
 
-        if let Some(chunk) = body.as_ref()
-            && !accumulate_response_hex(ctx, chunk, self.config.task_routing.max_response_body_bytes)
-        {
-            return Ok(FilterAction::Continue);
+        if ctx.get_metadata("a2a.response.sse_capture_enabled") == Some("true") {
+            if let Some(chunk) = body.as_ref() {
+                process_sse_response_chunk(ctx, chunk, store, &self.config.task_routing);
+            }
+            if end_of_stream {
+                clear_sse_capture_metadata(ctx);
+            }
         }
-
-        try_capture_from_buffer(ctx, store, &self.config.task_routing, end_of_stream);
 
         Ok(FilterAction::Continue)
     }
@@ -419,7 +438,6 @@ fn accumulate_response_hex(ctx: &mut HttpFilterContext<'_>, chunk: &[u8], max_by
         .entry("a2a.response.buffer_hex".to_owned())
         .or_default();
     for byte in chunk {
-        use std::fmt::Write;
         let _ = write!(hex_buf, "{byte:02x}");
     }
 
@@ -453,6 +471,139 @@ fn hex_digit(b: u8) -> Option<u8> {
         b'a'..=b'f' => Some(b - b'a' + 10),
         _ => None,
     }
+}
+
+/// Runs inside the synchronous `on_response_body` hook, so it cannot
+/// await or write to external stores — state persists via `filter_metadata`
+/// hex encoding between calls.
+fn process_sse_response_chunk(
+    ctx: &mut HttpFilterContext<'_>,
+    chunk: &[u8],
+    store: &LocalTaskRouteStore,
+    config: &config::TaskRoutingConfig,
+) {
+    let mut state = load_sse_scan_state(ctx);
+
+    let result = sse::scan_sse_chunk(&mut state, chunk, config.max_response_body_bytes);
+
+    for payload in &result.payloads {
+        try_extract_task_from_sse_payload(payload, ctx, store, config);
+    }
+
+    if result.overflowed {
+        debug!(
+            scratch_bytes = state.scratch_bytes,
+            max_bytes = config.max_response_body_bytes,
+            "SSE scratch exceeds capture limit, disabling streaming capture"
+        );
+        clear_sse_capture_metadata(ctx);
+    } else {
+        save_sse_scan_state(ctx, &state);
+    }
+}
+
+/// Invalid UTF-8 or unparseable JSON silently skips — the proxy must
+/// never fail on arbitrary SSE payloads.
+fn try_extract_task_from_sse_payload(
+    data: &[u8],
+    ctx: &HttpFilterContext<'_>,
+    store: &LocalTaskRouteStore,
+    config: &config::TaskRoutingConfig,
+) {
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(data) else {
+        return;
+    };
+
+    let Some(cluster) = ctx.filter_metadata.get("a2a.response.cluster") else {
+        return;
+    };
+
+    store_task_route(&value, cluster, store, config);
+}
+
+/// Reconstructs scanner state from hex-encoded `filter_metadata` keys.
+/// Metadata bypasses the 256-byte dynamic-value helper because the
+/// scanner buffers raw SSE line/data bytes that can exceed that limit.
+fn load_sse_scan_state(ctx: &HttpFilterContext<'_>) -> sse::SseScanState {
+    let line_buf = ctx
+        .filter_metadata
+        .get("a2a.response.sse_line_buf_hex")
+        .and_then(|hex| decode_hex(hex))
+        .unwrap_or_default();
+
+    let data_buf = ctx
+        .filter_metadata
+        .get("a2a.response.sse_data_hex")
+        .and_then(|hex| decode_hex(hex))
+        .unwrap_or_default();
+
+    let has_data = ctx
+        .filter_metadata
+        .get("a2a.response.sse_has_data")
+        .is_some_and(|v| v == "true");
+
+    let prev_cr = ctx
+        .filter_metadata
+        .get("a2a.response.sse_prev_cr")
+        .is_some_and(|v| v == "true");
+
+    let scratch_bytes: usize = ctx
+        .filter_metadata
+        .get("a2a.response.sse_scratch_bytes")
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0);
+
+    sse::SseScanState {
+        line_buf,
+        data_buf,
+        has_data,
+        prev_cr,
+        scratch_bytes,
+    }
+}
+
+/// Persists scanner state back to `filter_metadata` for the next chunk.
+fn save_sse_scan_state(ctx: &mut HttpFilterContext<'_>, state: &sse::SseScanState) {
+    set_hex_metadata(ctx, "a2a.response.sse_line_buf_hex", &state.line_buf);
+    set_hex_metadata(ctx, "a2a.response.sse_data_hex", &state.data_buf);
+
+    ctx.filter_metadata.insert(
+        "a2a.response.sse_has_data".to_owned(),
+        if state.has_data { "true" } else { "false" }.to_owned(),
+    );
+    ctx.filter_metadata.insert(
+        "a2a.response.sse_prev_cr".to_owned(),
+        if state.prev_cr { "true" } else { "false" }.to_owned(),
+    );
+    ctx.filter_metadata.insert(
+        "a2a.response.sse_scratch_bytes".to_owned(),
+        state.scratch_bytes.to_string(),
+    );
+}
+
+/// Hex-encodes raw bytes into a metadata value, or removes the key if empty.
+fn set_hex_metadata(ctx: &mut HttpFilterContext<'_>, key: &str, data: &[u8]) {
+    if data.is_empty() {
+        ctx.filter_metadata.remove(key);
+    } else {
+        let mut hex = String::with_capacity(data.len() * 2);
+        for byte in data {
+            let _ = write!(hex, "{byte:02x}");
+        }
+        ctx.filter_metadata.insert(key.to_owned(), hex);
+    }
+}
+
+/// Called on overflow, end-of-stream, or error to ensure no stale
+/// scanner state leaks into later requests on the same connection.
+fn clear_sse_capture_metadata(ctx: &mut HttpFilterContext<'_>) {
+    ctx.filter_metadata.remove("a2a.response.sse_capture_enabled");
+    ctx.filter_metadata.remove("a2a.response.sse_line_buf_hex");
+    ctx.filter_metadata.remove("a2a.response.sse_data_hex");
+    ctx.filter_metadata.remove("a2a.response.sse_has_data");
+    ctx.filter_metadata.remove("a2a.response.sse_prev_cr");
+    ctx.filter_metadata.remove("a2a.response.sse_scratch_bytes");
+    ctx.filter_metadata.remove("a2a.response.cluster");
 }
 
 /// Whether a content-type header value indicates `text/event-stream`.
