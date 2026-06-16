@@ -1,6 +1,9 @@
 # Cargo build output
 target
 
+# Test artifacts
+**/*.db
+
 # Rustfmt backup files
 **/*.rs.bk
 

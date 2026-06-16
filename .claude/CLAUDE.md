@@ -315,7 +315,8 @@ cannot be applied dynamically (logged as warnings).
 ## CI Workflows
 
 CI workflows that post PR comments must use the
-`PRAXIS_BOT` secret as the token, not the default
+`praxis-bot-app` GitHub App token (via
+`actions/create-github-app-token`), not the default
 `github.token`.
 
 ## Pingora Boundary
