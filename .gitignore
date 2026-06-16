@@ -13,10 +13,6 @@ target
 # Cargo mutants output
 **/mutants.out*/
 
-# Fuzz artifacts (keep seed corpus)
-tests/fuzz/artifacts/
-tests/fuzz/corpus/
-
 # LLVM coverage artifacts
 coverage/
 coverage.json

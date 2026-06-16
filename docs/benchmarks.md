@@ -385,8 +385,6 @@ GitHub Actions workflows run on this repository:
 - `codeql.yaml`: CodeQL security analysis on push/PR
   and weekly schedule
 - `documentation.yaml`: rustdoc generation on push/PR
-- `fuzz.yaml`: fuzz testing on push/PR and nightly
-  schedule
 - `msrv.yaml`: minimum supported Rust version check
   on push/PR
 - `nightly.yaml`: comprehensive nightly test runs

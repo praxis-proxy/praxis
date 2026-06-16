@@ -37,8 +37,8 @@ pub(super) async fn execute(
     ctx.response_phase_done = true;
     ctx.upstream_response_status = Some(upstream_response.status.as_u16());
 
-    let (result, _headers_modified) = run_response_pipeline(pipeline, ctx, &mut resp).await?;
-    handle_response_result(result, upstream_response, &resp)
+    let (result, headers_modified) = run_response_pipeline(pipeline, ctx, &mut resp).await?;
+    handle_response_result(result, upstream_response, resp, headers_modified)
 }
 
 /// Run the response pipeline and capture the result plus header-modified flag.
@@ -73,16 +73,23 @@ async fn run_response_pipeline(
 /// Map the filter pipeline result to a Pingora Result, restoring headers on success.
 ///
 /// Headers were taken from the Pingora response via [`std::mem::take`] earlier,
-/// so they must always be restored. We re-insert through Pingora's API to keep
-/// the internal `header_name_map` consistent with the `HeaderMap`.
+/// so they must always be restored. When no filter modified them, a direct swap
+/// is safe because the internal `header_name_map` was never invalidated. When
+/// filters did modify headers, we rebuild through Pingora's API to keep the
+/// name map consistent.
 fn handle_response_result(
     result: std::result::Result<FilterAction, praxis_filter::FilterError>,
     upstream_response: &mut pingora_http::ResponseHeader,
-    resp: &praxis_filter::Response,
+    mut resp: praxis_filter::Response,
+    headers_modified: bool,
 ) -> Result<()> {
     match result {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
-            write_headers_to_pingora(&resp.headers, resp.status, upstream_response);
+            if headers_modified {
+                write_headers_to_pingora(&resp.headers, resp.status, upstream_response);
+            } else {
+                upstream_response.headers = std::mem::take(&mut resp.headers);
+            }
             Ok(())
         },
         Ok(FilterAction::Reject(rejection)) => {

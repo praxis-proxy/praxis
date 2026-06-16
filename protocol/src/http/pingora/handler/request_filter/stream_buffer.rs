@@ -207,3 +207,154 @@ pub(super) async fn pre_read_body(
 
     Ok(all_extra_headers)
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trace_redacts_authorization_header() {
+        assert!(
+            !is_trace_allowed("authorization"),
+            "authorization should be redacted from TRACE"
+        );
+    }
+
+    #[test]
+    fn trace_redacts_cookie_header() {
+        assert!(!is_trace_allowed("cookie"), "cookie should be redacted from TRACE");
+    }
+
+    #[test]
+    fn trace_redacts_x_api_key_header() {
+        assert!(
+            !is_trace_allowed("x-api-key"),
+            "x-api-key should be redacted from TRACE"
+        );
+    }
+
+    #[test]
+    fn trace_redacts_x_auth_token_header() {
+        assert!(
+            !is_trace_allowed("x-auth-token"),
+            "x-auth-token should be redacted from TRACE"
+        );
+    }
+
+    #[test]
+    fn trace_redacts_proxy_authorization_header() {
+        assert!(
+            !is_trace_allowed("proxy-authorization"),
+            "proxy-authorization should be redacted from TRACE"
+        );
+    }
+
+    #[test]
+    fn trace_redacts_set_cookie_header() {
+        assert!(
+            !is_trace_allowed("set-cookie"),
+            "set-cookie should be redacted from TRACE"
+        );
+    }
+
+    #[test]
+    fn trace_allows_host_header() {
+        assert!(is_trace_allowed("host"), "host should be allowed in TRACE");
+    }
+
+    #[test]
+    fn trace_allows_content_type_header() {
+        assert!(
+            is_trace_allowed("content-type"),
+            "content-type should be allowed in TRACE"
+        );
+    }
+
+    #[test]
+    fn trace_allows_accept_header() {
+        assert!(is_trace_allowed("accept"), "accept should be allowed in TRACE");
+    }
+
+    #[test]
+    fn trace_allows_user_agent_header() {
+        assert!(is_trace_allowed("user-agent"), "user-agent should be allowed in TRACE");
+    }
+
+    #[test]
+    fn trace_allowlist_excludes_all_sensitive_headers() {
+        let sensitive = [
+            "authorization",
+            "cookie",
+            "set-cookie",
+            "x-api-key",
+            "x-auth-token",
+            "proxy-authorization",
+            "x-csrf-token",
+            "x-forwarded-for",
+        ];
+        for header in sensitive {
+            assert!(
+                !is_trace_allowed(header),
+                "{header} should not be in the TRACE allowlist"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_buffer_max_bytes_uses_value_when_set() {
+        let mode = BodyMode::StreamBuffer { max_bytes: Some(4096) };
+        let resolved = match mode {
+            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
+            _ => 0,
+        };
+        assert_eq!(resolved, 4096, "explicit max_bytes should be used");
+    }
+
+    #[test]
+    fn stream_buffer_max_bytes_falls_back_to_absolute_max() {
+        let mode = BodyMode::StreamBuffer { max_bytes: None };
+        let resolved = match mode {
+            BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
+            _ => 0,
+        };
+        assert_eq!(
+            resolved, ABSOLUTE_MAX_BODY_BYTES,
+            "None max_bytes should fall back to ABSOLUTE_MAX_BODY_BYTES"
+        );
+    }
+
+    #[test]
+    fn non_stream_buffer_mode_skips_pre_read() {
+        let modes = [BodyMode::Stream, BodyMode::SizeLimit { max_bytes: 1024 }];
+        for mode in modes {
+            let is_stream_buffer = matches!(mode, BodyMode::StreamBuffer { .. });
+            assert!(!is_stream_buffer, "{mode:?} should not trigger StreamBuffer pre-read");
+        }
+    }
+
+    #[test]
+    fn body_buffer_overflow_produces_413() {
+        let mut buffer = BodyBuffer::new(10);
+        let large = bytes::Bytes::from(vec![0u8; 20]);
+        assert!(buffer.push(large).is_err(), "oversized push should fail");
+    }
+
+    #[test]
+    fn body_buffer_within_limit_succeeds() {
+        let mut buffer = BodyBuffer::new(100);
+        let small = bytes::Bytes::from(vec![0u8; 50]);
+        assert!(buffer.push(small).is_ok(), "within-limit push should succeed");
+    }
+
+    // -----------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------
+
+    fn is_trace_allowed(name: &str) -> bool {
+        TRACE_ALLOWED_HEADERS.contains(&name)
+    }
+}

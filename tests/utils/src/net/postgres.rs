@@ -172,21 +172,69 @@ fn detect_container_engine() -> String {
 
 /// Poll until `PostgreSQL` is ready to accept queries.
 ///
-/// Uses `pg_isready` inside the container to verify the
-/// database is fully initialized, not just TCP-listening.
+/// First waits for `pg_isready`, then verifies the target
+/// database is queryable via `psql`. The two-phase check
+/// guards against a race in the Docker entrypoint where the
+/// server accepts connections before the `POSTGRES_DB`
+/// database has been created.
 fn wait_for_postgres(engine: &str, container_id: &str) {
     let deadline = Instant::now() + READY_TIMEOUT;
 
-    while Instant::now() < deadline {
-        let ok = Command::new(engine)
+    poll_until(deadline, || {
+        Command::new(engine)
             .args(["exec", container_id, "pg_isready", "-U", PG_USER])
             .output()
-            .is_ok_and(|o| o.status.success());
-        if ok {
+            .is_ok_and(|o| o.status.success())
+    });
+
+    poll_until(deadline, || {
+        Command::new(engine)
+            .args([
+                "exec",
+                container_id,
+                "psql",
+                "-U",
+                PG_USER,
+                "-d",
+                PG_DATABASE,
+                "-c",
+                "SELECT 1",
+            ])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    });
+}
+
+/// Repeatedly call `check` until it returns `true` or the deadline passes.
+fn poll_until(deadline: Instant, check: impl Fn() -> bool) {
+    loop {
+        if check() {
             return;
+        }
+        if Instant::now() >= deadline {
+            break;
         }
         thread::sleep(READY_POLL_INTERVAL);
     }
-
     panic!("`PostgreSQL` container did not become ready within {READY_TIMEOUT:?}");
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[test]
+    fn poll_until_checks_readiness_after_sleep_crosses_deadline() {
+        let attempts = Cell::new(0);
+
+        poll_until(Instant::now() + Duration::from_millis(1), || {
+            let next_attempt = attempts.get() + 1;
+            attempts.set(next_attempt);
+            next_attempt == 2
+        });
+
+        assert_eq!(attempts.get(), 2);
+    }
 }

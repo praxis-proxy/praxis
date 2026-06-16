@@ -53,7 +53,7 @@ impl Protocol for PingoraTcp {
                 .and_then(|l| pipelines.get(&l.name))
                 .map_or_else(|| Arc::clone(&fallback_pipeline), Arc::clone);
 
-            let idle_timeout = timeout_ms.map(Duration::from_millis);
+            let session_timeout = timeout_ms.map(Duration::from_millis);
             let max_duration = max_dur_secs.map(Duration::from_secs);
             let service_name = match (upstream_opt.as_deref(), cluster_opt.as_deref()) {
                 (Some(addr), _) => format!("tcp-proxy:{addr}"),
@@ -68,7 +68,7 @@ impl Protocol for PingoraTcp {
                 upstream_opt.clone(),
                 cluster_opt.map(Arc::from),
                 pipeline,
-                idle_timeout,
+                session_timeout,
                 max_duration,
                 connection_semaphore,
             );
