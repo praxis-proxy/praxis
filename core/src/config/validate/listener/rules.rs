@@ -43,14 +43,30 @@ pub(in crate::config::validate) fn validate_listeners(listeners: &mut [Listener]
 }
 
 /// Reject duplicate bind addresses across listeners.
+///
+/// Parses addresses as [`SocketAddr`] before comparing so that
+/// `0.0.0.0:8080` and `[::]:8080` are detected as overlapping
+/// on dual-stack systems.
+///
+/// [`SocketAddr`]: std::net::SocketAddr
 fn validate_unique_addresses(listeners: &[Listener]) -> Result<(), ProxyError> {
-    let mut seen = HashSet::new();
+    let mut seen_raw = HashSet::new();
+    let mut seen_parsed = HashSet::new();
     for listener in listeners {
-        if !seen.insert(&listener.address) {
+        if !seen_raw.insert(&listener.address) {
             return Err(ProxyError::Config(format!(
                 "duplicate listener address '{}' (listeners '{}' and another share the same address)",
                 listener.address, listener.name
             )));
+        }
+        if let Ok(addr) = listener.address.parse::<std::net::SocketAddr>() {
+            let normalized = (addr.ip().is_unspecified(), addr.port());
+            if !seen_parsed.insert(normalized) {
+                return Err(ProxyError::Config(format!(
+                    "listener '{}' address '{}' overlaps with another listener on the same port",
+                    listener.name, listener.address
+                )));
+            }
         }
     }
     Ok(())
@@ -273,6 +289,29 @@ filter_chains:
         assert!(
             err.to_string().contains("duplicate listener address"),
             "should reject duplicate addresses: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_overlapping_wildcard_addresses() {
+        let yaml = r#"
+listeners:
+  - name: ipv4
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+  - name: ipv6
+    address: "[::]:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("overlaps"),
+            "0.0.0.0 and [::] on same port should overlap: {err}"
         );
     }
 

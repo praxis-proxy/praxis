@@ -21,7 +21,7 @@ const COUNTER_MASK: u64 = 0xFFFF_FFFF_FFFF; // 2^48 - 1
 /// Generates 32-character hex request IDs with per-instance entropy.
 ///
 /// Combines a wall-clock timestamp (microseconds since epoch), a
-/// random 16-bit seed (set once at construction), and a 48-bit
+/// random 32-bit seed (set once at construction), and a 48-bit
 /// monotone counter to produce IDs that are probabilistically
 /// unique across instances.
 ///
@@ -30,7 +30,7 @@ const COUNTER_MASK: u64 = 0xFFFF_FFFF_FFFF; // 2^48 - 1
 ///
 /// use praxis_core::{id::IdGenerator, time::FixedTimeSource};
 ///
-/// let generator = IdGenerator::with_seed(0x1234);
+/// let generator = IdGenerator::with_seed(0x1234_5678);
 /// let ts = FixedTimeSource::new(Duration::from_micros(1));
 /// let id = generator.generate(&ts);
 /// assert_eq!(id.len(), 32);
@@ -40,7 +40,7 @@ pub struct IdGenerator {
     counter: AtomicU64,
 
     /// Random per-instance seed for cross-instance uniqueness.
-    seed: u16,
+    seed: u32,
 }
 
 impl Default for IdGenerator {
@@ -66,7 +66,7 @@ impl IdGenerator {
 
     /// Create a generator with a fixed seed for deterministic tests.
     #[must_use]
-    pub fn with_seed(seed: u16) -> Self {
+    pub fn with_seed(seed: u32) -> Self {
         Self {
             counter: AtomicU64::new(0),
             seed,
@@ -75,19 +75,20 @@ impl IdGenerator {
 
     /// Generate a 32-character hex request ID.
     ///
-    /// Format: `{micros:016x}{seed:04x}{counter:012x}`
+    /// Format: `{micros:012x}{seed:08x}{counter:012x}`
     ///
-    /// - Chars 0-15: microseconds since epoch (64-bit)
-    /// - Chars 16-19: per-instance seed (16-bit)
+    /// - Chars 0-11: microseconds since epoch (48-bit)
+    /// - Chars 12-19: per-instance seed (32-bit)
     /// - Chars 20-31: monotone counter (48-bit, masked)
     #[must_use]
     pub fn generate(&self, time_source: &dyn TimeSource) -> String {
         #[allow(clippy::cast_possible_truncation, reason = "clamped to u64::MAX before cast")]
         let micros = time_source.now().as_micros().min(u128::from(u64::MAX)) as u64;
+        let micros_masked = micros & COUNTER_MASK;
 
         let seq = self.counter.fetch_add(1, Ordering::Relaxed) & COUNTER_MASK;
 
-        format!("{micros:016x}{:04x}{seq:012x}", self.seed)
+        format!("{micros_masked:012x}{:08x}{seq:012x}", self.seed)
     }
 }
 
@@ -105,11 +106,11 @@ mod tests {
 
     #[test]
     fn deterministic_output_with_fixed_seed() {
-        let generator = IdGenerator::with_seed(0xABCD);
-        let ts = FixedTimeSource::new(Duration::from_micros(0x0011_2233_4455_6677));
+        let generator = IdGenerator::with_seed(0xDEAD_BEEF);
+        let ts = FixedTimeSource::new(Duration::from_micros(0x0011_2233_4455));
         let id = generator.generate(&ts);
         assert_eq!(
-            id, "0011223344556677abcd000000000000",
+            id, "001122334455deadbeef000000000000",
             "fixed seed + fixed time should produce a known ID"
         );
     }

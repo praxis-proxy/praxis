@@ -66,3 +66,6 @@ jobs:
 
       - name: Integration tests
         run: make test-integration
+
+      - name: Integration tests (PostgreSQL, requires container engine)
+        run: cargo test -p praxis-tests-integration --test suite -- openai_response_store_postgres --ignored

@@ -46,13 +46,15 @@ use tracing::{debug, trace, warn};
 
 use super::{
     ListParams, Order,
-    config::{ResponseStoreConfig, StorageBackend, validate_config},
+    config::{ResponseStoreConfig, StorageBackend, revalidate_postgres_host, validate_config},
     list_input_items,
 };
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode, limits::MAX_JSON_BODY_BYTES},
-    builtins::http::ai::store::{ResponseRecord, ResponseStore, SqliteResponseStore},
+    builtins::http::ai::store::{
+        PostgresResponseStore, ResponseRecord, ResponseStore, SqliteResponseStore, StoreError,
+    },
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -83,9 +85,8 @@ pub struct ResponseStoreFilter {
     /// Parsed configuration.
     pub(crate) config: ResponseStoreConfig,
 
-    /// Lazily initialized store backend. `Option` ensures init
-    /// failure stores `None` permanently, preventing retries on
-    /// bad config.
+    /// Lazily initialized store backend. SQLite init failures are
+    /// cached as `None`; Postgres init failures are retried.
     pub(crate) store: OnceCell<Option<Arc<dyn ResponseStore>>>,
 }
 
@@ -109,48 +110,111 @@ impl ResponseStoreFilter {
         }
     }
 
-    /// Initialize the store backend, returning `None` on failure.
+    /// Build the configured store backend.
     #[allow(
         clippy::cognitive_complexity,
         clippy::too_many_lines,
         reason = "tracing macros inflate complexity"
     )]
-    pub(super) async fn init_store(&self) -> Option<Arc<dyn ResponseStore>> {
+    pub(super) async fn build_store(&self) -> Result<Arc<dyn ResponseStore>, StoreError> {
         match self.config.backend {
             StorageBackend::Sqlite => {
-                let result = SqliteResponseStore::new(
+                let store = SqliteResponseStore::new(
                     self.config.database_url.expose_secret(),
                     &self.config.responses_table,
                     &self.config.conversations_table,
                 )
                 .await;
-
-                match result {
-                    Ok(store) => {
-                        debug!(
-                            backend = ?self.config.backend,
-                            responses_table = %self.config.responses_table,
-                            conversations_table = %self.config.conversations_table,
-                            "response store initialized"
-                        );
-                        Some(Arc::new(store))
-                    },
-                    Err(e) => {
-                        warn!(
-                            backend = ?self.config.backend,
-                            error = %e,
-                            "response store initialization failed (permanent)"
-                        );
-                        None
-                    },
-                }
+                store.map(|s| {
+                    let arc: Arc<dyn ResponseStore> = Arc::new(s);
+                    arc
+                })
             },
+
+            StorageBackend::Postgres => {
+                revalidate_postgres_host(&self.config).map_err(|e| {
+                    StoreError::Unavailable(format!("postgres host validation failed before connect: {e}"))
+                })?;
+                let ssl_root_cert = self.config.ssl_root_cert.as_ref().map(|s| {
+                    let secret: &str = s.expose_secret();
+                    secret
+                });
+                let store = PostgresResponseStore::new(
+                    self.config.database_url.expose_secret(),
+                    &self.config.responses_table,
+                    &self.config.conversations_table,
+                    self.config.ssl_mode,
+                    ssl_root_cert,
+                )
+                .await;
+                store.map(|s| {
+                    let arc: Arc<dyn ResponseStore> = Arc::new(s);
+                    arc
+                })
+            },
+        }
+    }
+
+    /// Build the store and log successful initialization.
+    async fn build_logged_store(&self) -> Result<Arc<dyn ResponseStore>, StoreError> {
+        let store = self.build_store().await?;
+        debug!(
+            backend = ?self.config.backend,
+            responses_table = %self.config.responses_table,
+            conversations_table = %self.config.conversations_table,
+            "response store initialized"
+        );
+        Ok(store)
+    }
+
+    /// Initialize a store once, caching failed init permanently.
+    async fn init_permanent_store(&self) -> Option<Arc<dyn ResponseStore>> {
+        match self.build_logged_store().await {
+            Ok(store) => Some(store),
+            Err(e) => {
+                warn!(
+                    backend = ?self.config.backend,
+                    error = %e,
+                    "response store initialization failed (permanent)"
+                );
+                None
+            },
+        }
+    }
+
+    /// Return the initialized store, retrying transient Postgres failures.
+    async fn get_or_init_store(&self) -> Option<Arc<dyn ResponseStore>> {
+        if matches!(self.config.backend, StorageBackend::Postgres) {
+            match self
+                .store
+                .get_or_try_init(|| async { self.build_logged_store().await.map(Some) })
+                .await
+            {
+                Ok(store) => store.as_ref().map(Arc::clone),
+                Err(e) => {
+                    warn!(
+                        backend = ?self.config.backend,
+                        error = %e,
+                        "response store initialization failed (will retry)"
+                    );
+                    None
+                },
+            }
+        } else {
+            self.store
+                .get_or_init(|| async { self.init_permanent_store().await })
+                .await
+                .as_ref()
+                .map(Arc::clone)
         }
     }
 
     /// Handle `DELETE /v1/responses/{id}` by deleting from the store.
     async fn handle_delete(&self, tenant_id: &str, id: &str) -> Result<FilterAction, FilterError> {
-        let store = self.store.get_or_init(|| async { self.init_store().await }).await;
+        let store = self
+            .store
+            .get_or_init(|| async { self.init_permanent_store().await })
+            .await;
 
         let Some(store) = store else {
             return Ok(FilterAction::Continue);
@@ -458,8 +522,7 @@ impl HttpFilter for ResponseStoreFilter {
             return Ok(FilterAction::Continue);
         }
 
-        let store_opt = self.store.get_or_init(|| async { self.init_store().await }).await;
-        if store_opt.is_none() {
+        if self.get_or_init_store().await.is_none() {
             ctx.set_metadata("responses.skip_persist", "true");
         }
 
@@ -475,8 +538,7 @@ impl HttpFilter for ResponseStoreFilter {
             return Ok(FilterAction::Continue);
         }
 
-        let store_opt = self.store.get_or_init(|| async { self.init_store().await }).await;
-        if store_opt.is_none() {
+        if self.get_or_init_store().await.is_none() {
             trace!("skipping persistence because response store is unavailable");
             ctx.set_metadata("responses.skip_persist", "true");
             return Ok(FilterAction::Continue);
@@ -546,7 +608,7 @@ impl ResponseStoreFilter {
     /// Lazily initialize the store and return a clone of the `Arc`.
     async fn ensure_store(&self) -> Option<Arc<dyn ResponseStore>> {
         self.store
-            .get_or_init(|| async { self.init_store().await })
+            .get_or_init(|| async { self.init_permanent_store().await })
             .await
             .clone()
     }

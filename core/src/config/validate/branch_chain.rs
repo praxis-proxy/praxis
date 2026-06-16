@@ -28,6 +28,12 @@ pub const MAX_BRANCH_DEPTH: usize = 10;
 /// ceiling caps what users can configure.
 pub const MAX_ITERATIONS_CEILING: u32 = 100;
 
+/// Maximum branch chains a single filter may define.
+const MAX_BRANCHES_PER_FILTER: usize = 16;
+
+/// Maximum total branch chain count across all filter chains.
+const MAX_TOTAL_BRANCHES: usize = 256;
+
 // -----------------------------------------------------------------------------
 // Branch Chain Validation
 // -----------------------------------------------------------------------------
@@ -35,11 +41,19 @@ pub const MAX_ITERATIONS_CEILING: u32 = 100;
 /// Validate all branch chains across all filter chains.
 pub(crate) fn validate_branch_chains(chains: &[FilterChainConfig]) -> Result<(), ProxyError> {
     let chain_names: HashSet<&str> = chains.iter().map(|c| c.name.as_str()).collect();
+    let initial_count = chain_names.len();
     let mut all_names: HashSet<String> = chain_names.iter().map(|s| (*s).to_owned()).collect();
 
     for chain in chains {
         validate_filter_names_unique(&chain.filters, &chain.name)?;
         collect_branch_names(&chain.filters, &mut all_names, &chain_names, 0)?;
+    }
+
+    let branch_count = all_names.len() - initial_count;
+    if branch_count > MAX_TOTAL_BRANCHES {
+        return Err(ProxyError::Config(format!(
+            "total branch count ({branch_count}) exceeds maximum ({MAX_TOTAL_BRANCHES})"
+        )));
     }
 
     Ok(())
@@ -92,9 +106,16 @@ fn collect_branch_names(
     );
 
     for entry in filters {
+        entry.warn_config_typos();
         let Some(branches) = &entry.branch_chains else {
             continue;
         };
+        if branches.len() > MAX_BRANCHES_PER_FILTER {
+            return Err(ProxyError::Config(format!(
+                "filter has {} branch chains (max {MAX_BRANCHES_PER_FILTER})",
+                branches.len()
+            )));
+        }
         for branch in branches {
             validate_branch(branch, all_names, chain_names, depth)?;
         }
@@ -110,6 +131,7 @@ fn validate_branch(
     depth: usize,
 ) -> Result<(), ProxyError> {
     let bname = &branch.name;
+    super::validate_name_chars(bname, "branch")?;
     if !all_names.insert(branch.name.clone()) {
         return Err(ProxyError::Config(format!("duplicate branch name '{bname}'")));
     }
@@ -131,6 +153,7 @@ fn validate_branch(
 
     validate_max_iterations(branch)?;
     validate_on_result_filter_name(branch)?;
+    validate_on_result_key_value(branch)?;
 
     for chain_ref in &branch.chains {
         validate_chain_ref(chain_ref, all_names, chain_names, depth)?;
@@ -164,6 +187,37 @@ fn validate_on_result_filter_name(branch: &BranchChainConfig) -> Result<(), Prox
     Ok(())
 }
 
+/// Validate `on_result.key` and `on_result.value` are non-empty
+/// and contain only safe characters.
+fn validate_on_result_key_value(branch: &BranchChainConfig) -> Result<(), ProxyError> {
+    let Some(cond) = &branch.on_result else {
+        return Ok(());
+    };
+    let bname = &branch.name;
+    if cond.key.is_empty() {
+        return Err(ProxyError::Config(format!(
+            "branch '{bname}': on_result.key must not be empty"
+        )));
+    }
+    validate_on_result_field(&cond.key, "key", bname)?;
+    if cond.value.is_empty() {
+        return Err(ProxyError::Config(format!(
+            "branch '{bname}': on_result.result must not be empty"
+        )));
+    }
+    validate_on_result_field(&cond.value, "result", bname)
+}
+
+/// Validate a single `on_result` field uses safe characters.
+fn validate_on_result_field(val: &str, field: &str, branch_name: &str) -> Result<(), ProxyError> {
+    if !val.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-') {
+        return Err(ProxyError::Config(format!(
+            "branch '{branch_name}': on_result.{field} '{val}' must be ASCII alphanumeric, '_', or '-'"
+        )));
+    }
+    Ok(())
+}
+
 /// Validate `max_iterations` constraints.
 fn validate_max_iterations(branch: &BranchChainConfig) -> Result<(), ProxyError> {
     let bname = &branch.name;
@@ -191,9 +245,17 @@ fn validate_chain_ref(
             }
         },
         ChainRef::Inline { name, filters } => {
+            super::validate_name_chars(name, "inline chain")?;
             if depth + 1 > MAX_BRANCH_DEPTH {
                 return Err(ProxyError::Config(format!(
                     "branch nesting depth exceeds maximum ({MAX_BRANCH_DEPTH})"
+                )));
+            }
+            if filters.len() > super::filter_chain::MAX_FILTERS_PER_CHAIN {
+                return Err(ProxyError::Config(format!(
+                    "inline chain '{name}' has too many filters ({}, max {})",
+                    filters.len(),
+                    super::filter_chain::MAX_FILTERS_PER_CHAIN
                 )));
             }
             if !all_names.insert(name.clone()) {
@@ -223,6 +285,152 @@ fn validate_chain_ref(
 )]
 mod tests {
     use crate::config::Config;
+
+    #[test]
+    fn reject_branch_name_with_special_chars() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: "bad.branch"
+            chains:
+              - name: inline
+                filters:
+                  - filter: headers
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("alphanumeric"),
+            "branch name with dots should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_inline_chain_name_with_special_chars() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: branch
+            chains:
+              - name: "bad.inline"
+                filters:
+                  - filter: headers
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("alphanumeric"),
+            "inline chain name with dots should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_on_result_key() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: branch
+            on_result:
+              filter: cache
+              key: ""
+              result: hit
+            chains:
+              - name: inline
+                filters:
+                  - filter: headers
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("on_result.key must not be empty"),
+            "empty on_result key should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_on_result_value() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: branch
+            on_result:
+              filter: cache
+              result: ""
+            chains:
+              - name: inline
+                filters:
+                  - filter: headers
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("on_result.result must not be empty"),
+            "empty on_result value should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_on_result_key_with_special_chars() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: branch
+            on_result:
+              filter: cache
+              key: "bad.key"
+              result: hit
+            chains:
+              - name: inline
+                filters:
+                  - filter: headers
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("on_result.key"),
+            "on_result key with dots should be rejected: {err}"
+        );
+    }
 
     #[test]
     fn valid_branch_config() {
@@ -781,6 +989,98 @@ filter_chains:
 
         let yaml = nested_yaml(super::super::branch_chain::MAX_BRANCH_DEPTH);
         Config::from_yaml(&yaml).expect("nesting at exactly MAX_BRANCH_DEPTH should pass");
+    }
+
+    #[test]
+    fn reject_too_many_branches_per_filter() {
+        let mut branches = String::new();
+        for i in 0..17 {
+            branches.push_str(&format!(
+                "          - name: branch_{i}\n            chains:\n              \
+                 - name: inline_{i}\n                filters:\n                  \
+                 - filter: headers\n"
+            ));
+        }
+        let yaml = format!(
+            r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+{branches}      - filter: static_response
+        status: 200
+"#
+        );
+        let err = Config::from_yaml(&yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("branch chains"),
+            "should reject >16 branches per filter: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_max_branches_per_filter() {
+        let mut branches = String::new();
+        for i in 0..16 {
+            branches.push_str(&format!(
+                "          - name: branch_{i}\n            chains:\n              \
+                 - name: inline_{i}\n                filters:\n                  \
+                 - filter: headers\n"
+            ));
+        }
+        let yaml = format!(
+            r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+{branches}      - filter: static_response
+        status: 200
+"#
+        );
+        Config::from_yaml(&yaml).expect("exactly 16 branches per filter should pass");
+    }
+
+    #[test]
+    fn reject_inline_chain_too_many_filters() {
+        let mut filters = String::new();
+        for _ in 0..101 {
+            filters.push_str("                  - filter: headers\n");
+        }
+        let yaml = format!(
+            r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: big_branch
+            chains:
+              - name: big_inline
+                filters:
+{filters}      - filter: static_response
+        status: 200
+"#
+        );
+        let err = Config::from_yaml(&yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("too many filters"),
+            "inline chain with >100 filters should be rejected: {err}"
+        );
     }
 
     #[test]

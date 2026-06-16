@@ -21,10 +21,17 @@ jobs:
     permissions:
       issues: write
     steps:
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
+          private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
+
       - name: Add triage/needs-triage on new issue
         if: github.event.action == 'opened'
         env:
-          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
           ISSUE: ${{ github.event.issue.number }}
         run: |
@@ -34,7 +41,7 @@ jobs:
       - name: Accept triaged issue
         if: github.event.action == 'milestoned'
         env:
-          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
           ISSUE: ${{ github.event.issue.number }}
         run: |
@@ -45,7 +52,7 @@ jobs:
       - name: Revert to needs-triage on demilestone
         if: github.event.action == 'demilestoned'
         env:
-          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
           ISSUE: ${{ github.event.issue.number }}
         run: |

@@ -83,6 +83,18 @@ pub(crate) fn validate_postgres_identifiers(tables: &TableNames) -> Result<(), S
     Ok(())
 }
 
+/// Validate table names for a `PostgreSQL` response store.
+pub(crate) fn validate_postgres_table_identifiers(
+    responses_table: &str,
+    conversations_table: &str,
+) -> Result<(), StoreError> {
+    let tables = TableNames {
+        responses: responses_table.to_owned(),
+        conversations: conversations_table.to_owned(),
+    };
+    validate_postgres_identifiers(&tables)
+}
+
 /// Validate the configured table names and return them as borrowed identifiers.
 fn validate_table_names(tables: &TableNames) -> Result<(&str, &str), StoreError> {
     let r = tables.responses.as_str();
