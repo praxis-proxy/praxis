@@ -221,12 +221,6 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "bitflags"
-version = "1.3.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bef38d45163c2f1dde094a7dfd33ccf595c92905c8f8f4fdc18d06fb1037718a"
-
-[[package]]
-name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b4388bee8683e3d04af747c73422af53102d2bd24d9eadb6cbc100baef4b43f8"
@@ -301,6 +295,12 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
+
+[[package]]
+name = "cfg_aliases"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "613afe47fcd5fac7ccf1db93babcb082c5994d996f20b8b159f2ad1658eb5724"
 
 [[package]]
 name = "chrono"
@@ -476,10 +476,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "daemonize"
-version = "0.5.0"
+name = "daemonix"
+version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab8bfdaacb3c887a54d41bdf48d3af8873b3f5566469f8ba21b92057509f116e"
+checksum = "f0b747381562a10fd2104e9333ad72fe5158d79de81b64426fc9e229c6d3fb38"
 dependencies = [
  "libc",
 ]
@@ -491,6 +491,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "70def8d72740e44d9f676d8dab2c933a236663d86dd24319b57a2bed4d694774"
 dependencies = [
  "petgraph",
+]
+
+[[package]]
+name = "dashmap"
+version = "5.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
+dependencies = [
+ "cfg-if",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
 ]
 
 [[package]]
@@ -1134,7 +1147,7 @@ version = "0.1.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f02ab6bace2054fb888a3c16f990117b579d14a3088e472d63c6011fa185c9d3"
 dependencies = [
- "bitflags 2.13.0",
+ "bitflags",
  "libc",
  "plain",
  "redox_syscall 0.8.1",
@@ -1224,9 +1237,9 @@ checksum = "88904434abc2901f197fe8cc55f0445e7ded921dba5911dad2e2b39b48e663c4"
 
 [[package]]
 name = "memoffset"
-version = "0.6.5"
+version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5aa361d4faea93603064a027415f07bd8e1d5c88c9fbf68bf56a285428fd79ce"
+checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
 ]
@@ -1260,12 +1273,13 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.24.3"
+version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fa52e972a9a719cecb6864fb88568781eb706bac2cd1d4f04a648542dbf78069"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
 dependencies = [
- "bitflags 1.3.2",
+ "bitflags",
  "cfg-if",
+ "cfg_aliases",
  "libc",
  "memoffset",
 ]
@@ -1444,7 +1458,7 @@ checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 [[package]]
 name = "pingora-core"
 version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=d066f6818038dc296326566afb8e7bf39fb463ff#d066f6818038dc296326566afb8e7bf39fb463ff"
+source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
 dependencies = [
  "ahash",
  "async-trait",
@@ -1453,7 +1467,7 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
- "daemonize",
+ "daemonix",
  "daggy",
  "derivative",
  "flate2",
@@ -1497,12 +1511,12 @@ dependencies = [
 [[package]]
 name = "pingora-error"
 version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=d066f6818038dc296326566afb8e7bf39fb463ff#d066f6818038dc296326566afb8e7bf39fb463ff"
+source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
 
 [[package]]
 name = "pingora-http"
 version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=d066f6818038dc296326566afb8e7bf39fb463ff#d066f6818038dc296326566afb8e7bf39fb463ff"
+source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
 dependencies = [
  "bytes",
  "http",
@@ -1512,24 +1526,27 @@ dependencies = [
 [[package]]
 name = "pingora-pool"
 version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=d066f6818038dc296326566afb8e7bf39fb463ff#d066f6818038dc296326566afb8e7bf39fb463ff"
+source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
 dependencies = [
  "crossbeam-queue",
+ "dashmap 5.5.3",
+ "futures",
  "log",
  "lru",
  "parking_lot",
  "pingora-timeout",
- "thread_local",
  "tokio",
 ]
 
 [[package]]
 name = "pingora-runtime"
 version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=d066f6818038dc296326566afb8e7bf39fb463ff#d066f6818038dc296326566afb8e7bf39fb463ff"
+source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
 dependencies = [
+ "log",
  "once_cell",
  "rand 0.8.6",
+ "serde",
  "thread_local",
  "tokio",
 ]
@@ -1537,7 +1554,7 @@ dependencies = [
 [[package]]
 name = "pingora-rustls"
 version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=d066f6818038dc296326566afb8e7bf39fb463ff#d066f6818038dc296326566afb8e7bf39fb463ff"
+source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
 dependencies = [
  "log",
  "no_debug",
@@ -1553,7 +1570,7 @@ dependencies = [
 [[package]]
 name = "pingora-timeout"
 version = "0.8.0"
-source = "git+https://github.com/praxis-proxy/pingora.git?rev=d066f6818038dc296326566afb8e7bf39fb463ff#d066f6818038dc296326566afb8e7bf39fb463ff"
+source = "git+https://github.com/praxis-proxy/pingora.git?rev=c27df356266c7158caf52b6704de998d6018b1bd#c27df356266c7158caf52b6704de998d6018b1bd"
 dependencies = [
  "once_cell",
  "parking_lot",
@@ -1616,7 +1633,7 @@ dependencies = [
 name = "praxis-proxy-core"
 version = "0.3.1"
 dependencies = [
- "dashmap",
+ "dashmap 6.2.1",
  "pingora-core",
  "praxis-proxy-tls",
  "rand 0.9.4",
@@ -1634,7 +1651,7 @@ version = "0.3.1"
 dependencies = [
  "async-trait",
  "bytes",
- "dashmap",
+ "dashmap 6.2.1",
  "http",
  "percent-encoding",
  "praxis-proxy-core",
@@ -1765,7 +1782,7 @@ version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed2bf2547551a7053d6fdfafda3f938979645c44812fbfcda098faae3f1a362d"
 dependencies = [
- "bitflags 2.13.0",
+ "bitflags",
 ]
 
 [[package]]
@@ -1774,7 +1791,7 @@ version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5b44b894f2a6e36457d665d1e08c3866add6ed5e70050c1b4ba8a8ddedb02ce7"
 dependencies = [
- "bitflags 2.13.0",
+ "bitflags",
 ]
 
 [[package]]
@@ -1941,7 +1958,7 @@ version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "897b2245f0b511c87893af39b033e5ca9cce68824c4d7e7630b5a1d339658d02"
 dependencies = [
- "bitflags 2.13.0",
+ "bitflags",
  "core-foundation",
  "core-foundation-sys",
  "libc",
@@ -2212,7 +2229,7 @@ checksum = "db58fcd5a53cf07c184b154801ff91347e4c30d17a3562a635ff028ad5deda46"
 dependencies = [
  "atoi",
  "base64",
- "bitflags 2.13.0",
+ "bitflags",
  "byteorder",
  "crc",
  "dotenvy",

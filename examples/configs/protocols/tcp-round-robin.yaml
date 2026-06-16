@@ -13,6 +13,9 @@ clusters:
       - "127.0.0.1:15433"
       - "127.0.0.1:15434"
 
+insecure_options:
+  allow_private_endpoints: true
+
 filter_chains:
   - name: tcp_lb
     filters:

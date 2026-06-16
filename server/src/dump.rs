@@ -5,7 +5,7 @@
 
 use std::{collections::HashMap, io::Write as _};
 
-use praxis_core::config::{Config, FailureMode};
+use praxis_core::config::{ChainRef, Config, FailureMode, FilterEntry};
 use serde::Serialize;
 
 // -----------------------------------------------------------------------------
@@ -96,13 +96,31 @@ fn redact_secrets(config: &Config) -> Config {
     let mut redacted = config.clone();
     for chain in &mut redacted.filter_chains {
         for entry in &mut chain.filters {
-            if entry.filter_type == "credential_injection" {
-                redact_credential_values(&mut entry.config);
-            }
-            redact_sensitive_keys(&mut entry.config);
+            redact_filter_entry(entry);
         }
     }
     redacted
+}
+
+/// Redact sensitive values in a filter entry and nested inline branch chains.
+fn redact_filter_entry(entry: &mut FilterEntry) {
+    if entry.filter_type == "credential_injection" {
+        redact_credential_values(&mut entry.config);
+    }
+    redact_sensitive_keys(&mut entry.config);
+
+    let Some(branches) = &mut entry.branch_chains else {
+        return;
+    };
+    for branch in branches {
+        for chain in &mut branch.chains {
+            if let ChainRef::Inline { filters, .. } = chain {
+                for entry in filters {
+                    redact_filter_entry(entry);
+                }
+            }
+        }
+    }
 }
 
 /// Walk the flattened config YAML for a `credential_injection` filter
@@ -159,12 +177,12 @@ fn redact_sensitive_keys(value: &mut serde_yaml::Value) {
 }
 
 /// Field names that should be redacted in config dumps.
-const SENSITIVE_FIELD_NAMES: &[&str] = &["key_path", "password", "secret", "token"];
+const SENSITIVE_FIELD_NAMES: &[&str] = &["database_url", "key_path", "password", "secret", "token"];
 
 /// Resolve all listeners into their dump representations.
 fn build_resolved_listeners(
     config: &Config,
-    chains: &HashMap<&str, &[praxis_core::config::FilterEntry]>,
+    chains: &HashMap<&str, &[FilterEntry]>,
 ) -> Result<Vec<ResolvedListenerDump>, Box<dyn std::error::Error + Send + Sync>> {
     config
         .listeners
@@ -176,7 +194,7 @@ fn build_resolved_listeners(
 /// Resolve a single listener's chains into a flat filter list.
 fn build_resolved_listener(
     listener: &praxis_core::config::Listener,
-    chains: &HashMap<&str, &[praxis_core::config::FilterEntry]>,
+    chains: &HashMap<&str, &[FilterEntry]>,
 ) -> Result<ResolvedListenerDump, Box<dyn std::error::Error + Send + Sync>> {
     Ok(ResolvedListenerDump {
         name: listener.name.clone(),
@@ -188,7 +206,7 @@ fn build_resolved_listener(
 /// Flatten chain references into an ordered list of resolved filters.
 fn build_resolved_filters(
     chain_names: &[String],
-    chains: &HashMap<&str, &[praxis_core::config::FilterEntry]>,
+    chains: &HashMap<&str, &[FilterEntry]>,
 ) -> Result<Vec<ResolvedFilterDump>, Box<dyn std::error::Error + Send + Sync>> {
     let mut filters = Vec::new();
     let mut pipeline_index = 0;
@@ -506,6 +524,77 @@ filter_chains:
         assert!(
             yaml.contains("header_prefix"),
             "non-sensitive fields must remain: {yaml}"
+        );
+    }
+
+    #[test]
+    fn response_store_database_url_redacted_in_dump() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: openai_response_store
+        backend: postgres
+        database_url: "postgres://user:super-secret-db-pass@localhost:5432/praxis"
+        responses_table: openai_responses
+        conversations_table: openai_conversations
+"#,
+        )
+        .unwrap();
+        let dump = build_dump(&config, "test.yaml").unwrap();
+        let yaml = serde_yaml::to_string(&dump).unwrap();
+        assert!(
+            !yaml.contains("super-secret-db-pass"),
+            "database_url credential must be redacted in dump: {yaml}"
+        );
+        assert!(
+            yaml.contains("database_url: '[REDACTED]'"),
+            "database_url should be replaced with the redaction marker: {yaml}"
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines, reason = "test YAML is intentionally explicit")]
+    fn branch_chain_response_store_database_url_redacted_in_dump() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+        name: mark
+        branch_chains:
+          - name: persist_branch
+            chains:
+              - name: inline_store
+                filters:
+                  - filter: openai_response_store
+                    backend: postgres
+                    database_url: "postgres://user:super-secret-db-pass@localhost:5432/praxis"
+                    responses_table: openai_responses
+                    conversations_table: openai_conversations
+            rejoin: next
+"#,
+        )
+        .unwrap();
+        let dump = build_dump(&config, "test.yaml").unwrap();
+        let yaml = serde_yaml::to_string(&dump).unwrap();
+        assert!(
+            !yaml.contains("super-secret-db-pass"),
+            "branch chain database_url credential must be redacted in dump: {yaml}"
+        );
+        assert!(
+            yaml.contains("database_url: '[REDACTED]'"),
+            "branch chain database_url should be replaced with the redaction marker: {yaml}"
         );
     }
 

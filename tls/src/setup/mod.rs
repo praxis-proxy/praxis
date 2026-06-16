@@ -123,7 +123,7 @@ fn build_server_config_base(
         Some(TlsVersion::Tls13) => vec![&version::TLS13],
         Some(TlsVersion::Tls12) | None => vec![&version::TLS12, &version::TLS13],
     };
-    let provider = maybe_filter_provider(default_crypto_provider(), tls.cipher_suites.as_deref());
+    let provider = maybe_filter_provider(default_crypto_provider(), tls.cipher_suites.as_deref())?;
     let builder = ServerConfig::builder_with_provider(provider)
         .with_protocol_versions(&versions)
         .map_err(|e| TlsError::ServerConfigError {
@@ -147,12 +147,19 @@ fn build_server_config_base(
 
 /// Return a provider with only the requested cipher suites, or the
 /// original provider when no filter is specified.
+///
+/// # Errors
+///
+/// Returns [`TlsError::EmptyCipherSuites`] when all requested
+/// suites are filtered out (none match the provider).
+///
+/// [`TlsError::EmptyCipherSuites`]: crate::TlsError::EmptyCipherSuites
 fn maybe_filter_provider(
     provider: Arc<rustls::crypto::CryptoProvider>,
     cipher_suites: Option<&[CipherSuiteId]>,
-) -> Arc<rustls::crypto::CryptoProvider> {
+) -> Result<Arc<rustls::crypto::CryptoProvider>, TlsError> {
     let Some(ids) = cipher_suites else {
-        return provider;
+        return Ok(provider);
     };
 
     let allowed: Vec<_> = ids.iter().map(CipherSuiteId::to_rustls).collect();
@@ -164,16 +171,27 @@ fn maybe_filter_provider(
         .copied()
         .collect();
 
-    tracing::info!(
-        requested = ids.len(),
-        matched = filtered.len(),
-        "cipher suite filter applied"
-    );
+    if filtered.is_empty() {
+        return Err(TlsError::EmptyCipherSuites);
+    }
+    if filtered.len() < ids.len() {
+        tracing::warn!(
+            requested = ids.len(),
+            matched = filtered.len(),
+            "some requested cipher suites were not found in the provider"
+        );
+    } else {
+        tracing::info!(
+            requested = ids.len(),
+            matched = filtered.len(),
+            "cipher suite filter applied"
+        );
+    }
 
-    Arc::new(rustls::crypto::CryptoProvider {
+    Ok(Arc::new(rustls::crypto::CryptoProvider {
         cipher_suites: filtered,
         ..(*provider).clone()
-    })
+    }))
 }
 
 // -----------------------------------------------------------------------------
@@ -459,7 +477,7 @@ mod tests {
         let provider = default_crypto_provider();
         let original_count = provider.cipher_suites.len();
 
-        let result = maybe_filter_provider(Arc::clone(&provider), None);
+        let result = maybe_filter_provider(Arc::clone(&provider), None).expect("None filter should succeed");
         assert_eq!(
             result.cipher_suites.len(),
             original_count,
@@ -472,7 +490,7 @@ mod tests {
         let provider = default_crypto_provider();
         let ids = [CipherSuiteId::Tls13Aes256GcmSha384];
 
-        let result = maybe_filter_provider(provider, Some(&ids));
+        let result = maybe_filter_provider(provider, Some(&ids)).expect("single-suite filter should succeed");
         assert_eq!(
             result.cipher_suites.len(),
             1,
@@ -493,7 +511,7 @@ mod tests {
             CipherSuiteId::Tls13Aes128GcmSha256,
         ];
 
-        let result = maybe_filter_provider(provider, Some(&ids));
+        let result = maybe_filter_provider(provider, Some(&ids)).expect("two-suite filter should succeed");
         assert_eq!(
             result.cipher_suites.len(),
             2,

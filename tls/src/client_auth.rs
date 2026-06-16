@@ -2,6 +2,11 @@
 // Copyright (c) 2024 Shane Utt
 
 //! Client certificate verifier construction for listener mTLS.
+//!
+//! **Limitation**: CRLs are loaded once at startup and are not
+//! automatically reloaded when the CRL file changes on disk.
+//! To pick up newly revoked certificates the proxy must be
+//! restarted or the configuration reloaded.
 
 use std::sync::Arc;
 
@@ -21,6 +26,9 @@ use crate::{ClientCertMode, TlsError};
 ///
 /// When `crl_paths` is non-empty, the verifier checks presented client
 /// certificates against the provided CRLs and rejects revoked certificates.
+///
+/// **Note**: CRLs are loaded once and baked into the verifier. There is
+/// no automatic reload when CRL files change on disk.
 ///
 /// # Errors
 ///
@@ -81,10 +89,11 @@ pub(crate) fn build_client_verifier(
 fn load_crls(paths: &[String]) -> Result<Vec<CertificateRevocationListDer<'static>>, TlsError> {
     let mut crls = Vec::new();
     for path in paths {
-        let pem = std::fs::read(path).map_err(|e| TlsError::FileLoadError {
+        let pem = zeroize::Zeroizing::new(std::fs::read(path).map_err(|e| TlsError::FileLoadError {
             path: path.clone(),
             detail: e.to_string(),
-        })?;
+        })?);
+
         let parsed: Vec<_> = rustls_pemfile::crls(&mut &pem[..])
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| TlsError::FileLoadError {
@@ -106,10 +115,11 @@ fn load_crls(paths: &[String]) -> Result<Vec<CertificateRevocationListDer<'stati
 ///
 /// [`RootCertStore`]: rustls::RootCertStore
 fn load_ca_root_store(ca_path: &str) -> Result<RootCertStore, TlsError> {
-    let ca_pem = std::fs::read(ca_path).map_err(|e| TlsError::FileLoadError {
+    let ca_pem = zeroize::Zeroizing::new(std::fs::read(ca_path).map_err(|e| TlsError::FileLoadError {
         path: ca_path.to_owned(),
         detail: e.to_string(),
-    })?;
+    })?);
+
 
     let certs: Vec<_> = rustls_pemfile::certs(&mut &ca_pem[..])
         .collect::<Result<Vec<_>, _>>()

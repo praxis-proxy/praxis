@@ -337,6 +337,9 @@ listeners:
     cluster: db_pool
     filter_chains: [tcp_lb]
 
+insecure_options:
+  allow_private_endpoints: true
+
 clusters:
   - name: db_pool
     endpoints:
@@ -381,6 +384,9 @@ listeners:
     cluster: db_pool
     filter_chains: [tcp_lb]
 
+insecure_options:
+  allow_private_endpoints: true
+
 clusters:
   - name: db_pool
     endpoints:
@@ -423,6 +429,9 @@ listeners:
     protocol: tcp
     cluster: cache_pool
     filter_chains: [tcp_lb]
+
+insecure_options:
+  allow_private_endpoints: true
 
 clusters:
   - name: cache_pool

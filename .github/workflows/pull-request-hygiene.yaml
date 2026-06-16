@@ -20,9 +20,16 @@ jobs:
       checks: read
       pull-requests: write
     steps:
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
+          private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
+
       - name: Convert failing PRs to draft
         env:
-          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           prs=$(gh pr list --base main --state open --limit 100 \
@@ -60,9 +67,16 @@ jobs:
       issues: read
       pull-requests: write
     steps:
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
+          private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
+
       - name: Close draft PRs inactive for 5 days
         env:
-          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           threshold=$(date -u -d "5 days ago" +%Y-%m-%dT%H:%M:%SZ)
@@ -100,9 +114,16 @@ jobs:
       issues: read
       pull-requests: write
     steps:
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        with:
+          app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
+          private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
+
       - name: Close non-draft PRs inactive for 7 days
         env:
-          GH_TOKEN: ${{ secrets.PRAXIS_BOT }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
         run: |
           threshold=$(date -u -d "7 days ago" +%Y-%m-%dT%H:%M:%SZ)

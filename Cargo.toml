@@ -52,9 +52,9 @@ metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "user"] }
 notify = "8.2.0"
 # Temporary fork: custom ServerConfig (PR #726) + WrappedX509::parse() for per-cluster CA.
-pingora-core = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "d066f6818038dc296326566afb8e7bf39fb463ff", features = ["rustls"] }
-pingora-http = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "d066f6818038dc296326566afb8e7bf39fb463ff" }
-pingora-proxy = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "d066f6818038dc296326566afb8e7bf39fb463ff", features = ["rustls"] }
+pingora-core = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "c27df356266c7158caf52b6704de998d6018b1bd", features = ["rustls"] }
+pingora-http = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "c27df356266c7158caf52b6704de998d6018b1bd" }
+pingora-proxy = { version = "0.8.0", git = "https://github.com/praxis-proxy/pingora.git", rev = "c27df356266c7158caf52b6704de998d6018b1bd", features = ["rustls"] }
 percent-encoding = "2.3.2"
 praxis-ext-proc = { version = "0.3.1", path = "filter/ext-proc", package = "praxis-proxy-ext-proc" }
 praxis-proto = { version = "0.3.1", path = "filter/proto", package = "praxis-proxy-proto" }

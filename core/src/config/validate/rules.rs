@@ -17,7 +17,7 @@ use super::{
     listener::{validate_listener_names, validate_listeners},
 };
 use crate::{
-    config::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, Config, ProtocolKind},
+    config::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, Config, InsecureOptions, ProtocolKind},
     errors::ProxyError,
 };
 
@@ -39,6 +39,7 @@ impl Config {
     /// assert!(err.to_string().contains("at least one listener"));
     /// ```
     pub fn validate(&mut self) -> Result<(), ProxyError> {
+        warn_active_insecure_options(&self.insecure_options);
         validate_listeners(&mut self.listeners)?;
         validate_listener_names(&self.listeners)?;
         validate_filter_chains(&self.filter_chains, &self.listeners)?;
@@ -61,6 +62,30 @@ impl Config {
         validate_runtime_threads(self.runtime.threads)?;
 
         Ok(())
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Insecure Options Warning
+// -----------------------------------------------------------------------------
+
+/// Emit a warning for each active insecure option flag.
+fn warn_active_insecure_options(opts: &InsecureOptions) {
+    let flags = [
+        ("allow_open_security_filters", opts.allow_open_security_filters),
+        ("allow_private_endpoints", opts.allow_private_endpoints),
+        ("allow_private_health_checks", opts.allow_private_health_checks),
+        ("allow_public_admin", opts.allow_public_admin),
+        ("allow_root", opts.allow_root),
+        ("allow_tls_without_sni", opts.allow_tls_without_sni),
+        ("allow_unbounded_body", opts.allow_unbounded_body),
+        ("csrf_log_only", opts.csrf_log_only),
+        ("skip_pipeline_validation", opts.skip_pipeline_validation),
+    ];
+    for (name, active) in flags {
+        if active {
+            warn!(flag = name, "insecure_options flag is active");
+        }
     }
 }
 
@@ -173,7 +198,22 @@ fn validate_upstream_ca_file(ca_file: Option<&str>) -> Result<(), ProxyError> {
         return Err(ProxyError::Config(format!("upstream_ca_file does not exist: {path}")));
     }
 
+    warn_if_symlink(path);
+
     Ok(())
+}
+
+/// Emit a warning when a path is a symlink.
+fn warn_if_symlink(path: &str) {
+    let p = Path::new(path);
+    if p.is_symlink() {
+        let target = std::fs::canonicalize(p).map_or_else(|_| "unknown".to_owned(), |c| c.display().to_string());
+        warn!(
+            path = path,
+            target = %target,
+            "file is a symlink"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------
