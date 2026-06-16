@@ -244,7 +244,7 @@ fn parse_cert_pem(cert_path: &str) -> Result<Vec<Vec<u8>>, TlsError> {
 
 /// Read a PEM private key file and return the DER-encoded key bytes.
 fn parse_key_pem(key_path: &str) -> Result<Zeroizing<Vec<u8>>, TlsError> {
-    let pem = Zeroizing::new(read_pem_file(key_path)?);
+    let pem = read_pem_file(key_path)?;
     rustls_pemfile::private_key(&mut &pem[..])
         .map_err(|e| TlsError::FileLoadError {
             path: key_path.to_owned(),
@@ -257,14 +257,22 @@ fn parse_key_pem(key_path: &str) -> Result<Zeroizing<Vec<u8>>, TlsError> {
         .map(|k| Zeroizing::new(k.secret_der().to_vec()))
 }
 
-/// Read a file into a byte vector, mapping I/O errors to [`TlsError`].
+/// Read a file into a zeroizing byte vector, mapping I/O errors
+/// to [`TlsError`].
+///
+/// PEM files may contain private key material in combined
+/// cert+key bundles, so all reads are wrapped in [`Zeroizing`]
+/// to clear memory on drop.
 ///
 /// [`TlsError`]: crate::TlsError
-fn read_pem_file(path: &str) -> Result<Vec<u8>, TlsError> {
-    std::fs::read(path).map_err(|e| TlsError::FileLoadError {
-        path: path.to_owned(),
-        detail: e.to_string(),
-    })
+/// [`Zeroizing`]: zeroize::Zeroizing
+fn read_pem_file(path: &str) -> Result<Zeroizing<Vec<u8>>, TlsError> {
+    std::fs::read(path)
+        .map(Zeroizing::new)
+        .map_err(|e| TlsError::FileLoadError {
+            path: path.to_owned(),
+            detail: e.to_string(),
+        })
 }
 
 // -----------------------------------------------------------------------------

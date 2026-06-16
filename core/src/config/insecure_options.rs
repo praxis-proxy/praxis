@@ -24,6 +24,7 @@ use serde::Deserialize;
 ///
 /// let opts = InsecureOptions::default();
 /// assert!(!opts.allow_open_security_filters);
+/// assert!(!opts.allow_private_endpoints);
 /// assert!(!opts.allow_private_health_checks);
 /// assert!(!opts.allow_public_admin);
 /// assert!(!opts.allow_root);
@@ -49,6 +50,10 @@ pub struct InsecureOptions {
     /// Allow security-critical filters to use `failure_mode: open`,
     /// demoting the validation error to a warning.
     pub allow_open_security_filters: bool,
+
+    /// Allow cluster endpoints to resolve to loopback, link-local,
+    /// or cloud metadata addresses.
+    pub allow_private_endpoints: bool,
 
     /// Allow health checks to loopback/metadata addresses.
     pub allow_private_health_checks: bool,
@@ -99,6 +104,10 @@ mod tests {
         assert!(
             !opts.allow_open_security_filters,
             "allow_open_security_filters should default to false"
+        );
+        assert!(
+            !opts.allow_private_endpoints,
+            "allow_private_endpoints should default to false"
         );
         assert!(
             !opts.allow_private_health_checks,

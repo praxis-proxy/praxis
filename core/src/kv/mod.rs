@@ -85,7 +85,7 @@ pub enum MatchType {
 ///
 /// impl KvBackend for MyBackend {
 ///     fn get(&self, key: &str) -> Option<Arc<str>> { None }
-///     fn set(&self, key: &str, value: Arc<str>) {}
+///     fn set(&self, key: &str, value: Arc<str>) -> bool { true }
 ///     fn delete(&self, key: &str) -> bool { false }
 ///     fn entries(&self) -> Vec<(Arc<str>, Arc<str>)> { vec![] }
 ///     fn lookup(&self, _: &str, _: MatchType) -> Result<Option<(Arc<str>, Arc<str>)>, String> { Ok(None) }
@@ -100,7 +100,10 @@ pub trait KvBackend: Send + Sync + Debug {
     fn get(&self, key: &str) -> Option<Arc<str>>;
 
     /// Insert or update a key-value pair.
-    fn set(&self, key: &str, value: Arc<str>);
+    ///
+    /// Returns `true` if the value was stored, `false` if the
+    /// store is at capacity and the key is new.
+    fn set(&self, key: &str, value: Arc<str>) -> bool;
 
     /// Remove a key. Returns `true` if the key existed.
     fn delete(&self, key: &str) -> bool;

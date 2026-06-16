@@ -728,7 +728,6 @@ async fn on_response_body_persists_valid_response() {
         "should continue after spawning persist task"
     );
 
-
     let store = store_opt.as_ref().unwrap();
     let record = store
         .get_response("default", "resp_test123")
@@ -828,7 +827,6 @@ async fn pipeline_persists_after_format_request_body_classification() {
         "response body phase should persist and continue"
     );
 
-
     let store = SqliteResponseStore::new(&db_url, "test_responses", "test_conversations")
         .await
         .unwrap();
@@ -881,6 +879,941 @@ conversations_table: conversations
     assert!(
         store_opt2.is_none(),
         "store should remain None on second request (failure is permanent)"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_store_init_failure_is_not_cached() {
+    let socket_dir = std::env::temp_dir().join(format!(
+        "praxis_missing_postgres_socket_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?host={}"
+responses_table: responses
+conversations_table: conversations
+allow_private_database_url: true
+"#,
+        socket_dir.display()
+    ))
+    .unwrap();
+    let cfg: ResponseStoreConfig = parse_filter_config("openai_response_store", &yaml).unwrap();
+    validate_config(&cfg).unwrap();
+    let filter = ResponseStoreFilter::new(cfg);
+
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+
+    drop(filter.on_request(&mut ctx).await.unwrap());
+
+    assert!(
+        filter.store.get().is_none(),
+        "failed postgres initialization should leave OnceCell unset for retry"
+    );
+    assert_eq!(
+        ctx.get_metadata("responses.skip_persist"),
+        Some("true"),
+        "current request should still skip persistence after failed init"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Postgres Config
+// -----------------------------------------------------------------------------
+
+fn postgres_config_yaml(database_url: &str, extra: &str) -> serde_yaml::Value {
+    serde_yaml::from_str(&format!(
+        r#"
+backend: postgres
+database_url: "{database_url}"
+responses_table: responses
+conversations_table: conversations
+{extra}
+"#
+    ))
+    .unwrap()
+}
+
+#[test]
+fn valid_postgres_config_parses() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let filter = ResponseStoreFilter::from_config(&yaml).unwrap();
+    assert_eq!(
+        filter.name(),
+        "openai_response_store",
+        "postgres config should parse successfully"
+    );
+}
+
+#[test]
+fn postgres_config_accepts_postgresql_scheme() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgresql://user:pass@203.0.113.10:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_ok(), "postgresql:// scheme should be accepted");
+}
+
+#[test]
+fn postgres_config_rejects_loopback_database_host() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@127.0.0.1:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "loopback postgres hosts should be rejected by default");
+}
+
+#[test]
+fn postgres_config_rejects_legacy_ipv4_local_database_hosts() {
+    for host in [
+        "127.1",
+        "2130706433",
+        "0x7f.0.0.1",
+        "0177.0.0.1",
+        "0",
+        "0xa9fea9fe",
+        "0x0a000005",
+    ] {
+        let yaml = postgres_config_yaml(&format!("postgres://user:pass@{host}:5432/praxis"), "");
+        let result = ResponseStoreFilter::from_config(&yaml);
+        assert!(
+            result.is_err(),
+            "legacy IPv4 local-sensitive postgres host should be rejected by default: {host}"
+        );
+    }
+}
+
+#[test]
+fn postgres_config_rejects_localhost_database_host() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@LOCALHOST.:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "localhost postgres hosts should be rejected by default"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_ipv6_loopback_database_host() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@[::1]:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "IPv6 loopback postgres hosts should be rejected by default"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_link_local_database_host() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@169.254.169.254:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "link-local postgres hosts should be rejected by default"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_private_database_hosts() {
+    for host in ["10.0.0.5", "172.16.0.1", "192.168.1.10", "[fd00::1]"] {
+        let yaml = postgres_config_yaml(&format!("postgres://user:pass@{host}:5432/praxis"), "");
+        let result = ResponseStoreFilter::from_config(&yaml);
+        assert!(
+            result.is_err(),
+            "private postgres hosts should be rejected by default: {host}"
+        );
+    }
+}
+
+#[test]
+fn postgres_config_rejects_dns_database_hosts_without_private_database_url_opt_in() {
+    let yaml = postgres_config_yaml("postgres://user:pass@db.example.net:5432/praxis", "");
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "DNS postgres hosts should be rejected by default to avoid DNS rebinding"
+    );
+}
+
+#[test]
+fn postgres_config_allows_dns_database_hosts_with_private_database_url_opt_in() {
+    let yaml = postgres_config_yaml(
+        "postgres://user:pass@db.example.net:5432/praxis",
+        "allow_private_database_url: true",
+    );
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_ok(),
+        "explicit private database URL opt-in should allow DNS hosts"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_unspecified_database_host() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@0.0.0.0:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "unspecified postgres hosts should be rejected by default"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_hostaddr_loopback_override() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?hostaddr=127.0.0.1"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "hostaddr loopback override should be rejected");
+}
+
+#[test]
+fn postgres_config_rejects_host_loopback_override() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?host=127.0.0.1"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "host loopback override should be rejected");
+}
+
+#[test]
+fn postgres_config_rejects_legacy_ipv4_host_override() {
+    for host in [
+        "127.1",
+        "2130706433",
+        "0x7f.0.0.1",
+        "0177.0.0.1",
+        "0",
+        "0xa9fea9fe",
+        "0x0a000005",
+    ] {
+        let yaml = postgres_config_yaml(
+            &format!("postgres://user:pass@203.0.113.10:5432/praxis?host={host}"),
+            "",
+        );
+        let result = ResponseStoreFilter::from_config(&yaml);
+        assert!(
+            result.is_err(),
+            "legacy IPv4 local-sensitive host override should be rejected by default: {host}"
+        );
+    }
+}
+
+#[test]
+fn postgres_config_rejects_host_localhost_override() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?host=localhost"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "host localhost override should be rejected");
+}
+
+#[test]
+fn postgres_config_rejects_mixed_case_host_query_as_missing_explicit_host() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres:///?HoSt=203.0.113.10"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "mixed-case host query should not satisfy explicit host validation"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_hostaddr_unspecified_override() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?hostaddr=::"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "hostaddr unspecified override should be rejected");
+}
+
+#[test]
+fn postgres_config_rejects_ipv4_mapped_link_local_hostaddr() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?hostaddr=::ffff:169.254.169.254"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "IPv4-mapped metadata hostaddr should be rejected");
+}
+
+#[test]
+fn postgres_config_allows_loopback_with_private_database_url_opt_in() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@127.0.0.1:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+allow_private_database_url: true
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_ok(),
+        "explicit private database URL opt-in should allow loopback"
+    );
+}
+
+#[test]
+fn postgres_config_allows_legacy_ipv4_with_private_database_url_opt_in() {
+    let yaml = postgres_config_yaml(
+        "postgres://user:pass@127.1:5432/praxis",
+        "allow_private_database_url: true",
+    );
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_ok(),
+        "explicit private database URL opt-in should allow legacy IPv4 loopback"
+    );
+}
+
+#[test]
+fn postgres_config_allows_localhost_with_private_database_url_opt_in() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@localhost:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+allow_private_database_url: true
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_ok(),
+        "explicit private database URL opt-in should allow localhost"
+    );
+}
+
+#[test]
+fn postgres_config_allows_private_with_private_database_url_opt_in() {
+    for host in ["10.0.0.5", "[fd00::1]"] {
+        let yaml = postgres_config_yaml(
+            &format!("postgres://user:pass@{host}:5432/praxis"),
+            "allow_private_database_url: true",
+        );
+        let result = ResponseStoreFilter::from_config(&yaml);
+        assert!(
+            result.is_ok(),
+            "explicit private database URL opt-in should allow private hosts: {host}"
+        );
+    }
+}
+
+#[test]
+fn postgres_config_allows_unspecified_with_private_database_url_opt_in() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@0.0.0.0:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+allow_private_database_url: true
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_ok(),
+        "explicit private database URL opt-in should allow unspecified hosts"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_socket_host_without_private_database_url_opt_in() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?host=%2Fvar%2Frun%2Fpostgresql"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "Unix socket host override should require explicit opt-in"
+    );
+}
+
+#[test]
+fn postgres_config_allows_socket_host_with_private_database_url_opt_in() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?host=%2Fvar%2Frun%2Fpostgresql"
+responses_table: responses
+conversations_table: conversations
+allow_private_database_url: true
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_ok(),
+        "explicit private database URL opt-in should allow Unix sockets"
+    );
+}
+
+#[test]
+fn postgres_config_allows_socket_host_with_empty_authority_and_port_with_opt_in() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@:5433/praxis?host=%2Fvar%2Frun%2Fpostgresql"
+responses_table: responses
+conversations_table: conversations
+allow_private_database_url: true
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_ok(),
+        "query host should supply the socket target when authority host is empty"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_socket_host_path_traversal_with_opt_in() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?host=%2Fvar%2Frun%2F..%2Fpostgresql"
+responses_table: responses
+conversations_table: conversations
+allow_private_database_url: true
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "Unix socket host traversal should be rejected even with opt-in"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_missing_explicit_host() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@/praxis"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "postgres database_url should not rely on environment/default host"
+    );
+}
+
+#[test]
+fn postgres_config_with_ssl_mode_parses() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+ssl_mode: require
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_ok(), "postgres config with ssl_mode should parse");
+}
+
+#[test]
+fn postgres_config_with_ssl_root_cert_parses() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+ssl_mode: verify-ca
+ssl_root_cert: /path/to/ca.pem
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_ok(),
+        "postgres config with ssl_mode and ssl_root_cert should parse"
+    );
+}
+
+#[test]
+fn postgres_config_with_url_verify_sslmode_and_ssl_root_cert_parses() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?sslmode=verify-full"
+responses_table: responses
+conversations_table: conversations
+ssl_root_cert: /path/to/ca.pem
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_ok(), "URL sslmode=verify-full should allow ssl_root_cert");
+}
+
+#[test]
+fn postgres_config_with_url_sslrootcert_and_verified_sslmode_parses() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?sslmode=verify-full&sslrootcert=/path/to/ca.pem"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_ok(),
+        "URL sslrootcert should parse when effective sslmode verifies certificates"
+    );
+}
+
+#[test]
+fn postgres_config_with_url_ssl_root_cert_alias_and_verified_sslmode_parses() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?ssl-mode=verify-ca&ssl-root-cert=/path/to/ca.pem"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_ok(),
+        "URL ssl-root-cert alias should parse when effective sslmode verifies certificates"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_ssl_root_cert_without_verified_ssl_mode() {
+    for ssl_mode in ["", "ssl_mode: disable", "ssl_mode: prefer", "ssl_mode: require"] {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+            r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+{ssl_mode}
+ssl_root_cert: /path/to/ca.pem
+"#
+        ))
+        .unwrap();
+        let result = ResponseStoreFilter::from_config(&yaml);
+        assert!(
+            result.is_err(),
+            "ssl_root_cert should require verify-ca or verify-full, got {ssl_mode:?}"
+        );
+    }
+}
+
+#[test]
+fn postgres_config_rejects_ssl_root_cert_with_non_verified_url_sslmode() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?sslmode=require"
+responses_table: responses
+conversations_table: conversations
+ssl_root_cert: /path/to/ca.pem
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "URL sslmode=require should not allow ssl_root_cert");
+}
+
+#[test]
+fn postgres_config_does_not_treat_mixed_case_sslmode_as_effective() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?SSLMODE=verify-full&sslrootcert=/path/to/ca.pem"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "mixed-case sslmode query should not satisfy sslrootcert validation"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_url_sslrootcert_without_verified_ssl_mode() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?sslmode=require&sslrootcert=/path/to/ca.pem"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "URL sslrootcert should require verify-ca or verify-full"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_url_sslrootcert_when_last_sslmode_is_not_verified() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?sslmode=verify-full&sslmode=require&sslrootcert=/path/to/ca.pem"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "last URL sslmode should match the effective sqlx option"
+    );
+}
+
+#[test]
+fn postgres_config_explicit_ssl_mode_overrides_url_sslmode() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?sslmode=verify-full"
+responses_table: responses
+conversations_table: conversations
+ssl_mode: require
+ssl_root_cert: /path/to/ca.pem
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "explicit ssl_mode=require should override URL sslmode=verify-full"
+    );
+}
+
+#[test]
+fn postgres_config_explicit_verified_ssl_mode_allows_url_sslrootcert() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?sslmode=require&sslrootcert=/path/to/ca.pem"
+responses_table: responses
+conversations_table: conversations
+ssl_mode: verify-full
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_ok(),
+        "explicit verified ssl_mode should override URL sslmode=require"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_ssl_root_cert_path_traversal() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis"
+responses_table: responses
+conversations_table: conversations
+ssl_mode: verify-ca
+ssl_root_cert: ../ca.pem
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "ssl_root_cert path traversal should be rejected");
+}
+
+#[test]
+fn postgres_config_rejects_url_sslrootcert_path_traversal() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?sslmode=verify-full&sslrootcert=../ca.pem"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "URL sslrootcert path traversal should be rejected");
+}
+
+#[test]
+fn postgres_config_rejects_url_encoded_sslrootcert_path_traversal() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?sslmode=verify-full&sslrootcert=%2e%2e%2fca.pem"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "URL sslrootcert percent-encoded path traversal should be rejected"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_url_sslcert_path_traversal() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?sslmode=require&sslcert=../client.pem"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "URL sslcert path traversal should be rejected");
+}
+
+#[test]
+fn postgres_config_rejects_url_sslkey_path_traversal() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?sslmode=require&sslkey=../client.key"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "URL sslkey path traversal should be rejected");
+}
+
+#[test]
+fn postgres_config_rejects_long_responses_table() {
+    let responses_table = "r".repeat(64);
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis"
+responses_table: {responses_table}
+conversations_table: conversations
+"#
+    ))
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "postgres responses_table above 63 bytes should be rejected"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_long_conversations_table_for_index_name() {
+    let conversations_table = "c".repeat(50);
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis"
+responses_table: responses
+conversations_table: {conversations_table}
+"#
+    ))
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "postgres conversations_table above index-safe length should be rejected"
+    );
+}
+
+#[test]
+fn sqlite_config_rejects_ssl_mode() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: sqlite
+database_url: "sqlite::memory:"
+responses_table: responses
+conversations_table: conversations
+ssl_mode: require
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "ssl_mode should be rejected for sqlite backend");
+}
+
+#[test]
+fn sqlite_config_rejects_ssl_root_cert() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: sqlite
+database_url: "sqlite::memory:"
+responses_table: responses
+conversations_table: conversations
+ssl_root_cert: /path/to/ca.pem
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "ssl_root_cert should be rejected for sqlite backend");
+}
+
+#[test]
+fn sqlite_config_rejects_allow_private_database_url() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: sqlite
+database_url: "sqlite::memory:"
+responses_table: responses
+conversations_table: conversations
+allow_private_database_url: true
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "allow_private_database_url should be rejected for sqlite backend"
+    );
+}
+
+#[test]
+fn postgres_url_without_postgres_scheme_rejected() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: postgres
+database_url: "sqlite::memory:"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .unwrap();
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "non-postgres URL should be rejected for postgres backend"
     );
 }
 
@@ -1396,11 +2329,17 @@ fn cleanup_sqlite_file(db_path: &PathBuf) {
 }
 
 async fn init_store(filter: &ResponseStoreFilter) {
-    filter.store.get_or_init(|| async { filter.init_store().await }).await;
+    filter
+        .store
+        .get_or_init(|| async { filter.build_store().await.ok() })
+        .await;
 }
 
 async fn init_store_and_seed(filter: &ResponseStoreFilter, id: &str, tenant_id: &str, input: serde_json::Value) {
-    let store_opt = filter.store.get_or_init(|| async { filter.init_store().await }).await;
+    let store_opt = filter
+        .store
+        .get_or_init(|| async { filter.build_store().await.ok() })
+        .await;
     let store = store_opt.as_ref().expect("store should be initialized");
     let record = crate::builtins::http::ai::store::ResponseRecord {
         id: id.to_owned(),

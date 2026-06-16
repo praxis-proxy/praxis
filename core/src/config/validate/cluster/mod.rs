@@ -43,7 +43,7 @@ pub(in crate::config::validate) fn validate_clusters(
             return Err(ProxyError::Config("cluster name must not be empty".into()));
         }
         super::validate_name_chars(&cluster.name, "cluster")?;
-        endpoints::validate_endpoints(cluster)?;
+        endpoints::validate_endpoints(cluster, insecure_options)?;
         tls::validate_tls_settings(cluster, insecure_options)?;
         timeouts::validate_timeouts(cluster)?;
         if let Some(ref hc) = cluster.health_check {

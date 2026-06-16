@@ -18,7 +18,7 @@ use crate::{
 const MAX_CHAINS: usize = 1_000;
 
 /// Maximum number of filters allowed per filter chain.
-const MAX_FILTERS_PER_CHAIN: usize = 100;
+pub(super) const MAX_FILTERS_PER_CHAIN: usize = 100;
 
 // -----------------------------------------------------------------------------
 // Filter Chain Validation

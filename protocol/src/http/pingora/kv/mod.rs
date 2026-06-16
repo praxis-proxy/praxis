@@ -135,8 +135,11 @@ fn handle_set(registry: &KvStoreRegistry, store: &str, key: &str, value: &str) -
     let Some(backend) = registry.get(store) else {
         return json_response(404, br#"{"error":"store not found"}"#);
     };
-    backend.set(key, Arc::from(value));
-    json_response(200, br#"{"status":"ok"}"#)
+    if backend.set(key, Arc::from(value)) {
+        json_response(200, br#"{"status":"ok"}"#)
+    } else {
+        json_response(507, br#"{"error":"store capacity reached"}"#)
+    }
 }
 
 /// `DELETE /api/kv/{store}/{key}`: remove a key.

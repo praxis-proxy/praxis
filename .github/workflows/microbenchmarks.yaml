@@ -5,14 +5,9 @@ name: Microbenchmarks
 # ------------------------------------------------------------------------------
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  schedule:
+    - cron: "57 2 * * *"
+  workflow_dispatch:
 
 permissions: {}
 

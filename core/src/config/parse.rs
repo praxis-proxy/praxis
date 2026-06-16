@@ -68,20 +68,55 @@ fn check_yaml_expansion(raw: &str, threshold: usize) -> Result<(), ProxyError> {
         // error is reported by the subsequent Config deserialization.
         return Ok(());
     };
-    let Ok(expanded) = serde_yaml::to_string(&value) else {
-        return Err(ProxyError::Config(
-            "YAML alias expansion check failed: could not re-serialize parsed document".to_owned(),
-        ));
-    };
-    if expanded.len() > threshold {
+    let size = estimate_value_size(&value);
+    if size > threshold {
         return Err(ProxyError::Config(format!(
-            "YAML alias expansion too large ({} bytes expanded from {} bytes raw, \
+            "YAML alias expansion too large ({size} bytes estimated from {} bytes raw, \
              max {threshold})",
-            expanded.len(),
             raw.len()
         )));
     }
     Ok(())
+}
+
+/// Walk a [`serde_yaml::Value`] tree counting approximate byte size
+/// without re-serializing.
+///
+/// Avoids the secondary allocation that `serde_yaml::to_string`
+/// would produce (up to 16 MiB for a near-threshold document).
+///
+/// [`serde_yaml::Value`]: serde_yaml::Value
+fn estimate_value_size(value: &serde_yaml::Value) -> usize {
+    match value {
+        serde_yaml::Value::Null => 4,
+        serde_yaml::Value::Bool(_) => 5,
+        serde_yaml::Value::Number(n) => {
+            if let Some(u) = n.as_u64() {
+                count_digits(u)
+            } else if let Some(i) = n.as_i64() {
+                count_digits(i.unsigned_abs()) + usize::from(i.is_negative())
+            } else {
+                16
+            }
+        },
+        serde_yaml::Value::String(s) => s.len() + 2,
+        serde_yaml::Value::Sequence(seq) => 2 + seq.iter().map(estimate_value_size).sum::<usize>(),
+        serde_yaml::Value::Mapping(map) => {
+            2 + map
+                .iter()
+                .map(|(k, v)| estimate_value_size(k) + estimate_value_size(v) + 2)
+                .sum::<usize>()
+        },
+        serde_yaml::Value::Tagged(t) => t.tag.to_string().len() + estimate_value_size(&t.value),
+    }
+}
+
+/// Count decimal digits in a `u64`.
+fn count_digits(n: u64) -> usize {
+    if n == 0 {
+        return 1;
+    }
+    (n.ilog10() as usize) + 1
 }
 
 // -----------------------------------------------------------------------------

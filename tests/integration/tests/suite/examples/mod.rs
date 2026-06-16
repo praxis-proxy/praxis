@@ -35,6 +35,8 @@ mod multi_listener;
 #[cfg(feature = "ai-inference")]
 mod openai_response_store;
 #[cfg(feature = "ai-inference")]
+mod openai_response_store_postgres;
+#[cfg(feature = "ai-inference")]
 mod openai_responses_format;
 #[cfg(feature = "ai-inference")]
 mod openai_responses_validate;
