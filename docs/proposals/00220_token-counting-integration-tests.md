@@ -289,9 +289,5 @@ Add to `tests/integration/tests/suite/examples/mod.rs`:
 mod token_counting;
 ```
 
-[#20]: https://github.com/praxis-proxy/praxis/issues/20
-[#210]: https://github.com/praxis-proxy/praxis/issues/210
-[#211]: https://github.com/praxis-proxy/praxis/issues/211
 [#212]: https://github.com/praxis-proxy/praxis/issues/212
 [#214]: https://github.com/praxis-proxy/praxis/issues/214
-[#216]: https://github.com/praxis-proxy/praxis/issues/216
