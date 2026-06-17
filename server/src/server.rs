@@ -78,35 +78,75 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
     enforce_root_check(&config);
     warn_insecure_options(&config);
     init_runtime_limits(&config.runtime);
-    info!("building filter pipelines");
     warn_insecure_key_permissions(&config);
 
-    let health_registry = build_health_registry(&config.clusters);
-    let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-    let pipelines = resolve_pipelines(&config, &registry, &health_registry, &kv_stores).unwrap_or_else(|e| fatal(&e));
-    let pipelines = Arc::new(pipelines);
+    let state = build_server_state(&config, &registry);
 
     info!("initializing server");
     let mut server = PingoraServerRuntime::new(&config);
-    let _cert_shutdowns = register_protocols(&mut server, &config, &pipelines);
+    let _cert_shutdowns = register_protocols(&mut server, &config, &state.pipelines);
+    register_admin_endpoints(&mut server, &config, &state.health_registry, &state.kv_stores);
 
-    if let Some(ref admin_addr) = config.admin.address {
-        praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server(
-            server.server_mut(),
-            admin_addr,
-            Some(Arc::clone(&health_registry)),
-            Some(kv_stores.clone()),
-            config.admin.verbose,
-        );
-    }
-
-    let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-    spawn_health_check_tasks(&config, &health_registry, &health_shutdown);
-    let _watcher = spawn_watcher(config_path, config, registry, &pipelines, &health_shutdown, kv_stores);
+    let _watcher = spawn_watcher(config_path, config, registry, state);
 
     info!("starting server");
     server.run()
 }
+
+// -----------------------------------------------------------------------------
+// Server State
+// -----------------------------------------------------------------------------
+
+/// State built during server initialization and shared with the
+/// file watcher for hot reload.
+struct ServerState {
+    /// Resolved filter pipelines per listener.
+    pipelines: Arc<ListenerPipelines>,
+    /// Cluster health state.
+    health_registry: HealthRegistry,
+    /// KV store registry.
+    kv_stores: praxis_core::kv::KvStoreRegistry,
+    /// Health check cancellation token.
+    health_shutdown: Arc<Mutex<CancellationToken>>,
+    /// Response store registry.
+    #[cfg(feature = "ai-inference")]
+    response_stores: praxis_filter::ResponseStoreRegistry,
+}
+
+/// Build filter pipelines, health checks, and registries.
+fn build_server_state(config: &Config, registry: &FilterRegistry) -> ServerState {
+    info!("building filter pipelines");
+    let health_registry = build_health_registry(&config.clusters);
+    let kv_stores = praxis_core::kv::KvStoreRegistry::new();
+    #[cfg(feature = "ai-inference")]
+    let response_stores = praxis_filter::ResponseStoreRegistry::new();
+
+    let pipelines = resolve_pipelines(
+        config,
+        registry,
+        &health_registry,
+        &kv_stores,
+        #[cfg(feature = "ai-inference")]
+        &response_stores,
+    )
+    .unwrap_or_else(|e| fatal(&e));
+
+    let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+    spawn_health_check_tasks(config, &health_registry, &health_shutdown);
+
+    ServerState {
+        pipelines: Arc::new(pipelines),
+        health_registry,
+        kv_stores,
+        health_shutdown,
+        #[cfg(feature = "ai-inference")]
+        response_stores,
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Protocol Registration
+// -----------------------------------------------------------------------------
 
 /// Register HTTP and TCP protocol handlers with the Pingora server.
 fn register_protocols(
@@ -134,26 +174,47 @@ fn register_protocols(
 }
 
 /// Spawn the config file watcher if a config path is available.
-#[allow(clippy::too_many_arguments, reason = "orchestration function")]
 fn spawn_watcher(
     config_path: Option<PathBuf>,
     config: Config,
     registry: FilterRegistry,
-    pipelines: &Arc<ListenerPipelines>,
-    health_shutdown: &Arc<Mutex<CancellationToken>>,
-    kv_stores: praxis_core::kv::KvStoreRegistry,
+    state: ServerState,
 ) -> Option<std::thread::JoinHandle<()>> {
     let path = config_path?;
     let handle = crate::watcher::spawn_config_watcher(crate::watcher::WatcherParams {
         config_path: path,
-        health_shutdown: Arc::clone(health_shutdown),
+        health_shutdown: Arc::clone(&state.health_shutdown),
         initial_config: config,
-        kv_stores,
-        pipelines: Arc::clone(pipelines),
+        kv_stores: state.kv_stores,
+        pipelines: Arc::clone(&state.pipelines),
         registry: Arc::new(registry),
+        #[cfg(feature = "ai-inference")]
+        response_stores: state.response_stores,
         shutdown: CancellationToken::new(),
     });
     Some(handle)
+}
+
+// -----------------------------------------------------------------------------
+// Admin
+// -----------------------------------------------------------------------------
+
+/// Register admin/health endpoints with the Pingora server.
+fn register_admin_endpoints(
+    server: &mut PingoraServerRuntime,
+    config: &Config,
+    health_registry: &HealthRegistry,
+    kv_stores: &praxis_core::kv::KvStoreRegistry,
+) {
+    if let Some(ref admin_addr) = config.admin.address {
+        praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server(
+            server.server_mut(),
+            admin_addr,
+            Some(Arc::clone(health_registry)),
+            Some(kv_stores.clone()),
+            config.admin.verbose,
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------

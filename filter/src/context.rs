@@ -3,7 +3,7 @@
 
 //! Transport-agnostic HTTP request/response metadata and per-request filter context.
 
-use std::{borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
+use std::{any::Any, borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
 
 use http::{HeaderMap, Method, StatusCode, Uri};
 use praxis_core::{
@@ -38,6 +38,18 @@ pub struct HttpFilterContext<'a> {
 
     /// The cluster name selected by the router filter.
     pub cluster: Option<Arc<str>>,
+
+    /// Stable invocation ID of the filter currently executing.
+    ///
+    /// Assigned at pipeline build time and unique within the
+    /// request's pinned [`FilterPipeline`]. Set by the pipeline
+    /// executor before each filter hook call and cleared after.
+    /// Filter state accessors use this as the storage key so
+    /// that multiple instances of the same filter type — including
+    /// filters in branch chains — get independent state.
+    ///
+    /// [`FilterPipeline`]: crate::FilterPipeline
+    pub current_filter_id: Option<usize>,
 
     /// Whether the downstream connection uses TLS.
     ///
@@ -81,6 +93,19 @@ pub struct HttpFilterContext<'a> {
     /// reads these to evaluate branch conditions. Cleared
     /// after branch evaluation at each filter.
     pub filter_results: HashMap<&'static str, FilterResultSet>,
+
+    /// Typed per-filter state that persists across all lifecycle
+    /// phases (request, request-body, response, response-body).
+    ///
+    /// Keyed by stable filter invocation ID, unique within the
+    /// request's pinned [`FilterPipeline`]. Swapped into each
+    /// `HttpFilterContext` from the protocol-layer request context
+    /// and written back after filter execution, following the same
+    /// pattern as [`filter_metadata`].
+    ///
+    /// [`FilterPipeline`]: crate::FilterPipeline
+    /// [`filter_metadata`]: Self::filter_metadata
+    pub filter_state: HashMap<usize, Box<dyn Any + Send + Sync>>,
 
     /// Shared health registry for endpoint health lookups.
     pub health_registry: Option<&'a HealthRegistry>,
@@ -232,6 +257,60 @@ impl HttpFilterContext<'_> {
         self.set_metadata("token.input", input.to_string());
         self.set_metadata("token.output", output.to_string());
         self.set_metadata("token.total", total.to_string());
+    }
+
+    /// Store typed per-request state for the currently executing filter.
+    ///
+    /// Uses [`current_filter_id`] as the storage key, so multiple
+    /// instances of the same filter type get independent state.
+    ///
+    /// No-op if called outside of pipeline execution (when
+    /// [`current_filter_id`] is `None`).
+    ///
+    /// [`current_filter_id`]: Self::current_filter_id
+    pub fn insert_filter_state<T: Any + Send + Sync>(&mut self, state: T) {
+        let Some(idx) = self.current_filter_id else {
+            tracing::warn!("insert_filter_state called outside pipeline execution");
+            return;
+        };
+        self.filter_state.insert(idx, Box::new(state));
+    }
+
+    /// Retrieve a shared reference to the typed state stored by the
+    /// currently executing filter.
+    ///
+    /// Returns `None` when no state is stored, when the stored type
+    /// does not match `T`, or when called outside pipeline execution.
+    pub fn get_filter_state<T: Any + Send + Sync>(&self) -> Option<&T> {
+        let idx = self.current_filter_id?;
+        self.filter_state.get(&idx)?.downcast_ref()
+    }
+
+    /// Retrieve a mutable reference to the typed state stored by the
+    /// currently executing filter.
+    ///
+    /// Returns `None` under the same conditions as
+    /// [`get_filter_state`].
+    ///
+    /// [`get_filter_state`]: Self::get_filter_state
+    pub fn get_filter_state_mut<T: Any + Send + Sync>(&mut self) -> Option<&mut T> {
+        let idx = self.current_filter_id?;
+        self.filter_state.get_mut(&idx)?.downcast_mut()
+    }
+
+    /// Remove and return the typed state stored by the currently
+    /// executing filter.
+    ///
+    /// Returns `None` when no state is stored, when the stored type
+    /// does not match `T`, or when called outside pipeline execution.
+    /// A type mismatch does not destroy the stored entry.
+    pub fn remove_filter_state<T: Any + Send + Sync>(&mut self) -> Option<T> {
+        let idx = self.current_filter_id?;
+        if !self.filter_state.get(&idx)?.as_ref().is::<T>() {
+            return None;
+        }
+        let boxed = self.filter_state.remove(&idx)?;
+        Some(*boxed.downcast::<T>().ok()?)
     }
 }
 
@@ -706,5 +785,124 @@ mod tests {
         assert_eq!(ctx.get_metadata("token.input"), Some("200"));
         assert_eq!(ctx.get_metadata("token.output"), Some("80"));
         assert_eq!(ctx.get_metadata("token.total"), Some("280"));
+    }
+
+    // -------------------------------------------------------------------------
+    // Filter State Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn insert_and_get_filter_state_returns_typed_value() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        ctx.insert_filter_state(42u64);
+        assert_eq!(
+            ctx.get_filter_state::<u64>(),
+            Some(&42u64),
+            "should return the inserted value"
+        );
+    }
+
+    #[test]
+    fn get_filter_state_returns_none_when_empty() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        assert!(
+            ctx.get_filter_state::<u64>().is_none(),
+            "should return None when no state stored"
+        );
+    }
+
+    #[test]
+    fn get_filter_state_returns_none_for_wrong_type() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        ctx.insert_filter_state(42u64);
+        assert!(
+            ctx.get_filter_state::<String>().is_none(),
+            "should return None for type mismatch"
+        );
+    }
+
+    #[test]
+    fn get_filter_state_returns_none_when_no_index() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.filter_state.insert(0, Box::new(42u64));
+        assert!(
+            ctx.get_filter_state::<u64>().is_none(),
+            "should return None when current_filter_id is None"
+        );
+    }
+
+    #[test]
+    fn get_filter_state_mut_allows_mutation() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        ctx.insert_filter_state(10u64);
+        *ctx.get_filter_state_mut::<u64>().unwrap() += 5;
+        assert_eq!(
+            ctx.get_filter_state::<u64>(),
+            Some(&15u64),
+            "mutation through get_mut should be visible"
+        );
+    }
+
+    #[test]
+    fn remove_filter_state_takes_ownership() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        ctx.insert_filter_state("hello".to_owned());
+        let removed = ctx.remove_filter_state::<String>();
+        assert_eq!(removed.as_deref(), Some("hello"), "should return the stored value");
+        assert!(
+            ctx.get_filter_state::<String>().is_none(),
+            "state should be gone after remove"
+        );
+    }
+
+    #[test]
+    fn remove_filter_state_returns_none_for_wrong_type() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        ctx.insert_filter_state(42u64);
+        assert!(
+            ctx.remove_filter_state::<String>().is_none(),
+            "type mismatch should return None"
+        );
+        assert!(
+            ctx.get_filter_state::<u64>().is_some(),
+            "type mismatch remove should not destroy the entry"
+        );
+    }
+
+    #[test]
+    fn different_indices_do_not_collide() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
+        ctx.insert_filter_state(100u64);
+        ctx.current_filter_id = Some(1);
+        ctx.insert_filter_state(200u64);
+
+        ctx.current_filter_id = Some(0);
+        assert_eq!(ctx.get_filter_state::<u64>(), Some(&100u64), "index 0 state");
+
+        ctx.current_filter_id = Some(1);
+        assert_eq!(ctx.get_filter_state::<u64>(), Some(&200u64), "index 1 state");
+    }
+
+    #[test]
+    fn insert_filter_state_is_noop_without_index() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.insert_filter_state(42u64);
+        assert!(ctx.filter_state.is_empty(), "state map should remain empty");
     }
 }

@@ -35,13 +35,17 @@ impl FilterPipeline {
     ///
     /// Returns [`FilterError`] if any filter fails.
     #[allow(clippy::indexing_slicing, reason = "while loop bounds idx")]
+    #[allow(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
     pub async fn execute_http_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         ctx.executed_filter_indices = vec![false; self.filters.len()];
         ctx.body_done_indices = vec![false; self.filters.len()];
         let mut idx = 0;
         while idx < self.filters.len() {
             let pf = &self.filters[idx];
-            match run_request_filter(pf, ctx).await? {
+            ctx.current_filter_id = Some(pf.filter_id);
+            let result = run_request_filter(pf, ctx).await;
+            ctx.current_filter_id = None;
+            match result? {
                 RequestFilterResult::Skip => {
                     idx += 1;
                     continue;
@@ -74,6 +78,7 @@ impl FilterPipeline {
     /// Returns [`FilterError`] if any filter fails.
     ///
     /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
+    #[allow(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
     pub async fn execute_http_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         for (idx, pf) in self.filters.iter().enumerate().rev() {
             if ctx.executed_filter_indices.get(idx) == Some(&false) {
@@ -90,8 +95,11 @@ impl FilterPipeline {
             if skip_by_response_conditions(http_filter, &pf.response_conditions, ctx) {
                 continue;
             }
+            ctx.current_filter_id = Some(pf.filter_id);
             trace!(filter = http_filter.name(), "on_response");
-            let action = run_response_filter(http_filter, ctx, pf.failure_mode).await?;
+            let action = run_response_filter(http_filter, ctx, pf.failure_mode).await;
+            ctx.current_filter_id = None;
+            let action = action?;
             if let Some(rejection) = action {
                 return Ok(FilterAction::Reject(rejection));
             }
@@ -109,6 +117,7 @@ impl FilterPipeline {
     ///
     /// [`BodyDone`]: FilterAction::BodyDone
     #[allow(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
+    #[allow(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
     pub async fn execute_http_request_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -126,13 +135,16 @@ impl FilterPipeline {
             let Some(http_filter) = as_request_body_filter(&pf.filter, &pf.conditions, ctx.request) else {
                 continue;
             };
+            ctx.current_filter_id = Some(pf.filter_id);
             trace!(filter = http_filter.name(), "on_request_body");
-            match dispatch_body_result(
+            let outcome = dispatch_body_result(
                 http_filter.on_request_body(ctx, body, end_of_stream).await,
                 http_filter.name(),
                 "request body",
                 pf.failure_mode,
-            )? {
+            );
+            ctx.current_filter_id = None;
+            match outcome? {
                 BodyFilterOutcome::Continue => {},
                 BodyFilterOutcome::Released => released = true,
                 BodyFilterOutcome::BodyDone => {
@@ -154,6 +166,7 @@ impl FilterPipeline {
     ///
     /// [`BodyDone`]: FilterAction::BodyDone
     #[allow(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
+    #[allow(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
     pub fn execute_http_response_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -171,13 +184,16 @@ impl FilterPipeline {
             let Some(http_filter) = as_response_body_filter(&pf.filter, &pf.response_conditions, ctx) else {
                 continue;
             };
+            ctx.current_filter_id = Some(pf.filter_id);
             trace!(filter = http_filter.name(), "on_response_body");
-            match dispatch_body_result(
+            let outcome = dispatch_body_result(
                 http_filter.on_response_body(ctx, body, end_of_stream),
                 http_filter.name(),
                 "response body",
                 pf.failure_mode,
-            )? {
+            );
+            ctx.current_filter_id = None;
+            match outcome? {
                 BodyFilterOutcome::Continue => {},
                 BodyFilterOutcome::Released => released = true,
                 BodyFilterOutcome::BodyDone => {

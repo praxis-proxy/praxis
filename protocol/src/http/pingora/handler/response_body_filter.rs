@@ -7,11 +7,18 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use pingora_core::Result;
-use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
 use praxis_filter::{BodyBuffer, BodyMode, FilterAction, FilterPipeline};
 use tracing::{debug, warn};
 
 use super::super::context::PingoraRequestCtx;
+
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Defense-in-depth fallback when `StreamBuffer { max_bytes: None }`
+/// reaches the body filter layer (64 MiB).
+const BODY_FALLBACK_LIMIT: usize = 67_108_864; // 64 MiB
 
 // -----------------------------------------------------------------------------
 // Response Body Filters
@@ -62,7 +69,7 @@ pub(super) fn execute(
 
         BodyMode::StreamBuffer { max_bytes } if !ctx.response_body_released => {
             if let Some(ref chunk) = *body {
-                let limit = max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES);
+                let limit = max_bytes.unwrap_or(BODY_FALLBACK_LIMIT);
                 let buf = ctx.response_body_buffer.get_or_insert_with(|| BodyBuffer::new(limit));
 
                 if buf.push(chunk.clone()).is_err() {
@@ -85,7 +92,7 @@ pub(super) fn execute(
         _ => tracing::warn!("unhandled BodyMode variant in response body filter"),
     }
 
-    let (result, body_bytes, cluster, upstream, filter_metadata) = {
+    let (result, body_bytes, cluster, upstream, filter_metadata, filter_state) = {
         let mut fctx = ctx.filter_context_for(pipeline, None).ok_or_else(|| {
             pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
@@ -99,12 +106,14 @@ pub(super) fn execute(
             fctx.cluster,
             fctx.upstream,
             fctx.filter_metadata,
+            fctx.filter_state,
         )
     };
     ctx.response_body_bytes = body_bytes;
     ctx.cluster = cluster;
     ctx.upstream = upstream;
     ctx.filter_metadata = filter_metadata;
+    ctx.filter_state = filter_state;
 
     match result {
         Ok(FilterAction::Continue | FilterAction::BodyDone) => {

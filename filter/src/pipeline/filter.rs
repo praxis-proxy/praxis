@@ -21,22 +21,33 @@ use crate::any_filter::AnyFilter;
 /// optional user-assigned name.
 pub(crate) struct PipelineFilter {
     /// Optional user-assigned name for rejoin targeting.
-    pub name: Option<Arc<str>>,
+    pub(crate) name: Option<Arc<str>>,
 
     /// Branches evaluated after this filter.
-    pub branches: Vec<ResolvedBranch>,
+    pub(crate) branches: Vec<ResolvedBranch>,
 
     /// Request-phase conditions.
-    pub conditions: Vec<Condition>,
+    pub(crate) conditions: Vec<Condition>,
 
     /// Per-filter failure mode (open or closed).
-    pub failure_mode: FailureMode,
+    pub(crate) failure_mode: FailureMode,
 
     /// The filter implementation.
-    pub filter: AnyFilter,
+    pub(crate) filter: AnyFilter,
+
+    /// Unique invocation identity for per-request state storage.
+    ///
+    /// Assigned monotonically during pipeline build across all
+    /// filters including branch sub-chains. Used as the key in
+    /// [`HttpFilterContext::filter_state`] so that multiple
+    /// instances of the same filter type — and filters in
+    /// different branch levels — get independent state.
+    ///
+    /// [`HttpFilterContext::filter_state`]: crate::HttpFilterContext::filter_state
+    pub(crate) filter_id: usize,
 
     /// Response-phase conditions.
-    pub response_conditions: Vec<ResponseCondition>,
+    pub(crate) response_conditions: Vec<ResponseCondition>,
 }
 
 impl fmt::Debug for PipelineFilter {
@@ -53,16 +64,18 @@ impl fmt::Debug for PipelineFilter {
 impl PipelineFilter {
     /// Create a `PipelineFilter` with no branches or name.
     pub(crate) fn new(
+        filter_id: usize,
         filter: AnyFilter,
         conditions: Vec<Condition>,
         response_conditions: Vec<ResponseCondition>,
     ) -> Self {
         Self {
+            name: None,
             branches: Vec::new(),
             conditions,
             failure_mode: FailureMode::default(),
             filter,
-            name: None,
+            filter_id,
             response_conditions,
         }
     }

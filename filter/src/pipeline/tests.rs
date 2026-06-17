@@ -1582,6 +1582,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
     let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
     let mut filter_a = PipelineFilter::new(
+        0,
         AnyFilter::Http(Box::new(LoggingFilter {
             label: "A",
             log: Arc::clone(&log),
@@ -1598,6 +1599,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
     }];
 
     let filter_b = PipelineFilter::new(
+        1,
         AnyFilter::Http(Box::new(LoggingFilter {
             label: "B",
             log: Arc::clone(&log),
@@ -1607,6 +1609,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
     );
 
     let filter_c = PipelineFilter::new(
+        2,
         AnyFilter::Http(Box::new(LoggingFilter {
             label: "C",
             log: Arc::clone(&log),
@@ -1650,6 +1653,7 @@ async fn all_executed_filters_run_on_response() {
         compression: None,
         filters: vec![
             PipelineFilter::new(
+                0,
                 AnyFilter::Http(Box::new(LoggingFilter {
                     label: "first",
                     log: Arc::clone(&log),
@@ -1658,6 +1662,7 @@ async fn all_executed_filters_run_on_response() {
                 vec![],
             ),
             PipelineFilter::new(
+                1,
                 AnyFilter::Http(Box::new(LoggingFilter {
                     label: "second",
                     log: Arc::clone(&log),
@@ -1693,6 +1698,7 @@ async fn skipped_filter_skips_its_branches() {
     let counter = Arc::new(AtomicUsize::new(0));
 
     let branch_filter = PipelineFilter::new(
+        100,
         AnyFilter::Http(Box::new(CountingFilter {
             counter: Arc::clone(&counter),
         })),
@@ -1708,6 +1714,7 @@ async fn skipped_filter_skips_its_branches() {
     };
 
     let mut parent = PipelineFilter::new(
+        0,
         AnyFilter::Http(Box::new(CountingFilter {
             counter: Arc::new(AtomicUsize::new(0)),
         })),
@@ -2764,7 +2771,8 @@ impl HttpFilter for StreamBufferBodyDoneFilter {
 fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
     let filters: Vec<_> = filters
         .into_iter()
-        .map(|f| PipelineFilter::new(AnyFilter::Http(f), vec![], vec![]))
+        .enumerate()
+        .map(|(i, f)| PipelineFilter::new(i, AnyFilter::Http(f), vec![], vec![]))
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 
@@ -2787,7 +2795,8 @@ fn make_pipeline_with_conditions(
 ) -> FilterPipeline {
     let filters: Vec<_> = filters
         .into_iter()
-        .map(|(f, c)| PipelineFilter::new(AnyFilter::Http(f), c, vec![]))
+        .enumerate()
+        .map(|(i, (f, c))| PipelineFilter::new(i, AnyFilter::Http(f), c, vec![]))
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 
@@ -2810,7 +2819,8 @@ fn make_pipeline_with_response_conditions(
 ) -> FilterPipeline {
     let filters: Vec<_> = filters
         .into_iter()
-        .map(|(f, rc)| PipelineFilter::new(AnyFilter::Http(f), vec![], rc))
+        .enumerate()
+        .map(|(i, (f, rc))| PipelineFilter::new(i, AnyFilter::Http(f), vec![], rc))
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 
@@ -2853,6 +2863,397 @@ fn when_status(codes: &[u16]) -> praxis_core::config::ResponseCondition {
         status: Some(codes.to_vec()),
         headers: None,
     })
+}
+
+// -----------------------------------------------------------------------------
+// Filter State Lifecycle Tests
+// -----------------------------------------------------------------------------
+
+/// Tracked state that records observations and drop events.
+struct TrackedState {
+    id: u64,
+    observations: Arc<std::sync::Mutex<Vec<(u64, &'static str)>>>,
+}
+
+impl Drop for TrackedState {
+    fn drop(&mut self) {
+        if let Ok(mut obs) = self.observations.lock() {
+            obs.push((self.id, "drop"));
+        }
+    }
+}
+
+/// Test filter that stores per-request typed state and reads it in
+/// every phase, recording observations for lifecycle verification.
+struct StatefulFilter {
+    id: u64,
+    observations: Arc<std::sync::Mutex<Vec<(u64, &'static str)>>>,
+}
+
+#[async_trait]
+impl HttpFilter for StatefulFilter {
+    fn name(&self) -> &'static str {
+        "stateful"
+    }
+
+    async fn on_request(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        ctx.insert_filter_state(TrackedState {
+            id: self.id,
+            observations: Arc::clone(&self.observations),
+        });
+        self.observations.lock().unwrap().push((self.id, "on_request"));
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_response(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let state = ctx.get_filter_state::<TrackedState>();
+        assert!(state.is_some(), "state should survive into response phase");
+        assert_eq!(state.unwrap().id, self.id, "state id should match filter id");
+        self.observations.lock().unwrap().push((self.id, "on_response"));
+        Ok(FilterAction::Continue)
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    async fn on_request_body(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        let state = ctx.get_filter_state::<TrackedState>();
+        assert!(state.is_some(), "state should survive into request body phase");
+        assert_eq!(state.unwrap().id, self.id, "state id should match filter id");
+        self.observations.lock().unwrap().push((self.id, "on_request_body"));
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        let state = ctx.get_filter_state::<TrackedState>();
+        assert!(state.is_some(), "state should survive into response body phase");
+        assert_eq!(state.unwrap().id, self.id, "state id should match filter id");
+        self.observations.lock().unwrap().push((self.id, "on_response_body"));
+        Ok(FilterAction::Continue)
+    }
+}
+
+#[tokio::test]
+async fn filter_state_persists_from_request_to_request_body() {
+    let obs: Arc<std::sync::Mutex<Vec<(u64, &'static str)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = make_pipeline(vec![Box::new(StatefulFilter {
+        id: 1,
+        observations: Arc::clone(&obs),
+    })]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let _action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    let mut body = Some(Bytes::from_static(b"hello"));
+    let _action = pipeline
+        .execute_http_request_body(&mut ctx, &mut body, true)
+        .await
+        .unwrap();
+    let recorded = obs.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec![(1, "on_request"), (1, "on_request_body")],
+        "state should persist from request to request body"
+    );
+}
+
+#[tokio::test]
+async fn filter_state_persists_from_request_to_response() {
+    let obs: Arc<std::sync::Mutex<Vec<(u64, &'static str)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = make_pipeline(vec![Box::new(StatefulFilter {
+        id: 2,
+        observations: Arc::clone(&obs),
+    })]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let _action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    let _action = pipeline.execute_http_response(&mut ctx).await.unwrap();
+    let recorded = obs.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec![(2, "on_request"), (2, "on_response")],
+        "state should persist from request to response"
+    );
+}
+
+#[tokio::test]
+async fn two_same_type_filters_get_independent_state() {
+    let obs: Arc<std::sync::Mutex<Vec<(u64, &'static str)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = make_pipeline(vec![
+        Box::new(StatefulFilter {
+            id: 10,
+            observations: Arc::clone(&obs),
+        }),
+        Box::new(StatefulFilter {
+            id: 20,
+            observations: Arc::clone(&obs),
+        }),
+    ]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let _action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    let _action = pipeline.execute_http_response(&mut ctx).await.unwrap();
+    let recorded = obs.lock().unwrap().clone();
+    assert_eq!(
+        recorded,
+        vec![
+            (10, "on_request"),
+            (20, "on_request"),
+            (20, "on_response"),
+            (10, "on_response"),
+        ],
+        "two instances should have independent state and both should see their own id"
+    );
+}
+
+#[tokio::test]
+async fn filter_state_dropped_on_request_reject() {
+    let obs: Arc<std::sync::Mutex<Vec<(u64, &'static str)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = make_pipeline(vec![
+        Box::new(StatefulFilter {
+            id: 30,
+            observations: Arc::clone(&obs),
+        }),
+        Box::new(RejectFilter),
+    ]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Reject(_)), "pipeline should reject");
+    drop(ctx);
+    let recorded = obs.lock().unwrap().clone();
+    assert!(
+        recorded.contains(&(30, "on_request")),
+        "state should have been inserted"
+    );
+    assert!(
+        recorded.contains(&(30, "drop")),
+        "state should be dropped when context is dropped"
+    );
+}
+
+#[tokio::test]
+async fn filter_state_dropped_on_body_reject() {
+    let obs: Arc<std::sync::Mutex<Vec<(u64, &'static str)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = make_pipeline(vec![
+        Box::new(StatefulFilter {
+            id: 40,
+            observations: Arc::clone(&obs),
+        }),
+        Box::new(BodyRejectFilter),
+    ]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let _action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    let mut body = Some(Bytes::from_static(b"REJECT"));
+    let action = pipeline
+        .execute_http_request_body(&mut ctx, &mut body, true)
+        .await
+        .unwrap();
+    assert!(matches!(action, FilterAction::Reject(_)), "body filter should reject");
+    drop(ctx);
+    let recorded = obs.lock().unwrap().clone();
+    assert!(
+        recorded.contains(&(40, "on_request")),
+        "state should have been inserted"
+    );
+    assert!(
+        recorded.contains(&(40, "on_request_body")),
+        "body phase should have read state"
+    );
+    assert!(
+        recorded.contains(&(40, "drop")),
+        "state should be dropped when context is dropped"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_requests_do_not_share_state() {
+    let obs: Arc<std::sync::Mutex<Vec<(u64, &'static str)>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let pipeline = Arc::new(make_pipeline(vec![Box::new(StatefulFilter {
+        id: 50,
+        observations: Arc::clone(&obs),
+    })]));
+
+    let pipeline1 = Arc::clone(&pipeline);
+    let pipeline2 = Arc::clone(&pipeline);
+
+    let h1 = tokio::spawn(async move {
+        let req = crate::test_utils::make_request(Method::GET, "/a");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        drop(pipeline1.execute_http_request(&mut ctx).await.unwrap());
+        let state = ctx
+            .filter_state
+            .get(&0)
+            .unwrap()
+            .downcast_ref::<TrackedState>()
+            .unwrap();
+        assert_eq!(state.id, 50, "request 1 should see filter id 50");
+    });
+
+    let h2 = tokio::spawn(async move {
+        let req = crate::test_utils::make_request(Method::GET, "/b");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        drop(pipeline2.execute_http_request(&mut ctx).await.unwrap());
+        let state = ctx
+            .filter_state
+            .get(&0)
+            .unwrap()
+            .downcast_ref::<TrackedState>()
+            .unwrap();
+        assert_eq!(state.id, 50, "request 2 should see filter id 50");
+    });
+
+    h1.await.unwrap();
+    h2.await.unwrap();
+}
+
+// -----------------------------------------------------------------------------
+// Identity Leak-Path Tests
+// -----------------------------------------------------------------------------
+
+/// Filter that errors on every phase.
+struct AllPhaseErrorFilter;
+
+#[async_trait]
+impl HttpFilter for AllPhaseErrorFilter {
+    fn name(&self) -> &'static str {
+        "all_phase_error"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Err("request error".into())
+    }
+
+    async fn on_response(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Err("response error".into())
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    async fn on_request_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        Err("request body error".into())
+    }
+
+    fn on_response_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        Err("response body error".into())
+    }
+}
+
+#[tokio::test]
+async fn identity_none_after_request_filter_skipped_by_conditions() {
+    let pipeline = make_pipeline_with_conditions(vec![(
+        Box::new(CountingFilter {
+            counter: Arc::new(AtomicUsize::new(0)),
+        }),
+        vec![when_path("/api")],
+    )]);
+    let req = crate::test_utils::make_request(Method::GET, "/other");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let _action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        ctx.current_filter_id.is_none(),
+        "identity should be None after filter skipped by conditions"
+    );
+}
+
+#[tokio::test]
+async fn identity_none_after_request_rejection() {
+    let pipeline = make_pipeline(vec![Box::new(RejectFilter)]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Reject(_)), "should reject");
+    assert!(
+        ctx.current_filter_id.is_none(),
+        "identity should be None after rejection"
+    );
+}
+
+#[tokio::test]
+async fn identity_none_after_request_error_closed() {
+    let pipeline = make_pipeline(vec![Box::new(AllPhaseErrorFilter)]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let result = pipeline.execute_http_request(&mut ctx).await;
+    assert!(result.is_err(), "should propagate error");
+    assert!(
+        ctx.current_filter_id.is_none(),
+        "identity should be None after request error"
+    );
+}
+
+#[tokio::test]
+async fn identity_none_after_response_error_closed() {
+    let pipeline = make_pipeline(vec![Box::new(AllPhaseErrorFilter)]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.executed_filter_indices = vec![true];
+    let result = pipeline.execute_http_response(&mut ctx).await;
+    assert!(result.is_err(), "should propagate error");
+    assert!(
+        ctx.current_filter_id.is_none(),
+        "identity should be None after response error"
+    );
+}
+
+#[tokio::test]
+async fn identity_none_after_request_body_error_closed() {
+    let pipeline = make_pipeline(vec![Box::new(AllPhaseErrorFilter)]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from_static(b"data"));
+    let result = pipeline.execute_http_request_body(&mut ctx, &mut body, true).await;
+    assert!(result.is_err(), "should propagate error");
+    assert!(
+        ctx.current_filter_id.is_none(),
+        "identity should be None after request body error"
+    );
+}
+
+#[test]
+fn identity_none_after_response_body_error_closed() {
+    let pipeline = make_pipeline(vec![Box::new(AllPhaseErrorFilter)]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.executed_filter_indices = vec![true];
+    let mut body = Some(Bytes::from_static(b"data"));
+    let result = pipeline.execute_http_response_body(&mut ctx, &mut body, true);
+    assert!(result.is_err(), "should propagate error");
+    assert!(
+        ctx.current_filter_id.is_none(),
+        "identity should be None after response body error"
+    );
 }
 
 #[cfg(feature = "ai-inference")]

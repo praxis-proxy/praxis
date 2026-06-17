@@ -437,7 +437,8 @@ mod tests {
     fn make_tcp_pipeline(filters: Vec<Box<dyn TcpFilter>>) -> FilterPipeline {
         let filters: Vec<_> = filters
             .into_iter()
-            .map(|f| crate::pipeline::filter::PipelineFilter::new(AnyFilter::Tcp(f), vec![], vec![]))
+            .enumerate()
+            .map(|(i, f)| crate::pipeline::filter::PipelineFilter::new(i, AnyFilter::Tcp(f), vec![], vec![]))
             .collect();
         FilterPipeline {
             body_capabilities: BodyCapabilities::default(),

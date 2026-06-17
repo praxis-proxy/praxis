@@ -23,6 +23,9 @@ struct BuildContext<'a> {
     /// Top-level chain lookup table.
     chains: &'a HashMap<&'a str, &'a [FilterEntry]>,
 
+    /// Shared counter for unique filter invocation IDs.
+    next_filter_id: &'a mut usize,
+
     /// Filter type names from the current pipeline, for `on_result` validation.
     pipeline_filter_names: Vec<&'a str>,
 
@@ -47,18 +50,31 @@ pub(super) fn resolve_chain_filters(
     chains: &HashMap<&str, &[FilterEntry]>,
     depth: usize,
 ) -> Result<Vec<PipelineFilter>, FilterError> {
+    let mut next_filter_id: usize = 0;
+    resolve_chain_filters_with_counter(entries, registry, chains, depth, &mut next_filter_id)
+}
+
+/// Inner implementation that threads a shared counter for unique filter IDs.
+fn resolve_chain_filters_with_counter(
+    entries: &mut [FilterEntry],
+    registry: &FilterRegistry,
+    chains: &HashMap<&str, &[FilterEntry]>,
+    depth: usize,
+    next_filter_id: &mut usize,
+) -> Result<Vec<PipelineFilter>, FilterError> {
     if depth > MAX_BRANCH_DEPTH {
         return Err(format!("branch nesting depth exceeds maximum ({MAX_BRANCH_DEPTH})").into());
     }
-    let (mut filters, branch_configs) = build_filters(entries, registry)?;
+    let (mut filters, branch_configs) = build_filters(entries, registry, next_filter_id)?;
     let pipeline_filter_names: Vec<&str> = filters.iter().map(|pf| pf.filter.name()).collect();
-    let bctx = BuildContext {
+    let mut bctx = BuildContext {
         chains,
+        next_filter_id,
         pipeline_filter_names,
         registry,
     };
     let name_index = build_name_index(&filters);
-    attach_branches(&mut filters, branch_configs, &bctx, &name_index, depth)?;
+    attach_branches(&mut filters, branch_configs, &mut bctx, &name_index, depth)?;
     Ok(filters)
 }
 
@@ -76,6 +92,7 @@ type BranchConfigs = Vec<Option<Vec<BranchChainConfig>>>;
 fn build_filters(
     entries: &mut [FilterEntry],
     registry: &FilterRegistry,
+    next_filter_id: &mut usize,
 ) -> Result<(Vec<PipelineFilter>, BranchConfigs), FilterError> {
     let mut filters = Vec::with_capacity(entries.len());
     let mut branch_configs: BranchConfigs = Vec::with_capacity(entries.len());
@@ -87,7 +104,10 @@ fn build_filters(
             conditions = has_conditions,
             "filter added to pipeline"
         );
+        let filter_id = *next_filter_id;
+        *next_filter_id += 1;
         let mut pf = PipelineFilter::new(
+            filter_id,
             filter,
             mem::take(&mut entry.conditions),
             mem::take(&mut entry.response_conditions),
@@ -121,7 +141,7 @@ fn build_name_index(filters: &[PipelineFilter]) -> HashMap<Arc<str>, usize> {
 fn attach_branches(
     filters: &mut [PipelineFilter],
     branch_configs: BranchConfigs,
-    bctx: &BuildContext<'_>,
+    bctx: &mut BuildContext<'_>,
     name_index: &HashMap<Arc<str>, usize>,
     depth: usize,
 ) -> Result<(), FilterError> {
@@ -141,15 +161,16 @@ fn attach_branches(
 /// [`ResolvedBranch`]: super::branch::ResolvedBranch
 fn resolve_branches(
     configs: &[BranchChainConfig],
-    bctx: &BuildContext<'_>,
+    bctx: &mut BuildContext<'_>,
     name_index: &HashMap<Arc<str>, usize>,
     current_idx: usize,
     depth: usize,
 ) -> Result<Vec<ResolvedBranch>, FilterError> {
-    configs
-        .iter()
-        .map(|c| resolve_single_branch(c, bctx, name_index, current_idx, depth))
-        .collect()
+    let mut resolved = Vec::with_capacity(configs.len());
+    for c in configs {
+        resolved.push(resolve_single_branch(c, bctx, name_index, current_idx, depth)?);
+    }
+    Ok(resolved)
 }
 
 /// Resolve a single [`BranchChainConfig`] into a [`ResolvedBranch`].
@@ -157,7 +178,7 @@ fn resolve_branches(
 /// [`ResolvedBranch`]: super::branch::ResolvedBranch
 fn resolve_single_branch(
     config: &BranchChainConfig,
-    bctx: &BuildContext<'_>,
+    bctx: &mut BuildContext<'_>,
     name_index: &HashMap<Arc<str>, usize>,
     current_idx: usize,
     depth: usize,
@@ -223,7 +244,7 @@ fn resolve_condition(cond: &BranchCondition) -> ResolvedBranchCondition {
 /// Resolve [`ChainRef`] entries into [`PipelineFilter`]s.
 fn resolve_chain_refs(
     refs: &[ChainRef],
-    bctx: &BuildContext<'_>,
+    bctx: &mut BuildContext<'_>,
     depth: usize,
 ) -> Result<Vec<PipelineFilter>, FilterError> {
     let mut filters = Vec::new();
@@ -236,11 +257,12 @@ fn resolve_chain_refs(
                 .to_vec(),
             ChainRef::Inline { filters: f, .. } => f.clone(),
         };
-        filters.append(&mut resolve_chain_filters(
+        filters.append(&mut resolve_chain_filters_with_counter(
             &mut entries,
             bctx.registry,
             bctx.chains,
             depth,
+            bctx.next_filter_id,
         )?);
     }
     Ok(filters)
@@ -295,6 +317,7 @@ fn resolve_named_rejoin(
     clippy::indexing_slicing,
     clippy::panic,
     clippy::redundant_closure_for_method_calls,
+    clippy::too_many_lines,
     reason = "tests"
 )]
 mod tests {
@@ -318,7 +341,7 @@ mod tests {
             make_entry("request_id", Some("first")),
             make_entry("request_id", Some("second")),
         ];
-        let (filters, _) = build_filters(&mut entries, &registry).unwrap();
+        let (filters, _) = build_filters(&mut entries, &registry, &mut 0).unwrap();
         let index = build_name_index(&filters);
         assert_eq!(index.get("first"), Some(&0), "first filter at index 0");
         assert_eq!(index.get("second"), Some(&1), "second filter at index 1");
@@ -328,7 +351,7 @@ mod tests {
     fn build_name_index_unnamed_skipped() {
         let registry = FilterRegistry::with_builtins();
         let mut entries = vec![make_entry("request_id", None), make_entry("request_id", Some("named"))];
-        let (filters, _) = build_filters(&mut entries, &registry).unwrap();
+        let (filters, _) = build_filters(&mut entries, &registry, &mut 0).unwrap();
         let index = build_name_index(&filters);
         assert_eq!(index.len(), 1, "only named filters should appear");
         assert_eq!(index.get("named"), Some(&1), "named filter at index 1");
@@ -499,13 +522,15 @@ mod tests {
     fn resolve_unknown_chain_errors() {
         let registry = FilterRegistry::with_builtins();
         let chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
-        let bctx = BuildContext {
+        let mut next_id: usize = 0;
+        let mut bctx = BuildContext {
             chains: &chains,
+            next_filter_id: &mut next_id,
             pipeline_filter_names: vec![],
             registry: &registry,
         };
         let refs = vec![ChainRef::Named("nonexistent".to_owned())];
-        let err = resolve_chain_refs(&refs, &bctx, 0).unwrap_err();
+        let err = resolve_chain_refs(&refs, &mut bctx, 0).unwrap_err();
         assert!(
             err.to_string().contains("unknown chain"),
             "should report unknown chain: {err}"
@@ -677,5 +702,155 @@ mod tests {
             name: name.map(|n| n.to_owned()),
             response_conditions: vec![],
         }
+    }
+
+    /// Collect all `filter_id` values from a filter list, recursing into branches.
+    fn collect_ids(filters: &[PipelineFilter]) -> Vec<usize> {
+        let mut ids = Vec::new();
+        for pf in filters {
+            ids.push(pf.filter_id);
+            for branch in &pf.branches {
+                ids.extend(collect_ids(&branch.filters));
+            }
+        }
+        ids
+    }
+
+    // -------------------------------------------------------------------------
+    // Nested Branch ID Uniqueness
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn top_level_and_branch_filters_get_unique_ids() {
+        let registry = FilterRegistry::with_builtins();
+        let utility = vec![make_entry("request_id", None)];
+        let chains: HashMap<&str, &[FilterEntry]> = HashMap::from([("util", utility.as_slice())]);
+        let mut entries = vec![
+            FilterEntry {
+                branch_chains: Some(vec![BranchChainConfig {
+                    chains: vec![ChainRef::Named("util".to_owned())],
+                    max_iterations: None,
+                    name: "b1".to_owned(),
+                    on_result: None,
+                    rejoin: "next".to_owned(),
+                }]),
+                ..make_entry("request_id", None)
+            },
+            make_entry("request_id", None),
+        ];
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        let ids = collect_ids(&filters);
+        let unique: std::collections::HashSet<usize> = ids.iter().copied().collect();
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "all filter_id values should be unique: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn nested_branch_filters_get_unique_ids() {
+        let registry = FilterRegistry::with_builtins();
+        let inner_chain = vec![FilterEntry {
+            branch_chains: Some(vec![BranchChainConfig {
+                chains: vec![ChainRef::Inline {
+                    filters: vec![make_entry("request_id", None)],
+                    name: "leaf".to_owned(),
+                }],
+                max_iterations: None,
+                name: "inner_branch".to_owned(),
+                on_result: None,
+                rejoin: "next".to_owned(),
+            }]),
+            ..make_entry("request_id", None)
+        }];
+        let chains: HashMap<&str, &[FilterEntry]> = HashMap::from([("inner", inner_chain.as_slice())]);
+        let mut entries = vec![FilterEntry {
+            branch_chains: Some(vec![BranchChainConfig {
+                chains: vec![ChainRef::Named("inner".to_owned())],
+                max_iterations: None,
+                name: "outer_branch".to_owned(),
+                on_result: None,
+                rejoin: "next".to_owned(),
+            }]),
+            ..make_entry("request_id", None)
+        }];
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        let ids = collect_ids(&filters);
+        let unique: std::collections::HashSet<usize> = ids.iter().copied().collect();
+        assert_eq!(ids.len(), 3, "should have top-level + branch + nested branch filters");
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "all filter_id values at multiple nesting depths should be unique: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn same_named_chain_referenced_twice_gets_separate_ids() {
+        let registry = FilterRegistry::with_builtins();
+        let shared = vec![make_entry("request_id", None)];
+        let chains: HashMap<&str, &[FilterEntry]> = HashMap::from([("shared", shared.as_slice())]);
+        let mut entries = vec![
+            FilterEntry {
+                branch_chains: Some(vec![BranchChainConfig {
+                    chains: vec![ChainRef::Named("shared".to_owned())],
+                    max_iterations: None,
+                    name: "ref_a".to_owned(),
+                    on_result: None,
+                    rejoin: "next".to_owned(),
+                }]),
+                ..make_entry("request_id", None)
+            },
+            FilterEntry {
+                branch_chains: Some(vec![BranchChainConfig {
+                    chains: vec![ChainRef::Named("shared".to_owned())],
+                    max_iterations: None,
+                    name: "ref_b".to_owned(),
+                    on_result: None,
+                    rejoin: "next".to_owned(),
+                }]),
+                ..make_entry("request_id", None)
+            },
+        ];
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        let ids = collect_ids(&filters);
+        let unique: std::collections::HashSet<usize> = ids.iter().copied().collect();
+        assert_eq!(ids.len(), 4, "2 top-level + 2 branch filters");
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "same chain referenced twice should get separate invocation IDs: {ids:?}"
+        );
+    }
+
+    #[test]
+    fn ids_do_not_reset_during_recursive_resolution() {
+        let registry = FilterRegistry::with_builtins();
+        let deep = vec![make_entry("request_id", None), make_entry("request_id", None)];
+        let chains: HashMap<&str, &[FilterEntry]> = HashMap::from([("deep", deep.as_slice())]);
+        let mut entries = vec![
+            make_entry("request_id", None),
+            FilterEntry {
+                branch_chains: Some(vec![BranchChainConfig {
+                    chains: vec![ChainRef::Named("deep".to_owned())],
+                    max_iterations: None,
+                    name: "b".to_owned(),
+                    on_result: None,
+                    rejoin: "next".to_owned(),
+                }]),
+                ..make_entry("request_id", None)
+            },
+            make_entry("request_id", None),
+        ];
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        let ids = collect_ids(&filters);
+        let unique: std::collections::HashSet<usize> = ids.iter().copied().collect();
+        assert_eq!(ids.len(), 5, "3 top-level + 2 branch filters");
+        assert_eq!(
+            ids.len(),
+            unique.len(),
+            "IDs should be unique even across recursive resolution: {ids:?}"
+        );
     }
 }

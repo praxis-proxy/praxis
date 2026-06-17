@@ -186,6 +186,7 @@ async fn run_pipeline(
         request_body_mode,
         selected_endpoint_index,
         filter_metadata,
+        filter_state,
     ) = {
         let mut filter_ctx = ctx.build_filter_context(pipeline, &request, None);
 
@@ -201,11 +202,13 @@ async fn run_pipeline(
             filter_ctx.request_body_mode,
             filter_ctx.selected_endpoint_index,
             filter_ctx.filter_metadata,
+            filter_ctx.filter_state,
         )
     };
 
     ctx.request_snapshot = Some(request);
     ctx.filter_metadata = filter_metadata;
+    ctx.filter_state = filter_state;
     ctx.metrics_cluster_shared = cluster.as_ref().map(|c| ::metrics::SharedString::from(Arc::clone(c)));
     ctx.metrics_cluster = cluster.clone();
 

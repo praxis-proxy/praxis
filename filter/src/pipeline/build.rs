@@ -27,7 +27,7 @@ impl FilterPipeline {
     #[allow(clippy::too_many_lines, reason = "cfg attribute inflates line count")]
     pub fn build(entries: &mut [FilterEntry], registry: &FilterRegistry) -> Result<Self, FilterError> {
         let mut filters = Vec::with_capacity(entries.len());
-        for entry in entries.iter_mut() {
+        for (filter_id, entry) in entries.iter_mut().enumerate() {
             let filter = registry.create(&entry.filter_type, &entry.config)?;
             warn_tcp_unsupported_fields(&filter, entry);
             let has_conditions = !entry.conditions.is_empty() || !entry.response_conditions.is_empty();
@@ -37,6 +37,7 @@ impl FilterPipeline {
                 "filter added to pipeline"
             );
             let mut pf = PipelineFilter::new(
+                filter_id,
                 filter,
                 mem::take(&mut entry.conditions),
                 mem::take(&mut entry.response_conditions),

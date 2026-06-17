@@ -130,7 +130,7 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {
-        let pipeline = self.pipeline.load();
+        let pipeline = ctx.pin_pipeline(&self.pipeline);
         request_filter::execute(&pipeline, session, ctx).await
     }
 
@@ -143,7 +143,7 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
     where
         Self::CTX: Send + Sync,
     {
-        let pipeline = self.pipeline.load();
+        let pipeline = ctx.pipeline(&self.pipeline);
         let result = response_filter::execute(&pipeline, upstream_response, ctx).await;
         if result.is_ok() {
             let client_ver = ctx.client_http_version.unwrap_or(http::Version::HTTP_11);
@@ -187,7 +187,7 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
     }
 
     async fn logging(&self, session: &mut Session, e: Option<&pingora_core::Error>, ctx: &mut Self::CTX) {
-        let pipeline = self.pipeline.load();
+        let pipeline = ctx.pipeline(&self.pipeline);
         emit_request_metrics(session, ctx);
         record_passive_health(&pipeline, e, ctx);
         logging_cleanup(&pipeline, ctx).await;

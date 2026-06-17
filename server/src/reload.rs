@@ -44,6 +44,7 @@ pub(crate) fn reload_pipelines(
     live: &ListenerPipelines,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
+    #[cfg(feature = "ai-inference")] response_stores: &praxis_filter::ResponseStoreRegistry,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("building new pipelines from reloaded config");
 
@@ -54,7 +55,14 @@ pub(crate) fn reload_pipelines(
 
     let health_registry = build_health_registry(&new_config.clusters);
 
-    let new_pipelines = match resolve_pipelines(new_config, registry, &health_registry, kv_stores) {
+    let new_pipelines = match resolve_pipelines(
+        new_config,
+        registry,
+        &health_registry,
+        kv_stores,
+        #[cfg(feature = "ai-inference")]
+        response_stores,
+    ) {
         Ok(p) => p,
         Err(e) => {
             error!(error = %e, "config reload failed: pipeline build error");
@@ -311,6 +319,8 @@ mod tests {
             &live,
             &shutdown,
             &empty_kv_stores(),
+            #[cfg(feature = "ai-inference")]
+            &empty_response_stores(),
         );
 
         assert!(result.is_ok(), "valid reload should succeed");
@@ -344,6 +354,8 @@ filter_chains:
             &live,
             &shutdown,
             &empty_kv_stores(),
+            #[cfg(feature = "ai-inference")]
+            &empty_response_stores(),
         );
         assert!(result.is_err(), "invalid filter should return Err");
 
@@ -364,6 +376,8 @@ filter_chains:
             &live,
             &shutdown,
             &empty_kv_stores(),
+            #[cfg(feature = "ai-inference")]
+            &empty_response_stores(),
         )
         .unwrap();
 
@@ -386,6 +400,8 @@ filter_chains:
             &live,
             &shutdown,
             &empty_kv_stores(),
+            #[cfg(feature = "ai-inference")]
+            &empty_response_stores(),
         )
         .unwrap();
 
@@ -423,6 +439,8 @@ filter_chains:
             &live,
             &shutdown,
             &empty_kv_stores(),
+            #[cfg(feature = "ai-inference")]
+            &empty_response_stores(),
         );
         assert!(
             !old_token.is_cancelled(),
@@ -459,6 +477,8 @@ filter_chains:
             &live,
             &shutdown,
             &empty_kv_stores(),
+            #[cfg(feature = "ai-inference")]
+            &empty_response_stores(),
         );
         assert!(result.is_ok(), "reload with new listener should succeed");
         assert!(
@@ -617,7 +637,15 @@ filter_chains:
         let config = valid_config();
         let registry = FilterRegistry::with_builtins();
         let health_registry: HealthRegistry = Arc::new(HashMap::new());
-        let pipelines = resolve_pipelines(&config, &registry, &health_registry, &empty_kv_stores()).unwrap();
+        let pipelines = resolve_pipelines(
+            &config,
+            &registry,
+            &health_registry,
+            &empty_kv_stores(),
+            #[cfg(feature = "ai-inference")]
+            &empty_response_stores(),
+        )
+        .unwrap();
         let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
         (pipelines, config, registry, shutdown)
     }
@@ -625,5 +653,11 @@ filter_chains:
     /// Empty KV store registry for tests without KV stores.
     fn empty_kv_stores() -> praxis_core::kv::KvStoreRegistry {
         praxis_core::kv::KvStoreRegistry::new()
+    }
+
+    /// Empty response store registry for tests without response stores.
+    #[cfg(feature = "ai-inference")]
+    fn empty_response_stores() -> praxis_filter::ResponseStoreRegistry {
+        praxis_filter::ResponseStoreRegistry::new()
     }
 }

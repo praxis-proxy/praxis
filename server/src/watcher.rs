@@ -49,6 +49,10 @@ pub(crate) struct WatcherParams {
     /// KV store registry, preserved across reloads.
     pub(crate) kv_stores: praxis_core::kv::KvStoreRegistry,
 
+    /// Response store registry, preserved across reloads.
+    #[cfg(feature = "ai-inference")]
+    pub(crate) response_stores: praxis_filter::ResponseStoreRegistry,
+
     /// Live pipeline storage, swapped atomically on reload.
     pub(crate) pipelines: Arc<ListenerPipelines>,
 
@@ -117,6 +121,8 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
                     &params.pipelines,
                     &params.health_shutdown,
                     &params.kv_stores,
+                    #[cfg(feature = "ai-inference")]
+                    &params.response_stores,
                 );
             }
             () = params.shutdown.cancelled() => {
@@ -140,6 +146,7 @@ fn handle_reload(
     pipelines: &ListenerPipelines,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
+    #[cfg(feature = "ai-inference")] response_stores: &praxis_filter::ResponseStoreRegistry,
 ) {
     let content = match std::fs::read_to_string(config_path) {
         Ok(c) => c,
@@ -172,6 +179,8 @@ fn handle_reload(
         pipelines,
         health_shutdown,
         kv_stores,
+        #[cfg(feature = "ai-inference")]
+        response_stores,
     ) {
         Ok(()) => {
             *current_config = new_config;
@@ -283,8 +292,17 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let pipelines =
-            Arc::new(crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores).unwrap());
+        let pipelines = Arc::new(
+            crate::pipelines::resolve_pipelines(
+                &config,
+                &registry,
+                &health_registry,
+                &kv_stores,
+                #[cfg(feature = "ai-inference")]
+                &empty_response_stores(),
+            )
+            .unwrap(),
+        );
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
         let shutdown = CancellationToken::new();
 
@@ -295,6 +313,8 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines,
             registry,
+            #[cfg(feature = "ai-inference")]
+            response_stores: empty_response_stores(),
             shutdown: shutdown.clone(),
         });
 
@@ -314,8 +334,17 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let pipelines =
-            Arc::new(crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores).unwrap());
+        let pipelines = Arc::new(
+            crate::pipelines::resolve_pipelines(
+                &config,
+                &registry,
+                &health_registry,
+                &kv_stores,
+                #[cfg(feature = "ai-inference")]
+                &empty_response_stores(),
+            )
+            .unwrap(),
+        );
         let old_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
         let shutdown = CancellationToken::new();
@@ -327,6 +356,8 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines: Arc::clone(&pipelines),
             registry: Arc::clone(&registry),
+            #[cfg(feature = "ai-inference")]
+            response_stores: empty_response_stores(),
             shutdown: shutdown.clone(),
         });
 
@@ -354,8 +385,17 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let pipelines =
-            Arc::new(crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores).unwrap());
+        let pipelines = Arc::new(
+            crate::pipelines::resolve_pipelines(
+                &config,
+                &registry,
+                &health_registry,
+                &kv_stores,
+                #[cfg(feature = "ai-inference")]
+                &empty_response_stores(),
+            )
+            .unwrap(),
+        );
         let old_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
         let shutdown = CancellationToken::new();
@@ -367,6 +407,8 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines: Arc::clone(&pipelines),
             registry: Arc::clone(&registry),
+            #[cfg(feature = "ai-inference")]
+            response_stores: empty_response_stores(),
             shutdown: shutdown.clone(),
         });
 
@@ -424,8 +466,17 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let pipelines =
-            Arc::new(crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores).unwrap());
+        let pipelines = Arc::new(
+            crate::pipelines::resolve_pipelines(
+                &config,
+                &registry,
+                &health_registry,
+                &kv_stores,
+                #[cfg(feature = "ai-inference")]
+                &empty_response_stores(),
+            )
+            .unwrap(),
+        );
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
         let shutdown = CancellationToken::new();
 
@@ -436,6 +487,8 @@ mod tests {
             kv_stores,
             pipelines,
             registry,
+            #[cfg(feature = "ai-inference")]
+            response_stores: empty_response_stores(),
             shutdown: shutdown.clone(),
         });
 
@@ -464,6 +517,12 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    /// Empty response store registry for tests without response stores.
+    #[cfg(feature = "ai-inference")]
+    fn empty_response_stores() -> praxis_filter::ResponseStoreRegistry {
+        praxis_filter::ResponseStoreRegistry::new()
     }
 
     /// Serializes tests that mutate the process working directory.

@@ -2042,6 +2042,7 @@ fn make_response() -> praxis_filter::Response {
 static TEST_ID_GENERATOR: std::sync::LazyLock<praxis_core::id::IdGenerator> =
     std::sync::LazyLock::new(|| praxis_core::id::IdGenerator::with_seed(0));
 
+#[allow(clippy::too_many_lines, reason = "unavoidable: single large statement")]
 /// Build a minimal [`HttpFilterContext`] for unit tests.
 fn make_ctx(req: &praxis_filter::Request) -> HttpFilterContext<'_> {
     HttpFilterContext {
@@ -2049,6 +2050,7 @@ fn make_ctx(req: &praxis_filter::Request) -> HttpFilterContext<'_> {
         branch_iterations: HashMap::new(),
         client_addr: None,
         cluster: None,
+        current_filter_id: None,
         downstream_tls: false,
         executed_filter_indices: Vec::new(),
         extra_request_headers: Vec::new(),
@@ -2056,6 +2058,7 @@ fn make_ctx(req: &praxis_filter::Request) -> HttpFilterContext<'_> {
         request_headers_to_set: Vec::new(),
         filter_metadata: HashMap::new(),
         filter_results: HashMap::new(),
+        filter_state: HashMap::new(),
         health_registry: None,
         id_generator: &TEST_ID_GENERATOR,
         kv_stores: None,

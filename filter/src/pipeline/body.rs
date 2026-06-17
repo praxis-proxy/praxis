@@ -324,6 +324,7 @@ mod tests {
         }
 
         let branch_filter = PipelineFilter {
+            filter_id: 100,
             branches: vec![],
             conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -339,6 +340,7 @@ mod tests {
             rejoin: RejoinTarget::Next,
         };
         let parent = PipelineFilter {
+            filter_id: 0,
             branches: vec![branch],
             conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -371,6 +373,7 @@ mod tests {
         let branch = ResolvedBranch {
             condition: None,
             filters: vec![PipelineFilter::new(
+                100,
                 AnyFilter::Http(Box::new(NoopHttpFilter)),
                 vec![],
                 vec![],
@@ -380,6 +383,7 @@ mod tests {
             rejoin: RejoinTarget::Next,
         };
         let parent = PipelineFilter {
+            filter_id: 0,
             branches: vec![branch],
             conditions: vec![],
             failure_mode: FailureMode::default(),
