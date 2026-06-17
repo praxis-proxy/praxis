@@ -15,7 +15,7 @@ repository.
 
 ```console
 make setup-hooks    # install git pre-commit hook (fmt + lint)
-make build          # workspace build (includes benches + fuzz)
+make build          # workspace build (includes benches)
 make test           # all tests (downloads h2spec if needed)
 make fmt            # format with nightly rustfmt
 make lint           # clippy + nightly fmt check + xtask lint-deps

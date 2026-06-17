@@ -38,7 +38,6 @@ pub async fn http_probe(addr: &str, path: &str, expected_status: u16, timeout: D
 }
 
 /// Inner HTTP probe logic (no timeout wrapper).
-#[allow(clippy::indexing_slicing, reason = "bounded by read length")]
 #[allow(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
 async fn http_probe_inner(addr: &str, path: &str, expected_status: u16) -> bool {
     let mut stream = match TcpStream::connect(addr).await {
@@ -55,21 +54,39 @@ async fn http_probe_inner(addr: &str, path: &str, expected_status: u16) -> bool 
         return false;
     }
 
-    let mut buf = [0u8; 256];
-    let n = match stream.read(&mut buf).await {
-        Ok(n) if n > 0 => n,
-        Ok(_) => {
-            trace!(addr, "health check received empty response");
-            return false;
-        },
-        Err(e) => {
-            trace!(addr, error = %e, "health check read failed");
-            return false;
-        },
-    };
+    match read_status_line(&mut stream, addr).await {
+        Some(data) => parse_status_code(&data) == Some(expected_status),
+        None => false,
+    }
+}
 
-    let response = String::from_utf8_lossy(&buf[..n]);
-    parse_status_code(&response) == Some(expected_status)
+/// Read from `stream` until the first `\r\n` (end of status line) or buffer full.
+///
+/// Returns `None` on empty response or I/O error.
+#[allow(clippy::indexing_slicing, reason = "bounded by filled counter")]
+async fn read_status_line(stream: &mut TcpStream, addr: &str) -> Option<String> {
+    let mut buf = [0u8; 256];
+    let mut filled = 0;
+    loop {
+        match stream.read(&mut buf[filled..]).await {
+            Ok(0) => break,
+            Ok(n) => {
+                filled += n;
+                if buf[..filled].windows(2).any(|w| w == b"\r\n") || filled >= buf.len() {
+                    break;
+                }
+            },
+            Err(e) => {
+                trace!(addr, error = %e, "health check read failed");
+                return None;
+            },
+        }
+    }
+    if filled == 0 {
+        trace!(addr, "health check received empty response");
+        return None;
+    }
+    Some(String::from_utf8_lossy(&buf[..filled]).into_owned())
 }
 
 /// Extract the HTTP status code from a response status line.

@@ -81,39 +81,46 @@ pub(crate) fn response_header_from_pingora(upstream: &mut pingora_http::Response
 /// ```
 ///
 /// [`Rejection`]: praxis_filter::Rejection
-#[allow(
-    clippy::expect_used,
-    clippy::cognitive_complexity,
-    reason = "status codes are valid; error handling branches"
-)]
+#[allow(clippy::cognitive_complexity, reason = "error handling branches")]
 pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) {
     debug!(status = rejection.status, "sending rejection response");
-
     session.set_keepalive(None);
 
-    let mut header = pingora_http::ResponseHeader::build(rejection.status, Some(rejection.headers.len()))
-        .expect("valid rejection status");
-
-    for (name, value) in &rejection.headers {
-        let _insert = header.insert_header(name.clone(), value.clone());
-    }
-
+    let mut header = build_rejection_header(&rejection);
     let has_body = rejection.body.is_some();
-
     if let Some(ref body) = rejection.body {
         let _insert = header.insert_header("content-length", body.len().to_string());
     }
-
     if let Err(e) = session.write_response_header(Box::new(header), !has_body).await {
         debug!(error = %e, "failed to write rejection response header");
         return;
     }
-
     if let Some(body) = rejection.body
         && let Err(e) = session.write_response_body(Some(body), true).await
     {
         debug!(error = %e, "failed to write rejection response body");
     }
+}
+
+/// Build a Pingora [`ResponseHeader`] from a [`Rejection`], falling back
+/// to 500 if the status code is invalid.
+///
+/// [`ResponseHeader`]: pingora_http::ResponseHeader
+/// [`Rejection`]: praxis_filter::Rejection
+fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader {
+    let header_count = Some(rejection.headers.len());
+    let mut header = match pingora_http::ResponseHeader::build(rejection.status, header_count) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(status = rejection.status, error = %e, "invalid rejection status; using 500");
+            #[allow(clippy::expect_used, reason = "500 is a valid status code")]
+            pingora_http::ResponseHeader::build(500, header_count).expect("500 is a valid status code")
+        },
+    };
+    for (name, value) in &rejection.headers {
+        let _insert = header.insert_header(name.clone(), value.clone());
+    }
+    header
 }
 
 // -----------------------------------------------------------------------------

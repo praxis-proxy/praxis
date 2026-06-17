@@ -65,8 +65,8 @@ pub(crate) struct PingoraTcpProxy {
     /// Per-listener connection semaphore for max connections.
     connection_semaphore: Option<Arc<Semaphore>>,
 
-    /// Optional idle timeout for the bidirectional forwarding session.
-    idle_timeout: Option<Duration>,
+    /// Optional session timeout for the bidirectional forwarding phase.
+    session_timeout: Option<Duration>,
 
     /// Optional maximum total session duration.
     max_duration: Option<Duration>,
@@ -85,14 +85,14 @@ impl PingoraTcpProxy {
         upstream_addr: Option<String>,
         cluster: Option<Arc<str>>,
         pipeline: Arc<ArcSwap<FilterPipeline>>,
-        idle_timeout: Option<Duration>,
+        session_timeout: Option<Duration>,
         max_duration: Option<Duration>,
         connection_semaphore: Option<Arc<Semaphore>>,
     ) -> Self {
         Self {
             cluster,
             connection_semaphore,
-            idle_timeout,
+            session_timeout,
             max_duration,
             pipeline,
             upstream_addr,
@@ -129,7 +129,7 @@ impl PingoraTcpProxy {
     ) -> Option<io::Result<(u64, u64)>> {
         let copy_fut = async {
             let copy_future = tokio::io::copy_bidirectional(session, upstream);
-            match self.idle_timeout {
+            match self.session_timeout {
                 Some(timeout) => forward_with_timeout(copy_future, shutdown_rx, timeout, upstream_addr).await,
                 None => forward_no_timeout(copy_future, shutdown_rx).await,
             }
@@ -213,14 +213,17 @@ impl PingoraTcpProxy {
 impl ServerApp for PingoraTcpProxy {
     #[allow(clippy::too_many_lines, reason = "linear connection lifecycle")]
     async fn process_new(self: &Arc<Self>, mut session: Stream, shutdown: &ShutdownWatch) -> Option<Stream> {
+        let connect_time = std::time::Instant::now();
+        let (remote_addr, local_addr) = extract_addrs(&session);
+
         if praxis_core::memory::is_exceeded() {
-            warn!("memory pressure threshold exceeded, closing TCP connection");
+            warn!(remote = %remote_addr, "memory pressure threshold exceeded, closing TCP connection");
             return None;
         }
 
         let (exceeded, _global_permit) = crate::connections::try_acquire_global();
         if exceeded {
-            warn!("global max connections reached, closing TCP connection");
+            warn!(remote = %remote_addr, "global max connections reached, closing TCP connection");
             return None;
         }
 
@@ -228,15 +231,12 @@ impl ServerApp for PingoraTcpProxy {
             if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
                 Some(permit)
             } else {
-                warn!("max TCP connections reached, closing connection");
+                warn!(remote = %remote_addr, "max TCP connections reached, closing connection");
                 return None;
             }
         } else {
             None
         };
-
-        let connect_time = std::time::Instant::now();
-        let (remote_addr, local_addr) = extract_addrs(&session);
 
         let (sni_hostname, peeked_bytes) = if self.upstream_addr.is_none() {
             let Ok(result) = tokio::time::timeout(SNI_PEEK_TIMEOUT, peek_sni(&mut session)).await else {

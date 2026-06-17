@@ -61,6 +61,35 @@ pub(crate) async fn dispatch_kv_request(registry: &KvStoreRegistry, session: &mu
     let path = session.req_header().uri.path().to_owned();
     let method = session.req_header().method.clone();
 
+    match resolve_kv_route(method.as_str(), &path) {
+        KvRoute::List(store) => handle_list(registry, &store),
+        KvRoute::Get(store, key) => handle_get(registry, &store, &key),
+        KvRoute::Set(store, key) => match read_body(session).await {
+            Ok(body) => handle_set(registry, &store, &key, &body),
+            Err(resp) => resp,
+        },
+        KvRoute::Delete(store, key) => handle_delete(registry, &store, &key),
+        KvRoute::NotFound => json_response(404, br#"{"error":"not found"}"#),
+    }
+}
+
+/// Resolved KV API route from method + path.
+#[derive(Debug, PartialEq, Eq)]
+enum KvRoute {
+    /// `GET /api/kv/{store}`
+    List(String),
+    /// `GET /api/kv/{store}/{key}`
+    Get(String, String),
+    /// `PUT /api/kv/{store}/{key}`
+    Set(String, String),
+    /// `DELETE /api/kv/{store}/{key}`
+    Delete(String, String),
+    /// Unrecognised method or path.
+    NotFound,
+}
+
+/// Parse a KV admin route from method and path.
+fn resolve_kv_route(method: &str, path: &str) -> KvRoute {
     let segments: Vec<&str> = path
         .strip_prefix("/api/kv/")
         .unwrap_or("")
@@ -68,15 +97,12 @@ pub(crate) async fn dispatch_kv_request(registry: &KvStoreRegistry, session: &mu
         .filter(|s| !s.is_empty())
         .collect();
 
-    match (method.as_str(), segments.as_slice()) {
-        ("GET", [store]) => handle_list(registry, store),
-        ("GET", [store, key]) => handle_get(registry, store, key),
-        ("PUT", [store, key]) => match read_body(session).await {
-            Ok(body) => handle_set(registry, store, key, &body),
-            Err(resp) => resp,
-        },
-        ("DELETE", [store, key]) => handle_delete(registry, store, key),
-        _ => json_response(404, br#"{"error":"not found"}"#),
+    match (method, segments.as_slice()) {
+        ("GET", [store]) => KvRoute::List((*store).to_owned()),
+        ("GET", [store, key]) => KvRoute::Get((*store).to_owned(), (*key).to_owned()),
+        ("PUT", [store, key]) => KvRoute::Set((*store).to_owned(), (*key).to_owned()),
+        ("DELETE", [store, key]) => KvRoute::Delete((*store).to_owned(), (*key).to_owned()),
+        _ => KvRoute::NotFound,
     }
 }
 
@@ -97,12 +123,21 @@ impl ServeHttp for PingoraKvService {
 /// valid UTF-8.
 async fn read_body(session: &mut ServerSession) -> Result<String, Response<Vec<u8>>> {
     let mut buf = Vec::new();
-    while let Some(chunk) = session.read_request_body().await.ok().flatten() {
-        if buf.len() + chunk.len() > MAX_BODY_BYTES {
-            warn!(limit = MAX_BODY_BYTES, "KV admin request body exceeded size limit");
-            return Err(json_response(413, br#"{"error":"request body too large"}"#));
+    loop {
+        match session.read_request_body().await {
+            Ok(Some(chunk)) => {
+                if buf.len() + chunk.len() > MAX_BODY_BYTES {
+                    warn!(limit = MAX_BODY_BYTES, "KV admin request body exceeded size limit");
+                    return Err(json_response(413, br#"{"error":"request body too large"}"#));
+                }
+                buf.extend_from_slice(&chunk);
+            },
+            Ok(None) => break,
+            Err(e) => {
+                warn!(error = %e, "KV admin request body read failed");
+                return Err(json_response(502, br#"{"error":"request body read failed"}"#));
+            },
         }
-        buf.extend_from_slice(&chunk);
     }
     String::from_utf8(buf).map_err(|e| {
         warn!(error = %e, "KV admin request body is not valid UTF-8");
@@ -316,6 +351,87 @@ mod tests {
         let registry = make_empty_registry();
         let resp = handle_list(&registry, "nope");
         assert_eq!(resp.status().as_u16(), 404, "missing store should return 404");
+    }
+
+    #[test]
+    fn route_get_single_segment_is_list() {
+        assert_eq!(
+            resolve_kv_route("GET", "/api/kv/mystore"),
+            KvRoute::List("mystore".to_owned()),
+            "GET with one segment should route to List"
+        );
+    }
+
+    #[test]
+    fn route_get_two_segments_is_get() {
+        assert_eq!(
+            resolve_kv_route("GET", "/api/kv/mystore/mykey"),
+            KvRoute::Get("mystore".to_owned(), "mykey".to_owned()),
+            "GET with two segments should route to Get"
+        );
+    }
+
+    #[test]
+    fn route_put_two_segments_is_set() {
+        assert_eq!(
+            resolve_kv_route("PUT", "/api/kv/mystore/mykey"),
+            KvRoute::Set("mystore".to_owned(), "mykey".to_owned()),
+            "PUT with two segments should route to Set"
+        );
+    }
+
+    #[test]
+    fn route_delete_two_segments_is_delete() {
+        assert_eq!(
+            resolve_kv_route("DELETE", "/api/kv/mystore/mykey"),
+            KvRoute::Delete("mystore".to_owned(), "mykey".to_owned()),
+            "DELETE with two segments should route to Delete"
+        );
+    }
+
+    #[test]
+    fn route_unknown_method_is_not_found() {
+        assert_eq!(
+            resolve_kv_route("PATCH", "/api/kv/mystore/mykey"),
+            KvRoute::NotFound,
+            "PATCH should route to NotFound"
+        );
+    }
+
+    #[test]
+    fn route_extra_segments_is_not_found() {
+        assert_eq!(
+            resolve_kv_route("GET", "/api/kv/store/key/extra"),
+            KvRoute::NotFound,
+            "extra path segments should route to NotFound"
+        );
+    }
+
+    #[test]
+    fn route_no_segments_is_not_found() {
+        assert_eq!(
+            resolve_kv_route("GET", "/api/kv/"),
+            KvRoute::NotFound,
+            "bare /api/kv/ should route to NotFound"
+        );
+    }
+
+    #[test]
+    fn route_wrong_prefix_is_not_found() {
+        assert_eq!(
+            resolve_kv_route("GET", "/api/other/store"),
+            KvRoute::NotFound,
+            "wrong path prefix should route to NotFound"
+        );
+    }
+
+    #[test]
+    fn route_trailing_slash_ignored() {
+        assert_eq!(
+            resolve_kv_route("GET", "/api/kv/store/"),
+            KvRoute::List("store".to_owned()),
+            "trailing slash should be filtered and match List"
+        );
     }
 
     #[test]
