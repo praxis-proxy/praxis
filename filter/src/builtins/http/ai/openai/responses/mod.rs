@@ -17,7 +17,6 @@
 //! The `openai_responses_validate` filter runs after the classifier
 //! to validate parameter combinations and extract additional fields.
 
-pub(crate) mod classifier;
 mod config;
 #[allow(
     dead_code,
@@ -46,9 +45,16 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tracing::{debug, trace};
 
-use self::{
-    classifier::{AiRequestFormat, classify_request_body, is_responses_path},
-    config::{OnInvalidBehavior, ResponsesFormatConfig, build_config},
+use self::config::{OnInvalidBehavior, ResponsesFormatConfig, build_config};
+use crate::{
+    FilterAction, FilterError, Rejection,
+    body::{BodyAccess, BodyMode},
+    builtins::http::{
+        ai::classifier::{AiRequestFormat, ClassifiedRequest, classify_request_body, empty_result, is_responses_path},
+        value_safety::is_safe_promoted_value,
+    },
+    factory::parse_filter_config,
+    filter::{HttpFilter, HttpFilterContext},
 };
 
 // -----------------------------------------------------------------------------
@@ -57,13 +63,6 @@ use self::{
 
 /// Maximum length of a body-derived value promoted to headers or filter results.
 const MAX_PROMOTED_VALUE_LEN: usize = 256;
-use crate::{
-    FilterAction, FilterError, Rejection,
-    body::{BodyAccess, BodyMode},
-    builtins::http::value_safety::is_safe_promoted_value,
-    factory::parse_filter_config,
-    filter::{HttpFilter, HttpFilterContext},
-};
 
 // -----------------------------------------------------------------------------
 // ResponsesFormatFilter
@@ -151,7 +150,7 @@ impl HttpFilter for ResponsesFormatFilter {
                 path = ctx.request.uri.path(),
                 "classified request by method and path"
             );
-            classifier::empty_result(AiRequestFormat::Responses)
+            empty_result(AiRequestFormat::Responses)
         } else {
             classify_request_body(bytes)
         };
@@ -189,7 +188,9 @@ fn handle_invalid_format(format: AiRequestFormat, config: &ResponsesFormatConfig
                 AiRequestFormat::InvalidJson => "invalid JSON body",
                 AiRequestFormat::NonJson => "request body is not JSON",
                 AiRequestFormat::UnknownJson => "unrecognized AI API format",
-                AiRequestFormat::Responses | AiRequestFormat::ChatCompletions => return None,
+                AiRequestFormat::Responses | AiRequestFormat::AnthropicMessages | AiRequestFormat::ChatCompletions => {
+                    return None;
+                },
             };
 
             trace!(reason = message, "rejecting unrecognized body");
@@ -210,7 +211,7 @@ fn handle_invalid_format(format: AiRequestFormat, config: &ResponsesFormatConfig
 /// (conversation history, tools, persistence, or background processing)
 /// and `Some("stateless")` when it can be forwarded directly to a
 /// native Responses backend. Returns `None` for non-Responses formats.
-fn compute_mode(classified: &classifier::ClassifiedRequest) -> Option<&'static str> {
+fn compute_mode(classified: &ClassifiedRequest) -> Option<&'static str> {
     if classified.format != AiRequestFormat::Responses {
         return None;
     }
@@ -225,7 +226,7 @@ fn compute_mode(classified: &classifier::ClassifiedRequest) -> Option<&'static s
 }
 
 /// Write durable metadata that persists across all Pingora lifecycle phases.
-fn write_metadata(ctx: &mut HttpFilterContext<'_>, classified: &classifier::ClassifiedRequest, mode: Option<&str>) {
+fn write_metadata(ctx: &mut HttpFilterContext<'_>, classified: &ClassifiedRequest, mode: Option<&str>) {
     ctx.set_metadata("openai_responses_format.format", classified.format.as_str());
     write_optional_metadata(ctx, classified);
     write_boolean_metadata(ctx, classified);
@@ -236,7 +237,7 @@ fn write_metadata(ctx: &mut HttpFilterContext<'_>, classified: &classifier::Clas
 }
 
 /// Write optional string and boolean-option metadata fields.
-fn write_optional_metadata(ctx: &mut HttpFilterContext<'_>, classified: &classifier::ClassifiedRequest) {
+fn write_optional_metadata(ctx: &mut HttpFilterContext<'_>, classified: &ClassifiedRequest) {
     if let Some(model) = &classified.model
         && is_safe_promoted_value(model)
     {
@@ -260,7 +261,7 @@ fn write_optional_metadata(ctx: &mut HttpFilterContext<'_>, classified: &classif
 }
 
 /// Write boolean presence flags to metadata.
-fn write_boolean_metadata(ctx: &mut HttpFilterContext<'_>, classified: &classifier::ClassifiedRequest) {
+fn write_boolean_metadata(ctx: &mut HttpFilterContext<'_>, classified: &ClassifiedRequest) {
     if classified.has_previous_response_id {
         ctx.set_metadata("openai_responses_format.has_previous_response_id", "true");
     }
@@ -278,7 +279,7 @@ fn write_boolean_metadata(ctx: &mut HttpFilterContext<'_>, classified: &classifi
 /// Promote classification facts to configurable request headers.
 fn promote_headers(
     ctx: &mut HttpFilterContext<'_>,
-    classified: &classifier::ClassifiedRequest,
+    classified: &ClassifiedRequest,
     config: &ResponsesFormatConfig,
     mode: Option<&str>,
 ) {
@@ -316,7 +317,7 @@ fn promote_headers(
 /// Promote classification facts to filter results for branch conditions.
 fn promote_filter_results(
     ctx: &mut HttpFilterContext<'_>,
-    classified: &classifier::ClassifiedRequest,
+    classified: &ClassifiedRequest,
     mode: Option<&'static str>,
 ) -> Result<(), FilterError> {
     let results = ctx.filter_results.entry("openai_responses_format").or_default();
@@ -335,7 +336,7 @@ fn promote_filter_results(
 /// Promote optional string and boolean-option fields to filter results.
 fn promote_optional_results(
     results: &mut crate::results::FilterResultSet,
-    classified: &classifier::ClassifiedRequest,
+    classified: &ClassifiedRequest,
 ) -> Result<(), FilterError> {
     if let Some(model) = &classified.model
         && is_safe_promoted_value(model)
@@ -362,7 +363,7 @@ fn promote_optional_results(
 /// Promote boolean presence flags to filter results.
 fn promote_boolean_results(
     results: &mut crate::results::FilterResultSet,
-    classified: &classifier::ClassifiedRequest,
+    classified: &ClassifiedRequest,
 ) -> Result<(), FilterError> {
     if classified.has_previous_response_id {
         results.set("has_previous_response_id", "true")?;

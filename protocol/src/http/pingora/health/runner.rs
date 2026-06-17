@@ -122,13 +122,17 @@ async fn run_health_check_loop(params: &HealthCheckParams, shutdown: Cancellatio
 
     probe_all_endpoints(params).await;
 
+    let mut ticker = tokio::time::interval(params.interval);
+    ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ticker.tick().await;
+
     loop {
         tokio::select! {
             () = shutdown.cancelled() => {
                 info!(cluster = %params.cluster_name, "health check shutting down");
                 return;
             }
-            () = tokio::time::sleep(params.interval) => {
+            _ = ticker.tick() => {
                 probe_all_endpoints(params).await;
             }
         }

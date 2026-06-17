@@ -85,12 +85,7 @@ pub(super) async fn handle_max_forwards(session: &mut Session) -> Option<bool> {
         return None;
     }
 
-    let mf = session
-        .req_header()
-        .headers
-        .get("max-forwards")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.trim().parse::<u32>().ok())?;
+    let mf = parse_max_forwards(session)?;
 
     if mf == 0 {
         debug!(method = %method, "Max-Forwards is 0; responding without forwarding");
@@ -108,4 +103,94 @@ pub(super) async fn handle_max_forwards(session: &mut Session) -> Option<bool> {
         .req_header_mut()
         .insert_header("max-forwards", (mf - 1).to_string());
     None
+}
+
+/// Parse `Max-Forwards` from a Pingora session.
+fn parse_max_forwards(session: &Session) -> Option<u32> {
+    session
+        .req_header()
+        .headers
+        .get("max-forwards")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.trim().parse::<u32>().ok())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod tests {
+    #[test]
+    fn max_forwards_applies_to_trace() {
+        assert!(
+            is_max_forwards_method(&http::Method::TRACE),
+            "Max-Forwards should apply to TRACE"
+        );
+    }
+
+    #[test]
+    fn max_forwards_applies_to_options() {
+        assert!(
+            is_max_forwards_method(&http::Method::OPTIONS),
+            "Max-Forwards should apply to OPTIONS"
+        );
+    }
+
+    #[test]
+    fn max_forwards_does_not_apply_to_get() {
+        assert!(
+            !is_max_forwards_method(&http::Method::GET),
+            "Max-Forwards should not apply to GET"
+        );
+    }
+
+    #[test]
+    fn max_forwards_does_not_apply_to_post() {
+        assert!(
+            !is_max_forwards_method(&http::Method::POST),
+            "Max-Forwards should not apply to POST"
+        );
+    }
+
+    #[test]
+    fn max_forwards_does_not_apply_to_put() {
+        assert!(
+            !is_max_forwards_method(&http::Method::PUT),
+            "Max-Forwards should not apply to PUT"
+        );
+    }
+
+    #[test]
+    fn max_forwards_does_not_apply_to_delete() {
+        assert!(
+            !is_max_forwards_method(&http::Method::DELETE),
+            "Max-Forwards should not apply to DELETE"
+        );
+    }
+
+    #[test]
+    fn max_forwards_does_not_apply_to_head() {
+        assert!(
+            !is_max_forwards_method(&http::Method::HEAD),
+            "Max-Forwards should not apply to HEAD"
+        );
+    }
+
+    #[test]
+    fn max_forwards_does_not_apply_to_patch() {
+        assert!(
+            !is_max_forwards_method(&http::Method::PATCH),
+            "Max-Forwards should not apply to PATCH"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------
+
+    fn is_max_forwards_method(method: &http::Method) -> bool {
+        matches!(*method, http::Method::TRACE | http::Method::OPTIONS)
+    }
 }

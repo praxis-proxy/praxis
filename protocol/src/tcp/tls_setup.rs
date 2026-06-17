@@ -47,11 +47,12 @@ pub(super) fn group_tcp_listeners(config: &Config) -> HashMap<TcpGroupKey, Vec<&
 // Group Consistency Validation
 // -----------------------------------------------------------------------------
 
-/// Reject TCP groups where listeners have inconsistent filter chains.
+/// Reject TCP groups where listeners have inconsistent settings.
 ///
 /// All listeners sharing the same `(upstream, cluster, timeout)`
 /// key are served by a single Pingora [`Service`], which uses
-/// one pipeline. Differing `filter_chains` would be silently
+/// one pipeline and one connection semaphore. Differing
+/// `filter_chains` or `max_connections` would be silently
 /// discarded; this check surfaces the misconfiguration early.
 ///
 /// [`Service`]: pingora_core::services::listening::Service
@@ -68,6 +69,14 @@ pub(super) fn validate_tcp_group_consistency(
                     "TCP listeners '{}' and '{}' share the same upstream/timeout \
                      group but have different filter_chains; grouped listeners \
                      must use identical chains",
+                    first.name, listener.name
+                )));
+            }
+            if listener.max_connections != first.max_connections {
+                return Err(ProxyError::Config(format!(
+                    "TCP listeners '{}' and '{}' share the same upstream/timeout \
+                     group but have different max_connections; grouped listeners \
+                     must use identical limits",
                     first.name, listener.name
                 )));
             }
@@ -253,6 +262,81 @@ listeners:
         );
     }
 
+    #[test]
+    fn validate_consistency_accepts_matching_chains() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: a
+    address: "0.0.0.0:5432"
+    protocol: tcp
+    upstream: "10.0.0.1:5432"
+  - name: b
+    address: "0.0.0.0:5433"
+    protocol: tcp
+    upstream: "10.0.0.1:5432"
+"#,
+        )
+        .unwrap();
+        let groups = group_tcp_listeners(&config);
+        assert!(
+            validate_tcp_group_consistency(&groups).is_ok(),
+            "identical chains should pass consistency check"
+        );
+    }
+
+    #[test]
+    fn validate_consistency_rejects_different_chains() {
+        let owned = groups_with_different_filter_chains();
+        let groups = to_ref_groups(&owned);
+        let err = validate_tcp_group_consistency(&groups).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("different filter_chains"),
+            "error should mention filter_chains: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_consistency_rejects_different_max_connections() {
+        let owned = groups_with_different_max_connections();
+        let groups = to_ref_groups(&owned);
+        let err = validate_tcp_group_consistency(&groups).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("different max_connections"),
+            "error should mention max_connections: {msg}"
+        );
+    }
+
+    #[test]
+    fn validate_consistency_accepts_single_listener_groups() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: solo
+    address: "0.0.0.0:5432"
+    protocol: tcp
+    upstream: "10.0.0.1:5432"
+"#,
+        )
+        .unwrap();
+        let groups = group_tcp_listeners(&config);
+        assert!(
+            validate_tcp_group_consistency(&groups).is_ok(),
+            "single-listener group should always pass"
+        );
+    }
+
+    #[test]
+    fn validate_consistency_accepts_empty_groups() {
+        let groups: HashMap<TcpGroupKey, Vec<&praxis_core::config::Listener>> = HashMap::new();
+        assert!(
+            validate_tcp_group_consistency(&groups).is_ok(),
+            "empty groups should pass"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -337,5 +421,58 @@ filter_chains:
             runtime: RuntimeConfig::default(),
             shutdown_timeout_secs: 10,
         }
+    }
+
+    /// Convert owned listener groups to reference-based groups.
+    fn to_ref_groups(
+        owned: &HashMap<TcpGroupKey, Vec<praxis_core::config::Listener>>,
+    ) -> HashMap<TcpGroupKey, Vec<&praxis_core::config::Listener>> {
+        owned.iter().map(|(k, v)| (k.clone(), v.iter().collect())).collect()
+    }
+
+    /// Build grouped listeners with different `filter_chains`.
+    fn groups_with_different_filter_chains() -> HashMap<TcpGroupKey, Vec<praxis_core::config::Listener>> {
+        let mut a = make_tcp_listener("a", "0.0.0.0:5432");
+        a.filter_chains = vec!["chain-a".to_owned()];
+        let mut b = make_tcp_listener("b", "0.0.0.0:5433");
+        b.filter_chains = vec!["chain-b".to_owned()];
+        make_group(vec![a, b])
+    }
+
+    /// Build grouped listeners with different `max_connections`.
+    fn groups_with_different_max_connections() -> HashMap<TcpGroupKey, Vec<praxis_core::config::Listener>> {
+        let mut a = make_tcp_listener("a", "0.0.0.0:5432");
+        a.max_connections = Some(100);
+        let mut b = make_tcp_listener("b", "0.0.0.0:5433");
+        b.max_connections = Some(200);
+        make_group(vec![a, b])
+    }
+
+    /// Build a TCP listener with the given name and address.
+    fn make_tcp_listener(name: &str, address: &str) -> praxis_core::config::Listener {
+        use praxis_core::config::{Listener, ProtocolKind};
+        Listener {
+            name: name.to_owned(),
+            address: address.to_owned(),
+            cluster: None,
+            downstream_read_timeout_ms: None,
+            filter_chains: vec![],
+            max_connections: None,
+            protocol: ProtocolKind::Tcp,
+            tcp_session_timeout_ms: None,
+            tcp_max_duration_secs: None,
+            tls: None,
+            upstream: Some("10.0.0.1:5432".to_owned()),
+        }
+    }
+
+    /// Wrap listeners into a single-group map.
+    fn make_group(
+        listeners: Vec<praxis_core::config::Listener>,
+    ) -> HashMap<TcpGroupKey, Vec<praxis_core::config::Listener>> {
+        let key = (Some("10.0.0.1:5432".to_owned()), None, None, None);
+        let mut groups = HashMap::new();
+        groups.insert(key, listeners);
+        groups
     }
 }

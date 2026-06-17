@@ -22,6 +22,7 @@ pub(crate) fn json_response(status: u16, body: &[u8]) -> Response<Vec<u8>> {
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
+        .header("Content-Length", body.len())
         .body(body.to_vec())
         .expect("valid json response")
 }
@@ -31,6 +32,7 @@ pub(crate) fn json_response(status: u16, body: &[u8]) -> Response<Vec<u8>> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 
@@ -45,5 +47,26 @@ mod tests {
         let body = b"{\"key\":\"value\"}";
         let resp = json_response(200, body);
         assert_eq!(resp.body(), body, "body content mismatch");
+    }
+
+    #[test]
+    fn sets_content_type_header() {
+        let resp = json_response(200, b"{}");
+        assert_eq!(
+            resp.headers().get("Content-Type").map(|v| v.to_str().unwrap()),
+            Some("application/json"),
+            "Content-Type header should be application/json"
+        );
+    }
+
+    #[test]
+    fn sets_content_length_header() {
+        let body = b"{\"ok\":true}";
+        let resp = json_response(200, body);
+        assert_eq!(
+            resp.headers().get("Content-Length").map(|v| v.to_str().unwrap()),
+            Some("11"),
+            "Content-Length should match body length"
+        );
     }
 }

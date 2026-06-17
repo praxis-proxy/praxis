@@ -25,7 +25,6 @@ RUST_TARGETS := all build release check \
 	lint fmt doc audit coverage coverage-check \
 	run-echo run-debug
 NIGHTLY_FMT_TARGETS  := lint fmt
-NIGHTLY_FUZZ_TARGETS := fuzz fuzz-build
 CMAKE_TARGETS := all build release check \
 	test test-unit \
 	test-schema test-integration test-conformance \
@@ -33,8 +32,7 @@ CMAKE_TARGETS := all build release check \
 	test-config-validation test-config \
 	bench \
 	lint doc coverage coverage-check \
-	run-echo run-debug \
-	fuzz fuzz-build
+	run-echo run-debug
 
 ifneq ($(V),)
   _NOCAPTURE := -- --nocapture
@@ -46,7 +44,6 @@ endif
 	test-security test-security-suite test-resilience test-smoke \
 	bench \
 	lint fmt doc audit coverage coverage-check \
-	fuzz fuzz-build \
 	require-container-engine \
 	container container-run \
 	test-container test-container-run \
@@ -90,7 +87,6 @@ check-prereqs-nightly: check-prereqs-nightly-toolchain
 $(RUST_TARGETS): check-prereqs
 $(CMAKE_TARGETS): check-prereqs-cmake
 $(NIGHTLY_FMT_TARGETS): check-prereqs-nightly
-$(NIGHTLY_FUZZ_TARGETS): check-prereqs-nightly-toolchain
 
 # -------------------------------------------------------------------
 # All
@@ -105,7 +101,6 @@ all: build fmt lint test audit container
 build:
 	cargo build --workspace
 	cargo build --workspace --benches
-	cargo build --manifest-path tests/fuzz/Cargo.toml
 
 release:
 	cargo build --workspace --release
@@ -187,21 +182,6 @@ test-smoke:
 
 bench: $(VEGETA) $(FORTIO_DEP)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo bench -p benchmarks
-
-# -------------------------------------------------------------------
-# Fuzz
-# -------------------------------------------------------------------
-
-FUZZ_DURATION ?= 120
-
-fuzz:
-	cargo +$(NIGHTLY_VERSION) fuzz run --fuzz-dir tests/fuzz fuzz_sni -- -max_total_time=$(FUZZ_DURATION)
-	cargo +$(NIGHTLY_VERSION) fuzz run --fuzz-dir tests/fuzz fuzz_path_sanitize -- -max_total_time=$(FUZZ_DURATION)
-	cargo +$(NIGHTLY_VERSION) fuzz run --fuzz-dir tests/fuzz fuzz_config_parse -- -max_total_time=$(FUZZ_DURATION)
-	cargo +$(NIGHTLY_VERSION) fuzz run --fuzz-dir tests/fuzz fuzz_filter_pipeline -- -max_total_time=$(FUZZ_DURATION)
-
-fuzz-build:
-	cargo +$(NIGHTLY_VERSION) fuzz build --fuzz-dir tests/fuzz
 
 # -------------------------------------------------------------------
 # Quality
@@ -378,10 +358,6 @@ help:
 	@echo ""
 	@echo "Bench:"
 	@echo "  bench                Criterion micro-benchmarks"
-	@echo ""
-	@echo "Fuzz (requires cargo-fuzz + nightly):"
-	@echo "  fuzz                 run all fuzz targets (FUZZ_DURATION=60)"
-	@echo "  fuzz-build           build fuzz targets without running"
 	@echo ""
 	@echo "Quality:"
 	@echo "  lint                 clippy + rustfmt check"
