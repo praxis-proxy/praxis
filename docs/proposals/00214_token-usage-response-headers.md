@@ -1,11 +1,11 @@
 ---
 issue: https://github.com/praxis-proxy/praxis/issues/214
-discussion: # TBD
+discussion: https://github.com/praxis-proxy/praxis/pull/471
 status: proposed
 authors:
   - noalimoy
 graduation_criteria:
-  - How? section with requirements and design
+  - Implementation PR with passing tests
 stakeholders:
   - shaneutt
   - szedan-rh
@@ -25,9 +25,9 @@ response:
 
 | Header | Value |
 |--------|-------|
-| `X-Token-Input` | Input/prompt token count |
-| `X-Token-Output` | Output/completion token count |
-| `X-Token-Total` | Total token count (input + output) |
+| `Praxis-Token-Input` | Input/prompt token count |
+| `Praxis-Token-Output` | Output/completion token count |
+| `Praxis-Token-Total` | Total token count (input + output) |
 
 Headers are only injected when token data is available
 in filter metadata. If the upstream response does not
@@ -35,8 +35,9 @@ contain token usage (e.g., error responses, non-AI
 traffic), no headers are added. For streaming responses,
 token counts are only resolved after the full body has
 been accumulated ([#211]), parsed ([#216]), and written
-to filter metadata ([#212]); header injection in this
-case is an open design question (see below).
+to filter metadata ([#212]); header injection for
+streaming is an open question (see Open Questions
+below).
 
 ### Goals
 
@@ -45,7 +46,8 @@ case is an open design question (see below).
 - Read token data from filter metadata without
   provider-specific logic
 - Support conditional injection (only when data exists)
-- Work with both streaming and non-streaming responses
+- Support non-streaming responses; define a path for
+  streaming support
 
 ### Non-Goals
 
@@ -93,31 +95,150 @@ consumption.
   the HTTP level so that I can make routing decisions
   based on response cost without deep packet inspection.
 
+## How?
+
+### Requirements
+
+- Read token counts from `filter_metadata` keys:
+  `token.input`, `token.output`, `token.total`
+- Inject headers only when all three values are present
+- Operate in the `on_response` filter phase
+- Mark `response_headers_modified` when headers are
+  added
+- No-op when token data is absent (non-AI traffic,
+  error responses)
+- No configuration options (zero-config filter)
+- Use `Praxis-Token-*` header prefix
+
+### Design
+
+#### Module Location
+
+The filter lives at
+`filter/src/builtins/http/observability/token_usage_headers.rs`
+alongside the existing `access_log` and `request_id`
+observability filters.
+
+#### Data Flow
+
+The filter consumes metadata written by
+`set_token_usage()` ([#474]) via `filter_metadata`:
+
+```text
+Token Counting Filter (writes via set_token_usage)
+  ctx.set_token_usage(150, 350, None)
+    → ctx.set_metadata("token.input", "150")
+    → ctx.set_metadata("token.output", "350")
+    → ctx.set_metadata("token.total", "500")  // auto-computed
+       │
+       ▼
+TokenUsageHeadersFilter (reads via get_metadata)
+  ctx.get_metadata("token.input")
+       │
+       ▼
+Response Headers (injected into downstream response)
+  Praxis-Token-Input: 150
+  Praxis-Token-Output: 350
+  Praxis-Token-Total: 500
+```
+
+#### Implementation Approach
+
+1. **String-based metadata transport** — per maintainer
+   guidance in [#462], token data uses `filter_metadata`
+   rather than typed fields on `HttpFilterContext`. This
+   keeps the core struct free of AI-specific concerns.
+
+2. **All-or-nothing injection** — if any of the three
+   metadata keys is missing, no headers are injected.
+   This matches the atomicity guarantee of
+   `set_token_usage()` which always writes all three
+   keys together.
+
+3. **Compile-time header names** — header constants use
+   `HeaderName::from_static()` for zero-cost runtime
+   validation.
+
+4. **`Praxis-Token-*` prefix** — the `x-praxis-*`
+   prefix is reserved for proxy-internal routing
+   metadata: rejected from clients (HTTP 400),
+   stripped from upstream responses, and never
+   forwarded to clients (`reserved_headers.rs`).
+   Using `X-Praxis-Token-*` would place client-facing
+   headers inside that reserved namespace, since
+   `x-praxis-token-input` starts with `x-praxis-`.
+
+   Existing client-facing headers (`X-Request-ID`,
+   `X-RateLimit-*`) are de facto industry standards
+   that don't need a vendor prefix. Per-request token
+   usage has no such standard — providers report
+   remaining quota in headers (`x-ratelimit-*`) but
+   expose actual consumption only in the JSON body.
+   This filter surfaces per-request usage at the HTTP
+   layer, which is Praxis-specific, so a vendor
+   prefix identifies the source.
+
+   `Praxis-Token-*` (without `X-`) satisfies both
+   constraints: `praxis-token-input` does not match
+   the reserved `x-praxis-*` prefix, and the
+   `Praxis-` vendor prefix identifies the source.
+   Dropping the `X-` prefix also aligns with
+   RFC 6648, which deprecates `X-` for new headers.
+
+5. **Streaming** — for non-streaming responses the
+   filter operates in `on_response` where
+   `response_header` is available. For streaming
+   responses, token counts arrive during
+   `on_response_body` where `response_header` is
+   `None`. The mechanism for streaming header
+   injection remains an open question (see below).
+
+#### Pipeline Ordering
+
+The filter must run **after** the token counting filter
+in the response phase. Since `on_response` executes in
+reverse config order, `token_usage_headers` should
+appear **before** the token counting filter in the YAML
+filter chain:
+
+```yaml
+filters:
+  - filter: token_usage_headers
+  - filter: token_counting
+  - filter: load_balancer
+    clusters:
+      - name: backend
+        endpoints:
+          - "127.0.0.1:3000"
+```
+
+No explicit dependency configuration is required.
+
+#### YAML Configuration
+
+```yaml
+- filter: token_usage_headers
+```
+
+No configuration parameters. The filter is enabled by
+including it in the filter chain.
+
 ## Open Questions
 
-### Header naming convention
+### Streaming header injection
 
-The proposed header names use the `X-Token-*` prefix.
-Praxis already reserves the `x-praxis-*` prefix for
-internal proxy metadata. Should downstream-facing token
-headers follow a similar convention (e.g.,
-`X-Praxis-Token-Input`), or is the current
-`X-Token-Input` form sufficient?
-
-### Streaming and header injection timing
-
-For non-streaming responses the filter can add headers
-before the body is sent. For streaming responses, token
-counts are only available after the final chunk is
-processed. In HTTP/1.1, response headers are sent before
-the body, so injecting them after streaming completes is
-not possible with standard headers. Should the filter
-use HTTP trailers, buffer the response, or skip header
-injection for streaming responses entirely? This will be
-addressed in the How? section.
+For streaming responses, token counts are only
+available after the final chunk is processed. At that
+point, `response_header` is `None` in the current
+architecture. Options include HTTP trailers, response
+buffering, or a new pipeline hook. This will be
+resolved during implementation.
 
 [#210]: https://github.com/praxis-proxy/praxis/issues/210
 [#211]: https://github.com/praxis-proxy/praxis/issues/211
 [#212]: https://github.com/praxis-proxy/praxis/issues/212
 [#216]: https://github.com/praxis-proxy/praxis/issues/216
+[#462]: https://github.com/praxis-proxy/praxis/pull/462
+[#471]: https://github.com/praxis-proxy/praxis/pull/471
+[#474]: https://github.com/praxis-proxy/praxis/pull/474
 
