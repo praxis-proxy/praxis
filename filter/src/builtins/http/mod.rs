@@ -12,6 +12,8 @@ mod transformation;
 pub(crate) mod value_safety;
 
 #[cfg(feature = "ai-inference")]
+pub use ai::AnthropicMessagesFormatFilter;
+#[cfg(feature = "ai-inference")]
 pub use ai::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::OpenaiResponsesValidateFilter;

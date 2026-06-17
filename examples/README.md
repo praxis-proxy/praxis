@@ -25,6 +25,7 @@ page.
 | [a2a-classifier-routing.yaml](configs/ai/a2a-classifier-routing.yaml) | Routes A2A requests by body-derived method, family, task ID, and streaming detection |
 | [a2a-task-routing.yaml](configs/ai/a2a-task-routing.yaml) | Captures task ownership from SendMessage JSON responses and SendStreamingMessage / SubscribeToTask SSE responses, then routes follow-up task operations back to the backend cluster that created the task |
 | [ai-inference-body-based-routing.yaml](configs/ai/ai-inference-body-based-routing.yaml) | Routes LLM API requests to different backends based on the `model` field in the JSON request body |
+| [unified-gateway.yaml](configs/ai/anthropic/unified-gateway.yaml) | Routes traffic by classifier-promoted headers so a single listener handles Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses requests |
 | [credential-injection.yaml](configs/ai/credential-injection.yaml) | Injects per-cluster API credentials into upstream requests and strips client-provided credentials to prevent forwarding |
 | [json-rpc-routing.yaml](configs/ai/json-rpc-routing.yaml) | Routes JSON-RPC 2.0 requests to different backends based on the "method" field in the JSON request body |
 | [mcp-classifier-routing.yaml](configs/ai/mcp-classifier-routing.yaml) | Routes MCP requests by body-derived method and tool name |
