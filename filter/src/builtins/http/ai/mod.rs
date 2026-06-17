@@ -24,6 +24,10 @@ pub(crate) mod store;
 pub(crate) mod token_usage;
 
 mod token_usage_headers;
+#[cfg(feature = "ai-inference")]
+mod token_count;
+#[cfg(feature = "ai-inference")]
+mod x_token_headers;
 
 pub(crate) mod config_validation;
 mod on_invalid;
@@ -61,3 +65,7 @@ pub use prompt_enrich::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
 pub use store::ResponseStoreRegistry;
 pub use token_usage_headers::TokenUsageHeadersFilter;
+#[cfg(feature = "ai-inference")]
+pub use token_count::TokenCountFilter;
+#[cfg(feature = "ai-inference")]
+pub use x_token_headers::XTokenHeadersFilter;

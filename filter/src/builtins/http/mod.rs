@@ -44,6 +44,8 @@ pub use ai::ResponsesProxyFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::token_usage::{TokenUsage, TokenUsageProvider, extract_token_usage, set_token_usage};
 pub use ai::{A2aFilter, JsonRpcFilter, McpFilter, TokenUsageHeadersFilter};
+#[cfg(feature = "ai-inference")]
+pub use ai::{TokenCountFilter, XTokenHeadersFilter};
 pub use observability::{AccessLogFilter, RequestIdFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter};
 #[cfg(feature = "cpex-policy-engine")]

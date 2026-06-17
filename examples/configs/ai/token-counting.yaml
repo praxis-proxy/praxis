@@ -1,0 +1,50 @@
+# Token counting: extract and surface AI provider token usage.
+#
+# Requires the ai-inference feature:
+#   cargo build -p praxis --features ai-inference
+#
+# Chains token_count → x_token_headers → access_log.
+#
+# token_count reads the provider response body (or headers for
+# bedrock_invoke_model) and writes input/output/total counts to
+# FilterContext metadata.
+#
+# x_token_headers injects X-Token-Input, X-Token-Output, and
+# X-Token-Total into the downstream response.
+#
+# access_log emits a structured log line per request.
+#
+# Usage:
+#   RUST_LOG=info cargo run -p praxis --features ai-inference \
+#     -- -c examples/configs/ai/token-counting.yaml
+
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - token-counting
+
+filter_chains:
+  - name: token-counting
+    filters:
+      # x_token_headers must come before token_count so that in the
+      # reverse response-header phase it runs after token_count and can
+      # read the token metadata that token_count sets from response headers
+      # (bedrock_invoke_model) or from on_response_body (all others).
+      - filter: x_token_headers
+
+      - filter: token_count
+        provider: openai
+
+      - filter: access_log
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: ai-provider
+
+      - filter: load_balancer
+        clusters:
+          - name: ai-provider
+            endpoints:
+              - "127.0.0.1:8000"

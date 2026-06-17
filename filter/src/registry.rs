@@ -230,6 +230,18 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
         "responses_proxy",
         crate::builtins::ResponsesProxyFilter::from_config,
     );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "token_count",
+        crate::builtins::TokenCountFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "x_token_headers",
+        crate::builtins::XTokenHeadersFilter::from_config,
+    );
 }
 
 /// Register a single HTTP filter factory by name.
