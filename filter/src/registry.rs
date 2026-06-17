@@ -146,6 +146,12 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     #[cfg(feature = "ai-inference")]
     register_http(
         factories,
+        "anthropic_messages_format",
+        crate::builtins::AnthropicMessagesFormatFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
         "model_to_header",
         crate::builtins::ModelToHeaderFilter::from_config,
     );
@@ -288,6 +294,11 @@ mod tests {
         );
         #[cfg(feature = "ai-inference")]
         assert!(names.contains(&"prompt_enrich"), "prompt_enrich should be registered");
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"anthropic_messages_format"),
+            "anthropic_messages_format should be registered"
+        );
         #[cfg(feature = "ai-inference")]
         assert!(
             names.contains(&"openai_responses_format"),
