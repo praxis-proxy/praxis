@@ -549,6 +549,26 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn logging_cleanup_preserves_extensions() {
+        let registry = praxis_filter::FilterRegistry::with_builtins();
+        let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.response_phase_done = false;
+        ctx.extensions.insert(42u32);
+        ctx.request_snapshot = Some(praxis_filter::Request {
+            method: http::Method::POST,
+            uri: "/test".parse().unwrap(),
+            headers: http::HeaderMap::new(),
+        });
+        logging_cleanup(&pipeline, &mut ctx).await;
+        assert_eq!(
+            ctx.extensions.get::<u32>(),
+            Some(&42),
+            "extensions should survive logging_cleanup"
+        );
+    }
+
     #[test]
     fn passive_health_error_is_failure() {
         let (pipeline, ctx) = make_passive_scenario(Some(3), Some(2));
