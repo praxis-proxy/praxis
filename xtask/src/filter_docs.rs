@@ -349,7 +349,7 @@ fn discover_all_filters(root: &Path, shared_items: &ModuleItems) -> Vec<FilterEn
         categories.sort();
 
         for category_dir in &categories {
-            let category = category_dir.file_name().unwrap().to_string_lossy().into_owned();
+            let category = dir_file_name(category_dir);
             let filters = extract_filters(category_dir, shared_items);
             for filter in filters {
                 let required_feature = feature_requirements.get(&filter.name).cloned();
@@ -1044,28 +1044,18 @@ fn enum_variant_shape(variant: &syn::Variant) -> EnumVariantShape {
 
 /// Detect `#[serde(rename_all = "...")]` on attributes.
 fn detect_rename_all(attrs: &[syn::Attribute]) -> Option<&'static str> {
-    attrs.iter().find_map(|attr| {
-        if !attr.path().is_ident("serde") {
-            return None;
-        }
-        let tokens = attr.meta.to_token_stream().to_string();
-        if !tokens.contains("rename_all") {
-            return None;
-        }
-        if tokens.contains("snake_case") {
-            return Some("snake_case");
-        }
-        if tokens.contains("lowercase") {
-            return Some("lowercase");
-        }
-        if tokens.contains("kebab-case") {
-            return Some("kebab-case");
-        }
-        if tokens.contains("camelCase") {
-            return Some("camelCase");
-        }
-        None
-    })
+    let value = attrs.iter().find_map(|attr| serde_lit_value(attr, "rename_all"))?;
+    match value.as_str() {
+        "snake_case" => Some("snake_case"),
+        "lowercase" => Some("lowercase"),
+        "UPPERCASE" => Some("UPPERCASE"),
+        "camelCase" => Some("camelCase"),
+        "PascalCase" => Some("PascalCase"),
+        "kebab-case" => Some("kebab-case"),
+        "SCREAMING_SNAKE_CASE" => Some("SCREAMING_SNAKE_CASE"),
+        "SCREAMING-KEBAB-CASE" => Some("SCREAMING-KEBAB-CASE"),
+        _ => None,
+    }
 }
 
 /// Apply a rename rule to a variant name.
@@ -1073,8 +1063,11 @@ fn apply_rename(name: &str, rule: Option<&str>) -> String {
     match rule {
         Some("snake_case") => to_snake_case(name),
         Some("lowercase") => name.to_lowercase(),
-        Some("kebab-case") => to_snake_case(name).replace('_', "-"),
+        Some("UPPERCASE") => name.to_uppercase(),
         Some("camelCase") => to_camel_case(name),
+        Some("kebab-case") => to_snake_case(name).replace('_', "-"),
+        Some("SCREAMING_SNAKE_CASE") => to_snake_case(name).to_uppercase(),
+        Some("SCREAMING-KEBAB-CASE") => to_snake_case(name).to_uppercase().replace('_', "-"),
         _ => name.to_owned(),
     }
 }
@@ -1295,7 +1288,7 @@ fn custom_deserializer_type(field: &RawField) -> Option<&'static str> {
 
 /// Render a type path, resolving known wrappers and enum types.
 fn render_type_path(tp: &syn::TypePath, enums: &BTreeMap<String, EnumInfo>) -> String {
-    let last = tp.path.segments.last().unwrap();
+    let last = tp.path.segments.last().expect("TypePath has at least one segment");
     let ident = last.ident.to_string();
 
     match ident.as_str() {
@@ -1816,6 +1809,14 @@ fn workspace_root() -> PathBuf {
         .parent()
         .unwrap_or_else(|| Path::new("."))
         .to_owned()
+}
+
+/// Extract the final component of a directory path as a string.
+fn dir_file_name(dir: &Path) -> String {
+    dir.file_name()
+        .expect("directory has a file name")
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// Create directories recursively, exiting on failure.
