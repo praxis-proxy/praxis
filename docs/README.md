@@ -10,7 +10,7 @@
 
 - [Configuration](operating/configuration.md):
   YAML config, listeners, chains, runtime
-- [Filter Reference](operating/filter-reference.md):
+- [Filter Reference](filters/reference.md):
   all built-in filter configurations
 - [TLS](operating/tls.md):
   certificates, mTLS, SNI, hot-reload

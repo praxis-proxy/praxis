@@ -41,6 +41,9 @@ use crate::{
 /// Extracts top-level fields from a JSON request body and promotes
 /// their values to request headers using [`StreamBuffer`] mode.
 ///
+/// If the field is missing or the body is not valid JSON, the filter
+/// passes through without modification.
+///
 /// # Single-field YAML
 ///
 /// ```yaml

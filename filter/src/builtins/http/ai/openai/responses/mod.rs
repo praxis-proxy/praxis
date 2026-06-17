@@ -73,6 +73,17 @@ const MAX_PROMOTED_VALUE_LEN: usize = 256;
 /// Classifies AI API request bodies and promotes routing facts to
 /// headers, metadata, and filter results without mutating the body.
 ///
+/// Classification formats: `openai_responses`, `openai_chat_completions`,
+/// `unknown_json`, `invalid_json`, `non_json`.
+///
+/// Routing mode for Responses API: `stateful` when the request contains
+/// `previous_response_id`, non-empty `tools`, `store=true` (default when
+/// omitted), `background=true`, `conversation`, or `prompt_id`;
+/// `stateless` when `store=false` with no other stateful markers.
+///
+/// Use with branch chains to route stateful and stateless requests to
+/// different clusters.
+///
 /// # YAML
 ///
 /// ```yaml

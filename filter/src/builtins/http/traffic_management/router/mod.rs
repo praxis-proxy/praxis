@@ -50,6 +50,13 @@ use crate::{
 /// set [`rewritten_path`], the router matches against the rewritten
 /// path. Otherwise, it uses the original request path.
 ///
+/// Sets `ctx.cluster` for downstream filters but does not pick an
+/// endpoint or forward the request. The `load_balancer` filter reads
+/// `ctx.cluster` to select an endpoint.
+///
+/// Longest prefix wins. Routes without `host` match any host. Header
+/// restrictions use AND semantics with case-sensitive matching.
+///
 /// # YAML configuration
 ///
 /// ```yaml

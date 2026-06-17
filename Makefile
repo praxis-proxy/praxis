@@ -43,7 +43,8 @@ endif
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience test-smoke \
 	bench \
-	lint fmt doc audit semver coverage coverage-check \
+	lint generate-filter-docs fmt doc audit semver coverage coverage-check \
+	fuzz fuzz-build \
 	require-container-engine \
 	container container-run \
 	test-container test-container-run \
@@ -192,6 +193,10 @@ lint:
 	cargo xtask lint-deps
 	cargo xtask lint-example-tests
 	cargo xtask sync-example-readme
+	cargo xtask lint-filter-docs
+
+generate-filter-docs:
+	cargo xtask generate-filter-docs
 
 semver:
 	cargo semver-checks
@@ -366,7 +371,8 @@ help:
 	@echo "  bench                Criterion micro-benchmarks"
 	@echo ""
 	@echo "Quality:"
-	@echo "  lint                 clippy + rustfmt check"
+	@echo "  lint                 clippy + rustfmt check + filter docs"
+	@echo "  generate-filter-docs generate per-filter docs under docs/filters/"
 	@echo "  fmt                  format with nightly rustfmt"
 	@echo "  audit                cargo audit + cargo deny"
 	@echo "  coverage             HTML coverage report"

@@ -45,6 +45,9 @@ struct TcpLoadBalancerConfig {
 /// the configured strategy, and writes the result to `ctx.upstream_addr`.
 /// On disconnect, releases the least-connections counter if applicable.
 ///
+/// If all endpoints are unhealthy, the filter enters panic mode and
+/// routes to all endpoints.
+///
 /// # YAML configuration
 ///
 /// ```yaml

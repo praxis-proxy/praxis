@@ -43,6 +43,8 @@ struct IpAclConfig {
 /// When both are set, `allow` takes precedence: a client matching
 /// an allow entry is never denied.
 ///
+/// Denied requests receive a 403 Forbidden response.
+///
 /// # YAML configuration
 ///
 /// ```yaml

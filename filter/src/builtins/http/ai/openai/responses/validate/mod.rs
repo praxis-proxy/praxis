@@ -50,6 +50,18 @@ const MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
 /// parses the body as [`serde_json::Value`] for targeted field
 /// extraction. Does not deserialize the full body into a typed struct.
 ///
+/// Must be placed after `openai_responses_format` in the filter chain.
+/// Skips non-Responses API requests (those not classified as
+/// `openai_responses`).
+///
+/// Validation rules: rejects `stream=true` combined with
+/// `background=true` (400), rejects `background=true` combined with
+/// `store=false` (400).
+///
+/// Generates metadata: `responses.response_id` (format: `resp_` + 32
+/// hex chars, CSPRNG), `responses.conversation_id`, `responses.store`,
+/// `responses.background`, `responses.stream`.
+///
 /// This filter has no configuration, body buffering is handled by
 /// the upstream `openai_responses_format` classifier.
 #[derive(Default)]

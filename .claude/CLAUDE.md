@@ -317,7 +317,7 @@ These two concepts are distinct, take care to not conflate them.
 Filters live under
 `filter/src/builtins/<protocol>/<category>/`.
 See `docs/filters/README.md` for the filter system
-documentation and `docs/operating/filter-reference.md`
+documentation and `docs/filters/reference.md`
 for built-in filter configurations.
 
 Categories: `ai`, `observability`,

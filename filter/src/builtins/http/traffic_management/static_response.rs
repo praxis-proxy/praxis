@@ -50,6 +50,10 @@ struct HeaderEntry {
 
 /// Returns a fixed response without contacting any upstream.
 ///
+/// Useful for health checks, status endpoints, or stub routes.
+/// Combine with conditions to serve static responses on specific
+/// paths.
+///
 /// # YAML configuration
 ///
 /// ```yaml

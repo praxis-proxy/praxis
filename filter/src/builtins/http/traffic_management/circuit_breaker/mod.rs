@@ -43,6 +43,11 @@ use crate::{
 /// breaker state machine. Clusters not listed in the
 /// config are unaffected (pass-through).
 ///
+/// When consecutive upstream failures reach the threshold,
+/// the circuit opens and subsequent requests receive 503
+/// immediately. After the recovery window, a single probe
+/// request is forwarded; if it succeeds the circuit closes.
+///
 /// # YAML configuration
 ///
 /// ```yaml

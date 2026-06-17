@@ -53,6 +53,17 @@ use crate::{
 /// session presence to request headers/filter results; stores session ID in
 /// durable metadata.
 ///
+/// Recognized methods include `initialize`, `tools/call`, `tools/list`,
+/// `resources/read`, `resources/list`, `prompts/get`, `prompts/list`,
+/// and `ping`.
+///
+/// Methods requiring a name selector (`tools/call`, `resources/read`,
+/// `prompts/get`) return a JSON-RPC error if the selector is missing
+/// and `on_invalid` is `reject`.
+///
+/// Writes `mcp.*` and `json_rpc.*` entries to the filter result set
+/// for branch chain conditions.
+///
 /// # YAML
 ///
 /// ```yaml

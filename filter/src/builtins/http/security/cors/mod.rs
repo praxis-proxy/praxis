@@ -51,6 +51,12 @@ const VARY_ORIGIN: &str = "Origin";
 /// Spec-compliant CORS filter implementing origin validation,
 /// preflight handling, and response header injection.
 ///
+/// Wildcard subdomain patterns (e.g. `https://*.example.com`) are
+/// supported in `allow_origins`.
+///
+/// `allow_credentials: true` is incompatible with wildcard origins,
+/// methods, or headers per the Fetch spec.
+///
 /// # YAML configuration
 ///
 /// ```yaml

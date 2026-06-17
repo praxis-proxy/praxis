@@ -77,6 +77,13 @@ use crate::{
 ///   kind: x-praxis-a2a-kind
 ///   streaming: x-praxis-a2a-streaming
 ///   version: x-praxis-a2a-version
+/// task_routing:
+///   enabled: true
+///   store: local
+///   route_cluster_header: x-praxis-a2a-route-cluster
+///   ttl_seconds: 3600
+///   terminal_ttl_seconds: 300
+///   max_response_body_bytes: 65536
 /// ```
 pub struct A2aFilter {
     /// Parsed filter configuration.

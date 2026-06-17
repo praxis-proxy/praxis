@@ -45,6 +45,12 @@ use crate::{
 /// the check. State-changing methods require a matching
 /// `Origin` or `Referer` header.
 ///
+/// State-changing methods require an `Origin` or `Referer`
+/// header matching the trusted origins. Rejected requests
+/// receive 403 Forbidden.
+///
+/// A bare wildcard (`"*"`) cannot be mixed with other origins.
+///
 /// # YAML configuration
 ///
 /// ```yaml

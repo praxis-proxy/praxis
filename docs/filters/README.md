@@ -489,7 +489,7 @@ on the later filter to permit it.
 
 ## Related
 
-- [Filter Reference](../operating/filter-reference.md):
+- [Filter Reference](reference.md):
   configuration for all built-in filters
 - [Extensions](extensions.md): writing custom filters
 - [Payload Processing](../architecture/payload-processing.md):
