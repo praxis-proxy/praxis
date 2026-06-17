@@ -189,10 +189,13 @@ Each test function follows the pattern established by
    `a2a.rs`) or apply an explicit string replacement on top of
    `patch_yaml`, for example:
    ```rust
-   let yaml = load_example_config_raw("ai/token-counting.yaml");
+   let yaml = std::fs::read_to_string(example_config_path("ai/token-counting.yaml")).unwrap();
    let yaml = yaml.replace("provider: openai", "provider: anthropic");
    let patched = patch_yaml(&yaml, proxy_port, &port_map);
    ```
+   (`load_example_config_raw` does not exist in the test utilities;
+   `std::fs::read_to_string(example_config_path(...))` is the correct
+   way to get the raw YAML string for manipulation before parsing.)
    This is necessary to genuinely exercise the Anthropic, Google,
    Bedrock, and Azure parsing branches inside `token_count`, not
    just vary the backend response.
