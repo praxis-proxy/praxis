@@ -260,6 +260,10 @@ other providers.
 | `openai_streaming_extracts_token_counts` | OpenAI | SSE | Input: 10, Output: 20, Total: 30 |
 | `anthropic_streaming_split_events_extracts_token_counts` | Anthropic | SSE | Input: 10, Output: 20, Total: 30 |
 | `google_streaming_no_done_sentinel_extracts_token_counts` | Google | SSE | Input: 10, Output: 20, Total: 30 |
+
+> **Why no Azure SSE or Bedrock streaming tests?**
+> Azure's SSE format is identical to OpenAI's (`data: {...}` chunks with the same `usage` field layout) — the `azure` provider code path shares the same SSE parser as `openai`. A dedicated Azure streaming test would be a duplicate of `openai_streaming_extracts_token_counts` and adds no coverage. Bedrock does not use SSE at all: Bedrock Converse returns a binary event-stream format (not `text/event-stream`) and Bedrock InvokeModel returns a single JSON body; neither path exercises the SSE parser. These omissions are intentional and not gaps to fill.
+
 | `token_count_response_body_passes_through_unchanged` | OpenAI | JSON | body == original |
 | `missing_usage_fields_no_token_headers_injected` | OpenAI | JSON (no usage) | headers absent |
 | `openai_streaming_whitespace_and_comments` | OpenAI | SSE (noisy) | Input: 10, Output: 20, Total: 30 |
