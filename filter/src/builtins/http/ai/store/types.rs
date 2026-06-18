@@ -46,19 +46,57 @@ pub struct ResponseRecord {
 // ConversationRecord
 // -----------------------------------------------------------------------------
 
-/// A stored conversation message cache.
+/// A stored conversation record.
 ///
-/// Holds accumulated conversation messages for a conversation ID,
-/// used by the rehydrate filter to load multi-turn context.
+/// Holds the conversation object and accumulated messages for a
+/// conversation ID. The `messages` field is used by the rehydrate
+/// filter for multi-turn context; `metadata` and `created_at` are
+/// exposed via the `/v1/conversations` API.
 pub struct ConversationRecord {
-    /// Conversation ID.
+    /// Conversation ID (e.g., `"conv_abc123"`).
     pub conversation_id: String,
 
     /// Tenant ID for multi-tenant isolation.
     pub tenant_id: String,
 
+    /// Unix timestamp when the conversation was created.
+    pub created_at: i64,
+
+    /// User-defined metadata as JSON (up to 16 key-value pairs).
+    pub metadata: serde_json::Value,
+
     /// Accumulated conversation messages as JSON.
     pub messages: serde_json::Value,
+}
+
+// -----------------------------------------------------------------------------
+// ConversationItemRecord
+// -----------------------------------------------------------------------------
+
+/// A stored conversation item.
+///
+/// Items are the individual entries within a conversation (messages,
+/// tool calls, tool outputs, etc.). Stored as opaque JSON blobs with
+/// a monotonic position for ordering.
+#[expect(dead_code, reason = "used by ConversationItemStore in #631")]
+pub struct ConversationItemRecord {
+    /// Unique item ID (e.g., `"item_abc123"`).
+    pub item_id: String,
+
+    /// Tenant ID for multi-tenant isolation.
+    pub tenant_id: String,
+
+    /// Parent conversation ID.
+    pub conversation_id: String,
+
+    /// Verbatim item data as JSON.
+    pub item_data: serde_json::Value,
+
+    /// Unix timestamp when the item was created.
+    pub created_at: i64,
+
+    /// Monotonic position within the conversation for ordering.
+    pub position: i64,
 }
 
 // -----------------------------------------------------------------------------

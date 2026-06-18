@@ -827,7 +827,7 @@ async fn pipeline_persists_after_format_request_body_classification() {
         "response body phase should persist and continue"
     );
 
-    let store = SqliteResponseStore::new(&db_url, "test_responses", "test_conversations")
+    let store = SqliteResponseStore::new(&db_url, "test_responses", "test_conversations", None)
         .await
         .unwrap();
     let record = store
