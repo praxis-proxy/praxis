@@ -4,7 +4,7 @@
 //! Integration tests for per-listener downstream read timeout.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     time::{Duration, Instant},
 };

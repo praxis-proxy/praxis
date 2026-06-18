@@ -239,7 +239,7 @@ fn expand_location(template: &str, path: &str, query: Option<&str>, host: Option
 fn strip_port(host: &str) -> &str {
     if host.starts_with('[') {
         match host.find(']') {
-            Some(i) => &host[..=i],
+            Some(i) => host.get(..=i).unwrap_or(host),
             None => host,
         }
     } else {
@@ -284,6 +284,7 @@ fn infer_scheme(ctx: &HttpFilterContext<'_>) -> &'static str {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

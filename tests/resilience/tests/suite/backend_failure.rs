@@ -4,7 +4,7 @@
 //! Tests for proxy behavior when backends are unreachable, slow, or drop connections mid-request.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     time::{Duration, Instant},
 };

@@ -155,17 +155,23 @@ async fn promotes_metadata_for_anthropic_request() {
     .await;
 
     assert_eq!(
-        ctx.filter_metadata.get("anthropic_messages_format.format").map(String::as_str),
+        ctx.filter_metadata
+            .get("anthropic_messages_format.format")
+            .map(String::as_str),
         Some("anthropic_messages"),
         "format metadata"
     );
     assert_eq!(
-        ctx.filter_metadata.get("anthropic_messages_format.model").map(String::as_str),
+        ctx.filter_metadata
+            .get("anthropic_messages_format.model")
+            .map(String::as_str),
         Some("claude-opus-4-8"),
         "model metadata"
     );
     assert_eq!(
-        ctx.filter_metadata.get("anthropic_messages_format.stream").map(String::as_str),
+        ctx.filter_metadata
+            .get("anthropic_messages_format.stream")
+            .map(String::as_str),
         Some("true"),
         "stream metadata"
     );
@@ -293,7 +299,9 @@ async fn stream_false_promoted_to_metadata_and_header() {
     .await;
 
     assert_eq!(
-        ctx.filter_metadata.get("anthropic_messages_format.stream").map(String::as_str),
+        ctx.filter_metadata
+            .get("anthropic_messages_format.stream")
+            .map(String::as_str),
         Some("false"),
         "stream:false should be promoted to metadata"
     );
@@ -329,7 +337,9 @@ async fn null_header_config_suppresses_headers() {
     );
 
     assert_eq!(
-        ctx.filter_metadata.get("anthropic_messages_format.format").map(String::as_str),
+        ctx.filter_metadata
+            .get("anthropic_messages_format.format")
+            .map(String::as_str),
         Some("anthropic_messages"),
         "metadata should still be written even with null header config"
     );

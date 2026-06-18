@@ -16,10 +16,6 @@ pub(crate) mod openai;
 #[cfg(feature = "ai-inference")]
 mod prompt_enrich;
 #[cfg(feature = "ai-inference")]
-#[allow(
-    dead_code,
-    reason = "store module provides foundation for response store filter and upcoming CRUD endpoints"
-)]
 pub(crate) mod store;
 #[cfg(feature = "ai-inference")]
 pub(crate) mod token_usage;

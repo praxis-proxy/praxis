@@ -7,7 +7,7 @@ use super::{
     HeaderFilter, HeaderFilterConfig,
     ops::{append_headers, remove_headers, set_headers},
 };
-use crate::filter::HttpFilter;
+use crate::filter::HttpFilter as _;
 
 // -----------------------------------------------------------------------------
 // Tests

@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use sqlx::{
-    Row, SqlitePool,
+    Row as _, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use tracing::info;

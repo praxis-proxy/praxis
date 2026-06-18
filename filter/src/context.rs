@@ -20,10 +20,6 @@ use crate::{body::BodyMode, pipeline::body::merge_body_mode, results::FilterResu
 ///
 /// Created by the protocol layer for each incoming request. Filters read
 /// and mutate it to select clusters, choose upstreams, and inject headers.
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "transport context tracks independent lifecycle flags across phases"
-)]
 pub struct HttpFilterContext<'a> {
     /// Per-filter body-done tracking. When `true` at index `i`,
     /// filter `i` is skipped for remaining body chunks.
@@ -374,6 +370,7 @@ pub struct Response {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -771,7 +768,7 @@ mod tests {
         ctx.set_token_usage(u64::MAX, 1, None);
         assert_eq!(
             ctx.get_metadata("token.total"),
-            Some(&u64::MAX.to_string()[..]),
+            Some(&*u64::MAX.to_string()),
             "total should saturate instead of wrapping"
         );
     }

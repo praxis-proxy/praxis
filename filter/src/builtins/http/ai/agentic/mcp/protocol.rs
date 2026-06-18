@@ -42,6 +42,7 @@ pub(crate) enum ProtocolProfile {
 
 impl ProtocolProfile {
     /// String label for logging and metadata.
+    #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on methods")]
     #[allow(dead_code, reason = "plumbing for follow-up profile-aware logging")]
     pub(crate) fn as_str(self) -> &'static str {
         match self {
@@ -64,6 +65,7 @@ pub(crate) fn is_supported_version(version: &str) -> bool {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

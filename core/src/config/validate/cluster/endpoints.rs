@@ -108,7 +108,8 @@ fn reject_ssrf_host(host: &str, cluster_name: &str, addr_str: &str) -> Result<()
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
-#[expect(
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
@@ -276,10 +277,7 @@ mod tests {
 
     #[test]
     fn reject_ipv4_mapped_ipv6_loopback_endpoint() {
-        let clusters = vec![Cluster::with_defaults(
-            "web",
-            vec!["[::ffff:127.0.0.1]:80".into()],
-        )];
+        let clusters = vec![Cluster::with_defaults("web", vec!["[::ffff:127.0.0.1]:80".into()])];
         let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
         assert!(
             err.to_string().contains("sensitive address"),

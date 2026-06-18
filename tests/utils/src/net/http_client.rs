@@ -4,7 +4,7 @@
 //! Lightweight HTTP client for integration tests.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     time::Duration,
 };
@@ -50,6 +50,7 @@ pub fn http_get(addr: &str, path: &str, host: Option<&str>) -> (u16, String) {
 }
 
 /// Send an HTTP GET, retrying up to 3 times on 5xx responses.
+#[expect(clippy::disallowed_methods, reason = "blocking test utility, not async")]
 pub fn http_get_retry(addr: &str, path: &str, host: Option<&str>) -> (u16, String) {
     for _ in 0..2 {
         let (status, body) = http_get(addr, path, host);
@@ -122,6 +123,8 @@ pub fn json_post(path: &str, body: &str) -> String {
 /// can occur in CI after [`wait_for_http`] returns.
 ///
 /// [`wait_for_http`]: crate::net::wait::wait_for_http
+#[expect(clippy::disallowed_methods, reason = "blocking test utility, not async")]
+#[expect(clippy::unwrap_used, reason = "test utility panics on failure")]
 fn tcp_connect(addr: &str) -> TcpStream {
     for _ in 0..20 {
         if let Ok(stream) = TcpStream::connect(addr) {
@@ -166,9 +169,9 @@ pub fn decode_chunked(body: &str) -> String {
     let mut remaining = body;
 
     while let Some(crlf) = remaining.find("\r\n") {
-        let size_hex = remaining[..crlf].trim();
+        let size_hex = remaining.get(..crlf).unwrap_or_default().trim();
         let size = usize::from_str_radix(size_hex, 16).unwrap_or(0);
-        remaining = &remaining[crlf + 2..];
+        remaining = remaining.get(crlf + 2..).unwrap_or_default();
 
         if size == 0 {
             break;
@@ -178,11 +181,11 @@ pub fn decode_chunked(body: &str) -> String {
             break;
         }
 
-        result.push_str(&remaining[..size]);
-        remaining = &remaining[size..];
+        result.push_str(remaining.get(..size).unwrap_or_default());
+        remaining = remaining.get(size..).unwrap_or_default();
 
         if remaining.starts_with("\r\n") {
-            remaining = &remaining[2..];
+            remaining = remaining.get(2..).unwrap_or_default();
         }
     }
 
@@ -197,11 +200,7 @@ pub fn parse_header(raw: &str, name: &str) -> Option<String> {
     let lower_name = name.to_lowercase();
     headers_part.lines().find_map(|line| {
         let (key, value) = line.split_once(':')?;
-        if key.trim().to_lowercase() == lower_name {
-            Some(value.trim().to_owned())
-        } else {
-            None
-        }
+        (key.trim().to_lowercase() == lower_name).then(|| value.trim().to_owned())
     })
 }
 
@@ -225,11 +224,7 @@ pub fn parse_header_all(raw: &str, name: &str) -> Vec<String> {
         .lines()
         .filter_map(|line| {
             let (key, value) = line.split_once(':')?;
-            if key.trim().to_lowercase() == lower_name {
-                Some(value.trim().to_owned())
-            } else {
-                None
-            }
+            (key.trim().to_lowercase() == lower_name).then(|| value.trim().to_owned())
         })
         .collect()
 }
@@ -239,6 +234,7 @@ pub fn parse_header_all(raw: &str, name: &str) -> Vec<String> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;

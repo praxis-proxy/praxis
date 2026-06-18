@@ -182,13 +182,13 @@ fn default_work_stealing() -> bool {
 }
 
 /// Serde default for [`RuntimeConfig::upstream_keepalive_pool_size`].
-#[allow(clippy::unnecessary_wraps, reason = "serde default")]
+#[expect(clippy::unnecessary_wraps, reason = "serde default")]
 fn default_upstream_keepalive_pool_size() -> Option<usize> {
     Some(64)
 }
 
 /// Serde default for [`RuntimeConfig::global_queue_interval`].
-#[allow(clippy::unnecessary_wraps, reason = "serde default")]
+#[expect(clippy::unnecessary_wraps, reason = "serde default")]
 fn default_global_queue_interval() -> Option<u32> {
     Some(61)
 }
@@ -198,6 +198,7 @@ fn default_global_queue_interval() -> Option<u32> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

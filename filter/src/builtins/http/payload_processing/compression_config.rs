@@ -41,7 +41,7 @@ pub(crate) const DEFAULT_CONTENT_TYPES: &[&str] = &[
 /// assert!(config.brotli_enabled);
 /// assert!(config.zstd_enabled);
 /// ```
-#[allow(clippy::struct_excessive_bools, reason = "algorithm flags")]
+#[expect(clippy::struct_excessive_bools, reason = "algorithm flags")]
 #[derive(Debug, Clone)]
 pub struct CompressionConfig {
     /// Default compression level for all algorithms.
@@ -149,7 +149,7 @@ impl CompressionConfig {
     /// headers.insert("content-encoding", "gzip".parse().unwrap());
     /// assert!(config.is_already_compressed(&headers));
     /// ```
-    #[allow(clippy::unused_self, reason = "method API preferred")]
+    #[expect(clippy::unused_self, reason = "method API preferred")]
     pub fn is_already_compressed(&self, headers: &http::HeaderMap) -> bool {
         headers.contains_key(http::header::CONTENT_ENCODING)
     }
@@ -203,6 +203,7 @@ impl CompressionConfig {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

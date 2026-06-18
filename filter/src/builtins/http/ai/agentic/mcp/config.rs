@@ -107,7 +107,7 @@ impl Default for McpHeaders {
 }
 
 /// Default method header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -116,7 +116,7 @@ fn default_method_header() -> Option<String> {
 }
 
 /// Default name header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -125,7 +125,7 @@ fn default_name_header() -> Option<String> {
 }
 
 /// Default kind header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -134,7 +134,7 @@ fn default_kind_header() -> Option<String> {
 }
 
 /// Default protocol-version header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -143,7 +143,7 @@ fn default_protocol_version_header() -> Option<String> {
 }
 
 /// Default session-present header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]

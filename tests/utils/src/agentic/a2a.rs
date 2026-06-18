@@ -14,7 +14,7 @@
 //! [a2a]: https://a2aproject.github.io/A2A/
 
 use std::{
-    io::Write,
+    io::Write as _,
     net::TcpStream,
     sync::{
         Arc, Mutex,
@@ -177,7 +177,7 @@ impl A2aMockServerGuard {
 impl Drop for A2aMockServerGuard {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        let _ = TcpStream::connect(format!("127.0.0.1:{}", self.port));
+        _ = TcpStream::connect(format!("127.0.0.1:{}", self.port));
     }
 }
 

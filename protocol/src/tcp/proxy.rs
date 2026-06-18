@@ -11,7 +11,7 @@ use pingora_core::{apps::ServerApp, protocols::Stream, server::ShutdownWatch};
 use praxis_filter::{FilterAction, FilterPipeline, TcpFilterContext};
 use praxis_tls::sni;
 use tokio::{
-    io::AsyncReadExt,
+    io::AsyncReadExt as _,
     net::TcpStream,
     sync::{Semaphore, watch},
 };
@@ -80,7 +80,7 @@ pub(crate) struct PingoraTcpProxy {
 
 impl PingoraTcpProxy {
     /// Create a TCP proxy, optionally targeting a fixed upstream address.
-    #[allow(clippy::too_many_arguments, reason = "per-listener configuration")]
+    #[expect(clippy::too_many_arguments, reason = "per-listener configuration")]
     pub(super) fn new(
         upstream_addr: Option<String>,
         cluster: Option<Arc<str>>,
@@ -180,7 +180,7 @@ impl PingoraTcpProxy {
     }
 
     /// Run TCP disconnect filters for logging.
-    #[allow(clippy::too_many_arguments, reason = "per-connection metrics")]
+    #[expect(clippy::too_many_arguments, reason = "per-connection metrics")]
     async fn run_disconnect_filters(
         &self,
         remote_addr: &str,
@@ -211,7 +211,7 @@ impl PingoraTcpProxy {
 
 #[async_trait]
 impl ServerApp for PingoraTcpProxy {
-    #[allow(clippy::too_many_lines, reason = "linear connection lifecycle")]
+    #[expect(clippy::too_many_lines, reason = "linear connection lifecycle")]
     async fn process_new(self: &Arc<Self>, mut session: Stream, shutdown: &ShutdownWatch) -> Option<Stream> {
         let connect_time = std::time::Instant::now();
         let (remote_addr, local_addr) = extract_addrs(&session);
@@ -351,7 +351,7 @@ enum SniPeekResult {
 ///
 /// Returns `(sni_hostname, peeked_bytes)`. The peeked bytes must be
 /// forwarded to the upstream before starting bidirectional copy.
-#[allow(clippy::indexing_slicing, reason = "filled <= buf.len() maintained by loop")]
+#[expect(clippy::indexing_slicing, reason = "filled <= buf.len() maintained by loop")]
 async fn peek_sni(session: &mut Stream) -> (Option<String>, Vec<u8>) {
     let mut buf = vec![0u8; PEEK_INITIAL];
     let mut filled = 0;
@@ -405,7 +405,7 @@ fn handle_sni_read(buf: &mut Vec<u8>, filled: usize) -> PeekAction {
 }
 
 /// Attempt to parse SNI from the filled portion of the buffer.
-#[allow(clippy::indexing_slicing, reason = "filled <= buf.len() maintained by caller")]
+#[expect(clippy::indexing_slicing, reason = "filled <= buf.len() maintained by caller")]
 fn try_parse_sni(buf: &[u8], filled: usize) -> SniPeekResult {
     let data = &buf[..filled];
     match sni::parse_sni(data) {
@@ -449,7 +449,7 @@ async fn forward_with_timeout(
         r = tokio::time::timeout(timeout, copy_future) => if let Ok(inner) = r {
             Some(inner)
         } else {
-            #[allow(clippy::cast_possible_truncation, reason = "millis fit u64")]
+            #[expect(clippy::cast_possible_truncation, reason = "millis fit u64")]
             let timeout_ms = timeout.as_millis() as u64;
             warn!(upstream = %upstream_addr, timeout_ms, "TCP session timed out");
             None
@@ -493,6 +493,7 @@ async fn connect_upstream(upstream_addr: &str) -> Option<TcpStream> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

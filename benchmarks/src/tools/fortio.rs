@@ -297,7 +297,7 @@ fn fortio_latency(hist: &FortioDurationHistogram) -> crate::result::LatencyMetri
 fn fortio_throughput(report: &FortioReport) -> crate::result::ThroughputMetrics {
     let total_bytes = report.bytes_sent + report.bytes_received;
     let duration_secs = report.actual_duration_ns / 1_000_000_000.0;
-    #[allow(clippy::cast_precision_loss, reason = "precision loss acceptable")]
+    #[expect(clippy::cast_precision_loss, reason = "precision loss acceptable")]
     let bytes_per_sec = if duration_secs > 0.0 {
         total_bytes as f64 / duration_secs
     } else {
@@ -312,18 +312,14 @@ fn fortio_throughput(report: &FortioReport) -> crate::result::ThroughputMetrics 
 /// Extract error metrics from a Fortio report.
 fn fortio_errors(report: &FortioReport) -> crate::result::ErrorMetrics {
     let is_http = report.ret_codes.keys().any(|c| c.parse::<u16>().is_ok());
-    let non_2xx = if is_http {
-        Some(
-            report
-                .ret_codes
-                .iter()
-                .filter(|(code, _)| code.parse::<u16>().is_ok_and(|c| !(200..300).contains(&c)))
-                .map(|(_, count)| count)
-                .sum(),
-        )
-    } else {
-        None
-    };
+    let non_2xx = is_http.then(|| {
+        report
+            .ret_codes
+            .iter()
+            .filter(|(code, _)| code.parse::<u16>().is_ok_and(|c| !(200..300).contains(&c)))
+            .map(|(_, count)| count)
+            .sum()
+    });
     crate::result::ErrorMetrics {
         non_2xx,
         timeouts: 0,
@@ -336,6 +332,7 @@ fn fortio_errors(report: &FortioReport) -> crate::result::ErrorMetrics {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -291,7 +291,7 @@ filter_chains:
 /// Send an HTTP request and read only the response headers.
 fn send_and_read_headers(addr: &str, request: &str) -> String {
     use std::{
-        io::{Read, Write},
+        io::{Read as _, Write as _},
         net::TcpStream,
         time::Duration,
     };

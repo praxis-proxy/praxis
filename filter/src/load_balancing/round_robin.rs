@@ -61,7 +61,7 @@ impl RoundRobin {
     }
 
     /// Attempt weighted selection among only healthy endpoints.
-    #[allow(clippy::indexing_slicing, reason = "bounds checked")]
+    #[expect(clippy::indexing_slicing, reason = "bounds checked")]
     fn select_healthy(&self, tick: usize, state: &ClusterHealthState) -> Option<Arc<str>> {
         let healthy_weight: usize = self
             .endpoints
@@ -90,7 +90,7 @@ impl RoundRobin {
 }
 
 /// Walk `endpoints` to find the weight bucket containing `slot`.
-#[allow(clippy::expect_used, reason = "non-empty at construction")]
+#[expect(clippy::expect_used, reason = "non-empty at construction")]
 fn select_by_weight(endpoints: &[WeightedEndpoint], tick: usize, total_weight: usize) -> Arc<str> {
     let slot = tick % total_weight;
     let mut cumulative = 0usize;
@@ -108,6 +108,7 @@ fn select_by_weight(endpoints: &[WeightedEndpoint], tick: usize, total_weight: u
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

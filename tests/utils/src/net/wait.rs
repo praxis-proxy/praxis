@@ -49,7 +49,7 @@ pub fn wait_for_tcp(addr: &str) {
 ///
 /// Panics if the server does not become ready within 5 seconds.
 pub fn wait_for_http(addr: &str) {
-    use std::io::{Read, Write};
+    use std::io::{Read as _, Write as _};
 
     let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
 
@@ -80,7 +80,7 @@ pub fn wait_for_http(addr: &str) {
 ///
 /// Panics if the server does not become ready within 5 seconds.
 pub fn wait_for_http2(addr: &str) {
-    use std::io::{Read, Write};
+    use std::io::{Read as _, Write as _};
 
     for _ in 0..500 {
         if let Ok(mut stream) = TcpStream::connect(addr) {

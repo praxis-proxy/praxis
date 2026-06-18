@@ -4,7 +4,7 @@
 //! TCP proxy throughput benchmarks.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::{TcpListener, TcpStream},
     sync::Arc,
     time::{Duration, Instant},

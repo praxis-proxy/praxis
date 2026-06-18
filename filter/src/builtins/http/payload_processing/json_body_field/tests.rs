@@ -6,7 +6,7 @@
 use bytes::Bytes;
 
 use super::{JsonBodyFieldFilter, extract::contains_control_chars};
-use crate::{FilterAction, filter::HttpFilter};
+use crate::{FilterAction, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Tests

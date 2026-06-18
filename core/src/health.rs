@@ -93,8 +93,8 @@ impl EndpointHealth {
     /// ep.mark_healthy();
     /// assert!(ep.is_healthy());
     /// ```
-    #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
-    #[allow(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
+    #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[expect(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
     pub fn mark_healthy(&self) {
         let mut inner = self.inner.lock().expect("health lock poisoned");
         inner.healthy = true;
@@ -115,8 +115,8 @@ impl EndpointHealth {
     /// ep.mark_unhealthy();
     /// assert!(!ep.is_healthy());
     /// ```
-    #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
-    #[allow(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
+    #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[expect(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
     pub fn mark_unhealthy(&self) {
         let mut inner = self.inner.lock().expect("health lock poisoned");
         inner.healthy = false;
@@ -140,8 +140,8 @@ impl EndpointHealth {
     /// assert!(ep.record_success(2), "second success should transition");
     /// assert!(ep.is_healthy());
     /// ```
-    #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
-    #[allow(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
+    #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[expect(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
     pub fn record_success(&self, healthy_threshold: u32) -> bool {
         let mut inner = self.inner.lock().expect("health lock poisoned");
         inner.consecutive_failures = 0;
@@ -170,8 +170,8 @@ impl EndpointHealth {
     /// assert!(ep.record_failure(3), "third failure should transition");
     /// assert!(!ep.is_healthy());
     /// ```
-    #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
-    #[allow(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
+    #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[expect(clippy::significant_drop_tightening, reason = "cache store must happen under lock")]
     pub fn record_failure(&self, unhealthy_threshold: u32) -> bool {
         let mut inner = self.inner.lock().expect("health lock poisoned");
         inner.consecutive_successes = 0;
@@ -380,6 +380,7 @@ pub type ClusterHealthState = Arc<ClusterHealthEntry>;
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

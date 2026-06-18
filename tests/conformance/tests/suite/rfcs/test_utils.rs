@@ -4,7 +4,7 @@
 //! Shared test utilities for RFC conformance tests.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     time::Duration,
 };

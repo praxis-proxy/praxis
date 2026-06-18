@@ -16,7 +16,7 @@ use tokio::sync::watch;
 ///
 /// When `hot_reload` is enabled, uses a [`ReloadableCertResolver`]
 /// and spawns a [`CertWatcher`] background task. Otherwise builds
-/// a static [`ServerConfig`] via [`build_server_config`].
+/// a static `ServerConfig` via [`build_server_config`].
 ///
 /// `context_label` appears in debug tracing to distinguish HTTP
 /// from TCP callers (e.g. `"HTTP"`, `"TCP"`).
@@ -26,7 +26,6 @@ use tokio::sync::watch;
 /// it signals the watcher task to stop.
 ///
 /// [`TlsSettings`]: pingora_core::listeners::tls::TlsSettings
-/// [`ServerConfig`]: rustls::ServerConfig
 /// [`build_server_config`]: praxis_tls::setup::build_server_config
 /// [`ReloadableCertResolver`]: praxis_tls::reload::ReloadableCertResolver
 /// [`CertWatcher`]: praxis_tls::watcher::CertWatcher

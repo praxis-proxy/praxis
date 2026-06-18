@@ -18,6 +18,7 @@
 //! to validate parameter combinations and extract additional fields.
 
 mod config;
+#[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on modules")]
 #[allow(
     dead_code,
     reason = "store utilities for GET (#458) and DELETE (#459) response endpoints"
@@ -27,6 +28,7 @@ pub(crate) mod store;
 pub use store::ResponseStoreFilter;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -61,7 +61,7 @@ struct UrlRewriteConfig {
     /// When `true`, suppresses the duplicate-rewrite validation
     /// error if another rewrite filter precedes this one.
     #[serde(default)]
-    #[allow(dead_code, reason = "consumed by pipeline validation")]
+    #[expect(dead_code, reason = "consumed by pipeline validation")]
     allow_rewrite_override: bool,
 }
 
@@ -432,6 +432,7 @@ fn build_path_and_query(path: &str, query: Option<&str>) -> String {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

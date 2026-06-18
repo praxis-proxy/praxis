@@ -199,7 +199,7 @@ fn null_bytes_in_headers_handled() {
 /// Send raw bytes to a proxy and return the response.
 fn send_raw_bytes(addr: &str, request: &[u8]) -> String {
     use std::{
-        io::{Read, Write},
+        io::{Read as _, Write as _},
         net::TcpStream,
         time::Duration,
     };

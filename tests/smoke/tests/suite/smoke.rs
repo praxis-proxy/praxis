@@ -4,7 +4,7 @@
 //! Smoke tests.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::{TcpListener, TcpStream},
     time::Duration,
 };

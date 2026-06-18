@@ -52,7 +52,7 @@ impl PiiKind {
 // -----------------------------------------------------------------------------
 
 /// Matches US SSNs in the canonical `NNN-NN-NNNN` format.
-#[allow(
+#[expect(
     clippy::expect_used,
     reason = "hardcoded regex patterns are known-valid at compile time"
 )]
@@ -64,7 +64,7 @@ static SSN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{3}-\d{2}-\d{
 /// within a longer digit run: e.g. 17 consecutive digits that start with a
 /// Visa prefix will not trigger because `\b` fails between two adjacent word
 /// characters (both digits are `\w`).
-#[allow(
+#[expect(
     clippy::expect_used,
     reason = "hardcoded regex patterns are known-valid at compile time"
 )]
@@ -94,7 +94,7 @@ static CREDIT_CARD_RE: LazyLock<Regex> = LazyLock::new(|| {
 /// Separators between each group are **required** so that bare digit strings
 /// (product codes, IDs) are not mis-detected. A trailing `\b` ensures the
 /// subscriber number is not immediately followed by more digits.
-#[allow(
+#[expect(
     clippy::expect_used,
     reason = "hardcoded regex patterns are known-valid at compile time"
 )]
@@ -115,7 +115,7 @@ static PHONE_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Matches email addresses.
-#[allow(
+#[expect(
     clippy::expect_used,
     reason = "hardcoded regex patterns are known-valid at compile time"
 )]

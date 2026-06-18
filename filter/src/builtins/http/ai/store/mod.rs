@@ -14,6 +14,7 @@ mod trait_def;
 mod types;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -30,6 +31,11 @@ use dashmap::{DashMap, mapref::entry::Entry};
 /// Validate response-store table identifiers.
 pub(crate) use schemas::{validate_identifier as validate_table_identifier, validate_postgres_table_identifiers};
 
+#[expect(
+    clippy::allow_attributes,
+    clippy::useless_attribute,
+    reason = "unused_imports expect unfulfilled"
+)]
 #[allow(unused_imports, reason = "re-exports for upcoming store filter")]
 pub use self::{
     postgres::{PostgresResponseStore, SslMode},
@@ -52,7 +58,7 @@ pub use self::{
 #[derive(Clone)]
 pub struct ResponseStoreRegistry {
     /// Named store backends.
-    #[allow(clippy::type_complexity, reason = "DashMap of trait objects is inherently verbose")]
+    #[expect(clippy::type_complexity, reason = "DashMap of trait objects is inherently verbose")]
     stores: Arc<DashMap<Arc<str>, Arc<dyn ResponseStore>>>,
 }
 

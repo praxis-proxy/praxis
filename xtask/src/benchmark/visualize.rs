@@ -73,18 +73,12 @@ fn unique_scenarios(report: &BenchmarkReport) -> Vec<String> {
     report
         .results
         .iter()
-        .filter_map(|r| {
-            if seen.insert(r.scenario.clone()) {
-                Some(r.scenario.clone())
-            } else {
-                None
-            }
-        })
+        .filter(|&r| seen.insert(r.scenario.clone()))
+        .map(|r| r.scenario.clone())
         .collect()
 }
 
 /// Extract a per-proxy, per-scenario metric matrix.
-#[allow(clippy::cast_precision_loss, reason = "chart indices")]
 fn extract_matrix<F>(report: &BenchmarkReport, scenarios: &[String], metric: F) -> Vec<Vec<f64>>
 where
     F: Fn(&benchmarks::result::BenchmarkResult) -> f64,
@@ -129,7 +123,7 @@ struct ChartDef {
 }
 
 /// All charts to render.
-#[allow(clippy::cast_precision_loss, reason = "chart values")]
+#[expect(clippy::cast_precision_loss, reason = "chart values")]
 const CHARTS: &[ChartDef] = &[
     ChartDef {
         suffix: "p99-latency",
@@ -198,7 +192,7 @@ fn proxy_color(name: &str) -> plotters::style::RGBColor {
 
 /// Render one SVG per metric into the output directory.
 fn render_charts(report: &BenchmarkReport, stem: &str, dir: &str) {
-    use plotters::prelude::{IntoDrawingArea, SVGBackend, WHITE};
+    use plotters::prelude::{IntoDrawingArea as _, SVGBackend, WHITE};
 
     let scenarios = unique_scenarios(report);
 
@@ -237,7 +231,7 @@ type PanelChart<'a, 'b> = plotters::prelude::ChartContext<
 >;
 
 /// Render a single grouped bar chart panel.
-#[allow(clippy::cast_precision_loss, clippy::too_many_arguments, reason = "chart rendering")]
+#[expect(clippy::cast_precision_loss, clippy::too_many_arguments, reason = "chart rendering")]
 fn render_panel(
     area: &plotters::prelude::DrawingArea<plotters::prelude::SVGBackend<'_>, plotters::coord::Shift>,
     title: &str,
@@ -246,7 +240,7 @@ fn render_panel(
     scenarios: &[String],
     bars: &[Vec<f64>],
 ) {
-    use plotters::{prelude::ChartBuilder, style::IntoFont};
+    use plotters::{prelude::ChartBuilder, style::IntoFont as _};
 
     let n_proxies = proxies.len();
     let n_scenarios = scenarios.len();
@@ -274,7 +268,7 @@ fn render_panel(
 
 /// Configure the y-axis mesh, hiding the x-axis grid.
 fn configure_mesh(chart: &mut PanelChart<'_, '_>, y_label: &str) {
-    use plotters::style::IntoFont;
+    use plotters::style::IntoFont as _;
 
     chart
         .configure_mesh()
@@ -287,7 +281,7 @@ fn configure_mesh(chart: &mut PanelChart<'_, '_>, y_label: &str) {
 }
 
 /// Draw grouped bars for each proxy across all scenarios.
-#[allow(clippy::cast_precision_loss, clippy::indexing_slicing, reason = "chart coordinates")]
+#[expect(clippy::cast_precision_loss, clippy::indexing_slicing, reason = "chart coordinates")]
 fn draw_bars(
     chart: &mut PanelChart<'_, '_>,
     proxies: &[String],
@@ -295,7 +289,7 @@ fn draw_bars(
     group_width: f64,
     bars: &[Vec<f64>],
 ) {
-    use plotters::{prelude::Rectangle, style::Color};
+    use plotters::{prelude::Rectangle, style::Color as _};
 
     for (pi, proxy) in proxies.iter().enumerate() {
         let color = proxy_color(proxy);
@@ -318,7 +312,7 @@ fn draw_bars(
 }
 
 /// Draw scenario name labels along the x-axis.
-#[allow(clippy::cast_precision_loss, reason = "chart coordinates")]
+#[expect(clippy::cast_precision_loss, reason = "chart coordinates")]
 fn draw_scenario_labels(
     chart: &mut PanelChart<'_, '_>,
     scenarios: &[String],
@@ -328,7 +322,7 @@ fn draw_scenario_labels(
 ) {
     use plotters::{
         prelude::BLACK,
-        style::{IntoFont, TextStyle},
+        style::{IntoFont as _, TextStyle},
     };
 
     let label_style = TextStyle::from(("sans-serif", 10).into_font()).color(&BLACK);
@@ -351,7 +345,7 @@ fn draw_scenario_labels(
 fn draw_legend<'a>(chart: &mut PanelChart<'a, 'a>) {
     use plotters::{
         prelude::{BLACK, SeriesLabelPosition, WHITE},
-        style::{Color, IntoFont},
+        style::{Color as _, IntoFont as _},
     };
 
     chart

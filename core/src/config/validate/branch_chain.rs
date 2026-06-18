@@ -272,6 +272,7 @@ fn validate_chain_ref(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -284,6 +285,8 @@ fn validate_chain_ref(
     reason = "tests use unwrap/expect/indexing/raw strings/panic for brevity"
 )]
 mod tests {
+    use std::fmt::Write as _;
+
     use crate::config::Config;
 
     #[test]
@@ -734,13 +737,13 @@ filter_chains:
                 let pad = " ".repeat(indent);
                 let filter_name = format!("branch_{current}");
                 let chain_name = format!("inline_{current}");
-                yaml.push_str(&format!("{pad}- filter: headers\n"));
+                writeln!(yaml, "{pad}- filter: headers").unwrap();
                 if current < depth {
-                    yaml.push_str(&format!("{pad}  branch_chains:\n"));
-                    yaml.push_str(&format!("{pad}    - name: {filter_name}\n"));
-                    yaml.push_str(&format!("{pad}      chains:\n"));
-                    yaml.push_str(&format!("{pad}        - name: {chain_name}\n"));
-                    yaml.push_str(&format!("{pad}          filters:\n"));
+                    writeln!(yaml, "{pad}  branch_chains:").unwrap();
+                    writeln!(yaml, "{pad}    - name: {filter_name}").unwrap();
+                    writeln!(yaml, "{pad}      chains:").unwrap();
+                    writeln!(yaml, "{pad}        - name: {chain_name}").unwrap();
+                    writeln!(yaml, "{pad}          filters:").unwrap();
                     write_level(yaml, depth, current + 1, indent + 12);
                 }
             }
@@ -966,13 +969,13 @@ filter_chains:
                 let pad = " ".repeat(indent);
                 let filter_name = format!("branch_{current}");
                 let chain_name = format!("inline_{current}");
-                yaml.push_str(&format!("{pad}- filter: headers\n"));
+                writeln!(yaml, "{pad}- filter: headers").unwrap();
                 if current < depth {
-                    yaml.push_str(&format!("{pad}  branch_chains:\n"));
-                    yaml.push_str(&format!("{pad}    - name: {filter_name}\n"));
-                    yaml.push_str(&format!("{pad}      chains:\n"));
-                    yaml.push_str(&format!("{pad}        - name: {chain_name}\n"));
-                    yaml.push_str(&format!("{pad}          filters:\n"));
+                    writeln!(yaml, "{pad}  branch_chains:").unwrap();
+                    writeln!(yaml, "{pad}    - name: {filter_name}").unwrap();
+                    writeln!(yaml, "{pad}      chains:").unwrap();
+                    writeln!(yaml, "{pad}        - name: {chain_name}").unwrap();
+                    writeln!(yaml, "{pad}          filters:").unwrap();
                     write_level(yaml, depth, current + 1, indent + 12);
                 }
             }
@@ -995,11 +998,13 @@ filter_chains:
     fn reject_too_many_branches_per_filter() {
         let mut branches = String::new();
         for i in 0..17 {
-            branches.push_str(&format!(
+            write!(
+                branches,
                 "          - name: branch_{i}\n            chains:\n              \
                  - name: inline_{i}\n                filters:\n                  \
                  - filter: headers\n"
-            ));
+            )
+            .unwrap();
         }
         let yaml = format!(
             r#"
@@ -1027,11 +1032,13 @@ filter_chains:
     fn accept_max_branches_per_filter() {
         let mut branches = String::new();
         for i in 0..16 {
-            branches.push_str(&format!(
+            write!(
+                branches,
                 "          - name: branch_{i}\n            chains:\n              \
                  - name: inline_{i}\n                filters:\n                  \
                  - filter: headers\n"
-            ));
+            )
+            .unwrap();
         }
         let yaml = format!(
             r#"

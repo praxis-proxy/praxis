@@ -159,7 +159,7 @@ pub fn parse_sni(buf: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
 // -----------------------------------------------------------------------------
 
 /// Parse the TLS record header, returning the fragment payload.
-#[allow(clippy::indexing_slicing, reason = "bounds checked before access")]
+#[expect(clippy::indexing_slicing, reason = "bounds checked before access")]
 fn parse_record_header(buf: &[u8]) -> Result<&[u8], SniParseError> {
     if buf.len() < TLS_RECORD_HEADER_LEN {
         return Err(SniParseError::TooShort);
@@ -180,7 +180,7 @@ fn parse_record_header(buf: &[u8]) -> Result<&[u8], SniParseError> {
 }
 
 /// Parse the handshake message header, returning the `ClientHello` body.
-#[allow(clippy::indexing_slicing, reason = "bounds checked before access")]
+#[expect(clippy::indexing_slicing, reason = "bounds checked before access")]
 fn parse_handshake_header(fragment: &[u8]) -> Result<&[u8], SniParseError> {
     if fragment.len() < HANDSHAKE_HEADER_LEN {
         return Err(SniParseError::NeedMoreData);
@@ -395,6 +395,7 @@ fn validate_dns_hostname(hostname: &str) -> Result<(), SniParseError> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -630,23 +631,23 @@ mod tests {
         let host_entry_len = 1 + 2 + host_name.len();
         let list_len = unknown_entry_len + host_entry_len;
 
-        #[allow(clippy::cast_possible_truncation, reason = "test data is small")]
+        #[expect(clippy::cast_possible_truncation, reason = "test data is small")]
         let list_len_u16 = list_len as u16;
         sni_data.extend_from_slice(&0u16.to_be_bytes());
 
-        #[allow(clippy::cast_possible_truncation, reason = "test data is small")]
+        #[expect(clippy::cast_possible_truncation, reason = "test data is small")]
         let ext_data_len = (2 + list_len) as u16;
         sni_data.extend_from_slice(&ext_data_len.to_be_bytes());
         sni_data.extend_from_slice(&list_len_u16.to_be_bytes());
 
         sni_data.push(0x01);
-        #[allow(clippy::cast_possible_truncation, reason = "test data is small")]
+        #[expect(clippy::cast_possible_truncation, reason = "test data is small")]
         let unknown_len = unknown_name.len() as u16;
         sni_data.extend_from_slice(&unknown_len.to_be_bytes());
         sni_data.extend_from_slice(unknown_name);
 
         sni_data.push(SNI_NAME_TYPE_HOST);
-        #[allow(clippy::cast_possible_truncation, reason = "test data is small")]
+        #[expect(clippy::cast_possible_truncation, reason = "test data is small")]
         let host_len = host_name.len() as u16;
         sni_data.extend_from_slice(&host_len.to_be_bytes());
         sni_data.extend_from_slice(host_name);
@@ -685,7 +686,7 @@ mod tests {
     fn non_utf8_hostname_returns_invalid_hostname() {
         let name_data: &[u8] = &[0xFF, 0xFE];
 
-        #[allow(clippy::cast_possible_truncation, reason = "test data is small")]
+        #[expect(clippy::cast_possible_truncation, reason = "test data is small")]
         let name_len = name_data.len() as u16;
         let entry_len: u16 = 1 + 2 + name_len;
         let list_len: u16 = entry_len;
@@ -781,7 +782,7 @@ mod tests {
     fn build_sni_extension(hostname: &str) -> Vec<u8> {
         let name_bytes = hostname.as_bytes();
 
-        #[allow(clippy::cast_possible_truncation, reason = "test hostnames are short")]
+        #[expect(clippy::cast_possible_truncation, reason = "test hostnames are short")]
         let name_len = name_bytes.len() as u16;
 
         let entry_len = 1 + 2 + name_len;
@@ -803,7 +804,7 @@ mod tests {
         let mut ext = Vec::new();
         ext.extend_from_slice(&ext_type.to_be_bytes());
 
-        #[allow(clippy::cast_possible_truncation, reason = "test data is short")]
+        #[expect(clippy::cast_possible_truncation, reason = "test data is short")]
         let len = data.len() as u16;
 
         ext.extend_from_slice(&len.to_be_bytes());
@@ -812,7 +813,7 @@ mod tests {
     }
 
     /// Build a `ClientHello` body from components.
-    #[allow(clippy::cast_possible_truncation, reason = "test payloads are small")]
+    #[expect(clippy::cast_possible_truncation, reason = "test payloads are small")]
     fn build_client_hello(session_id: &[u8], cipher_suites: &[u8], compression: &[u8], extensions: &[u8]) -> Vec<u8> {
         let mut hello = Vec::new();
 
@@ -839,7 +840,7 @@ mod tests {
     }
 
     /// Wrap a `ClientHello` body in handshake + record headers.
-    #[allow(clippy::cast_possible_truncation, reason = "test payloads are small")]
+    #[expect(clippy::cast_possible_truncation, reason = "test payloads are small")]
     fn wrap_in_record(hello_body: &[u8]) -> Vec<u8> {
         let mut handshake = Vec::new();
         handshake.push(HANDSHAKE_TYPE_CLIENT_HELLO);

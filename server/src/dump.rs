@@ -247,6 +247,7 @@ pub(crate) fn write_dump(dump: &EffectiveConfigDump) -> Result<(), Box<dyn std::
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use praxis_core::config::{Config, FailureMode};
@@ -559,7 +560,7 @@ filter_chains:
     }
 
     #[test]
-    #[allow(clippy::too_many_lines, reason = "test YAML is intentionally explicit")]
+    #[expect(clippy::too_many_lines, reason = "test YAML is intentionally explicit")]
     fn branch_chain_response_store_database_url_redacted_in_dump() {
         let config = Config::from_yaml(
             r#"

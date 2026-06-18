@@ -76,7 +76,7 @@ impl LocalTaskRouteStore {
     /// # Panics
     ///
     /// Panics if the internal lock is poisoned.
-    #[allow(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
+    #[expect(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
     pub(crate) fn get_by_task_id(&self, task_id: &str) -> Option<Arc<str>> {
         let expired = {
             let tasks = self.tasks.read().expect("task route store lock poisoned");
@@ -105,7 +105,7 @@ impl LocalTaskRouteStore {
     /// # Panics
     ///
     /// Panics if the internal lock is poisoned.
-    #[allow(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
+    #[expect(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
     pub(crate) fn put(&self, task_id: &str, cluster: &str, ttl: Duration) {
         if !validate_id(task_id) {
             return;
@@ -127,7 +127,7 @@ impl LocalTaskRouteStore {
     /// # Panics
     ///
     /// Panics if the internal lock is poisoned.
-    #[allow(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
+    #[expect(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
     pub(crate) fn remove(&self, task_id: &str) {
         self.tasks
             .write()
@@ -268,11 +268,13 @@ fn validate_id(id: &str) -> bool {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
-    clippy::unwrap_used,
+    clippy::disallowed_methods,
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
+    clippy::unwrap_used,
     reason = "tests"
 )]
 mod tests {

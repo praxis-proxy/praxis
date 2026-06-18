@@ -43,7 +43,7 @@ use serde::Deserialize;
 /// assert!(opts.allow_public_admin);
 /// assert!(!opts.allow_unbounded_body);
 /// ```
-#[allow(clippy::struct_excessive_bools, reason = "security override flags")]
+#[expect(clippy::struct_excessive_bools, reason = "security override flags")]
 #[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InsecureOptions {
@@ -87,6 +87,7 @@ pub struct InsecureOptions {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

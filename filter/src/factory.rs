@@ -123,7 +123,7 @@ impl FilterFactory {
 ///
 /// let _factory: FilterFactory = http_builtin(my_factory);
 /// ```
-#[allow(clippy::type_complexity, reason = "complex function pointer")]
+#[expect(clippy::type_complexity, reason = "complex function pointer")]
 pub fn http_builtin(f: fn(&serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError>) -> FilterFactory {
     FilterFactory::Http(Arc::new(f))
 }
@@ -139,7 +139,7 @@ pub fn http_builtin(f: fn(&serde_yaml::Value) -> Result<Box<dyn HttpFilter>, Fil
 ///
 /// let _factory: FilterFactory = tcp_builtin(my_factory);
 /// ```
-#[allow(clippy::type_complexity, reason = "complex function pointer")]
+#[expect(clippy::type_complexity, reason = "complex function pointer")]
 pub fn tcp_builtin(f: fn(&serde_yaml::Value) -> Result<Box<dyn TcpFilter>, FilterError>) -> FilterFactory {
     FilterFactory::Tcp(Arc::new(f))
 }
@@ -149,6 +149,7 @@ pub fn tcp_builtin(f: fn(&serde_yaml::Value) -> Result<Box<dyn TcpFilter>, Filte
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

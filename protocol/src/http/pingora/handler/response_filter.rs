@@ -122,7 +122,7 @@ fn handle_response_result(
 /// [`HeaderMap`]: http::HeaderMap
 /// [`insert_header`]: pingora_http::ResponseHeader::insert_header
 fn write_headers_to_pingora(src: &http::HeaderMap, status: http::StatusCode, dst: &mut pingora_http::ResponseHeader) {
-    #[allow(clippy::expect_used, reason = "valid upstream status")]
+    #[expect(clippy::expect_used, reason = "valid upstream status")]
     let mut rebuilt = pingora_http::ResponseHeader::build(status, Some(src.len())).expect("valid status");
     for (name, value) in src {
         let _insert = rebuilt.append_header(name.clone(), value.clone());
@@ -153,6 +153,7 @@ fn is_websocket_101(headers: &http::HeaderMap) -> bool {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

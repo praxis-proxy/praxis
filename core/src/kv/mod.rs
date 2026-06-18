@@ -123,7 +123,7 @@ pub trait KvBackend: Send + Sync + Debug {
     /// the pattern fails to compile.
     ///
     /// [`Regex`]: MatchType::Regex
-    #[allow(clippy::type_complexity, reason = "trait return type")]
+    #[expect(clippy::type_complexity, reason = "trait return type")]
     fn lookup(&self, pattern: &str, match_type: MatchType) -> Result<Option<(Arc<str>, Arc<str>)>, String>;
 
     /// Number of entries in the store.
@@ -240,7 +240,7 @@ impl KvLookup {
 #[derive(Debug, Clone)]
 pub struct KvStoreRegistry {
     /// Named store backends.
-    #[allow(clippy::type_complexity, reason = "single-field struct wrapping DashMap")]
+    #[expect(clippy::type_complexity, reason = "single-field struct wrapping DashMap")]
     stores: Arc<DashMap<Arc<str>, Arc<dyn KvBackend>>>,
 }
 
@@ -410,6 +410,7 @@ pub mod memory;
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;

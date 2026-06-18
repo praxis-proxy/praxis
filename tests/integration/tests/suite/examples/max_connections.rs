@@ -4,7 +4,7 @@
 //! Tests for max connections limiting behavior.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     time::Duration,
 };

@@ -37,27 +37,31 @@ fn bench_config_parse(c: &mut Criterion) {
 
 /// Generate a YAML config string with `n` routes and `n` clusters.
 fn generate_config_yaml(n: usize) -> String {
+    use std::fmt::Write as _;
+
     let mut yaml = String::from(
         "listeners:\n  - name: default\n    address: \"127.0.0.1:8080\"\n    filter_chains:\n      - main\n\
          filter_chains:\n  - name: main\n    filters:\n      - filter: router\n        routes:\n",
     );
 
     for i in 0..n {
-        yaml.push_str(&format!(
+        _ = write!(
+            yaml,
             "          - path_prefix: \"/svc-{i}/\"\n            cluster: \"cluster-{i}\"\n"
-        ));
+        );
     }
 
     yaml.push_str("      - filter: load_balancer\n        clusters:\n");
     for i in 0..n {
-        yaml.push_str(&format!(
+        _ = write!(
+            yaml,
             "          - name: \"cluster-{i}\"\n            endpoints:\n              \
              - \"10.0.{}.{}:8080\"\n              - \"10.0.{}.{}:8080\"\n",
             i / 256,
             i % 256,
             i / 256,
             (i + 1) % 256,
-        ));
+        );
     }
 
     yaml

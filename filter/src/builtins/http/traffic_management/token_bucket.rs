@@ -127,7 +127,7 @@ impl fmt::Debug for TokenBucket {
 /// let secs = nanos_to_secs(9_000_000_001_000_000_000); // ~285 years
 /// assert!((secs - 9_000_000_001.0).abs() < 1e-9);
 /// ```
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     reason = "whole_secs max ~1.8e10 (u64::MAX nanos); well within f64's 2^53 mantissa. remainder < 1e9 is exact"
 )]
@@ -142,6 +142,7 @@ fn nanos_to_secs(nanos: u64) -> f64 {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

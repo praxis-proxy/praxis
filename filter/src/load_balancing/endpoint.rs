@@ -50,6 +50,7 @@ pub(crate) fn build_weighted_endpoints(cluster: &Cluster) -> Vec<WeightedEndpoin
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

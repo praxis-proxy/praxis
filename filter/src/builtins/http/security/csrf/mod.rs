@@ -7,6 +7,7 @@ mod config;
 mod origin;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -20,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use praxis_core::config::InsecureOptions;
-use rand::Rng;
+use rand::Rng as _;
 use tracing::{debug, trace, warn};
 
 use self::{

@@ -95,7 +95,7 @@ impl Runner {
     ///
     /// Returns [`BenchmarkError`] if the backend, proxy, or load
     /// generator fails to start, or if result parsing fails.
-    #[allow(clippy::cognitive_complexity, reason = "orchestration function")]
+    #[expect(clippy::cognitive_complexity, reason = "orchestration function")]
     pub async fn run(&self, proxy: &dyn ProxyConfig) -> Result<ScenarioResults, BenchmarkError> {
         info!(scenario = %self.scenario.name, proxy = proxy.name(), "starting benchmark run");
 
@@ -284,7 +284,7 @@ async fn run_post_load(
 // -----------------------------------------------------------------------------
 
 /// Build a [`VegetaConfig`] with common defaults.
-#[allow(clippy::too_many_arguments, reason = "builder parameters")]
+#[expect(clippy::too_many_arguments, reason = "builder parameters")]
 fn vegeta_config(
     target: &str,
     method: &str,
@@ -345,7 +345,6 @@ async fn run_ramp(
 ///
 /// Returns the [`TempDir`] (must be kept alive), target file path,
 /// and per-step duration.
-#[allow(clippy::cast_possible_truncation, reason = "step count fits u64")]
 async fn prepare_ramp_targets(
     url: &str,
     steps: &[u32],

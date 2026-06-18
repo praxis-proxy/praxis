@@ -67,7 +67,7 @@ impl OpenaiResponsesValidateFilter {
     /// is required by the [`FilterFactory`] signature.
     ///
     /// [`FilterFactory`]: crate::FilterFactory
-    #[allow(clippy::unnecessary_wraps, reason = "signature required by FilterFactory")]
+    #[expect(clippy::unnecessary_wraps, reason = "signature required by FilterFactory")]
     pub fn from_config(_config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         Ok(Box::new(Self))
     }
@@ -218,6 +218,7 @@ fn enrich_context(ctx: &mut HttpFilterContext<'_>, response_id: &str, conversati
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

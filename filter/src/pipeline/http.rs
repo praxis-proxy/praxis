@@ -34,8 +34,8 @@ impl FilterPipeline {
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails.
-    #[allow(clippy::indexing_slicing, reason = "while loop bounds idx")]
-    #[allow(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
+    #[expect(clippy::indexing_slicing, reason = "while loop bounds idx")]
+    #[expect(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
     pub async fn execute_http_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         ctx.executed_filter_indices = vec![false; self.filters.len()];
         ctx.body_done_indices = vec![false; self.filters.len()];
@@ -78,7 +78,6 @@ impl FilterPipeline {
     /// Returns [`FilterError`] if any filter fails.
     ///
     /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
-    #[allow(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
     pub async fn execute_http_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         for (idx, pf) in self.filters.iter().enumerate().rev() {
             if ctx.executed_filter_indices.get(idx) == Some(&false) {
@@ -116,8 +115,8 @@ impl FilterPipeline {
     /// Returns [`FilterError`] if any body filter fails.
     ///
     /// [`BodyDone`]: FilterAction::BodyDone
-    #[allow(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
-    #[allow(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
+    #[expect(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
+    #[expect(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
     pub async fn execute_http_request_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -165,8 +164,7 @@ impl FilterPipeline {
     /// Returns [`FilterError`] if any body filter fails.
     ///
     /// [`BodyDone`]: FilterAction::BodyDone
-    #[allow(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
-    #[allow(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
+    #[expect(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
     pub fn execute_http_response_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -271,6 +269,7 @@ async fn run_request_filter(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

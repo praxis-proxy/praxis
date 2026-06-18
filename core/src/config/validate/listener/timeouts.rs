@@ -88,6 +88,7 @@ pub(super) fn validate_tcp_max_duration(listener: &Listener) -> Result<(), Proxy
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

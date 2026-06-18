@@ -120,7 +120,7 @@ fn cl_te_desync_does_not_poison_connection() {
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    use std::io::{Read, Write};
+    use std::io::{Read as _, Write as _};
     let mut stream = std::net::TcpStream::connect(proxy.addr()).unwrap();
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(3)))

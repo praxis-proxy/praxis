@@ -6,7 +6,7 @@
 use super::GrpcDetectionFilter;
 use crate::{
     FilterAction,
-    filter::HttpFilter,
+    filter::HttpFilter as _,
     test_utils::{make_filter_context, make_request},
 };
 

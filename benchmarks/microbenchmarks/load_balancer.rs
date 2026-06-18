@@ -17,7 +17,7 @@ use std::hint::black_box;
 use common::{bench_runtime, make_request};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use praxis_core::config::{Cluster, ConsistentHashOpts, LoadBalancerStrategy, ParameterisedStrategy, SimpleStrategy};
-use praxis_filter::{HttpFilter, HttpFilterContext, LoadBalancerFilter};
+use praxis_filter::{HttpFilter as _, HttpFilterContext, LoadBalancerFilter};
 
 // -----------------------------------------------------------------------------
 // Benchmarks

@@ -14,6 +14,7 @@
 mod config;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -206,7 +207,10 @@ fn write_metadata(ctx: &mut HttpFilterContext<'_>, classified: &ClassifiedReques
     }
 
     if let Some(stream) = classified.stream {
-        ctx.set_metadata("anthropic_messages_format.stream", if stream { "true" } else { "false" });
+        ctx.set_metadata(
+            "anthropic_messages_format.stream",
+            if stream { "true" } else { "false" },
+        );
     }
 
     if let Some(max_tokens) = classified.max_tokens {

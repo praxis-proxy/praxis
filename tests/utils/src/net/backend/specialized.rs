@@ -5,7 +5,7 @@
 //! and shared TCP server utilities.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     sync::{
         Arc,
@@ -81,6 +81,7 @@ pub fn start_reserved_header_response_backend() -> u16 {
 }
 
 /// Start a backend that waits `delay` before responding.
+#[expect(clippy::disallowed_methods, reason = "blocking thread, not async")]
 pub fn start_slow_backend(body: &str, delay: Duration) -> u16 {
     let body = body.to_owned();
     spawn_tcp_server(move |mut stream| {
@@ -130,7 +131,7 @@ impl BackendGuard {
 impl Drop for BackendGuard {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        let _ = TcpStream::connect(format!("127.0.0.1:{}", self.port));
+        _ = TcpStream::connect(format!("127.0.0.1:{}", self.port));
     }
 }
 

@@ -264,7 +264,7 @@ impl ListenerTls {
     /// assert_eq!(c, cert.to_str().unwrap());
     /// assert_eq!(k, key.to_str().unwrap());
     /// ```
-    #[allow(clippy::indexing_slicing, reason = "validated non-empty")]
+    #[expect(clippy::indexing_slicing, reason = "validated non-empty")]
     pub fn primary_cert_paths(&self) -> (&str, &str) {
         let cert = &self.certificates[0];
         (&cert.cert_path, &cert.key_path)
@@ -475,6 +475,7 @@ fn validate_multi_cert_defaults(certificates: &[CertKeyPair]) -> Result<(), TlsE
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

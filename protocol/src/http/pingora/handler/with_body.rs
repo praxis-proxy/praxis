@@ -114,7 +114,7 @@ impl ProxyHttp for PingoraHttpHandler {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation, reason = "millis fit u64")]
+    #[expect(clippy::cast_possible_truncation, reason = "millis fit u64")]
     async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()>
     where
         Self::CTX: Send + Sync,

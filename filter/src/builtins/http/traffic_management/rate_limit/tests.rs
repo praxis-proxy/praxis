@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 
 use super::{HARD_CAP_PER_IP_ENTRIES, MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState};
-use crate::{FilterAction, builtins::http::traffic_management::token_bucket::TokenBucket, filter::HttpFilter};
+use crate::{FilterAction, builtins::http::traffic_management::token_bucket::TokenBucket, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Tests

@@ -30,7 +30,7 @@ mod tls_setup;
 /// [`Protocol`]: crate::Protocol
 pub struct PingoraTcp;
 
-#[allow(clippy::too_many_lines, reason = "linear registration with shutdown collection")]
+#[expect(clippy::too_many_lines, reason = "linear registration with shutdown collection")]
 impl Protocol for PingoraTcp {
     fn register(
         self: Box<Self>,
@@ -40,7 +40,7 @@ impl Protocol for PingoraTcp {
     ) -> Result<Vec<watch::Sender<bool>>, ProxyError> {
         let groups = tls_setup::group_tcp_listeners(config);
         tls_setup::validate_tcp_group_consistency(&groups)?;
-        #[allow(clippy::expect_used, reason = "empty pipeline is infallible")]
+        #[expect(clippy::expect_used, reason = "empty pipeline is infallible")]
         let fallback_pipeline = Arc::new(ArcSwap::from_pointee(
             FilterPipeline::build(&mut [], &FilterRegistry::with_builtins()).expect("empty pipeline is valid"),
         ));

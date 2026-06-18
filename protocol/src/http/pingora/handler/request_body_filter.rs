@@ -24,7 +24,7 @@ const BODY_FALLBACK_LIMIT: usize = 67_108_864; // 64 MiB
 // -----------------------------------------------------------------------------
 
 /// Run body filters on a request body chunk, enforcing size limits.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     clippy::cognitive_complexity,
     reason = "body filter dispatch"
@@ -61,10 +61,12 @@ pub(super) async fn execute(
     match ctx.request_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
             if let Some(ref chunk) = *body {
+                #[expect(clippy::allow_attributes, reason = "cast lint is platform-dependent")]
                 #[allow(clippy::cast_possible_truncation, reason = "chunk length fits u64")]
                 let chunk_len = chunk.len() as u64;
                 ctx.request_body_bytes += chunk_len;
 
+                #[expect(clippy::allow_attributes, reason = "cast lint is platform-dependent")]
                 #[allow(clippy::cast_possible_truncation, reason = "max_bytes fits u64")]
                 let limit = max_bytes as u64;
                 if ctx.request_body_bytes > limit {
@@ -167,6 +169,7 @@ pub(super) async fn execute(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
