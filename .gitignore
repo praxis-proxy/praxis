@@ -3,6 +3,7 @@ target
 
 # Test artifacts
 **/*.db
+**/postgres.rs.tmp*
 
 # Rustfmt backup files
 **/*.rs.bk

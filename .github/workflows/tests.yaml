@@ -62,6 +62,9 @@ jobs:
             ${{ runner.os }}-rust-1.96.0-cargo-
           save-always: true
 
+      - name: Install cargo-machete
+        run: cargo install cargo-machete --locked
+
       - name: Lint
         run: make lint
 
