@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! [RFC 9112] HTTP/1.1 conformance tests.
 //!
@@ -81,11 +81,7 @@ fn rfc9112_bare_cr_in_header_rejected() {
         buf
     };
     let status = parse_status(&raw);
-    assert!(
-        status == 400 || status == 200 || status == 0,
-        "expected 400, 200 (sanitized), or connection \
-         close for bare CR, got {status}"
-    );
+    assert_eq!(status, 400, "bare CR in header must be rejected with 400, got {status}");
 }
 
 // -----------------------------------------------------------------------------
@@ -115,11 +111,7 @@ fn rfc9112_absolute_form_request_uri() {
         ),
     );
     let status = parse_status(&raw);
-    assert!(
-        status == 200 || status == 400 || status == 404 || status == 0,
-        "expected 200, 400, 404, or connection close \
-         for absolute-form URI, got {status}"
-    );
+    assert_eq!(status, 400, "absolute-form URI must be rejected with 400, got {status}");
 }
 
 // -----------------------------------------------------------------------------
@@ -464,9 +456,9 @@ fn rfc9112_obs_fold_sp_rejected() {
     );
     let status = parse_status(&raw);
 
-    assert!(
-        status == 400 || status == 200 || status == 0,
-        "obs-fold (SP continuation) must be rejected (400) or unfolded (200), got {status}"
+    assert_eq!(
+        status, 400,
+        "obs-fold (SP continuation) must be rejected with 400, got {status}"
     );
 }
 
@@ -492,9 +484,9 @@ fn rfc9112_obs_fold_htab_rejected() {
     );
     let status = parse_status(&raw);
 
-    assert!(
-        status == 400 || status == 200 || status == 0,
-        "obs-fold (HTAB continuation) must be rejected (400) or unfolded (200), got {status}"
+    assert_eq!(
+        status, 400,
+        "obs-fold (HTAB continuation) must be rejected with 400, got {status}"
     );
 }
 
@@ -555,8 +547,8 @@ fn rfc9112_options_asterisk_form_handled() {
     );
     let status = parse_status(&raw);
 
-    assert!(
-        status == 200 || status == 400 || status == 404 || status == 0,
-        "OPTIONS * must not crash the proxy; expected 200, 400, 404, or connection close, got {status}"
+    assert_eq!(
+        status, 200,
+        "OPTIONS * must be forwarded to upstream, got {status}"
     );
 }

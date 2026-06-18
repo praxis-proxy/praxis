@@ -12,10 +12,9 @@
 /// Standard MCP protocol headers (`mcp-session-id`, `mcp-method`,
 /// `mcp-name`, `mcp-protocol-version`, `mcp-param-*`) do NOT match these
 /// prefixes because they lack the `x-` prefix.
-///
-/// TODO(#186) Spike: consider additive operator-managed reserved prefixes
-/// once the broader config model defines global vs listener/filter-chain
-/// scope and additive vs override semantics.
+// TODO(#186) Spike: consider additive operator-managed reserved prefixes
+// once the broader config model defines global vs listener/filter-chain
+// scope and additive vs override semantics.
 const RESERVED_HEADER_PREFIXES: &[&str] = &["x-praxis-", "x-mcp-", "x-a2a-"];
 
 /// Return whether a header name belongs to Praxis reserved internal metadata.

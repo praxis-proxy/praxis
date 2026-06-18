@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! AI filters for HTTP workloads: inference routing, prompt enrichment,
 //! agentic protocol classification, and `OpenAI` API pipelines.
@@ -22,7 +22,7 @@ mod prompt_enrich;
 )]
 pub(crate) mod store;
 #[cfg(feature = "ai-inference")]
-pub mod token_usage;
+pub(crate) mod token_usage;
 
 pub use agentic::{A2aFilter, JsonRpcFilter, McpFilter};
 #[cfg(feature = "ai-inference")]

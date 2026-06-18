@@ -60,18 +60,18 @@ The scope covers five capabilities:
 
    [mid-conversation system messages docs]: https://platform.claude.com/docs/en/build-with-claude/mid-conversation-system-messages
 
-2. **Request validation**: validate only the fields
-   that affect gateway/filter behavior: `messages`
-   is non-empty, `max_tokens` is present and > 0,
-   and `model` is non-empty. All other fields are
-   forwarded to the inference backend unmodified —
-   the backend handles parameter ranges, model
-   availability, role ordering, and content-level
-   validation. Unlike the Responses API, `Anthropic`
-   Messages does not require persistence or stateful
-   orchestration, so the validation filter is
-   lighter: no shared state struct, no store
-   initialization.
+2. **Request validation**: validate only request
+   properties the gateway or filters must act on
+   locally. All other fields are forwarded to the
+   inference backend unmodified; the backend handles
+   Anthropic API requirements such as required fields,
+   parameter types and ranges, model availability, role
+   ordering, and content-level validation. Unknown
+   fields are expected and must be preserved. Unlike
+   the Responses API, `Anthropic` Messages does not
+   require persistence or stateful orchestration, so
+   the validation filter is lighter: no shared state
+   struct, no store initialization.
 
 3. **Format transformation**: bidirectional conversion
    between `Anthropic` Messages and `OpenAI` Chat

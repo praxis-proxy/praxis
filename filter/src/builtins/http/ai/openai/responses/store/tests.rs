@@ -1817,6 +1817,85 @@ conversations_table: conversations
     );
 }
 
+#[test]
+fn postgres_config_rejects_percent_encoded_loopback() {
+    let yaml = postgres_config_yaml("postgres://user@%31%32%37.0.0.1/db", "");
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "percent-encoded loopback host should be rejected");
+}
+
+#[test]
+fn postgres_config_rejects_octal_loopback() {
+    let yaml = postgres_config_yaml("postgres://user@0177.0.0.1/db", "");
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "octal loopback host should be rejected via legacy IPv4 parsing"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_hex_loopback() {
+    let yaml = postgres_config_yaml("postgres://user@0x7f.0.0.1/db", "");
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "hex loopback host should be rejected via legacy IPv4 parsing"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_ipv6_bracketed_loopback() {
+    let yaml = postgres_config_yaml("postgres://user@[::1]/db", "");
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "bracketed IPv6 loopback host should be rejected");
+}
+
+#[test]
+fn postgres_config_rejects_socket_path_with_traversal() {
+    let yaml = postgres_config_yaml(
+        "postgres://user@203.0.113.10/db?host=%2Fvar%2Frun%2F..%2F..%2Fetc%2Fdb",
+        "allow_private_database_url: true",
+    );
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "socket path with directory traversal should be rejected"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_hostaddr_param_with_loopback() {
+    let yaml = postgres_config_yaml("postgres://user@8.8.8.8/db?hostaddr=127.0.0.1", "");
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "hostaddr query param with loopback should be rejected");
+}
+
+#[test]
+fn sqlite_mode_memory_query_param_accepted() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+backend: sqlite
+database_url: "sqlite:///path?mode=memory"
+responses_table: responses
+conversations_table: conversations
+"#,
+    )
+    .expect("YAML should parse");
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(
+        result.is_ok(),
+        "sqlite URL with mode=memory query param should be accepted as in-memory"
+    );
+}
+
+#[test]
+fn postgres_config_rejects_empty_host() {
+    let yaml = postgres_config_yaml("postgres:///mydb", "");
+    let result = ResponseStoreFilter::from_config(&yaml);
+    assert!(result.is_err(), "postgres URL with no host should be rejected");
+}
+
 // -----------------------------------------------------------------------------
 // GET /v1/responses/{id}
 // -----------------------------------------------------------------------------

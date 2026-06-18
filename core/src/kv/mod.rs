@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Key-value store trait and registry for runtime-updatable mappings.
 
@@ -7,9 +7,9 @@ use std::{fmt::Debug, sync::Arc};
 
 use dashmap::DashMap;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // MatchType
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// How a key lookup matches against stored keys.
 ///
@@ -34,9 +34,9 @@ pub enum MatchType {
     Suffix,
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // KvBackend Trait
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// A single key-value store backend.
 ///
@@ -51,8 +51,8 @@ pub enum MatchType {
 /// optimized for concurrent reads. Writes may occur from
 /// admin API requests and filter execution.
 ///
-/// Keys and values use [`Arc<str>`] for zero-copy sharing
-/// across threads.
+/// Keys and values use [`Arc<str>`] so multiple threads can
+/// hold read handles to the same data concurrently.
 ///
 /// # Accessing from a filter
 ///
@@ -135,9 +135,9 @@ pub trait KvBackend: Send + Sync + Debug {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // KvLookup
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Three-state result from a combined store + key lookup.
 ///
@@ -214,9 +214,9 @@ impl KvLookup {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // KvStoreRegistry
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Concurrent registry of named key-value store backends.
 ///
@@ -405,9 +405,9 @@ impl Default for KvStoreRegistry {
 
 pub mod memory;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]

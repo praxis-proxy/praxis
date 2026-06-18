@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Request smuggling hardening tests.
 
@@ -333,8 +333,8 @@ fn empty_transfer_encoding_rejected() {
     );
     let status = parse_status(&raw);
 
-    assert!(
-        status == 400 || status == 200 || status == 0,
-        "empty Transfer-Encoding should be rejected or handled safely (got {status})"
+    assert_eq!(
+        status, 400,
+        "empty Transfer-Encoding must be rejected with 400, got {status}"
     );
 }

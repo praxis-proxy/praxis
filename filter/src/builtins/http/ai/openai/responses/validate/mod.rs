@@ -238,7 +238,7 @@ mod tests {
         assert_eq!(
             filter.name(),
             "openai_responses_validate",
-            "filter name should be validate"
+            "filter name should be openai_responses_validate"
         );
     }
 

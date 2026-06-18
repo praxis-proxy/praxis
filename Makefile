@@ -43,7 +43,7 @@ endif
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience test-smoke \
 	bench \
-	lint fmt doc audit coverage coverage-check \
+	lint fmt doc audit semver coverage coverage-check \
 	require-container-engine \
 	container container-run \
 	test-container test-container-run \
@@ -131,9 +131,7 @@ container-run: | require-container-engine
 # -------------------------------------------------------------------
 
 test-container: | require-container-engine
-	$(CONTAINER_ENGINE) build \
-		$(if $(findstring podman,$(CONTAINER_ENGINE)),--ignorefile Containerfile.test.dockerignore) \
-		-t $(IMAGE)-test:$(VERSION) -f Containerfile.test .
+	$(CONTAINER_ENGINE) build -t $(IMAGE)-test:$(VERSION) -f Containerfile.test .
 
 test-container-run: test-container
 	$(CONTAINER_ENGINE) run --rm -v $(CURDIR):/src -v praxis-test-cache:/cache \
@@ -190,9 +188,13 @@ bench: $(VEGETA) $(FORTIO_DEP)
 lint:
 	cargo clippy --workspace --all-targets -- -D warnings
 	cargo +$(NIGHTLY_VERSION) fmt --all -- --check
+	cargo machete
 	cargo xtask lint-deps
 	cargo xtask lint-example-tests
 	cargo xtask sync-example-readme
+
+semver:
+	cargo semver-checks
 
 fmt:
 	cargo +$(NIGHTLY_VERSION) fmt --all
@@ -206,14 +208,18 @@ audit:
 
 coverage:
 	cargo llvm-cov --workspace --html --output-dir target/coverage \
+		--exclude benchmarks \
 		--exclude praxis-tests-conformance \
-		--ignore-filename-regex '(target/|tests/|xtask/|benchmarks/)' \
+		--exclude xtask \
+		--ignore-filename-regex '(target/|tests/)' \
 		--fail-under-lines 95
 
 coverage-check:
 	cargo llvm-cov --workspace --json \
+		--exclude benchmarks \
 		--exclude praxis-tests-conformance \
-		--ignore-filename-regex '(target/|tests/|xtask/|benchmarks/)' \
+		--exclude xtask \
+		--ignore-filename-regex '(target/|tests/)' \
 		--fail-under-lines 95 \
 		--output-path coverage.json
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Upstream cluster definitions: endpoints, load-balancing strategies, and timeouts.
 
@@ -41,6 +41,11 @@ pub struct Cluster {
     pub name: Arc<str>,
 
     /// TCP connection timeout in milliseconds.
+    ///
+    /// Applies to the TCP handshake only (before TLS). When
+    /// exceeded, the connection attempt fails and the load
+    /// balancer may retry on the next endpoint. `None` (the
+    /// default) uses Pingora's built-in timeout.
     #[serde(default)]
     pub connection_timeout_ms: Option<u64>,
 
@@ -53,6 +58,9 @@ pub struct Cluster {
     pub health_check: Option<HealthCheckConfig>,
 
     /// Idle connection timeout in milliseconds.
+    ///
+    /// Closes pooled upstream connections that have been idle
+    /// longer than this duration. `None` uses Pingora's default.
     #[serde(default)]
     pub idle_timeout_ms: Option<u64>,
 
@@ -78,7 +86,14 @@ pub struct Cluster {
     #[serde(default)]
     pub max_connections: Option<u32>,
 
-    /// Read timeout in milliseconds.
+    /// Per-read timeout in milliseconds.
+    ///
+    /// Applies to each individual read operation on an
+    /// established upstream connection. A timeout fires a 502
+    /// response to the client. Use [`total_connection_timeout_ms`]
+    /// to bound the entire exchange instead.
+    ///
+    /// [`total_connection_timeout_ms`]: Cluster::total_connection_timeout_ms
     #[serde(default)]
     pub read_timeout_ms: Option<u64>,
 
@@ -89,10 +104,21 @@ pub struct Cluster {
     pub tls: Option<praxis_tls::ClusterTls>,
 
     /// Total connection timeout in milliseconds (TCP + TLS).
+    ///
+    /// Bounds the combined TCP handshake and TLS negotiation.
+    /// When exceeded, the connection attempt fails with a 502
+    /// response. Prefer this over [`connection_timeout_ms`] for
+    /// TLS-enabled clusters where the handshake dominates latency.
+    ///
+    /// [`connection_timeout_ms`]: Cluster::connection_timeout_ms
     #[serde(default)]
     pub total_connection_timeout_ms: Option<u64>,
 
-    /// Write timeout in milliseconds.
+    /// Per-write timeout in milliseconds.
+    ///
+    /// Applies to each individual write operation on an
+    /// established upstream connection. A timeout fires a 502
+    /// response to the client.
     #[serde(default)]
     pub write_timeout_ms: Option<u64>,
 }

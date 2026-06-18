@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! TLS integration tests: listener termination, upstream origination,
 //! TCP TLS forwarding, mTLS, and SNI behavior.

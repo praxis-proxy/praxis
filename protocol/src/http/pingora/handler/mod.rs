@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Pingora `ProxyHttp` implementation: the main HTTP reverse-proxy handler.
 
@@ -265,7 +265,10 @@ async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx)
         && let Some(mut filter_ctx) = ctx.filter_context_for(pipeline, None)
     {
         let _result = pipeline.execute_http_response(&mut filter_ctx).await;
-        ctx.filter_metadata = filter_ctx.filter_metadata;
+        let metadata = filter_ctx.filter_metadata;
+        let state = filter_ctx.filter_state;
+        ctx.filter_metadata = metadata;
+        ctx.filter_state = state;
     }
 }
 

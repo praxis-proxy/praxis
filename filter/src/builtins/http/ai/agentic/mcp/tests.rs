@@ -9,7 +9,7 @@ use super::{
     McpFilter,
     config::{McpConfig, build_config},
 };
-use crate::{FilterAction, filter::HttpFilter};
+use crate::{FilterAction, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Config Tests
@@ -438,6 +438,41 @@ async fn complete_json_before_eos_still_continues() {
     assert!(
         matches!(action, FilterAction::Continue),
         "complete JSON-RPC before EOS should continue, not release"
+    );
+}
+
+#[tokio::test]
+async fn incomplete_json_before_eos_continues() {
+    let filter = make_default_filter();
+    let partial = br#"{"jsonrpc":"2.0","method":"tools/li"#;
+    let req = make_mcp_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from_static(partial));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "incomplete JSON before EOS should continue"
+    );
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "no headers should be promoted for incomplete JSON"
+    );
+}
+
+#[tokio::test]
+async fn malformed_json_rejected_at_eos() {
+    let filter = make_default_filter();
+    let req = make_mcp_request(&[]);
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from_static(b"not json {{{"));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "malformed JSON at EOS should be rejected by default"
     );
 }
 

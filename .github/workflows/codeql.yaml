@@ -31,7 +31,7 @@ jobs:
 
       - name: Install stable Rust
         if: matrix.language == 'rust'
-        uses: dtolnay/rust-toolchain@10c3493d811a9096cee4fdf287e41e852f6a51ba # 1.94.0
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
 
       - name: Cache Cargo registry and build artifacts
         if: matrix.language == 'rust'
@@ -42,9 +42,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-rust-1.94.0-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-1.96.0-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-1.94.0-cargo-
+            ${{ runner.os }}-rust-1.96.0-cargo-
           save-always: true
 
       - name: Initialize CodeQL

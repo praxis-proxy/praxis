@@ -244,6 +244,48 @@ async fn on_request_body_rejects_invalid_json() {
 }
 
 // -----------------------------------------------------------------------------
+// Body Parsing Edge Cases
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn partial_body_before_eos_continues() {
+    let filter = make_filter("{}");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+
+    let req: &'static crate::context::Request = Box::leak(Box::new(req));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    let mut body = Some(Bytes::from(r#"{"model":"gpt-4.1","inp"#));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "non-EOS body should return Continue"
+    );
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "no headers should be promoted before EOS"
+    );
+}
+
+#[tokio::test]
+async fn none_body_at_eos_continues() {
+    let filter = make_filter("{}");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+
+    let req: &'static crate::context::Request = Box::leak(Box::new(req));
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    let mut body: Option<Bytes> = None;
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        !matches!(action, FilterAction::Reject(_)),
+        "None body with default on_invalid:continue should not reject"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Promotion Tests (on_request_body)
 // -----------------------------------------------------------------------------
 

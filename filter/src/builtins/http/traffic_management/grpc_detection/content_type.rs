@@ -260,4 +260,76 @@ mod tests {
             "GrpcOther should map to 'grpc+other'"
         );
     }
+
+    #[test]
+    fn from_content_type_with_charset_and_whitespace() {
+        assert_eq!(
+            GrpcKind::from_content_type("application/grpc+proto ;  charset=utf-8"),
+            GrpcKind::GrpcProto,
+            "whitespace before semicolon should be trimmed after split"
+        );
+    }
+
+    #[test]
+    fn from_content_type_multiple_params() {
+        assert_eq!(
+            GrpcKind::from_content_type("application/grpc+json; charset=utf-8; boundary=something"),
+            GrpcKind::GrpcJson,
+            "multiple parameters after semicolons should be ignored"
+        );
+    }
+
+    #[test]
+    fn from_content_type_bare_grpc_with_semicolon() {
+        assert_eq!(
+            GrpcKind::from_content_type("application/grpc; charset=utf-8"),
+            GrpcKind::Grpc,
+            "bare grpc with parameters should map to Grpc"
+        );
+    }
+
+    #[test]
+    fn from_content_type_only_prefix_short() {
+        assert_eq!(
+            GrpcKind::from_content_type("application/grp"),
+            GrpcKind::None,
+            "value shorter than the grpc prefix should map to None"
+        );
+    }
+
+    #[test]
+    fn from_content_type_plus_empty_codec() {
+        assert_eq!(
+            GrpcKind::from_content_type("application/grpc+"),
+            GrpcKind::GrpcOther,
+            "plus sign with no codec name should map to GrpcOther"
+        );
+    }
+
+    #[test]
+    fn from_content_type_leading_whitespace() {
+        assert_eq!(
+            GrpcKind::from_content_type(" application/grpc"),
+            GrpcKind::Grpc,
+            "leading whitespace is trimmed before prefix check"
+        );
+    }
+
+    #[test]
+    fn from_content_type_all_caps() {
+        assert_eq!(
+            GrpcKind::from_content_type("APPLICATION/GRPC+JSON"),
+            GrpcKind::GrpcJson,
+            "fully uppercase content-type should be matched case-insensitively"
+        );
+    }
+
+    #[test]
+    fn from_content_type_trailing_whitespace_only() {
+        assert_eq!(
+            GrpcKind::from_content_type("application/grpc  "),
+            GrpcKind::Grpc,
+            "trailing whitespace without semicolon should be trimmed to bare grpc"
+        );
+    }
 }

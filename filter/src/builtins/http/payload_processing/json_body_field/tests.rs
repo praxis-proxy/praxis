@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Tests for the JSON body field filter.
 
@@ -550,6 +550,156 @@ async fn non_json_body_continues() {
         ctx.extra_request_headers.is_empty(),
         "no headers should be added for non-JSON body"
     );
+}
+
+#[tokio::test]
+async fn array_root_json_continues() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = br#"[1,2,3]"#;
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "array root JSON should continue since fields cannot be extracted"
+    );
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "no headers should be added for array root JSON"
+    );
+}
+
+#[tokio::test]
+async fn scalar_root_json_continues() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = br#""hello""#;
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "scalar root JSON should continue since fields cannot be extracted"
+    );
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "no headers should be added for scalar root JSON"
+    );
+}
+
+#[tokio::test]
+async fn null_field_value_promoted_as_string() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/api");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = br#"{"model":null}"#;
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Release),
+        "null field value should trigger release"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
+    let (ref name, ref value) = ctx.extra_request_headers[0];
+    assert_eq!(name, "X-Model", "header name should match");
+    assert_eq!(value, "null", "null value should be stringified as 'null'");
+}
+
+#[tokio::test]
+async fn deeply_nested_with_null_continues() {
+    let filter = make_filter("metadata", "X-Metadata");
+    let req = crate::test_utils::make_request(http::Method::POST, "/api");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = br#"{"metadata":{"inner":null}}"#;
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Release),
+        "nested object with null inner should trigger release"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
+    let (ref name, ref value) = ctx.extra_request_headers[0];
+    assert_eq!(name, "X-Metadata", "header name should match");
+    assert!(
+        value.contains("inner") && value.contains("null"),
+        "nested object with null should be serialized as JSON string: {value}"
+    );
+}
+
+#[tokio::test]
+async fn field_name_with_dot() {
+    let filter = make_filter("my.model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/api");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = br#"{"my.model":"gpt-4o"}"#;
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Release),
+        "dotted field name should be extractable"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
+    let (ref name, ref value) = ctx.extra_request_headers[0];
+    assert_eq!(name, "X-Model", "header name should match");
+    assert_eq!(value, "gpt-4o", "dotted field value should match");
+}
+
+#[tokio::test]
+async fn field_name_with_unicode() {
+    let filter = make_filter("mod\u{00e9}le", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/api");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = "{\"mod\u{00e9}le\":\"claude\"}";
+    let mut body = Some(Bytes::from(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Release),
+        "unicode field name should be extractable"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
+    let (ref name, ref value) = ctx.extra_request_headers[0];
+    assert_eq!(name, "X-Model", "header name should match");
+    assert_eq!(value, "claude", "unicode field value should match");
+}
+
+#[tokio::test]
+async fn empty_string_field_value_promoted() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/api");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = br#"{"model":""}"#;
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Release),
+        "empty string field should trigger release"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
+    let (ref name, ref value) = ctx.extra_request_headers[0];
+    assert_eq!(name, "X-Model", "header name should match");
+    assert_eq!(value, "", "empty string value should be promoted as empty header");
 }
 
 // -----------------------------------------------------------------------------

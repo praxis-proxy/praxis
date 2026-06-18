@@ -12,6 +12,11 @@ use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
 // -----------------------------------------------------------------------------
 
 /// Default maximum request body size for `StreamBuffer` mode (1 MiB).
+///
+/// Smaller than the OpenAI Responses default (10 MiB) because Anthropic
+/// Messages API payloads are typically text-only and do not carry inline
+/// file data URLs.  Operators needing larger payloads can override via
+/// `max_body_bytes` in config.
 const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576; // 1 MiB
 
 // -----------------------------------------------------------------------------

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Ordering validation checks for filter pipelines.
 
@@ -619,6 +619,7 @@ mod tests {
     /// Build a [`PipelineFilter`] with the given conditions.
     fn make_pf(conditions: Vec<Condition>) -> PipelineFilter {
         PipelineFilter {
+            filter_id: 0,
             branches: vec![],
             conditions,
             failure_mode: FailureMode::default(),

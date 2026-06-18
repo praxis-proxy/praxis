@@ -40,6 +40,8 @@ and the [extensions guide](../filters/extensions.md).
 | `prompt_enrich` | AI / Inference | HTTP (requires `ai-inference` feature) |
 | `openai_responses_format` | AI / Inference | HTTP (requires `ai-inference` feature) |
 | `openai_responses_validate` | AI / Inference | HTTP (requires `ai-inference` feature) |
+| `openai_response_store` | AI / Inference | HTTP (requires `ai-inference` feature) |
+| `anthropic_messages_format` | AI / Inference | HTTP (requires `ai-inference` feature) |
 
 ## Router
 
@@ -862,6 +864,159 @@ On rejection, returns a JSON error body:
 | `responses.stream` | `"true"` or `"false"` (defaults to `"false"`) |
 
 IDs use CSPRNG for cryptographic randomness.
+
+## A2A
+
+Extracts A2A protocol metadata from JSON-RPC request
+bodies and promotes method, family, task ID, streaming
+detection, and version to configurable request headers,
+filter results, and durable metadata for routing
+decisions. See [a2a-classifier-routing.yaml].
+
+[a2a-classifier-routing.yaml]: ../../examples/configs/ai/a2a-classifier-routing.yaml
+
+```yaml
+- filter: a2a
+  max_body_bytes: 65536
+  on_invalid: reject
+  method_aliases:
+    message/send: SendMessage
+    message/stream: SendStreamingMessage
+    tasks/get: GetTask
+    tasks/cancel: CancelTask
+  headers:
+    method: x-praxis-a2a-method
+    family: x-praxis-a2a-family
+    task_id: x-praxis-a2a-task-id
+    kind: x-praxis-a2a-kind
+    streaming: x-praxis-a2a-streaming
+    version: x-praxis-a2a-version
+```
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `max_body_bytes` | integer | 65536 | Maximum body size to buffer (64 KiB) |
+| `on_invalid` | string | `"reject"` | `"reject"` returns 400 for non-A2A; `"continue"` passes through |
+| `method_aliases` | map | `{}` | Map of slash-delimited method names to PascalCase aliases |
+| `headers.method` | string | `"x-praxis-a2a-method"` | Header name for the A2A method |
+| `headers.family` | string | `"x-praxis-a2a-family"` | Header name for the method family (message, task, etc.) |
+| `headers.task_id` | string | `"x-praxis-a2a-task-id"` | Header name for the extracted task ID |
+| `headers.kind` | string | `"x-praxis-a2a-kind"` | Header name for the JSON-RPC kind |
+| `headers.streaming` | string | `"x-praxis-a2a-streaming"` | Header name for streaming detection |
+| `headers.version` | string | `"x-praxis-a2a-version"` | Header name for the A2A protocol version |
+
+The filter writes `a2a.*` and `json_rpc.*` entries to
+the filter result set for branch chain conditions.
+
+## Model To Header
+
+Promotes the JSON `"model"` field from the request body
+to a request header for routing. A convenience wrapper
+around `json_body_field` that hardcodes `field: "model"`.
+Uses StreamBuffer mode to inspect the body before
+upstream selection. Requires the `ai-inference` feature.
+See [model-to-header-routing.yaml].
+
+[model-to-header-routing.yaml]: ../../examples/configs/ai/model-to-header-routing.yaml
+
+```yaml
+- filter: model_to_header
+  header: X-AI-Model
+```
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `header` | string | `"X-Model"` | Request header to promote the model value into |
+
+If the `model` field is missing or the body is not valid
+JSON, the filter passes through without modification.
+
+## Anthropic Messages Format
+
+Classifies Anthropic Messages API requests by inspecting
+the JSON request body and promotes format, model, and
+stream flag to configurable request headers, metadata,
+and filter results. Uses the `anthropic-version` header
+and `/v1/messages` path as boost signals when body-only
+heuristics are ambiguous. Does not mutate the body.
+Requires the `ai-inference` feature. See
+[unified-gateway.yaml].
+
+[unified-gateway.yaml]: ../../examples/configs/ai/anthropic/unified-gateway.yaml
+
+```yaml
+- filter: anthropic_messages_format
+  on_invalid: continue
+  max_body_bytes: 1048576
+  headers:
+    format: x-praxis-ai-format
+    model: x-praxis-ai-model
+    stream: x-praxis-ai-stream
+```
+
+| Field | Type | Default | Description |
+| ----- | ---- | ------- | ----------- |
+| `on_invalid` | string | `"continue"` | `"continue"` passes unclassifiable requests through; `"reject"` returns 400 |
+| `max_body_bytes` | integer | 1048576 | Maximum body size to buffer (1 MiB) |
+| `headers.format` | string | `"x-praxis-ai-format"` | Header for classification format |
+| `headers.model` | string | `"x-praxis-ai-model"` | Header for extracted model name |
+| `headers.stream` | string | `"x-praxis-ai-stream"` | Header for stream flag |
+
+Classification formats written to
+`anthropic_messages_format.format`:
+
+| Format | Meaning |
+| ------ | ------- |
+| `anthropic_messages` | Anthropic Messages API (body has `messages` + `anthropic-version` header or `/v1/messages` path) |
+| `openai_chat_completions` | Chat Completions API (body has `messages` without Anthropic signals) |
+| `openai_responses` | Responses API (body has `input`) |
+| `unknown_json` | Valid JSON without recognized format |
+| `invalid_json` | Malformed JSON |
+| `non_json` | Body is not JSON |
+
+## OpenAI Response Store
+
+Persists non-streaming Responses API responses to a
+database backend and handles retrieval and deletion
+locally. Supports SQLite (file-backed or in-memory) and
+PostgreSQL backends. Must be placed after
+`openai_responses_format` in the filter chain. Requires
+the `ai-inference` feature. See [response-store.yaml].
+
+[response-store.yaml]: ../../examples/configs/ai/openai/responses/response-store.yaml
+
+```yaml
+- filter: openai_response_store
+  backend: sqlite
+  database_url: "sqlite://responses.db?mode=rwc"
+  responses_table: openai_responses
+  conversations_table: openai_conversations
+```
+
+| Field | Type | Required | Description |
+| ----- | ---- | -------- | ----------- |
+| `backend` | string | yes | `"sqlite"` or `"postgres"` |
+| `database_url` | string | yes | Database connection URL (treated as a secret) |
+| `responses_table` | string | yes | Table name for stored responses |
+| `conversations_table` | string | yes | Table name for conversation messages |
+| `ssl_mode` | string | no | PostgreSQL SSL mode: `"disable"`, `"prefer"`, `"require"`, `"verify-ca"`, `"verify-full"` |
+| `ssl_root_cert` | string | no | Path to CA certificate for `verify-ca` / `verify-full` (treated as a secret) |
+| `allow_private_database_url` | bool | no | Allow DNS, loopback, or private-network database targets (default: false) |
+
+**Handled endpoints:**
+
+| Method | Path | Behavior |
+| ------ | ---- | -------- |
+| `POST` | `/v1/responses` | Proxied to backend; 2xx JSON response persisted |
+| `GET` | `/v1/responses/{id}` | Served from local store (200 or 404) |
+| `GET` | `/v1/responses/{id}/input_items` | Paginated input items from local store |
+| `DELETE` | `/v1/responses/{id}` | Deleted from local store (200 or 404) |
+
+Streaming responses (`stream: true`) are not persisted.
+Non-2xx responses and non-JSON content types are skipped.
+The store is lazily initialized on the first qualifying
+request; SQLite init failures are permanent while
+PostgreSQL failures are retried.
 
 ## Conditions
 

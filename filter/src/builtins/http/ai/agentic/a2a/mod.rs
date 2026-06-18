@@ -319,7 +319,7 @@ fn lookup_task_route(
     if let Some(cluster) = store.get_by_task_id(task_id) {
         ctx.extra_request_headers.push((
             Cow::Owned(config.task_routing.route_cluster_header.clone()),
-            cluster.to_string(),
+            (*cluster).to_owned(),
         ));
         ctx.set_metadata("a2a.route_decision", "task_route_hit");
         ctx.set_metadata("a2a.route_cluster", &*cluster);

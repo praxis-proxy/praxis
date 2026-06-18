@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Cluster validation: endpoints, weights, SNI hostnames, timeouts, and health check addresses.
 

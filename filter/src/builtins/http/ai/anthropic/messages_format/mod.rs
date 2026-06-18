@@ -136,6 +136,11 @@ impl HttpFilter for AnthropicMessagesFormatFilter {
         let has_anthropic_header = ctx.request.headers.get(ANTHROPIC_VERSION_HEADER).is_some();
         let is_messages_path = is_anthropic_messages_path(ctx.request.uri.path());
 
+        // Only ChatCompletions is eligible for reclassification: its
+        // body shape (`messages` without required `max_tokens`) overlaps
+        // with Anthropic Messages.  UnknownJson is not boosted because
+        // the body lacked `messages` entirely, so the Anthropic signal
+        // is too weak to override.
         if classified.format == AiRequestFormat::ChatCompletions && (has_anthropic_header || is_messages_path) {
             classified.format = AiRequestFormat::AnthropicMessages;
         }
@@ -192,20 +197,33 @@ fn handle_invalid_format(format: AiRequestFormat, config: &AnthropicMessagesForm
 
 /// Write durable metadata.
 fn write_metadata(ctx: &mut HttpFilterContext<'_>, classified: &ClassifiedRequest) {
-    ctx.set_metadata("anthropic_format.format", classified.format.as_str());
+    ctx.set_metadata("anthropic_messages_format.format", classified.format.as_str());
 
     if let Some(model) = &classified.model
         && is_safe_promoted_value(model)
     {
-        ctx.set_metadata("anthropic_format.model", model.clone());
+        ctx.set_metadata("anthropic_messages_format.model", model.clone());
     }
 
     if let Some(stream) = classified.stream {
-        ctx.set_metadata("anthropic_format.stream", if stream { "true" } else { "false" });
+        ctx.set_metadata("anthropic_messages_format.stream", if stream { "true" } else { "false" });
     }
 
     if let Some(max_tokens) = classified.max_tokens {
-        ctx.set_metadata("anthropic_format.max_tokens", max_tokens.to_string());
+        ctx.set_metadata("anthropic_messages_format.max_tokens", max_tokens.to_string());
+    }
+
+    if classified.has_tools {
+        ctx.set_metadata("anthropic_messages_format.has_tools", "true");
+    }
+    if classified.has_prompt_id {
+        ctx.set_metadata("anthropic_messages_format.has_prompt_id", "true");
+    }
+    if classified.has_conversation {
+        ctx.set_metadata("anthropic_messages_format.has_conversation", "true");
+    }
+    if classified.has_previous_response_id {
+        ctx.set_metadata("anthropic_messages_format.has_previous_response_id", "true");
     }
 }
 
@@ -264,6 +282,19 @@ fn promote_filter_results(ctx: &mut HttpFilterContext<'_>, classified: &Classifi
 
     if let Some(max_tokens) = classified.max_tokens {
         results.set("max_tokens", max_tokens.to_string())?;
+    }
+
+    if classified.has_tools {
+        results.set("has_tools", "true")?;
+    }
+    if classified.has_prompt_id {
+        results.set("has_prompt_id", "true")?;
+    }
+    if classified.has_conversation {
+        results.set("has_conversation", "true")?;
+    }
+    if classified.has_previous_response_id {
+        results.set("has_previous_response_id", "true")?;
     }
 
     Ok(())

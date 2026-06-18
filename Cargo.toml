@@ -29,7 +29,7 @@ members = [
 [workspace.package]
 version = "0.3.1"
 edition = "2024"
-rust-version = "1.94"
+rust-version = "1.96"
 authors = ["Shane Utt <shaneutt@linux.com>"]
 license = "MIT"
 repository = "https://github.com/praxis-proxy/praxis"
@@ -147,8 +147,11 @@ missing_debug_implementations = "allow"
 [workspace.lints.clippy]
 # Async and concurrency safety
 await_holding_lock = "deny"
+await_holding_refcell_ref = "deny"
 future_not_send = "deny"
 large_futures = "deny"
+let_underscore_future = "deny"
+let_underscore_must_use = "deny"
 # Memory and allocation efficiency
 implicit_clone = "deny"
 inefficient_to_string = "deny"
@@ -200,6 +203,7 @@ enum_glob_use = "deny"
 wildcard_imports = "deny"
 # String handling
 string_add_assign = "deny"
+string_slice = "deny"
 # Function size
 too_many_lines = "deny"
 # Dev hygiene
@@ -257,12 +261,13 @@ collection_is_never_read = "deny"
 significant_drop_in_scrutinee = "deny"
 mutex_integer = "deny"
 mutex_atomic = "deny"
+allow_attributes = "deny"
 allow_attributes_without_reason = "deny"
 significant_drop_tightening = "warn"
-# Diagnostic hygiene
-expect_used = "warn"
-panic = "warn"
-indexing_slicing = "warn"
+# Diagnostic hygiene (deny: a proxy must not panic)
+expect_used = "deny"
+panic = "deny"
+indexing_slicing = "deny"
 # String handling (extended)
 # string_to_string removed in recent clippy (covered by implicit_clone)
 # Redundancy
@@ -287,6 +292,30 @@ unused_result_ok = "deny"
 exit = "deny"
 # Restriction: prevent resource leaks
 mem_forget = "deny"
+# Restriction: trait import hygiene
+unused_trait_names = "deny"
+# Restriction: enforce descriptive error type names
+error_impl_error = "deny"
+# Restriction: unit structs use semicolons
+empty_structs_with_brackets = "deny"
+# Restriction: tests must live in #[cfg(test)] modules
+tests_outside_test_module = "deny"
+# Restriction: no SAFETY comments on safe code
+unnecessary_safety_comment = "deny"
+# Restriction: catch renamed trait method parameters
+renamed_function_params = "deny"
+# Restriction: prefer .then_some() / .then()
+if_then_some_else_none = "deny"
+# Restriction: avoid intermediate allocations
+format_push_string = "deny"
+# Restriction: use .as_slice() not &v[..]
+deref_by_slicing = "deny"
+# Restriction: catch inexact float literals
+lossy_float_literal = "deny"
+# Restriction: no semicolons in single-expression blocks
+semicolon_inside_block = "deny"
+# Restriction: enforce clippy.toml method blocklist
+disallowed_methods = "deny"
 
 [workspace.lints.rustdoc]
 broken_intra_doc_links = "deny"

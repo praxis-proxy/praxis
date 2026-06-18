@@ -6,7 +6,7 @@ repository.
 
 ## Requirements
 
-- Rust stable 1.94+
+- Rust stable 1.96+
 - Rust nightly (for `rustfmt`)
 - CMake 3.31+
 - Docker 29.3.0+ or Podman (for container builds)
@@ -111,6 +111,9 @@ coding style guide. Key points:
   not need narration.
 - Do not create re-export-only files. Import
   directly from the source module.
+- Blank line between each `#[...]` attribute on
+  structs, enums, fields, and variants; alphabetical
+  ordering within `#[derive(...)]` and `#[serde(...)]`
 - Pre-computed numeric literals with trailing
   comments for human-readable meaning
 - Use enums, not strings, for fixed value sets
@@ -127,18 +130,35 @@ The workspace enforces an extensive lint policy in
 `Cargo.toml` under `[workspace.lints.rust]` and
 `[workspace.lints.clippy]`. Key constraints:
 
-- `#[clippy::unwrap_used]` is denied; use `?` or
-  explicit error handling
-- `clippy::too_many_lines` and
-  `clippy::cognitive_complexity` are denied
+- `unwrap_used`, `expect_used`, `panic`,
+  `indexing_slicing`: all denied; a proxy must not
+  panic. Use `#[expect(..., reason = "...")]` for
+  genuine exceptions.
+- `allow_attributes`: denied; use `#[expect(...)]`
+  instead of `#[allow(...)]`. Combined with
+  `allow_attributes_without_reason`, every lint
+  suppression must use `#[expect]` with a `reason`.
+- `string_slice`: denied; no raw string indexing.
+  Use `.get()`, `.chars().nth()`, or
+  `.char_indices()`.
+- `await_holding_lock`, `await_holding_refcell_ref`:
+  denied; no holding guards across `.await` points.
+- `let_underscore_future`,
+  `let_underscore_must_use`: denied; never silently
+  drop futures or `#[must_use]` values.
+- `too_many_lines`, `cognitive_complexity`: denied
 - All cast operations (`cast_lossless`,
   `cast_possible_truncation`, etc.) are denied
-- `clippy::dbg_macro`, `print_stdout`,
-  `print_stderr` are denied
-- `missing_assert_message` is denied: every
-  `assert!` needs a message string
-- `clippy::str_to_string` is denied: use
-  `to_owned()` for `&str` to `String`
+- `dbg_macro`, `print_stdout`, `print_stderr`:
+  denied
+- `missing_assert_message`: denied; every `assert!`
+  needs a message string
+- `str_to_string`: denied; use `to_owned()` for
+  `&str` to `String`
+- `unused_trait_names`: denied; import traits with
+  `as _` when only methods are used
+- `disallowed_methods`: denied; `std::thread::sleep`
+  is blocked (use `tokio::time::sleep`)
 
 ## File Ordering
 
@@ -207,6 +227,11 @@ See `docs/filters/extensions.md` for the full guide.
 6. Add functional integration test in
    `tests/integration/tests/suite/examples/`
 7. Run `cargo xtask sync-example-readme --fix`
+
+For AI inference filters, follow
+`docs/developing/adding-filters.md#ai-inference-validation`:
+validate only fields needed for local proxy behavior and
+leave backend-owned API semantics to the inference backend.
 
 ## Adding a Protocol
 

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! HTTP security filters: CORS, CSRF, IP access control, credential injection,
 //! forwarded-header injection, and guardrails.

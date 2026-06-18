@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Runtime tuning: worker thread count, work-stealing toggle, logging overrides, and upstream CA.
 
@@ -31,7 +31,13 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RuntimeConfig {
-    /// Fixed global queue interval for the tokio scheduler.
+    /// Tokio scheduler global queue check interval, in ticks.
+    ///
+    /// Controls how often worker threads check the global task
+    /// queue. The default of 61 (a prime) reduces contention
+    /// under proxy workloads where most tasks are I/O-bound.
+    /// Set to `null` to use the tokio default. Valid range is
+    /// any positive `u32`.
     ///
     /// ```
     /// use praxis_core::config::RuntimeConfig;
@@ -62,11 +68,14 @@ pub struct RuntimeConfig {
     #[serde(default)]
     pub log_overrides: HashMap<String, String>,
 
-    /// Process-wide maximum concurrent connections across all listeners.
+    /// Process-wide maximum concurrent connections across all
+    /// listeners (both HTTP and TCP).
     ///
     /// When set, new connections beyond this limit are rejected
-    /// (HTTP 503 / TCP close), regardless of per-listener limits.
-    /// `None` (the default) means no global limit.
+    /// with HTTP 503 (or TCP close for non-HTTP listeners),
+    /// regardless of per-listener limits. Connections are shed
+    /// before filter pipeline execution. `None` (the default)
+    /// means no global limit.
     ///
     /// ```
     /// use praxis_core::config::RuntimeConfig;
@@ -100,7 +109,9 @@ pub struct RuntimeConfig {
 
     /// Number of worker threads per service.
     ///
-    /// Auto-detected by default.
+    /// `0` (the default) auto-detects based on available CPU
+    /// cores. Values above the CPU count are valid but yield
+    /// diminishing returns for I/O-bound workloads.
     #[serde(default)]
     pub threads: usize,
 
@@ -126,7 +137,12 @@ pub struct RuntimeConfig {
     #[serde(default)]
     pub upstream_ca_file: Option<String>,
 
-    /// Maximum number of idle upstream connections kept per thread.
+    /// Maximum number of idle upstream connections kept per worker
+    /// thread, shared across all clusters.
+    ///
+    /// When a worker's pool is full, the oldest idle connection
+    /// is evicted. Set to `null` to use Pingora's built-in
+    /// default. This is a per-thread limit, not per-cluster.
     ///
     /// ```
     /// use praxis_core::config::RuntimeConfig;

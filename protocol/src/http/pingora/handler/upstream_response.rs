@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Upstream response transformations: hop-by-hop header stripping
 //! and reserved internal header removal ([RFC 9110]).

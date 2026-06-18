@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Shared utility functions for Criterion benchmarks.
 
@@ -43,6 +43,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         branch_iterations: std::collections::HashMap::new(),
         client_addr: None,
         cluster: None,
+        current_filter_id: None,
         downstream_tls: false,
         executed_filter_indices: Vec::new(),
         extra_request_headers: Vec::new(),
@@ -50,6 +51,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         request_headers_to_set: Vec::new(),
         filter_metadata: std::collections::HashMap::new(),
         filter_results: std::collections::HashMap::new(),
+        filter_state: std::collections::HashMap::new(),
         health_registry: None,
         id_generator: &BENCH_ID_GENERATOR,
         kv_stores: None,

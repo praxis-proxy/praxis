@@ -57,7 +57,7 @@ pub(crate) struct ClassifiedRequest {
     pub has_conversation: bool,
     /// Whether `previous_response_id` is present and non-null.
     pub has_previous_response_id: bool,
-    /// Whether `prompt.id` is present and non-null.
+    /// Whether `prompt.prompt_id` is present and non-null.
     pub has_prompt_id: bool,
     /// Whether `tools` is a non-empty array.
     pub has_tools: bool,

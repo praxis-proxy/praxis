@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Upstream peer selection: converts the filter pipeline's [`Upstream`] into a Pingora `HttpPeer`.
 //!

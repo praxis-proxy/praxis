@@ -298,9 +298,9 @@ mod tests {
     #[test]
     fn local_store_expired_task_route_misses_and_removes_entry() {
         let store = LocalTaskRouteStore::new();
-        store.put("task-1", "agent-a", Duration::from_millis(1));
+        store.put("task-1", "agent-a", Duration::from_millis(50));
 
-        sleep(Duration::from_millis(10));
+        sleep(Duration::from_millis(200));
 
         let cluster = store.get_by_task_id("task-1");
         assert!(cluster.is_none(), "expired task route should miss");
