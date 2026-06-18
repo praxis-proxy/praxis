@@ -69,7 +69,7 @@ impl RequestExtensions {
     /// the correct type. The `expect` guards against impossible
     /// `TypeId` collisions in the standard library.
     pub fn get_or_insert_with<T: Send + Sync + 'static>(&mut self, f: impl FnOnce() -> T) -> &mut T {
-        #[allow(clippy::expect_used, reason = "downcast cannot fail after typed insert")]
+        #[expect(clippy::expect_used, reason = "downcast cannot fail after typed insert")]
         self.0
             .entry(std::any::TypeId::of::<T>())
             .or_insert_with(|| Box::new(f()))
@@ -91,6 +91,7 @@ impl RequestExtensions {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
 mod tests {
     use super::*;
