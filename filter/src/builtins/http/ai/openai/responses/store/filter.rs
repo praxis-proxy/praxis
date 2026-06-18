@@ -123,6 +123,7 @@ impl ResponseStoreFilter {
                     self.config.database_url.expose_secret(),
                     &self.config.responses_table,
                     &self.config.conversations_table,
+                    None,
                 )
                 .await;
                 store.map(|s| {
@@ -143,6 +144,7 @@ impl ResponseStoreFilter {
                     self.config.database_url.expose_secret(),
                     &self.config.responses_table,
                     &self.config.conversations_table,
+                    None,
                     self.config.ssl_mode,
                     ssl_root_cert,
                 )

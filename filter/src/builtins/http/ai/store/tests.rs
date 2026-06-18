@@ -19,7 +19,7 @@ use crate::builtins::http::ai::openai::responses::store::{ListParams, Order, lis
 
 #[tokio::test]
 async fn sqlite_store_initializes_schema() {
-    let store = SqliteResponseStore::new("sqlite::memory:", "test_responses", "test_conversation_messages")
+    let store = SqliteResponseStore::new("sqlite::memory:", "test_responses", "test_conversation_messages", None)
         .await
         .expect("store creation should succeed");
 
@@ -436,6 +436,8 @@ async fn upsert_and_get_conversation() {
     let record = ConversationRecord {
         conversation_id: "conv_1".to_owned(),
         tenant_id: "tenant_a".to_owned(),
+        created_at: 1000,
+        metadata: json!({}),
         messages: json!([{"role": "user", "content": "Hi"}]),
     };
 
@@ -461,6 +463,8 @@ async fn upsert_conversation_overwrites() {
     let record = ConversationRecord {
         conversation_id: "conv_1".to_owned(),
         tenant_id: "tenant_a".to_owned(),
+        created_at: 1000,
+        metadata: json!({}),
         messages: json!([{"role": "user", "content": "v1"}]),
     };
     store.upsert_conversation(&record).await.expect("upsert should succeed");
@@ -505,6 +509,8 @@ async fn conversation_tenant_isolation() {
     let record = ConversationRecord {
         conversation_id: "conv_1".to_owned(),
         tenant_id: "tenant_a".to_owned(),
+        created_at: 1000,
+        metadata: json!({}),
         messages: json!([]),
     };
     store.upsert_conversation(&record).await.expect("upsert should succeed");
@@ -523,6 +529,8 @@ async fn delete_existing_conversation() {
     let record = ConversationRecord {
         conversation_id: "conv_1".to_owned(),
         tenant_id: "tenant_a".to_owned(),
+        created_at: 1000,
+        metadata: json!({}),
         messages: json!([]),
     };
     store.upsert_conversation(&record).await.expect("upsert should succeed");
@@ -560,6 +568,8 @@ async fn delete_conversation_tenant_isolation() {
     let record = ConversationRecord {
         conversation_id: "conv_1".to_owned(),
         tenant_id: "tenant_a".to_owned(),
+        created_at: 1000,
+        metadata: json!({}),
         messages: json!([]),
     };
     store.upsert_conversation(&record).await.expect("upsert should succeed");
@@ -695,6 +705,7 @@ async fn pg_nonexistent_ssl_root_cert_fails() {
         &url,
         &format!("test_responses_{suffix}"),
         &format!("test_conversations_{suffix}"),
+        None,
         Some(SslMode::VerifyCa),
         Some("/nonexistent/ca.pem"),
     )
@@ -716,6 +727,7 @@ async fn make_pg_store() -> PostgresResponseStore {
         &url,
         &format!("test_responses_{suffix}"),
         &format!("test_conversations_{suffix}"),
+        None,
         Some(SslMode::Disable),
         None,
     )
@@ -916,6 +928,8 @@ async fn pg_upsert_and_get_conversation() {
     let record = ConversationRecord {
         conversation_id: "conv_1".to_owned(),
         tenant_id: "tenant_a".to_owned(),
+        created_at: 1000,
+        metadata: json!({}),
         messages: json!([{"role": "user", "content": "Hi"}]),
     };
 
@@ -943,6 +957,8 @@ async fn pg_upsert_conversation_overwrites() {
     let record = ConversationRecord {
         conversation_id: "conv_1".to_owned(),
         tenant_id: "tenant_a".to_owned(),
+        created_at: 1000,
+        metadata: json!({}),
         messages: json!([{"role": "user", "content": "v1"}]),
     };
     store.upsert_conversation(&record).await.expect("upsert should succeed");
@@ -977,6 +993,8 @@ async fn pg_delete_existing_conversation() {
     let record = ConversationRecord {
         conversation_id: "conv_1".to_owned(),
         tenant_id: "tenant_a".to_owned(),
+        created_at: 1000,
+        metadata: json!({}),
         messages: json!([]),
     };
     store.upsert_conversation(&record).await.expect("upsert should succeed");
@@ -1004,6 +1022,8 @@ async fn pg_conversation_tenant_isolation() {
     let record = ConversationRecord {
         conversation_id: "conv_1".to_owned(),
         tenant_id: "tenant_a".to_owned(),
+        created_at: 1000,
+        metadata: json!({}),
         messages: json!([]),
     };
     store.upsert_conversation(&record).await.expect("upsert should succeed");
@@ -1021,7 +1041,7 @@ async fn pg_conversation_tenant_isolation() {
 // -----------------------------------------------------------------------------
 
 async fn make_store() -> SqliteResponseStore {
-    SqliteResponseStore::new("sqlite::memory:", "test_responses", "test_conversation_messages")
+    SqliteResponseStore::new("sqlite::memory:", "test_responses", "test_conversation_messages", None)
         .await
         .expect("store creation should succeed")
 }
