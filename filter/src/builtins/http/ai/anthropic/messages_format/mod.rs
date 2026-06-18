@@ -220,15 +220,6 @@ fn write_metadata(ctx: &mut HttpFilterContext<'_>, classified: &ClassifiedReques
     if classified.has_tools {
         ctx.set_metadata("anthropic_messages_format.has_tools", "true");
     }
-    if classified.has_prompt_id {
-        ctx.set_metadata("anthropic_messages_format.has_prompt_id", "true");
-    }
-    if classified.has_conversation {
-        ctx.set_metadata("anthropic_messages_format.has_conversation", "true");
-    }
-    if classified.has_previous_response_id {
-        ctx.set_metadata("anthropic_messages_format.has_previous_response_id", "true");
-    }
 }
 
 /// Promote classification facts to configurable request headers.
@@ -290,15 +281,6 @@ fn promote_filter_results(ctx: &mut HttpFilterContext<'_>, classified: &Classifi
 
     if classified.has_tools {
         results.set("has_tools", "true")?;
-    }
-    if classified.has_prompt_id {
-        results.set("has_prompt_id", "true")?;
-    }
-    if classified.has_conversation {
-        results.set("has_conversation", "true")?;
-    }
-    if classified.has_previous_response_id {
-        results.set("has_previous_response_id", "true")?;
     }
 
     Ok(())
