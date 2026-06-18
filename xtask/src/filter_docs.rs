@@ -25,11 +25,11 @@ use quote::ToTokens as _;
 
 /// CLI arguments for `cargo xtask generate-filter-docs`.
 #[derive(Parser)]
-pub(crate) struct GenerateArgs {}
+pub(crate) struct GenerateArgs;
 
 /// CLI arguments for `cargo xtask lint-filter-docs`.
 #[derive(Parser)]
-pub(crate) struct LintArgs {}
+pub(crate) struct LintArgs;
 
 // ---------------------------------------------------------------------------
 // Entry Points
@@ -955,12 +955,12 @@ fn serde_attr_contains(attr: &syn::Attribute, name: &str) -> bool {
     }
 
     let mut found = false;
-    let _ = attr.parse_nested_meta(|meta| {
+    drop(attr.parse_nested_meta(|meta| {
         if meta.path.is_ident(name) {
             found = true;
         }
         Ok(())
-    });
+    }));
     found
 }
 
@@ -981,7 +981,7 @@ fn serde_lit_value(attr: &syn::Attribute, name: &str) -> Option<String> {
     }
 
     let mut value = None;
-    let _ = attr.parse_nested_meta(|meta| {
+    drop(attr.parse_nested_meta(|meta| {
         if meta.path.is_ident(name) {
             let meta_value = meta.value()?;
             let lit: syn::LitStr = meta_value.parse()?;
@@ -991,7 +991,7 @@ fn serde_lit_value(attr: &syn::Attribute, name: &str) -> Option<String> {
             let _: syn::Expr = meta_value.parse()?;
         }
         Ok(())
-    });
+    }));
     value
 }
 
@@ -1774,7 +1774,7 @@ fn remove_empty_dir(path: &Path) {
         return;
     };
     if entries.next().is_none() {
-        let _ = fs::remove_dir(path);
+        drop(fs::remove_dir(path));
     }
 }
 
@@ -1855,7 +1855,7 @@ fn relative_path(root: &Path, path: &Path) -> PathBuf {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(
+#[expect(
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
