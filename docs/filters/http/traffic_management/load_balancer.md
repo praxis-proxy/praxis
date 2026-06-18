@@ -15,7 +15,7 @@ Supported strategies: - `round_robin` (default): cycles through endpoints in ord
 |-------|------|---------|-------------|
 | `clusters` | Cluster[] | no | Cluster definitions. |
 | `clusters[].name` | string | yes | Unique name for the cluster. |
-| `clusters[].connection_timeout_ms` | u64 | no | TCP connection timeout in milliseconds. |
+| `clusters[].connection_timeout_ms` | u64 | no | TCP connection timeout in milliseconds. Applies to the TCP handshake only (before TLS). When exceeded, the connection attempt fails and the load balancer may retry on the next endpoint. `None` (the default) uses Pingora's built-in timeout. |
 | `clusters[].endpoints` | (string \| object)[] | yes | List of endpoints for the cluster. Each entry is either a plain `"host:port"` string or a `{ address, weight }` object. |
 | `clusters[].endpoints[].address` | string | yes | Socket address as `host:port`. |
 | `clusters[].endpoints[].weight` | u32 | no | Relative forwarding weight. Higher values receive proportionally more traffic. Defaults to 1. |
@@ -29,10 +29,10 @@ Supported strategies: - `round_robin` (default): cycles through endpoints in ord
 | `clusters[].health_check.path` | string | no | HTTP path to probe (only used for `http` type). |
 | `clusters[].health_check.timeout_ms` | u64 | no | Probe timeout in milliseconds. Must be less than `interval_ms`. |
 | `clusters[].health_check.unhealthy_threshold` | u32 | no | Consecutive failures required to mark an endpoint unhealthy. |
-| `clusters[].idle_timeout_ms` | u64 | no | Idle connection timeout in milliseconds. |
+| `clusters[].idle_timeout_ms` | u64 | no | Idle connection timeout in milliseconds. Closes pooled upstream connections that have been idle longer than this duration. `None` uses Pingora's default. |
 | `clusters[].load_balancer_strategy` | `round_robin` \| `least_connections` \| `p2c` \| `consistent_hash` | no | Load-balancing algorithm for this cluster. Defaults to `round_robin`. |
 | `clusters[].max_connections` | u32 | no | Maximum concurrent in-flight requests to this cluster. When set, excess requests receive 503. Prevents a single slow upstream from consuming all available capacity. |
-| `clusters[].read_timeout_ms` | u64 | no | Read timeout in milliseconds. |
+| `clusters[].read_timeout_ms` | u64 | no | Per-read timeout in milliseconds. Applies to each individual read operation on an established upstream connection. A timeout fires a 502 response to the client. Use [`total_connection_timeout_ms`] to bound the entire exchange instead. |
 | `clusters[].tls` | ClusterTls | no | TLS settings for upstream connections. Presence implies TLS is enabled. Omit for plaintext HTTP. |
 | `clusters[].tls.ca` | CaConfig | no | Custom CA. |
 | `clusters[].tls.ca.ca_path` | string | yes | Path to the PEM CA certificate file. |
@@ -44,8 +44,8 @@ Supported strategies: - `round_robin` (default): cycles through endpoints in ord
 | `clusters[].tls.client_cert.server_names` | string[] | no | SNI hostnames this certificate serves (listener only). |
 | `clusters[].tls.sni` | string | no | SNI hostname. |
 | `clusters[].tls.verify` | bool | no | Verify upstream certificate. |
-| `clusters[].total_connection_timeout_ms` | u64 | no | Total connection timeout in milliseconds (TCP + TLS). |
-| `clusters[].write_timeout_ms` | u64 | no | Write timeout in milliseconds. |
+| `clusters[].total_connection_timeout_ms` | u64 | no | Total connection timeout in milliseconds (TCP + TLS). Bounds the combined TCP handshake and TLS negotiation. When exceeded, the connection attempt fails with a 502 response. Prefer this over [`connection_timeout_ms`] for TLS-enabled clusters where the handshake dominates latency. |
+| `clusters[].write_timeout_ms` | u64 | no | Per-write timeout in milliseconds. Applies to each individual write operation on an established upstream connection. A timeout fires a 502 response to the client. |
 
 ## Example
 
