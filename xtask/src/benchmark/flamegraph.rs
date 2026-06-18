@@ -4,7 +4,7 @@
 //! `cargo xtask benchmark flamegraph` — CPU profiling with flamegraphs.
 
 use std::{
-    io::Write,
+    io::Write as _,
     path::{Path, PathBuf},
     process::{Command, Stdio},
     time::Duration,
@@ -140,7 +140,7 @@ async fn run_profiling(args: &Args, binary: PathBuf) {
     run_vegeta_load(args, &tmpdir, 2);
 
     let mut perf = start_perf_record(praxis_pid, &perf_data);
-    #[allow(clippy::cast_possible_wrap, reason = "PID fits i32")]
+    #[expect(clippy::cast_possible_wrap, reason = "PID fits i32")]
     let perf_pid = perf.id() as i32;
     tokio::time::sleep(Duration::from_millis(500)).await;
 

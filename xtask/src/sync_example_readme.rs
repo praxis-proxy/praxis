@@ -206,6 +206,8 @@ fn walk_yaml(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Render the table section (everything after `## Configs`).
 fn generate_tables(categories: &[(String, String)], entries: &BTreeMap<String, Vec<ExampleEntry>>) -> String {
+    use std::fmt::Write as _;
+
     let mut out = String::new();
 
     for (dir_name, section_title) in categories {
@@ -213,18 +215,18 @@ fn generate_tables(categories: &[(String, String)], entries: &BTreeMap<String, V
             continue;
         };
 
-        out.push_str(&format!("\n### {section_title}\n\n"));
+        _ = write!(out, "\n### {section_title}\n\n");
         out.push_str("| File | Description |\n");
         out.push_str("| ------ | ------------- |\n");
 
         for (cat, fname, path, desc) in SPECIAL_ENTRIES {
             if *cat == dir_name.as_str() {
-                out.push_str(&format!("| [{fname}]({path}) | {desc} |\n"));
+                _ = writeln!(out, "| [{fname}]({path}) | {desc} |");
             }
         }
 
         for e in items {
-            out.push_str(&format!("| [{}]({}) | {} |\n", e.filename, e.link_path, e.description));
+            _ = writeln!(out, "| [{}]({}) | {} |", e.filename, e.link_path, e.description);
         }
     }
 
@@ -314,10 +316,10 @@ fn first_sentence(s: &str) -> String {
             continue;
         }
         if i + 1 == bytes.len() {
-            return s[..i].to_owned();
+            return s.get(..i).unwrap_or(s).to_owned();
         }
         if bytes.get(i + 1) == Some(&b' ') && bytes.get(i + 2).is_some_and(u8::is_ascii_uppercase) {
-            return s[..i].to_owned();
+            return s.get(..i).unwrap_or(s).to_owned();
         }
     }
 
@@ -338,7 +340,10 @@ fn normalize_description(s: &str) -> String {
 fn split_at_marker(content: &str) -> (&str, &str) {
     if let Some(pos) = content.find(CONFIGS_MARKER) {
         let split = pos + CONFIGS_MARKER.len();
-        (&content[..split], &content[split..])
+        (
+            content.get(..split).unwrap_or(content),
+            content.get(split..).unwrap_or_default(),
+        )
     } else {
         (content, "")
     }
@@ -358,7 +363,7 @@ fn workspace_root() -> PathBuf {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::indexing_slicing, reason = "tests assert lengths before indexing")]
+#[expect(clippy::indexing_slicing, reason = "tests assert lengths before indexing")]
 mod tests {
     use super::*;
 

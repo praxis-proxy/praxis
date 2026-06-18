@@ -35,7 +35,7 @@ static PROMETHEUS_HANDLE: OnceLock<PrometheusHandle> = OnceLock::new();
 /// Panics if the global recorder cannot be installed (another
 /// recorder was already set by a different subsystem).
 pub fn install_prometheus_recorder() -> &'static PrometheusHandle {
-    #[allow(
+    #[expect(
         clippy::expect_used,
         reason = "recorder installation is a one-time startup operation"
     )]
@@ -160,6 +160,7 @@ pub(crate) fn record_request_metrics(labels: RequestMetricLabels, duration_secs:
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;

@@ -4,7 +4,7 @@
 //! TLS certificate generation and client utilities for integration tests.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     path::PathBuf,
     sync::{
@@ -102,7 +102,6 @@ impl TestCertificates {
     /// # Panics
     ///
     /// Panics if certificate generation or file I/O fails.
-    #[allow(clippy::too_many_lines, reason = "cert generation steps")]
     pub fn generate_for_san(san: &str) -> Self {
         let (ca_key, ca_params, ca_cert) = generate_ca(&format!("Praxis Test CA ({san})"));
         let issuer = Issuer::from_params(&ca_params, &ca_key);
@@ -223,10 +222,10 @@ impl TestCertificates {
         let cert_pem = std::fs::read(&client_cert.cert_path).expect("read client cert PEM");
         let key_pem = std::fs::read(&client_cert.key_path).expect("read client key PEM");
 
-        let certs: Vec<_> = rustls_pemfile::certs(&mut &cert_pem[..])
+        let certs: Vec<_> = rustls_pemfile::certs(&mut &*cert_pem)
             .collect::<Result<Vec<_>, _>>()
             .expect("parse client cert PEM");
-        let key = rustls_pemfile::private_key(&mut &key_pem[..])
+        let key = rustls_pemfile::private_key(&mut &*key_pem)
             .expect("parse client key PEM")
             .expect("no client private key found");
 
@@ -256,10 +255,10 @@ impl TestCertificates {
         let cert_pem = std::fs::read(&client_cert.cert_path).expect("read client cert PEM");
         let key_pem = std::fs::read(&client_cert.key_path).expect("read client key PEM");
 
-        let certs: Vec<_> = rustls_pemfile::certs(&mut &cert_pem[..])
+        let certs: Vec<_> = rustls_pemfile::certs(&mut &*cert_pem)
             .collect::<Result<Vec<_>, _>>()
             .expect("parse client cert PEM");
-        let key = rustls_pemfile::private_key(&mut &key_pem[..])
+        let key = rustls_pemfile::private_key(&mut &*key_pem)
             .expect("parse client key PEM")
             .expect("no client private key found");
 
@@ -498,7 +497,6 @@ fn try_h2_get(addr: &str, path: &str, client_config: &Arc<ClientConfig>) -> Opti
 }
 
 /// Inner fallible H2 GET that returns `None` instead of panicking.
-#[allow(clippy::cognitive_complexity, reason = "handshake sequence")]
 async fn try_h2_get_inner(addr: &str, path: &str, client_config: &Arc<ClientConfig>) -> Option<(u16, String)> {
     let connector = tokio_rustls::TlsConnector::from(Arc::clone(client_config));
     let server_name = rustls::pki_types::ServerName::try_from("localhost").ok()?;
@@ -563,10 +561,10 @@ fn build_tls_acceptor(certs: &TestCertificates) -> tokio_rustls::TlsAcceptor {
     let certs_pem = std::fs::read(&certs.cert_path).expect("read cert PEM");
     let key_pem = std::fs::read(&certs.key_path).expect("read key PEM");
 
-    let certs = rustls_pemfile::certs(&mut &certs_pem[..])
+    let certs = rustls_pemfile::certs(&mut &*certs_pem)
         .collect::<Result<Vec<_>, _>>()
         .expect("parse cert PEM");
-    let key = rustls_pemfile::private_key(&mut &key_pem[..])
+    let key = rustls_pemfile::private_key(&mut &*key_pem)
         .expect("parse key PEM")
         .expect("no private key found");
 
@@ -608,10 +606,10 @@ fn build_mtls_acceptor(certs: &TestCertificates) -> tokio_rustls::TlsAcceptor {
     let certs_pem = std::fs::read(&certs.cert_path).expect("read cert PEM");
     let key_pem = std::fs::read(&certs.key_path).expect("read key PEM");
 
-    let server_certs = rustls_pemfile::certs(&mut &certs_pem[..])
+    let server_certs = rustls_pemfile::certs(&mut &*certs_pem)
         .collect::<Result<Vec<_>, _>>()
         .expect("parse cert PEM");
-    let key = rustls_pemfile::private_key(&mut &key_pem[..])
+    let key = rustls_pemfile::private_key(&mut &*key_pem)
         .expect("parse key PEM")
         .expect("no private key found");
 

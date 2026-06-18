@@ -52,6 +52,7 @@ pub(super) fn validate_timeouts(cluster: &Cluster) -> Result<(), ProxyError> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

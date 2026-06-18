@@ -18,9 +18,9 @@ use super::{
 use crate::{
     FilterAction, FilterEntry, FilterPipeline, FilterRegistry,
     body::{BodyAccess, BodyMode},
-    builtins::http::ai::store::{ResponseStore, SqliteResponseStore},
+    builtins::http::ai::store::{ResponseStore as _, SqliteResponseStore},
     factory::parse_filter_config,
-    filter::{HttpFilter, HttpFilterContext},
+    filter::{HttpFilter as _, HttpFilterContext},
 };
 
 // -----------------------------------------------------------------------------

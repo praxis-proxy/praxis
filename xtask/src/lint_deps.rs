@@ -12,7 +12,7 @@ use clap::Parser;
 
 /// CLI arguments for `cargo xtask lint-deps`.
 #[derive(Parser)]
-pub(crate) struct Args {}
+pub(crate) struct Args;
 
 // -----------------------------------------------------------------------------
 // Entry Point
@@ -131,7 +131,7 @@ fn is_three_component(version: &str) -> bool {
 fn extract_quoted(s: &str) -> Option<String> {
     let inner = s.strip_prefix('"')?;
     let end = inner.find('"')?;
-    Some(inner[..end].to_owned())
+    Some(inner.get(..end)?.to_owned())
 }
 
 /// Extract the `version = "..."` value from an inline TOML table string.
@@ -142,7 +142,7 @@ fn extract_table_version(s: &str) -> Option<String> {
     if idx > 0 && s.as_bytes().get(idx - 1).is_some_and(u8::is_ascii_alphanumeric) {
         return None;
     }
-    let after_key = s[idx + "version".len()..].trim_start();
+    let after_key = s.get(idx + "version".len()..)?.trim_start();
     let after_eq = after_key.strip_prefix('=')?;
     extract_quoted(after_eq.trim_start())
 }
@@ -164,6 +164,7 @@ fn workspace_root() -> std::path::PathBuf {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;

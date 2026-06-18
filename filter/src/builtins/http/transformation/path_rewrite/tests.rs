@@ -13,7 +13,7 @@ use super::{
     config::PathRewriteConfig,
     ops::{PathRewriteOp, add_prefix, append_query, build_op, rewrite_path, strip_prefix},
 };
-use crate::{FilterAction, filter::HttpFilter};
+use crate::{FilterAction, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Tests

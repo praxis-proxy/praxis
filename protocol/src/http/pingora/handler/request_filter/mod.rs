@@ -50,7 +50,7 @@ struct PipelineResult {
 ///
 /// Host header validation runs first (before the pipeline) to reject
 /// ambiguous requests early.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     clippy::cognitive_complexity,
     reason = "orchestration function"
@@ -168,7 +168,7 @@ pub(in crate::http) async fn execute(
 /// Run the request-phase filter pipeline and snapshot the request for later phases.
 ///
 /// Returns the final action and any extra headers promoted by filters.
-#[allow(clippy::too_many_lines, reason = "writeback destructuring")]
+#[expect(clippy::too_many_lines, reason = "writeback destructuring")]
 async fn run_pipeline(
     pipeline: &FilterPipeline,
     request: Request,
@@ -262,6 +262,7 @@ fn reject_reserved_internal_headers(session: &Session) -> Option<Rejection> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

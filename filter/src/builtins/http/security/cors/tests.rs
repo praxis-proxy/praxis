@@ -9,7 +9,7 @@ use super::{
     CorsFilter, VARY_ORIGIN,
     origin::{OriginPolicy, build_origin_policy},
 };
-use crate::{FilterAction, Rejection, filter::HttpFilter};
+use crate::{FilterAction, Rejection, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -1046,7 +1046,7 @@ async fn non_utf8_origin_preflight_rejected_with_400() {
 // Test Utilities
 // -----------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments, reason = "exhaustive test config")]
+#[expect(clippy::too_many_arguments, reason = "exhaustive test config")]
 fn make_filter(
     origins: &[&str],
     methods: &[&str],

@@ -16,7 +16,7 @@ use praxis_core::config::{
 use super::{LoadBalancerFilter, entry::build_cluster_entry, strategy::build_strategy};
 use crate::{
     FilterAction,
-    filter::HttpFilter,
+    filter::HttpFilter as _,
     load_balancing::{endpoint::WeightedEndpoint, strategy::Strategy as SharedStrategy},
 };
 

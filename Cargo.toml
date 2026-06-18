@@ -38,7 +38,7 @@ repository = "https://github.com/praxis-proxy/praxis"
 arc-swap = "1.9.1"
 async-trait = "0.1.89"
 benchmarks = { path = "benchmarks" }
-bytes = "1.11.1"
+bytes = "1.12.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 dashmap = "6.2.1"
 clap = { version = "4.6.1", features = ["derive"] }

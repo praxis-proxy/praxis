@@ -14,7 +14,7 @@ use super::{
     envelope::{A2aFamily, A2aMethod, extract_a2a_envelope},
     task_routing::LocalTaskRouteStore,
 };
-use crate::{FilterAction, filter::HttpFilter};
+use crate::{FilterAction, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Config Tests
@@ -2284,11 +2284,10 @@ fn make_task_routing_filter_with_config(yaml: &str) -> A2aFilter {
     let validated_config = build_config(cfg).unwrap();
     let max_body_bytes = validated_config.max_body_bytes;
     let json_rpc_config = super::build_json_rpc_config(max_body_bytes);
-    let task_route_store = if validated_config.task_routing.enabled {
-        Some(Arc::new(LocalTaskRouteStore::new()))
-    } else {
-        None
-    };
+    let task_route_store = validated_config
+        .task_routing
+        .enabled
+        .then(|| Arc::new(LocalTaskRouteStore::new()));
     A2aFilter {
         config: validated_config,
         json_rpc_config,

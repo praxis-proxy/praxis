@@ -44,7 +44,7 @@ impl TcpAccessLogFilter {
     /// Returns [`FilterError`] if the YAML config is invalid.
     ///
     /// [`FilterError`]: crate::FilterError
-    #[allow(clippy::unnecessary_wraps, reason = "matches factory signature")]
+    #[expect(clippy::unnecessary_wraps, reason = "matches factory signature")]
     pub fn from_config(_config: &serde_yaml::Value) -> Result<Box<dyn TcpFilter>, FilterError> {
         Ok(Box::new(Self))
     }
@@ -68,7 +68,7 @@ impl TcpFilter for TcpAccessLogFilter {
     }
 
     async fn on_disconnect(&self, ctx: &mut TcpFilterContext<'_>) -> Result<(), FilterError> {
-        #[allow(clippy::cast_possible_truncation, reason = "millis fit u64")]
+        #[expect(clippy::cast_possible_truncation, reason = "millis fit u64")]
         let duration_ms = ctx.connect_time.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
         info!(
             remote = ctx.remote_addr,
@@ -88,6 +88,7 @@ impl TcpFilter for TcpAccessLogFilter {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

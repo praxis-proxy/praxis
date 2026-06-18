@@ -6,7 +6,7 @@
 //! [RFC 9112]: https://datatracker.ietf.org/doc/html/rfc9112
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     time::Duration,
 };
@@ -547,8 +547,5 @@ fn rfc9112_options_asterisk_form_handled() {
     );
     let status = parse_status(&raw);
 
-    assert_eq!(
-        status, 200,
-        "OPTIONS * must be forwarded to upstream, got {status}"
-    );
+    assert_eq!(status, 200, "OPTIONS * must be forwarded to upstream, got {status}");
 }

@@ -130,6 +130,7 @@ fn validate_sni_labels(sni: &str, cluster_name: &str) -> Result<(), ProxyError> 
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

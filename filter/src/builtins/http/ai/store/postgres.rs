@@ -8,7 +8,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use serde::Deserialize;
 use sqlx::{
-    Row,
+    Row as _,
     postgres::{PgConnectOptions, PgPoolOptions, PgRow, PgSslMode},
 };
 use tracing::info;
@@ -337,6 +337,7 @@ fn row_to_conversation_record(row: &PgRow) -> Result<ConversationRecord, StoreEr
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;

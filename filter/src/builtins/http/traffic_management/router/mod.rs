@@ -8,6 +8,7 @@ mod json_alias;
 mod matching;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -79,14 +80,17 @@ use crate::{
 #[derive(Debug)]
 pub struct RouterFilter {
     /// Whether any route has JSON aliases configured.
+    #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on struct fields")]
     #[allow(dead_code, reason = "alias config is validated before body access is wired")]
     has_json_alias_routes: bool,
 
     /// Maximum body bytes to buffer for JSON alias resolution.
+    #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on struct fields")]
     #[allow(dead_code, reason = "alias config is validated before body buffering is wired")]
     json_alias_max_body_bytes: usize,
 
     /// Header name for the promoted JSON alias value.
+    #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on struct fields")]
     #[allow(dead_code, reason = "alias config is validated before header promotion is wired")]
     json_alias_header: HeaderName,
 
@@ -104,7 +108,6 @@ struct ResolvedRoute {
     route: Route,
 
     /// Optional JSON aliases configured on this route.
-    #[allow(dead_code, reason = "route aliases are validated before body aliasing is wired")]
     json_aliases: Option<Vec<JsonAlias>>,
 
     /// For wildcard hosts (e.g. `*.example.com`), the pre-lowercased

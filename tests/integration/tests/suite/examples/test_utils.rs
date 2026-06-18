@@ -3,5 +3,5 @@
 
 //! Re-export shared example config utilities.
 
-#[allow(unreachable_pub)]
+#[expect(unreachable_pub)]
 pub use praxis_test_utils::load_example_config;

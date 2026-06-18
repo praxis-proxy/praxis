@@ -3,7 +3,7 @@
 
 //! Integration tests for MCP classifier filter.
 
-use std::{io::Write, net::TcpStream};
+use std::{io::Write as _, net::TcpStream};
 
 use praxis_core::config::Config;
 use praxis_test_utils::{

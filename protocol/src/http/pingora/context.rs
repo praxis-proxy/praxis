@@ -25,7 +25,7 @@ use tokio::sync::OwnedSemaphorePermit;
 /// ctx.cluster = Some(Arc::from("api-cluster"));
 /// assert_eq!(ctx.cluster.as_deref(), Some("api-cluster"));
 /// ```
-#[allow(clippy::struct_excessive_bools, reason = "lifecycle flags")]
+#[expect(clippy::struct_excessive_bools, reason = "lifecycle flags")]
 pub struct PingoraRequestCtx {
     /// Connection permit from the per-listener semaphore.
     ///
@@ -360,7 +360,7 @@ impl PingoraRequestCtx {
 }
 
 impl Default for PingoraRequestCtx {
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "context default enumerates all lifecycle fields explicitly"
     )]
@@ -408,6 +408,7 @@ impl Default for PingoraRequestCtx {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -7,6 +7,7 @@
 pub(crate) mod config;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -90,7 +91,8 @@ pub(crate) struct McpBrokerFilter {
     /// Maximum body bytes for `StreamBuffer`.
     max_body_bytes: usize,
     /// Configured protocol profile (stored for future profile-aware dispatch).
-    #[allow(dead_code, reason = "plumbing for follow-up profile-aware behavior")]
+    #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on struct fields")]
+    #[allow(dead_code, reason = "stored for future profile-aware dispatch")]
     protocol_profile: protocol::ProtocolProfile,
     /// Public path this MCP broker handles (e.g. `/mcp`).
     public_path: String,
@@ -156,7 +158,7 @@ impl HttpFilter for McpBrokerFilter {
         }
     }
 
-    #[allow(clippy::too_many_lines, reason = "sequential parse-extract-dispatch pipeline")]
+    #[expect(clippy::too_many_lines, reason = "sequential parse-extract-dispatch pipeline")]
     async fn on_request_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -215,7 +217,7 @@ impl HttpFilter for McpBrokerFilter {
 /// Maps a JSON-RPC method to the MCP handler that owns it.
 /// Never returns [`FilterAction::Release`] — all paths produce
 /// a terminal synthetic response.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     reason = "project threshold is 5; version plumbing adds two"
 )]
@@ -296,7 +298,7 @@ fn handle_delete(ctx: &HttpFilterContext<'_>) -> FilterAction {
 
 /// Generates a new MCP session and returns MCP capabilities.
 /// Does not initialize backends, that belongs to follow-up backend session work.
-#[allow(clippy::unnecessary_wraps, reason = "signature matches sibling handle_* fns")]
+#[expect(clippy::unnecessary_wraps, reason = "signature matches sibling handle_* fns")]
 fn handle_initialize(
     ctx: &mut HttpFilterContext<'_>,
     value: &serde_json::Value,

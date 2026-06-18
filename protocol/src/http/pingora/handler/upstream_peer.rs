@@ -245,7 +245,7 @@ fn lookup_cached(address: &str) -> Option<SocketAddr> {
 async fn resolve_blocking(address: &str) -> Result<Vec<SocketAddr>> {
     let owned = address.to_owned();
     tokio::task::spawn_blocking(move || {
-        use std::net::ToSocketAddrs;
+        use std::net::ToSocketAddrs as _;
         owned.to_socket_addrs().map(Iterator::collect::<Vec<_>>)
     })
     .await
@@ -285,6 +285,7 @@ fn select_preferred_address(addrs: &[SocketAddr], address: &str) -> Result<Socke
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -588,7 +589,7 @@ mod tests {
 
     /// Check whether `localhost` DNS resolution is available in this environment.
     fn localhost_resolution_available() -> bool {
-        use std::net::ToSocketAddrs;
+        use std::net::ToSocketAddrs as _;
         "localhost:8080"
             .to_socket_addrs()
             .is_ok_and(|mut addrs| addrs.next().is_some())

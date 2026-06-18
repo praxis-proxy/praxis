@@ -18,7 +18,7 @@ use std::{
 };
 
 use arc_swap::ArcSwap;
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use rustls::sign::CertifiedKey;
 use tokio::sync::mpsc;
 
@@ -69,7 +69,7 @@ impl CertWatcher {
     /// # Panics
     ///
     /// Panics if the tokio runtime cannot be created.
-    #[allow(clippy::expect_used, reason = "fatal if tokio runtime cannot start")]
+    #[expect(clippy::expect_used, reason = "fatal if tokio runtime cannot start")]
     pub fn spawn(
         current: Arc<ArcSwap<CertifiedKey>>,
         pair: CertKeyPair,
@@ -87,7 +87,7 @@ impl CertWatcher {
 
 /// Core watch loop: sets up the notify watcher, debounces events,
 /// and reloads certificates.
-#[allow(
+#[expect(
     clippy::cognitive_complexity,
     clippy::too_many_lines,
     reason = "event loop with tokio::select"
@@ -251,10 +251,12 @@ fn parent_dir(path: &str) -> PathBuf {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
-    clippy::unwrap_used,
+    clippy::disallowed_methods,
     clippy::expect_used,
     clippy::indexing_slicing,
+    clippy::unwrap_used,
     clippy::used_underscore_binding,
     reason = "tests"
 )]

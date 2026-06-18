@@ -9,7 +9,7 @@ use praxis_test_utils::{
     Backend, example_config_path, free_port, http_get, http_send, json_post, parse_body, parse_status, patch_yaml,
     start_proxy,
 };
-use sqlx::Row;
+use sqlx::Row as _;
 
 // -----------------------------------------------------------------------------
 // Constants

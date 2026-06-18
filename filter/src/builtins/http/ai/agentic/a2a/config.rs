@@ -80,7 +80,7 @@ pub(crate) struct TaskRoutingConfig {
 
     /// Behavior when a task route lookup misses.
     #[serde(default)]
-    #[allow(dead_code, reason = "validated at parse time, used in follow-up PRs")]
+    #[expect(dead_code, reason = "validated at parse time, used in follow-up PRs")]
     pub on_lookup_miss: OnLookupMiss,
 
     /// Internal header name injected on task route hit.
@@ -89,7 +89,7 @@ pub(crate) struct TaskRoutingConfig {
 
     /// Storage backend for task routes.
     #[serde(default)]
-    #[allow(dead_code, reason = "validated at parse time, only local supported in this PR")]
+    #[expect(dead_code, reason = "validated at parse time, only local supported in this PR")]
     pub store: TaskRouteStore,
 
     /// TTL in seconds for terminal task routes (0 = remove immediately).
@@ -182,7 +182,7 @@ impl Default for A2aHeaders {
 }
 
 /// Default method header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -191,7 +191,7 @@ fn default_method_header() -> Option<String> {
 }
 
 /// Default family header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -200,7 +200,7 @@ fn default_family_header() -> Option<String> {
 }
 
 /// Default task ID header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -209,7 +209,7 @@ fn default_task_id_header() -> Option<String> {
 }
 
 /// Default kind header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -218,7 +218,7 @@ fn default_kind_header() -> Option<String> {
 }
 
 /// Default streaming header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -227,7 +227,7 @@ fn default_streaming_header() -> Option<String> {
 }
 
 /// Default version header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -274,7 +274,7 @@ fn default_max_body_bytes() -> usize {
 // -----------------------------------------------------------------------------
 
 /// Validate and build the final configuration.
-#[allow(clippy::too_many_lines, reason = "sequential validation of config fields")]
+#[expect(clippy::too_many_lines, reason = "sequential validation of config fields")]
 pub(crate) fn build_config(cfg: A2aConfig) -> Result<A2aConfig, FilterError> {
     if cfg.max_body_bytes == 0 {
         return Err("a2a: 'max_body_bytes' must be greater than 0".into());

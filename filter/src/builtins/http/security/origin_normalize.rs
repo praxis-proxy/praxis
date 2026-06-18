@@ -51,7 +51,8 @@ pub(crate) fn normalize_origin(origin: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-#[expect(clippy::unwrap_used, reason = "tests")]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 

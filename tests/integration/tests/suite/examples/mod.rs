@@ -4,7 +4,7 @@
 //! Integration tests for example configurations.
 
 mod test_utils;
-#[allow(unreachable_pub)]
+#[expect(unreachable_pub)]
 pub use test_utils::load_example_config;
 
 mod access_logging;

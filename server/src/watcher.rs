@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use praxis_core::config::Config;
 use praxis_filter::FilterRegistry;
 use praxis_protocol::ListenerPipelines;
@@ -76,7 +76,7 @@ pub(crate) struct WatcherParams {
 /// # Panics
 ///
 /// Panics if the tokio runtime cannot be created.
-#[allow(clippy::expect_used, reason = "fatal if tokio runtime cannot start")]
+#[expect(clippy::expect_used, reason = "fatal if tokio runtime cannot start")]
 pub(crate) fn spawn_config_watcher(params: WatcherParams) -> std::thread::JoinHandle<()> {
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -134,7 +134,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
 }
 
 /// Read the config file, parse it, and attempt a reload.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
     reason = "orchestration function"
@@ -238,11 +238,13 @@ fn watch_dir_for_path(path: &std::path::Path) -> PathBuf {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
-    clippy::unwrap_used,
+    clippy::disallowed_methods,
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::too_many_lines,
+    clippy::unwrap_used,
     reason = "tests"
 )]
 mod tests {

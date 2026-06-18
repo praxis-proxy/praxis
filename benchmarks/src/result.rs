@@ -496,7 +496,7 @@ pub fn coefficient_of_variation(values: &[f64]) -> f64 {
 
 /// Result of comparing two [`ScenarioResults`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(clippy::struct_excessive_bools, reason = "three independent boolean outcomes")]
+#[expect(clippy::struct_excessive_bools, reason = "three independent boolean outcomes")]
 pub struct ComparativeResults {
     /// Scenario name.
     pub scenario: String,
@@ -559,6 +559,7 @@ pub fn current_environment() -> Environment {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

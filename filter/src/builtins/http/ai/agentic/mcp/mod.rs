@@ -9,6 +9,7 @@ pub(crate) mod envelope;
 pub(crate) mod protocol;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -129,7 +130,7 @@ impl HttpFilter for McpFilter {
         Ok(FilterAction::Continue)
     }
 
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "sequential parse-extract-validate-promote pipeline"
     )]
@@ -223,7 +224,7 @@ fn handle_parse_error(
 }
 
 /// Handle non-MCP input based on config.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "caller returns Result<FilterAction, FilterError> from trait method"
 )]
@@ -279,7 +280,7 @@ fn validate_mcp_headers(
 }
 
 /// Validate a single MCP header value against its body-derived counterpart.
-#[allow(clippy::too_many_lines, reason = "present/missing/invalid UTF-8 branches")]
+#[expect(clippy::too_many_lines, reason = "present/missing/invalid UTF-8 branches")]
 fn validate_single_header(
     ctx: &mut HttpFilterContext<'_>,
     header_name: &str,

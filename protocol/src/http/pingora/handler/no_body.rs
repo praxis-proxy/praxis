@@ -63,7 +63,7 @@ pub struct PingoraHttpHandlerNoBody {
 
 impl PingoraHttpHandlerNoBody {
     /// Create a handler without body filter support.
-    #[allow(dead_code, reason = "reserved for non-reload paths")]
+    #[expect(dead_code, reason = "reserved for non-reload paths")]
     pub(super) fn new(
         pipeline: Arc<ArcSwap<FilterPipeline>>,
         downstream_read_timeout: Option<Duration>,
@@ -96,7 +96,7 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
         }
     }
 
-    #[allow(clippy::cast_possible_truncation, reason = "millis fit u64")]
+    #[expect(clippy::cast_possible_truncation, reason = "millis fit u64")]
     async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()>
     where
         Self::CTX: Send + Sync,

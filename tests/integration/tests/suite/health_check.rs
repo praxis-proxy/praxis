@@ -5,7 +5,7 @@
 
 use std::{
     collections::HashMap,
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     sync::{
         Arc,

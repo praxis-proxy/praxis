@@ -76,7 +76,7 @@ impl BodyBuffer {
     /// # Panics
     ///
     /// Never actually panics. Internal `expect` is guarded by a length check.
-    #[allow(clippy::expect_used, reason = "guarded by length check")]
+    #[expect(clippy::expect_used, reason = "guarded by length check")]
     pub fn freeze(self) -> Bytes {
         match self.chunks.len() {
             0 => Bytes::new(),
@@ -124,6 +124,7 @@ pub struct BodyBufferOverflow {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

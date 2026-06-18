@@ -223,7 +223,7 @@ fn parse_byte_value(s: &str) -> Option<u64> {
 
     let value: f64 = num_str.trim().parse().ok()?;
 
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::cast_precision_loss,
@@ -237,7 +237,7 @@ fn parse_byte_value(s: &str) -> Option<u64> {
 // -----------------------------------------------------------------------------
 
 /// Compute aggregate [`ResourceMetrics`] from collected samples.
-#[allow(clippy::cast_precision_loss, reason = "sample counts and byte sums are small enough")]
+#[expect(clippy::cast_precision_loss, reason = "sample counts and byte sums are small enough")]
 fn compute_metrics(samples: &[StatsSample]) -> Option<ResourceMetrics> {
     if samples.is_empty() {
         warn!("no docker stats samples collected");
@@ -273,7 +273,7 @@ fn cpu_aggregates(samples: &[StatsSample], count: f64) -> (f64, f64) {
 }
 
 /// Compute average and peak memory from samples.
-#[allow(
+#[expect(
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
     clippy::cast_precision_loss,
@@ -290,6 +290,7 @@ fn mem_aggregates(samples: &[StatsSample], count: f64) -> (u64, u64) {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;

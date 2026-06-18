@@ -20,7 +20,7 @@ use crate::builtins::http::traffic_management::token_bucket::TokenBucket;
 
 impl RateLimitFilter {
     /// Nanoseconds elapsed since this filter's epoch.
-    #[allow(clippy::cast_possible_truncation, reason = "nanos fit u64")]
+    #[expect(clippy::cast_possible_truncation, reason = "nanos fit u64")]
     pub(super) fn now_nanos(&self) -> u64 {
         self.epoch.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
     }
@@ -29,7 +29,7 @@ impl RateLimitFilter {
     ///
     /// Returns the header list and the `Retry-After` seconds (floored
     /// at 1 when the client is rate-limited).
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "token count truncation"
@@ -61,13 +61,13 @@ impl RateLimitFilter {
     /// Scans up to [`EVICTION_SCAN_LIMIT`] entries and removes any whose
     /// `last_refill` is older than `2 * burst / rate` seconds, meaning
     /// the bucket would be fully refilled and idle.
-    #[allow(clippy::too_many_lines, reason = "atomic CAS loop")]
+    #[expect(clippy::too_many_lines, reason = "atomic CAS loop")]
     pub(super) fn maybe_evict(&self, map: &DashMap<IpAddr, TokenBucket>, now_nanos: u64) {
         if map.len() <= MAX_PER_IP_ENTRIES {
             return;
         }
 
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "rate/burst nanos"

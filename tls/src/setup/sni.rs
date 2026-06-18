@@ -101,7 +101,9 @@ impl ResolvesServerCert for SniCertResolver {
         for (suffix, cert) in &self.wildcard_certs {
             if lower.ends_with(suffix.as_str())
                 && lower.len() > suffix.len()
-                && !lower[..lower.len() - suffix.len()].contains('.')
+                && lower
+                    .get(..lower.len() - suffix.len())
+                    .is_some_and(|prefix| !prefix.contains('.'))
             {
                 return Some(Arc::clone(cert));
             }
@@ -187,6 +189,7 @@ fn register_server_names(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;

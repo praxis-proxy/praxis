@@ -5,7 +5,7 @@
 //! back, verifying that traffic resumes correctly.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpListener,
     sync::{
         Arc,

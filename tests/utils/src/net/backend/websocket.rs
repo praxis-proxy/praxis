@@ -5,7 +5,7 @@
 
 use std::net::SocketAddr;
 
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt as _, StreamExt as _};
 use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
 use tracing::debug;

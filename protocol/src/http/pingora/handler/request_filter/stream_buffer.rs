@@ -3,7 +3,7 @@
 
 //! StreamBuffer pre-read logic and TRACE response construction.
 
-use std::{borrow::Cow, collections::VecDeque, fmt::Write};
+use std::{borrow::Cow, collections::VecDeque, fmt::Write as _};
 
 use pingora_proxy::Session;
 use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
@@ -87,7 +87,7 @@ pub(super) enum PreReadError {
 /// `json_body_field` extracting a model name). The accumulated body
 /// is stored in `ctx.pre_read_body` for later forwarding by
 /// `request_body_filter`.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     unused_assignments,
     reason = "buffer management orchestration"

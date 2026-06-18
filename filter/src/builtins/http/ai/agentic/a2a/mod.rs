@@ -9,6 +9,7 @@ pub(crate) mod sse;
 pub(crate) mod task_routing;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -21,7 +22,7 @@ pub(crate) mod task_routing;
 )]
 mod tests;
 
-use std::{borrow::Cow, fmt::Write, sync::Arc};
+use std::{borrow::Cow, fmt::Write as _, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -105,11 +106,10 @@ impl A2aFilter {
         let max_body_bytes = validated_config.max_body_bytes;
         let json_rpc_config = build_json_rpc_config(max_body_bytes);
 
-        let task_route_store = if validated_config.task_routing.enabled {
-            Some(Arc::new(LocalTaskRouteStore::new()))
-        } else {
-            None
-        };
+        let task_route_store = validated_config
+            .task_routing
+            .enabled
+            .then(|| Arc::new(LocalTaskRouteStore::new()));
 
         Ok(Box::new(Self {
             config: validated_config,
@@ -152,7 +152,7 @@ impl HttpFilter for A2aFilter {
         Ok(FilterAction::Continue)
     }
 
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "sequential parse-extract-validate-promote pipeline"
     )]
@@ -207,7 +207,7 @@ impl HttpFilter for A2aFilter {
         Ok(FilterAction::Release)
     }
 
-    #[allow(clippy::too_many_lines, reason = "sequential guard-clause pipeline")]
+    #[expect(clippy::too_many_lines, reason = "sequential guard-clause pipeline")]
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if self.task_route_store.is_none() {
             return Ok(FilterAction::Continue);
@@ -301,7 +301,7 @@ impl HttpFilter for A2aFilter {
 // -----------------------------------------------------------------------------
 
 /// Look up a task route and inject the route cluster header on hit.
-#[allow(clippy::too_many_lines, reason = "sequential lookup-inject-trace pipeline")]
+#[expect(clippy::too_many_lines, reason = "sequential lookup-inject-trace pipeline")]
 fn lookup_task_route(
     ctx: &mut HttpFilterContext<'_>,
     a2a_envelope: &A2aEnvelope,
@@ -438,7 +438,7 @@ fn accumulate_response_hex(ctx: &mut HttpFilterContext<'_>, chunk: &[u8], max_by
         .entry("a2a.response.buffer_hex".to_owned())
         .or_default();
     for byte in chunk {
-        let _ = write!(hex_buf, "{byte:02x}");
+        _ = write!(hex_buf, "{byte:02x}");
     }
 
     let new_total = existing_bytes + chunk.len();
@@ -588,7 +588,7 @@ fn set_hex_metadata(ctx: &mut HttpFilterContext<'_>, key: &str, data: &[u8]) {
     } else {
         let mut hex = String::with_capacity(data.len() * 2);
         for byte in data {
-            let _ = write!(hex, "{byte:02x}");
+            _ = write!(hex, "{byte:02x}");
         }
         ctx.filter_metadata.insert(key.to_owned(), hex);
     }
@@ -648,7 +648,7 @@ fn handle_parse_error(
 }
 
 /// Handle non-A2A input based on config.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "caller returns Result<FilterAction, FilterError> from trait method"
 )]

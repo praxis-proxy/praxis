@@ -94,6 +94,7 @@ fn validate_listener_references(chains: &[FilterChainConfig], listeners: &[Liste
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -103,6 +104,8 @@ fn validate_listener_references(chains: &[FilterChainConfig], listeners: &[Liste
     reason = "tests use unwrap/expect/indexing/raw strings for brevity"
 )]
 mod tests {
+    use std::fmt::Write as _;
+
     use crate::config::Config;
 
     #[test]
@@ -165,7 +168,7 @@ filter_chains:
             "listeners:\n  - name: web\n    address: \"0.0.0.0:8080\"\n    filter_chains: [c0]\nfilter_chains:\n",
         );
         for i in 0..1_001 {
-            yaml.push_str(&format!("  - name: c{i}\n    filters:\n      - filter: headers\n"));
+            write!(yaml, "  - name: c{i}\n    filters:\n      - filter: headers\n").unwrap();
         }
         let err = Config::from_yaml(&yaml).unwrap_err();
         assert!(
@@ -195,7 +198,7 @@ filter_chains:
             "listeners:\n  - name: web\n    address: \"0.0.0.0:8080\"\n    filter_chains: [c0]\nfilter_chains:\n",
         );
         for i in 0..1_000 {
-            yaml.push_str(&format!("  - name: c{i}\n    filters:\n      - filter: headers\n"));
+            write!(yaml, "  - name: c{i}\n    filters:\n      - filter: headers\n").unwrap();
         }
         Config::from_yaml(&yaml).expect("exactly MAX_CHAINS should be accepted");
     }

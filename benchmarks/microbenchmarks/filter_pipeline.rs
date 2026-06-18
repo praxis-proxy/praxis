@@ -17,7 +17,7 @@ use std::hint::black_box;
 use common::{bench_runtime, make_ctx, make_request};
 use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use praxis_core::config::{PathMatch, Route};
-use praxis_filter::{FailureMode, FilterEntry, FilterPipeline, FilterRegistry, HttpFilter, RouterFilter};
+use praxis_filter::{FailureMode, FilterEntry, FilterPipeline, FilterRegistry, HttpFilter as _, RouterFilter};
 
 // -----------------------------------------------------------------------------
 // Benchmarks

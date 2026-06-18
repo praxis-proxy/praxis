@@ -31,7 +31,7 @@ use crate::pipelines::resolve_pipelines;
 ///
 /// Returns an error if the new config fails validation or pipeline
 /// construction. The running server is unaffected.
-#[allow(
+#[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
     clippy::cognitive_complexity,
@@ -105,7 +105,7 @@ pub(crate) fn reload_pipelines(
 
 /// Cancel old health check tasks and spawn new ones from the
 /// updated config.
-#[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+#[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
 fn respawn_health_checks(
     config: &Config,
     health_registry: &HealthRegistry,
@@ -153,7 +153,7 @@ fn log_restart_required_changes(old: &Config, new: &Config) {
 }
 
 /// Detect listener additions, removals, and address rebinds.
-#[allow(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
+#[expect(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
 fn detect_listener_topology_changes(old: &Config, new: &Config) {
     let old_names: std::collections::HashSet<&str> = old.listeners.iter().map(|l| l.name.as_str()).collect();
     let new_names: std::collections::HashSet<&str> = new.listeners.iter().map(|l| l.name.as_str()).collect();
@@ -287,6 +287,7 @@ fn warn_stateful_filter_reset(config: &Config) {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

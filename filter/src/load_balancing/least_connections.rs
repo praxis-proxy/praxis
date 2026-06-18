@@ -48,7 +48,7 @@ impl LeastConnections {
     /// Ties are broken by preferring higher-weight endpoints. Uses an
     /// optimistic CAS loop: scans for the minimum, then atomically
     /// increments. On CAS failure, rescans and retries.
-    #[allow(clippy::indexing_slicing, reason = "keyed by endpoints")]
+    #[expect(clippy::indexing_slicing, reason = "keyed by endpoints")]
     pub(crate) fn select(&self, health: Option<&ClusterHealthState>) -> Arc<str> {
         loop {
             let (addr, load) = self.find_best(health);
@@ -66,14 +66,14 @@ impl LeastConnections {
     /// Decrement the in-flight counter for `addr` after a response.
     pub(crate) fn release(&self, addr: &str) {
         if let Some(counter) = self.counters.get(addr) {
-            let _ = counter.fetch_update(Ordering::Release, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
+            _ = counter.fetch_update(Ordering::Release, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
         }
     }
 
     /// Scan endpoints and return the best candidate address with its
     /// current load. Prefers healthy endpoints when health state is
     /// available; falls back to all endpoints.
-    #[allow(clippy::indexing_slicing, clippy::expect_used, reason = "bounds checked; non-empty")]
+    #[expect(clippy::indexing_slicing, clippy::expect_used, reason = "bounds checked; non-empty")]
     fn find_best(&self, health: Option<&ClusterHealthState>) -> (Arc<str>, usize) {
         if let Some(state) = health
             && let Some((addr, load)) = self
@@ -109,6 +109,7 @@ impl LeastConnections {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

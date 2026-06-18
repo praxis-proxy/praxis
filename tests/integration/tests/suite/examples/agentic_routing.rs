@@ -493,7 +493,7 @@ fn a2a_task_routing_example_unknown_task_follows_fallback() {
 // Test Utilities
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_arguments, reason = "test utility with all A2A example ports")]
+#[expect(clippy::too_many_arguments, reason = "test utility with all A2A example ports")]
 fn load_a2a_example_config(
     proxy_port: u16,
     agent_port: u16,
