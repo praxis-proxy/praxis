@@ -335,7 +335,6 @@ a higher level and across multiple crates.
 | `tests/integration` | End-to-end filter and proxy tests |
 | `tests/resilience` | Load, failure recovery, throughput |
 | `tests/security` | Request smuggling, header injection |
-| `tests/smoke` | Quick startup and round-trip sanity |
 
 ## Related
 

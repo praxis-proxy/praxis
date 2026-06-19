@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Top-level configuration validation orchestration.
 
@@ -25,6 +25,10 @@ use crate::{
 // Config Validation
 // -----------------------------------------------------------------------------
 
+#[expect(
+    clippy::multiple_inherent_impl,
+    reason = "validation is split into a dedicated module"
+)]
 impl Config {
     /// Validate config constraints.
     ///
@@ -238,6 +242,7 @@ fn validate_runtime_threads(threads: usize) -> Result<(), ProxyError> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -680,6 +685,56 @@ filter_chains:
             config.body_limits.max_request_bytes,
             Some(DEFAULT_MAX_BODY_BYTES),
             "default body limit should be 10 MiB"
+        );
+    }
+
+    #[test]
+    fn accept_valid_unique_listener_names() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+  - name: api
+    address: "0.0.0.0:9090"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let config = Config::from_yaml(yaml);
+        assert!(
+            config.is_ok(),
+            "unique listener names should be accepted: {:?}",
+            config.err()
+        );
+    }
+
+    #[test]
+    fn accept_valid_unique_cluster_names() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: backend_a
+    endpoints: ["10.0.0.1:80"]
+  - name: backend_b
+    endpoints: ["10.0.0.2:80"]
+"#;
+        let config = Config::from_yaml(yaml);
+        assert!(
+            config.is_ok(),
+            "unique cluster names should be accepted: {:?}",
+            config.err()
         );
     }
 }

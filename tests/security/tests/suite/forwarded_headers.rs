@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Forwarded headers adversarial tests.
 
@@ -509,10 +509,6 @@ fn body_header(body: &str, name: &str) -> Option<String> {
     let lower = name.to_lowercase();
     body.lines().find_map(|line| {
         let (k, v) = line.split_once(':')?;
-        if k.trim().to_lowercase() == lower {
-            Some(v.trim().to_owned())
-        } else {
-            None
-        }
+        (k.trim().to_lowercase() == lower).then(|| v.trim().to_owned())
     })
 }

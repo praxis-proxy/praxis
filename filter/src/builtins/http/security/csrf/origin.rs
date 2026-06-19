@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Origin extraction and matching logic for the CSRF filter.
 
@@ -154,7 +154,7 @@ fn match_wildcard_subdomain(origin: &str, suffixes: &[(String, String)]) -> bool
         if scheme != s || !rest.ends_with(suffix.as_str()) || rest.len() <= suffix.len() {
             return false;
         }
-        let subdomain = &rest[..rest.len() - suffix.len()];
+        let subdomain = rest.get(..rest.len() - suffix.len()).unwrap_or_default();
         !subdomain.contains('.')
     })
 }

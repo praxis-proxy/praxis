@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Tests for the CSRF filter.
 
@@ -9,7 +9,7 @@ use super::{
     CsrfFilter,
     origin::{build_trusted_origins, extract_origin},
 };
-use crate::{FilterAction, filter::HttpFilter};
+use crate::{FilterAction, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -483,8 +483,8 @@ async fn zero_enforcement_still_rejects_cross_site_sec_fetch() {
 #[tokio::test]
 async fn partial_enforcement_samples_statistically() {
     let f = make_filter(&["https://example.com"], 50, false);
-    let mut enforced = 0u32;
-    let total = 2000u32;
+    let mut enforced = 0_u32;
+    let total = 2000_u32;
 
     for _ in 0..total {
         let mut req = crate::test_utils::make_request(http::Method::POST, "/submit");
@@ -600,6 +600,22 @@ fn extract_origin_normalizes_default_port_in_referer() {
         extract_origin(&headers),
         Some("http://example.com".to_owned()),
         "Referer with :80 should normalize"
+    );
+}
+
+#[test]
+fn extract_origin_referer_fragment_no_path() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert("referer", "https://example.com#section".parse().unwrap());
+    let origin = extract_origin(&headers);
+    assert!(
+        origin.is_some(),
+        "Referer with fragment but no path should still extract an origin"
+    );
+    assert_eq!(
+        origin.as_deref(),
+        Some("https://example.com#section"),
+        "fragment leaks when no path separates it (split('/') misses '#')"
     );
 }
 
@@ -740,7 +756,7 @@ async fn trace_is_not_safe_by_default() {
 #[tokio::test]
 async fn enforcement_percentage_one_enforces_rarely() {
     let f = make_filter(&["https://example.com"], 1, false);
-    let mut enforced = 0u32;
+    let mut enforced = 0_u32;
 
     for _ in 0..1000 {
         let mut req = crate::test_utils::make_request(http::Method::POST, "/");
@@ -760,7 +776,7 @@ async fn enforcement_percentage_one_enforces_rarely() {
 #[tokio::test]
 async fn enforcement_percentage_ninety_nine_enforces_almost_all() {
     let f = make_filter(&["https://example.com"], 99, false);
-    let mut enforced = 0u32;
+    let mut enforced = 0_u32;
 
     for _ in 0..1000 {
         let mut req = crate::test_utils::make_request(http::Method::POST, "/");

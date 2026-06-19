@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Deserialized YAML configuration types for the CORS filter.
 
@@ -36,7 +36,7 @@ pub enum DisallowedOriginMode {
 // -----------------------------------------------------------------------------
 
 /// Deserialized YAML config for the CORS filter.
-#[allow(clippy::struct_excessive_bools, reason = "CORS spec flags")]
+#[expect(clippy::struct_excessive_bools, reason = "CORS spec flags")]
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct CorsConfig {

@@ -21,9 +21,10 @@ nix = { workspace = true }
 plotters = { workspace = true }
 praxis = { workspace = true }
 praxis-core = { workspace = true }
-serde = { workspace = true }
+quote = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
+syn = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "process", "net", "io-util"] }
 tracing = { workspace = true }

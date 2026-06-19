@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! `cargo xtask echo` — quick HTTP test server.
 
@@ -165,6 +165,7 @@ fn parse_header(s: &str) -> Result<(&str, &str), String> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

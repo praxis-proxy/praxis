@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Filter pipeline: ordered chain of filters executed on each request.
 
@@ -16,6 +16,7 @@ mod http_utils;
 mod tcp;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -91,6 +92,10 @@ pub struct FilterPipeline {
     time_source: Arc<dyn TimeSource>,
 }
 
+#[expect(
+    clippy::multiple_inherent_impl,
+    reason = "pipeline concerns are split across modules"
+)]
 impl FilterPipeline {
     /// Apply global body size ceilings.
     ///

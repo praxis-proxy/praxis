@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! The [`HttpFilter`] trait definition.
 //!
@@ -81,33 +81,68 @@ pub trait HttpFilter: Send + Sync {
 
     /// Declares what access this filter needs to request bodies.
     ///
-    /// Default: [`BodyAccess::None`]
+    /// Return [`BodyAccess::None`] (the default) when the filter
+    /// does not inspect or modify request bodies. Return
+    /// [`BodyAccess::ReadOnly`] to receive body chunks in
+    /// [`on_request_body`] without modification rights, or
+    /// [`BodyAccess::ReadWrite`] to mutate body bytes in place.
+    ///
+    /// [`on_request_body`]: HttpFilter::on_request_body
     fn request_body_access(&self) -> BodyAccess {
         BodyAccess::None
     }
 
     /// Declares what access this filter needs to response bodies.
     ///
-    /// Default: [`BodyAccess::None`]
+    /// Return [`BodyAccess::None`] (the default) when the filter
+    /// does not inspect or modify response bodies. Return
+    /// [`BodyAccess::ReadOnly`] to receive body chunks in
+    /// [`on_response_body`] without modification rights, or
+    /// [`BodyAccess::ReadWrite`] to mutate body bytes in place.
+    ///
+    /// [`on_response_body`]: HttpFilter::on_response_body
     fn response_body_access(&self) -> BodyAccess {
         BodyAccess::None
     }
 
     /// Declares the delivery mode for request body chunks.
     ///
-    /// Default: [`BodyMode::Stream`]
+    /// [`BodyMode::Stream`] (the default) delivers chunks as they
+    /// arrive with minimal latency. [`BodyMode::StreamBuffer`]
+    /// accumulates chunks and defers forwarding until the filter
+    /// calls [`FilterAction::Release`] or end-of-stream; use this
+    /// when the filter needs the full body before making a decision
+    /// (e.g. JSON parsing for routing).
+    ///
+    /// [`FilterAction::Release`]: crate::FilterAction::Release
     fn request_body_mode(&self) -> BodyMode {
         BodyMode::Stream
     }
 
     /// Declares the delivery mode for response body chunks.
     ///
-    /// Default: [`BodyMode::Stream`]
+    /// [`BodyMode::Stream`] (the default) delivers chunks as they
+    /// arrive with minimal latency. [`BodyMode::StreamBuffer`]
+    /// accumulates chunks and defers forwarding until the filter
+    /// calls [`FilterAction::Release`] or end-of-stream; use this
+    /// when the filter needs the complete response body (e.g.
+    /// response persistence).
+    ///
+    /// [`FilterAction::Release`]: crate::FilterAction::Release
     fn response_body_mode(&self) -> BodyMode {
         BodyMode::Stream
     }
 
-    /// Whether this filter needs the original request context during body phases.
+    /// Whether this filter needs the original request context
+    /// during body phases.
+    ///
+    /// When `true`, the pipeline preserves the original request
+    /// headers and URI so they are available in [`on_request_body`]
+    /// and [`on_response_body`]. Enable this when body-phase
+    /// decisions depend on request metadata (method, path, headers).
+    ///
+    /// [`on_request_body`]: HttpFilter::on_request_body
+    /// [`on_response_body`]: HttpFilter::on_response_body
     fn needs_request_context(&self) -> bool {
         false
     }
@@ -121,10 +156,12 @@ pub trait HttpFilter: Send + Sync {
     fn apply_insecure_options(&self, _options: &InsecureOptions) {}
 
     /// Returns the compression configuration if this filter enables
-    /// response compression. Only `CompressionFilter` overrides
-    /// this; all other filters return `None`.
+    /// response compression.
     ///
-    /// Default: `None`
+    /// Return `Some` to activate response compression with the
+    /// given algorithm and level settings. Return `None` (the
+    /// default) to leave compression unmodified. Only one filter
+    /// in a pipeline should return `Some`.
     fn compression_config(&self) -> Option<&CompressionConfig> {
         None
     }
@@ -135,11 +172,20 @@ pub trait HttpFilter: Send + Sync {
 
     /// Called for each chunk of request body data, in pipeline order.
     ///
-    /// Default: Passthrough
+    /// `body` contains the current chunk (`None` when empty).
+    /// `end_of_stream` is `true` on the final chunk. Filters may
+    /// safely modify `body` before `end_of_stream` when using
+    /// [`BodyAccess::ReadWrite`]; buffered modes guarantee all
+    /// bytes arrive in a single call with `end_of_stream = true`.
+    /// Return [`FilterAction::Reject`] to abort with an error
+    /// response.
     ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if body processing fails.
+    /// Returns [`FilterError`] if body processing fails. The
+    /// pipeline converts errors into 500 responses.
+    ///
+    /// [`FilterAction::Reject`]: crate::FilterAction::Reject
     async fn on_request_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -150,13 +196,23 @@ pub trait HttpFilter: Send + Sync {
         Ok(FilterAction::Continue)
     }
 
-    /// Called for each chunk of response body data, in reverse pipeline order.
+    /// Called for each chunk of response body data, in reverse
+    /// pipeline order.
     ///
-    /// Default: passthrough, returns [`FilterAction::Continue`]
+    /// `body` contains the current chunk (`None` when empty).
+    /// `end_of_stream` is `true` on the final chunk. Filters may
+    /// safely modify `body` before `end_of_stream` when using
+    /// [`BodyAccess::ReadWrite`]; buffered modes guarantee all
+    /// bytes arrive in a single call with `end_of_stream = true`.
+    /// Return [`FilterAction::Reject`] to abort with an error
+    /// response.
     ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if body processing fails.
+    /// Returns [`FilterError`] if body processing fails. The
+    /// pipeline converts errors into 502 responses.
+    ///
+    /// [`FilterAction::Reject`]: crate::FilterAction::Reject
     fn on_response_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -176,6 +232,7 @@ pub type FilterError = Box<dyn std::error::Error + Send + Sync>;
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

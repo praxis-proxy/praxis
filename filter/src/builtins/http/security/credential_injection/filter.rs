@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! [`CredentialInjectionFilter`] implementation and `HttpFilter` trait impl.
 
@@ -139,7 +139,7 @@ impl HttpFilter for CredentialInjectionFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let Some(ref cluster) = ctx.cluster else {
+        let Some(cluster) = &ctx.cluster else {
             tracing::debug!("no cluster selected, skipping credential injection");
             return Ok(FilterAction::Continue);
         };

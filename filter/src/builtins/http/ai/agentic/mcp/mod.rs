@@ -9,6 +9,7 @@ pub(crate) mod envelope;
 pub(crate) mod protocol;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -51,6 +52,17 @@ use crate::{
 /// method, tool/resource/prompt name, JSON-RPC kind, protocol version, and
 /// session presence to request headers/filter results; stores session ID in
 /// durable metadata.
+///
+/// Recognized methods include `initialize`, `tools/call`, `tools/list`,
+/// `resources/read`, `resources/list`, `prompts/get`, `prompts/list`,
+/// and `ping`.
+///
+/// Methods requiring a name selector (`tools/call`, `resources/read`,
+/// `prompts/get`) return a JSON-RPC error if the selector is missing
+/// and `on_invalid` is `reject`.
+///
+/// Writes `mcp.*` and `json_rpc.*` entries to the filter result set
+/// for branch chain conditions.
 ///
 /// # YAML
 ///
@@ -129,7 +141,7 @@ impl HttpFilter for McpFilter {
         Ok(FilterAction::Continue)
     }
 
-    #[allow(
+    #[expect(
         clippy::too_many_lines,
         reason = "sequential parse-extract-validate-promote pipeline"
     )]
@@ -155,7 +167,7 @@ impl HttpFilter for McpFilter {
         let envelope = match parse_json_rpc_value(&value, &self.json_rpc_config) {
             Ok(Some(envelope)) => envelope,
             Ok(None) => return handle_non_mcp(&self.config),
-            Err(ref e) => return handle_parse_error(e, &self.config),
+            Err(e) => return handle_parse_error(&e, &self.config),
         };
 
         let Some(method_str) = &envelope.method else {
@@ -223,7 +235,7 @@ fn handle_parse_error(
 }
 
 /// Handle non-MCP input based on config.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "caller returns Result<FilterAction, FilterError> from trait method"
 )]
@@ -279,7 +291,7 @@ fn validate_mcp_headers(
 }
 
 /// Validate a single MCP header value against its body-derived counterpart.
-#[allow(clippy::too_many_lines, reason = "present/missing/invalid UTF-8 branches")]
+#[expect(clippy::too_many_lines, reason = "present/missing/invalid UTF-8 branches")]
 fn validate_single_header(
     ctx: &mut HttpFilterContext<'_>,
     header_name: &str,

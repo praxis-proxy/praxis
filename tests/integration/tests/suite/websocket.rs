@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Integration tests for WebSocket upgrade proxying.
 
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt as _, StreamExt as _};
 use praxis_core::config::Config;
 use praxis_test_utils::{
     free_port, http_send, parse_body, parse_status, simple_proxy_yaml, start_header_echo_backend, start_proxy,

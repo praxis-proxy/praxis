@@ -115,9 +115,9 @@ consumption.
 #### Module Location
 
 The filter lives at
-`filter/src/builtins/http/observability/token_usage_headers.rs`
-alongside the existing `access_log` and `request_id`
-observability filters.
+`filter/src/builtins/http/ai/token_usage_headers.rs`
+alongside the existing token counting and inference
+filters, since it is only applicable to AI workloads.
 
 #### Data Flow
 

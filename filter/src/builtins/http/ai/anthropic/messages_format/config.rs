@@ -12,6 +12,11 @@ use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
 // -----------------------------------------------------------------------------
 
 /// Default maximum request body size for `StreamBuffer` mode (1 MiB).
+///
+/// Smaller than the OpenAI Responses default (10 MiB) because Anthropic
+/// Messages API payloads are typically text-only and do not carry inline
+/// file data URLs.  Operators needing larger payloads can override via
+/// `max_body_bytes` in config.
 const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576; // 1 MiB
 
 // -----------------------------------------------------------------------------
@@ -62,7 +67,7 @@ impl Default for AnthropicMessagesFormatHeaders {
 }
 
 /// Default format header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -71,7 +76,7 @@ fn default_format_header() -> Option<String> {
 }
 
 /// Default model header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -80,7 +85,7 @@ fn default_model_header() -> Option<String> {
 }
 
 /// Default stream header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]

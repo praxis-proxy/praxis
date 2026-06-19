@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Integration tests for example configurations.
 
 mod test_utils;
-#[allow(unreachable_pub)]
+#[expect(unreachable_pub)]
 pub use test_utils::load_example_config;
 
 mod access_logging;
@@ -57,6 +57,7 @@ mod session_affinity;
 mod static_response;
 mod stream_buffer;
 mod timeout;
+mod token_usage_headers;
 mod virtual_hosts;
 mod websocket;
 mod weighted_load_balancing;

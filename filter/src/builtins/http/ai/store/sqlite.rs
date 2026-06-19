@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use sqlx::{
-    Row, SqlitePool,
+    Row as _, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use tracing::info;
@@ -41,16 +41,23 @@ impl SqliteResponseStore {
     ///
     /// `responses_table` and `conversations_table` are the SQL
     /// table names to use. These come from the filter's YAML
-    /// config (e.g., `openai_responses`).
+    /// config (e.g., `openai_responses`). `items_table` is
+    /// optional and enables conversation item storage.
     ///
     /// # Errors
     ///
     /// Returns [`StoreError::Database`] if the connection, schema
     /// initialization, or table name validation fails.
-    pub async fn new(database_url: &str, responses_table: &str, conversations_table: &str) -> Result<Self, StoreError> {
+    pub async fn new(
+        database_url: &str,
+        responses_table: &str,
+        conversations_table: &str,
+        items_table: Option<&str>,
+    ) -> Result<Self, StoreError> {
         let tables = TableNames {
             responses: responses_table.to_owned(),
             conversations: conversations_table.to_owned(),
+            items: items_table.map(str::to_owned),
         };
         let ddl = generate_ddl(&tables)?;
 
@@ -167,17 +174,22 @@ impl ResponseStore for SqliteResponseStore {
 
     async fn upsert_conversation(&self, record: &ConversationRecord) -> Result<(), StoreError> {
         let messages = serde_json::to_string(&record.messages).map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let metadata = serde_json::to_string(&record.metadata).map_err(|e| StoreError::Serialization(e.to_string()))?;
 
         let sql = format!(
-            "INSERT OR REPLACE INTO {} \
-             (conversation_id, tenant_id, messages) \
-             VALUES (?, ?, ?)",
+            "INSERT INTO {} \
+             (conversation_id, tenant_id, created_at, metadata, messages) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT(conversation_id, tenant_id) \
+             DO UPDATE SET messages = excluded.messages",
             self.tables.conversations
         );
 
         sqlx::query(&sql)
             .bind(&record.conversation_id)
             .bind(&record.tenant_id)
+            .bind(record.created_at)
+            .bind(&metadata)
             .bind(&messages)
             .execute(&self.pool)
             .await
@@ -192,7 +204,7 @@ impl ResponseStore for SqliteResponseStore {
         conversation_id: &str,
     ) -> Result<Option<ConversationRecord>, StoreError> {
         let sql = format!(
-            "SELECT conversation_id, tenant_id, messages \
+            "SELECT conversation_id, tenant_id, created_at, metadata, messages \
              FROM {} \
              WHERE conversation_id = ? AND tenant_id = ?",
             self.tables.conversations
@@ -260,6 +272,9 @@ fn row_to_conversation_record(row: &sqlx::sqlite::SqliteRow) -> Result<Conversat
     let messages_json: String = row
         .try_get("messages")
         .map_err(|e| StoreError::Database(e.to_string()))?;
+    let metadata_json: String = row
+        .try_get("metadata")
+        .map_err(|e| StoreError::Database(e.to_string()))?;
 
     Ok(ConversationRecord {
         conversation_id: row
@@ -268,6 +283,10 @@ fn row_to_conversation_record(row: &sqlx::sqlite::SqliteRow) -> Result<Conversat
         tenant_id: row
             .try_get("tenant_id")
             .map_err(|e| StoreError::Database(e.to_string()))?,
+        created_at: row
+            .try_get("created_at")
+            .map_err(|e| StoreError::Database(e.to_string()))?,
+        metadata: serde_json::from_str(&metadata_json).map_err(|e| StoreError::Serialization(e.to_string()))?,
         messages: serde_json::from_str(&messages_json).map_err(|e| StoreError::Serialization(e.to_string()))?,
     })
 }

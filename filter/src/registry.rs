@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Filter registry: maps filter type names to their factory functions.
 
@@ -106,13 +106,13 @@ impl FilterRegistry {
 // -----------------------------------------------------------------------------
 
 /// Register all built-in HTTP filter factories.
-#[allow(clippy::too_many_lines, reason = "one line per filter, will grow")]
+#[expect(clippy::too_many_lines, reason = "one line per filter, will grow")]
 fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     use crate::builtins::{
         A2aFilter, AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter,
         CsrfFilter, ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter,
         JsonRpcFilter, McpFilter, PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter,
-        StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
+        StaticResponseFilter, TimeoutFilter, TokenUsageHeadersFilter, UrlRewriteFilter,
     };
 
     register_http(factories, "a2a", A2aFilter::from_config);
@@ -139,6 +139,7 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     register_http(factories, "router", crate::RouterFilter::from_config);
     register_http(factories, "static_response", StaticResponseFilter::from_config);
     register_http(factories, "timeout", TimeoutFilter::from_config);
+    register_http(factories, "token_usage_headers", TokenUsageHeadersFilter::from_config);
     register_http(factories, "url_rewrite", UrlRewriteFilter::from_config);
     register_http(factories, "json_body_field", JsonBodyFieldFilter::from_config);
     register_http(factories, "json_rpc", JsonRpcFilter::from_config);
@@ -148,6 +149,30 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
         factories,
         "anthropic_messages_format",
         crate::builtins::AnthropicMessagesFormatFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "anthropic_messages_protocol",
+        crate::builtins::AnthropicMessagesProtocolFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "anthropic_stream_events",
+        crate::builtins::AnthropicStreamEventsFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "anthropic_to_openai",
+        crate::builtins::AnthropicToOpenaiFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "anthropic_validate",
+        crate::builtins::AnthropicValidateFilter::from_config,
     );
     #[cfg(feature = "ai-inference")]
     register_http(
@@ -182,7 +207,7 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
 }
 
 /// Register a single HTTP filter factory by name.
-#[allow(clippy::type_complexity, reason = "complex function pointer")]
+#[expect(clippy::type_complexity, reason = "complex function pointer")]
 fn register_http(
     factories: &mut HashMap<String, FilterFactory>,
     name: &str,
@@ -208,7 +233,7 @@ fn register_tcp_builtins(factories: &mut HashMap<String, FilterFactory>) {
 }
 
 /// Register a single TCP filter factory by name.
-#[allow(clippy::type_complexity, reason = "complex function pointer")]
+#[expect(clippy::type_complexity, reason = "complex function pointer")]
 fn register_tcp(
     factories: &mut HashMap<String, FilterFactory>,
     name: &str,
@@ -223,6 +248,7 @@ fn register_tcp(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -280,6 +306,10 @@ mod tests {
             "tcp_load_balancer should be registered"
         );
         assert!(names.contains(&"timeout"), "timeout should be registered");
+        assert!(
+            names.contains(&"token_usage_headers"),
+            "token_usage_headers should be registered"
+        );
         assert!(names.contains(&"url_rewrite"), "url_rewrite should be registered");
         assert!(
             names.contains(&"json_body_field"),
@@ -298,6 +328,26 @@ mod tests {
         assert!(
             names.contains(&"anthropic_messages_format"),
             "anthropic_messages_format should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"anthropic_messages_protocol"),
+            "anthropic_messages_protocol should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"anthropic_stream_events"),
+            "anthropic_stream_events should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"anthropic_to_openai"),
+            "anthropic_to_openai should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"anthropic_validate"),
+            "anthropic_validate should be registered"
         );
         #[cfg(feature = "ai-inference")]
         assert!(

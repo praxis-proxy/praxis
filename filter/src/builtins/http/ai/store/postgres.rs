@@ -8,7 +8,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use serde::Deserialize;
 use sqlx::{
-    Row,
+    Row as _,
     postgres::{PgConnectOptions, PgPoolOptions, PgRow, PgSslMode},
 };
 use tracing::info;
@@ -88,6 +88,9 @@ impl PostgresResponseStore {
     /// table names to use. These come from the filter's YAML
     /// config (e.g., `openai_responses`).
     ///
+    /// `items_table`, when provided, enables the conversation items
+    /// table for storing individual conversation entries.
+    ///
     /// `ssl_mode`, when provided, overrides any `sslmode` in the
     /// URL. Use [`SslMode::VerifyCa`] or [`SslMode::VerifyFull`]
     /// with `ssl_root_cert` to verify the server against a custom
@@ -98,16 +101,22 @@ impl PostgresResponseStore {
     ///
     /// Returns [`StoreError::Database`] if the connection, schema
     /// initialization, or table name validation fails.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "constructor mirrors SqliteResponseStore::new with SSL additions"
+    )]
     pub async fn new(
         database_url: &str,
         responses_table: &str,
         conversations_table: &str,
+        items_table: Option<&str>,
         ssl_mode: Option<SslMode>,
         ssl_root_cert: Option<&str>,
     ) -> Result<Self, StoreError> {
         let tables = TableNames {
             responses: responses_table.to_owned(),
             conversations: conversations_table.to_owned(),
+            items: items_table.map(str::to_owned),
         };
         validate_postgres_identifiers(&tables)?;
         let ddl = generate_ddl(&tables)?;
@@ -225,11 +234,12 @@ impl ResponseStore for PostgresResponseStore {
 
     async fn upsert_conversation(&self, record: &ConversationRecord) -> Result<(), StoreError> {
         let messages = serde_json::to_string(&record.messages).map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let metadata = serde_json::to_string(&record.metadata).map_err(|e| StoreError::Serialization(e.to_string()))?;
 
         let sql = format!(
             "INSERT INTO {} \
-             (conversation_id, tenant_id, messages) \
-             VALUES ($1, $2, $3) \
+             (conversation_id, tenant_id, created_at, metadata, messages) \
+             VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (conversation_id, tenant_id) DO UPDATE SET \
              messages = EXCLUDED.messages",
             self.tables.conversations
@@ -238,6 +248,8 @@ impl ResponseStore for PostgresResponseStore {
         sqlx::query(&sql)
             .bind(&record.conversation_id)
             .bind(&record.tenant_id)
+            .bind(record.created_at)
+            .bind(&metadata)
             .bind(&messages)
             .execute(&self.pool)
             .await
@@ -252,7 +264,8 @@ impl ResponseStore for PostgresResponseStore {
         conversation_id: &str,
     ) -> Result<Option<ConversationRecord>, StoreError> {
         let sql = format!(
-            "SELECT conversation_id, tenant_id, messages \
+            "SELECT conversation_id, tenant_id, created_at, \
+                    metadata, messages \
              FROM {} \
              WHERE conversation_id = $1 AND tenant_id = $2",
             self.tables.conversations
@@ -320,6 +333,9 @@ fn row_to_conversation_record(row: &PgRow) -> Result<ConversationRecord, StoreEr
     let messages_json: String = row
         .try_get("messages")
         .map_err(|e| StoreError::Database(e.to_string()))?;
+    let metadata_json: String = row
+        .try_get("metadata")
+        .map_err(|e| StoreError::Database(e.to_string()))?;
 
     Ok(ConversationRecord {
         conversation_id: row
@@ -328,6 +344,10 @@ fn row_to_conversation_record(row: &PgRow) -> Result<ConversationRecord, StoreEr
         tenant_id: row
             .try_get("tenant_id")
             .map_err(|e| StoreError::Database(e.to_string()))?,
+        created_at: row
+            .try_get("created_at")
+            .map_err(|e| StoreError::Database(e.to_string()))?,
+        metadata: serde_json::from_str(&metadata_json).map_err(|e| StoreError::Serialization(e.to_string()))?,
         messages: serde_json::from_str(&messages_json).map_err(|e| StoreError::Serialization(e.to_string()))?,
     })
 }
@@ -337,6 +357,7 @@ fn row_to_conversation_record(row: &PgRow) -> Result<ConversationRecord, StoreEr
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;

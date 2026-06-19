@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Request header normalization per [RFC 9110] and [RFC 9112].
 //!
@@ -172,6 +172,7 @@ fn handle_obs_fold(session: &mut Session) -> Option<Rejection> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
@@ -263,5 +264,79 @@ mod tests {
     fn unfold_preserves_empty() {
         let result = unfold_obs_fold(b"");
         assert!(result.is_empty(), "empty input should produce empty output");
+    }
+
+    #[test]
+    fn contains_obs_fold_single_crlf_sp() {
+        assert!(
+            contains_obs_fold(b"\r\n value"),
+            "CRLF+SP at the very start of the value is obs-fold"
+        );
+    }
+
+    #[test]
+    fn contains_obs_fold_multiple_folds() {
+        assert!(
+            contains_obs_fold(b"a\r\n b\r\n c"),
+            "value with multiple obs-fold sequences should be detected"
+        );
+    }
+
+    #[test]
+    fn contains_obs_fold_only_cr_no_lf() {
+        assert!(
+            !contains_obs_fold(b"value\r continuation"),
+            "bare CR followed by space is not obs-fold"
+        );
+    }
+
+    #[test]
+    fn contains_obs_fold_only_lf_sp() {
+        assert!(
+            !contains_obs_fold(b"value\n continuation"),
+            "bare LF followed by space is not obs-fold"
+        );
+    }
+
+    #[test]
+    fn unfold_at_start_of_value() {
+        let result = unfold_obs_fold(b"\r\n continuation");
+        assert_eq!(
+            result, b" continuation",
+            "obs-fold at the very start should become single SP"
+        );
+    }
+
+    #[test]
+    fn unfold_consecutive_folds() {
+        let result = unfold_obs_fold(b"a\r\n \r\n b");
+        assert_eq!(
+            result, b"a  b",
+            "two back-to-back obs-folds should each become single SP"
+        );
+    }
+
+    #[test]
+    fn unfold_mixed_whitespace_after_fold() {
+        let result = unfold_obs_fold(b"val\r\n\t  rest");
+        assert_eq!(
+            result, b"val rest",
+            "CRLF followed by tab then spaces should collapse to single SP"
+        );
+    }
+
+    #[test]
+    fn unfold_preserves_internal_crlf_without_continuation() {
+        let result = unfold_obs_fold(b"before\r\nafter");
+        assert_eq!(
+            result, b"before\r\nafter",
+            "bare CRLF without following whitespace should be kept as-is"
+        );
+    }
+
+    #[test]
+    fn unfold_single_byte_values() {
+        assert_eq!(unfold_obs_fold(b"x"), b"x", "single byte input unchanged");
+        assert_eq!(unfold_obs_fold(b"ab"), b"ab", "two byte input unchanged");
     }
 }

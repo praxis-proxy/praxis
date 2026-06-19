@@ -7,9 +7,6 @@ if [ "$(git config --get commit.gpgsign 2>/dev/null)" != "true" ]; then
     exit 1
 fi
 
-echo "pre-commit: formatting..."
-make fmt
-
 echo "pre-commit: linting..."
 make lint
 

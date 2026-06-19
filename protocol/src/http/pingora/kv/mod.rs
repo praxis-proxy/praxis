@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Admin HTTP endpoints for runtime key-value store CRUD.
 
@@ -239,6 +239,7 @@ pub fn add_kv_endpoint_to_pingora_server(server: &mut Server, admin_addr: &str, 
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use std::sync::Arc;

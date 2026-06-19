@@ -4,7 +4,7 @@
 # Stage 1: Build
 # ------------------------------------------------------------------------------
 
-FROM rust:1.94-alpine AS builder
+FROM rust:1.96-alpine AS builder
 
 ENV OPENSSL_STATIC=1
 
@@ -34,6 +34,10 @@ COPY server/Cargo.toml server/Cargo.toml
 # cache-build stage to succeed.
 COPY filter/proto/build.rs filter/proto/build.rs
 COPY filter/proto/proto filter/proto/proto
+
+# The server crate has a build.rs that discovers external filter
+# crates via cargo metadata for build-time auto-registration.
+COPY server/build.rs server/build.rs
 
 # Strip workspace members not needed for the praxis binary
 # so we don't need their Cargo.toml files.

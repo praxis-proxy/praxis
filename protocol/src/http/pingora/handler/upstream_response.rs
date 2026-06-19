@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Upstream response transformations: hop-by-hop header stripping
 //! and reserved internal header removal ([RFC 9110]).
@@ -106,6 +106,7 @@ pub(crate) fn strip_reserved_internal_response(resp: &mut ResponseHeader) {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

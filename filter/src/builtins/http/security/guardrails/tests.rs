@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Tests for the guardrails filter.
 
@@ -12,7 +12,7 @@ use super::{
     pii::PiiKind,
     rule::{CompiledRule, RuleMatcher, RuleTarget},
 };
-use crate::{FilterAction, FilterResultSet, filter::HttpFilter};
+use crate::{FilterAction, FilterResultSet, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -572,7 +572,6 @@ async fn pii_email_allows_no_email() {
     let action = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(matches!(action, FilterAction::Continue), "non-email @ should pass");
 }
-
 
 #[tokio::test]
 async fn pii_combined_rejects_any_match() {

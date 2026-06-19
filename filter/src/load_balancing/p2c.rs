@@ -70,7 +70,7 @@ impl PowerOfTwoChoices {
     ///
     /// Falls back to all endpoints when every endpoint is unhealthy.
     /// With a single endpoint, returns it directly.
-    #[allow(clippy::indexing_slicing, reason = "keyed by endpoints built in new()")]
+    #[expect(clippy::indexing_slicing, reason = "keyed by endpoints built in new()")]
     pub(crate) fn select(&self, health: Option<&ClusterHealthState>) -> Arc<str> {
         let candidates = self.healthy_candidates(health);
         let total_w: usize = candidates.iter().map(|ep| ep.weight as usize).sum();
@@ -93,13 +93,13 @@ impl PowerOfTwoChoices {
     /// Decrement the in-flight counter for `addr` after a response.
     pub(crate) fn release(&self, addr: &str) {
         if let Some(counter) = self.counters.get(addr) {
-            let _ = counter.fetch_update(Ordering::Release, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
+            _ = counter.fetch_update(Ordering::Release, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
         }
     }
 
     /// Return the endpoint with fewer in-flight requests.
     /// Ties broken by higher weight.
-    #[allow(clippy::indexing_slicing, reason = "keyed by endpoints built in new()")]
+    #[expect(clippy::indexing_slicing, reason = "keyed by endpoints built in new()")]
     fn less_loaded<'a>(&self, a: &'a WeightedEndpoint, b: &'a WeightedEndpoint) -> &'a WeightedEndpoint {
         let load_a = self.counters[&*a.address].load(Ordering::Acquire);
         let load_b = self.counters[&*b.address].load(Ordering::Acquire);
@@ -117,7 +117,7 @@ impl PowerOfTwoChoices {
     }
 
     /// Generate two distinct random slots in `[0, total_weight)`.
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         reason = "modulo total_weight bounds the result to usize range"
     )]
@@ -143,7 +143,7 @@ impl PowerOfTwoChoices {
     }
 
     /// Filter to healthy endpoints, falling back to all on panic mode.
-    #[allow(clippy::indexing_slicing, reason = "bounds checked by ep.index < len()")]
+    #[expect(clippy::indexing_slicing, reason = "bounds checked by ep.index < len()")]
     fn healthy_candidates(&self, health: Option<&ClusterHealthState>) -> Vec<&WeightedEndpoint> {
         if let Some(state) = health {
             let healthy: Vec<_> = self
@@ -164,10 +164,10 @@ impl PowerOfTwoChoices {
 // ---------------------------------------------------------------------------
 
 /// Map a random slot to an endpoint via cumulative weight buckets.
-#[allow(clippy::expect_used, reason = "total_weight > 0 guaranteed by caller")]
+#[expect(clippy::expect_used, reason = "total_weight > 0 guaranteed by caller")]
 fn weight_index<'a>(endpoints: &[&'a WeightedEndpoint], slot: usize, total_weight: usize) -> &'a WeightedEndpoint {
     let slot = slot % total_weight;
-    let mut cumulative = 0usize;
+    let mut cumulative = 0_usize;
     for ep in endpoints {
         cumulative += ep.weight as usize;
         if slot < cumulative {
@@ -182,6 +182,7 @@ fn weight_index<'a>(endpoints: &[&'a WeightedEndpoint], slot: usize, total_weigh
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -233,7 +234,7 @@ mod tests {
         let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1, 0), ep("10.0.0.2:80", 1, 1)]);
         p2c.counters["10.0.0.1:80"].store(100, Ordering::Relaxed);
 
-        let mut picked_2 = 0u32;
+        let mut picked_2 = 0_u32;
         for _ in 0..20 {
             let addr = p2c.select(None);
             if &*addr == "10.0.0.2:80" {
@@ -254,7 +255,7 @@ mod tests {
         let mut counts = HashMap::new();
         for _ in 0..100 {
             let addr = p2c.select(None);
-            *counts.entry(Arc::clone(&addr)).or_insert(0u32) += 1;
+            *counts.entry(Arc::clone(&addr)).or_insert(0_u32) += 1;
             p2c.release(&addr);
         }
 

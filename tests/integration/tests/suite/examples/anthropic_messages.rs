@@ -6,14 +6,175 @@
 use std::collections::HashMap;
 
 use praxis_test_utils::{
-    free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown, start_proxy,
+    Backend, free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown,
+    start_header_echo_backend, start_proxy,
 };
 
 use super::load_example_config;
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+const CHAT_COMPLETIONS_RESPONSE: &str = r#"{"id":"chatcmpl-test","model":"gpt-4","choices":[{"message":{"role":"assistant","content":"Hello from a Chat Completions backend."},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":4}}"#;
+
+const CHAT_COMPLETIONS_SSE_RESPONSE: &str = "data: {\"id\":\"chatcmpl-test\",\"model\":\"gpt-4\",\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"index\":0}]}\n\ndata: {\"id\":\"chatcmpl-test\",\"model\":\"gpt-4\",\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"index\":0}]}\n\ndata: {\"id\":\"chatcmpl-test\",\"model\":\"gpt-4\",\"choices\":[{\"delta\":{},\"index\":0,\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":1}}\n\ndata: [DONE]\n\n";
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
+
+#[test]
+fn anthropic_validate_forwards_valid_request() {
+    let backend_guard = start_backend_with_shutdown("ok");
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "ai/anthropic/request-validate.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"model":"claude-opus-4-8","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}"#;
+    let raw = http_send(proxy.addr(), &json_post("/v1/messages", body));
+
+    assert_eq!(parse_status(&raw), 200, "valid request should be forwarded");
+    assert_eq!(parse_body(&raw), "ok", "request should reach the backend");
+}
+
+#[test]
+fn anthropic_validate_forwards_backend_owned_semantics() {
+    let backend_guard = start_backend_with_shutdown("ok");
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "ai/anthropic/request-validate.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"model":"claude-opus-4-8","messages":[{"role":"user","content":"Hello"}]}"#;
+    let raw = http_send(proxy.addr(), &json_post("/v1/messages", body));
+
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "backend-owned Anthropic semantics should be forwarded"
+    );
+    assert_eq!(parse_body(&raw), "ok", "request should reach the backend");
+}
+
+#[test]
+fn anthropic_validate_rejects_malformed_json() {
+    let backend_guard = start_backend_with_shutdown("ok");
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "ai/anthropic/request-validate.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(proxy.addr(), &json_post("/v1/messages", "not json {{{"));
+    let parsed: serde_json::Value = serde_json::from_str(&parse_body(&raw)).expect("error body should be JSON");
+
+    assert_eq!(parse_status(&raw), 400, "malformed JSON should be rejected");
+    assert_eq!(
+        parsed["error"]["type"].as_str(),
+        Some("invalid_request_error"),
+        "error type should be invalid_request_error"
+    );
+}
+
+#[test]
+fn anthropic_messages_protocol_injects_default_version() {
+    let backend_guard = start_header_echo_backend();
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "ai/anthropic/messages-protocol.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"model":"claude-opus-4-8","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}"#;
+    let raw = http_send(proxy.addr(), &json_post("/v1/messages", body));
+    let echoed = parse_body(&raw).to_lowercase();
+
+    assert_eq!(parse_status(&raw), 200, "protocol request should return 200");
+    assert!(
+        echoed.contains("anthropic-version: 2023-06-01"),
+        "backend should receive injected anthropic-version header: {echoed}"
+    );
+}
+
+#[test]
+fn anthropic_to_openai_transforms_response_body() {
+    let backend_guard = Backend::fixed(CHAT_COMPLETIONS_RESPONSE)
+        .header("content-type", "application/json")
+        .start_with_shutdown();
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "ai/anthropic/messages-to-openai.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"model":"claude-opus-4-8","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}"#;
+    let raw = http_send(proxy.addr(), &json_post("/v1/messages", body));
+    let transformed: serde_json::Value = serde_json::from_str(&parse_body(&raw)).expect("response body should be JSON");
+
+    assert_eq!(parse_status(&raw), 200, "transformation should return 200");
+    assert_eq!(transformed["type"], "message", "response should be Anthropic message");
+    assert_eq!(
+        transformed["content"][0]["text"], "Hello from a Chat Completions backend.",
+        "Chat Completions response text should map to Anthropic content"
+    );
+    assert_eq!(
+        transformed["usage"]["input_tokens"], 11,
+        "prompt tokens should map to input tokens"
+    );
+}
+
+#[test]
+fn anthropic_to_openai_transforms_streaming_response_body() {
+    let backend_guard = Backend::fixed(CHAT_COMPLETIONS_SSE_RESPONSE)
+        .header("content-type", "text/event-stream")
+        .start_with_shutdown();
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "ai/anthropic/messages-to-openai.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let body =
+        r#"{"model":"claude-opus-4-8","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"Hello"}]}"#;
+    let raw = http_send(proxy.addr(), &json_post("/v1/messages", body));
+    let transformed = parse_body(&raw);
+
+    assert_eq!(parse_status(&raw), 200, "stream transformation should return 200");
+    assert!(
+        transformed.contains("event: message_start"),
+        "stream should include Anthropic message_start"
+    );
+    assert!(
+        transformed.contains("text_delta") && transformed.contains("Hello"),
+        "Chat Completions delta should map to Anthropic text_delta"
+    );
+    assert!(
+        transformed.contains("event: message_stop"),
+        "stream should include Anthropic message_stop"
+    );
+}
 
 #[test]
 fn unified_gateway_routes_anthropic_to_correct_backend() {

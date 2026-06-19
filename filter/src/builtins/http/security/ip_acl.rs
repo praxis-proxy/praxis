@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! IP-based access control filter (allow/deny by address or CIDR range).
 
@@ -42,6 +42,8 @@ struct IpAclConfig {
 /// When `deny` is configured, matching clients are rejected.
 /// When both are set, `allow` takes precedence: a client matching
 /// an allow entry is never denied.
+///
+/// Denied requests receive a 403 Forbidden response.
 ///
 /// # YAML configuration
 ///
@@ -143,6 +145,7 @@ impl HttpFilter for IpAclFilter {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

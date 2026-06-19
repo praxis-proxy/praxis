@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Shared utility functions for Criterion benchmarks.
 
@@ -45,6 +45,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         cluster: None,
         current_filter_id: None,
         downstream_tls: false,
+        extensions: praxis_filter::RequestExtensions::default(),
         executed_filter_indices: Vec::new(),
         extra_request_headers: Vec::new(),
         request_headers_to_remove: Vec::new(),

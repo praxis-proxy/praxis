@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 #![deny(unreachable_pub)]
 
@@ -14,6 +14,7 @@ pub mod reload;
 pub mod setup;
 pub mod sni;
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "test utilities")]
 mod test_utils;
 #[cfg(feature = "hot-reload")]

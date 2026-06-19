@@ -47,7 +47,7 @@ impl AiRequestFormat {
 
 /// Extracted facts from a classified request body.
 #[derive(Debug)]
-#[allow(clippy::struct_excessive_bools, reason = "independent presence flags from JSON body")]
+#[expect(clippy::struct_excessive_bools, reason = "independent presence flags from JSON body")]
 pub(crate) struct ClassifiedRequest {
     /// Extracted `background` field value, if present.
     pub background: Option<bool>,
@@ -57,7 +57,7 @@ pub(crate) struct ClassifiedRequest {
     pub has_conversation: bool,
     /// Whether `previous_response_id` is present and non-null.
     pub has_previous_response_id: bool,
-    /// Whether `prompt.id` is present and non-null.
+    /// Whether `prompt.prompt_id` is present and non-null.
     pub has_prompt_id: bool,
     /// Whether `tools` is a non-empty array.
     pub has_tools: bool,
@@ -236,6 +236,7 @@ fn extract_string(obj: &serde_json::Map<String, serde_json::Value>, key: &str) -
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

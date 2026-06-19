@@ -518,8 +518,8 @@ async fn initialize_returns_session_and_id() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 200, "initialize should return 200");
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             assert!(
@@ -566,8 +566,8 @@ async fn initialize_with_string_id_escaping() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 200, "initialize should return 200");
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             let parsed: serde_json::Value = serde_json::from_str(body_str).unwrap();
@@ -591,8 +591,8 @@ async fn ping_preserves_numeric_id() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 200, "ping should return 200");
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             assert!(
@@ -618,8 +618,8 @@ async fn ping_preserves_string_id() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 200, "ping should return 200");
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             assert!(
@@ -641,8 +641,8 @@ async fn notifications_initialized_returns_202() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 202, "notifications/initialized should return 202");
             assert!(
                 rejection.body.is_none(),
@@ -663,8 +663,8 @@ async fn notifications_initialized_with_id_rejected() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(
                 rejection.status, 200,
                 "notification methods with ids should return a JSON-RPC invalid request response"
@@ -689,8 +689,8 @@ async fn ping_with_null_id_rejected() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(
                 rejection.status, 200,
                 "null request ids should return a JSON-RPC error response"
@@ -719,8 +719,8 @@ async fn ping_with_missing_id_rejected() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(
                 rejection.status, 200,
                 "request methods without ids should return a JSON-RPC error response"
@@ -745,8 +745,8 @@ async fn ping_with_fractional_id_rejected_with_null_id() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(
                 rejection.status, 200,
                 "fractional request ids should return a JSON-RPC error response"
@@ -771,8 +771,8 @@ async fn tools_list_returns_prefixed_catalog() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 200, "tools/list should return 200");
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             assert!(
@@ -800,8 +800,8 @@ async fn tools_call_returns_unsupported() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(
                 rejection.status, 200,
                 "tools/call should return a JSON-RPC error response before backend routing is added"
@@ -827,8 +827,8 @@ async fn unsupported_method_returns_method_not_found() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(
                 rejection.status, 200,
                 "unsupported method should return a JSON-RPC error response"
@@ -853,8 +853,8 @@ async fn delete_with_session_returns_204() {
 
     let action = filter.on_request(&mut ctx).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 204, "DELETE with session should return 204");
         },
         _ => panic!("expected Reject with 204"),
@@ -869,8 +869,8 @@ async fn delete_without_session_returns_400() {
 
     let action = filter.on_request(&mut ctx).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 400, "DELETE without session should return 400");
         },
         _ => panic!("expected Reject with 400"),
@@ -902,8 +902,8 @@ async fn malformed_json_rejected() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 400, "malformed JSON should return 400");
         },
         _ => panic!("expected Reject with 400"),
@@ -920,8 +920,8 @@ async fn missing_method_rejected() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 400, "missing method should return 400");
         },
         _ => panic!("expected Reject with 400"),
@@ -982,8 +982,8 @@ async fn get_request_rejected_in_on_request() {
 
     let action = filter.on_request(&mut ctx).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 405, "GET should return 405");
         },
         _ => panic!("expected Reject with 405"),
@@ -1045,8 +1045,8 @@ async fn post_to_wrong_path_returns_404() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 404, "POST to non-MCP path should return 404");
         },
         _ => panic!("expected Reject with 404"),
@@ -1062,8 +1062,8 @@ async fn delete_to_wrong_path_returns_404() {
 
     let action = filter.on_request(&mut ctx).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 404, "DELETE to non-MCP path should return 404");
         },
         _ => panic!("expected Reject with 404"),
@@ -1094,8 +1094,8 @@ async fn full_body_at_eos_handles() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 200, "full body at EOS should handle ping");
         },
         _ => panic!("expected Reject with 200 for ping at EOS"),
@@ -1112,8 +1112,8 @@ async fn ping_with_query_param_matches_configured_mcp_path() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 200, "POST /mcp?x=1 should match MCP path");
         },
         _ => panic!("expected Reject with 200 for ping on /mcp?x=1"),
@@ -1129,8 +1129,8 @@ async fn delete_with_query_param_matches_configured_mcp_path() {
 
     let action = filter.on_request(&mut ctx).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 204, "DELETE /mcp?x=1 should match MCP path");
         },
         _ => panic!("expected Reject with 204 for DELETE on /mcp?x=1"),
@@ -1299,8 +1299,8 @@ async fn explicit_current_version_preserves_initialize_response() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             assert_eq!(rejection.status, 200, "initialize should return 200");
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             let parsed: serde_json::Value = serde_json::from_str(body_str).unwrap();
@@ -1332,8 +1332,8 @@ async fn initialize_echoes_supported_requested_version() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             let parsed: serde_json::Value = serde_json::from_str(body_str).unwrap();
             assert_eq!(
@@ -1356,8 +1356,8 @@ async fn initialize_unsupported_requested_version_falls_back_to_default() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             let parsed: serde_json::Value = serde_json::from_str(body_str).unwrap();
             assert_eq!(
@@ -1379,8 +1379,8 @@ async fn initialize_missing_version_falls_back_to_default() {
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
-    match action {
-        FilterAction::Reject(ref rejection) => {
+    match &action {
+        FilterAction::Reject(rejection) => {
             let body_str = std::str::from_utf8(rejection.body.as_ref().unwrap()).unwrap();
             let parsed: serde_json::Value = serde_json::from_str(body_str).unwrap();
             assert_eq!(

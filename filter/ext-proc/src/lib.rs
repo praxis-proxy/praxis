@@ -123,7 +123,7 @@ impl std::fmt::Display for Phase {
 /// [`ExternalProcessor`]: https://www.envoyproxy.io/docs/envoy/latest/api-v3/extensions/filters/http/ext_proc/v3/ext_proc.proto
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-#[allow(
+#[expect(
     clippy::struct_excessive_bools,
     reason = "mirrors Envoy ExternalProcessor proto fields"
 )]
@@ -141,12 +141,14 @@ struct ExtProcConfig {
 
     /// Allowlist of processing modes the processor may override to.
     /// Only evaluated when `allow_mode_override` is `true`.
+    #[expect(clippy::allow_attributes, reason = "field stored for future use")]
     #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
     #[serde(default)]
     allowed_override_modes: Vec<ProcessingModeConfig>,
 
     /// Timeout in milliseconds for deferred gRPC stream closure in
     /// observability mode. Default: 5000.
+    #[expect(clippy::allow_attributes, reason = "field stored for future use")]
     #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
     #[serde(default = "default_deferred_close_timeout_ms")]
     deferred_close_timeout_ms: u64,
@@ -158,6 +160,7 @@ struct ExtProcConfig {
 
     /// Controls which request/response headers are forwarded to the
     /// external processor. When unset, all headers are forwarded.
+    #[expect(clippy::allow_attributes, reason = "field stored for future use")]
     #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
     forward_rules: Option<ForwardRulesConfig>,
 
@@ -174,6 +177,7 @@ struct ExtProcConfig {
     /// Restricts which headers the external processor is allowed to
     /// mutate. When unset, all headers may be modified except
     /// pseudo-headers and `host`.
+    #[expect(clippy::allow_attributes, reason = "field stored for future use")]
     #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
     mutation_rules: Option<MutationRulesConfig>,
 
@@ -348,11 +352,13 @@ impl std::fmt::Display for BodySendMode {
 #[serde(deny_unknown_fields)]
 struct MutationRulesConfig {
     /// Headers the processor is allowed to mutate (allowlist).
+    #[expect(clippy::allow_attributes, reason = "field stored for future use")]
     #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
     #[serde(default)]
     allow: Vec<String>,
 
     /// Headers the processor is not allowed to mutate (denylist).
+    #[expect(clippy::allow_attributes, reason = "field stored for future use")]
     #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
     #[serde(default)]
     deny: Vec<String>,
@@ -366,11 +372,13 @@ struct MutationRulesConfig {
 #[serde(deny_unknown_fields)]
 struct ForwardRulesConfig {
     /// Only forward headers matching these patterns.
+    #[expect(clippy::allow_attributes, reason = "field stored for future use")]
     #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
     #[serde(default)]
     allowed_headers: Vec<String>,
 
     /// Never forward headers matching these patterns.
+    #[expect(clippy::allow_attributes, reason = "field stored for future use")]
     #[allow(dead_code, reason = "parsed for config compatibility; used in subsequent PRs")]
     #[serde(default)]
     disallowed_headers: Vec<String>,

@@ -19,9 +19,9 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # -----------------------------------------------------------------
+  # ----------------------------------------------------------------------------
   # Lint (fmt + clippy + dependency lint)
-  # -----------------------------------------------------------------
+  # ----------------------------------------------------------------------------
 
   lint:
     runs-on: ubuntu-24.04
@@ -36,7 +36,7 @@ jobs:
           components: rustfmt
 
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@10c3493d811a9096cee4fdf287e41e852f6a51ba # 1.94.0
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
         with:
           components: clippy
 
@@ -48,17 +48,17 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-rust-1.94.0-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-1.96.0-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-1.94.0-cargo-
+            ${{ runner.os }}-rust-1.96.0-cargo-
           save-always: true
 
       - name: Lint
         run: make lint
 
-  # -----------------------------------------------------------------
+  # ----------------------------------------------------------------------------
   # Documentation
-  # -----------------------------------------------------------------
+  # ----------------------------------------------------------------------------
 
   doc:
     runs-on: ubuntu-24.04
@@ -70,7 +70,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@10c3493d811a9096cee4fdf287e41e852f6a51ba # 1.94.0
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
 
       - name: Cache Cargo registry and build artifacts
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -80,17 +80,17 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-rust-1.94.0-doc-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-1.96.0-doc-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-1.94.0-doc-
+            ${{ runner.os }}-rust-1.96.0-doc-
           save-always: true
 
       - name: Build documentation
         run: make doc
 
-  # -----------------------------------------------------------------
+  # ----------------------------------------------------------------------------
   # Unit tests
-  # -----------------------------------------------------------------
+  # ----------------------------------------------------------------------------
 
   test-unit:
     runs-on: ubuntu-24.04
@@ -100,7 +100,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@10c3493d811a9096cee4fdf287e41e852f6a51ba # 1.94.0
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
 
       - name: Cache Cargo registry and build artifacts
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -110,20 +110,17 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-rust-1.94.0-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-1.96.0-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-1.94.0-cargo-
+            ${{ runner.os }}-rust-1.96.0-cargo-
           save-always: true
-
-      - name: Smoke tests
-        run: make test-smoke
 
       - name: Unit tests
         run: make test-unit
 
-  # -----------------------------------------------------------------
+  # ----------------------------------------------------------------------------
   # Integration tests
-  # -----------------------------------------------------------------
+  # ----------------------------------------------------------------------------
 
   test-integration:
     runs-on: ubuntu-24.04
@@ -133,7 +130,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@10c3493d811a9096cee4fdf287e41e852f6a51ba # 1.94.0
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
 
       - name: Cache Cargo registry and build artifacts
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -143,9 +140,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-rust-1.94.0-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-1.96.0-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-1.94.0-cargo-
+            ${{ runner.os }}-rust-1.96.0-cargo-
           save-always: true
 
       - name: Schema tests
@@ -160,9 +157,9 @@ jobs:
       - name: Integration tests
         run: make test-integration
 
-  # -----------------------------------------------------------------
+  # ----------------------------------------------------------------------------
   # Conformance tests
-  # -----------------------------------------------------------------
+  # ----------------------------------------------------------------------------
 
   test-conformance:
     runs-on: ubuntu-24.04
@@ -172,7 +169,7 @@ jobs:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
       - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@10c3493d811a9096cee4fdf287e41e852f6a51ba # 1.94.0
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
 
       - name: Cache Cargo registry and build artifacts
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -182,9 +179,9 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ${{ runner.os }}-rust-1.94.0-cargo-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-rust-1.96.0-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-rust-1.94.0-cargo-
+            ${{ runner.os }}-rust-1.96.0-cargo-
           save-always: true
 
       - name: Install Tools
@@ -193,9 +190,9 @@ jobs:
       - name: Conformance tests
         run: make test-conformance
 
-  # -----------------------------------------------------------------
+  # ----------------------------------------------------------------------------
   # Supply chain audit
-  # -----------------------------------------------------------------
+  # ----------------------------------------------------------------------------
 
   audit:
     runs-on: ubuntu-24.04
@@ -204,8 +201,8 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@10c3493d811a9096cee4fdf287e41e852f6a51ba # 1.94.0
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
 
       - name: Cache cargo binaries
         uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
@@ -224,9 +221,9 @@ jobs:
       - name: Run cargo deny
         run: cargo deny check
 
-  # -----------------------------------------------------------------
+  # ----------------------------------------------------------------------------
   # Coverage gate
-  # -----------------------------------------------------------------
+  # ----------------------------------------------------------------------------
 
   coverage:
     runs-on: ubuntu-24.04
@@ -235,8 +232,8 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@10c3493d811a9096cee4fdf287e41e852f6a51ba # 1.94.0
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
         with:
           toolchain: stable
           components: llvm-tools-preview

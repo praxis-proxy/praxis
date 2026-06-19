@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! HTTP protocol filters, organized by category.
 
@@ -14,6 +14,14 @@ pub(crate) mod value_safety;
 #[cfg(feature = "ai-inference")]
 pub use ai::AnthropicMessagesFormatFilter;
 #[cfg(feature = "ai-inference")]
+pub use ai::AnthropicMessagesProtocolFilter;
+#[cfg(feature = "ai-inference")]
+pub use ai::AnthropicStreamEventsFilter;
+#[cfg(feature = "ai-inference")]
+pub use ai::AnthropicToOpenaiFilter;
+#[cfg(feature = "ai-inference")]
+pub use ai::AnthropicValidateFilter;
+#[cfg(feature = "ai-inference")]
 pub use ai::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::OpenaiResponsesValidateFilter;
@@ -27,7 +35,7 @@ pub use ai::ResponseStoreRegistry;
 pub use ai::ResponsesFormatFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::token_usage::{TokenUsage, TokenUsageProvider, extract_token_usage};
-pub use ai::{A2aFilter, JsonRpcFilter, McpFilter};
+pub use ai::{A2aFilter, JsonRpcFilter, McpFilter, TokenUsageHeadersFilter};
 pub use observability::{AccessLogFilter, RequestIdFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter};
 pub use security::{

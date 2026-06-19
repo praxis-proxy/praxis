@@ -18,6 +18,9 @@ default = ["ai-inference"]
 ai-inference = ["dep:secrecy", "dep:sqlx", "dep:tokio"]
 ext-proc = ["dep:praxis-proto", "dep:tonic", "dep:prost-wkt-types"]
 
+[package.metadata.cargo-machete]
+ignored = ["praxis-proto", "prost-wkt-types", "tonic"]
+
 [lints]
 workspace = true
 

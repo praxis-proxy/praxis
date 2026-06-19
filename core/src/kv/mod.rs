@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Key-value store trait and registry for runtime-updatable mappings.
 
@@ -7,9 +7,9 @@ use std::{fmt::Debug, sync::Arc};
 
 use dashmap::DashMap;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // MatchType
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// How a key lookup matches against stored keys.
 ///
@@ -34,9 +34,9 @@ pub enum MatchType {
     Suffix,
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // KvBackend Trait
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// A single key-value store backend.
 ///
@@ -51,8 +51,8 @@ pub enum MatchType {
 /// optimized for concurrent reads. Writes may occur from
 /// admin API requests and filter execution.
 ///
-/// Keys and values use [`Arc<str>`] for zero-copy sharing
-/// across threads.
+/// Keys and values use [`Arc<str>`] so multiple threads can
+/// hold read handles to the same data concurrently.
 ///
 /// # Accessing from a filter
 ///
@@ -123,7 +123,7 @@ pub trait KvBackend: Send + Sync + Debug {
     /// the pattern fails to compile.
     ///
     /// [`Regex`]: MatchType::Regex
-    #[allow(clippy::type_complexity, reason = "trait return type")]
+    #[expect(clippy::type_complexity, reason = "trait return type")]
     fn lookup(&self, pattern: &str, match_type: MatchType) -> Result<Option<(Arc<str>, Arc<str>)>, String>;
 
     /// Number of entries in the store.
@@ -135,9 +135,9 @@ pub trait KvBackend: Send + Sync + Debug {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // KvLookup
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Three-state result from a combined store + key lookup.
 ///
@@ -214,9 +214,9 @@ impl KvLookup {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // KvStoreRegistry
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Concurrent registry of named key-value store backends.
 ///
@@ -240,7 +240,7 @@ impl KvLookup {
 #[derive(Debug, Clone)]
 pub struct KvStoreRegistry {
     /// Named store backends.
-    #[allow(clippy::type_complexity, reason = "single-field struct wrapping DashMap")]
+    #[expect(clippy::type_complexity, reason = "single-field struct wrapping DashMap")]
     stores: Arc<DashMap<Arc<str>, Arc<dyn KvBackend>>>,
 }
 
@@ -405,11 +405,12 @@ impl Default for KvStoreRegistry {
 
 pub mod memory;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;

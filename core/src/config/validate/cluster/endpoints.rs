@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Endpoint count, weight, and SSRF validation for clusters.
 
@@ -108,6 +108,7 @@ fn reject_ssrf_host(host: &str, cluster_name: &str, addr_str: &str) -> Result<()
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -272,6 +273,16 @@ mod tests {
     fn accept_hostname_endpoint() {
         let clusters = vec![Cluster::with_defaults("web", vec!["api.example.com:443".into()])];
         validate_clusters(&clusters, &InsecureOptions::default()).expect("hostname:port should be accepted");
+    }
+
+    #[test]
+    fn reject_ipv4_mapped_ipv6_loopback_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec!["[::ffff:127.0.0.1]:80".into()])];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("sensitive address"),
+            "IPv4-mapped IPv6 loopback should be flagged: {err}"
+        );
     }
 
     #[test]

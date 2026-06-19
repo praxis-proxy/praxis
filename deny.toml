@@ -1,9 +1,8 @@
 [advisories]
 unmaintained = "all"
+maximum-db-staleness = "P30D"
 ignore = [
     # Pingora transitive dependencies; not under our control.
-    # daemonize 0.5.0: unmaintained
-    "RUSTSEC-2025-0069",
     # derivative 2.2.0: unmaintained
     "RUSTSEC-2024-0388",
     # rustls-pemfile 2.2.0: unmaintained (via pingora-rustls)
@@ -28,7 +27,7 @@ allow = [
 
 [bans]
 multiple-versions = "warn"
-wildcards = "warn"
+wildcards = "deny"
 allow-wildcard-paths = true
 highlight = "all"
 
@@ -36,6 +35,4 @@ highlight = "all"
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-# Temporary fork: custom ServerConfig injection (PR #726)
-# and public WrappedX509 constructor for per-cluster CA.
-allow-git = ["https://github.com/praxis-proxy/pingora.git"]
+allow-git = []

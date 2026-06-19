@@ -116,7 +116,7 @@ pub(super) struct McpBrokerConfig {
 
 /// Entry in the pre-built tool catalog.
 #[derive(Debug, Clone)]
-#[allow(dead_code, reason = "fields used by follow-up tools/call routing")]
+#[expect(dead_code, reason = "fields used by follow-up tools/call routing")]
 pub(super) struct CatalogTool {
     /// Optional tool annotations.
     pub annotations: Option<serde_json::Value>,
@@ -331,7 +331,7 @@ fn build_catalog(servers: &[McpServerConfig], policy: InvalidToolPolicy) -> Resu
 
 /// MCP tools accept object-shaped input parameters.
 fn validate_tool_schemas(tool: &ToolConfig) -> Result<(), String> {
-    if let Some(ref schema) = tool.input_schema {
+    if let Some(schema) = &tool.input_schema {
         validate_schema_object("inputSchema", schema)?;
     }
     Ok(())
@@ -368,7 +368,7 @@ fn default_input_schema() -> serde_json::Value {
 /// Routing fields stay with catalog entries so follow-up `tools/call`
 /// routing can select the backend without reparsing config.
 fn build_catalog_entry(server: &McpServerConfig, tool: &ToolConfig) -> CatalogTool {
-    let exposed_name = if let Some(ref prefix) = server.tool_prefix {
+    let exposed_name = if let Some(prefix) = &server.tool_prefix {
         format!("{prefix}{}", tool.name)
     } else {
         tool.name.clone()

@@ -31,7 +31,7 @@ fn p2c_distributes_across_backends() {
     );
     let proxy = start_proxy(&config);
 
-    let total = 30u32;
+    let total = 30_u32;
     let mut counts: HashMap<String, u32> = HashMap::new();
     for _ in 0..total {
         let (status, body) = http_get(proxy.addr(), "/", None);

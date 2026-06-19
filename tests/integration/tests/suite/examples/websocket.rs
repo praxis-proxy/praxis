@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Tests for the `WebSocket` proxy example configuration.
 
 use std::collections::HashMap;
 
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt as _, StreamExt as _};
 use praxis_test_utils::{free_port, start_websocket_echo_backend};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 

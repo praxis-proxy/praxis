@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Edge case and meta-tests.
 
@@ -287,6 +287,38 @@ filter_chains:
 "#;
     let err = Config::from_yaml(yaml).unwrap_err();
     assert!(err.to_string().contains("exactly one"), "got: {err}");
+}
+
+#[test]
+fn reject_no_listeners() {
+    let err = Config::from_yaml("clusters: []").unwrap_err();
+    assert!(
+        err.to_string().contains("listeners"),
+        "config with no listeners should fail to parse: {err}"
+    );
+}
+
+#[test]
+fn reject_unknown_filter_chain_reference() {
+    let yaml = r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:0"
+    filter_chains:
+      - nonexistent
+"#;
+    let config = Config::from_yaml(yaml);
+
+    match config {
+        Err(_) => {},
+        Ok(mut cfg) => {
+            assert!(
+                cfg.validate().is_err(),
+                "referencing unknown chain should produce \
+                 a validation error"
+            );
+        },
+    }
 }
 
 #[test]

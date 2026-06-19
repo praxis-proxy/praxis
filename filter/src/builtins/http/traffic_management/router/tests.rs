@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Tests for the router filter.
 
@@ -13,7 +13,7 @@ use super::{
     config::{JsonAlias, RouterConfig, RouterRouteConfig},
     matching::{route_matches_request, should_stop_early, update_best_match},
 };
-use crate::{FilterAction, filter::HttpFilter};
+use crate::{FilterAction, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -719,6 +719,69 @@ fn should_stop_early_false_when_no_best() {
     assert!(
         !should_stop_early(None, &route),
         "should not stop when there is no current best"
+    );
+}
+
+#[test]
+fn empty_route_table_returns_none() {
+    let router = make_router(vec![]);
+    assert!(
+        router
+            .match_route("/any/path", Some("example.com"), &HeaderMap::new())
+            .is_none(),
+        "router with zero routes should return None for any request"
+    );
+}
+
+#[test]
+fn route_matches_request_empty_headers_constraint() {
+    let route = Route {
+        path_match: PathMatch::Prefix {
+            path_prefix: "/".to_owned(),
+        },
+        host: None,
+        headers: Some(HashMap::new()),
+        cluster: "vacuous".into(),
+    };
+    let resolved = ResolvedRoute {
+        route,
+        json_aliases: None,
+        wildcard_suffix: None,
+    };
+    let mut hdrs = HeaderMap::new();
+    hdrs.insert("x-anything", HeaderValue::from_static("whatever"));
+    assert!(
+        route_matches_request(&resolved, "/test", None, &hdrs, false),
+        "empty headers constraint map should match any request headers"
+    );
+    assert!(
+        route_matches_request(&resolved, "/test", None, &HeaderMap::new(), false),
+        "empty headers constraint map should match even with no request headers"
+    );
+}
+
+#[test]
+fn update_best_match_exact_beats_longer_prefix() {
+    let exact = exact_route("/api", "exact");
+    let long_prefix = prefix_route("/api/v1/", "long-prefix");
+    let best = update_best_match(None, &long_prefix);
+    let best = update_best_match(best, &exact);
+    assert_eq!(
+        &*best.expect("should have a best match").1.cluster,
+        "exact",
+        "exact path match should dominate even a longer prefix match"
+    );
+}
+
+#[test]
+fn should_stop_early_true_when_exact_route_already_best() {
+    let exact = exact_route("/api", "exact");
+    let short_prefix = prefix_route("/", "root");
+    let exact_specificity = (true, 4, 0_usize);
+    let best = Some((exact_specificity, &exact));
+    assert!(
+        should_stop_early(best, &short_prefix),
+        "prefix route shorter than exact best should trigger early stop"
     );
 }
 

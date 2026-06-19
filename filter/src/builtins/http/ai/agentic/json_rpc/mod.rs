@@ -7,6 +7,7 @@ pub(crate) mod config;
 pub(crate) mod envelope;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -40,6 +41,11 @@ use crate::{
 
 /// Extracts JSON-RPC 2.0 envelope metadata from request bodies and promotes
 /// method, id, and kind to request headers and filter results for routing.
+///
+/// Message kinds: `request`, `notification`, `response`, `batch`.
+///
+/// Writes `json_rpc.*` entries to the filter result set for branch
+/// chain conditions.
 ///
 /// # Basic YAML
 ///

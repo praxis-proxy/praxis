@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Path, host, and header matching logic for the router filter.
 
@@ -102,11 +102,11 @@ fn host_matches(pattern: &str, wildcard_suffix: Option<&str>, host: &str, multi_
         if host.len() <= suffix.len() {
             return false;
         }
-        let host_suffix = &host[host.len() - suffix.len()..];
+        let host_suffix = host.get(host.len() - suffix.len()..).unwrap_or_default();
         if !host_suffix.eq_ignore_ascii_case(suffix) {
             return false;
         }
-        let subdomain = &host[..host.len() - suffix.len()];
+        let subdomain = host.get(..host.len() - suffix.len()).unwrap_or_default();
         !subdomain.is_empty() && (multi_level || !subdomain.contains('.'))
     } else {
         host.eq_ignore_ascii_case(pattern)
@@ -138,7 +138,7 @@ fn headers_match(required: &Option<HashMap<String, String>>, actual: &HeaderMap)
 fn strip_port(host: &str) -> &str {
     if host.starts_with('[') {
         match host.find(']') {
-            Some(i) => &host[..=i],
+            Some(i) => host.get(..=i).unwrap_or(host),
             None => host,
         }
     } else {

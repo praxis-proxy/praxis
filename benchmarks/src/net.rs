@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Network utilities for benchmark orchestration.
 
@@ -110,11 +110,9 @@ pub fn detect_commit() -> String {
         .output()
         .ok()
         .and_then(|o| {
-            if o.status.success() {
-                Some(String::from_utf8_lossy(&o.stdout).trim().to_owned())
-            } else {
-                None
-            }
+            o.status
+                .success()
+                .then(|| String::from_utf8_lossy(&o.stdout).trim().to_owned())
         })
         .unwrap_or_else(|| "unknown".into())
 }

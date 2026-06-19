@@ -20,6 +20,8 @@
 - **rustfmt**: Ensure consistent code formatting
 - **cargo-audit**: Check for vulnerable dependencies
 - **cargo-deny**: Enforce supply chain safety policies
+- **cargo-machete**: Detect unused dependencies
+- **cargo-semver-checks**: Lint for SemVer violations
 - **rustdoc**: Generate the API documentation
 - **cargo xtask**: Developer task runner for benchmarks, flamegraphs, and debug utilities
 - **benchmarks**: Criterion microbenchmarks and scenario-based load tests ([Fortio], [Vegeta])
@@ -130,6 +132,82 @@ Security is enforced at the lint level. See lints in
 [Cargo.toml]:../../Cargo.toml
 [getting-started.md]:./getting-started.md
 
+### Lint Suppression Policy
+
+Use `#[expect(...)]` instead of `#[allow(...)]`. The
+`allow_attributes` lint enforces this mechanically.
+Every suppression must include a `reason`:
+
+```rust
+// Good:
+#[expect(
+    clippy::too_many_lines,
+    reason = "pipeline setup is inherently sequential"
+)]
+fn build_pipeline() { /* ... */ }
+
+// Bad — denied by allow_attributes:
+#[allow(clippy::too_many_lines)]
+fn build_pipeline() { /* ... */ }
+```
+
+`#[expect]` is self-cleaning: if the suppressed lint
+stops firing (because the code changed), the compiler
+warns that the expectation is unfulfilled. This
+prevents stale suppressions from accumulating.
+
+### Async Safety
+
+Do not hold synchronization guards across `.await`
+points. Holding a `Mutex`, `RefCell`, or `RwLock`
+guard across a suspension point risks deadlocks or
+runtime panics. The `await_holding_lock` and
+`await_holding_refcell_ref` lints enforce this.
+
+```rust
+// Bad — guard held across await:
+let guard = mutex.lock().await;
+let result = some_async_call().await;
+drop(guard);
+
+// Good — drop guard before awaiting:
+let data = {
+    let guard = mutex.lock().await;
+    guard.clone()
+};
+let result = some_async_call().await;
+```
+
+Never silently drop futures or `#[must_use]` values.
+`let _ = async_fn()` drops the future without polling
+it. The `let_underscore_future` and
+`let_underscore_must_use` lints catch this.
+
+### String Safety
+
+Raw string indexing (`&s[n..m]`) panics on non-char
+boundaries and is denied by the `string_slice` and
+`indexing_slicing` lints. Use safe alternatives:
+
+- `.get(range)` for fallible substring access
+- `.chars().nth(n)` for character-level access
+- `.char_indices()` for iterating with byte offsets
+
+### Trait Import Convention
+
+When importing a trait only for its methods (not
+naming the trait type), use `as _` to keep the name
+out of scope. The `unused_trait_names` lint enforces
+this.
+
+```rust
+// Good — trait name unused, import anonymously:
+use std::io::Write as _;
+
+// Bad — trait name pollutes scope unnecessarily:
+use std::io::Write;
+```
+
 ### Additional Coding Conventions
 
 - Use separator comments to visually separate distinct
@@ -156,7 +234,25 @@ Security is enforced at the lint level. See lints in
   2. All test functions (`#[test]` / `#[tokio::test]`)
   3. Test utilities at the end (with `// Test Utilities`
      separator)
-- Place a blank line between attribute blocks.
+- **Attribute formatting on structs, enums, fields,
+  and variants**:
+  - Place a blank line between each `#[...]` attribute
+    annotation.
+  - Order items within `#[derive(...)]` alphabetically.
+  - Order parameters within `#[serde(...)]` alphabetically.
+
+  ```rust
+  // Good:
+  #[derive(Clone, Debug, Default, Deserialize, Serialize)]
+
+  #[serde(default, deny_unknown_fields)]
+  pub struct Foo {
+
+  // Bad (no blank lines, non-alphabetical):
+  #[derive(Debug, Clone, Default, Serialize, Deserialize)]
+  #[serde(deny_unknown_fields, default)]
+  pub struct Foo {
+  ```
 - Separate distinct logical actions with blank lines. Function
   calls, variable bindings that begin a new step, and expression
   blocks that perform a discrete operation should have some newline space.

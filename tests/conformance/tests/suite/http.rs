@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! HTTP conformance tests.
 
@@ -23,9 +23,9 @@ fn nonsense_method_does_not_crash() {
     let raw = http_send(proxy.addr(), "XYZZY / HTTP/1.1\r\nHost: localhost\r\n\r\n");
     let status = parse_status(&raw);
 
-    assert!(
-        status == 200 || status == 400 || status == 405,
-        "expected 200, 400, or 405 for unknown method, got {status}"
+    assert_eq!(
+        status, 200,
+        "Pingora forwards unknown methods to upstream, got {status}"
     );
 }
 
@@ -40,9 +40,9 @@ fn missing_host_header_does_not_crash() {
     let raw = http_send(proxy.addr(), "GET / HTTP/1.1\r\nConnection: close\r\n\r\n");
     let status = parse_status(&raw);
 
-    assert!(
-        status == 200 || status == 400 || status == 0,
-        "expected 200, 400, or connection close for missing Host, got: {status}"
+    assert_eq!(
+        status, 400,
+        "HTTP/1.1 without Host must be rejected with 400, got {status}"
     );
 }
 
@@ -72,11 +72,11 @@ fn garbage_bytes_no_crash() {
 
     let garbage = b"\x00\x01\x02\x7f\x03\r\n";
     {
-        use std::io::{Read, Write};
+        use std::io::{Read as _, Write as _};
         let mut stream = std::net::TcpStream::connect(proxy.addr()).unwrap();
         drop(stream.set_read_timeout(Some(std::time::Duration::from_secs(2))));
         let _sent = stream.write_all(garbage);
-        let mut buf = [0u8; 1024];
+        let mut buf = [0_u8; 1024];
         let _bytes = stream.read(&mut buf);
     }
 
@@ -98,10 +98,7 @@ fn very_long_uri_handled() {
     let raw = http_send(proxy.addr(), &request);
     let status = parse_status(&raw);
 
-    assert!(
-        status == 200 || status == 414,
-        "expected 200 or 414 for long URI, got: {status}"
-    );
+    assert_eq!(status, 200, "Pingora forwards 8 KiB URIs to upstream, got {status}");
 }
 
 #[test]
@@ -122,9 +119,9 @@ fn very_long_header_value_handled() {
     let raw = http_send(proxy.addr(), &request);
     let status = parse_status(&raw);
 
-    assert!(
-        status == 200 || status == 431,
-        "expected 200 or 431 for large header, got: {status}"
+    assert_eq!(
+        status, 200,
+        "Pingora forwards 16 KiB header values to upstream, got {status}"
     );
 }
 
@@ -145,9 +142,9 @@ fn many_headers_handled() {
     let raw = http_send(proxy.addr(), &request);
     let status = parse_status(&raw);
 
-    assert!(
-        status == 200 || status == 431,
-        "expected 200 or 431 for many headers, got: {status}"
+    assert_eq!(
+        status, 200,
+        "Pingora forwards requests with 200 headers to upstream, got {status}"
     );
 }
 

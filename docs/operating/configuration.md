@@ -5,7 +5,7 @@ Single YAML file, passed as CLI argument or set via the
 `examples/configs/` for working examples.
 
 For individual filter configurations, see the
-[Filter Reference](filter-reference.md).
+[Filter Reference](../filters/reference.md).
 
 ## Structure
 

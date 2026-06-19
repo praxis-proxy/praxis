@@ -51,7 +51,6 @@ const SKIP: &[&str] = &[
     "security/cors.yaml",
     "security/downstream-read-timeout.yaml",
     "security/forwarded-headers.yaml",
-    "security/guardrails.yaml",
     // --- Traffic management ---
     "traffic-management/rate-limiting.yaml",
     "traffic-management/timeout.yaml",
@@ -63,7 +62,7 @@ const SKIP: &[&str] = &[
 
 /// CLI arguments for `cargo xtask lint-example-tests`.
 #[derive(Parser)]
-pub(crate) struct Args {}
+pub(crate) struct Args;
 
 // ---------------------------------------------------------------------------
 // Entry Point
@@ -162,6 +161,7 @@ fn workspace_root() -> std::path::PathBuf {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;

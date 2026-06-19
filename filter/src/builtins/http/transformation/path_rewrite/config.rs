@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Deserialized YAML configuration types for the path rewrite filter.
 
@@ -58,7 +58,7 @@ pub(super) struct PathRewriteConfig {
     ///
     /// Consumed by pipeline validation via the raw YAML config.
     #[serde(default)]
-    #[allow(dead_code, reason = "consumed by pipeline validation")]
+    #[expect(dead_code, reason = "consumed by pipeline validation")]
     pub allow_rewrite_override: bool,
 }
 

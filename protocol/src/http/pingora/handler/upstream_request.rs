@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Upstream request transformations: hop-by-hop header stripping
 //! and path rewriting ([RFC 9110]).
@@ -156,6 +156,7 @@ pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &Pingor
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

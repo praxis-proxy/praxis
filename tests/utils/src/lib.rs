@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 #![allow(
-    clippy::unwrap_used,
+    clippy::disallowed_methods,
     clippy::expect_used,
-    clippy::panic,
     clippy::indexing_slicing,
+    clippy::let_underscore_must_use,
     clippy::missing_assert_message,
+    clippy::panic,
+    clippy::unwrap_used,
     reason = "test utility code"
 )]
 #![allow(let_underscore_drop, reason = "test utility code")]

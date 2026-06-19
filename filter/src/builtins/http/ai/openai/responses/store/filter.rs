@@ -39,7 +39,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use secrecy::ExposeSecret;
+use secrecy::ExposeSecret as _;
 use serde_json::Value;
 use tokio::sync::OnceCell;
 use tracing::{debug, trace, warn};
@@ -111,11 +111,7 @@ impl ResponseStoreFilter {
     }
 
     /// Build the configured store backend.
-    #[allow(
-        clippy::cognitive_complexity,
-        clippy::too_many_lines,
-        reason = "tracing macros inflate complexity"
-    )]
+    #[expect(clippy::too_many_lines, reason = "tracing macros inflate complexity")]
     pub(super) async fn build_store(&self) -> Result<Arc<dyn ResponseStore>, StoreError> {
         match self.config.backend {
             StorageBackend::Sqlite => {
@@ -123,6 +119,7 @@ impl ResponseStoreFilter {
                     self.config.database_url.expose_secret(),
                     &self.config.responses_table,
                     &self.config.conversations_table,
+                    None,
                 )
                 .await;
                 store.map(|s| {
@@ -143,6 +140,7 @@ impl ResponseStoreFilter {
                     self.config.database_url.expose_secret(),
                     &self.config.responses_table,
                     &self.config.conversations_table,
+                    None,
                     self.config.ssl_mode,
                     ssl_root_cert,
                 )
@@ -419,7 +417,6 @@ fn response_is_persistable(ctx: &mut HttpFilterContext<'_>) -> bool {
 
 /// Parse a response body into a [`ResponseRecord`], returning
 /// `None` for invalid JSON or missing required fields.
-#[allow(clippy::cognitive_complexity, reason = "tracing macros inflate complexity")]
 fn parse_response_record(bytes: &[u8], tenant_id: &str) -> Option<ResponseRecord> {
     let json: Value = match serde_json::from_slice(bytes) {
         Ok(v) => v,
@@ -502,6 +499,7 @@ impl HttpFilter for ResponseStoreFilter {
         }
     }
 
+    #[expect(clippy::large_stack_frames, reason = "async handler with multiple await points")]
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if ctx.request.method == http::Method::GET {
             if let Some(action) = self.try_get_retrieval(ctx).await? {
@@ -587,6 +585,7 @@ impl HttpFilter for ResponseStoreFilter {
 // GET Retrieval
 // -----------------------------------------------------------------------------
 
+#[expect(clippy::multiple_inherent_impl, reason = "GET retrieval is a distinct concern")]
 impl ResponseStoreFilter {
     /// Attempt to handle a GET request for a stored response or its
     /// input items. Returns `Some(action)` when the path matches a

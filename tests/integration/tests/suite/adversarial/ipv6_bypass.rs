@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Adversarial tests verifying IPv4-mapped IPv6 addresses
 //! cannot bypass IP ACL rules.

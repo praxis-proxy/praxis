@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Deserialized YAML configuration types for the credential injection filter.
 
@@ -58,7 +58,7 @@ pub(super) struct ClusterCredentialConfig {
     /// Deprecated: injection always replaces any client-provided
     /// value for the header. Retained for config compatibility.
     #[serde(default = "default_strip")]
-    #[allow(dead_code, reason = "parsed by serde for config compatibility")]
+    #[expect(dead_code, reason = "parsed by serde for config compatibility")]
     pub strip_client_credential: bool,
 
     /// Literal credential value. Mutually exclusive with `env_var`.

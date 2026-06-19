@@ -7,6 +7,7 @@
 mod config;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -40,6 +41,13 @@ use crate::{
 /// request time, the filter parses the JSON body, splices
 /// prepend messages at the beginning and appends messages at
 /// the end, then re-serializes the modified body.
+///
+/// At least one of `prepend` or `append` must be non-empty.
+/// JSON is re-serialized, so byte-for-byte body identity is
+/// not preserved.
+///
+/// In chains that also use `json_body_field` or
+/// `model_to_header`, place `prompt_enrich` first.
 ///
 /// # YAML configuration
 ///

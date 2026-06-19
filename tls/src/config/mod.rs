@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! TLS configuration types: shared primitives and role-specific wrappers.
 
@@ -43,7 +43,7 @@ pub(crate) fn default_true() -> bool {
 }
 
 /// Serde skip predicate: true when [`ClientCertMode`] is the default (`None`).
-#[allow(clippy::trivially_copy_pass_by_ref, reason = "serde skip_serializing_if requires &T")]
+#[expect(clippy::trivially_copy_pass_by_ref, reason = "serde skip_serializing_if requires &T")]
 pub(crate) fn is_default_cert_mode(mode: &ClientCertMode) -> bool {
     *mode == ClientCertMode::None
 }

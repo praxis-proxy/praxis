@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Pre-computed body processing capabilities for filter pipelines.
 
@@ -37,7 +37,7 @@ use super::BodyMode;
 /// assert!(!caps.needs_response_body, "unset fields stay at default");
 /// ```
 #[derive(Debug, Clone, Default)]
-#[allow(clippy::struct_excessive_bools, reason = "capability flags")]
+#[expect(clippy::struct_excessive_bools, reason = "capability flags")]
 pub struct BodyCapabilities {
     /// Whether any filter writes to the request body.
     pub any_request_body_writer: bool,

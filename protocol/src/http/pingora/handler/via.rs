@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Via header injection per [RFC 9110 Section 7.6.3].
 //!
@@ -79,6 +79,7 @@ pub(crate) fn append_response_via(resp: &mut pingora_http::ResponseHeader, clien
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

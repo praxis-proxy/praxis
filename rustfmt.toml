@@ -16,3 +16,4 @@ reorder_impl_items = true
 hex_literal_case = "Upper"
 normalize_doc_attributes = true
 blank_lines_upper_bound = 2
+format_generated_files = false

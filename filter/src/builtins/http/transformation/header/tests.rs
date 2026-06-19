@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Tests for the header manipulation filter.
 
@@ -7,7 +7,7 @@ use super::{
     HeaderFilter, HeaderFilterConfig,
     ops::{append_headers, remove_headers, set_headers},
 };
-use crate::filter::HttpFilter;
+use crate::filter::HttpFilter as _;
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -28,7 +28,7 @@ async fn request_add_populates_extra_headers() {
         1,
         "should add exactly one request header"
     );
-    let (ref name, ref value) = ctx.extra_request_headers[0];
+    let (name, value) = &ctx.extra_request_headers[0];
     assert_eq!(name, "X-Forwarded-By", "header name should match");
     assert_eq!(value, "praxis", "header value should match");
 }
@@ -256,7 +256,6 @@ fn remove_headers_empty_list_is_noop() {
     assert_eq!(headers.len(), 1, "empty remove list should not affect headers");
 }
 
-
 #[tokio::test]
 async fn request_set_populates_headers_to_set() {
     let filter = make_header_filter(
@@ -272,7 +271,7 @@ async fn request_set_populates_headers_to_set() {
         1,
         "should queue exactly one header set operation"
     );
-    let (ref name, ref value) = ctx.request_headers_to_set[0];
+    let (name, value) = &ctx.request_headers_to_set[0];
     assert_eq!(name.as_str(), "x-custom", "set header name should match");
     assert_eq!(value.to_str().unwrap(), "overwritten", "set header value should match");
 }

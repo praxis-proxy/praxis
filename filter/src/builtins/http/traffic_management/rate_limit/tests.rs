@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Tests for the rate limit filter.
 
@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 
 use super::{HARD_CAP_PER_IP_ENTRIES, MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState};
-use crate::{FilterAction, builtins::http::traffic_management::token_bucket::TokenBucket, filter::HttpFilter};
+use crate::{FilterAction, builtins::http::traffic_management::token_bucket::TokenBucket, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -124,7 +124,7 @@ async fn global_mode_rejects_when_depleted() {
     ctx.client_addr = Some("10.0.0.1".parse().unwrap());
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(ref r) if r.status == 429),
+        matches!(&action, FilterAction::Reject(r) if r.status == 429),
         "request past burst should be rejected with 429"
     );
 }
@@ -146,7 +146,7 @@ async fn per_ip_mode_isolates_clients() {
     ctx.client_addr = Some("10.0.0.1".parse().unwrap());
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(ref r) if r.status == 429),
+        matches!(&action, FilterAction::Reject(r) if r.status == 429),
         "second request from IP A should be rejected"
     );
 
@@ -167,7 +167,7 @@ async fn per_ip_mode_no_client_addr_rejects() {
 
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(ref r) if r.status == 429),
+        matches!(&action, FilterAction::Reject(r) if r.status == 429),
         "missing client addr should be rejected with 429"
     );
 }
@@ -326,7 +326,7 @@ async fn per_ip_treats_mapped_ipv6_same_as_ipv4() {
     ctx.client_addr = Some("::ffff:10.0.0.1".parse().unwrap());
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(ref r) if r.status == 429),
+        matches!(&action, FilterAction::Reject(r) if r.status == 429),
         "request from ::ffff:10.0.0.1 should share bucket with V4 10.0.0.1"
     );
 }
@@ -348,7 +348,7 @@ async fn per_ip_mapped_ipv6_first_then_v4() {
     ctx.client_addr = Some("192.168.1.1".parse().unwrap());
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(ref r) if r.status == 429),
+        matches!(&action, FilterAction::Reject(r) if r.status == 429),
         "request from V4 192.168.1.1 should share bucket with ::ffff:192.168.1.1"
     );
 }
@@ -463,6 +463,52 @@ fn rate_limit_headers_saturate_near_u64_max() {
         reset_unix,
         u64::MAX,
         "reset should saturate to u64::MAX instead of wrapping"
+    );
+}
+
+#[test]
+fn from_config_rejects_burst_equal_to_rate_minus_one() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 10\nburst: 9").unwrap();
+    let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("burst must be >= rate"),
+        "burst of 9 with rate of 10 should be rejected: {err}"
+    );
+}
+
+#[test]
+fn from_config_accepts_burst_equal_to_rate() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 10\nburst: 10").unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).expect("burst equal to rate should be accepted");
+    assert_eq!(filter.name(), "rate_limit", "filter name should be rate_limit");
+}
+
+#[test]
+fn from_config_rejects_unknown_fields() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 10\nburst: 20\nextra: true").unwrap();
+    let err = RateLimitFilter::from_config(&yaml)
+        .err()
+        .expect("should error on unknown field");
+    assert!(
+        err.to_string().contains("rate_limit"),
+        "unknown field error should reference the filter name: {err}"
+    );
+}
+
+#[test]
+fn from_config_accepts_fractional_rate() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: 0.5\nburst: 1").unwrap();
+    let filter = RateLimitFilter::from_config(&yaml).expect("fractional rate of 0.5 should be accepted");
+    assert_eq!(filter.name(), "rate_limit", "filter name should be rate_limit");
+}
+
+#[test]
+fn from_config_rejects_negative_infinity_rate() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("mode: global\nrate: -.inf\nburst: 10").unwrap();
+    let err = RateLimitFilter::from_config(&yaml).err().expect("should error");
+    assert!(
+        err.to_string().contains("rate must be a finite number greater than 0"),
+        "should reject negative infinity rate: {err}"
     );
 }
 

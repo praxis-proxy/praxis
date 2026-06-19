@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Shane Utt
+// Copyright (c) 2024 Praxis Contributors
 
 //! Tests for least-connections load balancing behavior.
 
@@ -31,7 +31,7 @@ fn least_connections() {
     );
     let proxy = start_proxy(&config);
 
-    let total = 30u32;
+    let total = 30_u32;
     let mut counts: HashMap<String, u32> = HashMap::new();
     for _ in 0..total {
         let (status, body) = http_get(proxy.addr(), "/", None);

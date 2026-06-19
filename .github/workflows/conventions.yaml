@@ -26,7 +26,7 @@ jobs:
     steps:
       - name: Generate token
         id: app-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
           private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
@@ -38,16 +38,16 @@ jobs:
           MAX_ADDITIONS: "750"
         run: |
           labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
-          if echo "$labels" | grep -q '^skip/pr-hygiene$'; then
-            echo "skip/pr-hygiene label present — skipping size check"
+          if echo "$labels" | grep -q '^skip/pr-conventions$'; then
+            echo "skip/pr-conventions label present — skipping size check"
             exit 0
           fi
 
           if [ "${{ github.event.action }}" = "reopened" ]; then
             perm=$(gh api repos/${{ github.repository }}/collaborators/${{ github.event.sender.login }}/permission -q .permission)
             if [ "$perm" = "admin" ] || [ "$perm" = "maintain" ]; then
-              gh pr edit "$PR_NUMBER" --repo "${{ github.repository }}" --add-label "skip/pr-hygiene"
-              echo "Maintainer reopened — added skip/pr-hygiene label"
+              gh pr edit "$PR_NUMBER" --repo "${{ github.repository }}" --add-label "skip/pr-conventions"
+              echo "Maintainer reopened — added skip/pr-conventions label"
               exit 0
             fi
           fi
@@ -62,7 +62,7 @@ jobs:
             if [ "$already" -eq 0 ]; then
               gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
                 --body "${marker}
-          **PR too large**: ${added} lines added (limit: ${MAX_ADDITIONS}, excludes Cargo files, tests, docs, examples, and benchmarks). Please split into smaller PRs. Add \`skip/pr-hygiene\` label to override."
+          **PR too large**: ${added} lines added (limit: ${MAX_ADDITIONS}, excludes Cargo files, tests, docs, examples, and benchmarks). Please split into smaller PRs. Add \`skip/pr-conventions\` label to override."
             fi
             echo "::error::PR has ${added} lines added (limit: ${MAX_ADDITIONS})"
             exit 1
@@ -78,7 +78,7 @@ jobs:
     steps:
       - name: Generate token
         id: app-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
           private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
@@ -90,8 +90,8 @@ jobs:
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
-          if echo "$labels" | grep -q '^skip/pr-hygiene$'; then
-            echo "skip/pr-hygiene label present — skipping description check"
+          if echo "$labels" | grep -q '^skip/pr-conventions$'; then
+            echo "skip/pr-conventions label present — skipping description check"
             exit 0
           fi
 
@@ -117,7 +117,7 @@ jobs:
     steps:
       - name: Generate token
         id: app-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
           private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
@@ -198,7 +198,7 @@ jobs:
     steps:
       - name: Generate token
         id: app-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
           private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
@@ -240,7 +240,7 @@ jobs:
     steps:
       - name: Generate token
         id: app-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
           private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
@@ -288,7 +288,7 @@ jobs:
     steps:
       - name: Generate token
         id: app-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
           private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
@@ -384,7 +384,7 @@ jobs:
     steps:
       - name: Generate token
         id: app-token
-        uses: actions/create-github-app-token@fee1f7d63c2ff003460e3d139729b119787bc349 # v2.2.2
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
           app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
           private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
