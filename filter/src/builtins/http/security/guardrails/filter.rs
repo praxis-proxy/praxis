@@ -152,7 +152,7 @@ impl GuardrailsFilter {
     /// Check all header-targeted rules against the request headers.
     fn check_headers(&self, ctx: &HttpFilterContext<'_>) -> bool {
         for rule in &self.rules {
-            let RuleTarget::Header(ref header_name) = rule.target else {
+            let RuleTarget::Header(header_name) = &rule.target else {
                 continue;
             };
 

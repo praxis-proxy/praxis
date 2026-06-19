@@ -4,7 +4,7 @@
 //! TLS certificate generation and client utilities for integration tests.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     path::PathBuf,
     sync::{
@@ -102,7 +102,6 @@ impl TestCertificates {
     /// # Panics
     ///
     /// Panics if certificate generation or file I/O fails.
-    #[allow(clippy::too_many_lines, reason = "cert generation steps")]
     pub fn generate_for_san(san: &str) -> Self {
         let (ca_key, ca_params, ca_cert) = generate_ca(&format!("Praxis Test CA ({san})"));
         let issuer = Issuer::from_params(&ca_params, &ca_key);
@@ -223,10 +222,10 @@ impl TestCertificates {
         let cert_pem = std::fs::read(&client_cert.cert_path).expect("read client cert PEM");
         let key_pem = std::fs::read(&client_cert.key_path).expect("read client key PEM");
 
-        let certs: Vec<_> = rustls_pemfile::certs(&mut &cert_pem[..])
+        let certs: Vec<_> = rustls_pemfile::certs(&mut &*cert_pem)
             .collect::<Result<Vec<_>, _>>()
             .expect("parse client cert PEM");
-        let key = rustls_pemfile::private_key(&mut &key_pem[..])
+        let key = rustls_pemfile::private_key(&mut &*key_pem)
             .expect("parse client key PEM")
             .expect("no client private key found");
 
@@ -256,10 +255,10 @@ impl TestCertificates {
         let cert_pem = std::fs::read(&client_cert.cert_path).expect("read client cert PEM");
         let key_pem = std::fs::read(&client_cert.key_path).expect("read client key PEM");
 
-        let certs: Vec<_> = rustls_pemfile::certs(&mut &cert_pem[..])
+        let certs: Vec<_> = rustls_pemfile::certs(&mut &*cert_pem)
             .collect::<Result<Vec<_>, _>>()
             .expect("parse client cert PEM");
-        let key = rustls_pemfile::private_key(&mut &key_pem[..])
+        let key = rustls_pemfile::private_key(&mut &*key_pem)
             .expect("parse client key PEM")
             .expect("no client private key found");
 
@@ -314,6 +313,7 @@ pub fn https_get(addr: &str, path: &str, client_config: &Arc<ClientConfig>) -> (
 }
 
 /// Perform an HTTP/2 GET over TLS.
+#[expect(clippy::large_stack_frames, reason = "test helper with H2 handshake structs")]
 async fn h2_get(addr: &str, path: &str, client_config: &Arc<ClientConfig>) -> (u16, String) {
     let tls = tls_connect(addr, client_config).await;
 
@@ -485,6 +485,7 @@ pub fn wait_for_https(addr: &str, client_config: &Arc<ClientConfig>) {
 }
 
 /// Attempt an H2-over-TLS GET, returning `None` on any failure.
+#[expect(clippy::large_stack_frames, reason = "test helper with H2 handshake structs")]
 fn try_h2_get(addr: &str, path: &str, client_config: &Arc<ClientConfig>) -> Option<(u16, String)> {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -498,7 +499,7 @@ fn try_h2_get(addr: &str, path: &str, client_config: &Arc<ClientConfig>) -> Opti
 }
 
 /// Inner fallible H2 GET that returns `None` instead of panicking.
-#[allow(clippy::cognitive_complexity, reason = "handshake sequence")]
+#[expect(clippy::large_stack_frames, reason = "test helper with H2 handshake structs")]
 async fn try_h2_get_inner(addr: &str, path: &str, client_config: &Arc<ClientConfig>) -> Option<(u16, String)> {
     let connector = tokio_rustls::TlsConnector::from(Arc::clone(client_config));
     let server_name = rustls::pki_types::ServerName::try_from("localhost").ok()?;
@@ -563,10 +564,10 @@ fn build_tls_acceptor(certs: &TestCertificates) -> tokio_rustls::TlsAcceptor {
     let certs_pem = std::fs::read(&certs.cert_path).expect("read cert PEM");
     let key_pem = std::fs::read(&certs.key_path).expect("read key PEM");
 
-    let certs = rustls_pemfile::certs(&mut &certs_pem[..])
+    let certs = rustls_pemfile::certs(&mut &*certs_pem)
         .collect::<Result<Vec<_>, _>>()
         .expect("parse cert PEM");
-    let key = rustls_pemfile::private_key(&mut &key_pem[..])
+    let key = rustls_pemfile::private_key(&mut &*key_pem)
         .expect("parse key PEM")
         .expect("no private key found");
 
@@ -608,10 +609,10 @@ fn build_mtls_acceptor(certs: &TestCertificates) -> tokio_rustls::TlsAcceptor {
     let certs_pem = std::fs::read(&certs.cert_path).expect("read cert PEM");
     let key_pem = std::fs::read(&certs.key_path).expect("read key PEM");
 
-    let server_certs = rustls_pemfile::certs(&mut &certs_pem[..])
+    let server_certs = rustls_pemfile::certs(&mut &*certs_pem)
         .collect::<Result<Vec<_>, _>>()
         .expect("parse cert PEM");
-    let key = rustls_pemfile::private_key(&mut &key_pem[..])
+    let key = rustls_pemfile::private_key(&mut &*key_pem)
         .expect("parse key PEM")
         .expect("no private key found");
 
@@ -632,6 +633,7 @@ fn build_mtls_acceptor(certs: &TestCertificates) -> tokio_rustls::TlsAcceptor {
 }
 
 /// Accept TLS connections and serve fixed HTTP responses.
+#[expect(clippy::infinite_loop, reason = "server accept loop runs until task cancellation")]
 async fn tls_accept_loop(listener: std::net::TcpListener, acceptor: tokio_rustls::TlsAcceptor, body: String) {
     listener.set_nonblocking(true).expect("set non-blocking");
     let listener = tokio::net::TcpListener::from_std(listener).expect("tokio listener");
@@ -652,7 +654,7 @@ async fn tls_accept_loop(listener: std::net::TcpListener, acceptor: tokio_rustls
 
 /// Handle a single TLS HTTP connection: read headers, write response.
 async fn handle_tls_http(mut stream: tokio_rustls::server::TlsStream<tokio::net::TcpStream>, body: &str) {
-    let mut buf = vec![0u8; 4096];
+    let mut buf = vec![0_u8; 4096];
     let mut total = 0;
 
     loop {
@@ -705,7 +707,7 @@ fn handle_echo(mut stream: TcpStream) {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set read timeout");
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     loop {
         match stream.read(&mut buf) {
             Ok(0) | Err(_) => break,
@@ -747,7 +749,7 @@ fn handle_tagged(mut stream: TcpStream, tag: &str) {
     stream
         .set_read_timeout(Some(Duration::from_secs(5)))
         .expect("set read timeout");
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     match stream.read(&mut buf) {
         Ok(0) | Err(_) => {},
         Ok(n) => {

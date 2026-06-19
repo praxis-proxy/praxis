@@ -3,7 +3,7 @@
 
 //! Integration tests for A2A classifier filter.
 
-use std::io::{Read, Write};
+use std::io::{Read as _, Write as _};
 
 use praxis_core::config::Config;
 use praxis_test_utils::{

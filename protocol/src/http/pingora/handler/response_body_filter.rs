@@ -25,7 +25,7 @@ const BODY_FALLBACK_LIMIT: usize = 67_108_864; // 64 MiB
 // -----------------------------------------------------------------------------
 
 /// Run body filters on a response body chunk (synchronous; Pingora constraint).
-#[allow(
+#[expect(
     clippy::too_many_lines,
     clippy::cognitive_complexity,
     reason = "body filter dispatch"
@@ -50,11 +50,13 @@ pub(super) fn execute(
 
     match ctx.response_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
-            if let Some(ref chunk) = *body {
+            if let Some(chunk) = &*body {
+                #[expect(clippy::allow_attributes, reason = "cast lint is platform-dependent")]
                 #[allow(clippy::cast_possible_truncation, reason = "chunk length fits u64")]
                 let chunk_len = chunk.len() as u64;
                 ctx.response_body_bytes += chunk_len;
 
+                #[expect(clippy::allow_attributes, reason = "cast lint is platform-dependent")]
                 #[allow(clippy::cast_possible_truncation, reason = "max_bytes fits u64")]
                 let limit = max_bytes as u64;
                 if ctx.response_body_bytes > limit {
@@ -68,7 +70,7 @@ pub(super) fn execute(
         },
 
         BodyMode::StreamBuffer { max_bytes } if !ctx.response_body_released => {
-            if let Some(ref chunk) = *body {
+            if let Some(chunk) = &*body {
                 let limit = max_bytes.unwrap_or(BODY_FALLBACK_LIMIT);
                 let buf = ctx.response_body_buffer.get_or_insert_with(|| BodyBuffer::new(limit));
 
@@ -92,7 +94,7 @@ pub(super) fn execute(
         _ => tracing::warn!("unhandled BodyMode variant in response body filter"),
     }
 
-    let (result, body_bytes, cluster, upstream, filter_metadata, filter_state) = {
+    let (result, body_bytes, cluster, upstream, extensions, filter_metadata, filter_state) = {
         let mut fctx = ctx.filter_context_for(pipeline, None).ok_or_else(|| {
             pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
@@ -105,6 +107,7 @@ pub(super) fn execute(
             fctx.response_body_bytes,
             fctx.cluster,
             fctx.upstream,
+            fctx.extensions,
             fctx.filter_metadata,
             fctx.filter_state,
         )
@@ -112,6 +115,7 @@ pub(super) fn execute(
     ctx.response_body_bytes = body_bytes;
     ctx.cluster = cluster;
     ctx.upstream = upstream;
+    ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;
     ctx.filter_state = filter_state;
 
@@ -159,6 +163,7 @@ pub(super) fn execute(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

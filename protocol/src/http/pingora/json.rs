@@ -17,7 +17,7 @@ use http::Response;
 /// let resp = json_response(200, b"{\"ok\":true}");
 /// assert_eq!(resp.status().as_u16(), 200);
 /// ```
-#[allow(clippy::expect_used, reason = "valid static response")]
+#[expect(clippy::expect_used, reason = "valid static response")]
 pub(crate) fn json_response(status: u16, body: &[u8]) -> Response<Vec<u8>> {
     Response::builder()
         .status(status)
@@ -32,6 +32,7 @@ pub(crate) fn json_response(status: u16, body: &[u8]) -> Response<Vec<u8>> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;

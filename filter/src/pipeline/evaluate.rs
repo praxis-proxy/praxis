@@ -165,6 +165,7 @@ async fn dispatch_nested_outcome(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -651,7 +652,7 @@ mod tests {
         )];
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.filter_state.insert(parent_id, Box::new(77u64));
+        ctx.filter_state.insert(parent_id, Box::new(77_u64));
         evaluate_branches(&branches, &mut ctx).await.unwrap();
         let parent_state = ctx.filter_state.get(&parent_id).unwrap().downcast_ref::<u64>().unwrap();
         let branch_state = ctx.filter_state.get(&branch_id).unwrap().downcast_ref::<u64>().unwrap();

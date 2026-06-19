@@ -6,6 +6,7 @@
 pub(crate) mod content_type;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -27,6 +28,13 @@ use crate::{
 /// Detects gRPC requests from the `content-type` header and promotes the
 /// variant to filter metadata and results for downstream routing.
 ///
+/// Detection values: `grpc` (bare `application/grpc`), `grpc+proto`,
+/// `grpc+json`, `grpc+other` (unrecognized sub-protocol), `none`
+/// (non-gRPC request).
+///
+/// Writes `grpc_detection.kind` to both filter metadata and filter
+/// results for branch chain conditions.
+///
 /// # YAML
 ///
 /// ```yaml
@@ -40,7 +48,7 @@ impl GrpcDetectionFilter {
     /// # Errors
     ///
     /// Returns [`FilterError`] if the YAML config is invalid.
-    #[allow(clippy::unnecessary_wraps, reason = "signature required by FilterFactory")]
+    #[expect(clippy::unnecessary_wraps, reason = "signature required by FilterFactory")]
     pub fn from_config(_config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         Ok(Box::new(Self))
     }

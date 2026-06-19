@@ -63,7 +63,7 @@ pub struct PingoraHttpHandlerNoBody {
 
 impl PingoraHttpHandlerNoBody {
     /// Create a handler without body filter support.
-    #[allow(dead_code, reason = "reserved for non-reload paths")]
+    #[expect(dead_code, reason = "reserved for non-reload paths")]
     pub(super) fn new(
         pipeline: Arc<ArcSwap<FilterPipeline>>,
         downstream_read_timeout: Option<Duration>,
@@ -90,13 +90,13 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
     /// Registers Pingora's compression module when compression is
     /// configured.
     fn init_downstream_modules(&self, modules: &mut HttpModules) {
-        if let Some(ref cfg) = self.compression {
+        if let Some(cfg) = &self.compression {
             debug!(level = cfg.default_level, "registering compression module");
             modules.add_module(ResponseCompressionBuilder::enable(cfg.default_level));
         }
     }
 
-    #[allow(clippy::cast_possible_truncation, reason = "millis fit u64")]
+    #[expect(clippy::cast_possible_truncation, reason = "millis fit u64")]
     async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()>
     where
         Self::CTX: Send + Sync,
@@ -111,7 +111,7 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
             return reject_503(session, "1", "global max connections exceeded").await;
         }
 
-        if let Some(ref sem) = self.connection_semaphore {
+        if let Some(sem) = &self.connection_semaphore {
             if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
                 ctx._connection_permit = Some(permit);
             } else {

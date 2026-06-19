@@ -42,7 +42,6 @@ make test-integration   # end-to-end filter and proxy tests
 make test-conformance   # RFC conformance (h2spec, HTTP semantics)
 make test-security      # request smuggling, header injection
 make test-resilience    # load, failure recovery, throughput
-make test-smoke         # quick startup and round-trip sanity
 ```
 
 See `docs/developing/getting-started.md` for the full
@@ -84,96 +83,26 @@ server -> protocol -> filter -> core -> tls
 - `tests/conformance`: RFC conformance (h2spec)
 - `tests/security`: request smuggling, header injection
 - `tests/resilience`: load, failure recovery
-- `tests/smoke`: quick startup round-trip
 
 ## Conventions
 
 See `docs/developing/conventions.md` for the full
-coding style guide. Key points:
+coding style guide. Praxis-specific additions beyond
+the user-level Rust Baseline:
 
-- `unsafe_code = "deny"` in workspace lints
-- All items (public and private) require `///` doc
-  comments; enforced by `missing_docs` and
-  `missing_docs_in_private_items` lints
-- Comments answer "why?", never "what?"; use
-  `tracing` for runtime narration
-- Prefer `to_owned()` over `to_string()` for
-  `&str` to `String`
-- Use inline format args: `format!("{var}")`
-- Use let-chains, `is_some_and()`, `strip_prefix()`,
-  `filter()`, `map()`; prefer `Option`/`Result`
-  combinator chains over `if/else` blocks when the
-  logic is a linear transform
-- Reference-style rustdoc links, not inline
-- Do not document memory efficiency in rustdoc
-  (e.g. "avoids allocation", "zero-copy", "cheap
-  clone"). Correct memory use is expected; it does
-  not need narration.
-- Do not create re-export-only files. Import
-  directly from the source module.
-- Blank line between each `#[...]` attribute on
-  structs, enums, fields, and variants; alphabetical
-  ordering within `#[derive(...)]` and `#[serde(...)]`
+- Prefer `Option`/`Result` combinator chains
+  (`strip_prefix()`, `filter()`, `map()`) over
+  `if/else` blocks when the logic is a linear
+  transform
 - Pre-computed numeric literals with trailing
   comments for human-readable meaning
+  (e.g. `10_485_760; // 10 MiB`)
 - Use enums, not strings, for fixed value sets
   in config; `#[serde(deny_unknown_fields)]` on
   config structs; `#[serde(try_from)]` for
   constrained numerics; `#[serde(default)]`
   instead of `Option<T>` with `unwrap_or`.
   See `docs/developing/type-design.md`.
-  (e.g. `10_485_760; // 10 MiB`)
-
-## Workspace Lints
-
-The workspace enforces an extensive lint policy in
-`Cargo.toml` under `[workspace.lints.rust]` and
-`[workspace.lints.clippy]`. Key constraints:
-
-- `unwrap_used`, `expect_used`, `panic`,
-  `indexing_slicing`: all denied; a proxy must not
-  panic. Use `#[expect(..., reason = "...")]` for
-  genuine exceptions.
-- `allow_attributes`: denied; use `#[expect(...)]`
-  instead of `#[allow(...)]`. Combined with
-  `allow_attributes_without_reason`, every lint
-  suppression must use `#[expect]` with a `reason`.
-- `string_slice`: denied; no raw string indexing.
-  Use `.get()`, `.chars().nth()`, or
-  `.char_indices()`.
-- `await_holding_lock`, `await_holding_refcell_ref`:
-  denied; no holding guards across `.await` points.
-- `let_underscore_future`,
-  `let_underscore_must_use`: denied; never silently
-  drop futures or `#[must_use]` values.
-- `too_many_lines`, `cognitive_complexity`: denied
-- All cast operations (`cast_lossless`,
-  `cast_possible_truncation`, etc.) are denied
-- `dbg_macro`, `print_stdout`, `print_stderr`:
-  denied
-- `missing_assert_message`: denied; every `assert!`
-  needs a message string
-- `str_to_string`: denied; use `to_owned()` for
-  `&str` to `String`
-- `unused_trait_names`: denied; import traits with
-  `as _` when only methods are used
-- `disallowed_methods`: denied; `std::thread::sleep`
-  is blocked (use `tokio::time::sleep`)
-
-## File Ordering
-
-1. Constants (with separator comment)
-2. Public types, impls, functions
-3. Private types and impls
-4. Private utility functions (with separator)
-5. `#[cfg(test)] mod tests` (always last)
-
-Inside `mod tests`: imports, test functions, then
-test utilities (with `// Test Utilities` separator).
-
-Struct fields: `name` first (if present), then
-alphabetical. Impl blocks: `new()` first, then
-`name()`, then alphabetical.
 
 ## Test Requirements
 
@@ -206,11 +135,6 @@ must perform a real WebSocket handshake and message
 exchange). Parse-only validation is not sufficient;
 every example must prove its feature works with all
 configured variants.
-
-See `docs/developing/conventions.md` for full test
-conventions (no inline comments in test bodies, no
-doc comments on test functions, full-width separators
-only).
 
 ## Adding a Filter
 
@@ -317,7 +241,7 @@ These two concepts are distinct, take care to not conflate them.
 Filters live under
 `filter/src/builtins/<protocol>/<category>/`.
 See `docs/filters/README.md` for the filter system
-documentation and `docs/operating/filter-reference.md`
+documentation and `docs/filters/reference.md`
 for built-in filter configurations.
 
 Categories: `ai`, `observability`,

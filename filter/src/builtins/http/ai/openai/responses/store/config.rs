@@ -10,7 +10,7 @@ use std::{
 
 use percent_encoding::percent_decode_str;
 use praxis_core::connectivity::normalize_mapped_ipv4;
-use secrecy::{ExposeSecret, SecretString};
+use secrecy::{ExposeSecret as _, SecretString};
 use serde::Deserialize;
 
 use crate::{
@@ -337,7 +337,7 @@ fn parse_legacy_ipv4_number(part: &str) -> Option<u32> {
     let (digits, radix) = part.strip_prefix("0x").or_else(|| part.strip_prefix("0X")).map_or_else(
         || {
             if part.len() > 1 && part.starts_with('0') {
-                (&part[1..], 8)
+                (part.get(1..).unwrap_or_default(), 8)
             } else {
                 (part, 10)
             }

@@ -4,7 +4,7 @@
 //! Integration tests for per-listener downstream read timeout.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     time::{Duration, Instant},
 };
@@ -92,7 +92,7 @@ filter_chains:
         .expect("write request with partial body");
 
     let stall_start = Instant::now();
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     let result = stream.read(&mut buf);
     let elapsed = stall_start.elapsed();
 

@@ -37,6 +37,9 @@ tracing = { workspace = true }
 nix = { workspace = true }
 tikv-jemallocator = { workspace = true }
 
+[build-dependencies]
+cargo_metadata = "0.19"
+
 [dev-dependencies]
 tempfile = { workspace = true }
 
@@ -44,4 +47,3 @@ tempfile = { workspace = true }
 default = ["ai-inference"]
 ai-inference = ["praxis-filter/ai-inference", "praxis-protocol/ai-inference"]
 ext-proc = ["praxis-filter/ext-proc"]
-

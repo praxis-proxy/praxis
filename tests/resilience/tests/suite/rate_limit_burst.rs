@@ -14,7 +14,7 @@ use praxis_test_utils::{free_port, http_get, http_send, parse_header, parse_stat
 fn burst_exhaustion_then_rejection() {
     let backend_port = start_backend("ok");
     let proxy_port = free_port();
-    let usable = 4u32;
+    let usable = 4_u32;
     let burst = usable + 2;
     let yaml = rate_limit_yaml(proxy_port, backend_port, "global", 0.1, burst);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -27,7 +27,7 @@ fn burst_exhaustion_then_rejection() {
     }
 
     let mut first_429_at = None;
-    for i in 0..4u32 {
+    for i in 0..4_u32 {
         let raw = http_send(
             proxy.addr(),
             "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
@@ -196,7 +196,7 @@ fn rapid_burst_uses_all_tokens() {
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    let mut successes = 0u32;
+    let mut successes = 0_u32;
     let total = burst + 5;
     for _ in 0..total {
         let (status, _) = http_get(proxy.addr(), "/", None);

@@ -90,14 +90,16 @@ fn bench_headers_response(c: &mut Criterion) {
 /// Generate a YAML config for the header filter with `n` `request_add`
 /// and `n` `response_set` entries.
 fn header_filter_yaml(n: usize) -> String {
+    use std::fmt::Write as _;
+
     let mut yaml = String::from("request_add:\n");
     for i in 0..n {
-        yaml.push_str(&format!("  - name: x-req-{i}\n    value: value-{i}\n"));
+        _ = write!(yaml, "  - name: x-req-{i}\n    value: value-{i}\n");
     }
 
     yaml.push_str("response_set:\n");
     for i in 0..n {
-        yaml.push_str(&format!("  - name: x-resp-{i}\n    value: value-{i}\n"));
+        _ = write!(yaml, "  - name: x-resp-{i}\n    value: value-{i}\n");
     }
 
     yaml.push_str("response_remove:\n  - x-backend-server\n");

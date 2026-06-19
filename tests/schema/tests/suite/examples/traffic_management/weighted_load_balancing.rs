@@ -23,9 +23,9 @@ fn weighted_load_balancing() {
     );
     let proxy = start_proxy(&config);
 
-    let total = 200u32;
-    let mut light_count = 0u32;
-    let mut heavy_count = 0u32;
+    let total = 200_u32;
+    let mut light_count = 0_u32;
+    let mut heavy_count = 0_u32;
     for _ in 0..total {
         let (status, body) = http_get(proxy.addr(), "/", None);
         assert_eq!(status, 200, "weighted LB request should return 200");

@@ -34,6 +34,8 @@ use crate::http::pingora::{json::json_response, kv::dispatch_kv_request, metrics
 ///
 /// [RFC 8259 Section 7]: https://datatracker.ietf.org/doc/html/rfc8259#section-7
 pub(in crate::http::pingora) fn escape_json_string(s: &str) -> String {
+    use std::fmt::Write as _;
+
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
         match ch {
@@ -43,7 +45,7 @@ pub(in crate::http::pingora) fn escape_json_string(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
             c if c.is_control() && (c as u32) <= 0x1F => {
-                out.push_str(&format!("\\u{:04x}", c as u32));
+                _ = write!(out, "\\u{:04x}", c as u32);
             },
             c => out.push(c),
         }
@@ -163,7 +165,7 @@ impl ServeHttp for PingoraAdminService {
         let path = http_session.req_header().uri.path().to_owned();
 
         if path.starts_with("/api/kv/") {
-            if let Some(ref registry) = self.kv_registry {
+            if let Some(registry) = &self.kv_registry {
                 return dispatch_kv_request(registry, http_session).await;
             }
             return json_response(404, br#"{"error":"not found"}"#);
@@ -185,7 +187,7 @@ impl ServeHttp for PingoraAdminService {
 ///
 /// Returns 200 with `text/plain; version=0.0.4` content type when the
 /// recorder is installed, or 503 if it has not been initialised.
-#[allow(clippy::expect_used, reason = "valid static response")]
+#[expect(clippy::expect_used, reason = "valid static response")]
 fn prometheus_response() -> Response<Vec<u8>> {
     match metrics::render_prometheus() {
         Some(body) => Response::builder()
@@ -329,7 +331,7 @@ fn aggregate_health(registry: &HealthRegistry, verbose: bool) -> HealthAggregate
         }
         append_verbose_detail(&mut agg.verbose_detail, &mut first, name, h, eps.len());
     }
-    if let Some(ref mut vj) = agg.verbose_detail {
+    if let Some(vj) = &mut agg.verbose_detail {
         vj.push('}');
     }
     agg
@@ -337,6 +339,8 @@ fn aggregate_health(registry: &HealthRegistry, verbose: bool) -> HealthAggregate
 
 /// Append a single cluster's detail to the verbose JSON string.
 fn append_verbose_detail(detail: &mut Option<String>, first: &mut bool, name: &str, healthy: usize, total: usize) {
+    use std::fmt::Write as _;
+
     let Some(vj) = detail else { return };
     if !*first {
         vj.push(',');
@@ -344,15 +348,16 @@ fn append_verbose_detail(detail: &mut Option<String>, first: &mut bool, name: &s
     *first = false;
     let escaped = escape_json_string(name);
     let unhealthy = total - healthy;
-    vj.push_str(&format!(
+    _ = write!(
+        vj,
         r#""{escaped}":{{"healthy":{healthy},"unhealthy":{unhealthy},"total":{total}}}"#,
-    ));
+    );
 }
 
 /// Format the ready response body from aggregated health data.
 fn format_ready_body(status_str: &str, agg: &HealthAggregate) -> String {
     let (total, healthy, degraded) = (agg.total, agg.healthy, agg.degraded);
-    if let Some(ref detail) = agg.verbose_detail {
+    if let Some(detail) = &agg.verbose_detail {
         format!(
             r#"{{"status":"{status_str}","clusters":{{"total":{total},"healthy":{healthy},"degraded":{degraded},"detail":{detail}}}}}"#,
         )
@@ -368,6 +373,7 @@ fn format_ready_body(status_str: &str, agg: &HealthAggregate) -> String {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use std::{collections::HashMap, sync::Arc};

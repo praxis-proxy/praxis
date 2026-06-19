@@ -72,11 +72,11 @@ fn garbage_bytes_no_crash() {
 
     let garbage = b"\x00\x01\x02\x7f\x03\r\n";
     {
-        use std::io::{Read, Write};
+        use std::io::{Read as _, Write as _};
         let mut stream = std::net::TcpStream::connect(proxy.addr()).unwrap();
         drop(stream.set_read_timeout(Some(std::time::Duration::from_secs(2))));
         let _sent = stream.write_all(garbage);
-        let mut buf = [0u8; 1024];
+        let mut buf = [0_u8; 1024];
         let _bytes = stream.read(&mut buf);
     }
 

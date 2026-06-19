@@ -1,7 +1,7 @@
 ---
 issue: # TBD
 discussion: # TBD
-status: proposed
+status: accepted
 authors:
   - leseb
 graduation_criteria:

@@ -164,6 +164,7 @@ impl HttpFilter for ModelToHeaderFilter {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -226,7 +227,7 @@ mod tests {
             "should release after extracting model"
         );
         assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
-        let (ref name, ref value) = ctx.extra_request_headers[0];
+        let (name, value) = &ctx.extra_request_headers[0];
         assert_eq!(name, "X-Model", "header name should be X-Model");
         assert_eq!(
             value, "mistral-large-latest",
@@ -250,7 +251,7 @@ mod tests {
             matches!(action, FilterAction::Release),
             "should release after extracting model"
         );
-        let (ref name, ref value) = ctx.extra_request_headers[0];
+        let (name, value) = &ctx.extra_request_headers[0];
         assert_eq!(name, "X-AI-Model", "header name should be X-AI-Model");
         assert_eq!(value, "claude-3", "model should be promoted to custom header name");
     }

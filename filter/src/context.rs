@@ -10,7 +10,7 @@ use praxis_core::{
     connectivity::Upstream, health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, time::TimeSource,
 };
 
-use crate::{body::BodyMode, pipeline::body::merge_body_mode, results::FilterResultSet};
+use crate::{body::BodyMode, extensions::RequestExtensions, pipeline::body::merge_body_mode, results::FilterResultSet};
 
 // -----------------------------------------------------------------------------
 // HttpFilterContext
@@ -20,10 +20,6 @@ use crate::{body::BodyMode, pipeline::body::merge_body_mode, results::FilterResu
 ///
 /// Created by the protocol layer for each incoming request. Filters read
 /// and mutate it to select clusters, choose upstreams, and inject headers.
-#[allow(
-    clippy::struct_excessive_bools,
-    reason = "transport context tracks independent lifecycle flags across phases"
-)]
 pub struct HttpFilterContext<'a> {
     /// Per-filter body-done tracking. When `true` at index `i`,
     /// filter `i` is skipped for remaining body chunks.
@@ -59,6 +55,18 @@ pub struct HttpFilterContext<'a> {
     /// rather than the request URI scheme (which is absent
     /// in HTTP/1.1).
     pub downstream_tls: bool,
+
+    /// Type-safe request-scoped extension container.
+    ///
+    /// Filters store and retrieve arbitrary typed values that
+    /// persist across all Pingora lifecycle phases (request,
+    /// request body, response, response body, logging). Keyed
+    /// by [`TypeId`], so only one value per concrete type. Use
+    /// private newtypes to avoid collisions between independent
+    /// filters.
+    ///
+    /// [`TypeId`]: std::any::TypeId
+    pub extensions: RequestExtensions,
 
     /// Tracks which pipeline filter indices actually executed
     /// during the request phase. The response phase skips
@@ -374,6 +382,7 @@ pub struct Response {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -408,7 +417,7 @@ mod tests {
 
     #[test]
     fn response_status_codes() {
-        for code in [200u16, 404, 500] {
+        for code in [200_u16, 404, 500] {
             let resp = Response {
                 status: StatusCode::from_u16(code).unwrap(),
                 headers: HeaderMap::new(),
@@ -771,7 +780,7 @@ mod tests {
         ctx.set_token_usage(u64::MAX, 1, None);
         assert_eq!(
             ctx.get_metadata("token.total"),
-            Some(&u64::MAX.to_string()[..]),
+            Some(&*u64::MAX.to_string()),
             "total should saturate instead of wrapping"
         );
     }
@@ -796,10 +805,10 @@ mod tests {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.current_filter_id = Some(0);
-        ctx.insert_filter_state(42u64);
+        ctx.insert_filter_state(42_u64);
         assert_eq!(
             ctx.get_filter_state::<u64>(),
-            Some(&42u64),
+            Some(&42_u64),
             "should return the inserted value"
         );
     }
@@ -820,7 +829,7 @@ mod tests {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.current_filter_id = Some(0);
-        ctx.insert_filter_state(42u64);
+        ctx.insert_filter_state(42_u64);
         assert!(
             ctx.get_filter_state::<String>().is_none(),
             "should return None for type mismatch"
@@ -831,7 +840,7 @@ mod tests {
     fn get_filter_state_returns_none_when_no_index() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.filter_state.insert(0, Box::new(42u64));
+        ctx.filter_state.insert(0, Box::new(42_u64));
         assert!(
             ctx.get_filter_state::<u64>().is_none(),
             "should return None when current_filter_id is None"
@@ -843,11 +852,11 @@ mod tests {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.current_filter_id = Some(0);
-        ctx.insert_filter_state(10u64);
+        ctx.insert_filter_state(10_u64);
         *ctx.get_filter_state_mut::<u64>().unwrap() += 5;
         assert_eq!(
             ctx.get_filter_state::<u64>(),
-            Some(&15u64),
+            Some(&15_u64),
             "mutation through get_mut should be visible"
         );
     }
@@ -871,7 +880,7 @@ mod tests {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.current_filter_id = Some(0);
-        ctx.insert_filter_state(42u64);
+        ctx.insert_filter_state(42_u64);
         assert!(
             ctx.remove_filter_state::<String>().is_none(),
             "type mismatch should return None"
@@ -887,22 +896,22 @@ mod tests {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.current_filter_id = Some(0);
-        ctx.insert_filter_state(100u64);
+        ctx.insert_filter_state(100_u64);
         ctx.current_filter_id = Some(1);
-        ctx.insert_filter_state(200u64);
+        ctx.insert_filter_state(200_u64);
 
         ctx.current_filter_id = Some(0);
-        assert_eq!(ctx.get_filter_state::<u64>(), Some(&100u64), "index 0 state");
+        assert_eq!(ctx.get_filter_state::<u64>(), Some(&100_u64), "index 0 state");
 
         ctx.current_filter_id = Some(1);
-        assert_eq!(ctx.get_filter_state::<u64>(), Some(&200u64), "index 1 state");
+        assert_eq!(ctx.get_filter_state::<u64>(), Some(&200_u64), "index 1 state");
     }
 
     #[test]
     fn insert_filter_state_is_noop_without_index() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.insert_filter_state(42u64);
+        ctx.insert_filter_state(42_u64);
         assert!(ctx.filter_state.is_empty(), "state map should remain empty");
     }
 }

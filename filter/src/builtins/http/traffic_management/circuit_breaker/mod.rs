@@ -7,6 +7,7 @@ mod config;
 mod state;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -41,6 +42,11 @@ use crate::{
 /// Each configured cluster has an independent circuit
 /// breaker state machine. Clusters not listed in the
 /// config are unaffected (pass-through).
+///
+/// When consecutive upstream failures reach the threshold,
+/// the circuit opens and subsequent requests receive 503
+/// immediately. After the recovery window, a single probe
+/// request is forwarded; if it succeeds the circuit closes.
 ///
 /// # YAML configuration
 ///

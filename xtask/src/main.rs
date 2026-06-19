@@ -17,6 +17,7 @@
 mod benchmark;
 mod debug;
 mod echo;
+mod filter_docs;
 mod lint_deps;
 mod lint_example_tests;
 mod port;
@@ -62,6 +63,12 @@ enum Command {
     /// Verify or regenerate the `examples/README.md` table
     /// from YAML config header comments.
     SyncExampleReadme(sync_example_readme::Args),
+
+    /// Generate per-filter documentation under `docs/filters/`.
+    GenerateFilterDocs(filter_docs::GenerateArgs),
+
+    /// Check that filter doc files are up to date.
+    LintFilterDocs(filter_docs::LintArgs),
 }
 
 // -----------------------------------------------------------------------------
@@ -78,6 +85,8 @@ fn main() {
         Command::LintDeps(args) => lint_deps::run(args),
         Command::LintExampleTests(args) => lint_example_tests::run(args),
         Command::SyncExampleReadme(args) => sync_example_readme::run(&args),
+        Command::GenerateFilterDocs(args) => filter_docs::generate(args),
+        Command::LintFilterDocs(args) => filter_docs::lint(args),
     }
 }
 

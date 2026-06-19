@@ -280,7 +280,7 @@ fn read_pem_file(path: &str) -> Result<Zeroizing<Vec<u8>>, TlsError> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
+#[expect(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use std::sync::Arc;
 

@@ -4,7 +4,7 @@
 //! Tests for max connections limiting behavior.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     time::Duration,
 };
@@ -201,7 +201,7 @@ filter_chains: []
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("set read timeout");
-        let mut buf = [0u8; 1];
+        let mut buf = [0_u8; 1];
         let n = stream.read(&mut buf).unwrap_or(0);
         assert_eq!(n, 0, "second TCP connection should be closed");
     }

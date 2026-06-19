@@ -50,6 +50,10 @@ struct HeaderEntry {
 
 /// Returns a fixed response without contacting any upstream.
 ///
+/// Useful for health checks, status endpoints, or stub routes.
+/// Combine with conditions to serve static responses on specific
+/// paths.
+///
 /// # YAML configuration
 ///
 /// ```yaml
@@ -110,7 +114,7 @@ impl HttpFilter for StaticResponseFilter {
         for (name, value) in &self.headers {
             rejection = rejection.with_header(name, value);
         }
-        if let Some(ref body) = self.body {
+        if let Some(body) = &self.body {
             rejection = rejection.with_body(body.clone());
         }
         Ok(FilterAction::Reject(rejection))
@@ -122,6 +126,7 @@ impl HttpFilter for StaticResponseFilter {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -82,13 +82,13 @@ pub fn should_execute_response_ref(
 
 /// Evaluate a single predicate against borrowed status and headers.
 fn matches_status_headers(m: &ResponseConditionMatch, status: http::StatusCode, headers: &http::HeaderMap) -> bool {
-    if let Some(ref statuses) = m.status
+    if let Some(statuses) = &m.status
         && !statuses.contains(&status.as_u16())
     {
         return false;
     }
 
-    if let Some(ref required) = m.headers {
+    if let Some(required) = &m.headers {
         for (name, value) in required {
             match headers.get(name) {
                 Some(v) if v.to_str().ok() == Some(value.as_str()) => {},
@@ -105,6 +105,7 @@ fn matches_status_headers(m: &ResponseConditionMatch, status: http::StatusCode, 
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

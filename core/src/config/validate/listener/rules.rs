@@ -128,7 +128,7 @@ fn validate_tcp_routing(listener: &Listener) -> Result<(), ProxyError> {
         )));
     }
 
-    if let Some(ref upstream) = listener.upstream {
+    if let Some(upstream) = &listener.upstream {
         super::address::validate_tcp_upstream(upstream, &listener.name)?;
     }
 
@@ -155,6 +155,7 @@ pub(in crate::config::validate) fn validate_listener_names(listeners: &[Listener
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

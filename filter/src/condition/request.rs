@@ -68,20 +68,20 @@ pub fn should_execute(conditions: &[Condition], req: &Request) -> bool {
 /// Returns true if all specified fields in the predicate match the request.
 /// Unset fields impose no constraint (vacuously true).
 fn matches_request(m: &ConditionMatch, req: &Request) -> bool {
-    if let Some(ref exact) = m.path {
+    if let Some(exact) = &m.path {
         let req_path = req.uri.path();
         if req_path != exact {
             return false;
         }
     }
 
-    if let Some(ref prefix) = m.path_prefix
+    if let Some(prefix) = &m.path_prefix
         && !crate::path_match::path_prefix_matches(req.uri.path(), prefix)
     {
         return false;
     }
 
-    if let Some(ref methods) = m.methods
+    if let Some(methods) = &m.methods
         && !methods
             .iter()
             .any(|method| method.eq_ignore_ascii_case(req.method.as_str()))
@@ -89,7 +89,7 @@ fn matches_request(m: &ConditionMatch, req: &Request) -> bool {
         return false;
     }
 
-    if let Some(ref headers) = m.headers {
+    if let Some(headers) = &m.headers {
         for (name, value) in headers {
             match req.headers.get(name) {
                 Some(v) if v.to_str().ok() == Some(value.as_str()) => {},
@@ -106,6 +106,7 @@ fn matches_request(m: &ConditionMatch, req: &Request) -> bool {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

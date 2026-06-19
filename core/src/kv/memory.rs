@@ -81,15 +81,7 @@ impl InMemoryKvBackend {
             regex_cache: DashMap::new(),
         }
     }
-}
 
-/// Maximum number of compiled regex patterns to cache.
-const MAX_REGEX_CACHE_SIZE: usize = 10_000;
-
-/// Maximum number of entries per store.
-const MAX_ENTRIES: usize = 100_000;
-
-impl InMemoryKvBackend {
     /// Retrieve a cached compiled regex or compile and cache it.
     ///
     /// The cache is bounded at [`MAX_REGEX_CACHE_SIZE`] entries. When
@@ -110,6 +102,12 @@ impl InMemoryKvBackend {
         Ok(compiled)
     }
 }
+
+/// Maximum number of compiled regex patterns to cache.
+const MAX_REGEX_CACHE_SIZE: usize = 10_000;
+
+/// Maximum number of entries per store.
+const MAX_ENTRIES: usize = 100_000;
 
 impl Default for InMemoryKvBackend {
     fn default() -> Self {
@@ -178,6 +176,7 @@ impl KvBackend for InMemoryKvBackend {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use std::sync::Arc;

@@ -70,10 +70,7 @@ fn rfc9110_host_mismatch_with_absolute_uri() {
          Connection: close\r\n\r\n",
     );
     let status = parse_status(&raw);
-    assert_eq!(
-        status, 400,
-        "Host/URI mismatch must be rejected with 400, got {status}"
-    );
+    assert_eq!(status, 400, "Host/URI mismatch must be rejected with 400, got {status}");
 }
 
 // -----------------------------------------------------------------------------
@@ -100,10 +97,7 @@ fn rfc9110_trace_request_handled() {
          Connection: close\r\n\r\n",
     );
     let status = parse_status(&raw);
-    assert_eq!(
-        status, 200,
-        "Pingora forwards TRACE to upstream, got {status}"
-    );
+    assert_eq!(status, 200, "Pingora forwards TRACE to upstream, got {status}");
 }
 
 // -----------------------------------------------------------------------------

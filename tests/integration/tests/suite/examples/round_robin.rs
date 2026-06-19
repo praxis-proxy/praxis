@@ -31,7 +31,7 @@ fn round_robin() {
     );
     let proxy = start_proxy(&config);
 
-    let total = 30u32;
+    let total = 30_u32;
     let mut counts: HashMap<String, u32> = HashMap::new();
     let mut sequence: Vec<String> = Vec::with_capacity(total as usize);
     for _ in 0..total {

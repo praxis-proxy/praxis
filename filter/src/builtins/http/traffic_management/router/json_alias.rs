@@ -15,7 +15,7 @@ use super::{ResolvedRoute, config::JsonAlias};
 pub(super) fn pattern_matches(pattern: &str, value: &str) -> bool {
     if let Some(pos) = pattern.find('*') {
         let (prefix, rest) = pattern.split_at(pos);
-        let suffix = &rest[1..];
+        let suffix = rest.get(1..).unwrap_or_default();
         value.starts_with(prefix) && value.ends_with(suffix) && value.len() >= prefix.len() + suffix.len()
     } else {
         pattern == value
@@ -40,7 +40,7 @@ pub(super) struct AliasMatch<'a> {
     /// The matching alias rule.
     pub alias: &'a JsonAlias,
     /// The route that owns the matching alias.
-    #[allow(dead_code, reason = "cluster selection is validated before body aliasing is wired")]
+    #[expect(dead_code, reason = "cluster selection is validated before body aliasing is wired")]
     pub route: &'a ResolvedRoute,
     /// Alias specificity within the owning route.
     pub specificity: u32,
@@ -92,6 +92,7 @@ fn best_alias_in_route<'a>(
 }
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

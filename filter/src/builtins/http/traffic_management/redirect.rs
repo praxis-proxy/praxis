@@ -23,10 +23,10 @@ use crate::{
 /// ```
 /// use praxis_filter::RedirectStatus;
 ///
-/// let status = RedirectStatus::try_from(301u16).unwrap();
+/// let status = RedirectStatus::try_from(301_u16).unwrap();
 /// assert_eq!(status.as_u16(), 301);
 ///
-/// assert!(RedirectStatus::try_from(200u16).is_err());
+/// assert!(RedirectStatus::try_from(200_u16).is_err());
 /// ```
 #[derive(Debug, Clone, Copy)]
 pub enum RedirectStatus {
@@ -239,7 +239,7 @@ fn expand_location(template: &str, path: &str, query: Option<&str>, host: Option
 fn strip_port(host: &str) -> &str {
     if host.starts_with('[') {
         match host.find(']') {
-            Some(i) => &host[..=i],
+            Some(i) => host.get(..=i).unwrap_or(host),
             None => host,
         }
     } else {
@@ -284,6 +284,7 @@ fn infer_scheme(ctx: &HttpFilterContext<'_>) -> &'static str {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -320,7 +321,7 @@ mod tests {
 
     #[test]
     fn from_config_with_explicit_status() {
-        for status in [301u16, 302, 307, 308] {
+        for status in [301_u16, 302, 307, 308] {
             let yaml = serde_yaml::from_str::<serde_yaml::Value>(&format!(
                 "status: {status}\nlocation: \"https://example.com\""
             ))
@@ -332,7 +333,7 @@ mod tests {
 
     #[test]
     fn from_config_invalid_status_fails() {
-        for status in [200u16, 404, 500] {
+        for status in [200_u16, 404, 500] {
             let yaml =
                 serde_yaml::from_str::<serde_yaml::Value>(&format!("status: {status}\nlocation: \"https://x.com\""))
                     .unwrap();

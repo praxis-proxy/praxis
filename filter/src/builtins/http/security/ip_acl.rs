@@ -43,6 +43,8 @@ struct IpAclConfig {
 /// When both are set, `allow` takes precedence: a client matching
 /// an allow entry is never denied.
 ///
+/// Denied requests receive a 403 Forbidden response.
+///
 /// # YAML configuration
 ///
 /// ```yaml
@@ -143,6 +145,7 @@ impl HttpFilter for IpAclFilter {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

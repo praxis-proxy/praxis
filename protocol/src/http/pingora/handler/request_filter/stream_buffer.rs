@@ -3,7 +3,7 @@
 
 //! StreamBuffer pre-read logic and TRACE response construction.
 
-use std::{borrow::Cow, collections::VecDeque, fmt::Write};
+use std::{borrow::Cow, collections::VecDeque, fmt::Write as _};
 
 use pingora_proxy::Session;
 use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
@@ -87,7 +87,7 @@ pub(super) enum PreReadError {
 /// `json_body_field` extracting a model name). The accumulated body
 /// is stored in `ctx.pre_read_body` for later forwarding by
 /// `request_body_filter`.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     unused_assignments,
     reason = "buffer management orchestration"
@@ -133,7 +133,7 @@ pub(super) async fn pre_read_body(
         // size even when a ReadWrite filter shrinks or grows the body.
         original_body_bytes += downstream_chunk_len;
 
-        if let Some(ref b) = body
+        if let Some(b) = &body
             && buffer.push(b.clone()).is_err()
         {
             return Err(PreReadError::Rejected(Rejection::status(413)));
@@ -162,6 +162,7 @@ pub(super) async fn pre_read_body(
         ctx.cluster = filter_ctx.cluster;
         ctx.rewritten_path = filter_ctx.rewritten_path;
         ctx.upstream = filter_ctx.upstream;
+        ctx.extensions = filter_ctx.extensions;
         ctx.filter_metadata = filter_ctx.filter_metadata;
         ctx.filter_state = filter_ctx.filter_state;
         ctx.filter_results = filter_ctx.filter_results;
@@ -342,14 +343,14 @@ mod tests {
     #[test]
     fn body_buffer_overflow_produces_413() {
         let mut buffer = BodyBuffer::new(10);
-        let large = bytes::Bytes::from(vec![0u8; 20]);
+        let large = bytes::Bytes::from(vec![0_u8; 20]);
         assert!(buffer.push(large).is_err(), "oversized push should fail");
     }
 
     #[test]
     fn body_buffer_within_limit_succeeds() {
         let mut buffer = BodyBuffer::new(100);
-        let small = bytes::Bytes::from(vec![0u8; 50]);
+        let small = bytes::Bytes::from(vec![0_u8; 50]);
         assert!(buffer.push(small).is_ok(), "within-limit push should succeed");
     }
 

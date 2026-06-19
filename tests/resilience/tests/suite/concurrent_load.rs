@@ -204,8 +204,8 @@ filter_chains:
         })
         .collect();
 
-    let mut ok_count = 0u32;
-    let mut err_count = 0u32;
+    let mut ok_count = 0_u32;
+    let mut err_count = 0_u32;
     for handle in handles {
         let (status, body) = handle.join().expect("thread should not panic");
         match status {

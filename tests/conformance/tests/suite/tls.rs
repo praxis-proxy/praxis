@@ -269,7 +269,7 @@ fn build_tls13_client_config(certs: &TestCertificates) -> Arc<rustls::ClientConf
 /// connection was rejected.
 fn attempt_legacy_tls(addr: &str, version: u16) -> bool {
     use std::{
-        io::{Read, Write},
+        io::{Read as _, Write as _},
         net::TcpStream,
         time::Duration,
     };
@@ -307,7 +307,7 @@ fn attempt_legacy_tls(addr: &str, version: u16) -> bool {
         return true;
     }
 
-    let mut buf = [0u8; 256];
+    let mut buf = [0_u8; 256];
     match stream.read(&mut buf) {
         Ok(0) | Err(_) => true,
         Ok(n) => n >= 1 && buf[0] == 0x15,

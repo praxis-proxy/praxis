@@ -4,7 +4,7 @@
 //! TCP proxy throughput benchmarks.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::{TcpListener, TcpStream},
     sync::Arc,
     time::{Duration, Instant},
@@ -80,7 +80,7 @@ fn start_tcp_echo_backend() -> u16 {
         for stream in listener.incoming().flatten() {
             std::thread::spawn(move || {
                 let mut stream = stream;
-                let mut buf = [0u8; 8192];
+                let mut buf = [0_u8; 8192];
                 loop {
                     match stream.read(&mut buf) {
                         Ok(0) | Err(_) => break,
@@ -107,7 +107,7 @@ fn tcp_echo_roundtrip(addr: &str, message: &[u8]) -> bool {
     if stream.write_all(message).is_err() {
         return false;
     }
-    let mut buf = vec![0u8; message.len()];
+    let mut buf = vec![0_u8; message.len()];
     match stream.read_exact(&mut buf) {
         Ok(()) => buf == message,
         Err(_) => false,
@@ -139,7 +139,7 @@ fn run_tcp_benchmark(
             let count = per_thread + if i < remainder { 1 } else { 0 };
             std::thread::spawn(move || {
                 let mut latencies = Vec::with_capacity(count);
-                let mut errors = 0usize;
+                let mut errors = 0_usize;
                 for _ in 0..count {
                     let start = Instant::now();
                     if tcp_echo_roundtrip(&addr, &msg) {
@@ -154,7 +154,7 @@ fn run_tcp_benchmark(
         .collect();
 
     let mut all_latencies = Vec::with_capacity(total_requests);
-    let mut total_errors = 0usize;
+    let mut total_errors = 0_usize;
     for handle in handles {
         let (latencies, errors) = handle.join().expect("worker panicked");
         all_latencies.extend(latencies);

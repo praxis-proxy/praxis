@@ -50,10 +50,14 @@ struct PipelineResult {
 ///
 /// Host header validation runs first (before the pipeline) to reject
 /// ambiguous requests early.
-#[allow(
+#[expect(
     clippy::too_many_lines,
     clippy::cognitive_complexity,
     reason = "orchestration function"
+)]
+#[expect(
+    clippy::large_stack_frames,
+    reason = "primary request handler with multiple filter stages"
 )]
 pub(in crate::http) async fn execute(
     pipeline: &FilterPipeline,
@@ -168,7 +172,7 @@ pub(in crate::http) async fn execute(
 /// Run the request-phase filter pipeline and snapshot the request for later phases.
 ///
 /// Returns the final action and any extra headers promoted by filters.
-#[allow(clippy::too_many_lines, reason = "writeback destructuring")]
+#[expect(clippy::too_many_lines, reason = "writeback destructuring")]
 async fn run_pipeline(
     pipeline: &FilterPipeline,
     request: Request,
@@ -185,6 +189,7 @@ async fn run_pipeline(
         rewritten_path,
         request_body_mode,
         selected_endpoint_index,
+        extensions,
         filter_metadata,
         filter_state,
     ) = {
@@ -201,16 +206,18 @@ async fn run_pipeline(
             filter_ctx.rewritten_path,
             filter_ctx.request_body_mode,
             filter_ctx.selected_endpoint_index,
+            filter_ctx.extensions,
             filter_ctx.filter_metadata,
             filter_ctx.filter_state,
         )
     };
 
     ctx.request_snapshot = Some(request);
+    ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;
     ctx.filter_state = filter_state;
     ctx.metrics_cluster_shared = cluster.as_ref().map(|c| ::metrics::SharedString::from(Arc::clone(c)));
-    ctx.metrics_cluster = cluster.clone();
+    ctx.metrics_cluster.clone_from(&cluster);
 
     match action {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
@@ -262,6 +269,7 @@ fn reject_reserved_internal_headers(session: &Session) -> Option<Rejection> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

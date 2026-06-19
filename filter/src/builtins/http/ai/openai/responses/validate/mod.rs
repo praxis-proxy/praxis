@@ -50,6 +50,18 @@ const MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
 /// parses the body as [`serde_json::Value`] for targeted field
 /// extraction. Does not deserialize the full body into a typed struct.
 ///
+/// Must be placed after `openai_responses_format` in the filter chain.
+/// Skips non-Responses API requests (those not classified as
+/// `openai_responses`).
+///
+/// Validation rules: rejects `stream=true` combined with
+/// `background=true` (400), rejects `background=true` combined with
+/// `store=false` (400).
+///
+/// Generates metadata: `responses.response_id` (format: `resp_` + 32
+/// hex chars, CSPRNG), `responses.conversation_id`, `responses.store`,
+/// `responses.background`, `responses.stream`.
+///
 /// This filter has no configuration, body buffering is handled by
 /// the upstream `openai_responses_format` classifier.
 #[derive(Default)]
@@ -67,7 +79,7 @@ impl OpenaiResponsesValidateFilter {
     /// is required by the [`FilterFactory`] signature.
     ///
     /// [`FilterFactory`]: crate::FilterFactory
-    #[allow(clippy::unnecessary_wraps, reason = "signature required by FilterFactory")]
+    #[expect(clippy::unnecessary_wraps, reason = "signature required by FilterFactory")]
     pub fn from_config(_config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         Ok(Box::new(Self))
     }
@@ -218,6 +230,7 @@ fn enrich_context(ctx: &mut HttpFilterContext<'_>, response_id: &str, conversati
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

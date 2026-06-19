@@ -5,7 +5,7 @@
 
 use std::net::SocketAddr;
 
-use futures::{SinkExt, StreamExt};
+use futures::{SinkExt as _, StreamExt as _};
 use tokio::net::TcpListener;
 use tokio_tungstenite::accept_async;
 use tracing::debug;
@@ -84,6 +84,7 @@ pub async fn start_websocket_echo_backend() -> WsBackendGuard {
 }
 
 /// Accept `WebSocket` connections in a loop.
+#[expect(clippy::infinite_loop, reason = "server accept loop runs until task cancellation")]
 async fn accept_loop(listener: &TcpListener) {
     loop {
         let Ok((stream, peer)) = listener.accept().await else {

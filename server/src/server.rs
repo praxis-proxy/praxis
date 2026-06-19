@@ -14,7 +14,7 @@ use praxis_core::{
     health::{HealthRegistry, build_health_registry},
 };
 use praxis_filter::FilterRegistry;
-use praxis_protocol::{CertWatcherShutdowns, ListenerPipelines, Protocol, http::PingoraHttp, tcp::PingoraTcp};
+use praxis_protocol::{CertWatcherShutdowns, ListenerPipelines, Protocol as _, http::PingoraHttp, tcp::PingoraTcp};
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
@@ -39,18 +39,15 @@ pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
         return Some(PathBuf::from(path));
     }
     let default_path = PathBuf::from("praxis.yaml");
-    if default_path.exists() {
-        Some(default_path)
-    } else {
-        None
-    }
+    default_path.exists().then_some(default_path)
 }
 
 // -----------------------------------------------------------------------------
 // Server
 // -----------------------------------------------------------------------------
 
-/// Build filter pipelines using the built-in registry, register protocols and run the server.
+/// Build filter pipelines using built-in and auto-discovered external filters, register
+/// protocols and run the server.
 ///
 /// # Security: Root Check
 ///
@@ -59,9 +56,10 @@ pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
 /// `CAP_NET_BIND_SERVICE` or a reverse proxy for low-port binding.
 ///
 /// Config is owned for the server's lifetime (never returns).
+#[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
 pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
-    run_server_with_registry(config, FilterRegistry::with_builtins(), config_path)
+    run_server_with_registry(config, crate::build_full_registry(), config_path)
 }
 
 /// Build filter pipelines from the given registry, register protocols and run the server.
@@ -73,6 +71,7 @@ pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
 /// Config is owned for the server's lifetime (never returns).
 ///
 /// [`register_filters!`]: praxis_filter::register_filters
+#[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
 pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config_path: Option<PathBuf>) -> ! {
     enforce_root_check(&config);
@@ -206,7 +205,7 @@ fn register_admin_endpoints(
     health_registry: &HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
 ) {
-    if let Some(ref admin_addr) = config.admin.address {
+    if let Some(admin_addr) = &config.admin.address {
         praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server(
             server.server_mut(),
             admin_addr,
@@ -342,7 +341,7 @@ fn enforce_root_check(_config: &Config) {}
 /// blocking legitimate deployments.
 #[cfg(unix)]
 fn warn_insecure_key_permissions(config: &Config) {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::PermissionsExt as _;
 
     for listener in &config.listeners {
         if let Some(tls) = &listener.tls {
@@ -391,7 +390,7 @@ fn warn_insecure_key_permissions(_config: &Config) {}
 /// shutdown path here is best-effort.
 ///
 /// [`CancellationToken`]: tokio_util::sync::CancellationToken
-#[allow(clippy::expect_used, reason = "fatal")]
+#[expect(clippy::expect_used, reason = "fatal")]
 fn spawn_health_check_tasks(
     config: &Config,
     registry: &HealthRegistry,
@@ -422,7 +421,7 @@ fn spawn_health_check_tasks(
 // -----------------------------------------------------------------------------
 
 /// Print a fatal error to stderr and exit the process.
-#[allow(
+#[expect(
     clippy::print_stderr,
     clippy::exit,
     reason = "fatal error output before runtime is available"
@@ -437,6 +436,7 @@ pub fn fatal(err: &dyn std::fmt::Display) -> ! {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

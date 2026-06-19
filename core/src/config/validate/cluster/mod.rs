@@ -46,7 +46,7 @@ pub(in crate::config::validate) fn validate_clusters(
         endpoints::validate_endpoints(cluster, insecure_options)?;
         tls::validate_tls_settings(cluster, insecure_options)?;
         timeouts::validate_timeouts(cluster)?;
-        if let Some(ref hc) = cluster.health_check {
+        if let Some(hc) = &cluster.health_check {
             health_check::validate_health_check(hc, &cluster.name)?;
         }
         health_check::validate_health_check_ssrf(cluster, insecure_options)?;
@@ -59,6 +59,7 @@ pub(in crate::config::validate) fn validate_clusters(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

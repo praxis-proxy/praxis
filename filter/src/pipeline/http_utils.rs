@@ -188,6 +188,7 @@ pub(super) async fn run_response_filter(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -203,7 +204,7 @@ mod tests {
 
     #[test]
     fn accumulate_body_bytes_some_adds_to_counter() {
-        let mut counter = 0u64;
+        let mut counter = 0_u64;
         let body = Some(Bytes::from_static(b"hello"));
         accumulate_body_bytes(&mut counter, &body);
         assert_eq!(counter, 5, "counter should equal byte length of body");
@@ -211,14 +212,14 @@ mod tests {
 
     #[test]
     fn accumulate_body_bytes_none_does_not_change_counter() {
-        let mut counter = 42u64;
+        let mut counter = 42_u64;
         accumulate_body_bytes(&mut counter, &None);
         assert_eq!(counter, 42, "counter should remain unchanged for None body");
     }
 
     #[test]
     fn accumulate_body_bytes_multiple_sums_correctly() {
-        let mut counter = 0u64;
+        let mut counter = 0_u64;
         accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"abc")));
         accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"defgh")));
         accumulate_body_bytes(&mut counter, &None);
@@ -271,7 +272,7 @@ mod tests {
         )
         .unwrap();
         assert!(
-            matches!(outcome, BodyFilterOutcome::Rejected(ref r) if r.status == 429),
+            matches!(&outcome, BodyFilterOutcome::Rejected(r) if r.status == 429),
             "Ok(Reject(429)) should produce BodyFilterOutcome::Rejected with status 429"
         );
     }

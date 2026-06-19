@@ -19,6 +19,9 @@ pub(crate) struct TableNames {
     pub responses: String,
     /// Conversation messages table name.
     pub conversations: String,
+    /// Conversation items table name (optional; only used by
+    /// the conversations filter).
+    pub items: Option<String>,
 }
 
 // -----------------------------------------------------------------------------
@@ -39,29 +42,18 @@ pub(crate) struct TableNames {
 pub(crate) fn generate_ddl(tables: &TableNames) -> Result<Vec<String>, StoreError> {
     let (r, c) = validate_table_names(tables)?;
 
-    Ok(vec![
-        format!(
-            "CREATE TABLE IF NOT EXISTS {r} (
-                tenant_id       TEXT NOT NULL,
-                id              TEXT NOT NULL,
-                created_at      BIGINT NOT NULL,
-                model           TEXT NOT NULL,
-                response_object TEXT NOT NULL,
-                input           TEXT NOT NULL,
-                messages        TEXT NOT NULL,
-                PRIMARY KEY (tenant_id, id)
-            )"
-        ),
-        format!(
-            "CREATE TABLE IF NOT EXISTS {c} (
-                conversation_id TEXT NOT NULL,
-                tenant_id       TEXT NOT NULL,
-                messages        TEXT NOT NULL,
-                PRIMARY KEY (conversation_id, tenant_id)
-            )"
-        ),
+    let mut stmts = vec![
+        responses_ddl(r),
+        conversations_ddl(c),
         format!("CREATE INDEX IF NOT EXISTS idx_{c}_tenant_id ON {c}(tenant_id)"),
-    ])
+    ];
+
+    if let Some(items) = &tables.items {
+        let i = validate_items_table(items, r, c)?;
+        append_items_ddl(&mut stmts, i);
+    }
+
+    Ok(stmts)
 }
 
 /// Validate identifier lengths for `PostgreSQL` DDL.
@@ -80,6 +72,11 @@ pub(crate) fn validate_postgres_identifiers(tables: &TableNames) -> Result<(), S
     validate_postgres_identifier_len("response table name", r, POSTGRES_MAX_IDENTIFIER_LEN)?;
     validate_postgres_identifier_len("conversation table name", c, POSTGRES_MAX_CONVERSATION_TABLE_LEN)?;
 
+    if let Some(items) = &tables.items {
+        let i = validate_items_table(items, r, c)?;
+        validate_postgres_identifier_len("items table name", i, POSTGRES_MAX_ITEMS_TABLE_LEN)?;
+    }
+
     Ok(())
 }
 
@@ -91,8 +88,58 @@ pub(crate) fn validate_postgres_table_identifiers(
     let tables = TableNames {
         responses: responses_table.to_owned(),
         conversations: conversations_table.to_owned(),
+        items: None,
     };
     validate_postgres_identifiers(&tables)
+}
+
+/// DDL for the responses table.
+fn responses_ddl(r: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {r} (
+            tenant_id       TEXT NOT NULL,
+            id              TEXT NOT NULL,
+            created_at      BIGINT NOT NULL,
+            model           TEXT NOT NULL,
+            response_object TEXT NOT NULL,
+            input           TEXT NOT NULL,
+            messages        TEXT NOT NULL,
+            PRIMARY KEY (tenant_id, id)
+        )"
+    )
+}
+
+/// DDL for the conversations table.
+fn conversations_ddl(c: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {c} (
+            conversation_id TEXT NOT NULL,
+            tenant_id       TEXT NOT NULL,
+            created_at      BIGINT NOT NULL,
+            metadata        TEXT NOT NULL,
+            messages        TEXT NOT NULL,
+            PRIMARY KEY (conversation_id, tenant_id)
+        )"
+    )
+}
+
+/// Append DDL for the conversation items table and its index.
+fn append_items_ddl(stmts: &mut Vec<String>, i: &str) {
+    stmts.push(format!(
+        "CREATE TABLE IF NOT EXISTS {i} (
+            item_id           TEXT NOT NULL,
+            tenant_id         TEXT NOT NULL,
+            conversation_id   TEXT NOT NULL,
+            item_data         TEXT NOT NULL,
+            created_at        BIGINT NOT NULL,
+            position          BIGINT NOT NULL,
+            PRIMARY KEY (item_id, tenant_id)
+        )"
+    ));
+    stmts.push(format!(
+        "CREATE INDEX IF NOT EXISTS idx_{i}_conversation \
+         ON {i}(conversation_id, tenant_id, position)"
+    ));
 }
 
 /// Validate the configured table names and return them as borrowed identifiers.
@@ -122,6 +169,10 @@ const POSTGRES_MAX_IDENTIFIER_LEN: usize = 63;
 /// `idx_` (4) and `_tenant_id` (10) in the generated index name.
 const POSTGRES_MAX_CONVERSATION_TABLE_LEN: usize = POSTGRES_MAX_IDENTIFIER_LEN - 14;
 
+/// Maximum items table name length that leaves room for `idx_` (4)
+/// and `_conversation` (13) in the generated index name.
+const POSTGRES_MAX_ITEMS_TABLE_LEN: usize = POSTGRES_MAX_IDENTIFIER_LEN - 17;
+
 /// Reject identifiers that could cause SQL injection or invalid DDL.
 pub(crate) fn validate_identifier(name: &str) -> Result<(), StoreError> {
     if name.is_empty() {
@@ -148,6 +199,23 @@ pub(crate) fn validate_identifier(name: &str) -> Result<(), StoreError> {
     Ok(())
 }
 
+/// Validate the items table name and ensure it is distinct from the
+/// responses and conversations tables.
+fn validate_items_table<'a>(items: &'a str, responses: &str, conversations: &str) -> Result<&'a str, StoreError> {
+    validate_identifier(items)?;
+    if items.eq_ignore_ascii_case(responses) {
+        return Err(StoreError::Database(format!(
+            "items and response table names must be distinct: {items}"
+        )));
+    }
+    if items.eq_ignore_ascii_case(conversations) {
+        return Err(StoreError::Database(format!(
+            "items and conversation table names must be distinct: {items}"
+        )));
+    }
+    Ok(items)
+}
+
 /// Reject a `PostgreSQL` identifier that would be truncated.
 fn validate_postgres_identifier_len(kind: &str, name: &str, max_len: usize) -> Result<(), StoreError> {
     if name.len() > max_len {
@@ -163,6 +231,7 @@ fn validate_postgres_identifier_len(kind: &str, name: &str, max_len: usize) -> R
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
@@ -222,6 +291,7 @@ mod tests {
         let tables = TableNames {
             responses: "test_responses".to_owned(),
             conversations: "test_conversations".to_owned(),
+            items: None,
         };
         let ddl = generate_ddl(&tables).expect("valid names should produce DDL");
         assert_eq!(ddl.len(), 3, "should produce 3 DDL statements");
@@ -236,6 +306,7 @@ mod tests {
         let tables = TableNames {
             responses: "test_responses".to_owned(),
             conversations: "test_conversations".to_owned(),
+            items: None,
         };
         let ddl = generate_ddl(&tables).expect("valid names should produce DDL");
 
@@ -251,6 +322,7 @@ mod tests {
         let tables = TableNames {
             responses: "valid_name".to_owned(),
             conversations: "1invalid".to_owned(),
+            items: None,
         };
         let err = generate_ddl(&tables).unwrap_err();
         assert!(
@@ -264,6 +336,7 @@ mod tests {
         let tables = TableNames {
             responses: "same_table".to_owned(),
             conversations: "same_table".to_owned(),
+            items: None,
         };
         let err = generate_ddl(&tables).unwrap_err();
         assert!(
@@ -277,6 +350,7 @@ mod tests {
         let tables = TableNames {
             responses: "Responses".to_owned(),
             conversations: "responses".to_owned(),
+            items: None,
         };
         let err = generate_ddl(&tables).unwrap_err();
         assert!(
@@ -290,6 +364,7 @@ mod tests {
         let tables = TableNames {
             responses: "r".repeat(POSTGRES_MAX_IDENTIFIER_LEN + 1),
             conversations: "test_conversations".to_owned(),
+            items: None,
         };
         let err = validate_postgres_identifiers(&tables).unwrap_err();
 
@@ -304,6 +379,7 @@ mod tests {
         let tables = TableNames {
             responses: "test_responses".to_owned(),
             conversations: "c".repeat(POSTGRES_MAX_CONVERSATION_TABLE_LEN + 1),
+            items: None,
         };
         let err = validate_postgres_identifiers(&tables).unwrap_err();
 

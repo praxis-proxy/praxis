@@ -265,8 +265,10 @@ async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx)
         && let Some(mut filter_ctx) = ctx.filter_context_for(pipeline, None)
     {
         let _result = pipeline.execute_http_response(&mut filter_ctx).await;
+        let extensions = filter_ctx.extensions;
         let metadata = filter_ctx.filter_metadata;
         let state = filter_ctx.filter_state;
+        ctx.extensions = extensions;
         ctx.filter_metadata = metadata;
         ctx.filter_state = state;
     }
@@ -384,6 +386,7 @@ fn h2c_server_options() -> HttpServerOptions {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -543,6 +546,26 @@ mod tests {
             ctx.filter_metadata.get("mcp.method").map(String::as_str),
             Some("tools/call"),
             "filter_metadata should survive logging_cleanup"
+        );
+    }
+
+    #[tokio::test]
+    async fn logging_cleanup_preserves_extensions() {
+        let registry = praxis_filter::FilterRegistry::with_builtins();
+        let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.response_phase_done = false;
+        ctx.extensions.insert(42_u32);
+        ctx.request_snapshot = Some(praxis_filter::Request {
+            method: http::Method::POST,
+            uri: "/test".parse().unwrap(),
+            headers: http::HeaderMap::new(),
+        });
+        logging_cleanup(&pipeline, &mut ctx).await;
+        assert_eq!(
+            ctx.extensions.get::<u32>(),
+            Some(&42),
+            "extensions should survive logging_cleanup"
         );
     }
 

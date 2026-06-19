@@ -85,7 +85,7 @@ impl AccessLogFilter {
             return Err(format!("access_log: sample_rate must be in (0.0, 1.0], got {}", cfg.sample_rate).into());
         }
 
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "sample rate truncation"
@@ -148,7 +148,7 @@ impl HttpFilter for AccessLogFilter {
 // -----------------------------------------------------------------------------
 
 /// Truncate a `u128` to `u64`, saturating at `u64::MAX`.
-#[allow(clippy::cast_possible_truncation, reason = "clamped to u64")]
+#[expect(clippy::cast_possible_truncation, reason = "clamped to u64")]
 fn truncate_u128(v: u128) -> u64 {
     v.min(u128::from(u64::MAX)) as u64
 }
@@ -195,6 +195,7 @@ fn sanitize_for_log(s: &str) -> Cow<'_, str> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

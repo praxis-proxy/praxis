@@ -92,7 +92,7 @@ impl CircuitBreaker {
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.
-    #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
     pub(super) fn check(&self) -> CircuitState {
         let mut inner = self.inner.lock().expect("circuit breaker lock poisoned");
         match inner.state {
@@ -120,7 +120,7 @@ impl CircuitBreaker {
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.
-    #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
     pub(super) fn record_failure(&self) {
         let mut inner = self.inner.lock().expect("circuit breaker lock poisoned");
         match inner.state {
@@ -148,7 +148,7 @@ impl CircuitBreaker {
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.
-    #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
     pub(super) fn record_success(&self) {
         let mut inner = self.inner.lock().expect("circuit breaker lock poisoned");
         match inner.state {
@@ -170,7 +170,7 @@ impl CircuitBreaker {
     ///
     /// Panics if the internal mutex is poisoned.
     #[cfg(test)]
-    #[allow(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
     pub(super) fn state(&self) -> CircuitState {
         self.inner.lock().expect("circuit breaker lock poisoned").state
     }

@@ -9,8 +9,8 @@ use dashmap::DashMap;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 
 use super::{
-    EVICTION_SCAN_LIMIT, HARD_CAP_PER_IP_ENTRIES, HEADER_RATELIMIT_LIMIT, HEADER_RATELIMIT_REMAINING,
-    HEADER_RATELIMIT_RESET, MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState,
+    AGGRESSIVE_EVICTION_THRESHOLD, EVICTION_SCAN_LIMIT, HARD_CAP_PER_IP_ENTRIES, HEADER_RATELIMIT_LIMIT,
+    HEADER_RATELIMIT_REMAINING, HEADER_RATELIMIT_RESET, MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState,
 };
 use crate::builtins::http::traffic_management::token_bucket::TokenBucket;
 
@@ -20,7 +20,7 @@ use crate::builtins::http::traffic_management::token_bucket::TokenBucket;
 
 impl RateLimitFilter {
     /// Nanoseconds elapsed since this filter's epoch.
-    #[allow(clippy::cast_possible_truncation, reason = "nanos fit u64")]
+    #[expect(clippy::cast_possible_truncation, reason = "nanos fit u64")]
     pub(super) fn now_nanos(&self) -> u64 {
         self.epoch.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
     }
@@ -29,7 +29,7 @@ impl RateLimitFilter {
     ///
     /// Returns the header list and the `Retry-After` seconds (floored
     /// at 1 when the client is rate-limited).
-    #[allow(
+    #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "token count truncation"
@@ -61,23 +61,26 @@ impl RateLimitFilter {
     /// Scans up to [`EVICTION_SCAN_LIMIT`] entries and removes any whose
     /// `last_refill` is older than `2 * burst / rate` seconds, meaning
     /// the bucket would be fully refilled and idle.
-    #[allow(clippy::too_many_lines, reason = "atomic CAS loop")]
+    #[expect(clippy::too_many_lines, reason = "atomic CAS loop")]
     pub(super) fn maybe_evict(&self, map: &DashMap<IpAddr, TokenBucket>, now_nanos: u64) {
         if map.len() <= MAX_PER_IP_ENTRIES {
             return;
         }
 
-        #[allow(
+        #[expect(
             clippy::cast_possible_truncation,
             clippy::cast_sign_loss,
             reason = "rate/burst nanos"
         )]
         let idle_threshold_nanos = (2.0 * self.burst / self.rate * 1_000_000_000.0) as u64;
-        let mut scanned = 0usize;
-        let mut evicted = 0usize;
+
+        let aggressive = map.len() > AGGRESSIVE_EVICTION_THRESHOLD;
+        let scan_limit = if aggressive { usize::MAX } else { EVICTION_SCAN_LIMIT };
+        let mut scanned = 0_usize;
+        let mut evicted = 0_usize;
 
         map.retain(|_ip, bucket| {
-            if scanned >= EVICTION_SCAN_LIMIT {
+            if scanned >= scan_limit {
                 return true;
             }
             scanned += 1;
@@ -94,6 +97,7 @@ impl RateLimitFilter {
                 evicted,
                 scanned,
                 remaining = map.len(),
+                aggressive,
                 "rate_limit: evicted stale per-IP entries"
             );
         }

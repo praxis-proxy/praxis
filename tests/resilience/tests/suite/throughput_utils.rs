@@ -117,7 +117,7 @@ where
 
             std::thread::spawn(move || {
                 let mut latencies = Vec::with_capacity(count);
-                let mut errors = 0usize;
+                let mut errors = 0_usize;
 
                 for _ in 0..count {
                     let start = Instant::now();
@@ -135,7 +135,7 @@ where
         .collect();
 
     let mut all_latencies = Vec::with_capacity(config.total_requests);
-    let mut total_errors = 0usize;
+    let mut total_errors = 0_usize;
     for handle in handles {
         let (latencies, errors) = handle.join().expect("worker thread panicked");
         all_latencies.extend(latencies);

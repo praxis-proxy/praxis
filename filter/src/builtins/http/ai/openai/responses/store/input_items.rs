@@ -76,6 +76,8 @@ pub struct InputItemPage {
     pub data: Vec<serde_json::Value>,
 
     /// Cursor for the next page (`None` when no more pages).
+    #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on struct fields")]
+    #[allow(dead_code, reason = "pagination cursor for upcoming list endpoint")]
     pub next_cursor: Option<String>,
 
     /// Whether more pages exist beyond this one.

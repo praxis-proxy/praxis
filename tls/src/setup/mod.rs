@@ -91,7 +91,7 @@ pub fn build_server_config(tls: &ListenerTls) -> Result<Arc<ServerConfig>, TlsEr
 /// [`ReloadableCertResolver`]: crate::reload::ReloadableCertResolver
 /// [`ArcSwap`]: arc_swap::ArcSwap
 #[cfg(feature = "hot-reload")]
-#[allow(
+#[expect(
     clippy::type_complexity,
     reason = "return type is inherently complex due to ArcSwap + CertifiedKey"
 )]
@@ -199,6 +199,7 @@ fn maybe_filter_provider(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;

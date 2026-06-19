@@ -240,7 +240,7 @@ async fn vegeta_report(attack_stdout: &[u8]) -> Result<String, BenchmarkError> {
     let mut report = report_cmd.spawn().map_err(map_vegeta_spawn_error)?;
 
     if let Some(mut stdin) = report.stdin.take() {
-        use tokio::io::AsyncWriteExt;
+        use tokio::io::AsyncWriteExt as _;
         stdin.write_all(attack_stdout).await.map_err(BenchmarkError::Io)?;
     }
 
@@ -310,7 +310,7 @@ fn vegeta_latency(l: &VegetaLatencies) -> crate::result::LatencyMetrics {
 }
 
 /// Compute throughput metrics from a vegeta report.
-#[allow(clippy::cast_precision_loss, reason = "precision loss acceptable")]
+#[expect(clippy::cast_precision_loss, reason = "precision loss acceptable")]
 fn vegeta_throughput(report: &VegetaReport) -> crate::result::ThroughputMetrics {
     let duration_secs = report.duration as f64 / 1_000_000_000.0;
     let total_bytes = report.bytes_in.total + report.bytes_out.total;
@@ -326,7 +326,7 @@ fn vegeta_throughput(report: &VegetaReport) -> crate::result::ThroughputMetrics 
 }
 
 /// Extract error metrics from a vegeta report.
-#[allow(
+#[expect(
     clippy::cast_precision_loss,
     clippy::cast_possible_truncation,
     clippy::cast_sign_loss,
@@ -357,7 +357,7 @@ fn vegeta_errors(report: &VegetaReport) -> crate::result::ErrorMetrics {
 }
 
 /// Convert nanoseconds to seconds.
-#[allow(clippy::cast_precision_loss, reason = "precision loss acceptable")]
+#[expect(clippy::cast_precision_loss, reason = "precision loss acceptable")]
 fn ns_to_secs(ns: u64) -> f64 {
     ns as f64 / 1_000_000_000.0
 }
@@ -367,6 +367,7 @@ fn ns_to_secs(ns: u64) -> f64 {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

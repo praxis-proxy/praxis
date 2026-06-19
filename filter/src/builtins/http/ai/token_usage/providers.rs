@@ -13,7 +13,6 @@ use super::TokenUsage;
 
 /// `OpenAI` / Azure `OpenAI` response format.
 #[derive(Deserialize)]
-#[allow(dead_code, reason = "fields accessed via serde deserialization")]
 struct OpenAiResponse {
     /// Token usage statistics.
     usage: Option<OpenAiUsage>,
@@ -21,7 +20,6 @@ struct OpenAiResponse {
 
 /// `OpenAI` usage object.
 #[derive(Deserialize)]
-#[allow(dead_code, reason = "fields accessed via serde deserialization")]
 struct OpenAiUsage {
     /// Tokens in the prompt.
     prompt_tokens: u64,
@@ -50,7 +48,6 @@ pub(super) fn parse_openai(body: &[u8]) -> Option<TokenUsage> {
 
 /// `Anthropic` Claude response format.
 #[derive(Deserialize)]
-#[allow(dead_code, reason = "fields accessed via serde deserialization")]
 struct AnthropicResponse {
     /// Token usage statistics.
     usage: Option<AnthropicUsage>,
@@ -58,7 +55,6 @@ struct AnthropicResponse {
 
 /// `Anthropic` usage object.
 #[derive(Deserialize)]
-#[allow(dead_code, reason = "fields accessed via serde deserialization")]
 struct AnthropicUsage {
     /// Tokens in the input (excludes cached tokens when caching is active).
     input_tokens: u64,
@@ -94,7 +90,6 @@ pub(super) fn parse_anthropic(body: &[u8]) -> Option<TokenUsage> {
 /// Google `Gemini` response format.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code, reason = "fields accessed via serde deserialization")]
 struct GoogleResponse {
     /// Token usage metadata.
     usage_metadata: Option<GoogleUsageMetadata>,
@@ -103,7 +98,6 @@ struct GoogleResponse {
 /// Google `Gemini` usage metadata object.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code, reason = "fields accessed via serde deserialization")]
 struct GoogleUsageMetadata {
     /// Tokens in the prompt.
     prompt_token_count: u64,
@@ -133,7 +127,6 @@ pub(super) fn parse_google(body: &[u8]) -> Option<TokenUsage> {
 /// AWS `Bedrock` Converse API response format (fields in `usage` object).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code, reason = "fields accessed via serde deserialization")]
 struct BedrockConverseResponse {
     /// Token usage statistics.
     usage: Option<BedrockConverseUsage>,
@@ -142,7 +135,6 @@ struct BedrockConverseResponse {
 /// `Bedrock` Converse API usage object.
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[allow(dead_code, reason = "fields accessed via serde deserialization")]
 struct BedrockConverseUsage {
     /// Tokens in the input.
     input_tokens: u64,

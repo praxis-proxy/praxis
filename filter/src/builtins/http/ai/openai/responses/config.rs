@@ -77,7 +77,7 @@ impl Default for ResponsesFormatHeaders {
 }
 
 /// Default format header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -86,7 +86,7 @@ fn default_format_header() -> Option<String> {
 }
 
 /// Default model header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -95,7 +95,7 @@ fn default_model_header() -> Option<String> {
 }
 
 /// Default stream header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]
@@ -104,7 +104,7 @@ fn default_stream_header() -> Option<String> {
 }
 
 /// Default mode header name.
-#[allow(
+#[expect(
     clippy::unnecessary_wraps,
     reason = "serde default functions require Option return type"
 )]

@@ -32,7 +32,7 @@ const REWRITE_FILTERS: &[&str] = &["path_rewrite", "url_rewrite"];
 
 /// `load_balancer` without a filter that sets `ctx.cluster` will fail
 /// every request with "no cluster selected".
-#[allow(clippy::indexing_slicing, reason = "enumeration bounds")]
+#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_lb_without_cluster_selector(names: &[&str], errors: &mut Vec<String>) {
     for (i, name) in names.iter().enumerate() {
         if *name == "load_balancer" && !names[..i].contains(&"router") {
@@ -48,7 +48,7 @@ pub(super) fn check_lb_without_cluster_selector(names: &[&str], errors: &mut Vec
 }
 
 /// Unconditional `static_response` blocking subsequent filters.
-#[allow(clippy::indexing_slicing, reason = "enumeration bounds")]
+#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_unconditional_static_response(
     names: &[&str],
     filters: &[PipelineFilter],
@@ -70,7 +70,7 @@ pub(super) fn check_unconditional_static_response(
 }
 
 /// Security filters with request conditions (bypass risk).
-#[allow(clippy::indexing_slicing, reason = "enumeration bounds")]
+#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_conditional_security(names: &[&str], filters: &[PipelineFilter], errors: &mut Vec<String>) {
     for (i, name) in names.iter().enumerate() {
         if SECURITY_FILTERS.contains(name) {
@@ -89,7 +89,7 @@ pub(super) fn check_conditional_security(names: &[&str], filters: &[PipelineFilt
 /// Security filters with `failure_mode: open` (bypass risk on error).
 ///
 /// When `allow` is `true`, the error is demoted to a warning.
-#[allow(clippy::indexing_slicing, reason = "enumeration bounds")]
+#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_open_security_filters(
     names: &[&str],
     filters: &[PipelineFilter],
@@ -168,7 +168,7 @@ pub(super) fn check_misaligned_clusters(entries: &[FilterEntry], errors: &mut Ve
 }
 
 /// Multiple path rewriting filters (`path_rewrite` / `url_rewrite`).
-#[allow(clippy::indexing_slicing, reason = "checked before usage")]
+#[expect(clippy::indexing_slicing, reason = "checked before usage")]
 pub(super) fn check_duplicate_rewrite_filters(names: &[&str], entries: &[FilterEntry], errors: &mut Vec<String>) {
     let rewrite_indices: Vec<usize> = names
         .iter()
@@ -223,7 +223,7 @@ pub(super) fn check_router_without_lb(names: &[&str], warnings: &mut Vec<String>
 }
 
 /// All routers conditional with no unconditional fallback.
-#[allow(clippy::indexing_slicing, reason = "enumeration bounds")]
+#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_all_routers_conditional(names: &[&str], filters: &[PipelineFilter], warnings: &mut Vec<String>) {
     let router_indices: Vec<usize> = names
         .iter()
@@ -268,6 +268,7 @@ fn has_allow_rewrite_override(entries: &[FilterEntry], idx: usize) -> bool {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

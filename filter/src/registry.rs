@@ -106,7 +106,7 @@ impl FilterRegistry {
 // -----------------------------------------------------------------------------
 
 /// Register all built-in HTTP filter factories.
-#[allow(clippy::too_many_lines, reason = "one line per filter, will grow")]
+#[expect(clippy::too_many_lines, reason = "one line per filter, will grow")]
 fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     use crate::builtins::{
         A2aFilter, AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter,
@@ -152,6 +152,30 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     #[cfg(feature = "ai-inference")]
     register_http(
         factories,
+        "anthropic_messages_protocol",
+        crate::builtins::AnthropicMessagesProtocolFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "anthropic_stream_events",
+        crate::builtins::AnthropicStreamEventsFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "anthropic_to_openai",
+        crate::builtins::AnthropicToOpenaiFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "anthropic_validate",
+        crate::builtins::AnthropicValidateFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
         "model_to_header",
         crate::builtins::ModelToHeaderFilter::from_config,
     );
@@ -182,7 +206,7 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
 }
 
 /// Register a single HTTP filter factory by name.
-#[allow(clippy::type_complexity, reason = "complex function pointer")]
+#[expect(clippy::type_complexity, reason = "complex function pointer")]
 fn register_http(
     factories: &mut HashMap<String, FilterFactory>,
     name: &str,
@@ -208,7 +232,7 @@ fn register_tcp_builtins(factories: &mut HashMap<String, FilterFactory>) {
 }
 
 /// Register a single TCP filter factory by name.
-#[allow(clippy::type_complexity, reason = "complex function pointer")]
+#[expect(clippy::type_complexity, reason = "complex function pointer")]
 fn register_tcp(
     factories: &mut HashMap<String, FilterFactory>,
     name: &str,
@@ -223,6 +247,7 @@ fn register_tcp(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -298,6 +323,26 @@ mod tests {
         assert!(
             names.contains(&"anthropic_messages_format"),
             "anthropic_messages_format should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"anthropic_messages_protocol"),
+            "anthropic_messages_protocol should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"anthropic_stream_events"),
+            "anthropic_stream_events should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"anthropic_to_openai"),
+            "anthropic_to_openai should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"anthropic_validate"),
+            "anthropic_validate should be registered"
         );
         #[cfg(feature = "ai-inference")]
         assert!(

@@ -22,7 +22,7 @@ use praxis_protocol::ListenerPipelines;
 /// resolution error, body limit conflict, or pipeline ordering violation).
 ///
 /// [`FilterPipeline`]: praxis_filter::FilterPipeline
-#[allow(clippy::too_many_lines, reason = "orchestration function")]
+#[expect(clippy::too_many_lines, reason = "orchestration function")]
 pub fn resolve_pipelines(
     config: &Config,
     registry: &FilterRegistry,
@@ -81,7 +81,7 @@ pub fn resolve_pipelines(
 
 /// Run pipeline ordering validation; either fail or warn depending
 /// on the `skip` flag.
-#[allow(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
+#[expect(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
 fn validate_pipeline(
     pipeline: &FilterPipeline,
     entries: &[praxis_core::config::FilterEntry],
@@ -118,6 +118,7 @@ fn validate_pipeline(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

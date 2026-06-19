@@ -120,7 +120,7 @@ fn cl_te_desync_does_not_poison_connection() {
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    use std::io::{Read, Write};
+    use std::io::{Read as _, Write as _};
     let mut stream = std::net::TcpStream::connect(proxy.addr()).unwrap();
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(3)))
@@ -137,7 +137,7 @@ fn cl_te_desync_does_not_poison_connection() {
          \r\n";
     stream.write_all(ambiguous.as_bytes()).unwrap();
 
-    let mut first_response = vec![0u8; 8192];
+    let mut first_response = vec![0_u8; 8192];
     let n = stream.read(&mut first_response).unwrap_or(0);
     let first_raw = String::from_utf8_lossy(&first_response[..n]);
     let first_status = parse_status(&first_raw);

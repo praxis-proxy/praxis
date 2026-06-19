@@ -80,6 +80,7 @@ pub(crate) fn build_strategy(lb_strategy: &LoadBalancerStrategy, endpoints: Vec<
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -159,7 +160,7 @@ mod tests {
             make_endpoints(),
         );
         strategy.select(None, None);
-        if let Strategy::LeastConnections(ref lc) = strategy {
+        if let Strategy::LeastConnections(lc) = &strategy {
             let before = lc.counters["10.0.0.1:80"].load(Ordering::Relaxed);
             strategy.release("10.0.0.1:80");
             let after = lc.counters["10.0.0.1:80"].load(Ordering::Relaxed);
@@ -230,7 +231,7 @@ mod tests {
             make_endpoints(),
         );
         strategy.select(None, None);
-        if let Strategy::PowerOfTwoChoices(ref p2c) = strategy {
+        if let Strategy::PowerOfTwoChoices(p2c) = &strategy {
             let before = p2c.counters["10.0.0.1:80"].load(Ordering::Relaxed)
                 + p2c.counters["10.0.0.2:80"].load(Ordering::Relaxed);
             assert_eq!(before, 1, "one selection should have incremented one counter");

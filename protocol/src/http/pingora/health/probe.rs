@@ -6,7 +6,7 @@
 use std::time::Duration;
 
 use tokio::{
-    io::{AsyncReadExt, AsyncWriteExt},
+    io::{AsyncReadExt as _, AsyncWriteExt as _},
     net::TcpStream,
 };
 use tracing::trace;
@@ -38,7 +38,6 @@ pub async fn http_probe(addr: &str, path: &str, expected_status: u16, timeout: D
 }
 
 /// Inner HTTP probe logic (no timeout wrapper).
-#[allow(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
 async fn http_probe_inner(addr: &str, path: &str, expected_status: u16) -> bool {
     let mut stream = match TcpStream::connect(addr).await {
         Ok(s) => s,
@@ -63,9 +62,9 @@ async fn http_probe_inner(addr: &str, path: &str, expected_status: u16) -> bool 
 /// Read from `stream` until the first `\r\n` (end of status line) or buffer full.
 ///
 /// Returns `None` on empty response or I/O error.
-#[allow(clippy::indexing_slicing, reason = "bounded by filled counter")]
+#[expect(clippy::indexing_slicing, reason = "bounded by filled counter")]
 async fn read_status_line(stream: &mut TcpStream, addr: &str) -> Option<String> {
-    let mut buf = [0u8; 256];
+    let mut buf = [0_u8; 256];
     let mut filled = 0;
     loop {
         match stream.read(&mut buf[filled..]).await {
@@ -101,7 +100,7 @@ async fn read_status_line(stream: &mut TcpStream, addr: &str) -> Option<String> 
 /// );
 /// assert_eq!(parse_status_code("garbage"), None);
 /// ```
-#[allow(clippy::indexing_slicing, reason = "guarded by length check")]
+#[expect(clippy::indexing_slicing, reason = "guarded by length check")]
 pub(crate) fn parse_status_code(response: &str) -> Option<u16> {
     let first_line = response.lines().next()?;
     let parts: Vec<&str> = first_line.splitn(3, ' ').collect();
@@ -206,7 +205,7 @@ async fn h2_send_preface(stream: &mut TcpStream, addr: &str) -> bool {
 
 /// Read the server's response and verify it contains a SETTINGS frame.
 async fn h2_read_settings(stream: &mut TcpStream, addr: &str) -> bool {
-    let mut buf = [0u8; 64];
+    let mut buf = [0_u8; 64];
     let n = match stream.read(&mut buf).await {
         Ok(n) if n >= H2_FRAME_HEADER_LEN => n,
         Ok(n) => {
@@ -231,7 +230,7 @@ async fn h2_close_gracefully(stream: &mut TcpStream) {
     drop(stream.write_all(H2_SETTINGS_ACK).await);
     drop(stream.write_all(H2_GOAWAY).await);
 
-    let mut drain = [0u8; 256];
+    let mut drain = [0_u8; 256];
     while stream.read(&mut drain).await.unwrap_or(0) > 0 {}
 }
 
@@ -246,7 +245,7 @@ async fn h2_close_gracefully(stream: &mut TcpStream) {
 /// let not_settings = &[0, 0, 0, 1, 0, 0, 0, 0, 0];
 /// assert!(!is_settings_frame(not_settings));
 /// ```
-#[allow(clippy::indexing_slicing, reason = "guarded by length check")]
+#[expect(clippy::indexing_slicing, reason = "guarded by length check")]
 pub(crate) fn is_settings_frame(buf: &[u8]) -> bool {
     buf.len() >= H2_FRAME_HEADER_LEN && buf[3] == H2_FRAME_TYPE_SETTINGS
 }
@@ -292,6 +291,7 @@ pub async fn tcp_probe(addr: &str, timeout: Duration) -> bool {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
@@ -388,7 +388,7 @@ mod tests {
         let probe = tokio::spawn(async move { http_probe(&probe_addr, "/health", 200, Duration::from_secs(1)).await });
 
         let (mut socket, _peer) = listener.accept().await.unwrap();
-        let mut buf = [0u8; 512];
+        let mut buf = [0_u8; 512];
         let _ = socket.read(&mut buf).await.unwrap();
         socket
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
@@ -452,7 +452,7 @@ mod tests {
         let probe = tokio::spawn(async move { h2_probe(&probe_addr, Duration::from_secs(2)).await });
 
         let (mut socket, _peer) = listener.accept().await.unwrap();
-        let mut buf = [0u8; 512];
+        let mut buf = [0_u8; 512];
         let _ = socket.read(&mut buf).await.unwrap();
         socket.write_all(H2_SETTINGS).await.unwrap();
         socket.write_all(H2_SETTINGS_ACK).await.unwrap();
@@ -471,7 +471,7 @@ mod tests {
         let probe = tokio::spawn(async move { h2_probe(&probe_addr, Duration::from_secs(2)).await });
 
         let (mut socket, _peer) = listener.accept().await.unwrap();
-        let mut buf = [0u8; 512];
+        let mut buf = [0_u8; 512];
         let _ = socket.read(&mut buf).await.unwrap();
         socket
             .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
@@ -509,7 +509,7 @@ mod tests {
         let probe = tokio::spawn(async move { http_probe(&probe_addr, "/", 200, Duration::from_secs(1)).await });
 
         let (mut socket, _peer) = listener.accept().await.unwrap();
-        let mut buf = [0u8; 512];
+        let mut buf = [0_u8; 512];
         let _ = socket.read(&mut buf).await.unwrap();
         socket
             .write_all(b"HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n")

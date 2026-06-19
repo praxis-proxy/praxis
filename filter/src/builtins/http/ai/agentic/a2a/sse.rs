@@ -68,7 +68,7 @@ pub(crate) struct SseScanResult {
 
 /// Process one SSE chunk, returning completed `data:` payloads and
 /// an overflow flag.
-#[allow(clippy::too_many_lines, reason = "linear byte-processing loop")]
+#[expect(clippy::too_many_lines, reason = "linear byte-processing loop")]
 pub(crate) fn scan_sse_chunk(state: &mut SseScanState, chunk: &[u8], max_scratch_bytes: usize) -> SseScanResult {
     let mut payloads = Vec::new();
     let mut i = 0;
@@ -166,6 +166,7 @@ fn process_line(line: &[u8], data_buf: &mut Vec<u8>, has_data: &mut bool, payloa
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -72,7 +72,7 @@ struct HealthCheckParams {
 /// ```
 pub fn spawn_health_checks(clusters: &[Cluster], registry: &HealthRegistry, shutdown: &CancellationToken) {
     for cluster in clusters {
-        let Some(ref hc) = cluster.health_check else {
+        let Some(hc) = &cluster.health_check else {
             continue;
         };
         let Some(state) = registry.get(&cluster.name) else {
@@ -141,7 +141,7 @@ async fn run_health_check_loop(params: &HealthCheckParams, shutdown: Cancellatio
 
 /// Probe all endpoints in a cluster and update health state.
 async fn probe_all_endpoints(params: &HealthCheckParams) {
-    use futures::stream::{FuturesUnordered, StreamExt};
+    use futures::stream::{FuturesUnordered, StreamExt as _};
 
     let futures: FuturesUnordered<_> = params
         .endpoints
@@ -176,8 +176,8 @@ async fn spawn_probe(idx: usize, addr: String, params: &HealthCheckParams) -> (u
 }
 
 /// Record a probe result, updating health state and logging transitions.
-#[allow(clippy::indexing_slicing, reason = "bounds checked")]
-#[allow(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
+#[expect(clippy::indexing_slicing, reason = "bounds checked")]
+#[expect(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
 fn record_probe_result(params: &HealthCheckParams, idx: usize, addr: &str, success: bool) {
     if idx >= params.state.endpoints().len() {
         return;
@@ -200,6 +200,7 @@ fn record_probe_result(params: &HealthCheckParams, idx: usize, addr: &str, succe
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use std::sync::Arc;
@@ -313,7 +314,7 @@ mod tests {
         });
 
         let (mut socket, _peer) = listener.accept().await.unwrap();
-        let mut buf = [0u8; 512];
+        let mut buf = [0_u8; 512];
         let _ = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await.unwrap();
         tokio::io::AsyncWriteExt::write_all(&mut socket, b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
             .await

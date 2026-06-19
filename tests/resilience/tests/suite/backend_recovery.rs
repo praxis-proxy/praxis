@@ -5,7 +5,7 @@
 //! back, verifying that traffic resumes correctly.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpListener,
     sync::{
         Arc,
@@ -160,8 +160,8 @@ filter_chains:
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    let mut successes = 0u32;
-    let mut failures = 0u32;
+    let mut successes = 0_u32;
+    let mut failures = 0_u32;
     for _ in 0..20 {
         let (status, body) = http_get(proxy.addr(), "/", None);
         match status {
@@ -277,7 +277,7 @@ impl RestartableBackend {
                             let _sent = stream.write_all(resp.as_bytes());
                         });
                     },
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
                     },
                     Err(_) => break,
@@ -290,7 +290,7 @@ impl RestartableBackend {
 /// Read from a stream until the HTTP header terminator is found.
 fn read_until_headers(stream: &mut std::net::TcpStream) -> String {
     let mut data = Vec::new();
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     loop {
         match stream.read(&mut buf) {
             Ok(0) | Err(_) => break,

@@ -53,12 +53,12 @@ impl ConsistentHash {
     ///
     /// Skips unhealthy endpoints by probing adjacent ring slots, falling
     /// back to the original selection if all are unhealthy.
-    #[allow(clippy::indexing_slicing, reason = "within bounds")]
+    #[expect(clippy::indexing_slicing, reason = "within bounds")]
     pub(crate) fn select(&self, hash_key: Option<&str>, health: Option<&ClusterHealthState>) -> Arc<str> {
         let key = hash_key.unwrap_or("");
 
         let len = self.ring.len();
-        #[allow(clippy::cast_possible_truncation, reason = "modulo fits usize")]
+        #[expect(clippy::cast_possible_truncation, reason = "modulo fits usize")]
         let start = (fnv1a(key) as usize) % len;
 
         if let Some(state) = health {
@@ -96,6 +96,7 @@ fn fnv1a(s: &str) -> u64 {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -290,7 +291,7 @@ mod tests {
         let ch = ConsistentHash::new(endpoints, None);
 
         let keys: Vec<String> = (0..300).map(|i| format!("/weighted-{i}")).collect();
-        let mut ep1_count = 0usize;
+        let mut ep1_count = 0_usize;
 
         for key in &keys {
             let selected = ch.select(Some(key), None);

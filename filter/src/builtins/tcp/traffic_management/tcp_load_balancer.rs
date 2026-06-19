@@ -45,6 +45,9 @@ struct TcpLoadBalancerConfig {
 /// the configured strategy, and writes the result to `ctx.upstream_addr`.
 /// On disconnect, releases the least-connections counter if applicable.
 ///
+/// If all endpoints are unhealthy, the filter enters panic mode and
+/// routes to all endpoints.
+///
 /// # YAML configuration
 ///
 /// ```yaml
@@ -168,6 +171,7 @@ impl TcpFilter for TcpLoadBalancerFilter {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -303,7 +307,7 @@ mod tests {
         for _ in 0..4 {
             let mut ctx = make_ctx("weighted");
             lb.on_connect(&mut ctx).await.unwrap();
-            *counts.entry(ctx.upstream_addr.unwrap().into_owned()).or_insert(0u32) += 1;
+            *counts.entry(ctx.upstream_addr.unwrap().into_owned()).or_insert(0_u32) += 1;
         }
         assert_eq!(
             *counts.get("10.0.0.1:80").unwrap_or(&0),

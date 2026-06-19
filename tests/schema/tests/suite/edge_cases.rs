@@ -290,6 +290,38 @@ filter_chains:
 }
 
 #[test]
+fn reject_no_listeners() {
+    let err = Config::from_yaml("clusters: []").unwrap_err();
+    assert!(
+        err.to_string().contains("listeners"),
+        "config with no listeners should fail to parse: {err}"
+    );
+}
+
+#[test]
+fn reject_unknown_filter_chain_reference() {
+    let yaml = r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:0"
+    filter_chains:
+      - nonexistent
+"#;
+    let config = Config::from_yaml(yaml);
+
+    match config {
+        Err(_) => {},
+        Ok(mut cfg) => {
+            assert!(
+                cfg.validate().is_err(),
+                "referencing unknown chain should produce \
+                 a validation error"
+            );
+        },
+    }
+}
+
+#[test]
 fn reject_oversized_yaml() {
     let huge = "x".repeat(5 * 1024 * 1024);
     let err = Config::from_yaml(&huge).unwrap_err();

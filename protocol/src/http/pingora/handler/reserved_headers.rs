@@ -28,6 +28,7 @@ pub(in crate::http::pingora::handler) fn is_reserved_internal_header(name: &http
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;

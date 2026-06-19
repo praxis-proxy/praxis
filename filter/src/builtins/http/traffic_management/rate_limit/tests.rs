@@ -9,7 +9,7 @@ use dashmap::DashMap;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 
 use super::{HARD_CAP_PER_IP_ENTRIES, MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState};
-use crate::{FilterAction, builtins::http::traffic_management::token_bucket::TokenBucket, filter::HttpFilter};
+use crate::{FilterAction, builtins::http::traffic_management::token_bucket::TokenBucket, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -124,7 +124,7 @@ async fn global_mode_rejects_when_depleted() {
     ctx.client_addr = Some("10.0.0.1".parse().unwrap());
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(ref r) if r.status == 429),
+        matches!(&action, FilterAction::Reject(r) if r.status == 429),
         "request past burst should be rejected with 429"
     );
 }
@@ -146,7 +146,7 @@ async fn per_ip_mode_isolates_clients() {
     ctx.client_addr = Some("10.0.0.1".parse().unwrap());
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(ref r) if r.status == 429),
+        matches!(&action, FilterAction::Reject(r) if r.status == 429),
         "second request from IP A should be rejected"
     );
 
@@ -167,7 +167,7 @@ async fn per_ip_mode_no_client_addr_rejects() {
 
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(ref r) if r.status == 429),
+        matches!(&action, FilterAction::Reject(r) if r.status == 429),
         "missing client addr should be rejected with 429"
     );
 }
@@ -326,7 +326,7 @@ async fn per_ip_treats_mapped_ipv6_same_as_ipv4() {
     ctx.client_addr = Some("::ffff:10.0.0.1".parse().unwrap());
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(ref r) if r.status == 429),
+        matches!(&action, FilterAction::Reject(r) if r.status == 429),
         "request from ::ffff:10.0.0.1 should share bucket with V4 10.0.0.1"
     );
 }
@@ -348,7 +348,7 @@ async fn per_ip_mapped_ipv6_first_then_v4() {
     ctx.client_addr = Some("192.168.1.1".parse().unwrap());
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
-        matches!(action, FilterAction::Reject(ref r) if r.status == 429),
+        matches!(&action, FilterAction::Reject(r) if r.status == 429),
         "request from V4 192.168.1.1 should share bucket with ::ffff:192.168.1.1"
     );
 }

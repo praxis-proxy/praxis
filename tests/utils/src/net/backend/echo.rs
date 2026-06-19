@@ -92,10 +92,10 @@ pub fn start_header_echo_backend() -> BackendGuard {
 /// Read a complete HTTP request body from a raw TCP stream,
 /// using Content-Length to determine when all bytes have arrived.
 fn read_request_body(stream: &mut TcpStream) -> String {
-    use std::io::Read;
+    use std::io::Read as _;
 
     let mut data = Vec::new();
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
 
     loop {
         match stream.read(&mut buf) {

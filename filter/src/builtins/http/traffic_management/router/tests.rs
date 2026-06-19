@@ -13,7 +13,7 @@ use super::{
     config::{JsonAlias, RouterConfig, RouterRouteConfig},
     matching::{route_matches_request, should_stop_early, update_best_match},
 };
-use crate::{FilterAction, filter::HttpFilter};
+use crate::{FilterAction, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Tests

@@ -12,7 +12,7 @@ use super::{
     pii::PiiKind,
     rule::{CompiledRule, RuleMatcher, RuleTarget},
 };
-use crate::{FilterAction, FilterResultSet, filter::HttpFilter};
+use crate::{FilterAction, FilterResultSet, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Tests

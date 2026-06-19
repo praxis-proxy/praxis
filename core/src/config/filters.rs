@@ -162,7 +162,7 @@ impl FilterEntry {
 }
 
 /// Levenshtein edit distance between two ASCII strings.
-#[allow(clippy::indexing_slicing, reason = "indices are bounded by input lengths")]
+#[expect(clippy::indexing_slicing, reason = "indices are bounded by input lengths")]
 fn edit_distance(a: &str, b: &str) -> usize {
     let b_bytes = b.as_bytes();
     let mut prev: Vec<usize> = (0..=b_bytes.len()).collect();
@@ -183,6 +183,7 @@ fn edit_distance(a: &str, b: &str) -> usize {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

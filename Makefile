@@ -12,14 +12,20 @@ UNAME_S := $(shell uname -s | tr A-Z a-z)
 UNAME_M := $(shell uname -m)
 
 # -------------------------------------------------------------------
-# Prerequisite checks
+# All
+# -------------------------------------------------------------------
+
+all: build fmt lint test audit container
+
+# -------------------------------------------------------------------
+# Prerequisites
 # -------------------------------------------------------------------
 
 REQUIRED_CMDS := cargo
 RUST_TARGETS := all build release check \
 	test test-unit \
 	test-schema test-integration test-conformance \
-	test-security test-security-suite test-resilience test-smoke \
+	test-security test-security-suite test-resilience \
 	test-config-validation test-config \
 	bench \
 	lint fmt doc audit coverage coverage-check \
@@ -28,7 +34,7 @@ NIGHTLY_FMT_TARGETS  := lint fmt
 CMAKE_TARGETS := all build release check \
 	test test-unit \
 	test-schema test-integration test-conformance \
-	test-security test-security-suite test-resilience test-smoke \
+	test-security test-security-suite test-resilience \
 	test-config-validation test-config \
 	bench \
 	lint doc coverage coverage-check \
@@ -41,9 +47,10 @@ endif
 .PHONY: all build release check clean \
 	test test-unit \
 	test-schema test-integration test-conformance \
-	test-security test-security-suite test-resilience test-smoke \
+	test-security test-security-suite test-resilience \
 	bench \
-	lint fmt doc audit semver coverage coverage-check \
+	lint generate-filter-docs fmt doc audit semver coverage coverage-check \
+	fuzz fuzz-build \
 	require-container-engine \
 	container container-run \
 	test-container test-container-run \
@@ -89,12 +96,6 @@ $(CMAKE_TARGETS): check-prereqs-cmake
 $(NIGHTLY_FMT_TARGETS): check-prereqs-nightly
 
 # -------------------------------------------------------------------
-# All
-# -------------------------------------------------------------------
-
-all: build fmt lint test audit container
-
-# -------------------------------------------------------------------
 # Build
 # -------------------------------------------------------------------
 
@@ -125,17 +126,6 @@ container: | require-container-engine
 
 container-run: | require-container-engine
 	$(CONTAINER_ENGINE) run --rm --network=host $(IMAGE):$(VERSION) 2>&1
-
-# -------------------------------------------------------------------
-# Test Container
-# -------------------------------------------------------------------
-
-test-container: | require-container-engine
-	$(CONTAINER_ENGINE) build -t $(IMAGE)-test:$(VERSION) -f Containerfile.test .
-
-test-container-run: test-container
-	$(CONTAINER_ENGINE) run --rm -v $(CURDIR):/src -v praxis-test-cache:/cache \
-		$(IMAGE)-test:$(VERSION) 2>&1
 
 # -------------------------------------------------------------------
 # Test
@@ -171,8 +161,16 @@ test-config-validation: test-schema
 
 test-config: test-schema
 
-test-smoke:
-	cargo test -p praxis-tests-smoke $(_NOCAPTURE)
+# -------------------------------------------------------------------
+# Test Container
+# -------------------------------------------------------------------
+
+test-container: | require-container-engine
+	$(CONTAINER_ENGINE) build -t $(IMAGE)-test:$(VERSION) -f Containerfile.test .
+
+test-container-run: test-container
+	$(CONTAINER_ENGINE) run --rm -v $(CURDIR):/src -v praxis-test-cache:/cache \
+		$(IMAGE)-test:$(VERSION) 2>&1
 
 # -------------------------------------------------------------------
 # Bench
@@ -192,6 +190,10 @@ lint:
 	cargo xtask lint-deps
 	cargo xtask lint-example-tests
 	cargo xtask sync-example-readme
+	cargo xtask lint-filter-docs
+
+generate-filter-docs:
+	cargo xtask generate-filter-docs
 
 semver:
 	cargo semver-checks
@@ -366,7 +368,8 @@ help:
 	@echo "  bench                Criterion micro-benchmarks"
 	@echo ""
 	@echo "Quality:"
-	@echo "  lint                 clippy + rustfmt check"
+	@echo "  lint                 clippy + rustfmt check + filter docs"
+	@echo "  generate-filter-docs generate per-filter docs under docs/filters/"
 	@echo "  fmt                  format with nightly rustfmt"
 	@echo "  audit                cargo audit + cargo deny"
 	@echo "  coverage             HTML coverage report"

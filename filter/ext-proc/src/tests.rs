@@ -2,6 +2,7 @@
 // Copyright (c) 2026 Praxis Contributors
 
 #![allow(
+    clippy::let_underscore_must_use,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
@@ -2042,7 +2043,7 @@ fn make_response() -> praxis_filter::Response {
 static TEST_ID_GENERATOR: std::sync::LazyLock<praxis_core::id::IdGenerator> =
     std::sync::LazyLock::new(|| praxis_core::id::IdGenerator::with_seed(0));
 
-#[allow(clippy::too_many_lines, reason = "unavoidable: single large statement")]
+#[expect(clippy::too_many_lines, reason = "unavoidable: single large statement")]
 /// Build a minimal [`HttpFilterContext`] for unit tests.
 fn make_ctx(req: &praxis_filter::Request) -> HttpFilterContext<'_> {
     HttpFilterContext {
@@ -2052,6 +2053,7 @@ fn make_ctx(req: &praxis_filter::Request) -> HttpFilterContext<'_> {
         cluster: None,
         current_filter_id: None,
         downstream_tls: false,
+        extensions: praxis_filter::RequestExtensions::default(),
         executed_filter_indices: Vec::new(),
         extra_request_headers: Vec::new(),
         request_headers_to_remove: Vec::new(),

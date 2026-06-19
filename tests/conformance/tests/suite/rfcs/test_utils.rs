@@ -4,7 +4,7 @@
 //! Shared test utilities for RFC conformance tests.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     time::Duration,
 };
@@ -88,7 +88,7 @@ pub(super) fn start_te_backend() -> u16 {
 /// that the proxy should strip for H2 clients.
 fn handle_te_connection(mut stream: TcpStream) {
     drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     let _bytes = stream.read(&mut buf);
     let body = "te-test";
     let chunk = format!("{:x}\r\n{body}\r\n0\r\n\r\n", body.len());
@@ -123,7 +123,7 @@ pub(super) fn start_crlf_response_backend(malformed_header: &[u8]) -> u16 {
 /// malformed header bytes in the response.
 fn handle_crlf_connection(mut stream: TcpStream, malformed_header: &[u8]) {
     drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     let _bytes = stream.read(&mut buf);
     let body = b"ok";
     let mut response = Vec::new();
@@ -151,7 +151,7 @@ pub(super) fn start_garbage_backend() -> u16 {
 /// Handle a single connection for the garbage backend.
 fn handle_garbage_connection(mut stream: TcpStream) {
     drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     let _bytes = stream.read(&mut buf);
     let _sent = stream.write_all(b"\x00\x01\x02garbage\xff\xfe");
 }
@@ -173,7 +173,7 @@ pub(super) fn start_partial_header_backend() -> u16 {
 /// Handle a single connection for the partial-header backend.
 fn handle_partial_header_connection(mut stream: TcpStream) {
     drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     let _bytes = stream.read(&mut buf);
     let _sent = stream.write_all(b"HTTP/1.1 200 OK\r\n");
     let _flushed = stream.flush();
@@ -198,7 +198,7 @@ pub(super) fn start_custom_response_header_backend() -> u16 {
 /// backend.
 fn handle_custom_response_header(mut stream: TcpStream) {
     drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     let _bytes = stream.read(&mut buf);
     let body = "ok";
     let response = format!(
@@ -229,7 +229,7 @@ pub(super) fn start_etag_backend() -> u16 {
 /// Handle a single connection for the ETag backend.
 fn handle_etag_connection(mut stream: TcpStream) {
     drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     let _bytes = stream.read(&mut buf);
     let body = "etag-content";
     let response = format!(
@@ -261,7 +261,7 @@ pub(super) fn start_304_backend() -> u16 {
 /// Handle a single connection for the 304 backend.
 fn handle_304_connection(mut stream: TcpStream) {
     drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     let _bytes = stream.read(&mut buf);
     let response = "HTTP/1.1 304 Not Modified\r\n\
          ETag: \"v1-abc\"\r\n\
@@ -286,7 +286,7 @@ pub(super) fn start_multi_set_cookie_backend() -> u16 {
 /// Handle a single connection for the multi-Set-Cookie backend.
 fn handle_multi_set_cookie(mut stream: TcpStream) {
     drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     let _bytes = stream.read(&mut buf);
     let body = "cookies";
     let response = format!(
@@ -318,7 +318,7 @@ pub(super) fn start_set_cookie_with_attributes_backend() -> u16 {
 /// Handle a single connection for the Set-Cookie attributes backend.
 fn handle_set_cookie_attributes(mut stream: TcpStream) {
     drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     let _bytes = stream.read(&mut buf);
     let body = "ok";
     let response = format!(
@@ -350,7 +350,7 @@ pub(super) fn start_range_backend() -> u16 {
 /// Handle a single connection for the range backend.
 fn handle_range_connection(mut stream: TcpStream) {
     drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     let _bytes = stream.read(&mut buf);
     let body = "hello";
     let response = format!(
@@ -382,7 +382,7 @@ pub(super) fn start_redirect_backend(status_code: u16) -> u16 {
 /// Handle a single connection for the redirect backend.
 fn handle_redirect_connection(mut stream: TcpStream, status_code: u16) {
     drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     let _bytes = stream.read(&mut buf);
     let reason = match status_code {
         301 => "Moved Permanently",
@@ -419,7 +419,7 @@ pub(super) fn start_request_line_echo_backend() -> u16 {
 fn handle_request_line_echo(mut stream: TcpStream) {
     drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
     let mut data = Vec::new();
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     loop {
         match stream.read(&mut buf) {
             Ok(0) | Err(_) => break,
@@ -459,7 +459,7 @@ pub(super) fn start_417_backend() -> u16 {
 /// Handle a single connection for the 417 backend.
 fn handle_417_connection(mut stream: TcpStream) {
     drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     let _bytes = stream.read(&mut buf);
     let body = "expectation failed";
     let response = format!(

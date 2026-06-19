@@ -10,7 +10,7 @@ use super::{
     config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders},
     envelope::{JsonRpcIdKind, JsonRpcKind, parse_json_rpc_envelope},
 };
-use crate::{FilterAction, filter::HttpFilter};
+use crate::{FilterAction, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Config Tests

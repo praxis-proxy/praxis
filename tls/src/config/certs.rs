@@ -198,7 +198,7 @@ fn validate_dns_label(name: &str, label: &str) -> Result<(), TlsError> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
-#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
+#[expect(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
     use crate::ListenerTls;

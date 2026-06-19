@@ -4,7 +4,7 @@
 //! Simple fixed-response and routed backends.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::{TcpListener, TcpStream},
     time::Duration,
 };
@@ -90,7 +90,7 @@ impl Backend {
                 body.len()
             );
             for (name, value) in &headers {
-                use std::fmt::Write;
+                use std::fmt::Write as _;
                 let _written = write!(resp, "{name}: {value}\r\n");
             }
             resp.push_str("\r\n");
@@ -123,7 +123,7 @@ impl Backend {
                 body.len()
             );
             for (name, value) in &headers {
-                use std::fmt::Write;
+                use std::fmt::Write as _;
                 let _written = write!(resp, "{name}: {value}\r\n");
             }
             resp.push_str("\r\n");
@@ -171,7 +171,7 @@ impl ChunkedBackend {
                 "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nServer: praxis-test-backend\r\n"
                     .to_owned();
             for (name, value) in &headers {
-                use std::fmt::Write;
+                use std::fmt::Write as _;
                 let _written = write!(resp, "{name}: {value}\r\n");
             }
             resp.push_str("\r\n");
@@ -295,7 +295,7 @@ pub fn start_backend_v6(body: &str) -> u16 {
 /// write a minimal HTTP 200 response.
 fn handle_v6_connection(mut stream: TcpStream, body: &str) {
     drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
-    let mut buf = [0u8; 4096];
+    let mut buf = [0_u8; 4096];
     let _bytes = stream.read(&mut buf);
     let response = format!(
         "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

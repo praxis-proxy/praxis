@@ -156,11 +156,9 @@ fn prompt_enrichment_updates_content_length() {
         .lines()
         .find_map(|line| {
             let (key, value) = line.split_once(':')?;
-            if key.trim().eq_ignore_ascii_case("content-length") {
-                Some(value.trim().to_owned())
-            } else {
-                None
-            }
+            key.trim()
+                .eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().to_owned())
         })
         .expect("backend should echo content-length header");
     let echoed_len: usize = echoed_cl

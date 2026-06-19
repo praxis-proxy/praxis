@@ -5,7 +5,7 @@
 
 use std::{
     collections::HashMap,
-    sync::{Arc, RwLock},
+    sync::{Arc, Mutex, RwLock},
     time::{Duration, Instant},
 };
 
@@ -20,6 +20,12 @@ use crate::builtins::http::value_safety::contains_control_chars;
 
 /// Maximum length for stored IDs, matching the existing A2A dynamic-value bound.
 const MAX_ID_LEN: usize = 256;
+
+/// Maximum number of task route entries before inserts are rejected.
+const MAX_TASK_ROUTES: usize = 50_000;
+
+/// Minimum interval between proactive eviction sweeps.
+const EVICTION_INTERVAL: Duration = Duration::from_secs(30);
 
 // -----------------------------------------------------------------------------
 // TaskRoute
@@ -60,6 +66,9 @@ pub(crate) struct ExtractedTaskRoute {
 pub(crate) struct LocalTaskRouteStore {
     /// Task ID → cluster mappings.
     tasks: RwLock<HashMap<String, TaskRoute>>,
+
+    /// Timestamp of the last proactive eviction sweep.
+    last_eviction: Mutex<Instant>,
 }
 
 impl LocalTaskRouteStore {
@@ -67,6 +76,7 @@ impl LocalTaskRouteStore {
     pub(crate) fn new() -> Self {
         Self {
             tasks: RwLock::new(HashMap::new()),
+            last_eviction: Mutex::new(Instant::now()),
         }
     }
 
@@ -76,7 +86,7 @@ impl LocalTaskRouteStore {
     /// # Panics
     ///
     /// Panics if the internal lock is poisoned.
-    #[allow(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
+    #[expect(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
     pub(crate) fn get_by_task_id(&self, task_id: &str) -> Option<Arc<str>> {
         let expired = {
             let tasks = self.tasks.read().expect("task route store lock poisoned");
@@ -100,12 +110,18 @@ impl LocalTaskRouteStore {
 
     /// Store a task route mapping with the given TTL.
     ///
-    /// Silently ignores task IDs that fail validation (control chars, too long).
+    /// Silently ignores task IDs that fail validation (control chars,
+    /// too long) and rejects new inserts when the store is at
+    /// [`MAX_TASK_ROUTES`] capacity. Overwrites of existing keys are
+    /// always allowed regardless of capacity.
+    ///
+    /// Periodically sweeps expired entries (at most once per
+    /// [`EVICTION_INTERVAL`]) to bound memory growth.
     ///
     /// # Panics
     ///
     /// Panics if the internal lock is poisoned.
-    #[allow(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
+    #[expect(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
     pub(crate) fn put(&self, task_id: &str, cluster: &str, ttl: Duration) {
         if !validate_id(task_id) {
             return;
@@ -116,10 +132,18 @@ impl LocalTaskRouteStore {
             expires_at: Instant::now() + ttl,
         };
 
-        self.tasks
-            .write()
-            .expect("task route store lock poisoned")
-            .insert(task_id.to_owned(), route);
+        let mut tasks = self.tasks.write().expect("task route store lock poisoned");
+        self.maybe_evict(&mut tasks);
+
+        if tasks.len() >= MAX_TASK_ROUTES && !tasks.contains_key(task_id) {
+            tracing::warn!(
+                limit = MAX_TASK_ROUTES,
+                "task route store: capacity reached, insert rejected"
+            );
+            return;
+        }
+
+        tasks.insert(task_id.to_owned(), route);
     }
 
     /// Remove a task route immediately (for `terminal_ttl_seconds` == 0).
@@ -127,12 +151,33 @@ impl LocalTaskRouteStore {
     /// # Panics
     ///
     /// Panics if the internal lock is poisoned.
-    #[allow(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
+    #[expect(clippy::expect_used, reason = "poisoned lock is unrecoverable")]
     pub(crate) fn remove(&self, task_id: &str) {
         self.tasks
             .write()
             .expect("task route store lock poisoned")
             .remove(task_id);
+    }
+
+    /// Sweep expired entries if [`EVICTION_INTERVAL`] has elapsed.
+    fn maybe_evict(&self, tasks: &mut HashMap<String, TaskRoute>) {
+        if let Ok(mut last) = self.last_eviction.try_lock() {
+            if last.elapsed() < EVICTION_INTERVAL {
+                return;
+            }
+            let before = tasks.len();
+            let now = Instant::now();
+            tasks.retain(|_, r| now < r.expires_at);
+            let evicted = before.saturating_sub(tasks.len());
+            if evicted > 0 {
+                tracing::debug!(
+                    evicted,
+                    remaining = tasks.len(),
+                    "task route store: evicted expired entries"
+                );
+            }
+            *last = Instant::now();
+        }
     }
 }
 
@@ -268,11 +313,13 @@ fn validate_id(id: &str) -> bool {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
-    clippy::unwrap_used,
+    clippy::disallowed_methods,
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
+    clippy::unwrap_used,
     reason = "tests"
 )]
 mod tests {
@@ -342,6 +389,66 @@ mod tests {
         assert!(
             store.get_by_task_id(&long_id).is_none(),
             "task ID exceeding 256 bytes should not be stored"
+        );
+    }
+
+    #[test]
+    fn local_store_rejects_insert_at_capacity() {
+        let store = LocalTaskRouteStore::new();
+        for i in 0..MAX_TASK_ROUTES {
+            store.put(&format!("task-{i}"), "agent-a", Duration::from_secs(3600));
+        }
+
+        store.put("overflow", "agent-a", Duration::from_secs(3600));
+        assert!(
+            store.get_by_task_id("overflow").is_none(),
+            "insert should be rejected when store is at capacity"
+        );
+        assert_eq!(
+            store.tasks.read().unwrap().len(),
+            MAX_TASK_ROUTES,
+            "store size should not exceed MAX_TASK_ROUTES"
+        );
+    }
+
+    #[test]
+    fn local_store_allows_overwrite_at_capacity() {
+        let store = LocalTaskRouteStore::new();
+        for i in 0..MAX_TASK_ROUTES {
+            store.put(&format!("task-{i}"), "agent-a", Duration::from_secs(3600));
+        }
+
+        store.put("task-0", "agent-b", Duration::from_secs(3600));
+        assert_eq!(
+            store.get_by_task_id("task-0").as_deref(),
+            Some("agent-b"),
+            "overwrite of existing key should succeed at capacity"
+        );
+    }
+
+    #[test]
+    fn local_store_eviction_reclaims_expired_entries() {
+        let store = LocalTaskRouteStore::new();
+        for i in 0..100 {
+            store.put(&format!("task-{i}"), "agent-a", Duration::from_millis(50));
+        }
+        assert_eq!(store.tasks.read().unwrap().len(), 100, "should have 100 entries");
+
+        sleep(Duration::from_millis(200));
+
+        // Force eviction by setting last_eviction far in the past.
+        *store.last_eviction.lock().unwrap() = Instant::now() - EVICTION_INTERVAL - Duration::from_secs(1);
+        store.put("fresh", "agent-b", Duration::from_secs(3600));
+
+        let remaining = store.tasks.read().unwrap().len();
+        assert_eq!(
+            remaining, 1,
+            "eviction should have removed all 100 expired entries, leaving only 'fresh'"
+        );
+        assert_eq!(
+            store.get_by_task_id("fresh").as_deref(),
+            Some("agent-b"),
+            "fresh entry should be retrievable after eviction"
         );
     }
 

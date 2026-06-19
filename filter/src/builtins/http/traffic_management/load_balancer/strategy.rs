@@ -46,7 +46,7 @@ impl Strategy {
 
     /// Extract the hash key from the HTTP context for consistent-hash.
     fn extract_hash_key<'a>(&self, ctx: &'a HttpFilterContext<'_>) -> Option<&'a str> {
-        if let shared::Strategy::ConsistentHash(ref ch) = self.inner {
+        if let shared::Strategy::ConsistentHash(ch) = &self.inner {
             let key: &str = ch
                 .header()
                 .and_then(|h| ctx.request.headers.get(h))

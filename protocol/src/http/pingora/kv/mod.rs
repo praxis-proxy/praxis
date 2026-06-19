@@ -239,6 +239,7 @@ pub fn add_kv_endpoint_to_pingora_server(server: &mut Server, admin_addr: &str, 
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use std::sync::Arc;

@@ -7,6 +7,7 @@ mod config;
 mod origin;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -20,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use praxis_core::config::InsecureOptions;
-use rand::Rng;
+use rand::Rng as _;
 use tracing::{debug, trace, warn};
 
 use self::{
@@ -43,6 +44,12 @@ use crate::{
 /// Safe methods (GET, HEAD, OPTIONS by default) bypass
 /// the check. State-changing methods require a matching
 /// `Origin` or `Referer` header.
+///
+/// State-changing methods require an `Origin` or `Referer`
+/// header matching the trusted origins. Rejected requests
+/// receive 403 Forbidden.
+///
+/// A bare wildcard (`"*"`) cannot be mixed with other origins.
 ///
 /// # YAML configuration
 ///
@@ -188,7 +195,7 @@ impl CsrfFilter {
             return false;
         }
 
-        rand::rng().random_range(0u8..100) < self.enforce_percentage
+        rand::rng().random_range(0_u8..100) < self.enforce_percentage
     }
 }
 

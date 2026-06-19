@@ -49,7 +49,7 @@ pub fn wait_for_tcp(addr: &str) {
 ///
 /// Panics if the server does not become ready within 5 seconds.
 pub fn wait_for_http(addr: &str) {
-    use std::io::{Read, Write};
+    use std::io::{Read as _, Write as _};
 
     let request = b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
 
@@ -58,12 +58,12 @@ pub fn wait_for_http(addr: &str) {
             drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
             drop(stream.set_write_timeout(Some(Duration::from_secs(2))));
             if stream.write_all(request).is_ok() {
-                let mut buf = [0u8; 16];
+                let mut buf = [0_u8; 16];
                 if let Ok(n) = stream.read(&mut buf)
                     && n >= 5
                     && buf.starts_with(b"HTTP/")
                 {
-                    let mut drain = [0u8; 4096];
+                    let mut drain = [0_u8; 4096];
                     while stream.read(&mut drain).unwrap_or(0) > 0 {}
                     return;
                 }
@@ -80,21 +80,21 @@ pub fn wait_for_http(addr: &str) {
 ///
 /// Panics if the server does not become ready within 5 seconds.
 pub fn wait_for_http2(addr: &str) {
-    use std::io::{Read, Write};
+    use std::io::{Read as _, Write as _};
 
     for _ in 0..500 {
         if let Ok(mut stream) = TcpStream::connect(addr) {
             drop(stream.set_read_timeout(Some(Duration::from_secs(1))));
             drop(stream.set_write_timeout(Some(Duration::from_secs(1))));
             if stream.write_all(PREFACE).is_ok() && stream.write_all(SETTINGS).is_ok() {
-                let mut buf = [0u8; 64];
+                let mut buf = [0_u8; 64];
                 if let Ok(n) = stream.read(&mut buf)
                     && n >= 9
                     && buf[3] == 0x04
                 {
                     let _ack = stream.write_all(SETTINGS_ACK);
                     let _goaway = stream.write_all(GOAWAY);
-                    let mut drain = [0u8; 256];
+                    let mut drain = [0_u8; 256];
                     while stream.read(&mut drain).unwrap_or(0) > 0 {}
                     drop(stream);
                     std::thread::sleep(Duration::from_millis(100));

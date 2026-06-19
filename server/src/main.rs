@@ -47,7 +47,7 @@ struct Cli {
 // -----------------------------------------------------------------------------
 
 /// Entry point.
-#[allow(clippy::print_stderr, reason = "fatal error output")]
+#[expect(clippy::print_stderr, reason = "fatal error output")]
 fn main() {
     let cli = Cli::parse();
     let explicit = cli.config.or_else(|| std::env::var("PRAXIS_CONFIG").ok());
@@ -80,9 +80,10 @@ fn main() {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
-    use clap::Parser;
+    use clap::Parser as _;
 
     use super::Cli;
 

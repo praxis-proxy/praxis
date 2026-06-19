@@ -11,6 +11,7 @@ mod origin;
 pub use self::config::DisallowedOriginMode;
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -49,6 +50,12 @@ const VARY_ORIGIN: &str = "Origin";
 
 /// Spec-compliant CORS filter implementing origin validation,
 /// preflight handling, and response header injection.
+///
+/// Wildcard subdomain patterns (e.g. `https://*.example.com`) are
+/// supported in `allow_origins`.
+///
+/// `allow_credentials: true` is incompatible with wildcard origins,
+/// methods, or headers per the Fetch spec.
 ///
 /// # YAML configuration
 ///
@@ -89,7 +96,7 @@ const VARY_ORIGIN: &str = "Origin";
 /// let filter = CorsFilter::from_config(&yaml).unwrap();
 /// assert_eq!(filter.name(), "cors");
 /// ```
-#[allow(clippy::struct_excessive_bools, reason = "CORS spec flags")]
+#[expect(clippy::struct_excessive_bools, reason = "CORS spec flags")]
 pub struct CorsFilter {
     /// Pre-computed origin matching policy.
     policy: OriginPolicy,
@@ -178,13 +185,9 @@ impl CorsFilter {
     /// Returns `None` if the origin is disallowed.
     fn resolve_origin<'a>(&self, origin: &'a str) -> Option<&'a str> {
         if origin == "null" {
-            return if self.allow_null_origin { Some(origin) } else { None };
+            return self.allow_null_origin.then_some(origin);
         }
-        if self.policy.is_allowed(origin) {
-            Some(origin)
-        } else {
-            None
-        }
+        self.policy.is_allowed(origin).then_some(origin)
     }
 
     /// The ACAO header value: `*` for static wildcard, else the origin.
@@ -308,7 +311,6 @@ impl HttpFilter for CorsFilter {
         Ok(FilterAction::Continue)
     }
 
-    #[allow(clippy::too_many_lines, reason = "CORS response branches")]
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let Some(resp) = ctx.response_header.as_mut() else {
             return Ok(FilterAction::Continue);

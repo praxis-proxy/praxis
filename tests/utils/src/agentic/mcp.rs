@@ -247,7 +247,7 @@ impl McpMockServerGuard {
 impl Drop for McpMockServerGuard {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        let _ = TcpStream::connect(format!("127.0.0.1:{}", self.port));
+        _ = TcpStream::connect(format!("127.0.0.1:{}", self.port));
     }
 }
 

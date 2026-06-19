@@ -336,7 +336,7 @@ async fn invalid_json_rejects() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Reject(ref r) if r.status == 400),
+        matches!(&action, FilterAction::Reject(r) if r.status == 400),
         "should reject with 400 on invalid JSON"
     );
 }
@@ -369,7 +369,7 @@ async fn missing_messages_rejects() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Reject(ref r) if r.status == 400),
+        matches!(&action, FilterAction::Reject(r) if r.status == 400),
         "should reject with 400 when messages missing"
     );
 }
@@ -401,7 +401,7 @@ async fn messages_not_array_rejects() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Reject(ref r) if r.status == 400),
+        matches!(&action, FilterAction::Reject(r) if r.status == 400),
         "should reject with 400 when messages is not an array"
     );
 }
@@ -443,7 +443,7 @@ async fn updates_content_length_header() {
 
     let serialized = serde_json::to_vec(&body).unwrap();
     assert_eq!(ctx.extra_request_headers.len(), 1, "should set content-length header");
-    let (ref name, ref value) = ctx.extra_request_headers[0];
+    let (name, value) = &ctx.extra_request_headers[0];
     assert_eq!(name, "content-length", "header name should be content-length");
     assert_eq!(
         value,

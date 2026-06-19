@@ -16,7 +16,7 @@ use praxis_core::config::{
 use super::{LoadBalancerFilter, entry::build_cluster_entry, strategy::build_strategy};
 use crate::{
     FilterAction,
-    filter::HttpFilter,
+    filter::HttpFilter as _,
     load_balancing::{endpoint::WeightedEndpoint, strategy::Strategy as SharedStrategy},
 };
 
@@ -248,7 +248,7 @@ async fn weighted_endpoints_expand_proportionally() {
             matches!(action, FilterAction::Continue),
             "weighted selection should continue"
         );
-        *counts.entry(ctx.upstream.unwrap().address).or_insert(0u32) += 1;
+        *counts.entry(ctx.upstream.unwrap().address).or_insert(0_u32) += 1;
     }
 
     assert_eq!(
@@ -369,7 +369,7 @@ fn build_cluster_entry_preserves_weights_via_distribution() {
     for _ in 0..8 {
         *counts
             .entry(entry.strategy.select(&ctx, None).unwrap().to_string())
-            .or_insert(0u32) += 1;
+            .or_insert(0_u32) += 1;
     }
     assert_eq!(
         counts["10.0.0.1:80"], 5,

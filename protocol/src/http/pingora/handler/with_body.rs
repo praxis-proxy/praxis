@@ -108,13 +108,13 @@ impl ProxyHttp for PingoraHttpHandler {
     /// configured. Otherwise skips module registration to avoid
     /// per-request `Box` allocation overhead.
     fn init_downstream_modules(&self, modules: &mut HttpModules) {
-        if let Some(ref cfg) = self.compression {
+        if let Some(cfg) = &self.compression {
             debug!(level = cfg.default_level, "registering compression module");
             modules.add_module(ResponseCompressionBuilder::enable(cfg.default_level));
         }
     }
 
-    #[allow(clippy::cast_possible_truncation, reason = "millis fit u64")]
+    #[expect(clippy::cast_possible_truncation, reason = "millis fit u64")]
     async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()>
     where
         Self::CTX: Send + Sync,
@@ -129,7 +129,7 @@ impl ProxyHttp for PingoraHttpHandler {
             return reject_503(session, "1", "global max connections exceeded").await;
         }
 
-        if let Some(ref sem) = self.connection_semaphore {
+        if let Some(sem) = &self.connection_semaphore {
             if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
                 ctx._connection_permit = Some(permit);
             } else {

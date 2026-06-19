@@ -141,7 +141,7 @@ impl ForwardedHeadersFilter {
         proto: &str,
         host: Option<&str>,
     ) {
-        use std::fmt::Write;
+        use std::fmt::Write as _;
 
         tracing::debug!(client_ip = %client_ip, "setting standard Forwarded header");
         let for_param = format_for_param(client_ip);
@@ -207,9 +207,9 @@ impl HttpFilter for ForwardedHeadersFilter {
         "forwarded_headers"
     }
 
-    #[allow(clippy::too_many_lines, reason = "header construction")]
+    #[expect(clippy::too_many_lines, reason = "header construction")]
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        use std::fmt::Write;
+        use std::fmt::Write as _;
 
         let Some(client_ip) = ctx.client_addr else {
             return Ok(FilterAction::Continue);
@@ -249,7 +249,7 @@ impl HttpFilter for ForwardedHeadersFilter {
             .get("host")
             .and_then(|h| h.to_str().ok())
             .map(str::to_owned);
-        if let Some(ref host) = host_value {
+        if let Some(host) = &host_value {
             tracing::debug!(host = %host, "setting X-Forwarded-Host from Host header");
             ctx.extra_request_headers
                 .push((Cow::Borrowed("X-Forwarded-Host"), host.clone()));
@@ -268,6 +268,7 @@ impl HttpFilter for ForwardedHeadersFilter {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

@@ -100,7 +100,7 @@ fn build_server_conf(shutdown_timeout_secs: u64, threads: usize, runtime: &Runti
 
 /// Apply the upstream CA file to the server config, if configured.
 fn apply_upstream_ca(conf: &mut ServerConf, runtime: &RuntimeOptions) {
-    if let Some(ref ca_file) = runtime.upstream_ca_file {
+    if let Some(ca_file) = &runtime.upstream_ca_file {
         info!(ca_file, "setting global upstream CA file (replaces system trust store)");
         conf.ca_file = Some(ca_file.clone());
     }

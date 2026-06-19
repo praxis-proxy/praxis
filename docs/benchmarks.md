@@ -370,8 +370,8 @@ GitHub Actions workflows run on this repository:
   push/PR
 - `conformance.yaml`: HTTP/2 conformance (h2spec, RFC
   compliance) on push/PR
-- `conventions.yaml`: coding conventions and PR
-  hygiene enforcement on PRs
+- `conventions.yaml`: coding conventions enforcement
+  on PRs
 - `supply-chain.yaml`: supply chain safety checks
   (`cargo audit`, `cargo deny`) on push/PR
 - `container.yaml`: build, run, and health-check the
@@ -380,7 +380,7 @@ GitHub Actions workflows run on this repository:
   with baseline comparison on push/PR
 - `benchmarks.yaml`: comparative benchmarks (Praxis
   vs Envoy) on push to main
-- `coverage.yaml`: code coverage gate (90% minimum)
+- `coverage.yaml`: code coverage gate (95% minimum)
   on push/PR
 - `codeql.yaml`: CodeQL security analysis on push/PR
   and weekly schedule
@@ -388,8 +388,8 @@ GitHub Actions workflows run on this repository:
 - `msrv.yaml`: minimum supported Rust version check
   on push/PR
 - `nightly.yaml`: comprehensive nightly test runs
-- `pull-request-hygiene.yaml`: automated PR lifecycle
-  management (draft on failure, close stale)
+- `pull-request-conventions.yaml`: automated PR
+  lifecycle management (draft on failure, close stale)
 - `release.yaml`: tag-triggered release workflow
 - `publish.yaml`: manual container build and push to
   GHCR

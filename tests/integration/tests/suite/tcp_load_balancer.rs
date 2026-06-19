@@ -5,7 +5,7 @@
 
 use std::{
     collections::HashMap,
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     time::Duration,
 };
@@ -59,7 +59,7 @@ filter_chains:
     let config = Config::from_yaml(&yaml).unwrap();
     start_tcp_proxy(config, proxy_port);
 
-    let total = 30u32;
+    let total = 30_u32;
     let mut counts: HashMap<String, u32> = HashMap::new();
     for _ in 0..total {
         let tag = tcp_send_recv(&format!("127.0.0.1:{proxy_port}"), b"ping");
@@ -124,7 +124,7 @@ filter_chains:
     let config = Config::from_yaml(&yaml).unwrap();
     start_tcp_proxy(config, proxy_port);
 
-    let total = 200u32;
+    let total = 200_u32;
     let mut counts: HashMap<String, u32> = HashMap::new();
     for _ in 0..total {
         let tag = tcp_send_recv(&format!("127.0.0.1:{proxy_port}"), b"ping");

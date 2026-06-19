@@ -5,11 +5,114 @@ the building blocks for building bespoke proxy servers.
 Multiple extension mechanisms are provided to support a
 variety of needs.
 
-## Rust Extensions (Preferred)
+## Auto-Discovery (Recommended)
+
+External filter crates can self-register into Praxis at
+build time. The operator adds a `Cargo.toml` dependency
+and writes YAML config with zero Rust code changes to Praxis.
+
+### How It Works
+
+1. The external crate uses `export_filters!` to declare
+   its filters
+2. The crate's `Cargo.toml` carries a
+   `[package.metadata.praxis-filters]` marker
+3. The Praxis server's `build.rs` runs `cargo metadata`,
+   discovers marked crates, and generates registration code
+4. At startup, discovered filters are registered alongside
+   built-ins
+
+### External Crate Setup
+
+In the external crate's `Cargo.toml`:
+
+```toml
+[package]
+name = "my-auth-filters"
+version = "0.1.0"
+
+# Empty marker: tells the Praxis build script this crate exports filters.
+# The actual filter names and factories are declared in export_filters!.
+[package.metadata.praxis-filters]
+
+[dependencies]
+async-trait = "0.1"
+praxis-proxy-filter = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_yaml = { package = "yaml_serde", version = "0.10" }
+```
+
+In the external crate's `src/lib.rs`:
+
+```rust
+use async_trait::async_trait;
+use praxis_filter::{
+    FilterAction, FilterError, HttpFilter,
+    HttpFilterContext, export_filters,
+};
+
+pub struct MyAuthFilter { /* ... */ }
+
+#[async_trait]
+impl HttpFilter for MyAuthFilter {
+    fn name(&self) -> &'static str { "my_auth" }
+
+    async fn on_request(
+        &self, _ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+}
+
+impl MyAuthFilter {
+    pub fn from_config(
+        config: &serde_yaml::Value,
+    ) -> Result<Box<dyn HttpFilter>, FilterError> {
+        // Parse config and construct the filter
+        Ok(Box::new(Self { /* ... */ }))
+    }
+}
+
+export_filters! {
+    http "my_auth" => MyAuthFilter::from_config,
+}
+```
+
+### Operator Usage
+
+Add the crate to the Praxis server's `Cargo.toml`:
+
+```toml
+[dependencies]
+my-auth-filters = "0.1"
+```
+
+Then reference the filter by name in YAML:
+
+```yaml
+filter_chains:
+  - name: main
+    filters:
+      - filter: my_auth
+        some_option: "value"
+```
+
+Rebuild and run — no other changes needed.
+
+### Duplicate Detection
+
+If an external filter name collides with a built-in or
+another external filter, the server panics at startup
+with a clear error message. Filter names must be unique
+across all sources.
+
+## Rust Extensions (Manual Registration)
 
 Compile-time extensions with zero overhead. Implement
 `HttpFilter` or `TcpFilter` in your own crate, register it,
-and reference it in YAML config.
+and reference it in YAML config. Use this approach when
+building a custom Praxis binary with inline filters that
+don't need to be shared as a separate crate.
 
 1. Implement `HttpFilter` (`on_request`, `on_response`,
    body hooks) or `TcpFilter` (`on_connect`,

@@ -91,9 +91,9 @@ filter_chains:
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    let mut count_a = 0u32;
-    let mut count_b = 0u32;
-    let mut count_c = 0u32;
+    let mut count_a = 0_u32;
+    let mut count_b = 0_u32;
+    let mut count_c = 0_u32;
     for _ in 0..15 {
         let (_status, body) = http_get(proxy.addr(), "/", None);
         match body.as_str() {

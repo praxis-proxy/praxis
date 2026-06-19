@@ -1,0 +1,61 @@
+name: Spike
+description: Time-boxed investigation to reduce uncertainty
+labels: ["spike", "triage/needs-triage"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: What do we need to learn?
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: Why is this unknown blocking progress?
+    validations:
+      required: true
+  - type: textarea
+    id: approach
+    attributes:
+      label: Approach
+      description: How will we investigate?
+      placeholder: |
+        - [ ] Step 1
+        - [ ] Step 2
+  - type: textarea
+    id: deliverables
+    attributes:
+      label: Deliverables
+      description: What artifacts come out of this spike?
+      placeholder: |
+        - Decision record or comment summarizing findings
+        - Prototype branch (if applicable)
+        - Follow-up issues for implementation
+  - type: input
+    id: timebox
+    attributes:
+      label: Timebox
+      description: Maximum effort before reporting findings
+      placeholder: "2 days"
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - AI / Inference
+        - Core / Config
+        - Filter Pipeline
+        - Observability
+        - Protocol
+        - Security / TLS
+        - Traffic Management
+        - Transformation
+        - Other
+  - type: input
+    id: parent-epic
+    attributes:
+      label: Parent Epic (optional)
+      description: "Issue number if this belongs under an epic"
+      placeholder: "#484"

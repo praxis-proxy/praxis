@@ -46,6 +46,14 @@ use crate::{
 /// Performs exact-match lookup first, then longest-suffix
 /// wildcard match. Case-insensitive per [RFC 4343].
 ///
+/// Connections without SNI or with no matching route use
+/// `default_upstream` if configured, otherwise receive a
+/// TLS alert rejection.
+///
+/// Bare wildcards (`*`), IP addresses as server names, and
+/// duplicate server names across routes are rejected at
+/// config validation.
+///
 /// [RFC 4343]: https://datatracker.ietf.org/doc/html/rfc4343
 ///
 /// # Example
@@ -281,6 +289,7 @@ fn validate_server_name(name: &str) -> Result<(), FilterError> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

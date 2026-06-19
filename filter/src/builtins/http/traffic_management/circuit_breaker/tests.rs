@@ -9,7 +9,7 @@ use super::{
     CircuitBreakerFilter,
     state::{CircuitBreaker, CircuitState},
 };
-use crate::{FilterAction, filter::HttpFilter};
+use crate::{FilterAction, filter::HttpFilter as _};
 
 // ---------------------------------------------------------------------------
 // State Machine Tests

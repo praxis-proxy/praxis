@@ -63,7 +63,7 @@ fn validate_config_path(path: &str) {
 /// parsing shared by both MCP and A2A mock servers.
 pub(super) mod http {
     use std::{
-        io::{Read, Write},
+        io::{Read as _, Write as _},
         net::TcpStream,
     };
 
@@ -135,12 +135,12 @@ pub(super) mod http {
         let mut resp = format!("HTTP/1.1 {status} {reason}\r\n");
 
         for (name, value) in headers {
-            use std::fmt::Write as FmtWrite;
+            use std::fmt::Write as _;
             let _written = write!(resp, "{name}: {value}\r\n");
         }
 
         if !body.is_empty() {
-            use std::fmt::Write as FmtWrite;
+            use std::fmt::Write as _;
             let _written = write!(resp, "Content-Length: {}\r\n", body.len());
         }
 
@@ -174,7 +174,7 @@ pub(super) mod http {
     /// stream, returned as raw bytes.
     fn read_with_body(stream: &mut TcpStream) -> Option<Vec<u8>> {
         let mut data = Vec::new();
-        let mut buf = [0u8; 4096];
+        let mut buf = [0_u8; 4096];
 
         loop {
             match stream.read(&mut buf) {
@@ -215,6 +215,7 @@ pub(super) mod http {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::validate_config_path;

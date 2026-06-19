@@ -229,8 +229,8 @@ deploy only what they need.
   sub-millisecond proxy overhead.
 - Support credential injection for `Anthropic`
   backends using the existing `credential_injection`
-  filter for `x-api-key` and `anthropic_passthrough`
-  for `anthropic-version` header injection.
+  filter for `x-api-key` and `anthropic_messages_protocol`
+  for gateway-managed `anthropic-version` defaults.
 - Enable unified gateway configurations where a
   single Praxis instance routes to vLLM (`OpenAI`),
   llm-d (`OpenAI` via vLLM), KServe/MaaS backends,
@@ -367,9 +367,9 @@ filter chain config); routes select clusters
 within that pipeline at runtime.
 
 The operator deploys separate configs (or separate
-listeners) for passthrough vs transformation. The
-passthrough config includes `anthropic_passthrough`
-in the pipeline; the transformation config includes
+listeners) for native Messages vs transformation. The
+native Messages config includes `anthropic_messages_protocol`
+in the pipeline for protocol header normalization; the transformation config includes
 `anthropic_to_openai`. In Praxis, listeners flatten
 filter chains at startup and the router selects
 clusters, not chains — so the translation decision
@@ -396,8 +396,8 @@ flowchart TD
 
     Client --> Classify --> Validate
 
-    subgraph "Passthrough config"
-        Pass["anthropic_passthrough"]
+    subgraph "Native Messages config"
+        Pass["anthropic_messages_protocol"]
         Native["/v1/messages backend"]
         Pass --> Native
     end
@@ -417,7 +417,7 @@ flowchart TD
 |--------|---------|
 | `anthropic_messages_format` | Classify requests as Anthropic Messages and promote routing facts to headers, metadata, and filter results |
 | `anthropic_validate` | Validate proxy-needed fields (`messages`, `max_tokens`, `model`) and reject malformed requests with 400 |
-| `anthropic_passthrough` | Inject `anthropic-version` header for backends that natively support `/v1/messages` |
+| `anthropic_messages_protocol` | Supply a gateway-managed `anthropic-version` default for native `/v1/messages` backends |
 | `anthropic_to_openai` | Transform Anthropic request body to OpenAI Chat Completions and non-streaming response back |
 | `anthropic_stream_events` | Transform OpenAI Chat Completions SSE chunks into Anthropic Messages SSE events per-chunk |
 
@@ -725,13 +725,14 @@ filter: anthropic_stream_events
 
 ---
 
-### Filter 4: `anthropic_passthrough`
+### Filter 4: `anthropic_messages_protocol`
 
-**Purpose:** Preserve Anthropic-native features
-when routing to backends that natively support
-`/v1/messages` (`Anthropic` API, vLLM with Anthropic
-endpoint). No body transformation: only header
-management and credential injection coordination.
+**Purpose:** Normalize Anthropic Messages protocol
+headers when routing to backends that natively
+support `/v1/messages` (`Anthropic` API, vLLM with
+Anthropic endpoint). No body transformation: only
+gateway-managed `anthropic-version` defaulting and
+credential injection coordination.
 
 **Praxis trait methods:**
 - `on_request`: inject `anthropic-version` header
@@ -741,7 +742,10 @@ management and credential injection coordination.
 
 Request:
 - Inject `anthropic-version` header with configured
-  default if the client did not send one
+  default if an internal or non-SDK client did not
+  send one
+- Preserve caller-provided `anthropic-version`
+  headers
 - Preserve `cache_control` blocks in body as-is
 - Preserve `thinking` parameter as-is
 - Coordinate with `credential_injection` filter
@@ -758,7 +762,7 @@ are deferred to a follow-up.
 **Config:**
 
 ```yaml
-filter: anthropic_passthrough
+filter: anthropic_messages_protocol
 default_version: "2023-06-01"
 ```
 
@@ -766,7 +770,7 @@ default_version: "2023-06-01"
 
 ### Filter Chain Configuration
 
-#### Anthropic client → native backend (passthrough):
+#### Internal or Anthropic client → native backend:
 
 ```yaml
 listeners:
@@ -780,7 +784,7 @@ filter_chains:
       - filter: anthropic_messages_format
         on_invalid: continue
 
-      - filter: anthropic_passthrough
+      - filter: anthropic_messages_protocol
         default_version: "2023-06-01"
 
       - filter: router
@@ -897,7 +901,7 @@ Build order; each tier produces a working system:
 |------|--------|------------------|
 | 0 | `anthropic_messages_format` | Classification and routing. Anthropic requests detected and promoted to headers/metadata for downstream routing. |
 | 1 | `anthropic_validate` | Request validation. Malformed requests rejected at the proxy with consistent error format. |
-| 2 | `anthropic_passthrough` | Native Anthropic backend routing. Clients reach `Anthropic` API through Praxis with `anthropic-version` header injection. |
+| 2 | `anthropic_messages_protocol` | Native Anthropic backend routing. Clients reach `Anthropic` API through Praxis with centralized `anthropic-version` defaults. |
 | 3 | `anthropic_to_openai` (request + non-streaming response) | `Anthropic` SDK clients can reach vLLM/llm-d backends. Non-streaming responses translated back. |
 | 4 | `anthropic_stream_events` | Per-chunk SSE streaming. `OpenAI` chunks translated to `Anthropic` events incrementally as they arrive. Conformant with [Inference Proxy Conformance Guidelines](https://docs.google.com/document/d/1yDzs9ehHFxqYbufOmY-sEXiEtn9nhXUKHx4uKjasC5Q/edit?tab=t.0). |
 
@@ -925,12 +929,12 @@ filter/src/builtins/http/ai/
     stream_events/
       mod.rs                     # per-chunk SSE transformation
       config.rs                  # YAML config
-    passthrough/
-      mod.rs                     # passthrough filter
+    protocol/
+      mod.rs                     # protocol filter
       config.rs                  # YAML config
 
 examples/configs/ai/anthropic/
-  messages-passthrough.yaml      # passthrough config
+  messages-protocol.yaml      # protocol header config
   messages-to-openai.yaml        # transformation config
   unified-gateway.yaml           # multi-format routing
 
@@ -952,7 +956,7 @@ test maps 1:1 to its OGX Python counterpart by name.
 Tests use `Backend::fixed()` with hardcoded
 Anthropic Messages response fixtures. Each test
 starts a mock backend, configures Praxis with the
-passthrough filter chain, sends an Anthropic
+protocol filter chain, sends an Anthropic
 `/v1/messages` request, and validates the response
 structure. No live backends or recording replay
 servers are needed — fixtures are embedded in the

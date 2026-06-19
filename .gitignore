@@ -3,6 +3,7 @@ target
 
 # Test artifacts
 **/*.db
+**/postgres.rs.tmp*
 
 # Rustfmt backup files
 **/*.rs.bk
@@ -37,5 +38,9 @@ docs/**/
 !docs/architecture/
 !docs/developing/
 !docs/filters/
+!docs/filters/http/
+!docs/filters/http/*/
+!docs/filters/tcp/
+!docs/filters/tcp/*/
 !docs/operating/
 !docs/proposals/

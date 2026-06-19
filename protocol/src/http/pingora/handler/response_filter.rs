@@ -48,7 +48,7 @@ async fn run_response_pipeline(
     resp: &mut praxis_filter::Response,
 ) -> Result<(std::result::Result<FilterAction, praxis_filter::FilterError>, bool)> {
     let baseline_response_body_mode = ctx.response_body_mode;
-    let (r, headers_modified, response_body_mode, cluster, filter_metadata, filter_state) = {
+    let (r, headers_modified, response_body_mode, cluster, extensions, filter_metadata, filter_state) = {
         let mut fctx = ctx.filter_context_for(pipeline, Some(resp)).ok_or_else(|| {
             pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
@@ -61,12 +61,14 @@ async fn run_response_pipeline(
             fctx.response_headers_modified,
             fctx.response_body_mode,
             fctx.cluster,
+            fctx.extensions,
             fctx.filter_metadata,
             fctx.filter_state,
         )
     };
     ctx.cluster = cluster;
     ctx.response_body_mode = super::clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode);
+    ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;
     ctx.filter_state = filter_state;
     Ok((r, headers_modified))
@@ -122,7 +124,7 @@ fn handle_response_result(
 /// [`HeaderMap`]: http::HeaderMap
 /// [`insert_header`]: pingora_http::ResponseHeader::insert_header
 fn write_headers_to_pingora(src: &http::HeaderMap, status: http::StatusCode, dst: &mut pingora_http::ResponseHeader) {
-    #[allow(clippy::expect_used, reason = "valid upstream status")]
+    #[expect(clippy::expect_used, reason = "valid upstream status")]
     let mut rebuilt = pingora_http::ResponseHeader::build(status, Some(src.len())).expect("valid status");
     for (name, value) in src {
         let _insert = rebuilt.append_header(name.clone(), value.clone());
@@ -153,6 +155,7 @@ fn is_websocket_101(headers: &http::HeaderMap) -> bool {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

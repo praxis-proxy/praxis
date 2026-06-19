@@ -81,14 +81,14 @@ pub(crate) fn response_header_from_pingora(upstream: &mut pingora_http::Response
 /// ```
 ///
 /// [`Rejection`]: praxis_filter::Rejection
-#[allow(clippy::cognitive_complexity, reason = "error handling branches")]
+#[expect(clippy::cognitive_complexity, reason = "error handling branches")]
 pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) {
     debug!(status = rejection.status, "sending rejection response");
     session.set_keepalive(None);
 
     let mut header = build_rejection_header(&rejection);
     let has_body = rejection.body.is_some();
-    if let Some(ref body) = rejection.body {
+    if let Some(body) = &rejection.body {
         let _insert = header.insert_header("content-length", body.len().to_string());
     }
     if let Err(e) = session.write_response_header(Box::new(header), !has_body).await {
@@ -113,7 +113,7 @@ fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader
         Ok(h) => h,
         Err(e) => {
             tracing::warn!(status = rejection.status, error = %e, "invalid rejection status; using 500");
-            #[allow(clippy::expect_used, reason = "500 is a valid status code")]
+            #[expect(clippy::expect_used, reason = "500 is a valid status code")]
             pingora_http::ResponseHeader::build(500, header_count).expect("500 is a valid status code")
         },
     };
@@ -155,6 +155,7 @@ pub(crate) fn apply_connection_options(peer: &mut HttpPeer, opts: &ConnectionOpt
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,

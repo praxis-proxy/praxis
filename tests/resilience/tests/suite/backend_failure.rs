@@ -4,7 +4,7 @@
 //! Tests for proxy behavior when backends are unreachable, slow, or drop connections mid-request.
 
 use std::{
-    io::{Read, Write},
+    io::{Read as _, Write as _},
     net::TcpStream,
     time::{Duration, Instant},
 };
@@ -264,7 +264,7 @@ fn start_connection_drop_backend() -> u16 {
         for stream in listener.incoming().flatten() {
             std::thread::spawn(move || {
                 let mut s = stream;
-                let mut buf = [0u8; 1024];
+                let mut buf = [0_u8; 1024];
                 let _bytes = s.read(&mut buf);
                 drop(s);
             });
@@ -282,7 +282,7 @@ fn start_hang_backend() -> u16 {
             std::thread::spawn(move || {
                 let mut s = stream;
                 drop(s.set_read_timeout(Some(Duration::from_secs(30))));
-                let mut buf = [0u8; 4096];
+                let mut buf = [0_u8; 4096];
                 loop {
                     match s.read(&mut buf) {
                         Ok(0) | Err(_) => break,
@@ -304,7 +304,7 @@ fn start_partial_response_backend() -> u16 {
             std::thread::spawn(move || {
                 let mut s = stream;
                 drop(s.set_read_timeout(Some(Duration::from_secs(5))));
-                let mut buf = [0u8; 4096];
+                let mut buf = [0_u8; 4096];
                 let _bytes = s.read(&mut buf);
                 let _sent = s.write_all(b"HTTP/1.1 200 OK\r\n");
                 let _flushed = s.flush();

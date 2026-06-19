@@ -90,12 +90,12 @@ fn normalize(path: &str) -> String {
 }
 
 /// Return true when a path segment is exactly two literal or percent-encoded dots.
-#[allow(clippy::indexing_slicing, reason = "bounds checked by i + 2 < b.len()")]
+#[expect(clippy::indexing_slicing, reason = "bounds checked by i + 2 < b.len()")]
 fn is_traversal_segment(seg: &str) -> bool {
     if seg == ".." {
         return true;
     }
-    let mut dots = 0u16;
+    let mut dots = 0_u16;
     let mut i = 0;
     let b = seg.as_bytes();
     while i < b.len() {

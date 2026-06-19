@@ -24,6 +24,10 @@ use crate::{
 // FilterPipeline HTTP
 // -----------------------------------------------------------------------------
 
+#[expect(
+    clippy::multiple_inherent_impl,
+    reason = "pipeline concerns are split across modules"
+)]
 impl FilterPipeline {
     /// Run all HTTP request filters in order.
     ///
@@ -34,8 +38,8 @@ impl FilterPipeline {
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails.
-    #[allow(clippy::indexing_slicing, reason = "while loop bounds idx")]
-    #[allow(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
+    #[expect(clippy::indexing_slicing, reason = "while loop bounds idx")]
+    #[expect(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
     pub async fn execute_http_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         ctx.executed_filter_indices = vec![false; self.filters.len()];
         ctx.body_done_indices = vec![false; self.filters.len()];
@@ -78,7 +82,6 @@ impl FilterPipeline {
     /// Returns [`FilterError`] if any filter fails.
     ///
     /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
-    #[allow(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
     pub async fn execute_http_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         for (idx, pf) in self.filters.iter().enumerate().rev() {
             if ctx.executed_filter_indices.get(idx) == Some(&false) {
@@ -116,8 +119,8 @@ impl FilterPipeline {
     /// Returns [`FilterError`] if any body filter fails.
     ///
     /// [`BodyDone`]: FilterAction::BodyDone
-    #[allow(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
-    #[allow(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
+    #[expect(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
+    #[expect(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
     pub async fn execute_http_request_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -165,8 +168,7 @@ impl FilterPipeline {
     /// Returns [`FilterError`] if any body filter fails.
     ///
     /// [`BodyDone`]: FilterAction::BodyDone
-    #[allow(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
-    #[allow(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
+    #[expect(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
     pub fn execute_http_response_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -271,6 +273,7 @@ async fn run_request_filter(
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
@@ -289,7 +292,7 @@ mod tests {
 
     #[test]
     fn accumulate_body_bytes_increments_with_some() {
-        let mut counter = 0u64;
+        let mut counter = 0_u64;
         let body = Some(Bytes::from_static(b"hello"));
         accumulate_body_bytes(&mut counter, &body);
         assert_eq!(counter, 5, "counter should equal body length");
@@ -297,7 +300,7 @@ mod tests {
 
     #[test]
     fn accumulate_body_bytes_multiple_chunks() {
-        let mut counter = 0u64;
+        let mut counter = 0_u64;
         accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"abc")));
         accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"de")));
         assert_eq!(counter, 5, "counter should accumulate across calls");
@@ -305,14 +308,14 @@ mod tests {
 
     #[test]
     fn accumulate_body_bytes_noop_with_none() {
-        let mut counter = 10u64;
+        let mut counter = 10_u64;
         accumulate_body_bytes(&mut counter, &None);
         assert_eq!(counter, 10, "counter should be unchanged when body is None");
     }
 
     #[test]
     fn accumulate_body_bytes_noop_with_empty() {
-        let mut counter = 0u64;
+        let mut counter = 0_u64;
         accumulate_body_bytes(&mut counter, &Some(Bytes::new()));
         assert_eq!(counter, 0, "counter should be unchanged when body is empty");
     }

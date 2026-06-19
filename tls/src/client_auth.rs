@@ -151,6 +151,7 @@ fn load_ca_root_store(ca_path: &str) -> Result<RootCertStore, TlsError> {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
@@ -225,7 +226,7 @@ mod tests {
         let err = load_ca_root_store(empty_path.to_str().expect("path should be valid UTF-8"))
             .expect_err("empty PEM should fail");
         assert!(
-            matches!(err, TlsError::FileLoadError { ref detail, .. } if detail.contains("no certificates")),
+            matches!(&err, TlsError::FileLoadError { detail, .. } if detail.contains("no certificates")),
             "error should mention no certificates, got: {err}"
         );
     }

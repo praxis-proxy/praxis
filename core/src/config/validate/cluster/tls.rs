@@ -22,11 +22,11 @@ use crate::{
 ///
 /// [`InsecureOptions`]: crate::config::InsecureOptions
 pub(super) fn validate_tls_settings(cluster: &Cluster, insecure_options: &InsecureOptions) -> Result<(), ProxyError> {
-    let Some(ref tls) = cluster.tls else {
+    let Some(tls) = &cluster.tls else {
         return Ok(());
     };
 
-    if let Some(ref sni) = tls.sni {
+    if let Some(sni) = &tls.sni {
         validate_sni(sni, &cluster.name)?;
     }
 
@@ -130,6 +130,7 @@ fn validate_sni_labels(sni: &str, cluster_name: &str) -> Result<(), ProxyError> 
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
     clippy::unwrap_used,
     clippy::expect_used,
