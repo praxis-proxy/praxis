@@ -8,8 +8,9 @@ use std::sync::Arc;
 use serde_json::json;
 
 use super::{
-    ConversationRecord, PostgresResponseStore, ResponseRecord, ResponseStoreRegistry, SqliteResponseStore, SslMode,
-    StoreError, trait_def::ResponseStore,
+    ConversationItemRecord, ConversationRecord, PostgresResponseStore, ResponseRecord, ResponseStoreRegistry,
+    SqliteResponseStore, SslMode, StoreError,
+    trait_def::{ConversationItemStore as _, ResponseStore},
 };
 use crate::builtins::http::ai::openai::responses::store::{ListParams, Order, list_input_items};
 
@@ -593,6 +594,367 @@ async fn delete_conversation_tenant_isolation() {
 }
 
 // -----------------------------------------------------------------------------
+// Conversation Item CRUD (SQLite)
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn conversation_items_paginate_ascending_and_descending() {
+    let store = make_store_with_items().await;
+    let items = [
+        make_conversation_item("item_1", "tenant_a", "conv_1", 1),
+        make_conversation_item("item_2", "tenant_a", "conv_1", 2),
+        make_conversation_item("item_3", "tenant_a", "conv_1", 3),
+        make_conversation_item("item_4", "tenant_a", "conv_1", 4),
+    ];
+    store
+        .create_conversation_items(&items)
+        .await
+        .expect("item insert should succeed");
+
+    let asc = store
+        .list_conversation_items("tenant_a", "conv_1", None, 2, true)
+        .await
+        .expect("ascending list should succeed");
+    assert_item_ids(&asc, &["item_1", "item_2"]);
+
+    let asc_page2 = store
+        .list_conversation_items("tenant_a", "conv_1", Some("item_2"), 2, true)
+        .await
+        .expect("ascending page 2 should succeed");
+    assert_item_ids(&asc_page2, &["item_3", "item_4"]);
+
+    let desc = store
+        .list_conversation_items("tenant_a", "conv_1", None, 2, false)
+        .await
+        .expect("descending list should succeed");
+    assert_item_ids(&desc, &["item_4", "item_3"]);
+
+    let desc_page2 = store
+        .list_conversation_items("tenant_a", "conv_1", Some("item_3"), 2, false)
+        .await
+        .expect("descending page 2 should succeed");
+    assert_item_ids(&desc_page2, &["item_2", "item_1"]);
+}
+
+#[tokio::test]
+async fn conversation_items_paginate_duplicate_positions() {
+    let store = make_store_with_items().await;
+    let items = [
+        make_conversation_item("item_a", "tenant_a", "conv_1", 1),
+        make_conversation_item("item_b", "tenant_a", "conv_1", 1),
+        make_conversation_item("item_c", "tenant_a", "conv_1", 1),
+        make_conversation_item("item_d", "tenant_a", "conv_1", 2),
+    ];
+    store
+        .create_conversation_items(&items)
+        .await
+        .expect("item insert should succeed");
+
+    let page1 = store
+        .list_conversation_items("tenant_a", "conv_1", None, 2, true)
+        .await
+        .expect("page 1 should succeed");
+    assert_item_ids(&page1, &["item_a", "item_b"]);
+
+    let page2 = store
+        .list_conversation_items("tenant_a", "conv_1", Some("item_b"), 2, true)
+        .await
+        .expect("page 2 should succeed");
+    assert_item_ids(&page2, &["item_c", "item_d"]);
+}
+
+#[tokio::test]
+async fn conversation_item_single_ops_scope_to_conversation() {
+    let store = make_store_with_items().await;
+    let item_conv1 = make_conversation_item("item_1", "tenant_a", "conv_1", 1);
+    let item_conv2 = make_conversation_item("item_2", "tenant_a", "conv_2", 1);
+    store
+        .create_conversation_items(&[item_conv1, item_conv2])
+        .await
+        .expect("item insert should succeed");
+
+    let get_wrong_conv = store
+        .get_conversation_item("tenant_a", "conv_2", "item_1")
+        .await
+        .expect("get should succeed");
+    assert!(get_wrong_conv.is_none(), "item_1 should not be visible in conv_2");
+
+    let delete_wrong_conv = store
+        .delete_conversation_item("tenant_a", "conv_2", "item_1")
+        .await
+        .expect("delete should succeed");
+    assert!(!delete_wrong_conv, "deleting item_1 from conv_2 should return false");
+
+    let still_exists = store
+        .get_conversation_item("tenant_a", "conv_1", "item_1")
+        .await
+        .expect("get should succeed");
+    assert!(still_exists.is_some(), "item_1 should still exist in conv_1");
+}
+
+#[tokio::test]
+async fn max_item_position_returns_zero_when_empty() {
+    let store = make_store_with_items().await;
+    let max = store
+        .max_item_position("tenant_a", "conv_1")
+        .await
+        .expect("max_item_position should succeed");
+    assert_eq!(max, 0, "empty conversation should have max position 0");
+}
+
+#[tokio::test]
+async fn max_item_position_returns_highest() {
+    let store = make_store_with_items().await;
+    let items = [
+        make_conversation_item("item_1", "tenant_a", "conv_1", 5),
+        make_conversation_item("item_2", "tenant_a", "conv_1", 10),
+        make_conversation_item("item_3", "tenant_a", "conv_1", 3),
+    ];
+    store
+        .create_conversation_items(&items)
+        .await
+        .expect("item insert should succeed");
+
+    let max = store
+        .max_item_position("tenant_a", "conv_1")
+        .await
+        .expect("max_item_position should succeed");
+    assert_eq!(max, 10, "max position should be 10");
+}
+
+#[tokio::test]
+async fn delete_conversation_items_removes_all() {
+    let store = make_store_with_items().await;
+    let items = [
+        make_conversation_item("item_1", "tenant_a", "conv_1", 1),
+        make_conversation_item("item_2", "tenant_a", "conv_1", 2),
+    ];
+    store
+        .create_conversation_items(&items)
+        .await
+        .expect("item insert should succeed");
+
+    store
+        .delete_conversation_items("tenant_a", "conv_1")
+        .await
+        .expect("delete_conversation_items should succeed");
+
+    let remaining = store
+        .list_conversation_items("tenant_a", "conv_1", None, 100, true)
+        .await
+        .expect("list should succeed");
+    assert!(remaining.is_empty(), "all items should be deleted");
+}
+
+#[tokio::test]
+async fn conversation_item_tenant_isolation() {
+    let store = make_store_with_items().await;
+    let item = make_conversation_item("item_1", "tenant_a", "conv_1", 1);
+    store
+        .create_conversation_items(&[item])
+        .await
+        .expect("item insert should succeed");
+
+    let cross_tenant = store
+        .get_conversation_item("tenant_b", "conv_1", "item_1")
+        .await
+        .expect("cross-tenant get should succeed");
+    assert!(cross_tenant.is_none(), "tenant_b should not see tenant_a items");
+
+    let cross_tenant_list = store
+        .list_conversation_items("tenant_b", "conv_1", None, 100, true)
+        .await
+        .expect("cross-tenant list should succeed");
+    assert!(cross_tenant_list.is_empty(), "tenant_b should see no items");
+}
+
+#[tokio::test]
+async fn conversation_item_upsert_updates_existing() {
+    let store = make_store_with_items().await;
+    let original = make_conversation_item("item_1", "tenant_a", "conv_1", 1);
+    let updated = ConversationItemRecord {
+        item_data: json!({"type": "message", "role": "assistant", "content": "updated"}),
+        created_at: 2000,
+        position: 2,
+        ..make_conversation_item("item_1", "tenant_a", "conv_1", 1)
+    };
+
+    store
+        .create_conversation_items(&[original])
+        .await
+        .expect("initial item insert should succeed");
+    store
+        .create_conversation_items(&[updated])
+        .await
+        .expect("duplicate item insert should upsert");
+
+    let fetched = store
+        .get_conversation_item("tenant_a", "conv_1", "item_1")
+        .await
+        .expect("get should succeed")
+        .expect("item should exist after upsert");
+
+    assert_eq!(fetched.position, 2, "upsert should update position");
+    assert_eq!(fetched.created_at, 2000, "upsert should update created_at");
+    assert_eq!(
+        fetched.item_data,
+        json!({"type": "message", "role": "assistant", "content": "updated"}),
+        "upsert should update item data"
+    );
+}
+
+#[tokio::test]
+async fn get_conversation_item_returns_all_fields() {
+    let store = make_store_with_items().await;
+    let item = ConversationItemRecord {
+        item_id: "item_99".to_owned(),
+        tenant_id: "tenant_a".to_owned(),
+        conversation_id: "conv_1".to_owned(),
+        item_data: json!({"type": "function_call", "name": "search"}),
+        created_at: 5000,
+        position: 42,
+    };
+    store
+        .create_conversation_items(&[item])
+        .await
+        .expect("item insert should succeed");
+
+    let fetched = store
+        .get_conversation_item("tenant_a", "conv_1", "item_99")
+        .await
+        .expect("get should succeed")
+        .expect("item should exist");
+
+    assert_eq!(fetched.item_id, "item_99", "item_id should match");
+    assert_eq!(fetched.tenant_id, "tenant_a", "tenant_id should match");
+    assert_eq!(fetched.conversation_id, "conv_1", "conversation_id should match");
+    assert_eq!(
+        fetched.item_data,
+        json!({"type": "function_call", "name": "search"}),
+        "item_data should round-trip"
+    );
+    assert_eq!(fetched.created_at, 5000, "created_at should match");
+    assert_eq!(fetched.position, 42, "position should match");
+}
+
+#[tokio::test]
+async fn list_conversation_items_nonexistent_cursor_returns_empty() {
+    let store = make_store_with_items().await;
+    let item = make_conversation_item("item_1", "tenant_a", "conv_1", 1);
+    store
+        .create_conversation_items(&[item])
+        .await
+        .expect("item insert should succeed");
+
+    let result = store
+        .list_conversation_items("tenant_a", "conv_1", Some("nonexistent"), 10, true)
+        .await
+        .expect("list with nonexistent cursor should succeed");
+
+    assert!(result.is_empty(), "nonexistent cursor item should return empty list");
+}
+
+#[tokio::test]
+async fn delete_conversation_cascades_to_items() {
+    let store = make_store_with_items().await;
+    let conv = ConversationRecord {
+        conversation_id: "conv_1".to_owned(),
+        tenant_id: "tenant_a".to_owned(),
+        created_at: 1000,
+        metadata: json!({}),
+        messages: json!([]),
+    };
+    store
+        .upsert_conversation(&conv)
+        .await
+        .expect("conversation upsert should succeed");
+
+    let items = [
+        make_conversation_item("item_1", "tenant_a", "conv_1", 1),
+        make_conversation_item("item_2", "tenant_a", "conv_1", 2),
+    ];
+    store
+        .create_conversation_items(&items)
+        .await
+        .expect("item insert should succeed");
+
+    let deleted = store
+        .delete_conversation("tenant_a", "conv_1")
+        .await
+        .expect("delete_conversation should succeed");
+    assert!(deleted, "conversation should have been deleted");
+
+    let remaining = store
+        .list_conversation_items("tenant_a", "conv_1", None, 100, true)
+        .await
+        .expect("list should succeed");
+    assert!(
+        remaining.is_empty(),
+        "items should be cascade-deleted with conversation"
+    );
+}
+
+#[tokio::test]
+async fn conversation_item_methods_fail_without_items_table() {
+    let store = make_store().await;
+    let item = make_conversation_item("item_1", "tenant_a", "conv_1", 1);
+
+    let err = store.create_conversation_items(&[item]).await.unwrap_err();
+    assert!(
+        matches!(err, StoreError::Unavailable(_)),
+        "create should return Unavailable"
+    );
+
+    let err = store
+        .list_conversation_items("tenant_a", "conv_1", None, 10, true)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, StoreError::Unavailable(_)),
+        "list should return Unavailable"
+    );
+
+    let err = store
+        .get_conversation_item("tenant_a", "conv_1", "item_1")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, StoreError::Unavailable(_)),
+        "get should return Unavailable"
+    );
+
+    let err = store
+        .delete_conversation_item("tenant_a", "conv_1", "item_1")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, StoreError::Unavailable(_)),
+        "delete_item should return Unavailable"
+    );
+
+    let err = store
+        .conversation_item_position("tenant_a", "conv_1", "item_1")
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, StoreError::Unavailable(_)),
+        "position should return Unavailable"
+    );
+
+    let err = store.max_item_position("tenant_a", "conv_1").await.unwrap_err();
+    assert!(
+        matches!(err, StoreError::Unavailable(_)),
+        "max_position should return Unavailable"
+    );
+
+    let err = store.delete_conversation_items("tenant_a", "conv_1").await.unwrap_err();
+    assert!(
+        matches!(err, StoreError::Unavailable(_)),
+        "delete_items should return Unavailable"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Registry
 // -----------------------------------------------------------------------------
 
@@ -1055,6 +1417,318 @@ async fn pg_conversation_tenant_isolation() {
 }
 
 // -----------------------------------------------------------------------------
+// Conversation Item CRUD (PostgreSQL)
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore]
+async fn pg_conversation_items_paginate_ascending_and_descending() {
+    let store = make_pg_store_with_items().await;
+    let items = [
+        make_conversation_item("item_1", "tenant_a", "conv_1", 1),
+        make_conversation_item("item_2", "tenant_a", "conv_1", 2),
+        make_conversation_item("item_3", "tenant_a", "conv_1", 3),
+        make_conversation_item("item_4", "tenant_a", "conv_1", 4),
+    ];
+    store
+        .create_conversation_items(&items)
+        .await
+        .expect("item insert should succeed");
+
+    let asc = store
+        .list_conversation_items("tenant_a", "conv_1", None, 2, true)
+        .await
+        .expect("ascending list should succeed");
+    assert_item_ids(&asc, &["item_1", "item_2"]);
+
+    let asc_page2 = store
+        .list_conversation_items("tenant_a", "conv_1", Some("item_2"), 2, true)
+        .await
+        .expect("ascending page 2 should succeed");
+    assert_item_ids(&asc_page2, &["item_3", "item_4"]);
+
+    let desc = store
+        .list_conversation_items("tenant_a", "conv_1", None, 2, false)
+        .await
+        .expect("descending list should succeed");
+    assert_item_ids(&desc, &["item_4", "item_3"]);
+
+    let desc_page2 = store
+        .list_conversation_items("tenant_a", "conv_1", Some("item_3"), 2, false)
+        .await
+        .expect("descending page 2 should succeed");
+    assert_item_ids(&desc_page2, &["item_2", "item_1"]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_conversation_items_paginate_duplicate_positions() {
+    let store = make_pg_store_with_items().await;
+    let items = [
+        make_conversation_item("item_a", "tenant_a", "conv_1", 1),
+        make_conversation_item("item_b", "tenant_a", "conv_1", 1),
+        make_conversation_item("item_c", "tenant_a", "conv_1", 1),
+        make_conversation_item("item_d", "tenant_a", "conv_1", 2),
+    ];
+    store
+        .create_conversation_items(&items)
+        .await
+        .expect("item insert should succeed");
+
+    let page1 = store
+        .list_conversation_items("tenant_a", "conv_1", None, 2, true)
+        .await
+        .expect("page 1 should succeed");
+    assert_item_ids(&page1, &["item_a", "item_b"]);
+
+    let page2 = store
+        .list_conversation_items("tenant_a", "conv_1", Some("item_b"), 2, true)
+        .await
+        .expect("page 2 should succeed");
+    assert_item_ids(&page2, &["item_c", "item_d"]);
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_conversation_item_single_ops_scope_to_conversation() {
+    let store = make_pg_store_with_items().await;
+    let item_conv1 = make_conversation_item("item_1", "tenant_a", "conv_1", 1);
+    let item_conv2 = make_conversation_item("item_2", "tenant_a", "conv_2", 1);
+    store
+        .create_conversation_items(&[item_conv1, item_conv2])
+        .await
+        .expect("item insert should succeed");
+
+    let get_wrong_conv = store
+        .get_conversation_item("tenant_a", "conv_2", "item_1")
+        .await
+        .expect("get should succeed");
+    assert!(get_wrong_conv.is_none(), "item_1 should not be visible in conv_2");
+
+    let delete_wrong_conv = store
+        .delete_conversation_item("tenant_a", "conv_2", "item_1")
+        .await
+        .expect("delete should succeed");
+    assert!(!delete_wrong_conv, "deleting item_1 from conv_2 should return false");
+
+    let still_exists = store
+        .get_conversation_item("tenant_a", "conv_1", "item_1")
+        .await
+        .expect("get should succeed");
+    assert!(still_exists.is_some(), "item_1 should still exist in conv_1");
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_max_item_position_returns_zero_when_empty() {
+    let store = make_pg_store_with_items().await;
+    let max = store
+        .max_item_position("tenant_a", "conv_1")
+        .await
+        .expect("max_item_position should succeed");
+    assert_eq!(max, 0, "empty conversation should have max position 0");
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_max_item_position_returns_highest() {
+    let store = make_pg_store_with_items().await;
+    let items = [
+        make_conversation_item("item_1", "tenant_a", "conv_1", 5),
+        make_conversation_item("item_2", "tenant_a", "conv_1", 10),
+        make_conversation_item("item_3", "tenant_a", "conv_1", 3),
+    ];
+    store
+        .create_conversation_items(&items)
+        .await
+        .expect("item insert should succeed");
+
+    let max = store
+        .max_item_position("tenant_a", "conv_1")
+        .await
+        .expect("max_item_position should succeed");
+    assert_eq!(max, 10, "max position should be 10");
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_delete_conversation_items_removes_all() {
+    let store = make_pg_store_with_items().await;
+    let items = [
+        make_conversation_item("item_1", "tenant_a", "conv_1", 1),
+        make_conversation_item("item_2", "tenant_a", "conv_1", 2),
+    ];
+    store
+        .create_conversation_items(&items)
+        .await
+        .expect("item insert should succeed");
+
+    store
+        .delete_conversation_items("tenant_a", "conv_1")
+        .await
+        .expect("delete_conversation_items should succeed");
+
+    let remaining = store
+        .list_conversation_items("tenant_a", "conv_1", None, 100, true)
+        .await
+        .expect("list should succeed");
+    assert!(remaining.is_empty(), "all items should be deleted");
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_conversation_item_tenant_isolation() {
+    let store = make_pg_store_with_items().await;
+    let item = make_conversation_item("item_1", "tenant_a", "conv_1", 1);
+    store
+        .create_conversation_items(&[item])
+        .await
+        .expect("item insert should succeed");
+
+    let cross_tenant = store
+        .get_conversation_item("tenant_b", "conv_1", "item_1")
+        .await
+        .expect("cross-tenant get should succeed");
+    assert!(cross_tenant.is_none(), "tenant_b should not see tenant_a items");
+
+    let cross_tenant_list = store
+        .list_conversation_items("tenant_b", "conv_1", None, 100, true)
+        .await
+        .expect("cross-tenant list should succeed");
+    assert!(cross_tenant_list.is_empty(), "tenant_b should see no items");
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_conversation_item_upsert_updates_existing() {
+    let store = make_pg_store_with_items().await;
+    let original = make_conversation_item("item_1", "tenant_a", "conv_1", 1);
+    let updated = ConversationItemRecord {
+        item_data: json!({"type": "message", "role": "assistant", "content": "updated"}),
+        created_at: 2000,
+        position: 2,
+        ..make_conversation_item("item_1", "tenant_a", "conv_1", 1)
+    };
+
+    store
+        .create_conversation_items(&[original])
+        .await
+        .expect("initial item insert should succeed");
+    store
+        .create_conversation_items(&[updated])
+        .await
+        .expect("duplicate item insert should upsert");
+
+    let fetched = store
+        .get_conversation_item("tenant_a", "conv_1", "item_1")
+        .await
+        .expect("get should succeed")
+        .expect("item should exist after upsert");
+
+    assert_eq!(fetched.position, 2, "upsert should update position");
+    assert_eq!(fetched.created_at, 2000, "upsert should update created_at");
+    assert_eq!(
+        fetched.item_data,
+        json!({"type": "message", "role": "assistant", "content": "updated"}),
+        "upsert should update item data"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_get_conversation_item_returns_all_fields() {
+    let store = make_pg_store_with_items().await;
+    let item = ConversationItemRecord {
+        item_id: "item_99".to_owned(),
+        tenant_id: "tenant_a".to_owned(),
+        conversation_id: "conv_1".to_owned(),
+        item_data: json!({"type": "function_call", "name": "search"}),
+        created_at: 5000,
+        position: 42,
+    };
+    store
+        .create_conversation_items(&[item])
+        .await
+        .expect("item insert should succeed");
+
+    let fetched = store
+        .get_conversation_item("tenant_a", "conv_1", "item_99")
+        .await
+        .expect("get should succeed")
+        .expect("item should exist");
+
+    assert_eq!(fetched.item_id, "item_99", "item_id should match");
+    assert_eq!(fetched.tenant_id, "tenant_a", "tenant_id should match");
+    assert_eq!(fetched.conversation_id, "conv_1", "conversation_id should match");
+    assert_eq!(
+        fetched.item_data,
+        json!({"type": "function_call", "name": "search"}),
+        "item_data should round-trip"
+    );
+    assert_eq!(fetched.created_at, 5000, "created_at should match");
+    assert_eq!(fetched.position, 42, "position should match");
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_list_conversation_items_nonexistent_cursor_returns_empty() {
+    let store = make_pg_store_with_items().await;
+    let item = make_conversation_item("item_1", "tenant_a", "conv_1", 1);
+    store
+        .create_conversation_items(&[item])
+        .await
+        .expect("item insert should succeed");
+
+    let result = store
+        .list_conversation_items("tenant_a", "conv_1", Some("nonexistent"), 10, true)
+        .await
+        .expect("list with nonexistent cursor should succeed");
+
+    assert!(result.is_empty(), "nonexistent cursor item should return empty list");
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_delete_conversation_cascades_to_items() {
+    let store = make_pg_store_with_items().await;
+    let conv = ConversationRecord {
+        conversation_id: "conv_1".to_owned(),
+        tenant_id: "tenant_a".to_owned(),
+        created_at: 1000,
+        metadata: json!({}),
+        messages: json!([]),
+    };
+    store
+        .upsert_conversation(&conv)
+        .await
+        .expect("conversation upsert should succeed");
+
+    let items = [
+        make_conversation_item("item_1", "tenant_a", "conv_1", 1),
+        make_conversation_item("item_2", "tenant_a", "conv_1", 2),
+    ];
+    store
+        .create_conversation_items(&items)
+        .await
+        .expect("item insert should succeed");
+
+    let deleted = store
+        .delete_conversation("tenant_a", "conv_1")
+        .await
+        .expect("delete_conversation should succeed");
+    assert!(deleted, "conversation should have been deleted");
+
+    let remaining = store
+        .list_conversation_items("tenant_a", "conv_1", None, 100, true)
+        .await
+        .expect("list should succeed");
+    assert!(
+        remaining.is_empty(),
+        "items should be cascade-deleted with conversation"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
@@ -1062,6 +1736,56 @@ async fn make_store() -> SqliteResponseStore {
     SqliteResponseStore::new("sqlite::memory:", "test_responses", "test_conversation_messages", None)
         .await
         .expect("store creation should succeed")
+}
+
+async fn make_store_with_items() -> SqliteResponseStore {
+    SqliteResponseStore::new(
+        "sqlite::memory:",
+        "test_responses",
+        "test_conversation_messages",
+        Some("test_conversation_items"),
+    )
+    .await
+    .expect("store creation should succeed")
+}
+
+async fn make_pg_store_with_items() -> PostgresResponseStore {
+    let url = pg_database_url();
+    let suffix = pg_unique_suffix();
+    let responses_table = format!("test_responses_{suffix}");
+    let conversations_table = format!("test_conversations_{suffix}");
+    let items_table = format!("test_conversation_items_{suffix}");
+    PostgresResponseStore::new(
+        &url,
+        &responses_table,
+        &conversations_table,
+        Some(&items_table),
+        Some(SslMode::Disable),
+        None,
+    )
+    .await
+    .expect("postgres store creation should succeed")
+}
+
+fn make_conversation_item(
+    item_id: &str,
+    tenant_id: &str,
+    conversation_id: &str,
+    position: i64,
+) -> ConversationItemRecord {
+    ConversationItemRecord {
+        item_id: item_id.to_owned(),
+        tenant_id: tenant_id.to_owned(),
+        conversation_id: conversation_id.to_owned(),
+        item_data: json!({"type": "message", "role": "user", "content": "test"}),
+        created_at: 1000,
+        position,
+    }
+}
+
+fn assert_item_ids(items: &[ConversationItemRecord], expected: &[&str]) {
+    let ids: Vec<&str> = items.iter().map(|i| i.item_id.as_str()).collect();
+    assert_eq!(ids, expected, "item IDs should match expected order");
 }
 
 fn make_response_record(id: &str, tenant_id: &str, created_at: i64) -> ResponseRecord {
