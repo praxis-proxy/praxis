@@ -240,7 +240,11 @@ struct TokenCountConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ProviderKind {
-    Openai,
+    /// Variant name matches YAML `snake_case` via serde. Note that
+    /// `TokenUsageProvider` in `token_usage/mod.rs` uses `OpenAi`
+    /// (capital I). A private `to_library_provider` conversion function
+    /// maps `ProviderKind → TokenUsageProvider` at the call site.
+    OpenAi,
     Anthropic,
     Google,
     Bedrock,
@@ -260,7 +264,7 @@ pub struct TokenCountFilter {
 | `on_request` | No-op; returns `Continue` |
 | `on_response` | Detects `text/event-stream` content type and stores an `is_sse` flag in `FilterContext` metadata. For `bedrock_invoke_model`, reads token headers and calls `ctx.set_token_usage` |
 | `response_body_access` | `BodyAccess::None` for `bedrock_invoke_model`; `BodyAccess::ReadOnly` for all others |
-| `response_body_mode` | `BodyMode::StreamBuffer { max_bytes: Some(8 MiB) }` for all providers (body ignored for Bedrock InvokeModel via early return) |
+| `response_body_mode` | `BodyMode::Stream` for `bedrock_invoke_model` (no buffering needed); `BodyMode::StreamBuffer { max_bytes: Some(8 MiB) }` for all others |
 | `on_response_body` | Triggered once at `end_of_stream`. Reads the `is_sse` flag; calls `extract_from_sse` for SSE or `extract_token_usage` for JSON; writes result via `ctx.set_token_usage` |
 
 ### SSE Extraction Detail
@@ -322,6 +326,12 @@ registry.register_http("token_count", TokenCountFilter::from_config);
 ### YAML Configuration Example
 
 ```yaml
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - token-counting
+
 filter_chains:
   - name: token-counting
     filters:
