@@ -115,7 +115,6 @@ filter_chains:
           headers:
             Authorization: "Bearer ${LAKERA_API_KEY}"
         request:
-          body_from: request_body
           max_body_bytes: 1048576  # 1 MiB
         response:
           extract:
@@ -197,6 +196,13 @@ filter_chains:
   in `praxis-proto`.
 - **NGINX auth_request** — sub-request to an authorization
   endpoint; response status controls access.
+- **Lakera Guard** — HTTP content-safety API
+  (`POST /v2/guard`) that returns structured
+  `{"flagged": …, "categories": {…}}` decisions.
+  Used throughout this proposal as the motivating
+  example of an inline policy callout.
+- **OpenAI Moderation API** — similar HTTP endpoint
+  for content classification.
 
 ## How?
 
@@ -322,9 +328,15 @@ a string and written to `FilterResultSet`:
 
 #### Request flow
 
+The entry point depends on the configured `phase`:
+
 ```text
-on_request_body(end_of_stream=true)
-  │
+phase: request_headers          phase: request_body (default)
+  on_request()                    on_request_body(end_of_stream=true)
+  │  (empty body)                 │  (buffered request body)
+  │                               │
+  └──────────────┬────────────────┘
+                 │
   ├─ depth check ──► >= max_depth? ──► apply failure_mode
   │
   ├─ circuit breaker check ──► Open? ──► apply failure_mode
@@ -334,7 +346,7 @@ on_request_body(end_of_stream=true)
   │   headers: static config headers
   │          + forwarded downstream headers
   │          + x-praxis-callout-depth: <N+1>
-  │   body: buffered request body
+  │   body: buffered request body (or empty)
   │
   ├─ send with timeout ──► error? ──► record_failure
   │   (timeout covers only       apply failure_mode
@@ -351,13 +363,10 @@ on_request_body(end_of_stream=true)
   └─ return FilterAction::Continue
 ```
 
-For requests without a body (or when the operator only
-needs header-phase evaluation), the callout can
-optionally run in `on_request` instead. A config field
-`phase: request_headers | request_body` controls this.
 When `phase: request_headers`, the filter does not
 declare body access and the callout fires with an empty
-body.
+body. This is useful for header-only policy checks or
+requests without a body.
 
 #### Failure mode
 
@@ -442,8 +451,7 @@ target:
     - traceparent
     - x-request-id
 request:
-  phase: request_body         # or request_headers
-  body_from: request_body     # forward inbound body
+  phase: request_body         # or request_headers (empty body)
   max_body_bytes: 1048576     # 1 MiB (pipeline enforces 413)
 response:
   extract:
