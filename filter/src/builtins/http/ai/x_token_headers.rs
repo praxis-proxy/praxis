@@ -10,6 +10,7 @@
 //! when all three metadata keys are present.
 
 use async_trait::async_trait;
+use http::header::HeaderValue;
 
 use crate::{
     FilterAction, FilterError,
@@ -40,7 +41,8 @@ impl XTokenHeadersFilter {
     ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if the config contains unexpected fields.
+    /// Returns [`FilterError`] if the YAML config is malformed.
+    #[expect(clippy::unnecessary_wraps, reason = "signature required by registry")]
     pub fn from_config(_config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         Ok(Box::new(Self))
     }
@@ -65,9 +67,9 @@ impl HttpFilter for XTokenHeadersFilter {
 
         if let (Some(i), Some(o), Some(t)) = (input, output, total) {
             if let Some(resp) = ctx.response_header.as_mut() {
-                resp.headers.insert("x-token-input", i.to_string().parse().unwrap());
-                resp.headers.insert("x-token-output", o.to_string().parse().unwrap());
-                resp.headers.insert("x-token-total", t.to_string().parse().unwrap());
+                resp.headers.insert("x-token-input", HeaderValue::from(i));
+                resp.headers.insert("x-token-output", HeaderValue::from(o));
+                resp.headers.insert("x-token-total", HeaderValue::from(t));
                 modified = true;
             }
         }

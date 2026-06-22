@@ -421,6 +421,10 @@ mod tests {
         );
         #[cfg(feature = "cpex-policy-engine")]
         assert!(names.contains(&"policy"), "policy should be registered");
+        #[cfg(feature = "ai-inference")]
+        assert!(names.contains(&"token_count"), "token_count should be registered");
+        #[cfg(feature = "ai-inference")]
+        assert!(names.contains(&"x_token_headers"), "x_token_headers should be registered");
     }
 
     #[test]

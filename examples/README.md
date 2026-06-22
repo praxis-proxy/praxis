@@ -43,6 +43,7 @@ page.
 | [responses-routing.yaml](configs/ai/openai/responses/responses-routing.yaml) | Routes Responses API traffic by detected mode |
 | [prompt-enrichment.yaml](configs/ai/prompt-enrichment.yaml) | Injects system messages into OpenAI-compatible chat completion requests before forwarding to the upstream provider |
 | [token-usage-headers.yaml](configs/ai/token-usage-headers.yaml) | Inject Praxis-Token-Input, Praxis-Token-Output, and Praxis-Token-Total headers into downstream responses when token counts are available in filter metadata |
+| [token-counting.yaml](configs/ai/token-counting.yaml) | Extracts token usage from AI provider response bodies and headers, writes counts to filter metadata, and injects X-Token-Input, X-Token-Output, and X-Token-Total response headers |
 
 ### Branching
 
