@@ -183,11 +183,15 @@ fn extract_string_array(body: &serde_json::Value, field: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Extract a `u32` field by name.
+/// Extract a `u32` field by name, logging when a value is present
+/// but not representable as `u32`.
 fn extract_u32(body: &serde_json::Value, field: &str) -> Option<u32> {
-    body.get(field)
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|v| u32::try_from(v).ok())
+    let raw = body.get(field)?;
+    let result = raw.as_u64().and_then(|v| u32::try_from(v).ok());
+    if result.is_none() {
+        tracing::debug!(field, %raw, "ignoring non-u32 value");
+    }
+    result
 }
 
 /// Extract a bool field by name, returning a default if absent.
