@@ -151,7 +151,7 @@ fn build_server_state(config: &Config, registry: &FilterRegistry) -> ServerState
 fn register_protocols(
     server: &mut PingoraServerRuntime,
     config: &Config,
-    pipelines: &Arc<ListenerPipelines>,
+    pipelines: &ListenerPipelines,
 ) -> CertWatcherShutdowns {
     let mut all_shutdowns = Vec::new();
 
@@ -182,10 +182,10 @@ fn spawn_watcher(
     let path = config_path?;
     let handle = crate::watcher::spawn_config_watcher(crate::watcher::WatcherParams {
         config_path: path,
-        health_shutdown: Arc::clone(&state.health_shutdown),
+        health_shutdown: state.health_shutdown,
         initial_config: config,
         kv_stores: state.kv_stores,
-        pipelines: Arc::clone(&state.pipelines),
+        pipelines: state.pipelines,
         registry: Arc::new(registry),
         #[cfg(feature = "ai-inference")]
         response_stores: state.response_stores,
