@@ -197,12 +197,6 @@ filter_chains:
   in `praxis-proto`.
 - **NGINX auth_request** — sub-request to an authorization
   endpoint; response status controls access.
-- **Lakera Guard** — content-safety HTTP API for prompt
-  injection, PII, and harmful content detection
-  ([docs](https://docs.lakera.ai/docs/api/guard)).
-- **NVIDIA NeMo Guardrails** — self-hosted guardrails
-  server with configurable safety rails
-  ([docs](https://docs.nvidia.com/nemo/guardrails/latest/user-guides/server-guide.html)).
 
 ## How?
 
