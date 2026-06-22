@@ -200,6 +200,10 @@ filter_chains:
 
 ## How?
 
+Via a library supporting a call-out client, safely usable within filters.
+A generic HTTP call out filter will be supplied both as a utility and a
+reference implementation.
+
 ### Requirements
 
 1. **HTTP client pool** — a connection-pooled
