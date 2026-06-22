@@ -67,6 +67,16 @@ use crate::{
 /// Maximum length of a body-derived value promoted to headers or filter results.
 const MAX_PROMOTED_VALUE_LEN: usize = 256;
 
+/// Default store name used when registering the response store in the
+/// per-request registry.
+pub(crate) const DEFAULT_STORE_NAME: &str = "default";
+
+/// Metadata key for tenant isolation.
+pub(crate) const TENANT_METADATA_KEY: &str = "responses.tenant_id";
+
+/// Fallback tenant ID when no tenant metadata is present.
+pub(crate) const DEFAULT_TENANT_ID: &str = "default";
+
 // -----------------------------------------------------------------------------
 // ResponsesFormatFilter
 // -----------------------------------------------------------------------------
