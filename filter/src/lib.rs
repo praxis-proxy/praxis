@@ -38,9 +38,9 @@ pub mod ai {
     pub use crate::builtins::{
         AiGuardrailsFilter, AnthropicMessagesFormatFilter, AnthropicMessagesProtocolFilter,
         AnthropicStreamEventsFilter, AnthropicToOpenaiFilter, AnthropicValidateFilter, ModelRewriteFilter,
-        ModelToHeaderFilter, OpenaiResponsesValidateFilter, PromptEnrichFilter, RehydrateFilter, ResponseStoreFilter,
-        ResponseStoreRegistry, ResponsesFormatFilter, ResponsesProxyFilter, TokenUsage, TokenUsageProvider,
-        extract_token_usage, set_token_usage,
+        ModelToHeaderFilter, OpenaiResponsesToChatCompletionsFilter, OpenaiResponsesValidateFilter, PromptEnrichFilter,
+        RehydrateFilter, ResponseStoreFilter, ResponseStoreRegistry, ResponsesFormatFilter, ResponsesProxyFilter,
+        TokenUsage, TokenUsageProvider, extract_token_usage, set_token_usage,
     };
 }
 pub use context::{HttpFilterContext, Request, Response};

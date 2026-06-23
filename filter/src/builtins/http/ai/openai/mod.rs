@@ -17,4 +17,6 @@ pub use responses::ModelRewriteFilter;
 pub use responses::OpenaiResponsesValidateFilter;
 #[cfg(feature = "ai-inference")]
 pub use responses::RehydrateFilter;
-pub use responses::{ResponseStoreFilter, ResponsesFormatFilter, proxy::ResponsesProxyFilter};
+pub use responses::{
+    OpenaiResponsesToChatCompletionsFilter, ResponseStoreFilter, ResponsesFormatFilter, proxy::ResponsesProxyFilter,
+};

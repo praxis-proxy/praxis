@@ -243,6 +243,14 @@ rather than bolted-on external processors.
   IDs, and generates cryptographically random response
   and conversation IDs with `resp_` and `conv_`
   prefixes.
+- **Responses-to-Chat-Completions translation**
+  (`openai_responses_to_chat_completions`): rewrites
+  non-streaming `/v1/responses` creates to Chat
+  Completions-compatible request bodies, maps
+  successful non-streaming Chat Completions responses
+  back to Responses resources, and rejects streaming
+  translation until per-event Responses stream support
+  is available.
 
 ### Planned
 

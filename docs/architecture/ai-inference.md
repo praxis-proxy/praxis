@@ -138,6 +138,19 @@ Validates Responses API parameter combinations
 cryptographically random response and conversation
 IDs with `resp_` and `conv_` prefixes.
 
+### `openai_responses_to_chat_completions`
+
+Rewrites non-streaming Responses API create requests
+into Chat Completions-compatible request bodies and
+maps successful non-streaming Chat Completions
+responses back into Responses resources. This lets
+`/v1/responses` clients reach providers that support
+Chat Completions before they support Responses.
+
+Streaming requests are rejected with a clear 400
+response until a Responses stream-events filter can
+translate Chat Completions SSE chunks event-by-event.
+
 ### `anthropic_messages_format`
 
 Classifies Anthropic Messages API requests and
