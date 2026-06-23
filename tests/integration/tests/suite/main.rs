@@ -41,6 +41,8 @@ mod a2a;
 mod adversarial;
 mod agentic_mocks;
 #[cfg(feature = "ai-inference")]
+mod ai_guardrails;
+#[cfg(feature = "ai-inference")]
 mod anthropic_messages;
 mod body;
 mod body_pipeline;

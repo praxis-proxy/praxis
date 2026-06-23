@@ -215,7 +215,34 @@ provider:
 }
 
 #[tokio::test]
-async fn on_request_body_passes_through() {
+async fn on_request_body_skips_evaluation_when_phase_request_disabled() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+provider:
+  type: nemo
+  endpoint: "http://nemo:8000/v1/guardrail/checks"
+phase:
+  request: false
+"#,
+    )
+    .unwrap();
+
+    let filter = AiGuardrailsFilter::from_config(&yaml).unwrap();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = br#"{"messages":[{"role":"user","content":"hello"}]}"#;
+    let mut body = Some(bytes::Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, crate::FilterAction::Continue),
+        "request phase disabled should skip provider and continue"
+    );
+}
+
+#[tokio::test]
+async fn on_request_body_returns_continue_before_end_of_stream() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 provider:
@@ -232,9 +259,10 @@ provider:
     let json = br#"{"messages":[{"role":"user","content":"hello"}]}"#;
     let mut body = Some(bytes::Bytes::from_static(json));
 
-    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    // end_of_stream = false: should buffer and continue without calling provider
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
     assert!(
         matches!(action, crate::FilterAction::Continue),
-        "stub provider should pass through"
+        "non-EOS chunk should continue without calling provider"
     );
 }

@@ -11,6 +11,8 @@ mod access_logging;
 mod admin_interface;
 mod agentic_routing;
 #[cfg(feature = "ai-inference")]
+mod ai_guardrails;
+#[cfg(feature = "ai-inference")]
 mod anthropic_messages;
 mod api_key_filter;
 mod basic_reverse_proxy;

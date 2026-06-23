@@ -24,7 +24,6 @@ pub(super) struct AiGuardrailsConfig {
     pub provider: ProviderConfig,
 
     /// Which phases to evaluate.
-    #[expect(dead_code, reason = "read once provider evaluation is wired (#578)")]
     #[serde(default)]
     pub phase: PhaseConfig,
 }
@@ -58,10 +57,6 @@ pub(super) struct ProviderConfig {
 #[serde(deny_unknown_fields)]
 pub(super) struct PhaseConfig {
     /// Evaluate client requests before forwarding to the upstream.
-    #[expect(
-        dead_code,
-        reason = "read by on_request_body once provider evaluation is wired (#578)"
-    )]
     #[serde(default = "default_true")]
     pub request: bool,
 

@@ -24,6 +24,7 @@ page.
 | ------ | ------------- |
 | [a2a-classifier-routing.yaml](configs/ai/a2a-classifier-routing.yaml) | Routes A2A requests by body-derived method, family, task ID, and streaming detection |
 | [a2a-task-routing.yaml](configs/ai/a2a-task-routing.yaml) | Captures task ownership from SendMessage JSON responses and SendStreamingMessage / SubscribeToTask SSE responses, then routes follow-up task operations back to the backend cluster that created the task |
+| [ai-guardrails.yaml](configs/ai/ai-guardrails.yaml) | Evaluates every OpenAI-compatible chat completion request against a NeMo Guardrails service before forwarding to the upstream provider |
 | [ai-inference-body-based-routing.yaml](configs/ai/ai-inference-body-based-routing.yaml) | Routes LLM API requests to different backends based on the `model` field in the JSON request body |
 | [messages-protocol.yaml](configs/ai/anthropic/messages-protocol.yaml) | Routes Anthropic Messages API requests to a native `/v1/messages` backend |
 | [messages-to-openai.yaml](configs/ai/anthropic/messages-to-openai.yaml) | Transforms Anthropic Messages API requests and responses for Chat Completions-compatible inference backends |
