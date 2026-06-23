@@ -9,14 +9,11 @@
 //! Named `inference` in pipeline configs so branch chains can
 //! `rejoin` here for the agentic tool loop.
 //!
-//! When [`ResponsesState`] is present in [`RequestExtensions`],
+//! When `ResponsesState` is present in `RequestExtensions`,
 //! rebuilds the request body with the full conversation history
 //! from `state.messages` and strips `previous_response_id` (already
 //! resolved by the rehydrate filter). When no state is present,
 //! passes the body through unchanged.
-//!
-//! [`ResponsesState`]: super::state::ResponsesState
-//! [`RequestExtensions`]: crate::extensions::RequestExtensions
 
 mod config;
 
@@ -53,14 +50,14 @@ use crate::{
 // ResponsesProxyFilter
 // -----------------------------------------------------------------------------
 
-/// Rebuilds the request body from [`ResponsesState`] when present.
+/// Rebuilds the request body from `ResponsesState` when present.
 ///
 /// Reads the assembled conversation history from
-/// [`ResponsesState::messages`] and replaces the `input` field in
+/// `ResponsesState::messages` and replaces the `input` field in
 /// the outbound body. Strips `previous_response_id` since Praxis
 /// already resolved it locally via the rehydrate filter.
 ///
-/// When no [`ResponsesState`] exists (non-Responses requests, or
+/// When no `ResponsesState` exists (non-Responses requests, or
 /// requests without `previous_response_id`), passes through
 /// unchanged.
 ///
@@ -86,9 +83,6 @@ use crate::{
 /// let filter = ResponsesProxyFilter::from_config(&yaml).unwrap();
 /// assert_eq!(filter.name(), "responses_proxy");
 /// ```
-///
-/// [`ResponsesState`]: super::state::ResponsesState
-/// [`ResponsesState::messages`]: super::state::ResponsesState::messages
 pub struct ResponsesProxyFilter {
     /// Parsed and validated configuration.
     config: ResponsesProxyConfig,
