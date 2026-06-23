@@ -21,6 +21,7 @@ use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode, limits::MAX_JSON_BODY_BYTES},
     builtins::http::ai::store::ResponseRecord,
+    factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
 
@@ -63,15 +64,23 @@ impl RehydrateFilter {
     ///
     /// # Errors
     ///
-    /// This function does not return errors; the `Result` return
-    /// type is required by the [`FilterFactory`] signature.
-    ///
-    /// [`FilterFactory`]: crate::FilterFactory
-    #[expect(clippy::unnecessary_wraps, reason = "signature required by FilterFactory")]
-    pub fn from_config(_config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
+    /// Returns [`FilterError`] if the YAML config contains unknown fields.
+    pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
+        let empty = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        let cfg = if config.is_null() { &empty } else { config };
+        let _validated: RehydrateConfig = parse_filter_config("openai_responses_rehydrate", cfg)?;
         Ok(Box::new(Self))
     }
 }
+
+/// Empty YAML configuration for [`RehydrateFilter`].
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "serde cannot deserialize a map into a unit struct"
+)]
+struct RehydrateConfig {}
 
 #[async_trait]
 impl HttpFilter for RehydrateFilter {
@@ -171,6 +180,7 @@ async fn validate_previous_response(
     }
 
     let mut state = ResponsesState::from_request_body(parsed_body);
+    // TODO(#697): enforce a max rehydrated history size before cloning stored messages.
     let stored_messages = record.messages.as_array().cloned().unwrap_or_default();
     state.messages.splice(0..0, stored_messages);
     ctx.extensions.insert(state);

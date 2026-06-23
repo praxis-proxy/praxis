@@ -29,6 +29,16 @@ fn from_config_succeeds() {
 }
 
 #[test]
+fn unknown_field_rejected() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("unexpected: true").unwrap();
+    let result = RehydrateFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "unknown fields should be rejected by deny_unknown_fields"
+    );
+}
+
+#[test]
 fn body_access_is_read_only() {
     let filter = RehydrateFilter;
     assert_eq!(

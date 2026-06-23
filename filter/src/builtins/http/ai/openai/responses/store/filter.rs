@@ -361,9 +361,10 @@ fn register_store_in_context(ctx: &HttpFilterContext<'_>, store: &Arc<dyn Respon
     let Some(registry) = ctx.response_stores else {
         return;
     };
-    // Known limitation: the first default backend wins for this registry.
-    // That matches today's one-store-per-listener setup, but a future
-    // multi-store or live backend migration design should scope this by config.
+    // The response store is intentionally instance-scoped today: a Praxis
+    // process has one default Responses store shared by listener pipelines.
+    // If multi-store-per-instance support is added later, this registry key
+    // must become config- or listener-scoped instead of "default".
     if registry.get(DEFAULT_STORE_NAME).is_some() {
         return;
     }
