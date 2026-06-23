@@ -2441,17 +2441,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "praxis-proxy-callout"
-version = "0.3.1"
-dependencies = [
- "reqwest",
- "thiserror 2.0.18",
- "tokio",
- "tracing",
- "wiremock",
-]
-
-[[package]]
 name = "praxis-proxy-core"
 version = "0.3.1"
 dependencies = [
@@ -2460,10 +2449,13 @@ dependencies = [
  "quixotic-plecostomus-core",
  "rand 0.9.4",
  "regex",
+ "reqwest",
  "serde",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
  "tracing-subscriber",
+ "wiremock",
  "yaml_serde",
 ]
 
@@ -2888,9 +2880,9 @@ dependencies = [
 
 [[package]]
 name = "quinn"
-version = "0.11.9"
+version = "0.11.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b9e20a958963c291dc322d98411f541009df2ced7b5a4f2bd52337638cfccf20"
+checksum = "0c1a41e437b6bbd489372cd4971de128e85c855f56c57f283d20ff016cf7c0a8"
 dependencies = [
  "bytes",
  "cfg_aliases",
@@ -4670,9 +4662,9 @@ dependencies = [
 
 [[package]]
 name = "wasm-bindgen-futures"
-version = "0.4.75"
+version = "0.4.76"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "503b14d284f2c8dac03b819967e155ea753f573586193b2b2c95990cb5d69280"
+checksum = "c62df1340f32221cb9c54d6a27b030e3dba64361d4a95bed55f9aacb44da291d"
 dependencies = [
  "js-sys",
  "wasm-bindgen",

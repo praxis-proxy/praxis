@@ -3,14 +3,9 @@
 
 //! Reusable HTTP callout client for Praxis filters.
 //!
-//! Provides [`CalloutClient`] — a shared primitive that any filter can use
+//! Provides [`CalloutClient`](crate::callout::CalloutClient) — a shared primitive that any filter can use
 //! to make outbound HTTP requests with timeout, circuit breaking, and
 //! loop-prevention semantics.
-//!
-//! This crate has **no dependency** on `praxis-core` or `praxis-filter`;
-//! it is a standalone HTTP client library.
-
-#![deny(unsafe_code)]
 
 mod circuit;
 
@@ -19,10 +14,9 @@ mod tests;
 
 use std::time::Duration;
 
+use circuit::{CircuitBreaker, CircuitState};
 use reqwest::redirect;
 use tracing::{debug, warn};
-
-use crate::circuit::{CircuitBreaker, CircuitState};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -214,7 +208,7 @@ impl Default for CalloutConfig {
 /// # Example
 ///
 /// ```no_run
-/// use praxis_callout::{CalloutClient, CalloutConfig};
+/// use praxis_core::callout::{CalloutClient, CalloutConfig};
 ///
 /// let client = CalloutClient::new(CalloutConfig::default()).unwrap();
 /// ```

@@ -18,7 +18,7 @@ mod unit {
         matchers::{body_bytes, header, method, path},
     };
 
-    use crate::{
+    use super::super::{
         CalloutClient, CalloutConfig, CalloutRequest, CalloutResult, CircuitBreakerConfig, FailureMode,
         circuit::{CircuitBreaker, CircuitState},
     };
