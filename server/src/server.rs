@@ -85,7 +85,7 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
     info!("initializing server");
     let mut server = PingoraServerRuntime::new(&config);
     let _cert_shutdowns = register_protocols(&mut server, &config, &state.pipelines);
-    register_admin_endpoints(&mut server, &config, &health_registry, &state.kv_stores);
+    register_admin_endpoints(&mut server, &config, health_registry, &state.kv_stores);
 
     let _watcher = spawn_watcher(config_path, config, registry, state);
 
@@ -129,7 +129,7 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
     .unwrap_or_else(|e| fatal(&e));
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-    spawn_health_check_tasks(config, health_registry, &health_shutdown);
+    spawn_health_check_tasks(config, Arc::clone(health_registry), &health_shutdown);
 
     ServerState {
         pipelines: Arc::new(pipelines),
@@ -199,14 +199,14 @@ fn spawn_watcher(
 fn register_admin_endpoints(
     server: &mut PingoraServerRuntime,
     config: &Config,
-    health_registry: &HealthRegistry,
+    health_registry: HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
 ) {
     if let Some(admin_addr) = &config.admin.address {
         praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server(
             server.server_mut(),
             admin_addr,
-            Some(Arc::clone(health_registry)),
+            Some(health_registry),
             Some(kv_stores.clone()),
             config.admin.verbose,
         );
@@ -390,7 +390,7 @@ fn warn_insecure_key_permissions(_config: &Config) {}
 #[expect(clippy::expect_used, reason = "fatal")]
 fn spawn_health_check_tasks(
     config: &Config,
-    registry: &HealthRegistry,
+    registry: HealthRegistry,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
 ) {
     if registry.is_empty() {
@@ -399,7 +399,6 @@ fn spawn_health_check_tasks(
 
     let shutdown = health_shutdown.lock().expect("health shutdown lock").clone();
     let clusters = config.clusters.clone();
-    let registry = Arc::clone(registry);
 
     std::thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
