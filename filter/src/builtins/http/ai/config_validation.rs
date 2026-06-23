@@ -3,7 +3,7 @@
 
 //! Shared config validation helpers for AI classifier filters.
 
-use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
+use crate::{FilterError, body::MAX_JSON_BODY_BYTES};
 
 // ---------------------------------------------------------------------------
 // Header Name Validation

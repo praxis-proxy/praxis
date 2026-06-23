@@ -57,7 +57,7 @@ use super::{
 };
 use crate::{
     FilterAction, FilterError, Rejection,
-    body::{BodyAccess, BodyMode, limits::MAX_JSON_BODY_BYTES},
+    body::{BodyAccess, BodyMode, MAX_JSON_BODY_BYTES},
     builtins::http::ai::store::{
         PostgresResponseStore, ResponseRecord, ResponseStore, SqliteResponseStore, StoreError,
     },

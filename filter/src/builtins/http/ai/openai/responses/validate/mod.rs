@@ -29,7 +29,7 @@ use tracing::{debug, trace};
 use self::rules::validate_request;
 use crate::{
     FilterAction, FilterError, Rejection,
-    body::{BodyAccess, BodyMode, OPENAI_RESPONSES_BODY_MAX_BYTES},
+    body::{BodyAccess, BodyMode, MAX_JSON_BODY_BYTES},
     filter::{HttpFilter, HttpFilterContext},
 };
 
@@ -90,7 +90,7 @@ impl HttpFilter for OpenaiResponsesValidateFilter {
 
     fn request_body_mode(&self) -> BodyMode {
         BodyMode::StreamBuffer {
-            max_bytes: Some(OPENAI_RESPONSES_BODY_MAX_BYTES),
+            max_bytes: Some(MAX_JSON_BODY_BYTES),
         }
     }
 
