@@ -681,6 +681,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn previous_response_id_with_messages_classifies_as_responses() {
+        let body =
+            br#"{"model":"gpt-4.1","previous_response_id":"resp_abc","messages":[{"role":"user","content":"Hi"}]}"#;
+        let result = classify_request_body(body);
+
+        assert_eq!(
+            result.format,
+            AiRequestFormat::Responses,
+            "previous_response_id should take precedence over messages"
+        );
+    }
+
+    #[test]
+    fn conversation_with_messages_classifies_as_responses() {
+        let body = br#"{"model":"gpt-4.1","conversation":{"id":"conv_123"},"messages":[{"role":"user","content":"Hi"}],"max_tokens":1024,"system":"Be helpful."}"#;
+        let result = classify_request_body(body);
+
+        assert_eq!(
+            result.format,
+            AiRequestFormat::Responses,
+            "conversation should take precedence over Anthropic signals"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Path Classification
     // -------------------------------------------------------------------------
