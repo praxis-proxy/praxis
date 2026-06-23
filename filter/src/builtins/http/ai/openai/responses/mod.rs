@@ -68,6 +68,16 @@ use crate::{
 /// Maximum length of a body-derived value promoted to headers or filter results.
 const MAX_PROMOTED_VALUE_LEN: usize = 256;
 
+/// Default store name used when registering the response store in the
+/// per-request registry.
+pub(crate) const DEFAULT_STORE_NAME: &str = "default";
+
+/// Metadata key for tenant isolation.
+pub(crate) const TENANT_METADATA_KEY: &str = "responses.tenant_id";
+
+/// Fallback tenant ID when no tenant metadata is present.
+pub(crate) const DEFAULT_TENANT_ID: &str = "default";
+
 // -----------------------------------------------------------------------------
 // ResponsesFormatFilter
 // -----------------------------------------------------------------------------
@@ -273,6 +283,13 @@ fn write_optional_metadata(ctx: &mut HttpFilterContext<'_>, classified: &Classif
             if background { "true" } else { "false" },
         );
     }
+
+    if let Some(max_output_tokens) = classified.max_output_tokens {
+        ctx.set_metadata(
+            "openai_responses_format.max_output_tokens",
+            max_output_tokens.to_string(),
+        );
+    }
 }
 
 /// Write boolean presence flags to metadata.
@@ -370,6 +387,10 @@ fn promote_optional_results(
 
     if let Some(background) = classified.background {
         results.set("background", if background { "true" } else { "false" })?;
+    }
+
+    if let Some(max_output_tokens) = classified.max_output_tokens {
+        results.set("max_output_tokens", max_output_tokens.to_string())?;
     }
 
     Ok(())

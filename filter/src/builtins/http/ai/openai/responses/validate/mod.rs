@@ -192,11 +192,14 @@ fn reject_invalid(message: &str) -> FilterAction {
 }
 
 /// Extract conversation ID from the request body.
+///
+/// Handles both `"conversation": "conv_id"` and `"conversation": {"id": "conv_id"}`.
 fn extract_conversation_id(body: &serde_json::Value) -> Option<String> {
-    body.get("conversation")
-        .and_then(|c| c.get("id"))
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_owned)
+    body.get("conversation").and_then(|c| {
+        c.as_str()
+            .or_else(|| c.get("id").and_then(serde_json::Value::as_str))
+            .map(str::to_owned)
+    })
 }
 
 /// Enrich filter context with validated metadata for downstream filters.
@@ -339,6 +342,17 @@ mod tests {
             ctx.filter_metadata.get("responses.conversation_id").map(String::as_str),
             Some("conv_existing_123"),
             "conversation_id should be extracted from request body"
+        );
+    }
+
+    #[tokio::test]
+    async fn valid_request_with_bare_string_conversation_id() {
+        let ctx = run_filter(r#"{"input": "Hi", "conversation": "conv_existing_123"}"#, &[]).await;
+
+        assert_eq!(
+            ctx.filter_metadata.get("responses.conversation_id").map(String::as_str),
+            Some("conv_existing_123"),
+            "bare-string conversation ID should be extracted from request body"
         );
     }
 

@@ -120,7 +120,6 @@ fn load_ca_root_store(ca_path: &str) -> Result<RootCertStore, TlsError> {
         detail: e.to_string(),
     })?);
 
-
     let certs: Vec<_> = rustls_pemfile::certs(&mut &ca_pem[..])
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| TlsError::FileLoadError {
