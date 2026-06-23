@@ -55,6 +55,8 @@ mod redirect;
 #[cfg(feature = "ai-inference")]
 mod rehydrate;
 #[cfg(feature = "ai-inference")]
+mod responses_proxy;
+#[cfg(feature = "ai-inference")]
 mod responses_routing;
 mod round_robin;
 mod session_affinity;

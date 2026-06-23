@@ -1,0 +1,31 @@
+# Responses API Proxy (non-streaming passthrough)
+#
+# Proxies OpenAI Responses API requests to a native /v1/responses
+# backend. The responses_proxy filter is a pipeline waypoint
+# where body rebuilding from enriched filter state will happen
+# once upstream enrichment filters (rehydrate, tool_parse) land.
+#
+# For now the request body passes through unchanged and the
+# JSON response is relayed back to the client.
+
+listeners:
+  - name: ai-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [responses-proxy]
+
+filter_chains:
+  - name: responses-proxy
+    filters:
+      - filter: responses_proxy
+        name: inference
+
+      - filter: router
+        routes:
+          - path_prefix: "/v1/responses"
+            cluster: "inference-backend"
+
+      - filter: load_balancer
+        clusters:
+          - name: "inference-backend"
+            endpoints:
+              - "127.0.0.1:3001"

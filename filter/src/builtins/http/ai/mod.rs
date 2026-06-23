@@ -55,6 +55,8 @@ pub use openai::ResponseStoreFilter;
 #[cfg(feature = "ai-inference")]
 pub use openai::ResponsesFormatFilter;
 #[cfg(feature = "ai-inference")]
+pub use openai::ResponsesProxyFilter;
+#[cfg(feature = "ai-inference")]
 pub use prompt_enrich::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
 pub use store::ResponseStoreRegistry;

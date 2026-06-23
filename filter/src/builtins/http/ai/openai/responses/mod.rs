@@ -20,6 +20,7 @@
 mod config;
 #[cfg(feature = "ai-inference")]
 pub(crate) mod model_rewrite;
+pub(crate) mod proxy;
 #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on modules")]
 #[allow(
     dead_code,

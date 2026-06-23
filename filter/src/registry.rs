@@ -222,6 +222,12 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
         "openai_responses_rehydrate",
         crate::builtins::RehydrateFilter::from_config,
     );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "responses_proxy",
+        crate::builtins::ResponsesProxyFilter::from_config,
+    );
 }
 
 /// Register a single HTTP filter factory by name.
@@ -393,6 +399,11 @@ mod tests {
         assert!(
             names.contains(&"openai_responses_rehydrate"),
             "openai_responses_rehydrate should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"responses_proxy"),
+            "responses_proxy should be registered"
         );
     }
 

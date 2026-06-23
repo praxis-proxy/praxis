@@ -22,7 +22,12 @@
 #      prepending their message history to the current request.
 #      Passthrough for requests without previous_response_id.
 #
-#   5. The router sends all valid Responses API create requests to
+#   5. responses_proxy reads the assembled ResponsesState and
+#      rebuilds the outbound request body with the full conversation
+#      history. Strips previous_response_id (already resolved by
+#      rehydrate). Passthrough when no ResponsesState exists.
+#
+#   6. The router sends all valid Responses API create requests to
 #      the same inference backend. The promoted mode remains available
 #      as headers/metadata for downstream filters; it does not change
 #      backend selection in this example.
@@ -46,6 +51,11 @@
 #   curl -X POST http://localhost:8080/v1/responses \
 #     -H "Content-Type: application/json" \
 #     -d '{"model":"gpt-4.1","input":"Hello","store":false}'
+#
+#   # Multi-turn with previous_response_id
+#   curl -X POST http://localhost:8080/v1/responses \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"gpt-4.1","input":"What next?","previous_response_id":"resp_abc"}'
 #
 #   # Rejected (stream + background conflict)
 #   curl -X POST http://localhost:8080/v1/responses \
@@ -82,13 +92,9 @@ filter_chains:
         responses_table: openai_responses
         conversations_table: openai_conversations
       - filter: openai_responses_rehydrate
-        # Future #354 orchestration filters would follow here:
-        #   - filter: compact
-        #   - filter: tool_parse
-        #   - filter: responses_proxy
-        #   - filter: stream_events
-        #   - filter: tool_dispatch
-        #   - filter: reasoning
+
+      - filter: responses_proxy
+        name: inference
 
       - filter: router
         routes:
