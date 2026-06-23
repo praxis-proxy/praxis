@@ -29,16 +29,9 @@ use tracing::{debug, trace};
 use self::rules::validate_request;
 use crate::{
     FilterAction, FilterError, Rejection,
-    body::{BodyAccess, BodyMode},
+    body::{BodyAccess, BodyMode, OPENAI_RESPONSES_BODY_MAX_BYTES},
     filter::{HttpFilter, HttpFilterContext},
 };
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Maximum request body size for `StreamBuffer` mode (64 MiB).
-const MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
 
 // -----------------------------------------------------------------------------
 // OpenaiResponsesValidateFilter
@@ -97,7 +90,7 @@ impl HttpFilter for OpenaiResponsesValidateFilter {
 
     fn request_body_mode(&self) -> BodyMode {
         BodyMode::StreamBuffer {
-            max_bytes: Some(MAX_BODY_BYTES),
+            max_bytes: Some(OPENAI_RESPONSES_BODY_MAX_BYTES),
         }
     }
 

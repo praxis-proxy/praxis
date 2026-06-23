@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Responses API filters: format classifier and request validation.
+//! Responses API filters: format classifier, request validation, storage, and
+//! Chat Completions translation.
 //!
 //! Classifies requests as Responses API, Chat Completions, unknown
 //! JSON, invalid JSON, or non-JSON. Requests matching Responses API
@@ -25,8 +26,10 @@ mod config;
 )]
 pub(crate) mod state;
 pub(crate) mod store;
+pub(crate) mod to_chat_completions;
 
 pub use store::ResponseStoreFilter;
+pub use to_chat_completions::OpenaiResponsesToChatCompletionsFilter;
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]

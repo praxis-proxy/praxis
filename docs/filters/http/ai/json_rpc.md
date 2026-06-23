@@ -21,7 +21,7 @@ Writes `json_rpc.*` entries to the filter result set for branch chain conditions
 | `headers.kind` | string | no | Header name for JSON-RPC kind (e.g., `X-Json-Rpc-Kind`). |
 | `headers.method` | string | no | Header name for JSON-RPC method (e.g., `X-Json-Rpc-Method`). |
 | `max_body_bytes` | usize | no | Maximum body size in bytes for `StreamBuffer`. |
-| `on_invalid` | `continue` \| `reject` \| `error` | no | Invalid input handling behavior. |
+| `on_invalid` | OnInvalidBehavior | no | Invalid input handling behavior. |
 
 ## Examples
 

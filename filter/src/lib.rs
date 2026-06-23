@@ -38,6 +38,8 @@ pub use builtins::AnthropicToOpenaiFilter;
 #[cfg(feature = "ai-inference")]
 pub use builtins::AnthropicValidateFilter;
 #[cfg(feature = "ai-inference")]
+pub use builtins::OpenaiResponsesToChatCompletionsFilter;
+#[cfg(feature = "ai-inference")]
 pub use builtins::OpenaiResponsesValidateFilter;
 #[cfg(feature = "ai-inference")]
 pub use builtins::PromptEnrichFilter;

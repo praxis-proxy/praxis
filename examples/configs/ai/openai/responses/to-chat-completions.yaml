@@ -1,0 +1,39 @@
+# OpenAI Responses to Chat Completions
+#
+# Transforms `/v1/responses` request and non-streaming response bodies for
+# Chat Completions-compatible inference backends.
+
+listeners:
+  - name: responses-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [responses-transform]
+
+filter_chains:
+  - name: responses-transform
+    filters:
+      - filter: openai_responses_format
+        on_invalid: continue
+
+      - filter: openai_responses_validate
+
+      - filter: openai_responses_to_chat_completions
+        max_body_bytes: 67108864
+
+      - filter: path_rewrite
+        replace:
+          pattern: "^/v1/responses$"
+          replacement: "/v1/chat/completions"
+        conditions:
+          - when:
+              path: "/v1/responses"
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "chat-completions-backend"
+
+      - filter: load_balancer
+        clusters:
+          - name: "chat-completions-backend"
+            endpoints:
+              - "127.0.0.1:3001"
