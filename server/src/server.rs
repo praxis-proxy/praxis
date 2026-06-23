@@ -79,12 +79,13 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
     init_runtime_limits(&config.runtime);
     warn_insecure_key_permissions(&config);
 
-    let state = build_server_state(&config, &registry);
+    let health_registry = build_health_registry(&config.clusters);
+    let state = build_server_state(&config, &registry, &health_registry);
 
     info!("initializing server");
     let mut server = PingoraServerRuntime::new(&config);
     let _cert_shutdowns = register_protocols(&mut server, &config, &state.pipelines);
-    register_admin_endpoints(&mut server, &config, &state.health_registry, &state.kv_stores);
+    register_admin_endpoints(&mut server, &config, &health_registry, &state.kv_stores);
 
     let _watcher = spawn_watcher(config_path, config, registry, state);
 
@@ -101,8 +102,6 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
 struct ServerState {
     /// Resolved filter pipelines per listener.
     pipelines: Arc<ListenerPipelines>,
-    /// Cluster health state.
-    health_registry: HealthRegistry,
     /// KV store registry.
     kv_stores: praxis_core::kv::KvStoreRegistry,
     /// Health check cancellation token.
@@ -113,9 +112,8 @@ struct ServerState {
 }
 
 /// Build filter pipelines, health checks, and registries.
-fn build_server_state(config: &Config, registry: &FilterRegistry) -> ServerState {
+fn build_server_state(config: &Config, registry: &FilterRegistry, health_registry: &HealthRegistry) -> ServerState {
     info!("building filter pipelines");
-    let health_registry = build_health_registry(&config.clusters);
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
     #[cfg(feature = "ai-inference")]
     let response_stores = praxis_filter::ResponseStoreRegistry::new();
@@ -123,7 +121,7 @@ fn build_server_state(config: &Config, registry: &FilterRegistry) -> ServerState
     let pipelines = resolve_pipelines(
         config,
         registry,
-        &health_registry,
+        health_registry,
         &kv_stores,
         #[cfg(feature = "ai-inference")]
         &response_stores,
@@ -131,11 +129,10 @@ fn build_server_state(config: &Config, registry: &FilterRegistry) -> ServerState
     .unwrap_or_else(|e| fatal(&e));
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-    spawn_health_check_tasks(config, &health_registry, &health_shutdown);
+    spawn_health_check_tasks(config, health_registry, &health_shutdown);
 
     ServerState {
         pipelines: Arc::new(pipelines),
-        health_registry,
         kv_stores,
         health_shutdown,
         #[cfg(feature = "ai-inference")]
