@@ -353,9 +353,17 @@ impl CalloutClient {
             return self.on_failure();
         }
 
-        self.record_success();
         let headers = extract_headers(&response);
-        let body = response.bytes().await.map(|b| b.to_vec()).unwrap_or_default();
+        let body = match response.bytes().await {
+            Ok(b) => b.to_vec(),
+            Err(err) => {
+                warn!(%err, "failed to read callout response body");
+                self.record_failure();
+                return self.on_failure();
+            },
+        };
+
+        self.record_success();
         CalloutResult::Success(CalloutResponse {
             body,
             headers,
