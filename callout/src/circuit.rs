@@ -88,8 +88,11 @@ impl CircuitBreaker {
     /// burst of requests during the probe window will be
     /// rejected. If the probe is dropped without a
     /// `record_*` call, the circuit stays in `HalfOpen`
-    /// and subsequent callers see `Open` until the
-    /// recovery window elapses again.
+    /// and subsequent callers see `Open`. However,
+    /// `opened_at` is not reset on entering `HalfOpen`,
+    /// so the recovery window has already elapsed and
+    /// the next caller will immediately receive a new
+    /// `HalfOpen` probe opportunity.
     ///
     /// # Panics
     ///
