@@ -6,7 +6,10 @@
 use serde::Deserialize;
 
 use super::super::protocol::{self, ProtocolProfile};
-use crate::{FilterError, body::MAX_JSON_BODY_BYTES, builtins::http::transformation::has_dot_dot_traversal};
+use crate::{
+    FilterError,
+    builtins::http::{ai::config_validation::validate_max_body_bytes, transformation::has_dot_dot_traversal},
+};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -166,16 +169,7 @@ fn default_supported_versions() -> Vec<String> {
 
 /// Validate configuration and build the static tool catalog.
 pub(super) fn build_config(cfg: McpBrokerConfig) -> Result<(McpBrokerConfig, Vec<CatalogTool>), FilterError> {
-    if cfg.max_body_bytes == 0 {
-        return Err("mcp: max_body_bytes must be greater than 0".into());
-    }
-    if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
-        return Err(format!(
-            "mcp_broker: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
-            cfg.max_body_bytes
-        )
-        .into());
-    }
+    validate_max_body_bytes("mcp_broker", cfg.max_body_bytes)?;
 
     validate_versions(&cfg)?;
     validate_path("mcp", &cfg.path)?;

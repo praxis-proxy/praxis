@@ -496,7 +496,10 @@ fn request_path_matches(uri: &http::Uri, public_path: &str) -> bool {
 /// Build a [`JsonRpcConfig`] for the shared parser with MCP broker-appropriate
 /// defaults.
 fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
-    use crate::builtins::http::ai::agentic::json_rpc::config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders};
+    use crate::builtins::http::ai::{
+        OnInvalidBehavior,
+        agentic::json_rpc::config::{BatchPolicy, JsonRpcHeaders},
+    };
 
     JsonRpcConfig {
         batch_policy: BatchPolicy::Reject,
@@ -506,6 +509,6 @@ fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
             method: None,
         },
         max_body_bytes,
-        on_invalid: InvalidJsonRpcBehavior::Continue,
+        on_invalid: OnInvalidBehavior::Continue,
     }
 }

@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
+use crate::{FilterError, builtins::http::ai::config_validation::validate_max_body_bytes};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -15,7 +15,7 @@ use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
 ///
 /// Validation only needs the top-level JSON envelope, so the
 /// default stays below the shared JSON inspection ceiling. Users
-/// can raise it up to [`MAX_JSON_BODY_BYTES`] when they need to
+/// can raise it up to `MAX_JSON_BODY_BYTES` (64 MiB) when they need to
 /// accept larger Anthropic request bodies.
 const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576; // 1 MiB
 
@@ -45,15 +45,6 @@ fn default_max_body_bytes() -> usize {
 
 /// Validate the parsed configuration.
 pub(crate) fn build_config(cfg: AnthropicValidateConfig) -> Result<AnthropicValidateConfig, FilterError> {
-    if cfg.max_body_bytes == 0 {
-        return Err("anthropic_validate: 'max_body_bytes' must be greater than 0".into());
-    }
-    if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
-        return Err(format!(
-            "anthropic_validate: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
-            cfg.max_body_bytes
-        )
-        .into());
-    }
+    validate_max_body_bytes("anthropic_validate", cfg.max_body_bytes)?;
     Ok(cfg)
 }

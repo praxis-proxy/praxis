@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
+use crate::{FilterError, builtins::http::ai::config_validation::validate_max_body_bytes};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -40,15 +40,6 @@ fn default_max_body_bytes() -> usize {
 
 /// Validate the parsed configuration.
 pub(crate) fn build_config(cfg: AnthropicToOpenaiConfig) -> Result<AnthropicToOpenaiConfig, FilterError> {
-    if cfg.max_body_bytes == 0 {
-        return Err("anthropic_to_openai: 'max_body_bytes' must be greater than 0".into());
-    }
-    if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
-        return Err(format!(
-            "anthropic_to_openai: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
-            cfg.max_body_bytes
-        )
-        .into());
-    }
+    validate_max_body_bytes("anthropic_to_openai", cfg.max_body_bytes)?;
     Ok(cfg)
 }

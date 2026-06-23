@@ -165,16 +165,17 @@ impl HttpFilter for JsonRpcFilter {
 
 /// Handle JSON-RPC parse errors based on error type and `on_invalid` config.
 fn handle_parse_error(e: envelope::JsonRpcParseError, config: &JsonRpcConfig) -> Result<FilterAction, FilterError> {
-    use self::{config::InvalidJsonRpcBehavior, envelope::JsonRpcParseError};
+    use self::envelope::JsonRpcParseError;
+    use crate::builtins::http::ai::OnInvalidBehavior;
 
     match e {
         JsonRpcParseError::UnsupportedBatch | JsonRpcParseError::EmptyBatch => {
             Ok(FilterAction::Reject(Rejection::status(400)))
         },
         _ => match config.on_invalid {
-            InvalidJsonRpcBehavior::Continue => Ok(FilterAction::Continue),
-            InvalidJsonRpcBehavior::Reject => Ok(FilterAction::Reject(Rejection::status(400))),
-            InvalidJsonRpcBehavior::Error => Err(e.into()),
+            OnInvalidBehavior::Continue => Ok(FilterAction::Continue),
+            OnInvalidBehavior::Reject => Ok(FilterAction::Reject(Rejection::status(400))),
+            OnInvalidBehavior::Error => Err(e.into()),
         },
     }
 }

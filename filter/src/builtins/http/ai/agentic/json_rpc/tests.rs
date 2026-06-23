@@ -7,10 +7,10 @@ use bytes::Bytes;
 
 use super::{
     JsonRpcFilter,
-    config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders},
+    config::{BatchPolicy, JsonRpcHeaders},
     envelope::{JsonRpcIdKind, JsonRpcKind, parse_json_rpc_envelope},
 };
-use crate::{FilterAction, filter::HttpFilter as _};
+use crate::{FilterAction, builtins::http::ai::OnInvalidBehavior, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
 // Config Tests
@@ -110,7 +110,7 @@ fn default_headers_config_parses() {
 
 #[test]
 fn parses_request_with_string_id() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let json = br#"{"jsonrpc":"2.0","method":"tools/call","id":"req-123"}"#;
     let envelope = parse_json_rpc_envelope(json, &config).unwrap().unwrap();
 
@@ -127,7 +127,7 @@ fn parses_request_with_string_id() {
 
 #[test]
 fn parses_request_with_integer_id() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let json = br#"{"jsonrpc":"2.0","method":"SendMessage","id":42}"#;
     let envelope = parse_json_rpc_envelope(json, &config).unwrap().unwrap();
 
@@ -143,7 +143,7 @@ fn parses_request_with_integer_id() {
 
 #[test]
 fn parses_request_with_float_id() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let json = br#"{"jsonrpc":"2.0","method":"test","id":3.14}"#;
     let envelope = parse_json_rpc_envelope(json, &config).unwrap().unwrap();
 
@@ -157,7 +157,7 @@ fn parses_request_with_float_id() {
 
 #[test]
 fn parses_request_with_null_id() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let json = br#"{"jsonrpc":"2.0","method":"test","id":null}"#;
     let envelope = parse_json_rpc_envelope(json, &config).unwrap().unwrap();
 
@@ -172,7 +172,7 @@ fn parses_request_with_null_id() {
 
 #[test]
 fn parses_notification() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let json = br#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#;
     let envelope = parse_json_rpc_envelope(json, &config).unwrap().unwrap();
 
@@ -188,7 +188,7 @@ fn parses_notification() {
 
 #[test]
 fn parses_response_with_result() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let json = br#"{"jsonrpc":"2.0","id":"req-123","result":{"tools":[]}}"#;
     let envelope = parse_json_rpc_envelope(json, &config).unwrap().unwrap();
 
@@ -200,7 +200,7 @@ fn parses_response_with_result() {
 
 #[test]
 fn parses_response_with_error() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let json = br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"Method not found"}}"#;
     let envelope = parse_json_rpc_envelope(json, &config).unwrap().unwrap();
 
@@ -211,7 +211,7 @@ fn parses_response_with_error() {
 
 #[test]
 fn rejects_missing_jsonrpc_field() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Reject);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Reject);
     let json = br#"{"method":"test","id":1}"#;
     let err = parse_json_rpc_envelope(json, &config).expect_err("should fail");
     assert!(
@@ -222,7 +222,7 @@ fn rejects_missing_jsonrpc_field() {
 
 #[test]
 fn continues_on_missing_jsonrpc_when_configured() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let json = br#"{"method":"test","id":1}"#;
     let result = parse_json_rpc_envelope(json, &config).unwrap();
     assert!(
@@ -233,7 +233,7 @@ fn continues_on_missing_jsonrpc_when_configured() {
 
 #[test]
 fn rejects_wrong_jsonrpc_version() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Reject);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Reject);
     let json = br#"{"jsonrpc":"1.0","method":"test","id":1}"#;
     let err = parse_json_rpc_envelope(json, &config).expect_err("should fail");
     assert!(
@@ -244,7 +244,7 @@ fn rejects_wrong_jsonrpc_version() {
 
 #[test]
 fn rejects_missing_method_for_request() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Reject);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Reject);
     let json = br#"{"jsonrpc":"2.0","id":1}"#;
     let err = parse_json_rpc_envelope(json, &config).expect_err("should fail");
     assert!(
@@ -255,7 +255,7 @@ fn rejects_missing_method_for_request() {
 
 #[test]
 fn rejects_non_string_method() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Reject);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Reject);
     let json = br#"{"jsonrpc":"2.0","method":123,"id":1}"#;
     let err = parse_json_rpc_envelope(json, &config).expect_err("should fail");
     assert!(
@@ -266,7 +266,7 @@ fn rejects_non_string_method() {
 
 #[test]
 fn rejects_boolean_id() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Reject);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Reject);
     let json = br#"{"jsonrpc":"2.0","method":"test","id":true}"#;
     let err = parse_json_rpc_envelope(json, &config).expect_err("should fail");
     assert!(
@@ -277,7 +277,7 @@ fn rejects_boolean_id() {
 
 #[test]
 fn rejects_object_id() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Reject);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Reject);
     let json = br#"{"jsonrpc":"2.0","method":"test","id":{"key":"value"}}"#;
     let err = parse_json_rpc_envelope(json, &config).expect_err("should fail");
     assert!(
@@ -288,7 +288,7 @@ fn rejects_object_id() {
 
 #[test]
 fn rejects_array_id() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Reject);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Reject);
     let json = br#"{"jsonrpc":"2.0","method":"test","id":[1,2,3]}"#;
     let err = parse_json_rpc_envelope(json, &config).expect_err("should fail");
     assert!(
@@ -299,7 +299,7 @@ fn rejects_array_id() {
 
 #[test]
 fn handles_params_object() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let json = br#"{"jsonrpc":"2.0","method":"test","params":{"arg1":"val1"},"id":1}"#;
     let envelope = parse_json_rpc_envelope(json, &config).unwrap().unwrap();
     assert_eq!(
@@ -311,7 +311,7 @@ fn handles_params_object() {
 
 #[test]
 fn handles_params_array() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let json = br#"{"jsonrpc":"2.0","method":"test","params":["arg1","arg2"],"id":1}"#;
     let envelope = parse_json_rpc_envelope(json, &config).unwrap().unwrap();
     assert_eq!(
@@ -323,7 +323,7 @@ fn handles_params_array() {
 
 #[test]
 fn handles_reserved_rpc_method() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let json = br#"{"jsonrpc":"2.0","method":"rpc.discovery","id":1}"#;
     let envelope = parse_json_rpc_envelope(json, &config).unwrap().unwrap();
     assert_eq!(
@@ -335,7 +335,7 @@ fn handles_reserved_rpc_method() {
 
 #[test]
 fn batch_reject_policy_rejects_array() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Reject);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Reject);
     let json = br#"[{"jsonrpc":"2.0","method":"test1","id":1},{"jsonrpc":"2.0","method":"test2","id":2}]"#;
     let err = parse_json_rpc_envelope(json, &config).expect_err("should fail");
     assert!(
@@ -346,7 +346,7 @@ fn batch_reject_policy_rejects_array() {
 
 #[test]
 fn batch_first_policy_uses_first_item() {
-    let config = make_config(BatchPolicy::First, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::First, OnInvalidBehavior::Continue);
     let json = br#"[{"jsonrpc":"2.0","method":"first","id":1},{"jsonrpc":"2.0","method":"second","id":2}]"#;
     let envelope = parse_json_rpc_envelope(json, &config).unwrap().unwrap();
 
@@ -362,7 +362,7 @@ fn batch_first_policy_uses_first_item() {
 
 #[test]
 fn batch_first_policy_skips_invalid_items() {
-    let config = make_config(BatchPolicy::First, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::First, OnInvalidBehavior::Continue);
     let json = br#"[{"not":"jsonrpc"},{"jsonrpc":"2.0","method":"valid","id":2}]"#;
     let envelope = parse_json_rpc_envelope(json, &config).unwrap().unwrap();
 
@@ -376,7 +376,7 @@ fn batch_first_policy_skips_invalid_items() {
 
 #[test]
 fn empty_batch_array_fails() {
-    let config = make_config(BatchPolicy::First, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::First, OnInvalidBehavior::Continue);
     let json = br#"[]"#;
     let err = parse_json_rpc_envelope(json, &config).expect_err("should fail");
     assert!(err.to_string().contains("empty"), "error should mention empty batch");
@@ -384,7 +384,7 @@ fn empty_batch_array_fails() {
 
 #[test]
 fn invalid_json_fails() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Reject);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Reject);
     let json = b"not json at all";
     let err = parse_json_rpc_envelope(json, &config).expect_err("should fail");
     assert!(
@@ -395,7 +395,7 @@ fn invalid_json_fails() {
 
 #[test]
 fn non_object_json_continues_when_configured() {
-    let config = make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Continue);
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue);
     let json = br#""just a string""#;
     let result = parse_json_rpc_envelope(json, &config).unwrap();
     assert!(result.is_none(), "non-object JSON should return None when continuing");
@@ -641,7 +641,7 @@ fn body_mode_is_stream_buffer() {
 // Test Utilities
 // -----------------------------------------------------------------------------
 
-fn make_config(batch_policy: BatchPolicy, on_invalid: InvalidJsonRpcBehavior) -> super::config::JsonRpcConfig {
+fn make_config(batch_policy: BatchPolicy, on_invalid: OnInvalidBehavior) -> super::config::JsonRpcConfig {
     super::config::JsonRpcConfig {
         batch_policy,
         headers: JsonRpcHeaders::default(),
@@ -652,21 +652,21 @@ fn make_config(batch_policy: BatchPolicy, on_invalid: InvalidJsonRpcBehavior) ->
 
 fn make_filter() -> JsonRpcFilter {
     JsonRpcFilter {
-        config: make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Continue),
+        config: make_config(BatchPolicy::Reject, OnInvalidBehavior::Continue),
         max_body_bytes: 1_048_576,
     }
 }
 
 fn make_reject_filter() -> JsonRpcFilter {
     JsonRpcFilter {
-        config: make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Reject),
+        config: make_config(BatchPolicy::Reject, OnInvalidBehavior::Reject),
         max_body_bytes: 1_048_576,
     }
 }
 
 fn make_error_filter() -> JsonRpcFilter {
     JsonRpcFilter {
-        config: make_config(BatchPolicy::Reject, InvalidJsonRpcBehavior::Error),
+        config: make_config(BatchPolicy::Reject, OnInvalidBehavior::Error),
         max_body_bytes: 1_048_576,
     }
 }

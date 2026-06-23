@@ -48,7 +48,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tracing::{debug, trace};
 
-use self::config::{OnInvalidBehavior, ResponsesFormatConfig, build_config};
+use self::config::{ResponsesFormatConfig, build_config};
+use super::super::OnInvalidBehavior;
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
@@ -197,7 +198,7 @@ impl HttpFilter for ResponsesFormatFilter {
 fn handle_invalid_format(format: AiRequestFormat, config: &ResponsesFormatConfig) -> Option<FilterAction> {
     match config.on_invalid {
         OnInvalidBehavior::Continue => None,
-        OnInvalidBehavior::Reject => {
+        OnInvalidBehavior::Reject | OnInvalidBehavior::Error => {
             let message = match format {
                 AiRequestFormat::InvalidJson => "invalid JSON body",
                 AiRequestFormat::NonJson => "request body is not JSON",
