@@ -422,7 +422,11 @@ fn promote_boolean_results(
 }
 
 #[cfg(feature = "ai-inference")]
+pub(crate) mod rehydrate;
+#[cfg(feature = "ai-inference")]
 pub(crate) mod validate;
 
+#[cfg(feature = "ai-inference")]
+pub use rehydrate::RehydrateFilter;
 #[cfg(feature = "ai-inference")]
 pub use validate::OpenaiResponsesValidateFilter;

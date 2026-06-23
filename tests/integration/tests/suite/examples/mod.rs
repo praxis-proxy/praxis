@@ -53,6 +53,8 @@ mod prompt_enrichment;
 mod protocols;
 mod redirect;
 #[cfg(feature = "ai-inference")]
+mod rehydrate;
+#[cfg(feature = "ai-inference")]
 mod responses_routing;
 mod round_robin;
 mod session_affinity;

@@ -15,7 +15,7 @@ use std::fmt;
 /// messages used for multi-turn conversation rehydration. JSON
 /// columns use [`serde_json::Value`] — the store is intentionally
 /// schema-agnostic about their contents.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ResponseRecord {
     /// Unique response ID (e.g., `"resp_abc123"`).
     pub id: String,
