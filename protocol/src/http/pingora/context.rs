@@ -255,7 +255,7 @@ macro_rules! filter_context {
             time_source: $pipeline.time_source(),
             upstream: $ctx.upstream.take(),
         };
-        #[cfg(feature = "ai-inference")]
+        #[cfg(feature = "response-store")]
         if let Some(stores) = $pipeline.response_stores() {
             fctx.extensions.insert(stores.clone());
         }
