@@ -61,6 +61,8 @@ pub(crate) struct ClassifiedRequest {
     pub has_prompt_id: bool,
     /// Whether `tools` is a non-empty array.
     pub has_tools: bool,
+    /// Extracted `max_output_tokens` field value (Responses API), if present.
+    pub max_output_tokens: Option<u64>,
     /// Extracted `max_tokens` field value, if present.
     pub max_tokens: Option<u64>,
     /// Extracted `model` field value, if present.
@@ -142,6 +144,7 @@ pub(crate) fn classify_request_body(body: &[u8]) -> ClassifiedRequest {
         has_tools: obj
             .get("tools")
             .is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty())),
+        max_output_tokens: obj.get("max_output_tokens").and_then(serde_json::Value::as_u64),
         max_tokens: obj.get("max_tokens").and_then(serde_json::Value::as_u64),
         model: extract_string(obj, "model"),
         store: obj.get("store").and_then(serde_json::Value::as_bool),
@@ -151,9 +154,10 @@ pub(crate) fn classify_request_body(body: &[u8]) -> ClassifiedRequest {
 
 /// Determine format from top-level keys.
 ///
-/// Precedence: `input` or `prompt` object → Responses, then
-/// `messages` with Anthropic signals → Anthropic Messages, then
-/// `messages` alone → Chat Completions.
+/// Precedence: `input`, `prompt` object, `previous_response_id`,
+/// or `conversation` → Responses, then `messages` with Anthropic
+/// signals → Anthropic Messages, then `messages` alone → Chat
+/// Completions.
 ///
 /// Anthropic signals: `max_tokens` is required AND at least one of
 /// top-level `system` field or typed content blocks (arrays of
@@ -161,7 +165,11 @@ pub(crate) fn classify_request_body(body: &[u8]) -> ClassifiedRequest {
 /// positives when `OpenAI` Chat Completions requests include the
 /// optional `max_tokens` field.
 fn classify_format(obj: &serde_json::Map<String, serde_json::Value>) -> AiRequestFormat {
-    if obj.contains_key("input") || obj.get("prompt").is_some_and(serde_json::Value::is_object) {
+    if obj.contains_key("input")
+        || obj.get("prompt").is_some_and(serde_json::Value::is_object)
+        || obj.contains_key("previous_response_id")
+        || obj.contains_key("conversation")
+    {
         return AiRequestFormat::Responses;
     }
 
@@ -213,6 +221,7 @@ pub(crate) fn empty_result(format: AiRequestFormat) -> ClassifiedRequest {
         has_previous_response_id: false,
         has_prompt_id: false,
         has_tools: false,
+        max_output_tokens: None,
         max_tokens: None,
         model: None,
         store: None,
@@ -305,6 +314,31 @@ mod tests {
         assert!(
             result.has_previous_response_id,
             "previous_response_id should be detected"
+        );
+    }
+
+    #[test]
+    fn responses_max_output_tokens_extracted() {
+        let body = br#"{"model":"gpt-4.1","input":"test","max_output_tokens":2048}"#;
+        let result = classify_request_body(body);
+
+        assert_eq!(result.format, AiRequestFormat::Responses, "should be responses");
+        assert_eq!(
+            result.max_output_tokens,
+            Some(2048),
+            "max_output_tokens should be extracted"
+        );
+        assert!(result.max_tokens.is_none(), "max_tokens should be None");
+    }
+
+    #[test]
+    fn responses_absent_max_output_tokens_is_none() {
+        let body = br#"{"model":"gpt-4.1","input":"test"}"#;
+        let result = classify_request_body(body);
+
+        assert!(
+            result.max_output_tokens.is_none(),
+            "absent max_output_tokens should be None"
         );
     }
 
@@ -676,6 +710,31 @@ mod tests {
         );
     }
 
+    #[test]
+    fn previous_response_id_with_messages_classifies_as_responses() {
+        let body =
+            br#"{"model":"gpt-4.1","previous_response_id":"resp_abc","messages":[{"role":"user","content":"Hi"}]}"#;
+        let result = classify_request_body(body);
+
+        assert_eq!(
+            result.format,
+            AiRequestFormat::Responses,
+            "previous_response_id should take precedence over messages"
+        );
+    }
+
+    #[test]
+    fn conversation_with_messages_classifies_as_responses() {
+        let body = br#"{"model":"gpt-4.1","conversation":{"id":"conv_123"},"messages":[{"role":"user","content":"Hi"}],"max_tokens":1024,"system":"Be helpful."}"#;
+        let result = classify_request_body(body);
+
+        assert_eq!(
+            result.format,
+            AiRequestFormat::Responses,
+            "conversation should take precedence over Anthropic signals"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Path Classification
     // -------------------------------------------------------------------------
@@ -797,6 +856,79 @@ mod tests {
         assert!(
             !is_responses_path(&http::Method::GET, "/v1/responses//input_items"),
             "GET /v1/responses//input_items should not collapse empty id segment"
+        );
+    }
+
+    #[test]
+    fn previous_response_id_only_classifies_as_responses() {
+        let body = br#"{"model":"gpt-4.1","previous_response_id":"resp_abc"}"#;
+        let result = classify_request_body(body);
+
+        assert_eq!(
+            result.format,
+            AiRequestFormat::Responses,
+            "previous_response_id without input should classify as responses"
+        );
+        assert!(
+            result.has_previous_response_id,
+            "previous_response_id should be detected"
+        );
+    }
+
+    #[test]
+    fn previous_response_id_with_input_classifies_as_responses() {
+        let body = br#"{"model":"gpt-4.1","previous_response_id":"resp_abc","input":"hello"}"#;
+        let result = classify_request_body(body);
+
+        assert_eq!(
+            result.format,
+            AiRequestFormat::Responses,
+            "previous_response_id with input should still classify as responses"
+        );
+    }
+
+    #[test]
+    fn conversation_only_classifies_as_responses() {
+        let body = br#"{"model":"gpt-4.1","conversation":{"id":"conv_123"}}"#;
+        let result = classify_request_body(body);
+
+        assert_eq!(
+            result.format,
+            AiRequestFormat::Responses,
+            "conversation without input should classify as responses"
+        );
+        assert!(result.has_conversation, "conversation should be detected");
+    }
+
+    #[test]
+    fn null_previous_response_id_still_classifies_as_responses() {
+        let body = br#"{"model":"gpt-4.1","previous_response_id":null}"#;
+        let result = classify_request_body(body);
+
+        assert_eq!(
+            result.format,
+            AiRequestFormat::Responses,
+            "previous_response_id key present (even null) should classify as responses"
+        );
+        assert!(
+            !result.has_previous_response_id,
+            "null value should not set the has_previous_response_id flag"
+        );
+    }
+
+    #[test]
+    fn null_conversation_still_classifies_as_responses() {
+        let body = br#"{"model":"gpt-4.1","conversation":null}"#;
+        let result = classify_request_body(body);
+
+        assert_eq!(
+            result.format,
+            AiRequestFormat::Responses,
+            "conversation key present (even null) should classify as responses"
+        );
+        assert!(
+            !result.has_conversation,
+            "null value should not set the has_conversation flag"
         );
     }
 

@@ -283,6 +283,13 @@ fn write_optional_metadata(ctx: &mut HttpFilterContext<'_>, classified: &Classif
             if background { "true" } else { "false" },
         );
     }
+
+    if let Some(max_output_tokens) = classified.max_output_tokens {
+        ctx.set_metadata(
+            "openai_responses_format.max_output_tokens",
+            max_output_tokens.to_string(),
+        );
+    }
 }
 
 /// Write boolean presence flags to metadata.
@@ -380,6 +387,10 @@ fn promote_optional_results(
 
     if let Some(background) = classified.background {
         results.set("background", if background { "true" } else { "false" })?;
+    }
+
+    if let Some(max_output_tokens) = classified.max_output_tokens {
+        results.set("max_output_tokens", max_output_tokens.to_string())?;
     }
 
     Ok(())
