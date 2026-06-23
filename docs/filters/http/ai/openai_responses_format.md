@@ -11,7 +11,7 @@ Requires Cargo feature: `ai-inference`.
 
 Classification formats: `openai_responses`, `openai_chat_completions`, `unknown_json`, `invalid_json`, `non_json`.
 
-Routing mode for Responses API: `stateful` when the request contains `previous_response_id`, non-empty `tools`, `store=true` (default when omitted), `background=true`, `conversation`, or `prompt_id`; `stateless` when `store=false` with no other stateful markers.
+Routing mode for Responses API: `stateful` when the request contains `previous_response_id`, non-empty `tools`, `store=true` (default when omitted), `background=true`, `conversation`, or `prompt.id`; `stateless` when `store=false` with no other stateful markers.
 
 Use with branch chains to route stateful and stateless requests to different clusters.
 
@@ -19,7 +19,7 @@ Use with branch chains to route stateful and stateless requests to different clu
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `on_invalid` | `continue` \| `reject` | no | Behavior when the body cannot be classified. |
+| `on_invalid` | `continue` \| `reject` \| `error` | no | Behavior when the body cannot be classified. |
 | `max_body_bytes` | usize | no | Maximum body size in bytes for `StreamBuffer` mode. |
 | `headers` | ResponsesFormatHeaders | no | Header names for promoted classification facts. |
 | `headers.format` | string | no | Header name for the detected format (e.g. `openai_responses`, `openai_chat_completions`). |

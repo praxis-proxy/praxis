@@ -773,11 +773,7 @@ async fn mode_stateful_when_conversation_present() {
 
 #[tokio::test]
 async fn mode_stateful_when_prompt_id_present() {
-    let ctx = run_filter(
-        "{}",
-        r#"{"input":"test","store":false,"prompt":{"prompt_id":"pmpt_123"}}"#,
-    )
-    .await;
+    let ctx = run_filter("{}", r#"{"input":"test","store":false,"prompt":{"id":"pmpt_123"}}"#).await;
     let results = ctx.filter_results.get("openai_responses_format").unwrap();
 
     assert_eq!(results.get("mode"), Some("stateful"));
@@ -852,7 +848,7 @@ async fn mode_header_suppressed_when_null() {
 // -----------------------------------------------------------------------------
 
 /// Full Responses body with all optional fields for promotion tests.
-const FULL_RESPONSES_BODY: &str = r#"{"model":"gpt-4.1","input":"test","stream":true,"store":false,"background":true,"previous_response_id":"resp_abc","conversation":{"id":"conv_1"},"tools":[{"type":"function"}],"prompt":{"prompt_id":"pmpt_123"}}"#;
+const FULL_RESPONSES_BODY: &str = r#"{"model":"gpt-4.1","input":"test","stream":true,"store":false,"background":true,"previous_response_id":"resp_abc","conversation":{"id":"conv_1"},"tools":[{"type":"function"}],"prompt":{"id":"pmpt_123"}}"#;
 
 /// Run the filter's `on_request_body` and return the resulting context.
 async fn run_filter(config_yaml: &str, body_str: &str) -> HttpFilterContext<'static> {

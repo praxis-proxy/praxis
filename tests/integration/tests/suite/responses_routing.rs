@@ -38,8 +38,8 @@ fn mode_branch_routes_stateful_conditions_to_stateful_path() {
             r#"{"model":"gpt-4.1","input":"Hello","store":false,"conversation":{"id":"conv_123"}}"#,
         ),
         (
-            "prompt_id present",
-            r#"{"model":"gpt-4.1","input":"Hello","store":false,"prompt":{"prompt_id":"pmpt_123"}}"#,
+            "prompt.id present",
+            r#"{"model":"gpt-4.1","input":"Hello","store":false,"prompt":{"id":"pmpt_123"}}"#,
         ),
     ];
 

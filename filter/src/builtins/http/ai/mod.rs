@@ -45,6 +45,8 @@ pub use guardrails::AiGuardrailsFilter;
 pub use inference::ModelToHeaderFilter;
 pub(crate) use on_invalid::OnInvalidBehavior;
 #[cfg(feature = "ai-inference")]
+pub use openai::ModelRewriteFilter;
+#[cfg(feature = "ai-inference")]
 pub use openai::OpenaiResponsesValidateFilter;
 #[cfg(feature = "ai-inference")]
 pub use openai::ResponseStoreFilter;

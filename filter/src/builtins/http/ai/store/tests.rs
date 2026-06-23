@@ -642,6 +642,26 @@ fn registry_default_is_empty() {
     );
 }
 
+#[test]
+fn registry_clone_shares_storage() {
+    let registry = ResponseStoreRegistry::new();
+    let cloned = registry.clone();
+    assert!(
+        registry.shares_storage_with(&cloned),
+        "cloned registry handles should share backing storage"
+    );
+}
+
+#[test]
+fn registry_new_has_independent_storage() {
+    let first = ResponseStoreRegistry::new();
+    let second = ResponseStoreRegistry::new();
+    assert!(
+        !first.shares_storage_with(&second),
+        "independent registries should not share backing storage"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // PostgreSQL Backend (requires running instance, DATABASE_URL env var)
 // -----------------------------------------------------------------------------

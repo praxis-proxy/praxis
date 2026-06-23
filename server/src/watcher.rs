@@ -31,6 +31,10 @@ use crate::reload::reload_pipelines;
 /// Debounce window for filesystem events.
 const DEBOUNCE_MS: u64 = 500;
 
+/// Test-only startup wait for the background notify watcher.
+#[cfg(test)]
+const WATCHER_STARTUP_MS: u64 = 750;
+
 // -----------------------------------------------------------------------------
 // WatcherParams
 // -----------------------------------------------------------------------------
@@ -48,10 +52,6 @@ pub(crate) struct WatcherParams {
 
     /// KV store registry, preserved across reloads.
     pub(crate) kv_stores: praxis_core::kv::KvStoreRegistry,
-
-    /// Response store registry, preserved across reloads.
-    #[cfg(feature = "ai-inference")]
-    pub(crate) response_stores: praxis_filter::ResponseStoreRegistry,
 
     /// Live pipeline storage, swapped atomically on reload.
     pub(crate) pipelines: Arc<ListenerPipelines>,
@@ -121,8 +121,6 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
                     &params.pipelines,
                     &params.health_shutdown,
                     &params.kv_stores,
-                    #[cfg(feature = "ai-inference")]
-                    &params.response_stores,
                 );
             }
             () = params.shutdown.cancelled() => {
@@ -146,7 +144,6 @@ fn handle_reload(
     pipelines: &ListenerPipelines,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
-    #[cfg(feature = "ai-inference")] response_stores: &praxis_filter::ResponseStoreRegistry,
 ) {
     let content = match std::fs::read_to_string(config_path) {
         Ok(c) => c,
@@ -179,8 +176,6 @@ fn handle_reload(
         pipelines,
         health_shutdown,
         kv_stores,
-        #[cfg(feature = "ai-inference")]
-        response_stores,
     ) {
         Ok(()) => {
             *current_config = new_config;
@@ -315,8 +310,6 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines,
             registry,
-            #[cfg(feature = "ai-inference")]
-            response_stores: empty_response_stores(),
             shutdown: shutdown.clone(),
         });
 
@@ -358,12 +351,10 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines: Arc::clone(&pipelines),
             registry: Arc::clone(&registry),
-            #[cfg(feature = "ai-inference")]
-            response_stores: empty_response_stores(),
             shutdown: shutdown.clone(),
         });
 
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
 
         std::fs::write(&config_path, VALID_YAML_CHANGED).unwrap();
 
@@ -409,12 +400,10 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines: Arc::clone(&pipelines),
             registry: Arc::clone(&registry),
-            #[cfg(feature = "ai-inference")]
-            response_stores: empty_response_stores(),
             shutdown: shutdown.clone(),
         });
 
-        std::thread::sleep(Duration::from_millis(200));
+        std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
 
         std::fs::write(&config_path, "invalid: [[[yaml").unwrap();
 
@@ -489,8 +478,6 @@ mod tests {
             kv_stores,
             pipelines,
             registry,
-            #[cfg(feature = "ai-inference")]
-            response_stores: empty_response_stores(),
             shutdown: shutdown.clone(),
         });
 

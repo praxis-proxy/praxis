@@ -24,6 +24,8 @@ pub use ai::AnthropicToOpenaiFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::AnthropicValidateFilter;
 #[cfg(feature = "ai-inference")]
+pub use ai::ModelRewriteFilter;
+#[cfg(feature = "ai-inference")]
 pub use ai::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
 pub use ai::OpenaiResponsesValidateFilter;

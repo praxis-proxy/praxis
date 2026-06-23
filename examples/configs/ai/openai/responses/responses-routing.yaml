@@ -15,7 +15,7 @@
 # - store is true (the OpenAI spec default when omitted)
 # - background is true
 # - conversation is set
-# - prompt_id is set
+# - prompt.id is set
 #
 # Stateless requires store=false and no other stateful markers.
 

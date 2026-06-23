@@ -18,6 +18,8 @@
 //! to validate parameter combinations and extract additional fields.
 
 mod config;
+#[cfg(feature = "ai-inference")]
+pub(crate) mod model_rewrite;
 #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on modules")]
 #[allow(
     dead_code,
@@ -26,6 +28,8 @@ mod config;
 pub(crate) mod state;
 pub(crate) mod store;
 
+#[cfg(feature = "ai-inference")]
+pub use model_rewrite::ModelRewriteFilter;
 pub use store::ResponseStoreFilter;
 
 #[cfg(test)]
@@ -68,6 +72,16 @@ use crate::{
 /// Maximum length of a body-derived value promoted to headers or filter results.
 const MAX_PROMOTED_VALUE_LEN: usize = 256;
 
+/// Default store name used when registering the response store in the
+/// per-request registry.
+pub(crate) const DEFAULT_STORE_NAME: &str = "default";
+
+/// Metadata key for tenant isolation.
+pub(crate) const TENANT_METADATA_KEY: &str = "responses.tenant_id";
+
+/// Fallback tenant ID when no tenant metadata is present.
+pub(crate) const DEFAULT_TENANT_ID: &str = "default";
+
 // -----------------------------------------------------------------------------
 // ResponsesFormatFilter
 // -----------------------------------------------------------------------------
@@ -80,7 +94,7 @@ const MAX_PROMOTED_VALUE_LEN: usize = 256;
 ///
 /// Routing mode for Responses API: `stateful` when the request contains
 /// `previous_response_id`, non-empty `tools`, `store=true` (default when
-/// omitted), `background=true`, `conversation`, or `prompt_id`;
+/// omitted), `background=true`, `conversation`, or `prompt.id`;
 /// `stateless` when `store=false` with no other stateful markers.
 ///
 /// Use with branch chains to route stateful and stateless requests to
@@ -273,6 +287,13 @@ fn write_optional_metadata(ctx: &mut HttpFilterContext<'_>, classified: &Classif
             if background { "true" } else { "false" },
         );
     }
+
+    if let Some(max_output_tokens) = classified.max_output_tokens {
+        ctx.set_metadata(
+            "openai_responses_format.max_output_tokens",
+            max_output_tokens.to_string(),
+        );
+    }
 }
 
 /// Write boolean presence flags to metadata.
@@ -370,6 +391,10 @@ fn promote_optional_results(
 
     if let Some(background) = classified.background {
         results.set("background", if background { "true" } else { "false" })?;
+    }
+
+    if let Some(max_output_tokens) = classified.max_output_tokens {
+        results.set("max_output_tokens", max_output_tokens.to_string())?;
     }
 
     Ok(())

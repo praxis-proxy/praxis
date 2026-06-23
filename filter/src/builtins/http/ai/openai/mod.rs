@@ -6,5 +6,7 @@
 pub(crate) mod responses;
 
 #[cfg(feature = "ai-inference")]
+pub use responses::ModelRewriteFilter;
+#[cfg(feature = "ai-inference")]
 pub use responses::OpenaiResponsesValidateFilter;
 pub use responses::{ResponseStoreFilter, ResponsesFormatFilter};
