@@ -1,12 +1,17 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-#![allow(
+#![expect(
+    clippy::items_after_statements,
     clippy::let_underscore_must_use,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::panic,
+    clippy::clone_on_ref_ptr,
+    clippy::doc_markdown,
+    clippy::significant_drop_tightening,
+    clippy::too_many_lines,
     reason = "tests"
 )]
 
@@ -24,6 +29,7 @@ use praxis_proto::envoy::service::{
 };
 
 use super::*;
+use crate::duplex::{ExchangeConfig, ExchangeError, ExchangeEvent, ExtProcExchange};
 
 // -----------------------------------------------------------------------------
 // Config Parsing
@@ -2129,7 +2135,7 @@ use std::{net::SocketAddr, pin::Pin};
 
 use async_trait::async_trait;
 use praxis_proto::envoy::service::ext_proc::v3::{
-    BodyResponse, ProcessingRequest, ProcessingResponse,
+    BodyResponse, ProcessingRequest, ProcessingResponse, ProtocolConfiguration, TrailersResponse,
     external_processor_server::{ExternalProcessor, ExternalProcessorServer},
     processing_request, processing_response,
 };
@@ -2237,10 +2243,22 @@ fn build_noop_response(req: &ProcessingRequest) -> ProcessingResponse {
         Some(processing_request::Request::RequestHeaders(_)) => {
             processing_response::Response::RequestHeaders(HeadersResponse { response: None })
         },
+        Some(processing_request::Request::RequestBody(_)) => {
+            processing_response::Response::RequestBody(BodyResponse { response: None })
+        },
+        Some(processing_request::Request::RequestTrailers(_)) => {
+            processing_response::Response::RequestTrailers(TrailersResponse { header_mutation: None })
+        },
         Some(processing_request::Request::ResponseHeaders(_)) => {
             processing_response::Response::ResponseHeaders(HeadersResponse { response: None })
         },
-        _ => processing_response::Response::RequestHeaders(HeadersResponse { response: None }),
+        Some(processing_request::Request::ResponseBody(_)) => {
+            processing_response::Response::ResponseBody(BodyResponse { response: None })
+        },
+        Some(processing_request::Request::ResponseTrailers(_)) => {
+            processing_response::Response::ResponseTrailers(TrailersResponse { header_mutation: None })
+        },
+        None => processing_response::Response::RequestHeaders(HeadersResponse { response: None }),
     };
     ProcessingResponse {
         response: Some(response),
@@ -2370,4 +2388,3941 @@ async fn wait_for_server(addr: SocketAddr) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     panic!("mock server at {addr} did not become ready");
+}
+
+// =============================================================================
+// Duplex Exchange Tests
+// =============================================================================
+
+fn default_exchange_config() -> ExchangeConfig {
+    ExchangeConfig {
+        message_timeout: Duration::from_secs(5),
+        max_message_timeout: None,
+        request_body_mode: BodySendMode::None,
+        response_body_mode: BodySendMode::None,
+    }
+}
+
+fn streamed_body_exchange_config() -> ExchangeConfig {
+    ExchangeConfig {
+        request_body_mode: BodySendMode::Streamed,
+        response_body_mode: BodySendMode::Streamed,
+        ..default_exchange_config()
+    }
+}
+
+fn full_duplex_exchange_config() -> ExchangeConfig {
+    ExchangeConfig {
+        request_body_mode: BodySendMode::FullDuplexStreamed,
+        response_body_mode: BodySendMode::FullDuplexStreamed,
+        ..default_exchange_config()
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Duplex Mock Server
+// -----------------------------------------------------------------------------
+
+/// Configurable behavior for the duplex mock processor.
+///
+/// Unlike [`MockBehavior`] which handles one message,
+/// this reads the full conversation.
+#[derive(Clone)]
+enum DuplexBehavior {
+    /// Read request headers, respond with header mutation.
+    EchoHeaders { name: String, value: String },
+
+    /// Read headers + body chunks. Respond only after body EOS.
+    /// Returns header response then body response.
+    DelayedRouting { header_name: String, header_value: String },
+
+    /// Respond with ImmediateResponse on request headers.
+    ImmediateOnHeaders { status: i32, body: String },
+
+    /// Read headers, then respond with ImmediateResponse on first body chunk.
+    ImmediateOnBody { status: i32, body: String },
+
+    /// Read headers + body EOS, respond with multiple StreamedBodyResponse chunks.
+    StreamedBodyChunks { chunks: Vec<Vec<u8>> },
+
+    /// Handle full lifecycle: request headers, request body, response headers.
+    FullLifecycle {
+        req_header_name: String,
+        req_header_value: String,
+        resp_header_name: String,
+        resp_header_value: String,
+    },
+
+    /// Never respond (timeout testing).
+    Hang,
+
+    /// Close stream immediately without responding.
+    CloseEarly,
+
+    /// Send override_message_timeout then delayed header response.
+    OverrideTimeout {
+        override_ms: u64,
+        delay_ms: u64,
+        name: String,
+        value: String,
+    },
+
+    /// Echo headers, respond with unexpected body response type.
+    UnexpectedResponseType,
+
+    /// Read headers + body, respond to both. Body response uses
+    /// simple BodyMutation (not streamed).
+    HeadersAndBody,
+}
+
+struct DuplexMockProcessor {
+    behavior: DuplexBehavior,
+}
+
+#[async_trait]
+impl ExternalProcessor for DuplexMockProcessor {
+    type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+    async fn process(
+        &self,
+        request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+    ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+        let mut stream = request.into_inner();
+        let behavior = self.behavior.clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(16);
+        tokio::spawn(async move {
+            match behavior {
+                DuplexBehavior::EchoHeaders { name, value } => {
+                    let msg = stream.message().await.unwrap().unwrap();
+                    let resp = build_add_header_response(&msg, &name, &value);
+                    drop(tx.send(Ok(resp)).await);
+                },
+                DuplexBehavior::DelayedRouting {
+                    header_name,
+                    header_value,
+                } => {
+                    let header_msg = stream.message().await.unwrap().unwrap();
+                    loop {
+                        let body_msg = stream.message().await.unwrap().unwrap();
+                        if let Some(processing_request::Request::RequestBody(b)) = &body_msg.request
+                            && b.end_of_stream
+                        {
+                            break;
+                        }
+                    }
+                    let header_resp = build_add_header_response(&header_msg, &header_name, &header_value);
+                    drop(tx.send(Ok(header_resp)).await);
+                    use praxis_proto::envoy::service::ext_proc::v3::{
+                        BodyMutation, CommonResponse, StreamedBodyResponse, body_mutation,
+                    };
+                    let body_resp = ProcessingResponse {
+                        response: Some(processing_response::Response::RequestBody(BodyResponse {
+                            response: Some(CommonResponse {
+                                body_mutation: Some(BodyMutation {
+                                    mutation: Some(body_mutation::Mutation::StreamedResponse(StreamedBodyResponse {
+                                        body: Vec::new(),
+                                        end_of_stream: true,
+                                    })),
+                                }),
+                                ..Default::default()
+                            }),
+                        })),
+                        ..Default::default()
+                    };
+                    drop(tx.send(Ok(body_resp)).await);
+                },
+                DuplexBehavior::ImmediateOnHeaders { status, body } => {
+                    let _msg = stream.message().await.unwrap().unwrap();
+                    let resp = build_immediate_response(status, &body);
+                    drop(tx.send(Ok(resp)).await);
+                },
+                DuplexBehavior::ImmediateOnBody { status, body } => {
+                    let _headers = stream.message().await.unwrap().unwrap();
+                    let header_resp = ProcessingResponse {
+                        response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                            response: None,
+                        })),
+                        ..Default::default()
+                    };
+                    drop(tx.send(Ok(header_resp)).await);
+                    let _body_msg = stream.message().await.unwrap().unwrap();
+                    let resp = build_immediate_response(status, &body);
+                    drop(tx.send(Ok(resp)).await);
+                },
+                DuplexBehavior::StreamedBodyChunks { chunks } => {
+                    let _headers = stream.message().await.unwrap().unwrap();
+                    loop {
+                        let body_msg = stream.message().await.unwrap().unwrap();
+                        if let Some(processing_request::Request::RequestBody(b)) = &body_msg.request
+                            && b.end_of_stream
+                        {
+                            break;
+                        }
+                    }
+                    let header_resp = ProcessingResponse {
+                        response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                            response: None,
+                        })),
+                        ..Default::default()
+                    };
+                    drop(tx.send(Ok(header_resp)).await);
+
+                    for (i, chunk) in chunks.iter().enumerate() {
+                        let is_last = i == chunks.len() - 1;
+                        use praxis_proto::envoy::service::ext_proc::v3::{
+                            BodyMutation, CommonResponse, StreamedBodyResponse, body_mutation,
+                        };
+                        let body_resp = ProcessingResponse {
+                            response: Some(processing_response::Response::RequestBody(BodyResponse {
+                                response: Some(CommonResponse {
+                                    body_mutation: Some(BodyMutation {
+                                        mutation: Some(body_mutation::Mutation::StreamedResponse(
+                                            StreamedBodyResponse {
+                                                body: chunk.clone(),
+                                                end_of_stream: is_last,
+                                            },
+                                        )),
+                                    }),
+                                    ..Default::default()
+                                }),
+                            })),
+                            ..Default::default()
+                        };
+                        drop(tx.send(Ok(body_resp)).await);
+                    }
+                },
+                DuplexBehavior::FullLifecycle {
+                    req_header_name,
+                    req_header_value,
+                    resp_header_name,
+                    resp_header_value,
+                } => {
+                    let header_msg = stream.message().await.unwrap().unwrap();
+                    let req_resp = build_add_header_response(&header_msg, &req_header_name, &req_header_value);
+                    drop(tx.send(Ok(req_resp)).await);
+
+                    while let Ok(Some(msg)) = stream.message().await {
+                        if let Some(processing_request::Request::ResponseHeaders(_)) = msg.request {
+                            let resp_resp = ProcessingResponse {
+                                response: Some(processing_response::Response::ResponseHeaders(HeadersResponse {
+                                    response: Some(CommonResponse {
+                                        header_mutation: Some(HeaderMutation {
+                                            set_headers: vec![make_hvo(&resp_header_name, &resp_header_value)],
+                                            remove_headers: vec![],
+                                        }),
+                                        ..Default::default()
+                                    }),
+                                })),
+                                ..Default::default()
+                            };
+                            drop(tx.send(Ok(resp_resp)).await);
+                            break;
+                        }
+                    }
+                },
+                DuplexBehavior::Hang => {
+                    futures::future::pending::<()>().await;
+                },
+                DuplexBehavior::CloseEarly => {},
+                DuplexBehavior::OverrideTimeout {
+                    override_ms,
+                    delay_ms,
+                    name,
+                    value,
+                } => {
+                    let msg = stream.message().await.unwrap().unwrap();
+                    let override_resp = build_override_response(override_ms);
+                    drop(tx.send(Ok(override_resp)).await);
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    let real_resp = build_add_header_response(&msg, &name, &value);
+                    drop(tx.send(Ok(real_resp)).await);
+                },
+                DuplexBehavior::UnexpectedResponseType => {
+                    let _msg = stream.message().await.unwrap().unwrap();
+                    let resp = build_unexpected_body_response();
+                    drop(tx.send(Ok(resp)).await);
+                },
+                DuplexBehavior::HeadersAndBody => {
+                    let header_msg = stream.message().await.unwrap().unwrap();
+                    let header_resp = build_noop_response(&header_msg);
+                    drop(tx.send(Ok(header_resp)).await);
+
+                    let _body_msg = stream.message().await.unwrap().unwrap();
+                    let body_resp = ProcessingResponse {
+                        response: Some(processing_response::Response::RequestBody(BodyResponse {
+                            response: None,
+                        })),
+                        ..Default::default()
+                    };
+                    drop(tx.send(Ok(body_resp)).await);
+                },
+            }
+        });
+
+        let output = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(tonic::Response::new(Box::pin(output)))
+    }
+}
+
+async fn start_duplex_processor(behavior: DuplexBehavior) -> (SocketAddr, MockServerGuard) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    let svc = ExternalProcessorServer::new(DuplexMockProcessor { behavior });
+
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+
+    wait_for_server(addr).await;
+
+    let guard = MockServerGuard {
+        shutdown: Some(shutdown_tx),
+    };
+    (addr, guard)
+}
+
+fn make_request_headers() -> processing_request::Request {
+    processing_request::Request::RequestHeaders(praxis_proto::envoy::service::ext_proc::v3::HttpHeaders {
+        headers: Some(praxis_proto::envoy::service::ext_proc::v3::HeaderMap {
+            headers: vec![HeaderValue {
+                key: ":method".to_owned(),
+                value: "GET".to_owned(),
+                raw_value: Vec::new(),
+            }],
+        }),
+        end_of_stream: false,
+    })
+}
+
+fn make_request_body(body: &[u8], end_of_stream: bool) -> processing_request::Request {
+    processing_request::Request::RequestBody(praxis_proto::envoy::service::ext_proc::v3::HttpBody {
+        body: body.to_vec(),
+        end_of_stream,
+    })
+}
+
+fn make_response_headers() -> processing_request::Request {
+    processing_request::Request::ResponseHeaders(praxis_proto::envoy::service::ext_proc::v3::HttpHeaders {
+        headers: Some(praxis_proto::envoy::service::ext_proc::v3::HeaderMap {
+            headers: vec![HeaderValue {
+                key: ":status".to_owned(),
+                value: "200".to_owned(),
+                raw_value: Vec::new(),
+            }],
+        }),
+        end_of_stream: false,
+    })
+}
+
+fn make_request_trailers() -> processing_request::Request {
+    processing_request::Request::RequestTrailers(praxis_proto::envoy::service::ext_proc::v3::HttpTrailers {
+        trailers: Some(praxis_proto::envoy::service::ext_proc::v3::HeaderMap { headers: vec![] }),
+    })
+}
+
+// -----------------------------------------------------------------------------
+// Duplex Exchange Test Functions
+// -----------------------------------------------------------------------------
+
+/// Mock that records the protocol_config from the first message.
+struct ProtocolConfigRecorder {
+    recorded: std::sync::Arc<tokio::sync::Mutex<Option<ProtocolConfiguration>>>,
+}
+
+#[async_trait]
+impl ExternalProcessor for ProtocolConfigRecorder {
+    type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+    async fn process(
+        &self,
+        request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+    ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+        let mut stream = request.into_inner();
+        let recorded = self.recorded.clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            let mut first = true;
+            while let Ok(Some(msg)) = stream.message().await {
+                if first {
+                    *recorded.lock().await = msg.protocol_config;
+                    first = false;
+                }
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+            }
+        });
+
+        let output = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(tonic::Response::new(Box::pin(output)))
+    }
+}
+
+#[tokio::test]
+async fn duplex_first_message_includes_protocol_config() {
+    let recorded = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    let svc = ExternalProcessorServer::new(ProtocolConfigRecorder {
+        recorded: recorded.clone(),
+    });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        request_body_mode: BodySendMode::FullDuplexStreamed,
+        response_body_mode: BodySendMode::FullDuplexStreamed,
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _resp = exchange.receive().await.unwrap();
+
+    let pc = recorded.lock().await;
+    let pc = pc.as_ref().expect("first message should include protocol_config");
+    assert_eq!(
+        pc.request_body_mode, 4,
+        "request_body_mode should be FULL_DUPLEX_STREAMED"
+    );
+    assert_eq!(
+        pc.response_body_mode, 4,
+        "response_body_mode should be FULL_DUPLEX_STREAMED"
+    );
+
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_second_message_omits_protocol_config() {
+    let all_configs: std::sync::Arc<tokio::sync::Mutex<Vec<Option<ProtocolConfiguration>>>> =
+        std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    struct AllConfigRecorder {
+        configs: std::sync::Arc<tokio::sync::Mutex<Vec<Option<ProtocolConfiguration>>>>,
+    }
+
+    #[async_trait]
+    impl ExternalProcessor for AllConfigRecorder {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let configs = self.configs.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                while let Ok(Some(msg)) = stream.message().await {
+                    configs.lock().await.push(msg.protocol_config);
+                    let resp = build_noop_response(&msg);
+                    drop(tx.send(Ok(resp)).await);
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let svc = ExternalProcessorServer::new(AllConfigRecorder {
+        configs: all_configs.clone(),
+    });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _r1 = exchange.receive().await.unwrap();
+    exchange.send(make_request_body(b"data", true)).await.unwrap();
+    let _r2 = exchange.receive().await.unwrap();
+
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+
+    let configs = all_configs.lock().await;
+    assert_eq!(configs.len(), 2, "server should have received 2 messages");
+    assert!(configs[0].is_some(), "first message should include protocol_config");
+    assert!(configs[1].is_none(), "second message should omit protocol_config");
+}
+
+#[tokio::test]
+async fn duplex_request_headers_round_trip() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::EchoHeaders {
+        name: "x-injected".to_owned(),
+        value: "from-duplex".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let resp = exchange.receive().await.unwrap();
+    assert!(
+        matches!(resp, ExchangeEvent::RequestHeaders { .. }),
+        "should receive a response with header mutation"
+    );
+}
+
+#[tokio::test]
+async fn duplex_request_body_round_trip() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::HeadersAndBody).await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _hdr_resp = exchange.receive().await.unwrap();
+    exchange.send(make_request_body(b"hello", true)).await.unwrap();
+    let body_resp = exchange.receive().await.unwrap();
+    assert!(
+        matches!(body_resp, ExchangeEvent::RequestBody { .. }),
+        "should receive a body response"
+    );
+}
+
+#[tokio::test]
+async fn duplex_delayed_routing_no_deadlock() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::DelayedRouting {
+        header_name: "x-endpoint".to_owned(),
+        header_value: "10.0.0.1:8080".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    exchange.send(make_request_body(b"chunk1", false)).await.unwrap();
+    exchange.send(make_request_body(b"chunk2", true)).await.unwrap();
+
+    let header_resp = exchange.receive().await.unwrap();
+    assert!(
+        matches!(header_resp, ExchangeEvent::RequestHeaders { .. }),
+        "should receive deferred header response after body EOS"
+    );
+    let body_resp = exchange.receive().await.unwrap();
+    assert!(
+        matches!(body_resp, ExchangeEvent::RequestBody { .. }),
+        "should receive body response after header response"
+    );
+}
+
+#[tokio::test]
+async fn duplex_multiple_sends_before_any_receive() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::DelayedRouting {
+        header_name: "x-ep".to_owned(),
+        header_value: "ep1".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    exchange.send(make_request_body(b"all-at-once", true)).await.unwrap();
+
+    let r1 = exchange.receive().await.unwrap();
+    let r2 = exchange.receive().await.unwrap();
+    assert!(
+        matches!(r1, ExchangeEvent::RequestHeaders { .. }),
+        "first response should exist"
+    );
+    assert!(
+        matches!(r2, ExchangeEvent::RequestBody { .. }),
+        "second response should exist"
+    );
+}
+
+#[tokio::test]
+async fn duplex_response_headers_on_same_stream() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::FullLifecycle {
+        req_header_name: "x-req".to_owned(),
+        req_header_value: "val".to_owned(),
+        resp_header_name: "x-resp".to_owned(),
+        resp_header_value: "val".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    let _req_resp = exchange.receive().await.unwrap();
+
+    exchange.send(make_response_headers()).await.unwrap();
+    let resp_resp = exchange.receive().await.unwrap();
+    assert!(
+        matches!(resp_resp, ExchangeEvent::ResponseHeaders { .. }),
+        "should receive response headers on the same stream"
+    );
+}
+
+#[tokio::test]
+async fn duplex_streamed_body_chunks() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::StreamedBodyChunks {
+        chunks: vec![b"chunk1".to_vec(), b"chunk2".to_vec(), b"chunk3".to_vec()],
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    exchange.send(make_request_body(b"body", true)).await.unwrap();
+
+    let _header_resp = exchange.receive().await.unwrap();
+
+    let mut chunks_received = 0;
+    for _ in 0..3 {
+        let resp = exchange.receive().await.unwrap();
+        assert!(
+            matches!(resp, ExchangeEvent::RequestBody { .. }),
+            "should receive body response chunk"
+        );
+        chunks_received += 1;
+    }
+    assert_eq!(chunks_received, 3, "should receive all 3 streamed body chunks");
+}
+
+#[tokio::test]
+async fn duplex_immediate_response_on_headers() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::ImmediateOnHeaders {
+        status: 403,
+        body: "blocked".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    let resp = exchange.receive().await.unwrap();
+    assert!(
+        matches!(resp, ExchangeEvent::Immediate { .. }),
+        "should receive ImmediateResponse during headers"
+    );
+}
+
+#[tokio::test]
+async fn duplex_immediate_response_on_body() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::ImmediateOnBody {
+        status: 413,
+        body: "too large".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    let _hdr = exchange.receive().await.unwrap();
+    exchange.send(make_request_body(b"big", true)).await.unwrap();
+    let resp = exchange.receive().await.unwrap();
+    assert!(
+        matches!(resp, ExchangeEvent::Immediate { .. }),
+        "should receive ImmediateResponse during body"
+    );
+}
+
+#[tokio::test]
+async fn duplex_unexpected_response_type_rejected() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::UnexpectedResponseType).await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "wrong-phase response should be rejected by output validation"
+    );
+}
+
+#[tokio::test]
+async fn duplex_empty_stream_error() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::CloseEarly).await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::EmptyStream)),
+        "should return EmptyStream when server closes without responding"
+    );
+}
+
+#[tokio::test]
+async fn duplex_timeout_before_response() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::Hang).await;
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        message_timeout: Duration::from_millis(50),
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::Timeout)),
+        "should timeout when server hangs"
+    );
+}
+
+#[tokio::test]
+async fn duplex_timeout_override_accepted() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::OverrideTimeout {
+        override_ms: 2000,
+        delay_ms: 200,
+        name: "x-after".to_owned(),
+        value: "override".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        message_timeout: Duration::from_millis(100),
+        max_message_timeout: Some(Duration::from_secs(5)),
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let resp = exchange.receive().await.unwrap();
+    assert!(
+        matches!(resp, ExchangeEvent::RequestHeaders { .. }),
+        "override should extend deadline past delay"
+    );
+}
+
+#[tokio::test]
+async fn duplex_timeout_override_clamped() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::OverrideTimeout {
+        override_ms: 5000,
+        delay_ms: 300,
+        name: "x-late".to_owned(),
+        value: "val".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        message_timeout: Duration::from_millis(100),
+        max_message_timeout: Some(Duration::from_millis(200)),
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::Timeout)),
+        "clamped override should still timeout"
+    );
+}
+
+#[tokio::test]
+async fn duplex_timeout_override_ignored_without_max() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::OverrideTimeout {
+        override_ms: 500,
+        delay_ms: 0,
+        name: "x-after".to_owned(),
+        value: "val".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    // Override envelope is consumed and ignored (no max_timeout
+    // configured). The real response follows.
+    let event = exchange.receive().await.unwrap();
+    assert!(
+        matches!(event, ExchangeEvent::RequestHeaders { .. }),
+        "override without max_timeout is consumed and ignored; real response returned"
+    );
+}
+
+#[test]
+fn exchange_is_send_and_sync() {
+    fn assert_send<T: Send>() {}
+    fn assert_sync<T: Sync>() {}
+    assert_send::<ExtProcExchange>();
+    assert_sync::<ExtProcExchange>();
+}
+
+#[tokio::test]
+async fn duplex_transport_error() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+
+    let channel = Endpoint::from_shared(format!("http://{addr}")).unwrap().connect_lazy();
+
+    let config = ExchangeConfig {
+        message_timeout: Duration::from_millis(500),
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let send_result = exchange.send(make_request_headers()).await;
+    if send_result.is_err() {
+        return;
+    }
+    let recv_result = exchange.receive().await;
+    assert!(recv_result.is_err(), "connecting to closed port should fail on receive");
+}
+
+#[tokio::test]
+async fn duplex_finish_sending_causes_server_eof() {
+    let eof_observed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    struct EofObserver {
+        eof_observed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl ExternalProcessor for EofObserver {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let eof_flag = self.eof_observed.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                while let Ok(Some(msg)) = stream.message().await {
+                    let resp = build_noop_response(&msg);
+                    drop(tx.send(Ok(resp)).await);
+                }
+                eof_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let svc = ExternalProcessorServer::new(EofObserver {
+        eof_observed: eof_observed.clone(),
+    });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _resp = exchange.receive().await.unwrap();
+    exchange.finish_sending();
+
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        eof_observed.load(std::sync::atomic::Ordering::SeqCst),
+        "server should observe EOF on request stream after finish_sending"
+    );
+
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_receive_after_finish_sending() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::DelayedRouting {
+        header_name: "x-ep".to_owned(),
+        header_value: "ep1".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    exchange.send(make_request_body(b"data", true)).await.unwrap();
+    exchange.finish_sending();
+
+    let r1 = exchange.receive().await.unwrap();
+    assert!(
+        matches!(r1, ExchangeEvent::RequestHeaders { .. }),
+        "should still receive after finish_sending"
+    );
+    let r2 = exchange.receive().await.unwrap();
+    assert!(
+        matches!(r2, ExchangeEvent::RequestBody { .. }),
+        "should receive second response after finish_sending"
+    );
+}
+
+#[tokio::test]
+async fn duplex_send_after_finish_sending_fails() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::EchoHeaders {
+        name: "x-test".to_owned(),
+        value: "ok".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+
+    exchange.finish_sending();
+    let result = exchange.send(make_request_headers()).await;
+    assert!(
+        matches!(result, Err(ExchangeError::SendFailed)),
+        "sending after finish_sending should fail deterministically"
+    );
+}
+
+#[tokio::test]
+async fn duplex_drop_exchange_cleans_up() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::Hang).await;
+    let channel = connect_channel(addr).await;
+    let exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    drop(exchange);
+}
+
+#[tokio::test]
+async fn duplex_concurrent_exchanges_no_crosstalk() {
+    struct EchoIdProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for EchoIdProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                while let Ok(Some(msg)) = stream.message().await {
+                    if let Some(processing_request::Request::RequestHeaders(h)) = &msg.request {
+                        let id_header = h
+                            .headers
+                            .as_ref()
+                            .and_then(|m| m.headers.iter().find(|hv| hv.key == "x-exchange-id"))
+                            .map(|hv| hv.value.clone())
+                            .unwrap_or_default();
+                        let resp = build_add_header_response(&msg, "x-echo-id", &id_header);
+                        drop(tx.send(Ok(resp)).await);
+                    }
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(EchoIdProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let shared_channel = connect_channel(addr).await;
+
+    let mut handles = Vec::new();
+    for i in 0_u64..100 {
+        let channel = shared_channel.clone();
+        handles.push(tokio::spawn(async move {
+            let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+            let unique_id = format!("exchange-{i}");
+            let headers =
+                processing_request::Request::RequestHeaders(praxis_proto::envoy::service::ext_proc::v3::HttpHeaders {
+                    headers: Some(praxis_proto::envoy::service::ext_proc::v3::HeaderMap {
+                        headers: vec![
+                            HeaderValue {
+                                key: ":method".to_owned(),
+                                value: "GET".to_owned(),
+                                raw_value: Vec::new(),
+                            },
+                            HeaderValue {
+                                key: "x-exchange-id".to_owned(),
+                                value: unique_id.clone(),
+                                raw_value: Vec::new(),
+                            },
+                        ],
+                    }),
+                    end_of_stream: false,
+                });
+            exchange.send(headers).await.unwrap();
+            let resp = exchange.receive().await.unwrap();
+            if let ExchangeEvent::RequestHeaders { response: hr, .. } = &resp
+                && let Some(common) = &hr.response
+                && let Some(mutation) = &common.header_mutation
+            {
+                let echoed = mutation
+                    .set_headers
+                    .iter()
+                    .find(|hvo| hvo.header.as_ref().is_some_and(|h| h.key == "x-echo-id"))
+                    .and_then(|hvo| hvo.header.as_ref())
+                    .map(|h| h.value.as_str());
+                assert_eq!(
+                    echoed,
+                    Some(unique_id.as_str()),
+                    "exchange {i} should echo back its own unique ID"
+                );
+                return;
+            }
+            panic!("exchange {i} did not receive expected echo response");
+        }));
+    }
+    for handle in handles {
+        handle.await.unwrap();
+    }
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_exchange_is_send_and_sync() {
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<ExtProcExchange>();
+}
+
+#[tokio::test]
+async fn duplex_existing_fd00_tests_unaffected() {
+    let (addr, _guard) = start_mock_processor(MockBehavior::AddHeader {
+        name: "x-existing".to_owned(),
+        value: "works".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let req = make_request(Method::GET, "/test");
+    let mut ctx = make_ctx(&req);
+    let action = callout::process_request_headers(channel, &addr.to_string(), Duration::from_secs(5), None, &mut ctx)
+        .await
+        .unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "existing callout should still work alongside duplex module"
+    );
+}
+
+#[tokio::test]
+async fn duplex_terminal_state_after_timeout() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::Hang).await;
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        message_timeout: Duration::from_millis(50),
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _timeout = exchange.receive().await;
+    assert!(exchange.is_terminal(), "exchange should be closed after timeout");
+
+    let send_result = exchange.send(make_request_headers()).await;
+    assert!(
+        matches!(send_result, Err(ExchangeError::Closed)),
+        "send after timeout should return Closed"
+    );
+    let recv_result = exchange.receive().await;
+    assert!(
+        matches!(recv_result, Err(ExchangeError::Closed)),
+        "receive after timeout should return Closed"
+    );
+}
+
+#[tokio::test]
+async fn duplex_response_body_round_trip() {
+    struct ResponseBodyProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for ResponseBodyProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                while let Ok(Some(msg)) = stream.message().await {
+                    let resp = match &msg.request {
+                        Some(processing_request::Request::RequestHeaders(_)) => ProcessingResponse {
+                            response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                                response: None,
+                            })),
+                            ..Default::default()
+                        },
+                        Some(processing_request::Request::ResponseHeaders(_)) => ProcessingResponse {
+                            response: Some(processing_response::Response::ResponseHeaders(HeadersResponse {
+                                response: None,
+                            })),
+                            ..Default::default()
+                        },
+                        Some(processing_request::Request::ResponseBody(_)) => ProcessingResponse {
+                            response: Some(processing_response::Response::ResponseBody(BodyResponse {
+                                response: None,
+                            })),
+                            ..Default::default()
+                        },
+                        _ => ProcessingResponse::default(),
+                    };
+                    drop(tx.send(Ok(resp)).await);
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(ResponseBodyProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    let _req_hdr = exchange.receive().await.unwrap();
+
+    exchange.send(make_response_headers()).await.unwrap();
+    let _resp_hdr = exchange.receive().await.unwrap();
+
+    let resp_body = processing_request::Request::ResponseBody(praxis_proto::envoy::service::ext_proc::v3::HttpBody {
+        body: b"response body data".to_vec(),
+        end_of_stream: true,
+    });
+    exchange.send(resp_body).await.unwrap();
+    let resp = exchange.receive().await.unwrap();
+    assert!(
+        matches!(resp, ExchangeEvent::ResponseBody { .. }),
+        "should receive ResponseBody response"
+    );
+
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_server_observes_client_cancellation() {
+    let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    struct CancellationObserver {
+        cancelled: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    #[async_trait]
+    impl ExternalProcessor for CancellationObserver {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let flag = self.cancelled.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                if let Ok(Some(_msg)) = stream.message().await {
+                    let resp = ProcessingResponse {
+                        response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                            response: None,
+                        })),
+                        ..Default::default()
+                    };
+                    drop(tx.send(Ok(resp)).await);
+                }
+                while let Ok(Some(_msg)) = stream.message().await {}
+                flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                drop(tx);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let svc = ExternalProcessorServer::new(CancellationObserver {
+        cancelled: cancelled.clone(),
+    });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _resp = exchange.receive().await.unwrap();
+    drop(exchange);
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        cancelled.load(std::sync::atomic::Ordering::SeqCst),
+        "server should observe client cancellation when exchange is dropped"
+    );
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_repeated_clean_close() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::EchoHeaders {
+        name: "x-close".to_owned(),
+        value: "test".to_owned(),
+    })
+    .await;
+
+    let shared_channel = connect_channel(addr).await;
+
+    for i in 0..20 {
+        let mut exchange = ExtProcExchange::open(shared_channel.clone(), &default_exchange_config()).unwrap();
+        exchange.send(make_request_headers()).await.unwrap();
+        let resp = exchange.receive().await.unwrap();
+        assert!(
+            matches!(resp, ExchangeEvent::RequestHeaders { .. }),
+            "exchange {i} should receive a response"
+        );
+        exchange.finish_sending();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Directional State and Ordering Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn duplex_request_body_before_headers_rejected() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::EchoHeaders {
+        name: "x-t".to_owned(),
+        value: "v".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    let result = exchange.send(make_request_body(b"data", false)).await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "body before headers should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn duplex_duplicate_request_headers_rejected() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::EchoHeaders {
+        name: "x-t".to_owned(),
+        value: "v".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let result = exchange.send(make_request_headers()).await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "duplicate request headers should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn duplex_body_after_eos_rejected() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::HeadersAndBody).await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    exchange.send(make_request_body(b"data", true)).await.unwrap();
+    let result = exchange.send(make_request_body(b"more", false)).await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "body after EOS should be rejected"
+    );
+}
+
+#[tokio::test]
+async fn duplex_legal_response_while_request_open() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::FullLifecycle {
+        req_header_name: "x-r".to_owned(),
+        req_header_value: "v".to_owned(),
+        resp_header_name: "x-s".to_owned(),
+        resp_header_value: "v".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _req_resp = exchange.receive().await.unwrap();
+    exchange.send(make_response_headers()).await.unwrap();
+    let resp_resp = exchange.receive().await.unwrap();
+    assert!(
+        matches!(resp_resp, ExchangeEvent::ResponseHeaders { .. }),
+        "response headers should be legal while request direction has only sent headers"
+    );
+}
+
+#[tokio::test]
+async fn duplex_request_trailers_send_and_classify() {
+    struct TrailerProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for TrailerProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                while let Ok(Some(msg)) = stream.message().await {
+                    let resp = match &msg.request {
+                        Some(processing_request::Request::RequestHeaders(_)) => ProcessingResponse {
+                            response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                                response: None,
+                            })),
+                            ..Default::default()
+                        },
+                        Some(processing_request::Request::RequestTrailers(_)) => ProcessingResponse {
+                            response: Some(processing_response::Response::RequestTrailers(TrailersResponse {
+                                header_mutation: None,
+                            })),
+                            ..Default::default()
+                        },
+                        _ => ProcessingResponse::default(),
+                    };
+                    drop(tx.send(Ok(resp)).await);
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(TrailerProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _hdr = exchange.receive().await.unwrap();
+
+    let trailers =
+        processing_request::Request::RequestTrailers(praxis_proto::envoy::service::ext_proc::v3::HttpTrailers {
+            trailers: Some(praxis_proto::envoy::service::ext_proc::v3::HeaderMap { headers: vec![] }),
+        });
+    exchange.send(trailers).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    assert!(
+        matches!(event, ExchangeEvent::RequestTrailers { .. }),
+        "should classify request trailers response"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_dynamic_metadata_preserved() {
+    struct MetadataProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for MetadataProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                if let Ok(Some(_msg)) = stream.message().await {
+                    let mut fields = HashMap::new();
+                    fields.insert(
+                        "test_key".to_owned(),
+                        prost_wkt_types::Value {
+                            kind: Some(prost_wkt_types::value::Kind::StringValue("test_value".to_owned())),
+                        },
+                    );
+                    let resp = ProcessingResponse {
+                        response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                            response: None,
+                        })),
+                        dynamic_metadata: Some(prost_wkt_types::Struct { fields }),
+                        ..Default::default()
+                    };
+                    drop(tx.send(Ok(resp)).await);
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(MetadataProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    match event {
+        ExchangeEvent::RequestHeaders { metadata, .. } => {
+            let md = metadata.expect("metadata should be present");
+            assert!(
+                md.fields.contains_key("test_key"),
+                "dynamic_metadata should be preserved on typed event"
+            );
+        },
+        other => panic!("expected RequestHeaders, got {other:?}"),
+    }
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_full_duplex_no_per_message_timeout() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::DelayedRouting {
+        header_name: "x-ep".to_owned(),
+        header_value: "ep1".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        message_timeout: Duration::from_millis(50),
+        request_body_mode: BodySendMode::FullDuplexStreamed,
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    exchange.send(make_request_body(b"data", true)).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    assert!(
+        matches!(event, ExchangeEvent::RequestHeaders { .. }),
+        "full-duplex receive without timeout should succeed even with low message_timeout"
+    );
+}
+
+#[tokio::test]
+async fn duplex_immediate_response_sets_terminal() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::ImmediateOnHeaders {
+        status: 403,
+        body: "blocked".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    assert!(
+        matches!(event, ExchangeEvent::Immediate { .. }),
+        "should be immediate event"
+    );
+    assert!(
+        exchange.is_terminal(),
+        "exchange should be terminal after ImmediateResponse"
+    );
+    let send_result = exchange.send(make_request_body(b"data", true)).await;
+    assert!(
+        matches!(send_result, Err(ExchangeError::Closed)),
+        "send after immediate should return Closed"
+    );
+}
+
+#[tokio::test]
+async fn duplex_override_envelope_ignores_response_data() {
+    struct OverrideWithResponseProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for OverrideWithResponseProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                if let Ok(Some(msg)) = stream.message().await {
+                    let override_with_response = ProcessingResponse {
+                        response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                            response: None,
+                        })),
+                        override_message_timeout: Some(prost_types::Duration { seconds: 2, nanos: 0 }),
+                        ..Default::default()
+                    };
+                    drop(tx.send(Ok(override_with_response)).await);
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    let real_resp = build_add_header_response(&msg, "x-real", "response");
+                    drop(tx.send(Ok(real_resp)).await);
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(OverrideWithResponseProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        max_message_timeout: Some(Duration::from_secs(5)),
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    match &event {
+        ExchangeEvent::RequestHeaders { response, .. } => {
+            assert!(
+                response.response.is_some(),
+                "should receive the REAL response, not the override envelope's response"
+            );
+        },
+        other => panic!("expected RequestHeaders from real response, got {other:?}"),
+    }
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+// -----------------------------------------------------------------------------
+// Duplex Exchange Evidence Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn duplex_body_mode_none_rejects_body_send() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::EchoHeaders {
+        name: "x-t".to_owned(),
+        value: "v".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _hdr = exchange.receive().await.unwrap();
+    let result = exchange.send(make_request_body(b"rejected", false)).await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "body send with BodySendMode::None should be rejected with OrderingViolation"
+    );
+}
+
+#[tokio::test]
+async fn duplex_non_full_duplex_body_creates_active_state() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::HeadersAndBody).await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    let hdr_resp = exchange.receive().await.unwrap();
+    assert!(
+        matches!(hdr_resp, ExchangeEvent::RequestHeaders { .. }),
+        "should receive header response before sending body"
+    );
+
+    exchange.send(make_request_body(b"chunk1", true)).await.unwrap();
+    let body_resp = exchange.receive().await.unwrap();
+    assert!(
+        matches!(body_resp, ExchangeEvent::RequestBody { .. }),
+        "non-full-duplex body chunk must receive body response before sending another"
+    );
+}
+
+#[tokio::test]
+async fn duplex_second_non_fd_send_while_active_rejected() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::HeadersAndBody).await;
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    let result = exchange.send(make_request_body(b"chunk", false)).await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "sending body before headers response should fail because active state is already outstanding"
+    );
+}
+
+#[tokio::test]
+async fn duplex_response_trailers_send_and_classify() {
+    struct ResponseTrailerProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for ResponseTrailerProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                while let Ok(Some(msg)) = stream.message().await {
+                    let resp = match &msg.request {
+                        Some(processing_request::Request::RequestHeaders(_)) => ProcessingResponse {
+                            response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                                response: None,
+                            })),
+                            ..Default::default()
+                        },
+                        Some(processing_request::Request::ResponseHeaders(_)) => ProcessingResponse {
+                            response: Some(processing_response::Response::ResponseHeaders(HeadersResponse {
+                                response: None,
+                            })),
+                            ..Default::default()
+                        },
+                        Some(processing_request::Request::ResponseTrailers(_)) => ProcessingResponse {
+                            response: Some(processing_response::Response::ResponseTrailers(TrailersResponse {
+                                header_mutation: None,
+                            })),
+                            ..Default::default()
+                        },
+                        _ => ProcessingResponse::default(),
+                    };
+                    drop(tx.send(Ok(resp)).await);
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(ResponseTrailerProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    let _req_hdr = exchange.receive().await.unwrap();
+
+    exchange.send(make_response_headers()).await.unwrap();
+    let _resp_hdr = exchange.receive().await.unwrap();
+
+    let trailers =
+        processing_request::Request::ResponseTrailers(praxis_proto::envoy::service::ext_proc::v3::HttpTrailers {
+            trailers: Some(praxis_proto::envoy::service::ext_proc::v3::HeaderMap { headers: vec![] }),
+        });
+    exchange.send(trailers).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    assert!(
+        matches!(event, ExchangeEvent::ResponseTrailers { .. }),
+        "should classify response trailers response"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_metadata_on_body_event() {
+    struct BodyMetadataProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for BodyMetadataProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                while let Ok(Some(msg)) = stream.message().await {
+                    let resp = match &msg.request {
+                        Some(processing_request::Request::RequestHeaders(_)) => ProcessingResponse {
+                            response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                                response: None,
+                            })),
+                            ..Default::default()
+                        },
+                        Some(processing_request::Request::RequestBody(_)) => {
+                            let mut fields = HashMap::new();
+                            fields.insert(
+                                "body_key".to_owned(),
+                                prost_wkt_types::Value {
+                                    kind: Some(prost_wkt_types::value::Kind::StringValue("body_value".to_owned())),
+                                },
+                            );
+                            ProcessingResponse {
+                                response: Some(processing_response::Response::RequestBody(BodyResponse {
+                                    response: None,
+                                })),
+                                dynamic_metadata: Some(prost_wkt_types::Struct { fields }),
+                                ..Default::default()
+                            }
+                        },
+                        _ => ProcessingResponse::default(),
+                    };
+                    drop(tx.send(Ok(resp)).await);
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(BodyMetadataProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _hdr = exchange.receive().await.unwrap();
+    exchange.send(make_request_body(b"data", true)).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    match event {
+        ExchangeEvent::RequestBody { metadata, .. } => {
+            let md = metadata.expect("metadata should be present on body event");
+            assert!(
+                md.fields.contains_key("body_key"),
+                "dynamic_metadata should be preserved on ExchangeEvent::RequestBody"
+            );
+        },
+        other => panic!("expected RequestBody, got {other:?}"),
+    }
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_metadata_on_immediate_event() {
+    struct ImmediateMetadataProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for ImmediateMetadataProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                if let Ok(Some(_msg)) = stream.message().await {
+                    let mut fields = HashMap::new();
+                    fields.insert(
+                        "imm_key".to_owned(),
+                        prost_wkt_types::Value {
+                            kind: Some(prost_wkt_types::value::Kind::StringValue("imm_value".to_owned())),
+                        },
+                    );
+                    let resp = ProcessingResponse {
+                        response: Some(processing_response::Response::ImmediateResponse(ImmediateResponse {
+                            status: Some(HttpStatus { code: 429 }),
+                            headers: None,
+                            body: "rate limited".to_owned(),
+                            grpc_status: None,
+                            details: String::new(),
+                        })),
+                        dynamic_metadata: Some(prost_wkt_types::Struct { fields }),
+                        ..Default::default()
+                    };
+                    drop(tx.send(Ok(resp)).await);
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(ImmediateMetadataProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    match event {
+        ExchangeEvent::Immediate { metadata, .. } => {
+            let md = metadata.expect("metadata should be present on immediate event");
+            assert!(
+                md.fields.contains_key("imm_key"),
+                "dynamic_metadata should be preserved on ExchangeEvent::Immediate"
+            );
+        },
+        other => panic!("expected Immediate, got {other:?}"),
+    }
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_override_ignored_in_full_duplex() {
+    struct FullDuplexOverrideProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for FullDuplexOverrideProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let _headers = stream.message().await.unwrap().unwrap();
+                let override_envelope = build_override_response(5000);
+                drop(tx.send(Ok(override_envelope)).await);
+                let header_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(header_resp)).await);
+
+                let _body = stream.message().await.unwrap().unwrap();
+                use praxis_proto::envoy::service::ext_proc::v3::{
+                    BodyMutation, CommonResponse, StreamedBodyResponse, body_mutation,
+                };
+                let body_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestBody(BodyResponse {
+                        response: Some(CommonResponse {
+                            body_mutation: Some(BodyMutation {
+                                mutation: Some(body_mutation::Mutation::StreamedResponse(StreamedBodyResponse {
+                                    body: b"data".to_vec(),
+                                    end_of_stream: true,
+                                })),
+                            }),
+                            ..Default::default()
+                        }),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(body_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(FullDuplexOverrideProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        max_message_timeout: Some(Duration::from_secs(10)),
+        ..full_duplex_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let hdr_event = exchange.receive().await.unwrap();
+    assert!(
+        matches!(hdr_event, ExchangeEvent::RequestHeaders { .. }),
+        "override envelope ignored; real header response returned"
+    );
+
+    exchange.send(make_request_body(b"data", true)).await.unwrap();
+    let body_event = exchange.receive().await.unwrap();
+    assert!(
+        matches!(body_event, ExchangeEvent::RequestBody { .. }),
+        "should receive body response in full-duplex mode"
+    );
+
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_repeated_override_ignored() {
+    struct DoubleOverrideProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for DoubleOverrideProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let msg = stream.message().await.unwrap().unwrap();
+                let override1 = build_override_response(2000);
+                drop(tx.send(Ok(override1)).await);
+                let override2 = build_override_response(3000);
+                drop(tx.send(Ok(override2)).await);
+                let real_resp = build_add_header_response(&msg, "x-real", "response");
+                drop(tx.send(Ok(real_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(DoubleOverrideProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        max_message_timeout: Some(Duration::from_secs(10)),
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    match &event {
+        ExchangeEvent::RequestHeaders { response, .. } => {
+            assert!(
+                response.response.is_some(),
+                "should receive the real response with header mutation, not an override envelope"
+            );
+        },
+        other => panic!("expected RequestHeaders from real response, got {other:?}"),
+    }
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_zero_duration_override_ignored() {
+    struct ZeroOverrideProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for ZeroOverrideProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let msg = stream.message().await.unwrap().unwrap();
+                let zero_override = ProcessingResponse {
+                    override_message_timeout: Some(prost_types::Duration { seconds: 0, nanos: 0 }),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(zero_override)).await);
+                let real_resp = build_add_header_response(&msg, "x-real", "response");
+                drop(tx.send(Ok(real_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(ZeroOverrideProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        max_message_timeout: Some(Duration::from_secs(10)),
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    match &event {
+        ExchangeEvent::RequestHeaders { response, .. } => {
+            assert!(
+                response.response.is_some(),
+                "should receive the real response, not the zero-override envelope"
+            );
+        },
+        other => panic!("expected RequestHeaders from real response, got {other:?}"),
+    }
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_backpressure_deterministic() {
+    struct BarrierProcessor {
+        barrier: std::sync::Arc<tokio::sync::Barrier>,
+    }
+
+    #[async_trait]
+    impl ExternalProcessor for BarrierProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let barrier = self.barrier.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                let _msg = stream.message().await.unwrap().unwrap();
+                barrier.wait().await;
+                while let Ok(Some(msg)) = stream.message().await {
+                    let resp = build_noop_response(&msg);
+                    drop(tx.send(Ok(resp)).await);
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(BarrierProcessor {
+        barrier: barrier.clone(),
+    });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+
+    let chunk_size = 16_384; // 16 KiB
+    let big_chunk = vec![0xAB_u8; chunk_size];
+    let max_attempts = 256;
+    let mut sent_count = 0_usize;
+    for _ in 0..max_attempts {
+        let send_fut = exchange.send(make_request_body(&big_chunk, false));
+        let result = tokio::time::timeout(Duration::from_millis(200), send_fut).await;
+        if result.is_err() {
+            break;
+        }
+        result.unwrap().unwrap();
+        sent_count += 1;
+    }
+    assert!(
+        sent_count < max_attempts,
+        "sends should eventually block due to backpressure; sent all {max_attempts} without blocking"
+    );
+
+    barrier.wait().await;
+
+    let resume_send = exchange.send(make_request_body(b"after-release", true));
+    let result = tokio::time::timeout(Duration::from_secs(2), resume_send).await;
+    assert!(result.is_ok(), "sends should resume after barrier is released");
+
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_deadline_starts_at_send_commit() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::Hang).await;
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        message_timeout: Duration::from_millis(50),
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+
+    let before_send = tokio::time::Instant::now();
+    exchange.send(make_request_headers()).await.unwrap();
+
+    tokio::time::sleep(Duration::from_millis(30)).await;
+
+    let result = exchange.receive().await;
+    let elapsed = before_send.elapsed();
+    assert!(
+        matches!(result, Err(ExchangeError::Timeout)),
+        "should timeout when server hangs"
+    );
+    assert!(
+        elapsed < Duration::from_millis(100),
+        "deadline should be ~50ms from send, not from receive; elapsed: {elapsed:?}"
+    );
+    assert!(
+        elapsed >= Duration::from_millis(40),
+        "deadline should not expire before the configured timeout; elapsed: {elapsed:?}"
+    );
+}
+
+#[tokio::test]
+async fn duplex_unsolicited_response_rejected() {
+    struct UnsolicitedResponseProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for UnsolicitedResponseProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _msg = stream.message().await.unwrap().unwrap();
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::ResponseHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(UnsolicitedResponseProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "unsolicited response for direction with no outbound headers should be rejected"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("expected") || err.contains("unsolicited"),
+        "error should indicate wrong response type: {err}"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_full_duplex_headers_no_timeout() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::OverrideTimeout {
+        override_ms: 0,
+        delay_ms: 200,
+        name: "x-delayed".to_owned(),
+        value: "ok".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        message_timeout: Duration::from_millis(50),
+        request_body_mode: BodySendMode::FullDuplexStreamed,
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    assert!(
+        matches!(event, ExchangeEvent::RequestHeaders { .. }),
+        "full-duplex headers should not timeout even when response is delayed past message_timeout"
+    );
+}
+
+#[tokio::test]
+async fn duplex_full_duplex_trailers_while_deferred() {
+    struct DeferredTrailerProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for DeferredTrailerProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                let mut messages = Vec::new();
+                while let Ok(Some(msg)) = stream.message().await {
+                    let is_trailers = matches!(msg.request, Some(processing_request::Request::RequestTrailers(_)));
+                    messages.push(msg);
+                    if is_trailers {
+                        break;
+                    }
+                }
+                for msg in &messages {
+                    let resp = match &msg.request {
+                        Some(processing_request::Request::RequestHeaders(_)) => ProcessingResponse {
+                            response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                                response: None,
+                            })),
+                            ..Default::default()
+                        },
+                        Some(processing_request::Request::RequestBody(_)) => {
+                            use praxis_proto::envoy::service::ext_proc::v3::{
+                                BodyMutation, CommonResponse, StreamedBodyResponse, body_mutation,
+                            };
+                            ProcessingResponse {
+                                response: Some(processing_response::Response::RequestBody(BodyResponse {
+                                    response: Some(CommonResponse {
+                                        body_mutation: Some(BodyMutation {
+                                            mutation: Some(body_mutation::Mutation::StreamedResponse(
+                                                StreamedBodyResponse {
+                                                    body: Vec::new(),
+                                                    end_of_stream: false,
+                                                },
+                                            )),
+                                        }),
+                                        ..Default::default()
+                                    }),
+                                })),
+                                ..Default::default()
+                            }
+                        },
+                        Some(processing_request::Request::RequestTrailers(_)) => ProcessingResponse {
+                            response: Some(processing_response::Response::RequestTrailers(TrailersResponse {
+                                header_mutation: None,
+                            })),
+                            ..Default::default()
+                        },
+                        _ => ProcessingResponse::default(),
+                    };
+                    drop(tx.send(Ok(resp)).await);
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(DeferredTrailerProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    exchange.send(make_request_body(b"chunk1", false)).await.unwrap();
+    exchange.send(make_request_body(b"chunk2", false)).await.unwrap();
+
+    let trailers =
+        processing_request::Request::RequestTrailers(praxis_proto::envoy::service::ext_proc::v3::HttpTrailers {
+            trailers: Some(praxis_proto::envoy::service::ext_proc::v3::HeaderMap { headers: vec![] }),
+        });
+    exchange.send(trailers).await.unwrap();
+
+    let r1 = exchange.receive().await.unwrap();
+    assert!(
+        matches!(r1, ExchangeEvent::RequestHeaders { .. }),
+        "should receive deferred header response"
+    );
+    let r2 = exchange.receive().await.unwrap();
+    assert!(
+        matches!(r2, ExchangeEvent::RequestBody { .. }),
+        "should receive body response"
+    );
+    let r3 = exchange.receive().await.unwrap();
+    assert!(
+        matches!(r3, ExchangeEvent::RequestBody { .. }),
+        "should receive second body response"
+    );
+    let r4 = exchange.receive().await.unwrap();
+    assert!(
+        matches!(r4, ExchangeEvent::RequestTrailers { .. }),
+        "should receive trailer response"
+    );
+
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_streamed_body_response_in_non_fd_rejected() {
+    struct StreamedInNonFdProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for StreamedInNonFdProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _headers = stream.message().await.unwrap().unwrap();
+                let header_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(header_resp)).await);
+
+                let _body = stream.message().await.unwrap().unwrap();
+                use praxis_proto::envoy::service::ext_proc::v3::{
+                    BodyMutation, CommonResponse, StreamedBodyResponse, body_mutation,
+                };
+                let body_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestBody(BodyResponse {
+                        response: Some(CommonResponse {
+                            body_mutation: Some(BodyMutation {
+                                mutation: Some(body_mutation::Mutation::StreamedResponse(StreamedBodyResponse {
+                                    body: b"streamed".to_vec(),
+                                    end_of_stream: true,
+                                })),
+                            }),
+                            ..Default::default()
+                        }),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(body_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(StreamedInNonFdProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _hdr = exchange.receive().await.unwrap();
+    exchange.send(make_request_body(b"data", true)).await.unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "StreamedBodyResponse mutation in non-full-duplex mode should be rejected"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("StreamedBodyResponse"),
+        "error should mention StreamedBodyResponse: {err}"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_non_streamed_body_response_in_fd_rejected() {
+    struct NonStreamedInFdProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for NonStreamedInFdProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _headers = stream.message().await.unwrap().unwrap();
+                let header_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(header_resp)).await);
+
+                let _body = stream.message().await.unwrap().unwrap();
+                let body_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestBody(BodyResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(body_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(NonStreamedInFdProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _hdr = exchange.receive().await.unwrap();
+    exchange.send(make_request_body(b"data", true)).await.unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "non-StreamedBodyResponse mutation in full-duplex mode should be rejected"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(err.contains("full-duplex"), "error should mention full-duplex: {err}");
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+// -----------------------------------------------------------------------------
+// Duplex Exchange Regression Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn duplex_request_body_response_without_body_send_rejected() {
+    struct HeadersOnlyFdProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for HeadersOnlyFdProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _headers = stream.message().await.unwrap().unwrap();
+                let header_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(header_resp)).await);
+                use praxis_proto::envoy::service::ext_proc::v3::{
+                    BodyMutation, CommonResponse, StreamedBodyResponse, body_mutation,
+                };
+                let body_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestBody(BodyResponse {
+                        response: Some(CommonResponse {
+                            body_mutation: Some(BodyMutation {
+                                mutation: Some(body_mutation::Mutation::StreamedResponse(StreamedBodyResponse {
+                                    body: b"unsolicited".to_vec(),
+                                    end_of_stream: true,
+                                })),
+                            }),
+                            ..Default::default()
+                        }),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(body_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(HeadersOnlyFdProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _hdr = exchange.receive().await.unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "body response without any body send should be rejected in full-duplex"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_request_trailer_response_without_trailer_send_rejected() {
+    struct HeadersBodyNoTrailerFdProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for HeadersBodyNoTrailerFdProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let _headers = stream.message().await.unwrap().unwrap();
+                let header_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(header_resp)).await);
+
+                let _body = stream.message().await.unwrap().unwrap();
+                use praxis_proto::envoy::service::ext_proc::v3::{
+                    BodyMutation, CommonResponse, StreamedBodyResponse, body_mutation,
+                };
+                let body_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestBody(BodyResponse {
+                        response: Some(CommonResponse {
+                            body_mutation: Some(BodyMutation {
+                                mutation: Some(body_mutation::Mutation::StreamedResponse(StreamedBodyResponse {
+                                    body: b"data".to_vec(),
+                                    end_of_stream: true,
+                                })),
+                            }),
+                            ..Default::default()
+                        }),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(body_resp)).await);
+
+                let trailer_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestTrailers(TrailersResponse {
+                        header_mutation: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(trailer_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(HeadersBodyNoTrailerFdProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    exchange.send(make_request_body(b"data", true)).await.unwrap();
+    let _hdr = exchange.receive().await.unwrap();
+    let _body = exchange.receive().await.unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "trailer response without trailer send should be rejected in full-duplex"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_response_body_response_without_body_send_rejected() {
+    struct ResponseHeadersOnlyFdProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for ResponseHeadersOnlyFdProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _req_hdrs = stream.message().await.unwrap().unwrap();
+                let req_hdr_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(req_hdr_resp)).await);
+
+                let _resp_hdrs = stream.message().await.unwrap().unwrap();
+                let resp_hdr_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::ResponseHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp_hdr_resp)).await);
+
+                use praxis_proto::envoy::service::ext_proc::v3::{
+                    BodyMutation, CommonResponse, StreamedBodyResponse, body_mutation,
+                };
+                let body_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::ResponseBody(BodyResponse {
+                        response: Some(CommonResponse {
+                            body_mutation: Some(BodyMutation {
+                                mutation: Some(body_mutation::Mutation::StreamedResponse(StreamedBodyResponse {
+                                    body: b"unsolicited".to_vec(),
+                                    end_of_stream: true,
+                                })),
+                            }),
+                            ..Default::default()
+                        }),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(body_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(ResponseHeadersOnlyFdProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _req_hdr = exchange.receive().await.unwrap();
+    exchange.send(make_response_headers()).await.unwrap();
+    let _resp_hdr = exchange.receive().await.unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "response body response without body send should be rejected in full-duplex"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_response_trailer_response_without_trailer_send_rejected() {
+    struct ResponseHeadersOnlyTrailerProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for ResponseHeadersOnlyTrailerProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _req_hdrs = stream.message().await.unwrap().unwrap();
+                let req_hdr_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(req_hdr_resp)).await);
+
+                let _resp_hdrs = stream.message().await.unwrap().unwrap();
+                let resp_hdr_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::ResponseHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp_hdr_resp)).await);
+
+                let trailer_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::ResponseTrailers(TrailersResponse {
+                        header_mutation: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(trailer_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(ResponseHeadersOnlyTrailerProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _req_hdr = exchange.receive().await.unwrap();
+    exchange.send(make_response_headers()).await.unwrap();
+    let _resp_hdr = exchange.receive().await.unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "response trailer response without trailer send should be rejected in full-duplex"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_duplicate_non_fd_body_response_rejected() {
+    struct DuplicateBodyResponseProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for DuplicateBodyResponseProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let _headers = stream.message().await.unwrap().unwrap();
+                let header_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(header_resp)).await);
+
+                let _body = stream.message().await.unwrap().unwrap();
+                let body_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestBody(BodyResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(body_resp)).await);
+
+                let dup_body_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestBody(BodyResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(dup_body_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(DuplicateBodyResponseProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _hdr = exchange.receive().await.unwrap();
+    exchange.send(make_request_body(b"data", true)).await.unwrap();
+    let _body = exchange.receive().await.unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "duplicate body response in non-full-duplex mode should be rejected (no active state)"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_cross_direction_non_fd_response_without_active_match_rejected() {
+    struct CrossDirectionProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for CrossDirectionProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let _headers = stream.message().await.unwrap().unwrap();
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::ResponseHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(CrossDirectionProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "cross-direction ResponseHeaders without response headers committed should be rejected"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_unsolicited_immediate_before_first_send_rejected() {
+    struct ImmediateBeforeSendProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for ImmediateBeforeSendProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            _request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let resp = ProcessingResponse {
+                    response: Some(processing_response::Response::ImmediateResponse(ImmediateResponse {
+                        status: Some(HttpStatus { code: 500 }),
+                        headers: None,
+                        body: "unsolicited".to_owned(),
+                        grpc_status: None,
+                        details: String::new(),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(ImmediateBeforeSendProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "immediate response before first send should be rejected"
+    );
+    let err = result.unwrap_err().to_string();
+    assert!(
+        err.contains("before first send"),
+        "error should mention 'before first send': {err}"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_rejected_response_does_not_advance_output_phase() {
+    struct WrongThenCorrectProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for WrongThenCorrectProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(8);
+            tokio::spawn(async move {
+                let _headers = stream.message().await.unwrap().unwrap();
+                let wrong_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestBody(BodyResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(wrong_resp)).await);
+                let correct_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(correct_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(WrongThenCorrectProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        request_body_mode: BodySendMode::Streamed,
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+
+    let (req_before, resp_before) = exchange.output_phases();
+
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "RequestBody response before RequestHeaders output should be rejected"
+    );
+
+    let (req_after, resp_after) = exchange.output_phases();
+    assert_eq!(
+        req_before, req_after,
+        "request output phase should be unchanged after rejection"
+    );
+    assert_eq!(
+        resp_before, resp_after,
+        "response output phase should be unchanged after rejection"
+    );
+
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_negative_override_ignored() {
+    struct NegativeOverrideProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for NegativeOverrideProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let msg = stream.message().await.unwrap().unwrap();
+                let bad_override = ProcessingResponse {
+                    override_message_timeout: Some(prost_types::Duration { seconds: -1, nanos: 0 }),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(bad_override)).await);
+                let real_resp = build_add_header_response(&msg, "x-real", "response");
+                drop(tx.send(Ok(real_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(NegativeOverrideProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        max_message_timeout: Some(Duration::from_secs(10)),
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    assert!(
+        matches!(event, ExchangeEvent::RequestHeaders { .. }),
+        "negative seconds override should be consumed and ignored; real response returned"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_negative_nanos_override_ignored() {
+    struct NegativeNanosOverrideProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for NegativeNanosOverrideProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let msg = stream.message().await.unwrap().unwrap();
+                let bad_override = ProcessingResponse {
+                    override_message_timeout: Some(prost_types::Duration { seconds: 1, nanos: -1 }),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(bad_override)).await);
+                let real_resp = build_add_header_response(&msg, "x-real", "response");
+                drop(tx.send(Ok(real_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(NegativeNanosOverrideProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        max_message_timeout: Some(Duration::from_secs(10)),
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    assert!(
+        matches!(event, ExchangeEvent::RequestHeaders { .. }),
+        "negative nanos override should be consumed and ignored; real response returned"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_out_of_range_nanos_override_ignored() {
+    struct OutOfRangeNanosProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for OutOfRangeNanosProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let msg = stream.message().await.unwrap().unwrap();
+                let bad_override = ProcessingResponse {
+                    override_message_timeout: Some(prost_types::Duration {
+                        seconds: 1,
+                        nanos: 2_000_000_000,
+                    }),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(bad_override)).await);
+                let real_resp = build_add_header_response(&msg, "x-real", "response");
+                drop(tx.send(Ok(real_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(OutOfRangeNanosProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        max_message_timeout: Some(Duration::from_secs(10)),
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    assert!(
+        matches!(event, ExchangeEvent::RequestHeaders { .. }),
+        "out-of-range nanos override should be consumed and ignored; real response returned"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_sub_millisecond_override_ignored() {
+    struct SubMsOverrideProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for SubMsOverrideProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                let msg = stream.message().await.unwrap().unwrap();
+                let bad_override = ProcessingResponse {
+                    override_message_timeout: Some(prost_types::Duration {
+                        seconds: 0,
+                        nanos: 500_000, // 0.5ms, below MIN_OVERRIDE
+                    }),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(bad_override)).await);
+                let real_resp = build_add_header_response(&msg, "x-real", "response");
+                drop(tx.send(Ok(real_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(SubMsOverrideProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        max_message_timeout: Some(Duration::from_secs(10)),
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    assert!(
+        matches!(event, ExchangeEvent::RequestHeaders { .. }),
+        "sub-millisecond override (0.5ms) should be consumed and ignored; real response returned"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_deadline_overflow_returns_error_not_panic() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::EchoHeaders {
+        name: "x-overflow".to_owned(),
+        value: "test".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let config = ExchangeConfig {
+        message_timeout: Duration::MAX,
+        ..default_exchange_config()
+    };
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let result = exchange.send(make_request_headers()).await;
+    assert!(
+        matches!(result, Err(ExchangeError::DeadlineOverflow)),
+        "Duration::MAX should fail at send with deadline overflow, not panic"
+    );
+}
+
+#[tokio::test]
+async fn duplex_trailer_metadata_preserved() {
+    struct TrailerMetadataProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for TrailerMetadataProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                while let Ok(Some(msg)) = stream.message().await {
+                    let resp = match &msg.request {
+                        Some(processing_request::Request::RequestHeaders(_)) => ProcessingResponse {
+                            response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                                response: None,
+                            })),
+                            ..Default::default()
+                        },
+                        Some(processing_request::Request::RequestTrailers(_)) => {
+                            let mut fields = HashMap::new();
+                            fields.insert(
+                                "trailer_key".to_owned(),
+                                prost_wkt_types::Value {
+                                    kind: Some(prost_wkt_types::value::Kind::StringValue("trailer_value".to_owned())),
+                                },
+                            );
+                            ProcessingResponse {
+                                response: Some(processing_response::Response::RequestTrailers(TrailersResponse {
+                                    header_mutation: None,
+                                })),
+                                dynamic_metadata: Some(prost_wkt_types::Struct { fields }),
+                                ..Default::default()
+                            }
+                        },
+                        _ => ProcessingResponse::default(),
+                    };
+                    drop(tx.send(Ok(resp)).await);
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(TrailerMetadataProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _hdr = exchange.receive().await.unwrap();
+    exchange.send(make_request_trailers()).await.unwrap();
+    let event = exchange.receive().await.unwrap();
+    match event {
+        ExchangeEvent::RequestTrailers { metadata, .. } => {
+            let md = metadata.expect("metadata should be present on trailer event");
+            assert!(
+                md.fields.contains_key("trailer_key"),
+                "dynamic_metadata should be preserved on ExchangeEvent::RequestTrailers"
+            );
+        },
+        other => panic!("expected RequestTrailers, got {other:?}"),
+    }
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_cancelled_blocked_send_leaves_state_unchanged() {
+    use crate::duplex::commit_message;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let timeout = Duration::from_millis(200);
+
+    let fill_msg = ProcessingRequest {
+        request: Some(make_request_headers()),
+        ..Default::default()
+    };
+    tx.send(fill_msg).await.unwrap();
+
+    {
+        let cancelled_msg = ProcessingRequest {
+            request: Some(make_request_body(b"CANCELLED_ID", false)),
+            ..Default::default()
+        };
+        let blocked = commit_message(&tx, cancelled_msg, Some(timeout));
+        let poll_result = tokio::time::timeout(Duration::from_millis(50), blocked).await;
+        assert!(poll_result.is_err(), "send should be pending while channel is full");
+    }
+
+    let first = rx.recv().await.unwrap();
+    assert!(
+        matches!(first.request, Some(processing_request::Request::RequestHeaders(_))),
+        "first received should be the fill message, not the cancelled body"
+    );
+
+    assert!(
+        rx.try_recv().is_err(),
+        "channel should be empty after removing the fill message; cancelled message must not be present"
+    );
+
+    let followup_msg = ProcessingRequest {
+        request: Some(make_request_body(b"FOLLOWUP_ID", true)),
+        ..Default::default()
+    };
+    let result = commit_message(&tx, followup_msg, None).await;
+    assert!(result.is_ok(), "follow-up should succeed after cancelled send");
+
+    let received = rx.recv().await.unwrap();
+    if let Some(processing_request::Request::RequestBody(body)) = &received.request {
+        assert_eq!(
+            body.body, b"FOLLOWUP_ID",
+            "should receive follow-up, not cancelled message"
+        );
+    } else {
+        panic!("expected RequestBody follow-up");
+    }
+}
+
+#[tokio::test]
+async fn duplex_repeated_close_with_eof_count() {
+    let eof_count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    struct EofCountingProcessor {
+        eof_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ExternalProcessor for EofCountingProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let eof_count = self.eof_count.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                while let Ok(Some(msg)) = stream.message().await {
+                    let resp = build_noop_response(&msg);
+                    drop(tx.send(Ok(resp)).await);
+                }
+                eof_count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(EofCountingProcessor {
+        eof_count: eof_count.clone(),
+    });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let shared_channel = connect_channel(addr).await;
+
+    for i in 0..100 {
+        let mut exchange = ExtProcExchange::open(shared_channel.clone(), &default_exchange_config()).unwrap();
+        exchange.send(make_request_headers()).await.unwrap();
+        let resp = exchange.receive().await.unwrap();
+        assert!(
+            matches!(resp, ExchangeEvent::RequestHeaders { .. }),
+            "exchange {i} should receive a response"
+        );
+        exchange.finish_sending();
+        drop(exchange);
+    }
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    let observed = eof_count.load(std::sync::atomic::Ordering::SeqCst);
+    assert_eq!(observed, 100, "server should observe exactly 100 EOFs, got {observed}");
+
+    let mut final_exchange = ExtProcExchange::open(shared_channel.clone(), &default_exchange_config()).unwrap();
+    final_exchange.send(make_request_headers()).await.unwrap();
+    let resp = final_exchange.receive().await.unwrap();
+    assert!(
+        matches!(resp, ExchangeEvent::RequestHeaders { .. }),
+        "final exchange on same channel should succeed"
+    );
+    final_exchange.finish_sending();
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_cross_direction_started_non_fd_duplicate_body_rejected() {
+    struct WrongTypeProcessor;
+
+    #[async_trait]
+    impl ExternalProcessor for WrongTypeProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                let mut msg_count = 0_u32;
+                while let Ok(Some(msg)) = stream.message().await {
+                    msg_count += 1;
+                    let resp = if msg_count == 5 {
+                        ProcessingResponse {
+                            response: Some(processing_response::Response::ResponseBody(BodyResponse {
+                                response: None,
+                            })),
+                            ..Default::default()
+                        }
+                    } else {
+                        build_noop_response(&msg)
+                    };
+                    drop(tx.send(Ok(resp)).await);
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(WrongTypeProcessor);
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let config = streamed_body_exchange_config();
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _rh = exchange.receive().await.unwrap();
+
+    exchange.send(make_request_body(b"chunk1", false)).await.unwrap();
+    let _rb = exchange.receive().await.unwrap();
+
+    exchange.send(make_response_headers()).await.unwrap();
+    let _resh = exchange.receive().await.unwrap();
+
+    exchange
+        .send(processing_request::Request::ResponseBody(
+            praxis_proto::envoy::service::ext_proc::v3::HttpBody {
+                body: b"resp_body".to_vec(),
+                end_of_stream: false,
+            },
+        ))
+        .await
+        .unwrap();
+    let _resb = exchange.receive().await.unwrap();
+
+    exchange.send(make_request_body(b"chunk2", false)).await.unwrap();
+    let result = exchange.receive().await;
+    assert!(
+        matches!(result, Err(ExchangeError::OrderingViolation(_))),
+        "ResponseBody when active expects RequestBody must be rejected"
+    );
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn duplex_blocked_send_deadline_starts_after_commit() {
+    use std::pin::pin;
+
+    use crate::duplex::commit_message;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let timeout = Duration::from_millis(200);
+
+    let fill_msg = ProcessingRequest {
+        request: Some(make_request_headers()),
+        ..Default::default()
+    };
+    tx.send(fill_msg).await.unwrap();
+
+    let target_msg = ProcessingRequest {
+        request: Some(make_request_body(b"target", false)),
+        ..Default::default()
+    };
+    let mut blocked_future = pin!(commit_message(&tx, target_msg, Some(timeout)));
+
+    let poll_result = tokio::time::timeout(Duration::from_millis(250), &mut blocked_future).await;
+    assert!(poll_result.is_err(), "send should remain pending while channel is full");
+
+    let _first = rx.recv().await.unwrap();
+
+    let result = blocked_future.await;
+    let deadline = result.unwrap().unwrap();
+
+    let remaining = deadline.duration_since(tokio::time::Instant::now());
+    assert!(
+        remaining > Duration::from_millis(150),
+        "deadline should have ~200ms remaining since it started at commit, not at reserve: {remaining:?}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// Single-Owner Pending-Process Driver Tests
+// -------------------------------------------------------------------------
+
+#[tokio::test(flavor = "current_thread")]
+async fn driver_delayed_response_headers_current_thread() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::DelayedRouting {
+        header_name: "x-ep".to_owned(),
+        header_value: "ep1".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let config = full_duplex_exchange_config();
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    exchange.send(make_request_body(b"chunk1", false)).await.unwrap();
+    exchange.send(make_request_body(b"chunk2", false)).await.unwrap();
+    exchange.send(make_request_body(b"", true)).await.unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(5), exchange.receive())
+        .await
+        .expect("should not timeout")
+        .expect("should receive headers response");
+    assert!(
+        matches!(event, ExchangeEvent::RequestHeaders { .. }),
+        "first event should be request headers response"
+    );
+}
+
+#[tokio::test]
+async fn driver_one_process_invocation() {
+    let invocation_count = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+
+    struct CountingProcessor {
+        count: std::sync::Arc<std::sync::atomic::AtomicU32>,
+    }
+
+    #[async_trait]
+    impl ExternalProcessor for CountingProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            self.count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let mut stream = request.into_inner();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                while let Ok(Some(_msg)) = stream.message().await {
+                    let resp = ProcessingResponse {
+                        response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                            response: None,
+                        })),
+                        ..Default::default()
+                    };
+                    drop(tx.send(Ok(resp)).await);
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let svc = ExternalProcessorServer::new(CountingProcessor {
+        count: invocation_count.clone(),
+    });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    exchange.send(make_request_headers()).await.unwrap();
+    let _resp = exchange.receive().await.unwrap();
+    drop(exchange.send(make_request_headers()).await);
+    drop(exchange);
+
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        invocation_count.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "exactly one Process invocation per exchange"
+    );
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn driver_outbound_half_close_preserves_drain() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::ImmediateOnBody {
+        status: 403,
+        body: "blocked".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let config = full_duplex_exchange_config();
+    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+
+    exchange.send(make_request_headers()).await.unwrap();
+    let _hdr = exchange.receive().await.unwrap();
+    exchange.send(make_request_body(b"data", true)).await.unwrap();
+
+    let event = tokio::time::timeout(Duration::from_secs(5), exchange.receive())
+        .await
+        .expect("should not timeout")
+        .expect("should receive immediate response");
+    assert!(
+        matches!(&event, ExchangeEvent::Immediate { response, .. } if response.status.as_ref().is_some_and(|s| s.code == 403)),
+        "should receive ImmediateResponse with exact 403 status"
+    );
 }

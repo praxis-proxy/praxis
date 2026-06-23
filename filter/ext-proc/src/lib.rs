@@ -36,6 +36,8 @@
 #![deny(unreachable_pub)]
 
 mod callout;
+#[expect(dead_code, reason = "wired into ExtProcFilter in follow-up PR")]
+pub(crate) mod duplex;
 mod mutations;
 use std::time::Duration;
 
@@ -336,6 +338,27 @@ impl std::fmt::Display for BodySendMode {
             Self::Buffered => f.write_str("buffered"),
             Self::BufferedPartial => f.write_str("buffered_partial"),
             Self::FullDuplexStreamed => f.write_str("full_duplex_streamed"),
+        }
+    }
+}
+
+impl BodySendMode {
+    /// Whether this mode uses full-duplex streaming.
+    pub(crate) fn is_full_duplex(self) -> bool {
+        self == Self::FullDuplexStreamed
+    }
+
+    /// Convert to the protobuf [`BodySendMode`] enum integer value.
+    ///
+    /// [`BodySendMode`]: praxis_proto::envoy::service::ext_proc::v3::BodySendMode
+    pub(crate) fn to_proto_i32(self) -> i32 {
+        use praxis_proto::envoy::service::ext_proc::v3::BodySendMode as ProtoMode;
+        match self {
+            Self::None => ProtoMode::None as i32,
+            Self::Streamed => ProtoMode::Streamed as i32,
+            Self::Buffered => ProtoMode::Buffered as i32,
+            Self::BufferedPartial => ProtoMode::BufferedPartial as i32,
+            Self::FullDuplexStreamed => ProtoMode::FullDuplexStreamed as i32,
         }
     }
 }

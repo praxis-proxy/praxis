@@ -6,8 +6,7 @@
 use serde::Deserialize;
 
 use crate::{
-    FilterError,
-    body::{DEFAULT_JSON_BODY_MAX_BYTES, MAX_JSON_BODY_BYTES},
+    FilterError, body::DEFAULT_JSON_BODY_MAX_BYTES, builtins::http::ai::config_validation::validate_max_body_bytes,
 };
 
 // -----------------------------------------------------------------------------
@@ -121,16 +120,7 @@ pub(super) fn validate_config(cfg: &PromptEnrichConfig) -> Result<(), FilterErro
         return Err("prompt_enrich: at least one of 'prepend' or 'append' must be non-empty".into());
     }
 
-    if cfg.max_body_bytes == 0 {
-        return Err("prompt_enrich: 'max_body_bytes' must be greater than zero".into());
-    }
-    if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
-        return Err(format!(
-            "prompt_enrich: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
-            cfg.max_body_bytes
-        )
-        .into());
-    }
+    validate_max_body_bytes("prompt_enrich", cfg.max_body_bytes)?;
 
     for msg in &cfg.prepend {
         if msg.content.is_empty() {
