@@ -18,7 +18,7 @@ use super::{
 use crate::{
     FilterAction, FilterEntry, FilterPipeline, FilterRegistry,
     body::{BodyAccess, BodyMode},
-    builtins::http::ai::store::{ResponseStore as _, SqliteResponseStore},
+    builtins::http::ai::store::{ResponseRecord, ResponseStore as _, ResponseStoreRegistry, SqliteResponseStore},
     factory::parse_filter_config,
     filter::{HttpFilter as _, HttpFilterContext},
 };
@@ -215,6 +215,16 @@ fn response_body_access_is_read_only() {
 }
 
 #[test]
+fn request_body_access_is_read_only() {
+    let filter = make_filter();
+    assert_eq!(
+        filter.request_body_access(),
+        BodyAccess::ReadOnly,
+        "request body access should be ReadOnly so the store is registered before rehydrate"
+    );
+}
+
+#[test]
 fn response_body_mode_is_bounded_stream_buffer() {
     let filter = make_filter();
     assert_eq!(
@@ -231,7 +241,7 @@ fn response_body_mode_is_bounded_stream_buffer() {
 // -----------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn on_request_skips_when_format_metadata_absent() {
+async fn on_request_does_not_initialize_store_without_format_metadata() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -239,16 +249,16 @@ async fn on_request_skips_when_format_metadata_absent() {
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
         matches!(action, FilterAction::Continue),
-        "should skip when format metadata is absent"
+        "should continue when format metadata is absent"
     );
     assert!(
         filter.store.get().is_none(),
-        "store should not be initialized when skipped"
+        "store should not initialize before request classification is available"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn on_request_skips_when_format_is_openai_chat_completions() {
+async fn on_request_does_not_initialize_store_for_non_responses_format() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -257,16 +267,16 @@ async fn on_request_skips_when_format_is_openai_chat_completions() {
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
         matches!(action, FilterAction::Continue),
-        "should skip when format is openai_chat_completions"
+        "should continue for non-responses format"
     );
     assert!(
         filter.store.get().is_none(),
-        "store should not be initialized for non-responses format"
+        "store should not initialize for non-Responses traffic"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn on_request_skips_when_store_is_false() {
+async fn on_request_does_not_initialize_store_when_store_is_false() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -276,16 +286,16 @@ async fn on_request_skips_when_store_is_false() {
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
         matches!(action, FilterAction::Continue),
-        "should skip when store is false"
+        "should continue when store is false"
     );
     assert!(
         filter.store.get().is_none(),
-        "store should not be initialized when store=false"
+        "store should not initialize when persistence and rehydrate are both unnecessary"
     );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn on_request_skips_when_stream_is_true() {
+async fn on_request_does_not_initialize_store_for_streaming_without_previous_response() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -295,11 +305,11 @@ async fn on_request_skips_when_stream_is_true() {
     let action = filter.on_request(&mut ctx).await.unwrap();
     assert!(
         matches!(action, FilterAction::Continue),
-        "should skip when stream is true"
+        "should continue for streaming requests"
     );
     assert!(
         filter.store.get().is_none(),
-        "store should not be initialized for streaming requests"
+        "store should not initialize for streaming requests unless rehydrate needs it"
     );
 }
 
@@ -354,6 +364,109 @@ async fn on_request_initializes_store_for_openai_responses_format() {
     assert!(
         store_opt.is_some(),
         "store should be Some for valid sqlite::memory: config"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_request_initializes_store_for_previous_response_id_even_when_store_false() {
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    ctx.set_metadata("openai_responses_format.store", "false");
+    ctx.set_metadata("openai_responses_format.has_previous_response_id", "true");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "should continue after initializing the store for rehydrate"
+    );
+    assert!(
+        filter.store.get().and_then(Option::as_ref).is_some(),
+        "store should initialize when previous_response_id requires rehydrate"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// on_request Registry
+// -----------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_request_registers_store_in_response_stores() {
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let registry = ResponseStoreRegistry::new();
+    ctx.response_stores = Some(&registry);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "should continue after registering store"
+    );
+    assert!(
+        registry.get("default").is_some(),
+        "store should be registered as 'default' in response_stores"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_request_skips_registration_when_no_registry() {
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "should continue even without registry"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_request_body_registers_store_for_previous_response_id_even_when_store_false() {
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let registry = ResponseStoreRegistry::new();
+    ctx.response_stores = Some(&registry);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    ctx.set_metadata("openai_responses_format.store", "false");
+    ctx.set_metadata("openai_responses_format.has_previous_response_id", "true");
+    let mut body = Some(Bytes::from_static(
+        br#"{"model":"gpt-4.1","input":"Hi","store":false,"previous_response_id":"resp_prev"}"#,
+    ));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "request body phase should continue after registering the store"
+    );
+    assert!(
+        registry.get("default").is_some(),
+        "store should register so rehydrate can fetch previous_response_id"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_request_body_does_not_initialize_store_for_store_false_without_previous_response() {
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    ctx.set_metadata("openai_responses_format.store", "false");
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4.1","input":"Hi","store":false}"#));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "request body phase should continue for store=false without rehydrate"
+    );
+    assert!(
+        filter.store.get().is_none(),
+        "store should not initialize when neither persistence nor rehydrate needs it"
     );
 }
 
@@ -748,8 +861,125 @@ async fn on_response_body_persists_valid_response() {
         "persisted input should be extracted from the response"
     );
     assert_eq!(
-        record.messages, body_json["output"],
-        "persisted messages should be extracted from the response output"
+        record.messages,
+        json!([
+            {"role": "user", "content": "Hello"},
+            {"type": "message", "content": "Hello"}
+        ]),
+        "persisted messages should preserve input before output for rehydration"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_response_body_persists_string_input_as_message_item() {
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+
+    drop(filter.on_request(&mut ctx).await.unwrap());
+
+    let store_opt = filter.store.get().expect("store OnceCell should be initialized");
+    assert!(store_opt.is_some(), "store should be initialized");
+
+    let body_json = json!({
+        "id": "resp_string_input",
+        "created_at": 1_719_900_000,
+        "model": "gpt-4.1",
+        "status": "completed",
+        "input": "Hello",
+        "output": [{"type": "message", "content": "Hi"}]
+    });
+    let mut body = Some(Bytes::from(serde_json::to_vec(&body_json).unwrap()));
+
+    let action = filter.on_response_body(&mut ctx, &mut body, true).unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "should continue after spawning persist task"
+    );
+
+    let store = store_opt.as_ref().unwrap();
+    let record = store
+        .get_response("default", "resp_string_input")
+        .await
+        .expect("get_response should succeed")
+        .expect("record should exist after persist");
+
+    assert_eq!(
+        record.input, body_json["input"],
+        "persisted input should preserve the response input"
+    );
+    assert_eq!(
+        record.messages,
+        json!([
+            {"type": "message", "role": "user", "content": "Hello"},
+            {"type": "message", "content": "Hi"}
+        ]),
+        "persisted messages should normalize string input before output"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn on_response_body_uses_request_input_when_response_omits_input() {
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    ctx.current_filter_id = Some(7);
+
+    let request_input = json!([{"role": "user", "content": "Captured request input"}]);
+    let request_json = json!({
+        "model": "gpt-4.1",
+        "input": request_input
+    });
+    let mut request_body = Some(Bytes::from(serde_json::to_vec(&request_json).unwrap()));
+    let request_action = filter.on_request_body(&mut ctx, &mut request_body, true).await.unwrap();
+    assert!(
+        matches!(request_action, FilterAction::Continue),
+        "request body phase should capture input and continue"
+    );
+
+    let store_opt = filter.store.get().expect("store OnceCell should be initialized");
+    assert!(store_opt.is_some(), "store should be initialized");
+
+    let response_json = json!({
+        "id": "resp_no_echoed_input",
+        "created_at": 1_719_900_000,
+        "model": "gpt-4.1",
+        "status": "completed",
+        "output": [{"type": "message", "content": "Stored output"}]
+    });
+    let mut response_body = Some(Bytes::from(serde_json::to_vec(&response_json).unwrap()));
+
+    ctx.current_filter_id = Some(7);
+    let response_action = filter.on_response_body(&mut ctx, &mut response_body, true).unwrap();
+    assert!(
+        matches!(response_action, FilterAction::Continue),
+        "response body phase should persist and continue"
+    );
+
+    let store = store_opt.as_ref().unwrap();
+    let record = store
+        .get_response("default", "resp_no_echoed_input")
+        .await
+        .expect("get_response should succeed")
+        .expect("record should exist after persist");
+
+    assert_eq!(
+        record.response_object, response_json,
+        "stored response object should remain the backend response"
+    );
+    assert_eq!(
+        record.input, request_input,
+        "stored input should come from the original request"
+    );
+    assert_eq!(
+        record.messages,
+        json!([
+            {"role": "user", "content": "Captured request input"},
+            {"type": "message", "content": "Stored output"}
+        ]),
+        "stored messages should combine request input with response output"
     );
 }
 
@@ -815,8 +1045,7 @@ async fn pipeline_persists_after_format_request_body_classification() {
         "created_at": 1_719_900_000,
         "model": "gpt-4.1",
         "status": "completed",
-        "input": [{"role": "user", "content": "Hello"}],
-        "output": []
+        "output": [{"type": "message", "content": "Hi"}]
     });
     let mut response_body = Some(Bytes::from(serde_json::to_vec(&response_json).unwrap()));
     let response_body_action = pipeline
@@ -836,9 +1065,70 @@ async fn pipeline_persists_after_format_request_body_classification() {
         .unwrap()
         .expect("pipeline should persist the response after body classification");
     assert_eq!(record.response_object, response_json);
-    assert_eq!(record.input, response_json["input"]);
+    assert_eq!(record.input, request_json["input"]);
+    assert_eq!(
+        record.messages,
+        json!([
+            {"role": "user", "content": "Hello"},
+            {"type": "message", "content": "Hi"}
+        ])
+    );
 
     drop(store);
+    drop(pipeline);
+    cleanup_sqlite_file(&db_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_non_responses_post_does_not_open_sqlite_store() {
+    let (db_url, db_path) = temp_sqlite_url("pipeline_non_responses_post_does_not_open_sqlite_store");
+
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(&format!(
+        r#"
+- filter: openai_responses_format
+- filter: openai_response_store
+  backend: sqlite
+  database_url: "{db_url}"
+  responses_table: test_responses
+  conversations_table: test_conversations
+"#
+    ))
+    .unwrap();
+    let registry = FilterRegistry::with_builtins();
+    let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat/completions");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let request_json = json!({
+        "model": "gpt-4.1",
+        "messages": [{"role": "user", "content": "Hello"}]
+    });
+    let mut request_body = Some(Bytes::from(serde_json::to_vec(&request_json).unwrap()));
+    let request_body_action = pipeline
+        .execute_http_request_body(&mut ctx, &mut request_body, true)
+        .await
+        .unwrap();
+    assert!(
+        matches!(request_body_action, FilterAction::Release),
+        "format classifier should release the buffered request body"
+    );
+    assert_eq!(
+        ctx.get_metadata("openai_responses_format.format"),
+        Some("openai_chat_completions"),
+        "format classifier should mark Chat Completions traffic"
+    );
+
+    let request_action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(request_action, FilterAction::Continue),
+        "request phase should continue without opening the response store"
+    );
+    assert!(
+        !db_path.exists(),
+        "non-Responses POST should not create the SQLite response store file"
+    );
+
     drop(pipeline);
     cleanup_sqlite_file(&db_path);
 }
@@ -2420,7 +2710,7 @@ async fn init_store_and_seed(filter: &ResponseStoreFilter, id: &str, tenant_id: 
         .get_or_init(|| async { filter.build_store().await.ok() })
         .await;
     let store = store_opt.as_ref().expect("store should be initialized");
-    let record = crate::builtins::http::ai::store::ResponseRecord {
+    let record = ResponseRecord {
         id: id.to_owned(),
         tenant_id: tenant_id.to_owned(),
         created_at: 1000,

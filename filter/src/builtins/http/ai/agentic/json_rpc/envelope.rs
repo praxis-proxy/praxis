@@ -5,7 +5,8 @@
 
 use serde_json::Value;
 
-use super::config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcConfig};
+use super::config::{BatchPolicy, JsonRpcConfig};
+use crate::builtins::http::ai::OnInvalidBehavior;
 
 // -----------------------------------------------------------------------------
 // JSON-RPC Types
@@ -280,7 +281,7 @@ fn classify_numeric_id(n: &serde_json::Number) -> (Option<String>, JsonRpcIdKind
 /// Handle non-JSON-RPC input based on `on_invalid` config.
 fn handle_non_json_rpc(config: &JsonRpcConfig) -> Result<Option<JsonRpcEnvelope>, JsonRpcParseError> {
     match config.on_invalid {
-        InvalidJsonRpcBehavior::Continue => Ok(None),
-        InvalidJsonRpcBehavior::Reject | InvalidJsonRpcBehavior::Error => Err(JsonRpcParseError::MissingVersion),
+        OnInvalidBehavior::Continue => Ok(None),
+        OnInvalidBehavior::Reject | OnInvalidBehavior::Error => Err(JsonRpcParseError::MissingVersion),
     }
 }

@@ -21,8 +21,9 @@ mod config;
 #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on modules")]
 #[allow(
     dead_code,
-    reason = "store utilities for GET (#458) and DELETE (#459) response endpoints"
+    reason = "state infrastructure for upcoming Responses API filter consumers (#354)"
 )]
+pub(crate) mod state;
 pub(crate) mod store;
 
 pub use store::ResponseStoreFilter;
@@ -47,7 +48,8 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tracing::{debug, trace};
 
-use self::config::{OnInvalidBehavior, ResponsesFormatConfig, build_config};
+use self::config::{ResponsesFormatConfig, build_config};
+use super::super::OnInvalidBehavior;
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
@@ -65,6 +67,16 @@ use crate::{
 
 /// Maximum length of a body-derived value promoted to headers or filter results.
 const MAX_PROMOTED_VALUE_LEN: usize = 256;
+
+/// Default store name used when registering the response store in the
+/// per-request registry.
+pub(crate) const DEFAULT_STORE_NAME: &str = "default";
+
+/// Metadata key for tenant isolation.
+pub(crate) const TENANT_METADATA_KEY: &str = "responses.tenant_id";
+
+/// Fallback tenant ID when no tenant metadata is present.
+pub(crate) const DEFAULT_TENANT_ID: &str = "default";
 
 // -----------------------------------------------------------------------------
 // ResponsesFormatFilter
@@ -196,7 +208,7 @@ impl HttpFilter for ResponsesFormatFilter {
 fn handle_invalid_format(format: AiRequestFormat, config: &ResponsesFormatConfig) -> Option<FilterAction> {
     match config.on_invalid {
         OnInvalidBehavior::Continue => None,
-        OnInvalidBehavior::Reject => {
+        OnInvalidBehavior::Reject | OnInvalidBehavior::Error => {
             let message = match format {
                 AiRequestFormat::InvalidJson => "invalid JSON body",
                 AiRequestFormat::NonJson => "request body is not JSON",

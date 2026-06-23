@@ -31,7 +31,7 @@ This first MCP static catalog change short-circuits all methods: no request is f
 | `headers.protocol_version` | string | no | Header name for the MCP protocol version (e.g. `x-praxis-mcp-protocol-version`). |
 | `headers.session_present` | string | no | Header name for MCP session presence (e.g. `x-praxis-mcp-session-present`). |
 | `max_body_bytes` | usize | no | Maximum body size in bytes for `StreamBuffer`. |
-| `on_invalid` | `reject` \| `continue` | no | Invalid input handling behavior. |
+| `on_invalid` | `continue` \| `reject` \| `error` | no | Invalid input handling behavior. |
 | `default_version` | string | no | Fallback MCP protocol version returned in broker `initialize` responses when the client's requested version is not supported. Must be present in `supported_versions` and implemented by this build. Defaults to [`protocol::DEFAULT_VERSION`]. |
 | `invalid_tool_policy` | `reject_server` \| `filter_out` | no | Behavior when a tool has an invalid schema. |
 | `path` | string | no | Public MCP path handled by Praxis. |

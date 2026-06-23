@@ -29,13 +29,10 @@ use bytes::Bytes;
 use tracing::{trace, warn};
 
 use self::{
-    config::{InvalidMcpBehavior, McpConfig, MismatchBehavior, MissingHeaderBehavior, build_config},
+    config::{McpConfig, MismatchBehavior, MissingHeaderBehavior, build_config},
     envelope::{McpEnvelope, extract_mcp_envelope},
 };
-use super::{
-    MAX_DYNAMIC_VALUE_LEN,
-    json_rpc::{config::JsonRpcConfig, envelope::parse_json_rpc_value},
-};
+use super::{super::OnInvalidBehavior, MAX_DYNAMIC_VALUE_LEN, json_rpc::config::JsonRpcConfig};
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
@@ -141,52 +138,42 @@ impl HttpFilter for McpFilter {
         Ok(FilterAction::Continue)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "sequential parse-extract-validate-promote pipeline"
-    )]
+    #[expect(clippy::too_many_lines, reason = "32 lines; two over limit due to parsed field refs")]
     async fn on_request_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        let Some(chunk) = body.as_ref() else {
-            return Ok(FilterAction::Continue);
+        let parsed = match super::body_parsing::parse_json_rpc_body(
+            body,
+            end_of_stream,
+            &self.json_rpc_config,
+            self.config.on_invalid,
+        ) {
+            Ok(Some(p)) => p,
+            Ok(None) => return Ok(FilterAction::Continue),
+            Err(action) => return action,
         };
 
-        if !end_of_stream {
-            return Ok(FilterAction::Continue);
-        }
+        let mcp_envelope = extract_mcp_envelope(&parsed.value, &parsed.method, &ctx.request.headers);
 
-        let value: serde_json::Value = match serde_json::from_slice(chunk) {
-            Ok(v) => v,
-            Err(_) => return handle_non_mcp(&self.config),
-        };
-
-        let envelope = match parse_json_rpc_value(&value, &self.json_rpc_config) {
-            Ok(Some(envelope)) => envelope,
-            Ok(None) => return handle_non_mcp(&self.config),
-            Err(e) => return handle_parse_error(&e, &self.config),
-        };
-
-        let Some(method_str) = &envelope.method else {
-            return handle_non_mcp(&self.config);
-        };
-
-        let mcp_envelope = extract_mcp_envelope(&value, method_str, &ctx.request.headers);
-
-        if let Some(action) = reject_missing_required_selector(&mcp_envelope, &envelope, &self.config) {
+        if let Some(action) = reject_missing_required_selector(&mcp_envelope, &parsed.envelope, &self.config) {
             return Ok(action);
         }
 
-        if let Err(action) = validate_mcp_headers(ctx, &mcp_envelope, &envelope, &self.config) {
+        if let Err(action) = validate_mcp_headers(ctx, &mcp_envelope, &parsed.envelope, &self.config) {
             return Ok(action);
         }
 
-        write_metadata(ctx, &envelope, &mcp_envelope);
-        promote_mcp_headers(&mcp_envelope, &envelope, &self.config, &mut ctx.extra_request_headers);
-        promote_filter_results(ctx, &envelope, &mcp_envelope)?;
+        write_metadata(ctx, &parsed.envelope, &mcp_envelope);
+        promote_mcp_headers(
+            &mcp_envelope,
+            &parsed.envelope,
+            &self.config,
+            &mut ctx.extra_request_headers,
+        );
+        promote_filter_results(ctx, &parsed.envelope, &mcp_envelope)?;
 
         trace!(
             mcp_method = mcp_envelope.method.as_str(),
@@ -205,7 +192,7 @@ impl HttpFilter for McpFilter {
 
 /// Build a `JsonRpcConfig` for the shared parser with MCP-appropriate defaults.
 fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
-    use super::json_rpc::config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders};
+    use super::json_rpc::config::{BatchPolicy, JsonRpcHeaders};
 
     JsonRpcConfig {
         batch_policy: BatchPolicy::Reject,
@@ -215,34 +202,7 @@ fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
             method: None,
         },
         max_body_bytes,
-        on_invalid: InvalidJsonRpcBehavior::Continue,
-    }
-}
-
-/// Handle JSON-RPC parse errors, separating batch rejection from general errors.
-fn handle_parse_error(
-    e: &super::json_rpc::envelope::JsonRpcParseError,
-    config: &McpConfig,
-) -> Result<FilterAction, FilterError> {
-    use super::json_rpc::envelope::JsonRpcParseError;
-
-    match e {
-        JsonRpcParseError::UnsupportedBatch | JsonRpcParseError::EmptyBatch => {
-            Ok(FilterAction::Reject(Rejection::status(400)))
-        },
-        _ => handle_non_mcp(config),
-    }
-}
-
-/// Handle non-MCP input based on config.
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "caller returns Result<FilterAction, FilterError> from trait method"
-)]
-fn handle_non_mcp(config: &McpConfig) -> Result<FilterAction, FilterError> {
-    match config.on_invalid {
-        InvalidMcpBehavior::Continue => Ok(FilterAction::Continue),
-        InvalidMcpBehavior::Reject => Ok(FilterAction::Reject(Rejection::status(400))),
+        on_invalid: OnInvalidBehavior::Continue,
     }
 }
 
@@ -255,8 +215,8 @@ fn reject_missing_required_selector(
     let requires = mcp.method.requires_name() || mcp.method.requires_uri();
     if requires && mcp.name.is_none() {
         match config.on_invalid {
-            InvalidMcpBehavior::Reject => Some(mcp_invalid_params_rejection(envelope)),
-            InvalidMcpBehavior::Continue => Some(FilterAction::Continue),
+            OnInvalidBehavior::Reject | OnInvalidBehavior::Error => Some(mcp_invalid_params_rejection(envelope)),
+            OnInvalidBehavior::Continue => Some(FilterAction::Continue),
         }
     } else {
         None

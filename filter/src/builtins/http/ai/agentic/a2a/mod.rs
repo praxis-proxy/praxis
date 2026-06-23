@@ -29,18 +29,15 @@ use bytes::Bytes;
 use tracing::{debug, trace};
 
 use self::{
-    config::{A2aConfig, InvalidA2aBehavior, build_config},
+    config::{A2aConfig, build_config},
     envelope::{A2aEnvelope, extract_a2a_envelope},
     task_routing::LocalTaskRouteStore,
 };
-use super::MAX_DYNAMIC_VALUE_LEN;
+use super::{super::OnInvalidBehavior, MAX_DYNAMIC_VALUE_LEN};
 use crate::{
-    FilterAction, FilterError, Rejection,
+    FilterAction, FilterError,
     body::{BodyAccess, BodyMode},
-    builtins::http::{
-        ai::agentic::json_rpc::{config::JsonRpcConfig, envelope::parse_json_rpc_value},
-        value_safety::contains_control_chars,
-    },
+    builtins::http::{ai::agentic::json_rpc::config::JsonRpcConfig, value_safety::contains_control_chars},
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -159,44 +156,39 @@ impl HttpFilter for A2aFilter {
         Ok(FilterAction::Continue)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "sequential parse-extract-validate-promote pipeline"
-    )]
+    #[expect(clippy::too_many_lines, reason = "31 lines; one over limit due to trace! fields")]
     async fn on_request_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        let Some(chunk) = body.as_ref() else {
-            return Ok(FilterAction::Continue);
+        let parsed = match super::body_parsing::parse_json_rpc_body(
+            body,
+            end_of_stream,
+            &self.json_rpc_config,
+            self.config.on_invalid,
+        ) {
+            Ok(Some(p)) => p,
+            Ok(None) => return Ok(FilterAction::Continue),
+            Err(action) => return action,
         };
 
-        if !end_of_stream {
-            return Ok(FilterAction::Continue);
-        }
+        let a2a_envelope = extract_a2a_envelope(
+            &parsed.value,
+            &parsed.method,
+            &self.config.method_aliases,
+            &ctx.request.headers,
+        );
 
-        let value: serde_json::Value = match serde_json::from_slice(chunk) {
-            Ok(v) => v,
-            Err(_) => return handle_non_a2a(&self.config),
-        };
-
-        let envelope = match parse_json_rpc_value(&value, &self.json_rpc_config) {
-            Ok(Some(envelope)) => envelope,
-            Ok(None) => return handle_non_a2a(&self.config),
-            Err(e) => return handle_parse_error(&e, &self.config),
-        };
-
-        let Some(method_str) = &envelope.method else {
-            return handle_non_a2a(&self.config);
-        };
-
-        let a2a_envelope = extract_a2a_envelope(&value, method_str, &self.config.method_aliases, &ctx.request.headers);
-
-        write_metadata(ctx, &envelope, &a2a_envelope);
-        promote_a2a_headers(&a2a_envelope, &envelope, &self.config, &mut ctx.extra_request_headers);
-        promote_filter_results(ctx, &envelope, &a2a_envelope)?;
+        write_metadata(ctx, &parsed.envelope, &a2a_envelope);
+        promote_a2a_headers(
+            &a2a_envelope,
+            &parsed.envelope,
+            &self.config,
+            &mut ctx.extra_request_headers,
+        );
+        promote_filter_results(ctx, &parsed.envelope, &a2a_envelope)?;
 
         if let Some(store) = &self.task_route_store {
             lookup_task_route(ctx, &a2a_envelope, store, &self.config);
@@ -622,12 +614,9 @@ fn is_event_stream_content_type(ct: &str) -> bool {
 
 /// Build a `JsonRpcConfig` for the shared parser with A2A-appropriate defaults.
 fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
-    use crate::builtins::http::ai::agentic::json_rpc::config::{BatchPolicy, InvalidJsonRpcBehavior, JsonRpcHeaders};
+    use crate::builtins::http::ai::agentic::json_rpc::config::{BatchPolicy, JsonRpcHeaders};
 
     JsonRpcConfig {
-        // A2A classification produces one static routing decision per request.
-        // JSON-RPC batches can mix methods, task IDs, and streaming semantics,
-        // so reject them instead of routing by an arbitrary batch element.
         batch_policy: BatchPolicy::Reject,
         headers: JsonRpcHeaders {
             id: None,
@@ -635,34 +624,7 @@ fn build_json_rpc_config(max_body_bytes: usize) -> JsonRpcConfig {
             method: None,
         },
         max_body_bytes,
-        on_invalid: InvalidJsonRpcBehavior::Continue,
-    }
-}
-
-/// Handle JSON-RPC parse errors, separating batch rejection from general errors.
-fn handle_parse_error(
-    e: &crate::builtins::http::ai::agentic::json_rpc::envelope::JsonRpcParseError,
-    config: &A2aConfig,
-) -> Result<FilterAction, FilterError> {
-    use crate::builtins::http::ai::agentic::json_rpc::envelope::JsonRpcParseError;
-
-    match e {
-        JsonRpcParseError::UnsupportedBatch | JsonRpcParseError::EmptyBatch => {
-            Ok(FilterAction::Reject(Rejection::status(400)))
-        },
-        _ => handle_non_a2a(config),
-    }
-}
-
-/// Handle non-A2A input based on config.
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "caller returns Result<FilterAction, FilterError> from trait method"
-)]
-fn handle_non_a2a(config: &A2aConfig) -> Result<FilterAction, FilterError> {
-    match config.on_invalid {
-        InvalidA2aBehavior::Continue => Ok(FilterAction::Continue),
-        InvalidA2aBehavior::Reject => Ok(FilterAction::Reject(Rejection::status(400))),
+        on_invalid: OnInvalidBehavior::Continue,
     }
 }
 

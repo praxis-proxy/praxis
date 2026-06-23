@@ -10,6 +10,7 @@ mod csrf;
 mod forwarded_headers;
 mod guardrails;
 mod ip_acl;
+pub(crate) mod origin_matcher;
 pub(crate) mod origin_normalize;
 
 pub use cors::{CorsFilter, DisallowedOriginMode};

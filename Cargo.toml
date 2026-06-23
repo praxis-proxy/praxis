@@ -81,6 +81,7 @@ rustls-pemfile = "2.2.0"
 serde_yaml = { package = "yaml_serde", version = "0.10.4" }
 sqlx = { version = "0.8.6", default-features = false, features = ["runtime-tokio-rustls", "sqlite", "postgres"] }
 syn = { version = "2.0.118", features = ["full", "extra-traits", "visit"] }
+sync_wrapper = "1.0.2"
 tempfile = "3.27.0"
 tokio-rustls = "0.26.4"
 tokio-tungstenite = "0.29.0"
