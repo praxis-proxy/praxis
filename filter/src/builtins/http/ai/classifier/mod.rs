@@ -61,6 +61,8 @@ pub(crate) struct ClassifiedRequest {
     pub has_prompt_id: bool,
     /// Whether `tools` is a non-empty array.
     pub has_tools: bool,
+    /// Extracted `max_output_tokens` field value (Responses API), if present.
+    pub max_output_tokens: Option<u64>,
     /// Extracted `max_tokens` field value, if present.
     pub max_tokens: Option<u64>,
     /// Extracted `model` field value, if present.
@@ -142,6 +144,7 @@ pub(crate) fn classify_request_body(body: &[u8]) -> ClassifiedRequest {
         has_tools: obj
             .get("tools")
             .is_some_and(|v| v.as_array().is_some_and(|a| !a.is_empty())),
+        max_output_tokens: obj.get("max_output_tokens").and_then(serde_json::Value::as_u64),
         max_tokens: obj.get("max_tokens").and_then(serde_json::Value::as_u64),
         model: extract_string(obj, "model"),
         store: obj.get("store").and_then(serde_json::Value::as_bool),
@@ -213,6 +216,7 @@ pub(crate) fn empty_result(format: AiRequestFormat) -> ClassifiedRequest {
         has_previous_response_id: false,
         has_prompt_id: false,
         has_tools: false,
+        max_output_tokens: None,
         max_tokens: None,
         model: None,
         store: None,
@@ -305,6 +309,31 @@ mod tests {
         assert!(
             result.has_previous_response_id,
             "previous_response_id should be detected"
+        );
+    }
+
+    #[test]
+    fn responses_max_output_tokens_extracted() {
+        let body = br#"{"model":"gpt-4.1","input":"test","max_output_tokens":2048}"#;
+        let result = classify_request_body(body);
+
+        assert_eq!(result.format, AiRequestFormat::Responses, "should be responses");
+        assert_eq!(
+            result.max_output_tokens,
+            Some(2048),
+            "max_output_tokens should be extracted"
+        );
+        assert!(result.max_tokens.is_none(), "max_tokens should be None");
+    }
+
+    #[test]
+    fn responses_absent_max_output_tokens_is_none() {
+        let body = br#"{"model":"gpt-4.1","input":"test"}"#;
+        let result = classify_request_body(body);
+
+        assert!(
+            result.max_output_tokens.is_none(),
+            "absent max_output_tokens should be None"
         );
     }
 
