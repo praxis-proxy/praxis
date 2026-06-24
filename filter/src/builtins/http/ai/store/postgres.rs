@@ -281,9 +281,7 @@ impl ResponseStore for PostgresResponseStore {
     }
 
     async fn delete_conversation(&self, tenant_id: &str, conversation_id: &str) -> Result<bool, StoreError> {
-        let mut tx = self
-            .pool
-            .begin()
+        let mut tx = Box::pin(self.pool.begin())
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
@@ -327,26 +325,24 @@ impl ConversationItemStore for PostgresResponseStore {
             .as_deref()
             .ok_or_else(|| StoreError::Unavailable("items table not configured".to_owned()))?;
 
-        let mut tx = self
-            .pool
-            .begin()
+        let mut tx = Box::pin(self.pool.begin())
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
+
+        let sql = format!(
+            "INSERT INTO {table} \
+             (item_id, tenant_id, conversation_id, item_data, created_at, position) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
+             ON CONFLICT(item_id, tenant_id) DO UPDATE SET \
+             conversation_id = EXCLUDED.conversation_id, \
+             item_data = EXCLUDED.item_data, \
+             created_at = EXCLUDED.created_at, \
+             position = EXCLUDED.position"
+        );
 
         for item in items {
             let item_data =
                 serde_json::to_string(&item.item_data).map_err(|e| StoreError::Serialization(e.to_string()))?;
-
-            let sql = format!(
-                "INSERT INTO {table} \
-                 (item_id, tenant_id, conversation_id, item_data, created_at, position) \
-                 VALUES ($1, $2, $3, $4, $5, $6) \
-                 ON CONFLICT(item_id, tenant_id) DO UPDATE SET \
-                 conversation_id = EXCLUDED.conversation_id, \
-                 item_data = EXCLUDED.item_data, \
-                 created_at = EXCLUDED.created_at, \
-                 position = EXCLUDED.position"
-            );
 
             sqlx::query(AssertSqlSafe(sql.as_str()))
                 .bind(&item.item_id)

@@ -273,20 +273,20 @@ impl ConversationItemStore for SqliteResponseStore {
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
+        let sql = format!(
+            "INSERT INTO {table} \
+             (item_id, tenant_id, conversation_id, item_data, created_at, position) \
+             VALUES (?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(item_id, tenant_id) DO UPDATE SET \
+             conversation_id = excluded.conversation_id, \
+             item_data = excluded.item_data, \
+             created_at = excluded.created_at, \
+             position = excluded.position"
+        );
+
         for item in items {
             let item_data =
                 serde_json::to_string(&item.item_data).map_err(|e| StoreError::Serialization(e.to_string()))?;
-
-            let sql = format!(
-                "INSERT INTO {table} \
-                 (item_id, tenant_id, conversation_id, item_data, created_at, position) \
-                 VALUES (?, ?, ?, ?, ?, ?) \
-                 ON CONFLICT(item_id, tenant_id) DO UPDATE SET \
-                 conversation_id = excluded.conversation_id, \
-                 item_data = excluded.item_data, \
-                 created_at = excluded.created_at, \
-                 position = excluded.position"
-            );
 
             sqlx::query(AssertSqlSafe(sql.as_str()))
                 .bind(&item.item_id)
