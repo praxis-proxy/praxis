@@ -28,7 +28,7 @@ pub fn resolve_pipelines(
     registry: &FilterRegistry,
     health_registry: &praxis_core::health::HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
-    #[cfg(feature = "ai-inference")] response_stores: &praxis_filter::ResponseStoreRegistry,
+    #[cfg(feature = "ai-inference")] response_stores: &praxis_filter::ai::ResponseStoreRegistry,
 ) -> Result<ListenerPipelines, Box<dyn std::error::Error + Send + Sync>> {
     let chains: HashMap<&str, &[_]> = config
         .filter_chains
@@ -580,8 +580,8 @@ filter_chains:
 
     /// Empty response store registry for tests without response stores.
     #[cfg(feature = "ai-inference")]
-    fn empty_response_stores() -> praxis_filter::ResponseStoreRegistry {
-        praxis_filter::ResponseStoreRegistry::new()
+    fn empty_response_stores() -> praxis_filter::ai::ResponseStoreRegistry {
+        praxis_filter::ai::ResponseStoreRegistry::new()
     }
 
     /// Minimal valid config with one listener for pipeline tests.

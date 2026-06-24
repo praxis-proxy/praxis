@@ -510,8 +510,8 @@ mod tests {
 
     /// Empty response store registry for tests without response stores.
     #[cfg(feature = "ai-inference")]
-    fn empty_response_stores() -> praxis_filter::ResponseStoreRegistry {
-        praxis_filter::ResponseStoreRegistry::new()
+    fn empty_response_stores() -> praxis_filter::ai::ResponseStoreRegistry {
+        praxis_filter::ai::ResponseStoreRegistry::new()
     }
 
     /// Serializes tests that mutate the process working directory.

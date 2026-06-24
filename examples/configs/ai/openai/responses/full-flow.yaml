@@ -13,13 +13,19 @@
 #      and conversation IDs, and writes responses.* metadata for
 #      downstream filters. Skips non-Responses requests gracefully.
 #
-#   3. The router sends all valid Responses API create requests to
+#   3. openai_response_store persists non-streaming responses to
+#      SQLite and registers the store backend so downstream filters
+#      (rehydrate, compact) can read from it.
+#
+#   4. openai_responses_rehydrate loads conversation context from
+#      previous_response_id by fetching stored responses and
+#      prepending their message history to the current request.
+#      Passthrough for requests without previous_response_id.
+#
+#   5. The router sends all valid Responses API create requests to
 #      the same inference backend. The promoted mode remains available
 #      as headers/metadata for downstream filters; it does not change
-#      backend selection in this example. Once #354 orchestration
-#      filters land, stateful requests could use a separate filter
-#      chain with response_store, rehydrate, tool_parse, etc. before
-#      reaching the same inference backend.
+#      backend selection in this example.
 #
 # A request is stateful when any of these hold:
 #   - previous_response_id is set
@@ -75,8 +81,8 @@ filter_chains:
         database_url: "sqlite://responses.db?mode=rwc"
         responses_table: openai_responses
         conversations_table: openai_conversations
+      - filter: openai_responses_rehydrate
         # Future #354 orchestration filters would follow here:
-        #   - filter: rehydrate
         #   - filter: compact
         #   - filter: tool_parse
         #   - filter: responses_proxy

@@ -59,7 +59,7 @@ use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode, MAX_JSON_BODY_BYTES},
     builtins::http::ai::store::{
-        PostgresResponseStore, ResponseRecord, ResponseStore, SqliteResponseStore, StoreError,
+        PostgresResponseStore, ResponseRecord, ResponseStore, ResponseStoreRegistry, SqliteResponseStore, StoreError,
     },
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
@@ -358,12 +358,13 @@ pub(super) fn extract_response_id(path: &str) -> Option<&str> {
 /// Publish the initialized store into the per-request registry so
 /// downstream filters (rehydrate, compact, etc.) can read from it.
 fn register_store_in_context(ctx: &HttpFilterContext<'_>, store: &Arc<dyn ResponseStore>) {
-    let Some(registry) = ctx.response_stores else {
+    let Some(registry) = ctx.extensions.get::<ResponseStoreRegistry>() else {
         return;
     };
-    // Known limitation: the first default backend wins for this registry.
-    // That matches today's one-store-per-listener setup, but a future
-    // multi-store or live backend migration design should scope this by config.
+    // The response store is intentionally instance-scoped today: a Praxis
+    // process has one default Responses store shared by listener pipelines.
+    // If multi-store-per-instance support is added later, this registry key
+    // must become config- or listener-scoped instead of "default".
     if registry.get(DEFAULT_STORE_NAME).is_some() {
         return;
     }

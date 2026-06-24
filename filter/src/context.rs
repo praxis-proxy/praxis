@@ -124,10 +124,6 @@ pub struct HttpFilterContext<'a> {
     /// Named key-value stores for runtime mappings.
     pub kv_stores: Option<&'a KvStoreRegistry>,
 
-    /// Named response store backends for AI API persistence.
-    #[cfg(feature = "ai-inference")]
-    pub response_stores: Option<&'a crate::builtins::http::ai::store::ResponseStoreRegistry>,
-
     /// Transport-agnostic request headers, URI, and method.
     pub request: &'a Request,
 
@@ -249,22 +245,6 @@ impl HttpFilterContext<'_> {
     /// [`set_request_body_mode`]: Self::set_request_body_mode
     pub fn set_response_body_mode(&mut self, mode: BodyMode) {
         merge_body_mode(&mut self.response_body_mode, mode);
-    }
-
-    /// Store token usage counts in [`filter_metadata`] so that downstream
-    /// filters, access log templates, and metrics can read them.
-    ///
-    /// Writes the well-known keys `token.input`, `token.output`, and
-    /// `token.total`. If `total` is `None`, it defaults to
-    /// `input.saturating_add(output)`.
-    ///
-    /// [`filter_metadata`]: Self::filter_metadata
-    pub fn set_token_usage(&mut self, input: u64, output: u64, total: Option<u64>) {
-        let total = total.unwrap_or_else(|| input.saturating_add(output));
-
-        self.set_metadata("token.input", input.to_string());
-        self.set_metadata("token.output", output.to_string());
-        self.set_metadata("token.total", total.to_string());
     }
 
     /// Store typed per-request state for the currently executing filter.
@@ -728,72 +708,6 @@ mod tests {
             store.lookup(".main", MatchType::Suffix).unwrap().is_some(),
             "suffix lookup should match route.web.main"
         );
-    }
-
-    // -------------------------------------------------------------------------
-    // Token Usage Tests
-    // -------------------------------------------------------------------------
-
-    #[test]
-    fn token_metadata_absent_by_default() {
-        let req = crate::test_utils::make_request(Method::GET, "/");
-        let ctx = crate::test_utils::make_filter_context(&req);
-        assert!(ctx.get_metadata("token.input").is_none());
-        assert!(ctx.get_metadata("token.output").is_none());
-        assert!(ctx.get_metadata("token.total").is_none());
-    }
-
-    #[test]
-    fn set_token_usage_writes_all_metadata_keys() {
-        let req = crate::test_utils::make_request(Method::GET, "/");
-        let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.set_token_usage(150, 80, Some(230));
-        assert_eq!(ctx.get_metadata("token.input"), Some("150"));
-        assert_eq!(ctx.get_metadata("token.output"), Some("80"));
-        assert_eq!(ctx.get_metadata("token.total"), Some("230"));
-    }
-
-    #[test]
-    fn set_token_usage_computes_total_when_none() {
-        let req = crate::test_utils::make_request(Method::GET, "/");
-        let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.set_token_usage(100, 50, None);
-        assert_eq!(ctx.get_metadata("token.total"), Some("150"));
-    }
-
-    #[test]
-    fn set_token_usage_uses_explicit_total() {
-        let req = crate::test_utils::make_request(Method::GET, "/");
-        let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.set_token_usage(100, 50, Some(200));
-        assert_eq!(
-            ctx.get_metadata("token.total"),
-            Some("200"),
-            "explicit total should override computed sum"
-        );
-    }
-
-    #[test]
-    fn set_token_usage_saturates_on_overflow() {
-        let req = crate::test_utils::make_request(Method::GET, "/");
-        let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.set_token_usage(u64::MAX, 1, None);
-        assert_eq!(
-            ctx.get_metadata("token.total"),
-            Some(&*u64::MAX.to_string()),
-            "total should saturate instead of wrapping"
-        );
-    }
-
-    #[test]
-    fn set_token_usage_overwrites_previous() {
-        let req = crate::test_utils::make_request(Method::GET, "/");
-        let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.set_token_usage(100, 50, None);
-        ctx.set_token_usage(200, 80, Some(280));
-        assert_eq!(ctx.get_metadata("token.input"), Some("200"));
-        assert_eq!(ctx.get_metadata("token.output"), Some("80"));
-        assert_eq!(ctx.get_metadata("token.total"), Some("280"));
     }
 
     // -------------------------------------------------------------------------

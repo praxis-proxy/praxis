@@ -66,7 +66,7 @@ use crate::{
 /// # Example
 ///
 /// ```rust
-/// use praxis_filter::PromptEnrichFilter;
+/// use praxis_filter::ai::PromptEnrichFilter;
 ///
 /// let yaml: serde_yaml::Value = serde_yaml::from_str(
 ///     r#"
@@ -106,7 +106,7 @@ impl PromptEnrichFilter {
     /// [`FilterError`]: crate::FilterError
     ///
     /// ```rust
-    /// use praxis_filter::PromptEnrichFilter;
+    /// use praxis_filter::ai::PromptEnrichFilter;
     ///
     /// let yaml: serde_yaml::Value =
     ///     serde_yaml::from_str("prepend:\n  - role: system\n    content: \"Hello\"").unwrap();

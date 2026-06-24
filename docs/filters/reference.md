@@ -22,6 +22,7 @@ Built-in filters organized by protocol and category.
 | [`openai_response_store`](http/ai/openai_response_store.md) | `ai-inference` | Persists non-streaming Responses API responses to the configured response store backend. |
 | [`openai_responses_format`](http/ai/openai_responses_format.md) | `ai-inference` | Classifies AI API request bodies and promotes routing facts to headers, metadata, and filter results without mutating the body. |
 | [`openai_responses_model_rewrite`](http/ai/openai_responses_model_rewrite.md) | `ai-inference` | Rewrites the `model` field in Responses API request bodies. |
+| [`openai_responses_rehydrate`](http/ai/openai_responses_rehydrate.md) | `ai-inference` | Validates `previous_response_id` by fetching the stored response, confirming its status is `"completed"`, and populating `ResponsesState` with the full conversation history (stored turns + current input). |
 | [`openai_responses_validate`](http/ai/openai_responses_validate.md) | `ai-inference` | Validates and enriches Responses API requests. |
 | [`prompt_enrich`](http/ai/prompt_enrich.md) | `ai-inference` | Injects statically configured messages into the `messages` array of OpenAI-compatible chat completion request bodies. |
 | [`token_usage_headers`](http/ai/token_usage_headers.md) | - | Injects `Praxis-Token-Input`, `Praxis-Token-Output`, and `Praxis-Token-Total` headers into downstream responses when token usage data is present in [`filter_metadata`]. |

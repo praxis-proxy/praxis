@@ -45,5 +45,5 @@ tempfile = { workspace = true }
 
 [features]
 default = ["ai-inference"]
-ai-inference = ["praxis-filter/ai-inference", "praxis-protocol/ai-inference"]
+ai-inference = ["praxis-filter/ai-inference", "praxis-protocol/response-store"]
 ext-proc = ["praxis-filter/ext-proc"]
