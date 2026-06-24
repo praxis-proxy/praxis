@@ -4,7 +4,7 @@
 # combinations.
 #
 # Requires the ai-inference feature:
-#   cargo build -p praxis --features ai-inference
+#   cargo build -p praxis-proxy --features ai-inference
 #
 # The openai_responses_format classifier must run before openai_responses_validate.
 # It buffers the body, classifies the request as Responses API, and

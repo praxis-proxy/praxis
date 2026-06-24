@@ -12,7 +12,7 @@
 #   - The response is not already compressed (no Content-Encoding)
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/payload-processing/compression.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/payload-processing/compression.yaml
 #   curl -H "Accept-Encoding: gzip" http://localhost:8080/
 
 listeners:

@@ -8,7 +8,7 @@
 #   Client ──TCP──► Praxis :5432 ──TCP──► PostgreSQL :5432
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/protocols/tcp-proxy.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/tcp-proxy.yaml
 
 listeners:
   - name: postgres

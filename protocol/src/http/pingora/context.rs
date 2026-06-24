@@ -224,10 +224,7 @@ pub struct PingoraRequestCtx {
 /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
 macro_rules! filter_context {
     ($ctx:expr, $pipeline:expr, $request:expr, $response_header:expr) => {{
-        #[cfg(feature = "response-store")]
-        if let Some(stores) = $pipeline.response_stores() {
-            $ctx.extensions.insert(stores.clone());
-        }
+        $pipeline.prepare_extensions(&mut $ctx.extensions);
         praxis_filter::HttpFilterContext {
             body_done_indices: Vec::new(),
             branch_iterations: std::collections::HashMap::new(),

@@ -58,7 +58,7 @@ RUN mkdir -p core/src \
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p praxis
+    cargo build --release -p praxis-proxy
 
 # ------------------------------------------------------------------------------
 # Cache Tricks
@@ -86,7 +86,7 @@ RUN find core/src filter/src filter/proto/src \
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
-    cargo build --release -p praxis \
+    cargo build --release -p praxis-proxy \
     && cp target/release/praxis /usr/local/bin/praxis
 
 # ------------------------------------------------------------------------------

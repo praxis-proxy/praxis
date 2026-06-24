@@ -275,11 +275,11 @@ response_conditions:
 See filter activity in real time:
 
 ```console
-RUST_LOG=debug cargo run -p praxis -- -c config.yaml
+RUST_LOG=debug cargo run -p praxis-proxy -- -c config.yaml
 ```
 
 Filter-specific logging:
 
 ```console
-RUST_LOG=praxis_filter::builtins::http::ai=debug cargo run -p praxis -- -c config.yaml
+RUST_LOG=praxis_filter::builtins::http::ai=debug cargo run -p praxis-proxy -- -c config.yaml
 ```

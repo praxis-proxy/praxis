@@ -64,7 +64,7 @@ protox = "0.9.1"
 rand = "0.9.4"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
 quote = "1.0.46"
-praxis = { path = "server" }
+praxis = { path = "server", package = "praxis-proxy" }
 praxis-core = { version = "0.3.1", path = "core", package = "praxis-proxy-core" }
 praxis-filter = { version = "0.3.1", path = "filter", package = "praxis-proxy-filter" }
 praxis-protocol = { version = "0.3.1", path = "protocol", package = "praxis-proxy-protocol" }

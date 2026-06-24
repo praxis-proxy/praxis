@@ -5,7 +5,7 @@
 # removing a backend re-hashes ~1/N of traffic.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/traffic-management/session-affinity.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/session-affinity.yaml
 #   for i in $(seq 1 6); do
 #     curl -H "X-User-Id: user-42" http://localhost:8080/
 #   done

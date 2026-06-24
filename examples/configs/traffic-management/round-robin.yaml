@@ -4,7 +4,7 @@
 # receives an equal share of requests.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/traffic-management/round-robin.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/round-robin.yaml
 #   for i in $(seq 1 9); do curl -s http://localhost:8080/; echo; done
 
 listeners:

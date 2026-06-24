@@ -18,7 +18,7 @@
 #   └────────┘ ~90%       └────────┘ ~10%
 #
 # Usage:
-#   cargo run -p praxis -- \
+#   cargo run -p praxis-proxy -- \
 #     -c examples/configs/traffic-management/canary-routing.yaml
 #   for i in $(seq 1 10); do
 #     curl -s http://localhost:8080/

@@ -36,7 +36,7 @@
 #   3. Cache-Control set only on successful responses
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/pipeline/conditional-filters.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/pipeline/conditional-filters.yaml
 #
 # Exercise:
 #   curl http://localhost:8080/api/users        # timeout enforced

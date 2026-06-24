@@ -25,7 +25,7 @@
 #   /v2/users?source=gateway
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/transformation/url-rewriting.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/transformation/url-rewriting.yaml
 #   curl http://localhost:8080/v1/users?debug=true
 #   # Request reaches backend as /v2/users?source=gateway
 #

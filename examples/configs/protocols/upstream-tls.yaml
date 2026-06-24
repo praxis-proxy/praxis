@@ -7,7 +7,7 @@
 #   Client ──HTTP──► Praxis :8080 ──TLS──► Backend :8443
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/protocols/upstream-tls.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/upstream-tls.yaml
 #   curl http://localhost:8080/
 
 listeners:

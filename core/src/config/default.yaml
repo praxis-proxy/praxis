@@ -5,7 +5,7 @@
 # a JSON status on "/" and 404 on all other paths.
 #
 # Usage:
-#   cargo run -p praxis
+#   cargo run -p praxis-proxy
 #   curl http://localhost:8080/
 
 admin:

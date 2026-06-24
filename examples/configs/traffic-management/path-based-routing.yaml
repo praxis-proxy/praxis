@@ -14,7 +14,7 @@
 # individual filters.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/traffic-management/path-based-routing.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/path-based-routing.yaml
 #   curl http://localhost:8080/api/users
 #   curl http://localhost:8080/static/index.html
 #   curl http://localhost:8080/healthz

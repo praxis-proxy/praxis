@@ -4,7 +4,7 @@
 # requests. Useful when request cost or latency varies.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/traffic-management/least-connections.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/least-connections.yaml
 #   curl http://localhost:8080/ &
 #   curl http://localhost:8080/ &
 #   curl http://localhost:8080/ &

@@ -11,7 +11,7 @@
 # Both placed before the router so they run on every request.
 #
 # Usage:
-#   RUST_LOG=info cargo run -p praxis -- -c examples/configs/observability/logging.yaml
+#   RUST_LOG=info cargo run -p praxis-proxy -- -c examples/configs/observability/logging.yaml
 #   curl -v http://localhost:8080/api/users
 #   curl -H "X-Trace-Id: my-trace-42" -v http://localhost:8080/
 

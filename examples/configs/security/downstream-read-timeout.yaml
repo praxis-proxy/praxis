@@ -10,7 +10,7 @@
 # initial header reads on fresh connections.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/security/downstream-read-timeout.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/security/downstream-read-timeout.yaml
 #   curl http://localhost:8080/
 
 listeners:

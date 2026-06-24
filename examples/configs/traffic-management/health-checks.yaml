@@ -5,7 +5,7 @@
 # GET probes (check status code) and TCP connect probes.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/traffic-management/health-checks.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/health-checks.yaml
 
 listeners:
   - name: default

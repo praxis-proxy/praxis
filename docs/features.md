@@ -326,7 +326,7 @@ by default):
 To disable AI features:
 
 ```console
-cargo build -p praxis --no-default-features
+cargo build -p praxis-proxy --no-default-features
 ```
 
 ## Extensions

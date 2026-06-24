@@ -10,7 +10,7 @@
 #   (any other host) →  default cluster
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/traffic-management/hosts.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/hosts.yaml
 #
 # Exercise:
 #   curl -H "Host: api.example.com" http://localhost:8080/users
