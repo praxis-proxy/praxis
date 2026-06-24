@@ -233,6 +233,34 @@ async fn preserves_other_request_fields() {
     assert_eq!(rebuilt["model"], "gpt-4o", "model should be preserved");
 }
 
+#[tokio::test]
+async fn rejects_oversized_rebuilt_body_with_413() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("max_body_bytes: 16").unwrap();
+    let filter = super::ResponsesProxyFilter::from_config(&yaml).unwrap();
+    let req = make_request(Method::POST, "/v1/responses");
+    let mut ctx = make_filter_context(&req);
+
+    let request_body = json!({
+        "model": "gpt-4o",
+        "input": "hello",
+        "previous_response_id": "resp_abc123"
+    });
+    let mut state = ResponsesState::from_request_body(request_body);
+    state
+        .messages
+        .splice(0..0, vec![json!({"role": "user", "content": "a]long message that exceeds the tiny limit"})]);
+    ctx.extensions.insert(state);
+
+    let mut body = Some(Bytes::from(
+        r#"{"model":"gpt-4o","input":"hello","previous_response_id":"resp_abc123"}"#,
+    ));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(r) if r.status == 413),
+        "should reject with 413 when rebuilt body exceeds max_body_bytes"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
