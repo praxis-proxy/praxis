@@ -122,7 +122,7 @@ pub fn set_token_usage(ctx: &mut HttpFilterContext<'_>, input: u64, output: u64,
 /// # Example
 ///
 /// ```
-/// use praxis_filter::{TokenUsageProvider, extract_token_usage};
+/// use praxis_filter::ai::{TokenUsageProvider, extract_token_usage};
 ///
 /// let openai_response =
 ///     br#"{"usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30}}"#;

@@ -113,7 +113,7 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
     info!("building filter pipelines");
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
     #[cfg(feature = "ai-inference")]
-    let response_stores = praxis_filter::ResponseStoreRegistry::new();
+    let response_stores = praxis_filter::ai::ResponseStoreRegistry::new();
 
     let pipelines = resolve_pipelines(
         config,

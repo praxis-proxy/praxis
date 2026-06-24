@@ -20,7 +20,7 @@ use super::{DEFAULT_STORE_NAME, DEFAULT_TENANT_ID, TENANT_METADATA_KEY, state::R
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode, MAX_JSON_BODY_BYTES},
-    builtins::http::ai::store::ResponseRecord,
+    builtins::http::ai::store::{ResponseRecord, ResponseStoreRegistry},
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -210,7 +210,7 @@ async fn fetch_previous_response(
     tenant_id: &str,
     prev_id: &str,
 ) -> Result<ResponseRecord, FilterAction> {
-    let registry = ctx.response_stores.ok_or_else(|| {
+    let registry = ctx.extensions.get::<ResponseStoreRegistry>().ok_or_else(|| {
         warn!("rehydrate: response store registry not available");
         reject_server_error("response store is not available")
     })?;

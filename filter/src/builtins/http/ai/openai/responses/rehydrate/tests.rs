@@ -174,7 +174,7 @@ async fn validates_previous_response_and_sets_metadata() {
     let filter = RehydrateFilter;
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.response_stores = Some(&registry);
+    ctx.extensions.insert(registry.clone());
     ctx.set_metadata("openai_responses_format.format", "openai_responses");
     let original = r#"{"model":"gpt-4.1","input":"What next?","previous_response_id":"resp_prev"}"#;
     let mut body = Some(Bytes::from(original));
@@ -258,7 +258,9 @@ async fn pipeline_validates_during_cold_request_body_pre_read() {
 
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.response_stores = pipeline.response_stores();
+    if let Some(stores) = pipeline.response_stores() {
+        ctx.extensions.insert(stores.clone());
+    }
 
     drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
 
@@ -317,7 +319,7 @@ async fn rejects_when_previous_response_not_found() {
     let filter = RehydrateFilter;
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.response_stores = Some(&registry);
+    ctx.extensions.insert(registry.clone());
     ctx.set_metadata("openai_responses_format.format", "openai_responses");
     let mut body = Some(Bytes::from(r#"{"input":"Hi","previous_response_id":"resp_missing"}"#));
 
@@ -336,7 +338,7 @@ async fn rejects_when_status_not_completed() {
     let filter = RehydrateFilter;
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.response_stores = Some(&registry);
+    ctx.extensions.insert(registry.clone());
     ctx.set_metadata("openai_responses_format.format", "openai_responses");
     let mut body = Some(Bytes::from(r#"{"input":"Hi","previous_response_id":"resp_123"}"#));
 
@@ -355,7 +357,7 @@ async fn rejects_when_status_incomplete() {
     let filter = RehydrateFilter;
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.response_stores = Some(&registry);
+    ctx.extensions.insert(registry.clone());
     ctx.set_metadata("openai_responses_format.format", "openai_responses");
     let mut body = Some(Bytes::from(r#"{"input":"Hi","previous_response_id":"resp_123"}"#));
 
@@ -374,7 +376,7 @@ async fn rejects_when_status_failed() {
     let filter = RehydrateFilter;
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.response_stores = Some(&registry);
+    ctx.extensions.insert(registry.clone());
     ctx.set_metadata("openai_responses_format.format", "openai_responses");
     let mut body = Some(Bytes::from(r#"{"input":"Hi","previous_response_id":"resp_123"}"#));
 
@@ -407,7 +409,7 @@ async fn rejects_when_store_not_registered() {
     let filter = RehydrateFilter;
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.response_stores = Some(&registry);
+    ctx.extensions.insert(registry.clone());
     ctx.set_metadata("openai_responses_format.format", "openai_responses");
     let mut body = Some(Bytes::from(r#"{"input":"Hi","previous_response_id":"resp_123"}"#));
 
@@ -456,7 +458,7 @@ async fn rejects_when_store_fetch_fails() {
     let filter = RehydrateFilter;
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.response_stores = Some(&registry);
+    ctx.extensions.insert(registry.clone());
     ctx.set_metadata("openai_responses_format.format", "openai_responses");
     let mut body = Some(Bytes::from(r#"{"input":"Hi","previous_response_id":"resp_123"}"#));
 

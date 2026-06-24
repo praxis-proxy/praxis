@@ -50,7 +50,7 @@ fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &Fi
             config.insecure_options.allow_unbounded_body,
         )
         .unwrap();
-    pipeline.set_response_stores(praxis_filter::ResponseStoreRegistry::new());
+    pipeline.set_response_stores(praxis_filter::ai::ResponseStoreRegistry::new());
     Arc::new(pipeline)
 }
 

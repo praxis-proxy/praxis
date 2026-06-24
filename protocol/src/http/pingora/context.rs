@@ -224,7 +224,11 @@ pub struct PingoraRequestCtx {
 /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
 macro_rules! filter_context {
     ($ctx:expr, $pipeline:expr, $request:expr, $response_header:expr) => {{
-        let mut fctx = praxis_filter::HttpFilterContext {
+        #[cfg(feature = "response-store")]
+        if let Some(stores) = $pipeline.response_stores() {
+            $ctx.extensions.insert(stores.clone());
+        }
+        praxis_filter::HttpFilterContext {
             body_done_indices: Vec::new(),
             branch_iterations: std::collections::HashMap::new(),
             client_addr: $ctx.client_addr,
@@ -254,12 +258,7 @@ macro_rules! filter_context {
             selected_endpoint_index: $ctx.selected_endpoint_index,
             time_source: $pipeline.time_source(),
             upstream: $ctx.upstream.take(),
-        };
-        #[cfg(feature = "response-store")]
-        if let Some(stores) = $pipeline.response_stores() {
-            fctx.extensions.insert(stores.clone());
         }
-        fctx
     }};
 }
 

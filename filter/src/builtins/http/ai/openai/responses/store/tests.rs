@@ -1180,7 +1180,9 @@ async fn pipeline_persists_rehydrated_messages_when_response_omits_input() {
 
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.response_stores = pipeline.response_stores();
+    if let Some(stores) = pipeline.response_stores() {
+        ctx.extensions.insert(stores.clone());
+    }
 
     let request_json = json!({
         "model": "gpt-4.1",

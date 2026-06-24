@@ -25,36 +25,24 @@ mod tcp_filter;
 pub use actions::{FilterAction, Rejection};
 pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
-#[cfg(feature = "ai-inference")]
-pub use builtins::AiGuardrailsFilter;
-#[cfg(feature = "ai-inference")]
-pub use builtins::AnthropicMessagesFormatFilter;
-#[cfg(feature = "ai-inference")]
-pub use builtins::AnthropicMessagesProtocolFilter;
-#[cfg(feature = "ai-inference")]
-pub use builtins::AnthropicStreamEventsFilter;
-#[cfg(feature = "ai-inference")]
-pub use builtins::AnthropicToOpenaiFilter;
-#[cfg(feature = "ai-inference")]
-pub use builtins::AnthropicValidateFilter;
-#[cfg(feature = "ai-inference")]
-pub use builtins::OpenaiResponsesValidateFilter;
-#[cfg(feature = "ai-inference")]
-pub use builtins::PromptEnrichFilter;
-#[cfg(feature = "ai-inference")]
-pub use builtins::RehydrateFilter;
-#[cfg(feature = "ai-inference")]
-pub use builtins::ResponseStoreRegistry;
-#[cfg(feature = "ai-inference")]
-pub use builtins::ResponsesFormatFilter;
 pub use builtins::{
     CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, GuardrailsAction,
     GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode, RedirectStatus, RouterFilter, RuleTargetKind,
     has_dot_dot_traversal, http::payload_processing::compression_config::CompressionConfig, normalize_rewritten_path,
 };
-#[cfg(feature = "ai-inference")]
-pub use builtins::{TokenUsage, TokenUsageProvider, extract_token_usage, set_token_usage};
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
+
+/// AI inference filter types, gated behind the `ai-inference` feature.
+#[cfg(feature = "ai-inference")]
+pub mod ai {
+    pub use crate::builtins::{
+        AiGuardrailsFilter, AnthropicMessagesFormatFilter, AnthropicMessagesProtocolFilter,
+        AnthropicStreamEventsFilter, AnthropicToOpenaiFilter, AnthropicValidateFilter, ModelRewriteFilter,
+        ModelToHeaderFilter, OpenaiResponsesValidateFilter, PromptEnrichFilter, RehydrateFilter, ResponseStoreFilter,
+        ResponseStoreRegistry, ResponsesFormatFilter, TokenUsage, TokenUsageProvider, extract_token_usage,
+        set_token_usage,
+    };
+}
 pub use context::{HttpFilterContext, Request, Response};
 pub use extensions::RequestExtensions;
 pub use factory::{FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config, tcp_builtin};

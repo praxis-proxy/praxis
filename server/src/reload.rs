@@ -54,7 +54,7 @@ pub(crate) fn reload_pipelines(
 
     let health_registry = build_health_registry(&new_config.clusters);
     #[cfg(feature = "ai-inference")]
-    let response_stores = praxis_filter::ResponseStoreRegistry::new();
+    let response_stores = praxis_filter::ai::ResponseStoreRegistry::new();
 
     let new_pipelines = match resolve_pipelines(
         new_config,
@@ -711,7 +711,7 @@ filter_chains:
 
     /// Empty response store registry for tests without response stores.
     #[cfg(feature = "ai-inference")]
-    fn empty_response_stores() -> praxis_filter::ResponseStoreRegistry {
-        praxis_filter::ResponseStoreRegistry::new()
+    fn empty_response_stores() -> praxis_filter::ai::ResponseStoreRegistry {
+        praxis_filter::ai::ResponseStoreRegistry::new()
     }
 }

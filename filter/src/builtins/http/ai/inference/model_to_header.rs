@@ -56,7 +56,7 @@ fn default_header() -> String {
 /// # Example
 ///
 /// ```ignore
-/// use praxis_filter::ModelToHeaderFilter;
+/// use praxis_filter::ai::ModelToHeaderFilter;
 ///
 /// let yaml = serde_yaml::Value::Null;
 /// let filter = ModelToHeaderFilter::from_config(&yaml).unwrap();
@@ -80,7 +80,7 @@ impl ModelToHeaderFilter {
     /// [`FilterError`]: crate::FilterError
     ///
     /// ```ignore
-    /// use praxis_filter::ModelToHeaderFilter;
+    /// use praxis_filter::ai::ModelToHeaderFilter;
     ///
     /// let yaml: serde_yaml::Value = serde_yaml::from_str("header: X-AI-Model").unwrap();
     /// let filter = ModelToHeaderFilter::from_config(&yaml).unwrap();
