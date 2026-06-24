@@ -546,15 +546,16 @@ mod tests {
 
     #[test]
     fn cached_client_cert_debug_redacts_key() {
-        let key_der = [250, 251, 252];
-        let cached = CachedClientCert::new(vec![vec![42]], Zeroizing::new(key_der.to_vec()));
+        let cert_der = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let key_der = [0xCA, 0xFE, 0xBA, 0xBE];
+        let cached = CachedClientCert::new(vec![cert_der], Zeroizing::new(key_der.to_vec()));
         let debug = format!("{cached:?}");
         assert!(debug.contains("REDACTED"), "Debug output should redact the key");
         assert!(debug.contains("cert_count"), "Debug output should retain cert metadata");
-        assert!(!debug.contains("42"), "Debug output must not contain cert DER bytes");
-        assert!(!debug.contains("250"), "Debug output must not contain key bytes");
-        assert!(!debug.contains("251"), "Debug output must not contain key bytes");
-        assert!(!debug.contains("252"), "Debug output must not contain key bytes");
+        assert!(!debug.contains("222"), "Debug output must not contain cert DER bytes");
+        assert!(!debug.contains("202"), "Debug output must not contain key bytes");
+        assert!(!debug.contains("254"), "Debug output must not contain key bytes");
+        assert!(!debug.contains("186"), "Debug output must not contain key bytes");
     }
 
     #[test]
