@@ -81,8 +81,8 @@ pub struct ResponseStoreFilter {
     /// Parsed configuration.
     pub(crate) config: ResponseStoreConfig,
 
-    /// Lazily initialized store backend. SQLite init failures are
-    /// cached as `None`; Postgres init failures are retried.
+    /// Lazily initialized store backend. SQLite init failures are cached
+    /// as `None`; Postgres init failures are retried on every code path.
     pub(crate) store: OnceCell<Option<Arc<dyn ResponseStore>>>,
 }
 
@@ -205,12 +205,7 @@ impl ResponseStoreFilter {
 
     /// Handle `DELETE /v1/responses/{id}` by deleting from the store.
     async fn handle_delete(&self, tenant_id: &str, id: &str) -> Result<FilterAction, FilterError> {
-        let store = self
-            .store
-            .get_or_init(|| async { self.init_permanent_store().await })
-            .await;
-
-        let Some(store) = store else {
+        let Some(store) = self.ensure_store().await else {
             return Ok(FilterAction::Continue);
         };
 
@@ -760,10 +755,7 @@ impl ResponseStoreFilter {
 
     /// Lazily initialize the store and return a clone of the `Arc`.
     async fn ensure_store(&self) -> Option<Arc<dyn ResponseStore>> {
-        self.store
-            .get_or_init(|| async { self.init_permanent_store().await })
-            .await
-            .clone()
+        self.get_or_init_store().await
     }
 
     /// Serve `GET /v1/responses/{id}`.
