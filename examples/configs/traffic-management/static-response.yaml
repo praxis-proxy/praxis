@@ -5,7 +5,7 @@
 # mode.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/traffic-management/static-response.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/static-response.yaml
 #   curl http://localhost:8080/
 
 listeners:

@@ -7,7 +7,7 @@
 # Try it:
 #
 #   1. Start the proxy:
-#      cargo run -p praxis -- -c examples/configs/operations/hot-reload.yaml
+#      cargo run -p praxis-proxy -- -c examples/configs/operations/hot-reload.yaml
 #
 #   2. Send a request:
 #      curl http://localhost:8080/api/hello

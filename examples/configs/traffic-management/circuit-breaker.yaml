@@ -7,7 +7,7 @@
 # the circuit; a failed probe re-opens it.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/traffic-management/circuit-breaker.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/circuit-breaker.yaml
 
 listeners:
   - name: http

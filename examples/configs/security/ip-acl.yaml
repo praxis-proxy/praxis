@@ -7,7 +7,7 @@
 # `allow` and `deny` is rejected as an error.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/security/ip-acl.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/security/ip-acl.yaml
 #
 # Exercise:
 #   curl http://localhost:8080/      # allowed (loopback)

@@ -9,7 +9,7 @@
 # individual modules below.
 #
 # Usage:
-#   RUST_LOG=info cargo run -p praxis -- \
+#   RUST_LOG=info cargo run -p praxis-proxy -- \
 #     -c examples/configs/operations/log-overrides.yaml
 #   curl http://localhost:8080/
 

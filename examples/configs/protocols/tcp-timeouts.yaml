@@ -13,7 +13,7 @@
 #   Client -> TCP -> Praxis :5432 -> TCP -> PostgreSQL :15432
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/protocols/tcp-timeouts.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/tcp-timeouts.yaml
 
 listeners:
   - name: postgres

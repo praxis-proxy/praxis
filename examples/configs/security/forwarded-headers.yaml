@@ -8,7 +8,7 @@
 #   Forwarded: for=<ip>;proto=<proto>;host=<host>
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/security/forwarded-headers.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/security/forwarded-headers.yaml
 #   curl -v http://localhost:8080/
 
 listeners:

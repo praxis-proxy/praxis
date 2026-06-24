@@ -75,7 +75,7 @@ fn active_features() -> ActiveFeatures {
     let package = metadata
         .packages
         .iter()
-        .find(|pkg| pkg.name == "praxis")
+        .find(|pkg| pkg.name == "praxis-proxy")
         .expect("praxis package not found in metadata");
 
     let feature_names_by_env: HashMap<String, String> = package
@@ -123,7 +123,7 @@ fn collect_server_deps<'a>(packages: &'a [Package], resolve: &'a Resolve) -> Vec
     resolve
         .nodes
         .iter()
-        .find(|node| packages.iter().any(|p| p.id == node.id && p.name == "praxis"))
+        .find(|node| packages.iter().any(|p| p.id == node.id && p.name == "praxis-proxy"))
         .map(|node| node.deps.iter().collect())
         .unwrap_or_default()
 }

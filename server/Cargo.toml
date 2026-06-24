@@ -1,5 +1,5 @@
 [package]
-name = "praxis"
+name = "praxis-proxy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,6 @@ description = "Cloud and AI-native proxy server"
 license.workspace = true
 repository.workspace = true
 readme = "../README.md"
-publish = false
 
 [lib]
 name = "praxis"

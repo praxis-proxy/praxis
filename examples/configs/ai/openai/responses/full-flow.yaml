@@ -53,7 +53,7 @@
 #     -d '{"model":"gpt-4.1","input":"test","stream":true,"background":true}'
 #
 # Requires the ai-inference feature:
-#   cargo build -p praxis --features ai-inference
+#   cargo build -p praxis-proxy --features ai-inference
 
 listeners:
   - name: ai-gateway

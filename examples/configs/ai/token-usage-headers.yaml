@@ -5,7 +5,7 @@
 # token counts are available in filter metadata.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/ai/token-usage-headers.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/ai/token-usage-headers.yaml
 #   curl -v http://localhost:8080/v1/chat/completions
 #
 # The filter reads token.input, token.output, and token.total from

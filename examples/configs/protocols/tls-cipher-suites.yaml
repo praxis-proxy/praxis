@@ -26,7 +26,7 @@
 #
 # Usage:
 #   mkcert -install && mkcert localhost 127.0.0.1
-#   cargo run -p praxis -- -c examples/configs/protocols/tls-cipher-suites.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/tls-cipher-suites.yaml
 #   curl https://localhost:8443/
 
 listeners:

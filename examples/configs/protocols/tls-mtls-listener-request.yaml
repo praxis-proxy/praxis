@@ -12,7 +12,7 @@
 #   Client (cert optional) -> TLS -> Praxis :8443 -> HTTP -> Backend :3000
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/protocols/tls-mtls-listener-request.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/tls-mtls-listener-request.yaml
 #   curl --cacert ca.pem https://localhost:8443/                        # no cert, allowed
 #   curl --cert client.pem --key client-key.pem --cacert ca.pem \
 #        https://localhost:8443/                                        # with cert, also allowed

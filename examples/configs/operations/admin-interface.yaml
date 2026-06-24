@@ -12,7 +12,7 @@
 # per-cluster health detail in the body.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/operations/admin-interface.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/operations/admin-interface.yaml
 #   curl http://localhost:9901/healthy    # liveness
 #   curl http://localhost:9901/ready      # readiness (verbose)
 #   curl http://localhost:9901/metrics    # prometheus scrape
