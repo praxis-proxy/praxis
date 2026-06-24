@@ -112,6 +112,9 @@ pub enum StoreError {
     /// Database connection or query failure.
     Database(String),
 
+    /// Client-supplied input is invalid (e.g. malformed cursor).
+    InvalidInput(String),
+
     /// JSON serialization or deserialization failure.
     Serialization(String),
 
@@ -123,6 +126,7 @@ impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database(msg) => write!(f, "database error: {msg}"),
+            Self::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             Self::Serialization(msg) => write!(f, "serialization error: {msg}"),
             Self::Unavailable(msg) => write!(f, "store unavailable: {msg}"),
         }

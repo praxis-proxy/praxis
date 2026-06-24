@@ -2527,6 +2527,44 @@ async fn get_input_items_with_cursor() {
     assert_eq!(body["has_more"], false, "should indicate no more items after this page");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_input_items_with_malformed_cursor_returns_400() {
+    let filter = make_filter();
+    init_store_and_seed(
+        &filter,
+        "resp_bad_cursor",
+        "default",
+        json!([
+            {"id": "item_1", "type": "message"},
+            {"id": "item_2", "type": "message"}
+        ]),
+    )
+    .await;
+
+    let req = crate::test_utils::make_request(
+        http::Method::GET,
+        "/v1/responses/resp_bad_cursor/input_items?after=not-a-cursor",
+    );
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(rejection.status, 400, "malformed cursor should return 400");
+    assert_has_json_content_type(&rejection);
+
+    let body: serde_json::Value = serde_json::from_slice(rejection.body.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        body["error"]["type"], "invalid_request_error",
+        "malformed cursor should return an invalid request error"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("invalid input_items cursor")),
+        "error message should explain the invalid input_items cursor"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // DELETE
 // -----------------------------------------------------------------------------

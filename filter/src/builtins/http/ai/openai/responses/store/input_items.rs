@@ -96,10 +96,8 @@ pub struct InputItemPage {
 ///
 /// # Errors
 ///
-/// Returns [`StoreError::Database`] if the cursor is malformed
-/// or overflows while calculating the page window. Uses the
-/// `Database` variant as a pragmatic fit until a dedicated
-/// input-validation variant is added to [`StoreError`].
+/// Returns [`StoreError::InvalidInput`] if the cursor is malformed
+/// or overflows while calculating the page window.
 pub fn list_input_items(record: &ResponseRecord, params: &ListParams) -> Result<InputItemPage, StoreError> {
     let mut items = match &record.input {
         serde_json::Value::Array(arr) => arr.clone(),
@@ -116,10 +114,10 @@ pub fn list_input_items(record: &ResponseRecord, params: &ListParams) -> Result<
         .transpose()?
         .unwrap_or(0);
 
-    let limit = usize::try_from(params.effective_limit()).map_err(|e| StoreError::Database(e.to_string()))?;
+    let limit = usize::try_from(params.effective_limit()).map_err(|e| StoreError::InvalidInput(e.to_string()))?;
     let end = offset
         .checked_add(limit)
-        .ok_or_else(|| StoreError::Database("input_items cursor offset overflow".to_owned()))?
+        .ok_or_else(|| StoreError::InvalidInput("input_items cursor offset overflow".to_owned()))?
         .min(items.len());
     let has_more = end < items.len();
 
@@ -145,7 +143,7 @@ fn cursor_offset(items: &[serde_json::Value], cursor: &str) -> Result<usize, Sto
 
     cursor
         .parse::<usize>()
-        .map_err(|e| StoreError::Database(format!("invalid input_items cursor: {e}")))
+        .map_err(|e| StoreError::InvalidInput(format!("invalid input_items cursor: {e}")))
 }
 
 /// Return the offset after the item whose `id` matches the cursor.
