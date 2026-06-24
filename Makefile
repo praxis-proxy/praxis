@@ -185,10 +185,12 @@ bench: $(VEGETA) $(FORTIO_DEP)
 
 lint:
 	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy -p praxis-proxy-protocol --no-default-features --all-targets -- -D warnings
 	cargo +$(NIGHTLY_VERSION) fmt --all -- --check
 	cargo machete
 	cargo xtask lint-deps
 	cargo xtask lint-example-tests
+	cargo xtask lint-ai-isolation
 	cargo xtask sync-example-readme
 	cargo xtask lint-filter-docs
 
