@@ -40,8 +40,7 @@ pub mod ai {
         AnthropicStreamEventsFilter, AnthropicToOpenaiFilter, AnthropicValidateFilter, ModelRewriteFilter,
         ModelToHeaderFilter, OpenaiResponsesValidateFilter, PromptEnrichFilter, RehydrateFilter, ResponseStoreFilter,
         ResponseStoreRegistry, ResponsesFormatFilter, ResponsesProxyFilter, TokenUsage, TokenUsageProvider,
-        extract_token_usage,
-        set_token_usage,
+        extract_token_usage, set_token_usage,
     };
 }
 pub use context::{HttpFilterContext, Request, Response};

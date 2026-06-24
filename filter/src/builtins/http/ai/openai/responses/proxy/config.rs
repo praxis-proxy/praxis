@@ -5,14 +5,7 @@
 
 use serde::Deserialize;
 
-use crate::{FilterError, builtins::http::ai::config_validation::validate_max_body_bytes};
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Default maximum request body size for `StreamBuffer` mode (64 MiB).
-const DEFAULT_MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
+use crate::{FilterError, body::MAX_JSON_BODY_BYTES, builtins::http::ai::config_validation::validate_max_body_bytes};
 
 // -----------------------------------------------------------------------------
 // ResponsesProxyConfig
@@ -34,14 +27,14 @@ pub(super) struct ResponsesProxyConfig {
 impl Default for ResponsesProxyConfig {
     fn default() -> Self {
         Self {
-            max_body_bytes: DEFAULT_MAX_BODY_BYTES,
+            max_body_bytes: MAX_JSON_BODY_BYTES,
         }
     }
 }
 
 /// Serde default for `max_body_bytes`.
 fn default_max_body_bytes() -> usize {
-    DEFAULT_MAX_BODY_BYTES
+    MAX_JSON_BODY_BYTES
 }
 
 // -----------------------------------------------------------------------------
