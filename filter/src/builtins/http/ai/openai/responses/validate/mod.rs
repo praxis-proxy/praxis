@@ -175,7 +175,10 @@ fn parse_and_validate(ctx: &HttpFilterContext<'_>, body: &Option<Bytes>) -> Resu
 fn is_bodyless_responses_request(method: &http::Method, path: &str) -> bool {
     match *method {
         http::Method::GET | http::Method::DELETE => true,
-        http::Method::POST => path.ends_with("/cancel"),
+        http::Method::POST => matches!(
+            path.split('/').collect::<Vec<_>>().as_slice(),
+            ["", "v1", "responses", _, "cancel"]
+        ),
         _ => false,
     }
 }
@@ -622,6 +625,24 @@ mod tests {
         assert!(
             !ctx.filter_metadata.contains_key("responses.response_id"),
             "responses metadata should not be set for bodyless requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_input_tokens_still_validates_body() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses/input_tokens",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
+        let mut body = None;
+
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Reject(_)),
+            "POST /input_tokens without body should be rejected, not released"
         );
     }
 
