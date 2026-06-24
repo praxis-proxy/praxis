@@ -16,27 +16,14 @@ use bytes::Bytes;
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use super::state::ResponsesState;
+use super::{DEFAULT_STORE_NAME, DEFAULT_TENANT_ID, TENANT_METADATA_KEY, state::ResponsesState};
 use crate::{
     FilterAction, FilterError, Rejection,
-    body::{BodyAccess, BodyMode, limits::MAX_JSON_BODY_BYTES},
+    body::{BodyAccess, BodyMode, MAX_JSON_BODY_BYTES},
     builtins::http::ai::store::ResponseRecord,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Default store name to look up in the registry.
-const DEFAULT_STORE_NAME: &str = "default";
-
-/// Metadata key for the tenant identifier.
-const TENANT_METADATA_KEY: &str = "responses.tenant_id";
-
-/// Default tenant identifier.
-const DEFAULT_TENANT_ID: &str = "default";
 
 // -----------------------------------------------------------------------------
 // RehydrateFilter
@@ -179,16 +166,24 @@ async fn validate_previous_response(
         return Ok(action);
     }
 
-    let mut state = ResponsesState::from_request_body(parsed_body);
-    // TODO(#697): enforce a max rehydrated history size before cloning stored messages.
-    let stored_messages = record.messages.as_array().cloned().unwrap_or_default();
-    state.messages.splice(0..0, stored_messages);
-    ctx.extensions.insert(state);
+    ctx.extensions.insert(build_state(parsed_body, record.messages));
 
     debug!(previous_response_id = %prev_id, "previous response validated, state populated");
     ctx.set_metadata("responses.previous_response_id", prev_id);
 
     Ok(FilterAction::Release)
+}
+
+/// Build [`ResponsesState`] by prepending stored messages before the current input.
+// TODO(#697): enforce a max rehydrated history size.
+fn build_state(parsed_body: Value, messages: Value) -> ResponsesState {
+    let mut state = ResponsesState::from_request_body(parsed_body);
+    let stored = match messages {
+        Value::Array(arr) => arr,
+        _ => Vec::new(),
+    };
+    state.messages.splice(0..0, stored);
+    state
 }
 
 /// Parse the request body and extract `previous_response_id`.
