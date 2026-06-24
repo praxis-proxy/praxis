@@ -44,7 +44,7 @@ const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
 /// # Example
 ///
 /// ```ignore
-/// use praxis_filter::AiGuardrailsFilter;
+/// use praxis_filter::ai::AiGuardrailsFilter;
 ///
 /// let yaml: serde_yaml::Value = serde_yaml::from_str(
 ///     r#"
