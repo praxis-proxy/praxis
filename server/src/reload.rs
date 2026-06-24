@@ -53,17 +53,8 @@ pub(crate) fn reload_pipelines(
     }
 
     let health_registry = build_health_registry(&new_config.clusters);
-    #[cfg(feature = "ai-inference")]
-    let response_stores = praxis_filter::ai::ResponseStoreRegistry::new();
 
-    let new_pipelines = match resolve_pipelines(
-        new_config,
-        registry,
-        &health_registry,
-        kv_stores,
-        #[cfg(feature = "ai-inference")]
-        &response_stores,
-    ) {
+    let new_pipelines = match resolve_pipelines(new_config, registry, &health_registry, kv_stores) {
         Ok(p) => p,
         Err(e) => {
             error!(error = %e, "config reload failed: pipeline build error");
@@ -326,47 +317,6 @@ mod tests {
         assert!(result.is_ok(), "valid reload should succeed");
         let new_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
         assert_ne!(old_ptr, new_ptr, "pipeline pointer should change after reload");
-    }
-
-    #[cfg(feature = "ai-inference")]
-    #[test]
-    fn reload_uses_fresh_response_store_registry() {
-        let config = response_store_config();
-        let registry = FilterRegistry::with_builtins();
-        let health_registry: HealthRegistry = Arc::new(HashMap::new());
-        let initial_response_stores = empty_response_stores();
-        let live = resolve_pipelines(
-            &config,
-            &registry,
-            &health_registry,
-            &empty_kv_stores(),
-            &initial_response_stores,
-        )
-        .unwrap();
-        let old_pipeline = live.get("web").unwrap().load();
-        let old_pipeline_response_stores = old_pipeline
-            .response_stores()
-            .expect("initial pipeline should have response stores");
-        assert!(
-            old_pipeline_response_stores.shares_storage_with(&initial_response_stores),
-            "initial pipeline should use the startup response-store registry"
-        );
-
-        let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        reload_pipelines(&config, &config, &registry, &live, &shutdown, &empty_kv_stores()).unwrap();
-
-        let new_pipeline = live.get("web").unwrap().load();
-        let new_pipeline_response_stores = new_pipeline
-            .response_stores()
-            .expect("reloaded pipeline should have response stores");
-        assert!(
-            !new_pipeline_response_stores.shares_storage_with(&initial_response_stores),
-            "reloaded pipeline should not reuse the startup response-store registry"
-        );
-        assert!(
-            !new_pipeline_response_stores.shares_storage_with(old_pipeline_response_stores),
-            "reloaded pipeline should not inherit stores registered by the old pipeline"
-        );
     }
 
     #[test]
@@ -663,43 +613,12 @@ filter_chains:
         .unwrap()
     }
 
-    /// Config containing a response store for reload registry tests.
-    #[cfg(feature = "ai-inference")]
-    fn response_store_config() -> Config {
-        Config::from_yaml(
-            r#"
-listeners:
-  - name: web
-    address: "127.0.0.1:8080"
-    filter_chains: [main]
-filter_chains:
-  - name: main
-    filters:
-      - filter: openai_responses_format
-      - filter: openai_response_store
-        backend: sqlite
-        database_url: "sqlite::memory:"
-        responses_table: test_responses
-        conversations_table: test_conversations
-"#,
-        )
-        .unwrap()
-    }
-
     /// Set up live pipelines, registry, and shutdown token for reload tests.
     fn setup_live_pipelines() -> (ListenerPipelines, Config, FilterRegistry, Arc<Mutex<CancellationToken>>) {
         let config = valid_config();
         let registry = FilterRegistry::with_builtins();
         let health_registry: HealthRegistry = Arc::new(HashMap::new());
-        let pipelines = resolve_pipelines(
-            &config,
-            &registry,
-            &health_registry,
-            &empty_kv_stores(),
-            #[cfg(feature = "ai-inference")]
-            &empty_response_stores(),
-        )
-        .unwrap();
+        let pipelines = resolve_pipelines(&config, &registry, &health_registry, &empty_kv_stores()).unwrap();
         let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
         (pipelines, config, registry, shutdown)
     }
@@ -707,11 +626,5 @@ filter_chains:
     /// Empty KV store registry for tests without KV stores.
     fn empty_kv_stores() -> praxis_core::kv::KvStoreRegistry {
         praxis_core::kv::KvStoreRegistry::new()
-    }
-
-    /// Empty response store registry for tests without response stores.
-    #[cfg(feature = "ai-inference")]
-    fn empty_response_stores() -> praxis_filter::ai::ResponseStoreRegistry {
-        praxis_filter::ai::ResponseStoreRegistry::new()
     }
 }

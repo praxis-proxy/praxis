@@ -4,6 +4,12 @@
 //! `OpenAI` API filters: Responses API pipeline.
 
 pub(crate) mod responses;
+#[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on module")]
+#[allow(
+    dead_code,
+    reason = "Responses translation helpers are wired into the HTTP filter in a later stack entry"
+)]
+pub(crate) mod translation;
 
 #[cfg(feature = "ai-inference")]
 pub use responses::ModelRewriteFilter;

@@ -12,7 +12,7 @@
 # wildcards) for allow_origins, allow_methods, and allow_headers.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/security/cors.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/security/cors.yaml
 #
 # Exercise:
 #   # Simple request with allowed origin:

@@ -8,7 +8,7 @@
 # placeholders from the original request URI.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/traffic-management/redirect.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/redirect.yaml
 #   curl -v http://localhost:8080/some/path?q=1
 #   curl -v http://localhost:8081/docs/guide?lang=en
 

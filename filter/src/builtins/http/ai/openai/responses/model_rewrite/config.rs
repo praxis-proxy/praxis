@@ -21,14 +21,19 @@ use crate::{
 /// filter: openai_responses_model_rewrite
 /// default_model: "llama-3.3-70b"
 /// model_aliases:
-///   codex-mini-latest: "llama-3.3-70b"
-///   gpt-4.1-mini: "qwen-2.5-72b"
+///   "codex-mini-latest": "llama-3.3-70b"
+///   "gpt-4.1-*": "qwen-2.5-72b"
+///   "gpt-4.1-mini": "qwen-2.5-72b"
 /// max_body_bytes: 10485760
 /// on_invalid: continue
 /// headers:
 ///   effective_model: x-praxis-ai-effective-model
 ///   original_model: x-praxis-ai-original-model
 /// ```
+///
+/// Quote wildcard alias keys in YAML, such as `"gpt-4.1-*"`, so `*` is
+/// parsed as a literal character rather than YAML alias syntax. The examples
+/// quote all alias keys for consistency.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct ModelRewriteConfig {
@@ -45,7 +50,9 @@ pub(super) struct ModelRewriteConfig {
     #[serde(default = "default_max_body_bytes")]
     pub max_body_bytes: usize,
 
-    /// Map from client-facing model names to backend model names.
+    /// Map from client-facing model names or single-wildcard patterns
+    /// to backend model names. Quote wildcard keys in YAML. Exact aliases win
+    /// before wildcard aliases; wildcard aliases are matched by literal specificity.
     #[serde(default)]
     pub model_aliases: HashMap<String, String>,
 
@@ -157,6 +164,12 @@ fn validate_aliases(aliases: &HashMap<String, String>) -> Result<(), FilterError
     for (source, target) in aliases {
         if source.is_empty() {
             return Err("openai_responses_model_rewrite: alias source name must not be empty".into());
+        }
+        if source.chars().filter(|&c| c == '*').count() > 1 {
+            return Err(format!(
+                "openai_responses_model_rewrite: alias source pattern '{source}' must contain at most one '*'",
+            )
+            .into());
         }
         if target.is_empty() {
             return Err(

@@ -4,7 +4,7 @@
 # Each protocol gets its own filter chains.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/protocols/mixed-protocol.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/mixed-protocol.yaml
 
 listeners:
   - name: web

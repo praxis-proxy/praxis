@@ -7,7 +7,7 @@
 #   Client -> TLS -> Praxis :443 -> TLS -> upstream (by SNI)
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/protocols/tls-sni-routing.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/tls-sni-routing.yaml
 
 listeners:
   - name: tls-gateway

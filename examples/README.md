@@ -5,7 +5,7 @@ Configuration examples organized by category.
 ## Running an Example
 
 ```console
-cargo run -p praxis -- -c examples/configs/traffic-management/basic-reverse-proxy.yaml
+cargo run -p praxis-proxy -- -c examples/configs/traffic-management/basic-reverse-proxy.yaml
 curl http://localhost:8080/
 ```
 

@@ -8,7 +8,7 @@
 # Enable with RUST_LOG=info to see log output.
 #
 # Usage:
-#   RUST_LOG=info cargo run -p praxis -- -c examples/configs/observability/access-logging.yaml
+#   RUST_LOG=info cargo run -p praxis-proxy -- -c examples/configs/observability/access-logging.yaml
 #   curl http://localhost:8080/
 #   curl http://localhost:8080/api/users
 

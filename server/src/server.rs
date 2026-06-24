@@ -112,18 +112,8 @@ struct ServerState {
 fn build_server_state(config: &Config, registry: &FilterRegistry, health_registry: &HealthRegistry) -> ServerState {
     info!("building filter pipelines");
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-    #[cfg(feature = "ai-inference")]
-    let response_stores = praxis_filter::ai::ResponseStoreRegistry::new();
 
-    let pipelines = resolve_pipelines(
-        config,
-        registry,
-        health_registry,
-        &kv_stores,
-        #[cfg(feature = "ai-inference")]
-        &response_stores,
-    )
-    .unwrap_or_else(|e| fatal(&e));
+    let pipelines = resolve_pipelines(config, registry, health_registry, &kv_stores).unwrap_or_else(|e| fatal(&e));
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
     spawn_health_check_tasks(config, Arc::clone(health_registry), &health_shutdown);

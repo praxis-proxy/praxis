@@ -57,7 +57,7 @@ impl FilterPipeline {
             id_generator: Arc::new(IdGenerator::new()),
             kv_stores: None,
             #[cfg(feature = "ai-inference")]
-            response_stores: None,
+            response_stores: Some(crate::builtins::http::ai::store::ResponseStoreRegistry::new()),
             time_source: Arc::new(SystemTimeSource),
         })
     }
@@ -90,7 +90,7 @@ impl FilterPipeline {
             id_generator: Arc::new(IdGenerator::new()),
             kv_stores: None,
             #[cfg(feature = "ai-inference")]
-            response_stores: None,
+            response_stores: Some(crate::builtins::http::ai::store::ResponseStoreRegistry::new()),
             time_source: Arc::new(SystemTimeSource),
         })
     }

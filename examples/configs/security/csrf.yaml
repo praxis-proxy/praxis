@@ -14,7 +14,7 @@
 # only a fraction of requests while monitoring impact.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/security/csrf.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/security/csrf.yaml
 #
 # Exercise:
 #   # Safe method (allowed):

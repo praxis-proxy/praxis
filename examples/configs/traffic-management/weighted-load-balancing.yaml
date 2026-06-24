@@ -5,7 +5,7 @@
 # Useful for canary rollouts and heterogeneous hardware.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/traffic-management/weighted-load-balancing.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/weighted-load-balancing.yaml
 #   for i in $(seq 1 8); do curl -s http://localhost:8080/; echo; done
 #   # port 3002 receives ~3x more requests than port 3001
 

@@ -7,7 +7,7 @@
 # on :8081 sharing a single bucket across all clients.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/traffic-management/rate-limiting.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/rate-limiting.yaml
 #   curl -v http://localhost:8080/
 #   curl -v http://localhost:8081/
 #   # Repeat rapidly to trigger 429 Too Many Requests

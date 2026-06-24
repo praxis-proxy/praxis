@@ -51,7 +51,7 @@ use tracing::{debug, trace, warn};
 
 use super::{
     super::{DEFAULT_STORE_NAME, DEFAULT_TENANT_ID, TENANT_METADATA_KEY, state::ResponsesState},
-    ListParams, Order,
+    InputItemPage, ListParams, Order,
     config::{ResponseStoreConfig, StorageBackend, revalidate_postgres_host, validate_config},
     list_input_items,
 };
@@ -820,35 +820,42 @@ impl ResponseStoreFilter {
 /// Build a paginated input items response from a stored record.
 fn build_input_items_response(id: &str, record: &ResponseRecord, params: &ListParams) -> FilterAction {
     match list_input_items(record, params) {
-        Ok(page) => {
-            let first_id = page.data.first().and_then(|v| v.get("id")).and_then(|v| v.as_str());
-            let last_id = page.data.last().and_then(|v| v.get("id")).and_then(|v| v.as_str());
-
-            let body = serde_json::json!({
-                "object": "list",
-                "data": page.data,
-                "has_more": page.has_more,
-                "first_id": first_id,
-                "last_id": last_id,
-            });
-            debug!(
-                response_id = id,
-                count = page.data.len(),
-                has_more = page.has_more,
-                "serving input items"
-            );
-            let bytes = serde_json::to_vec(&body).unwrap_or_default();
-            FilterAction::Reject(
-                Rejection::status(200)
-                    .with_header("content-type", "application/json")
-                    .with_body(bytes),
-            )
+        Ok(page) => build_input_items_ok(id, &page),
+        Err(StoreError::InvalidInput(msg)) => {
+            debug!(response_id = id, error = %msg, "invalid input_items pagination parameter");
+            FilterAction::Reject(reject_invalid_input(&msg))
         },
         Err(e) => {
             warn!(response_id = id, error = %e, "input_items pagination failed");
             FilterAction::Reject(reject_store_error())
         },
     }
+}
+
+/// Serialize a successful input items page into a 200 JSON response.
+fn build_input_items_ok(id: &str, page: &InputItemPage) -> FilterAction {
+    let first_id = page.data.first().and_then(|v| v.get("id")).and_then(|v| v.as_str());
+    let last_id = page.data.last().and_then(|v| v.get("id")).and_then(|v| v.as_str());
+
+    let body = serde_json::json!({
+        "object": "list",
+        "data": page.data,
+        "has_more": page.has_more,
+        "first_id": first_id,
+        "last_id": last_id,
+    });
+    debug!(
+        response_id = id,
+        count = page.data.len(),
+        has_more = page.has_more,
+        "serving input items"
+    );
+    let bytes = serde_json::to_vec(&body).unwrap_or_default();
+    FilterAction::Reject(
+        Rejection::status(200)
+            .with_header("content-type", "application/json")
+            .with_body(bytes),
+    )
 }
 
 /// Parse cursor-based pagination parameters from a query string.
@@ -897,6 +904,19 @@ fn reject_not_found(id: &str) -> Rejection {
         }
     });
     Rejection::status(404)
+        .with_header("content-type", "application/json")
+        .with_body(serde_json::to_vec(&body).unwrap_or_default())
+}
+
+/// Build a 400 rejection for invalid client-supplied parameters.
+fn reject_invalid_input(message: &str) -> Rejection {
+    let body = serde_json::json!({
+        "error": {
+            "message": message,
+            "type": "invalid_request_error",
+        }
+    });
+    Rejection::status(400)
         .with_header("content-type", "application/json")
         .with_body(serde_json::to_vec(&body).unwrap_or_default())
 }

@@ -9,7 +9,7 @@
 #   Port 9090 — internal admin (no observability filters)
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/operations/multi-listener.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/operations/multi-listener.yaml
 #   curl http://localhost:8080/
 #   curl http://localhost:9090/
 

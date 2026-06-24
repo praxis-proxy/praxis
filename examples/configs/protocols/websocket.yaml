@@ -9,7 +9,7 @@
 #   Client -> WS -> Praxis :8080 -> WS -> Backend :3000
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/protocols/websocket.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/websocket.yaml
 
 listeners:
   - name: web

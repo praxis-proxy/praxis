@@ -7,6 +7,10 @@ Rewrites the `model` field in Responses API request bodies.
 
 Requires Cargo feature: `ai-inference`.
 
+## Configuration Notes
+
+Quote wildcard alias keys in YAML, such as `"gpt-4.1-*"`, so `*` is parsed as a literal character rather than YAML alias syntax. The examples quote all alias keys for consistency.
+
 ## Configuration
 
 | Field | Type | Required | Description |
@@ -16,7 +20,7 @@ Requires Cargo feature: `ai-inference`.
 | `headers.effective_model` | string | no | Header name for the effective (post-rewrite) model value. |
 | `headers.original_model` | string | no | Header name for the original (pre-rewrite) model value. |
 | `max_body_bytes` | usize | no | Maximum request body size to buffer before parsing. |
-| `model_aliases` | object<string, string> | no | Map from client-facing model names to backend model names. |
+| `model_aliases` | object<string, string> | no | Map from client-facing model names or single-wildcard patterns to backend model names. Quote wildcard keys in YAML. Exact aliases win before wildcard aliases; wildcard aliases are matched by literal specificity. |
 | `on_invalid` | `continue` \| `reject` | no | Behavior when the body is not valid JSON. |
 
 ## Examples
@@ -27,8 +31,9 @@ Requires Cargo feature: `ai-inference`.
 filter: openai_responses_model_rewrite
 default_model: "llama-3.3-70b"
 model_aliases:
-  codex-mini-latest: "llama-3.3-70b"
-  gpt-4.1-mini: "qwen-2.5-72b"
+  "codex-mini-latest": "llama-3.3-70b"
+  "gpt-4.1-*": "qwen-2.5-72b"
+  "gpt-4.1-mini": "qwen-2.5-72b"
 ```
 
 ### Example 2
@@ -37,7 +42,8 @@ model_aliases:
 filter: openai_responses_model_rewrite
 default_model: "llama-3.3-70b"
 model_aliases:
-  codex-mini-latest: "llama-3.3-70b"
+  "codex-mini-latest": "llama-3.3-70b"
+  "gpt-4.1-*": "qwen-2.5-72b"
 max_body_bytes: 10485760
 on_invalid: continue
 headers:

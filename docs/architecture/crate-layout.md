@@ -25,8 +25,13 @@ TCP implementations.
 
 **`praxis-proto`** : Vendored Envoy ext_proc protocol buffer
 definitions compiled into Rust types with tonic/prost gRPC
-stubs. Optional dependency of `praxis-filter` behind the
-`ext-proc` cargo feature.
+stubs. Used by `praxis-ext-proc`.
+
+**`praxis-ext-proc`** : Envoy-compatible external processing
+filter (anti-pattern — see [filter docs](../filters/README.md#external-processing-anti-pattern)).
+Optional dependency of `praxis` behind the `ext-proc`
+cargo feature. Enabled by default for Envoy migration
+compatibility.
 
 **`praxis-tls`** : TLS configuration types and runtime
 setup. Defines `ListenerTls` (certificate list, client CA,

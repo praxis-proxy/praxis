@@ -3258,27 +3258,24 @@ fn identity_none_after_response_body_error_closed() {
 
 #[cfg(feature = "ai-inference")]
 #[test]
-fn set_response_stores_is_accessible() {
-    use crate::builtins::http::ai::store::ResponseStoreRegistry;
-
-    let mut pipeline = FilterPipeline {
-        body_capabilities: BodyCapabilities::default(),
-        compression: None,
-        filters: vec![],
-        health_registry: None,
-        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
-        kv_stores: None,
-        response_stores: None,
-        time_source: Arc::new(praxis_core::time::SystemTimeSource),
-    };
-    assert!(
-        pipeline.response_stores().is_none(),
-        "response_stores should be None by default"
-    );
-
-    pipeline.set_response_stores(ResponseStoreRegistry::new());
+fn pipeline_auto_creates_response_stores() {
+    let pipeline = FilterPipeline::build(&mut [], &FilterRegistry::with_builtins()).unwrap();
     assert!(
         pipeline.response_stores().is_some(),
-        "response_stores should be Some after set"
+        "pipeline should auto-create response stores during build"
+    );
+}
+
+#[cfg(feature = "ai-inference")]
+#[test]
+fn separately_built_pipelines_have_distinct_response_stores() {
+    let registry = FilterRegistry::with_builtins();
+    let a = FilterPipeline::build(&mut [], &registry).unwrap();
+    let b = FilterPipeline::build(&mut [], &registry).unwrap();
+    let stores_a = a.response_stores().expect("stores present");
+    let stores_b = b.response_stores().expect("stores present");
+    assert!(
+        !stores_a.shares_storage_with(stores_b),
+        "each pipeline build should create an independent response store registry"
     );
 }

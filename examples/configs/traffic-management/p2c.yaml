@@ -6,7 +6,7 @@
 # endpoint pools.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/traffic-management/p2c.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/p2c.yaml
 #   curl http://localhost:8080/ &
 #   curl http://localhost:8080/ &
 #   curl http://localhost:8080/ &

@@ -10,11 +10,11 @@
 # not the original client-facing name.
 #
 # Use case: Codex or other Responses API clients send
-# `model: "codex-mini-latest"` and the proxy transparently
+# `model: "codex-mini-2026-06-24"` and the proxy transparently
 # rewrites it to a locally-hosted model before forwarding.
 #
 # Requires the ai-inference feature:
-#   cargo build -p praxis --features ai-inference
+#   cargo build -p praxis-proxy --features ai-inference
 
 listeners:
   - name: ai-gateway
@@ -33,8 +33,8 @@ filter_chains:
       - filter: openai_responses_model_rewrite
         default_model: "llama-3.3-70b"
         model_aliases:
-          codex-mini-latest: "llama-3.3-70b"
-          gpt-4.1-mini: "qwen-2.5-72b"
+          "codex-*": "llama-3.3-70b"
+          "gpt-4.1-mini": "qwen-2.5-72b"
         headers:
           effective_model: x-praxis-ai-effective-model
           original_model: x-praxis-ai-original-model

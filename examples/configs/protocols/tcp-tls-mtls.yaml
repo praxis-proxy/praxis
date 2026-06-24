@@ -8,7 +8,7 @@
 #   Client -> mTLS -> Praxis :5432 -> TCP -> PostgreSQL :15432
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/protocols/tcp-tls-mtls.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/tcp-tls-mtls.yaml
 #   psql "sslmode=verify-full sslcert=client.pem \
 #     sslkey=client-key.pem sslrootcert=ca.pem \
 #     host=localhost port=5432 dbname=mydb"

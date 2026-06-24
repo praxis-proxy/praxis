@@ -13,7 +13,7 @@
 # security-critical filters that must never be bypassed.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/pipeline/failure-mode.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/pipeline/failure-mode.yaml
 
 listeners:
   - name: default

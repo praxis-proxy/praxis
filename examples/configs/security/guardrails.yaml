@@ -7,7 +7,7 @@
 # rule returns 401 Unauthorized.
 #
 # Usage:
-#   cargo run -p praxis -- \
+#   cargo run -p praxis-proxy -- \
 #     -c examples/configs/security/guardrails.yaml
 #
 # Exercise:

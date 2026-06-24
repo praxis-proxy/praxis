@@ -113,20 +113,22 @@ impl HttpFilter for OpenaiResponsesValidateFilter {
             return Ok(FilterAction::Release);
         }
 
+        if is_bodyless_responses_request(&ctx.request.method, ctx.request.uri.path()) {
+            trace!(
+                method = %ctx.request.method,
+                path = ctx.request.uri.path(),
+                "skipping validation for bodyless endpoint"
+            );
+            return Ok(FilterAction::Release);
+        }
+
         let parsed = match parse_and_validate(ctx, body) {
             Ok(v) => v,
             Err(action) => return Ok(action),
         };
 
         let response_id = format!("resp_{}", ctx.id_generator.generate(ctx.time_source));
-        let conversation_id = if let Some(id) = extract_conversation_id(&parsed) {
-            trace!(conversation_id = %id, "conversation ID extracted from request");
-            id
-        } else {
-            let id = format!("conv_{}", ctx.id_generator.generate(ctx.time_source));
-            trace!(conversation_id = %id, "conversation ID generated");
-            id
-        };
+        let conversation_id = resolve_conversation_id(ctx, &parsed);
 
         enrich_context(ctx, &response_id, &conversation_id);
 
@@ -167,6 +169,20 @@ fn parse_and_validate(ctx: &HttpFilterContext<'_>, body: &Option<Bytes>) -> Resu
     Ok(parsed)
 }
 
+/// Check whether a Responses endpoint has no JSON request body to validate.
+///
+/// Assumes the format classifier already confirmed this is a Responses API path.
+fn is_bodyless_responses_request(method: &http::Method, path: &str) -> bool {
+    match *method {
+        http::Method::GET | http::Method::DELETE => true,
+        http::Method::POST => matches!(
+            path.split('/').collect::<Vec<_>>().as_slice(),
+            ["", "v1", "responses", _, "cancel"]
+        ),
+        _ => false,
+    }
+}
+
 /// Build a 400 rejection with a JSON error body.
 fn reject_invalid(message: &str) -> FilterAction {
     let body = serde_json::json!({
@@ -193,6 +209,18 @@ fn extract_conversation_id(body: &serde_json::Value) -> Option<String> {
             .or_else(|| c.get("id").and_then(serde_json::Value::as_str))
             .map(str::to_owned)
     })
+}
+
+/// Extract or generate a conversation ID for the request.
+fn resolve_conversation_id(ctx: &HttpFilterContext<'_>, body: &serde_json::Value) -> String {
+    if let Some(id) = extract_conversation_id(body) {
+        trace!(conversation_id = %id, "conversation ID extracted from request");
+        id
+    } else {
+        let id = format!("conv_{}", ctx.id_generator.generate(ctx.time_source));
+        trace!(conversation_id = %id, "conversation ID generated");
+        id
+    }
 }
 
 /// Enrich filter context with validated metadata for downstream filters.
@@ -517,6 +545,104 @@ mod tests {
         assert!(
             ctx.filter_metadata.contains_key("responses.response_id"),
             "response_id should still be generated"
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_get_response_without_body() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::GET,
+            "/v1/responses/resp_abc123",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
+        let mut body = None;
+
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Release),
+            "GET request should be released without body validation"
+        );
+        assert!(
+            !ctx.filter_metadata.contains_key("responses.response_id"),
+            "responses metadata should not be set for bodyless requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_delete_response_without_body() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::DELETE,
+            "/v1/responses/resp_abc123",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
+        let mut body = None;
+
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Release),
+            "DELETE request should be released without body validation"
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_get_input_items_without_body() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::GET,
+            "/v1/responses/resp_abc123/input_items",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
+        let mut body = None;
+
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Release),
+            "GET /input_items request should be released without body validation"
+        );
+    }
+
+    #[tokio::test]
+    async fn skips_post_cancel_without_body() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses/resp_abc123/cancel",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
+        let mut body = None;
+
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Release),
+            "POST /cancel request should be released without body validation"
+        );
+        assert!(
+            !ctx.filter_metadata.contains_key("responses.response_id"),
+            "responses metadata should not be set for bodyless requests"
+        );
+    }
+
+    #[tokio::test]
+    async fn post_input_tokens_still_validates_body() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses/input_tokens",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
+        let mut body = None;
+
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Reject(_)),
+            "POST /input_tokens without body should be rejected, not released"
         );
     }
 

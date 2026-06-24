@@ -3,9 +3,30 @@
 
 //! Envoy-compatible external processing (`ext_proc`) filter for Praxis.
 //!
-//! This crate provides an [`HttpFilter`] that sends request and response
-//! data to an external gRPC server for inspection or mutation via the
-//! Envoy [`ext_proc`] protocol.
+//! # Warning: Anti-Pattern
+//!
+//! **External processing is an anti-pattern.** It exists for backwards
+//! compatibility with Envoy deployments and for rare situations where
+//! no other solution is viable. Do not use it unless you are certain
+//! it must be used.
+//!
+//! External processing adds a gRPC hop to every request, introducing
+//! latency, operational complexity, and a new failure domain.
+//! Praxis's native filter system — in-process, zero-copy, with
+//! body streaming — handles the same use cases with less overhead
+//! and no network boundary. Prefer writing a native [`HttpFilter`]
+//! or using built-in filters (guardrails, body field extraction,
+//! header transforms, classifier+branch chains) instead.
+//!
+//! The `ext-proc` feature is enabled by default so that existing
+//! Envoy migrations work out of the box, but production deployments
+//! should plan to replace `ext_proc` usage with native filters.
+//!
+//! # Overview
+//!
+//! This crate provides an [`HttpFilter`] that sends request and
+//! response data to an external gRPC server for inspection or
+//! mutation via the Envoy [`ext_proc`] protocol.
 //!
 //! The configuration surface mirrors the protocol-level fields of
 //! Envoy's [`ExternalProcessor`] proto to simplify migration from

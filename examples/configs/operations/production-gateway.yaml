@@ -7,7 +7,7 @@
 # environment.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/operations/production-gateway.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/operations/production-gateway.yaml
 #   curl https://localhost/api/v1/users
 #   curl https://localhost/
 

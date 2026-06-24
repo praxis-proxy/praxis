@@ -31,6 +31,26 @@ fn responses_model_alias_reaches_upstream() {
     );
 }
 
+#[test]
+fn responses_wildcard_model_alias_reaches_upstream() {
+    let echo_guard = start_echo_backend();
+    let proxy_port = free_port();
+
+    let config = Config::from_yaml(&rewrite_yaml(proxy_port, echo_guard.port())).unwrap();
+    let proxy = start_proxy(&config);
+
+    let body = r#"{"model":"codex-mini-2026-06-24","input":"Hello, wildcard!"}"#;
+    let raw = http_send(proxy.addr(), &json_post("/v1/responses", body));
+
+    assert_eq!(parse_status(&raw), 200, "proxy should return 200");
+    let echoed: serde_json::Value = serde_json::from_str(&parse_body(&raw)).unwrap();
+    assert_eq!(
+        echoed["model"].as_str(),
+        Some("llama-3.3-70b"),
+        "wildcard model alias should be rewritten to alias target"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Default Model Injection
 // -----------------------------------------------------------------------------
@@ -243,13 +263,13 @@ fn effective_model_header_routes_to_expected_backend() {
     .unwrap();
     let proxy = start_proxy(&config);
 
-    let body = r#"{"model":"codex-mini-latest","input":"route to llama"}"#;
+    let body = r#"{"model":"codex-mini-2026-06-24","input":"route to llama"}"#;
     let raw = http_send(proxy.addr(), &json_post("/v1/responses", body));
     assert_eq!(parse_status(&raw), 200, "llama route should return 200");
     assert_eq!(
         parse_body(&raw),
         "llama-backend",
-        "codex-mini-latest should route to llama-backend via effective model header"
+        "wildcard codex model should route to llama-backend via effective model header"
     );
 
     let body = r#"{"model":"gpt-4.1-mini","input":"route to qwen"}"#;
@@ -390,6 +410,7 @@ filter_chains:
         default_model: "llama-3.3-70b"
         model_aliases:
           codex-mini-latest: "llama-3.3-70b"
+          "codex-*": "llama-3.3-70b"
           gpt-4.1-mini: "qwen-2.5-72b"
       - filter: router
         routes:
@@ -448,6 +469,7 @@ filter_chains:
       - filter: openai_responses_model_rewrite
         model_aliases:
           codex-mini-latest: "llama-3.3-70b"
+          "codex-*": "llama-3.3-70b"
           gpt-4.1-mini: "qwen-2.5-72b"
       - filter: router
         routes:

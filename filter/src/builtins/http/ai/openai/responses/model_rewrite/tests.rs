@@ -27,6 +27,23 @@ model_aliases:
 }
 
 #[test]
+fn from_config_accepts_wildcard_alias() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+model_aliases:
+  "codex-*": "llama-3.3-70b"
+"#,
+    )
+    .unwrap();
+    let filter = ModelRewriteFilter::from_config(&yaml).unwrap();
+    assert_eq!(
+        filter.name(),
+        "openai_responses_model_rewrite",
+        "single-wildcard alias should parse"
+    );
+}
+
+#[test]
 fn from_config_minimal_default_only() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(r#"default_model: "llama-3.3-70b""#).unwrap();
     let filter = ModelRewriteFilter::from_config(&yaml).unwrap();
@@ -113,6 +130,22 @@ model_aliases:
     .unwrap();
     let result = ModelRewriteFilter::from_config(&yaml);
     assert!(result.is_err(), "empty alias target should be rejected");
+}
+
+#[test]
+fn from_config_rejects_alias_source_with_multiple_wildcards() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+model_aliases:
+  "gpt-*-mini-*": "qwen-2.5-72b"
+"#,
+    )
+    .unwrap();
+    let result = ModelRewriteFilter::from_config(&yaml);
+    assert!(
+        result.is_err(),
+        "alias source with more than one wildcard should be rejected"
+    );
 }
 
 #[test]
@@ -477,6 +510,102 @@ async fn known_alias_rewrites_model() {
             .map(String::as_str),
         Some("true"),
         "rewritten flag"
+    );
+}
+
+#[tokio::test]
+async fn wildcard_alias_rewrites_model() {
+    let (ctx, body) = run_filter_with_body(
+        WILDCARD_ALIAS_CONFIG,
+        r#"{"model":"codex-mini-2026-06-24","input":"test"}"#,
+    )
+    .await;
+
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        parsed["model"].as_str(),
+        Some("llama-3.3-70b"),
+        "wildcard alias should rewrite matching model"
+    );
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_model_rewrite.original_model")
+            .map(String::as_str),
+        Some("codex-mini-2026-06-24"),
+        "original model metadata should preserve wildcard-matched client model"
+    );
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_model_rewrite.rewritten")
+            .map(String::as_str),
+        Some("true"),
+        "wildcard rewrite should set rewritten flag"
+    );
+}
+
+#[tokio::test]
+async fn exact_alias_beats_wildcard_alias() {
+    let (ctx, body) =
+        run_filter_with_body(WILDCARD_ALIAS_CONFIG, r#"{"model":"codex-mini-latest","input":"test"}"#).await;
+
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        parsed["model"].as_str(),
+        Some("llama-exact"),
+        "exact alias should take precedence over wildcard alias"
+    );
+    assert_eq!(
+        ctx.filter_metadata
+            .get("openai_responses_model_rewrite.effective_model")
+            .map(String::as_str),
+        Some("llama-exact"),
+        "effective model metadata should use exact alias target"
+    );
+}
+
+#[tokio::test]
+async fn more_specific_wildcard_alias_beats_less_specific_alias() {
+    let (_ctx, body) = run_filter_with_body(
+        WILDCARD_ALIAS_CONFIG,
+        r#"{"model":"gpt-4.1-2026-06-24","input":"test"}"#,
+    )
+    .await;
+
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        parsed["model"].as_str(),
+        Some("qwen-2.5-72b"),
+        "more specific wildcard should beat broader wildcard"
+    );
+}
+
+#[tokio::test]
+async fn wildcard_alias_tie_uses_lexical_pattern_order() {
+    let (_ctx, body) = run_filter_with_body(WILDCARD_ALIAS_CONFIG, r#"{"model":"foo-bar","input":"test"}"#).await;
+
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        parsed["model"].as_str(),
+        Some("bar-family"),
+        "equal-specificity wildcard ties should be deterministic"
+    );
+}
+
+#[tokio::test]
+async fn wildcard_alias_miss_passes_model_unchanged() {
+    let (ctx, body) =
+        run_filter_with_body(WILDCARD_ALIAS_CONFIG, r#"{"model":"anthropic-sonnet","input":"test"}"#).await;
+
+    let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        parsed["model"].as_str(),
+        Some("anthropic-sonnet"),
+        "non-matching wildcard aliases should pass through unchanged"
+    );
+    assert!(
+        !ctx.filter_metadata
+            .contains_key("openai_responses_model_rewrite.rewritten"),
+        "wildcard miss should not set rewritten flag"
     );
 }
 
@@ -895,6 +1024,17 @@ const ALIAS_CONFIG: &str = r#"
 model_aliases:
   codex-mini-latest: "llama-3.3-70b"
   gpt-4.1-mini: "qwen-2.5-72b"
+"#;
+
+/// Config with exact and wildcard alias mappings.
+const WILDCARD_ALIAS_CONFIG: &str = r#"
+model_aliases:
+  codex-mini-latest: "llama-exact"
+  "codex-*": "llama-3.3-70b"
+  "gpt-*": "generic-gpt"
+  "gpt-4.1-*": "qwen-2.5-72b"
+  "foo-*": "foo-family"
+  "*-bar": "bar-family"
 "#;
 
 /// Config with only default model.

@@ -15,7 +15,7 @@ use praxis_test_utils::{
 // -----------------------------------------------------------------------------
 
 #[test]
-fn example_config_alias_routes_to_llama_backend() {
+fn example_config_wildcard_alias_routes_to_llama_backend() {
     let llama_guard = start_backend_with_shutdown("llama-backend");
     let qwen_guard = start_backend_with_shutdown("qwen-backend");
     let default_guard = start_backend_with_shutdown("default-backend");
@@ -32,14 +32,14 @@ fn example_config_alias_routes_to_llama_backend() {
     );
     let proxy = start_proxy(&config);
 
-    let body = r#"{"model":"codex-mini-latest","input":"Hello from example test"}"#;
+    let body = r#"{"model":"codex-mini-2026-06-24","input":"Hello from example test"}"#;
     let raw = http_send(proxy.addr(), &json_post("/v1/responses", body));
 
     assert_eq!(parse_status(&raw), 200, "example config should route successfully");
     assert_eq!(
         parse_body(&raw),
         "llama-backend",
-        "codex-mini-latest should route to llama-backend via effective model header"
+        "codex-* should route to llama-backend via effective model header"
     );
 }
 

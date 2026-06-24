@@ -4,12 +4,17 @@
 //! Model rewrite filter for `OpenAI` Responses API requests.
 //!
 //! Rewrites the top-level `model` field in `POST /v1/responses`
-//! request bodies using a configured alias map. When the `model`
-//! field is missing or null and a `default_model` is configured,
-//! injects the default. Preserves every other field semantically,
-//! including `input`, `instructions`, `tools`, and unknown fields.
-//! Rewritten requests are re-serialized as JSON, so original
-//! whitespace and byte-level object key order are not preserved.
+//! request bodies using a configured alias map. Alias sources may
+//! be exact model names or single-wildcard patterns such as
+//! `codex-*`; exact aliases win before wildcard aliases, then the
+//! wildcard with the most literal characters wins. Equal-specificity
+//! wildcard ties use lexical source-pattern ordering so `HashMap`
+//! iteration order cannot affect the rewrite. When the `model` field
+//! is missing or null and a `default_model` is configured, injects the
+//! default. Preserves every other field semantically, including
+//! `input`, `instructions`, `tools`, and unknown fields. Rewritten
+//! requests are re-serialized as JSON, so original whitespace and
+//! byte-level object key order are not preserved.
 //!
 //! Gates on the request path (`POST /v1/responses` exactly), not
 //! on classifier metadata. This ensures `on_invalid: reject` fires
@@ -66,8 +71,9 @@ const MAX_PROMOTED_VALUE_LEN: usize = 256;
 /// filter: openai_responses_model_rewrite
 /// default_model: "llama-3.3-70b"
 /// model_aliases:
-///   codex-mini-latest: "llama-3.3-70b"
-///   gpt-4.1-mini: "qwen-2.5-72b"
+///   "codex-mini-latest": "llama-3.3-70b"
+///   "gpt-4.1-*": "qwen-2.5-72b"
+///   "gpt-4.1-mini": "qwen-2.5-72b"
 /// ```
 ///
 /// # Full YAML
@@ -76,7 +82,8 @@ const MAX_PROMOTED_VALUE_LEN: usize = 256;
 /// filter: openai_responses_model_rewrite
 /// default_model: "llama-3.3-70b"
 /// model_aliases:
-///   codex-mini-latest: "llama-3.3-70b"
+///   "codex-mini-latest": "llama-3.3-70b"
+///   "gpt-4.1-*": "qwen-2.5-72b"
 /// max_body_bytes: 10485760
 /// on_invalid: continue
 /// headers:
@@ -93,7 +100,8 @@ pub struct ModelRewriteFilter {
     /// Maximum request body size for `StreamBuffer` mode.
     max_body_bytes: usize,
 
-    /// Map from client-facing model names to backend model names.
+    /// Map from client-facing model names or single-wildcard patterns
+    /// to backend model names. Quote wildcard keys in YAML.
     model_aliases: HashMap<String, String>,
 
     /// Behavior when the body is not valid JSON.
@@ -241,8 +249,8 @@ fn apply_alias(
     aliases: &HashMap<String, String>,
     model: String,
 ) -> RewriteResult {
-    if let Some(target) = aliases.get(&model) {
-        let effective = target.clone();
+    if let Some(target) = resolve_alias(aliases, &model) {
+        let effective = target.to_owned();
         obj.insert("model".to_owned(), serde_json::Value::String(effective.clone()));
         RewriteResult {
             default_injected: false,
@@ -259,6 +267,53 @@ fn apply_alias(
             original_model: Some(model),
             rewritten: false,
         }
+    }
+}
+
+/// Resolve exact aliases first, then the most specific single-wildcard alias.
+///
+/// Equal-specificity wildcard ties use lexical pattern ordering so
+/// `HashMap` iteration order cannot affect the result.
+fn resolve_alias<'a>(aliases: &'a HashMap<String, String>, model: &str) -> Option<&'a str> {
+    if let Some(target) = aliases.get(model) {
+        return Some(target);
+    }
+
+    let mut best: Option<(&str, &str, u32)> = None;
+    for (pattern, target) in aliases {
+        if !pattern.contains('*') || !pattern_matches(pattern, model) {
+            continue;
+        }
+
+        let specificity = pattern_specificity(pattern);
+        let should_replace = best.is_none_or(|(best_pattern, _, best_specificity)| {
+            specificity > best_specificity || (specificity == best_specificity && pattern.as_str() < best_pattern)
+        });
+        if should_replace {
+            best = Some((pattern, target, specificity));
+        }
+    }
+    best.map(|(_, target, _)| target)
+}
+
+/// Match an exact or single-wildcard alias pattern against a model name.
+fn pattern_matches(pattern: &str, value: &str) -> bool {
+    if let Some(pos) = pattern.find('*') {
+        let (prefix, rest) = pattern.split_at(pos);
+        let suffix = rest.get(1..).unwrap_or_default();
+        value.starts_with(prefix) && value.ends_with(suffix) && value.len() >= prefix.len() + suffix.len()
+    } else {
+        pattern == value
+    }
+}
+
+/// Exact patterns sort above wildcards; wildcard specificity is literal length.
+fn pattern_specificity(pattern: &str) -> u32 {
+    if pattern.contains('*') {
+        let literal_len = pattern.len().saturating_sub(1);
+        u32::try_from(literal_len).unwrap_or(u32::MAX - 1)
+    } else {
+        u32::MAX
     }
 }
 
