@@ -119,21 +119,16 @@ impl HttpFilter for RehydrateFilter {
 
 /// Return whether this request targets the body-less Responses cancel endpoint.
 fn is_responses_cancel_path(path: &str) -> bool {
-    let path = path.strip_suffix('/').filter(|p| !p.is_empty()).unwrap_or(path);
-    let mut segments = path.split('/');
+    let path = path.trim_end_matches('/');
 
-    matches!(
-        (
-            segments.next(),
-            segments.next(),
-            segments.next(),
-            segments.next(),
-            segments.next(),
-            segments.next(),
-        ),
-        (Some(""), Some("v1"), Some("responses"), Some(response_id), Some("cancel"), None)
-            if !response_id.is_empty()
-    )
+    let Some(response_id) = path
+        .strip_prefix("/v1/responses/")
+        .and_then(|rest| rest.strip_suffix("/cancel"))
+    else {
+        return false;
+    };
+
+    !response_id.is_empty() && !response_id.contains('/')
 }
 
 /// Parse body, fetch stored response, validate status,
