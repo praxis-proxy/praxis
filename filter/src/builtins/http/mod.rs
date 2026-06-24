@@ -40,7 +40,7 @@ pub use ai::ResponseStoreRegistry;
 #[cfg(feature = "ai-inference")]
 pub use ai::ResponsesFormatFilter;
 #[cfg(feature = "ai-inference")]
-pub use ai::token_usage::{TokenUsage, TokenUsageProvider, extract_token_usage};
+pub use ai::token_usage::{TokenUsage, TokenUsageProvider, extract_token_usage, set_token_usage};
 pub use ai::{A2aFilter, JsonRpcFilter, McpFilter, TokenUsageHeadersFilter};
 pub use observability::{AccessLogFilter, RequestIdFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter};

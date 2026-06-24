@@ -21,6 +21,8 @@ mod tests;
 
 use providers::{parse_anthropic, parse_bedrock, parse_google, parse_openai};
 
+use crate::HttpFilterContext;
+
 // -----------------------------------------------------------------------------
 // Public Types
 // -----------------------------------------------------------------------------
@@ -95,6 +97,22 @@ pub enum TokenUsageProvider {
 // -----------------------------------------------------------------------------
 // Public API
 // -----------------------------------------------------------------------------
+
+/// Stores token usage counts in [`filter_metadata`] so that downstream
+/// filters, access log templates, and metrics can read them.
+///
+/// Writes the well-known keys `token.input`, `token.output`, and
+/// `token.total`. If `total` is `None`, it defaults to
+/// `input.saturating_add(output)`.
+///
+/// [`filter_metadata`]: HttpFilterContext::filter_metadata
+pub fn set_token_usage(ctx: &mut HttpFilterContext<'_>, input: u64, output: u64, total: Option<u64>) {
+    let total = total.unwrap_or_else(|| input.saturating_add(output));
+
+    ctx.set_metadata("token.input", input.to_string());
+    ctx.set_metadata("token.output", output.to_string());
+    ctx.set_metadata("token.total", total.to_string());
+}
 
 /// Extracts token usage from a provider's JSON response body.
 ///

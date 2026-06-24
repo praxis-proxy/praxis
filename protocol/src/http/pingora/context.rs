@@ -677,11 +677,11 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Token Usage Metadata Tests
+    // Metadata Roundtrip Tests
     // -------------------------------------------------------------------------
 
     #[test]
-    fn token_metadata_absent_by_default() {
+    fn metadata_roundtrip_through_filter_context() {
         let registry = FilterRegistry::with_builtins();
         let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
         let request = Request {
@@ -691,35 +691,24 @@ mod tests {
         };
 
         let mut ctx = default_ctx();
+        ctx.filter_metadata.insert("rpc.method".to_owned(), "echo".to_owned());
+        ctx.filter_metadata.insert("rpc.status".to_owned(), "ok".to_owned());
+
         let fctx = ctx.build_filter_context(&pipeline, &request, None);
-        assert!(fctx.get_metadata("token.input").is_none());
-        assert!(fctx.get_metadata("token.output").is_none());
-        assert!(fctx.get_metadata("token.total").is_none());
+        assert_eq!(
+            fctx.get_metadata("rpc.method"),
+            Some("echo"),
+            "metadata written before build should survive into filter context"
+        );
+        assert_eq!(
+            fctx.get_metadata("rpc.status"),
+            Some("ok"),
+            "multiple metadata keys should round-trip"
+        );
     }
 
     #[test]
-    fn token_metadata_roundtrip_through_filter_context() {
-        let registry = FilterRegistry::with_builtins();
-        let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
-        let request = Request {
-            method: Method::GET,
-            uri: "/".parse::<Uri>().unwrap(),
-            headers: HeaderMap::new(),
-        };
-
-        let mut ctx = default_ctx();
-        ctx.filter_metadata.insert("token.input".to_owned(), "150".to_owned());
-        ctx.filter_metadata.insert("token.output".to_owned(), "80".to_owned());
-        ctx.filter_metadata.insert("token.total".to_owned(), "230".to_owned());
-
-        let fctx = ctx.build_filter_context(&pipeline, &request, None);
-        assert_eq!(fctx.get_metadata("token.input"), Some("150"));
-        assert_eq!(fctx.get_metadata("token.output"), Some("80"));
-        assert_eq!(fctx.get_metadata("token.total"), Some("230"));
-    }
-
-    #[test]
-    fn set_token_usage_persists_via_filter_metadata() {
+    fn metadata_written_in_filter_context_persists_back() {
         let registry = FilterRegistry::with_builtins();
         let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
         let request = Request {
@@ -730,15 +719,20 @@ mod tests {
 
         let mut ctx = default_ctx();
         let mut fctx = ctx.build_filter_context(&pipeline, &request, None);
-        fctx.set_token_usage(42, 18, None);
-
-        assert_eq!(fctx.get_metadata("token.input"), Some("42"));
-        assert_eq!(fctx.get_metadata("token.output"), Some("18"));
-        assert_eq!(fctx.get_metadata("token.total"), Some("60"));
+        fctx.set_metadata("trace.id", "abc-123");
+        fctx.set_metadata("trace.span", "42");
 
         ctx.filter_metadata = fctx.filter_metadata;
-        assert_eq!(ctx.filter_metadata.get("token.input").map(String::as_str), Some("42"));
-        assert_eq!(ctx.filter_metadata.get("token.total").map(String::as_str), Some("60"));
+        assert_eq!(
+            ctx.filter_metadata.get("trace.id").map(String::as_str),
+            Some("abc-123"),
+            "metadata set in filter context should persist back to protocol context"
+        );
+        assert_eq!(
+            ctx.filter_metadata.get("trace.span").map(String::as_str),
+            Some("42"),
+            "multiple metadata keys should persist back"
+        );
     }
 
     // -------------------------------------------------------------------------
