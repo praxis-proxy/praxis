@@ -2,10 +2,9 @@
 * @shaneutt @twghu
 
 # Experimental AI Filters
-/filter/src/builtins/http/ai/openai/ @leseb @franciscojavierarceo
-/filter/src/builtins/http/ai/anthropic/ @leseb @franciscojavierarceo
-/filter/src/builtins/http/ai/mod.rs @leseb @franciscojavierarceo
+/filter/src/builtins/http/ai/ @leseb @franciscojavierarceo
 /filter/src/registry.rs @leseb @franciscojavierarceo
+/docs/filters/http/ai/ @leseb @franciscojavierarceo
 /examples/configs/ai/ @leseb @franciscojavierarceo
 /examples/README.md @leseb @franciscojavierarceo
 /tests/integration/tests/suite/examples/ @leseb @franciscojavierarceo
