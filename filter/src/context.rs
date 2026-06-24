@@ -124,10 +124,6 @@ pub struct HttpFilterContext<'a> {
     /// Named key-value stores for runtime mappings.
     pub kv_stores: Option<&'a KvStoreRegistry>,
 
-    /// Named response store backends for AI API persistence.
-    #[cfg(feature = "ai-inference")]
-    pub response_stores: Option<&'a crate::builtins::http::ai::store::ResponseStoreRegistry>,
-
     /// Transport-agnostic request headers, URI, and method.
     pub request: &'a Request,
 

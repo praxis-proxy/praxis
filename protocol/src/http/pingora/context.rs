@@ -223,8 +223,8 @@ pub struct PingoraRequestCtx {
 ///
 /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
 macro_rules! filter_context {
-    ($ctx:expr, $pipeline:expr, $request:expr, $response_header:expr) => {
-        praxis_filter::HttpFilterContext {
+    ($ctx:expr, $pipeline:expr, $request:expr, $response_header:expr) => {{
+        let mut fctx = praxis_filter::HttpFilterContext {
             body_done_indices: Vec::new(),
             branch_iterations: std::collections::HashMap::new(),
             client_addr: $ctx.client_addr,
@@ -242,8 +242,6 @@ macro_rules! filter_context {
             health_registry: $pipeline.health_registry(),
             id_generator: $pipeline.id_generator(),
             kv_stores: $pipeline.kv_stores(),
-            #[cfg(feature = "ai-inference")]
-            response_stores: $pipeline.response_stores(),
             request: $request,
             request_body_bytes: $ctx.request_body_bytes,
             request_body_mode: $ctx.request_body_mode,
@@ -256,8 +254,13 @@ macro_rules! filter_context {
             selected_endpoint_index: $ctx.selected_endpoint_index,
             time_source: $pipeline.time_source(),
             upstream: $ctx.upstream.take(),
+        };
+        #[cfg(feature = "ai-inference")]
+        if let Some(stores) = $pipeline.response_stores() {
+            fctx.extensions.insert(stores.clone());
         }
-    };
+        fctx
+    }};
 }
 
 impl PingoraRequestCtx {
