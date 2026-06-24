@@ -1341,6 +1341,78 @@ allow_private_database_url: true
     );
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_store_init_failure_is_not_cached_on_get() {
+    let socket_dir = std::env::temp_dir().join(format!(
+        "praxis_missing_postgres_socket_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?host={}"
+responses_table: responses
+conversations_table: conversations
+allow_private_database_url: true
+"#,
+        socket_dir.display()
+    ))
+    .unwrap();
+    let cfg: ResponseStoreConfig = parse_filter_config("openai_response_store", &yaml).unwrap();
+    validate_config(&cfg).unwrap();
+    let filter = ResponseStoreFilter::new(cfg);
+
+    let req = crate::test_utils::make_request(http::Method::GET, "/v1/responses/resp_test123");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(filter.on_request(&mut ctx).await.unwrap());
+
+    assert!(
+        filter.store.get().is_none(),
+        "failed postgres initialization on GET should leave OnceCell unset for retry"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_store_init_failure_is_not_cached_on_delete() {
+    let socket_dir = std::env::temp_dir().join(format!(
+        "praxis_missing_postgres_socket_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?host={}"
+responses_table: responses
+conversations_table: conversations
+allow_private_database_url: true
+"#,
+        socket_dir.display()
+    ))
+    .unwrap();
+    let cfg: ResponseStoreConfig = parse_filter_config("openai_response_store", &yaml).unwrap();
+    validate_config(&cfg).unwrap();
+    let filter = ResponseStoreFilter::new(cfg);
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_test123");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(filter.on_request(&mut ctx).await.unwrap());
+
+    assert!(
+        filter.store.get().is_none(),
+        "failed postgres initialization on DELETE should leave OnceCell unset for retry"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Postgres Config
 // -----------------------------------------------------------------------------

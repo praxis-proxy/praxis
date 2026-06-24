@@ -8,7 +8,7 @@
 //! containers. Per-connection code converts the DER bytes into
 //! library-specific types without touching the filesystem.
 
-use std::sync::Arc;
+use std::{fmt, sync::Arc};
 
 use zeroize::Zeroizing;
 
@@ -62,6 +62,31 @@ impl CachedCaCerts {
 // CachedClientCert
 // -----------------------------------------------------------------------------
 
+/// DER-encoded private key bytes with a redacted [`Debug`] representation.
+#[derive(Clone)]
+struct CachedPrivateKeyDer(
+    /// DER-encoded private key bytes, zeroized when dropped.
+    Zeroizing<Vec<u8>>,
+);
+
+impl CachedPrivateKeyDer {
+    /// Wrap DER-encoded private key bytes.
+    fn new(key_der: Zeroizing<Vec<u8>>) -> Self {
+        Self(key_der)
+    }
+
+    /// Borrow the underlying DER bytes for TLS client certificate setup.
+    fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+impl fmt::Debug for CachedPrivateKeyDer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("[REDACTED]")
+    }
+}
+
 /// DER-encoded client certificate and private key loaded at config time.
 ///
 /// The private key is wrapped in [`Zeroizing`] so it is cleared
@@ -77,19 +102,35 @@ impl CachedCaCerts {
 /// ```
 ///
 /// [`Zeroizing`]: zeroize::Zeroizing
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct CachedClientCert {
     /// DER-encoded certificate chain.
     cert_der: Vec<Vec<u8>>,
 
     /// DER-encoded private key (zeroized on drop).
-    key_der: Zeroizing<Vec<u8>>,
+    key_der: CachedPrivateKeyDer,
+}
+
+impl fmt::Debug for CachedClientCert {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let cert_count = self.cert_der.len();
+        let cert_der_total_bytes = self.cert_der.iter().map(Vec::len).sum::<usize>();
+
+        f.debug_struct("CachedClientCert")
+            .field("cert_count", &cert_count)
+            .field("cert_der_total_bytes", &cert_der_total_bytes)
+            .field("key_der", &self.key_der)
+            .finish()
+    }
 }
 
 impl CachedClientCert {
     /// Wrap pre-parsed DER certificate chain and private key.
     pub fn new(cert_der: Vec<Vec<u8>>, key_der: Zeroizing<Vec<u8>>) -> Self {
-        Self { cert_der, key_der }
+        Self {
+            cert_der,
+            key_der: CachedPrivateKeyDer::new(key_der),
+        }
     }
 
     /// Borrow the DER-encoded certificate chain.
@@ -99,7 +140,7 @@ impl CachedClientCert {
 
     /// Borrow the DER-encoded private key.
     pub fn key_der(&self) -> &[u8] {
-        &self.key_der
+        self.key_der.as_slice()
     }
 
     /// Read and parse PEM cert + key files into cached DER data.
@@ -501,6 +542,38 @@ mod tests {
         let cached = CachedCaCerts::new(vec![vec![1, 2, 3]]);
         let cloned = cached.clone();
         assert_eq!(cached.der_certs(), cloned.der_certs(), "cloned CA certs should match");
+    }
+
+    #[test]
+    fn cached_client_cert_debug_redacts_key() {
+        let cert_der = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let key_der = [0xCA, 0xFE, 0xBA, 0xBE];
+        let cached = CachedClientCert::new(vec![cert_der], Zeroizing::new(key_der.to_vec()));
+        let debug = format!("{cached:?}");
+        assert!(debug.contains("REDACTED"), "Debug output should redact the key");
+        assert!(debug.contains("cert_count"), "Debug output should retain cert metadata");
+        assert!(!debug.contains("222"), "Debug output must not contain cert DER bytes");
+        assert!(!debug.contains("202"), "Debug output must not contain key bytes");
+        assert!(!debug.contains("254"), "Debug output must not contain key bytes");
+        assert!(!debug.contains("186"), "Debug output must not contain key bytes");
+    }
+
+    #[test]
+    fn cached_cluster_tls_debug_redacts_client_key() {
+        let key_der = [250, 251, 252];
+        let client_cert = CachedClientCert::new(vec![vec![10]], Zeroizing::new(key_der.to_vec()));
+        let cached = CachedClusterTls {
+            ca: None,
+            client_cert: Some(Arc::new(client_cert)),
+            sni: Some("api.example.com".to_owned()),
+            verify: true,
+        };
+
+        let debug = format!("{cached:?}");
+        assert!(debug.contains("REDACTED"), "Debug output should redact the client key");
+        assert!(!debug.contains("250"), "Debug output must not contain key bytes");
+        assert!(!debug.contains("251"), "Debug output must not contain key bytes");
+        assert!(!debug.contains("252"), "Debug output must not contain key bytes");
     }
 
     #[test]
