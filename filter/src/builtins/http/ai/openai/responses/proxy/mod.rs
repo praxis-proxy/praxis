@@ -77,7 +77,7 @@ use crate::{
 /// # Example
 ///
 /// ```rust
-/// use praxis_filter::ResponsesProxyFilter;
+/// use praxis_filter::ai::ResponsesProxyFilter;
 ///
 /// let yaml = serde_yaml::Value::Null;
 /// let filter = ResponsesProxyFilter::from_config(&yaml).unwrap();

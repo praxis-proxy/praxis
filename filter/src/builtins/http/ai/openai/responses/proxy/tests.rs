@@ -246,9 +246,10 @@ async fn rejects_oversized_rebuilt_body_with_413() {
         "previous_response_id": "resp_abc123"
     });
     let mut state = ResponsesState::from_request_body(request_body);
-    state
-        .messages
-        .splice(0..0, vec![json!({"role": "user", "content": "a]long message that exceeds the tiny limit"})]);
+    state.messages.splice(
+        0..0,
+        vec![json!({"role": "user", "content": "a]long message that exceeds the tiny limit"})],
+    );
     ctx.extensions.insert(state);
 
     let mut body = Some(Bytes::from(
