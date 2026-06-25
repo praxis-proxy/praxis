@@ -25,8 +25,8 @@ use tracing::{debug, warn};
 /// Header injected into outbound callout requests to prevent loops.
 pub const DEPTH_HEADER: &str = "x-praxis-callout-depth";
 
-/// Default maximum callout depth.
-const DEFAULT_MAX_DEPTH: u32 = 3;
+/// Default maximum callout depth (no re-entry).
+const DEFAULT_MAX_DEPTH: u32 = 1;
 
 /// Default timeout for callout requests (5 000 ms).
 const DEFAULT_TIMEOUT_MS: u64 = 5_000;

@@ -379,7 +379,11 @@ mod unit {
             .mount(&server)
             .await;
 
-        let client = make_client();
+        let client = CalloutClient::new(CalloutConfig {
+            max_depth: 3,
+            ..CalloutConfig::default()
+        })
+        .unwrap();
         let req = CalloutRequest {
             body: None,
             depth: 1,
