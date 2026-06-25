@@ -256,7 +256,7 @@ mod unit {
             body: None,
             depth: 0,
             headers: vec![],
-            method: reqwest::Method::GET,
+            method: http::Method::GET,
             url: url.to_owned(),
         }
     }
@@ -309,8 +309,11 @@ mod unit {
         let req = CalloutRequest {
             body: None,
             depth: 0,
-            headers: vec![("authorization".into(), "Bearer token123".into())],
-            method: reqwest::Method::GET,
+            headers: vec![(
+                http::HeaderName::from_static("authorization"),
+                http::HeaderValue::from_static("Bearer token123"),
+            )],
+            method: http::Method::GET,
             url: format!("{}/check", server.uri()),
         };
         let result = client.execute(req).await;
@@ -335,7 +338,7 @@ mod unit {
             body: Some(b"hello".to_vec()),
             depth: 0,
             headers: vec![],
-            method: reqwest::Method::POST,
+            method: http::Method::POST,
             url: format!("{}/check", server.uri()),
         };
         let result = client.execute(req).await;
@@ -359,7 +362,7 @@ mod unit {
             body: None,
             depth: 0,
             headers: vec![],
-            method: reqwest::Method::PUT,
+            method: http::Method::PUT,
             url: format!("{}/check", server.uri()),
         };
         let result = client.execute(req).await;
@@ -388,7 +391,7 @@ mod unit {
             body: None,
             depth: 1,
             headers: vec![],
-            method: reqwest::Method::GET,
+            method: http::Method::GET,
             url: format!("{}/check", server.uri()),
         };
         let result = client.execute(req).await;
@@ -594,7 +597,7 @@ mod unit {
             body: None,
             depth: 3,
             headers: vec![],
-            method: reqwest::Method::GET,
+            method: http::Method::GET,
             url: "http://127.0.0.1:1/check".into(),
         };
         let result = client.execute(req).await;
@@ -617,7 +620,7 @@ mod unit {
             body: None,
             depth: 3,
             headers: vec![],
-            method: reqwest::Method::GET,
+            method: http::Method::GET,
             url: "http://127.0.0.1:1/check".into(),
         };
         let result = client.execute(req).await;
@@ -646,7 +649,7 @@ mod unit {
             body: None,
             depth: 2,
             headers: vec![],
-            method: reqwest::Method::GET,
+            method: http::Method::GET,
             url: format!("{}/check", server.uri()),
         };
         let result = client.execute(req).await;
@@ -669,7 +672,7 @@ mod unit {
             body: None,
             depth: 0,
             headers: vec![],
-            method: reqwest::Method::GET,
+            method: http::Method::GET,
             url: "http://127.0.0.1:1/check".into(),
         };
         let result = client.execute(req).await;

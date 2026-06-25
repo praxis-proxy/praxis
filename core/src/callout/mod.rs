@@ -92,7 +92,7 @@ pub struct CalloutResponse {
     pub body: Vec<u8>,
 
     /// Response headers.
-    pub headers: Vec<(String, String)>,
+    pub headers: Vec<(http::HeaderName, http::HeaderValue)>,
 
     /// HTTP status code.
     pub status: u16,
@@ -112,10 +112,10 @@ pub struct CalloutRequest {
     pub depth: u32,
 
     /// Request headers to send.
-    pub headers: Vec<(String, String)>,
+    pub headers: Vec<(http::HeaderName, http::HeaderValue)>,
 
     /// HTTP method.
-    pub method: reqwest::Method,
+    pub method: http::Method,
 
     /// Target URL.
     pub url: String,
@@ -319,7 +319,7 @@ impl CalloutClient {
     async fn send_request(&self, request: CalloutRequest) -> Result<reqwest::Response, String> {
         let mut builder = self.client.request(request.method, &request.url);
 
-        for (name, value) in &request.headers {
+        for (name, value) in request.headers {
             builder = builder.header(name, value);
         }
 
@@ -423,20 +423,11 @@ fn validate_config(config: &CalloutConfig) -> Result<(), CalloutError> {
     Ok(())
 }
 
-/// Extract headers from a reqwest response as string pairs.
-///
-/// Headers with non-UTF-8 values are skipped with a debug log.
-fn extract_headers(response: &reqwest::Response) -> Vec<(String, String)> {
+/// Extract headers from a reqwest response.
+fn extract_headers(response: &reqwest::Response) -> Vec<(http::HeaderName, http::HeaderValue)> {
     response
         .headers()
         .iter()
-        .filter_map(|(name, value)| {
-            if let Ok(v) = value.to_str() {
-                Some((name.to_string(), v.to_owned()))
-            } else {
-                debug!(header = %name, "skipping non-UTF-8 response header");
-                None
-            }
-        })
+        .map(|(name, value)| (name.clone(), value.clone()))
         .collect()
 }
