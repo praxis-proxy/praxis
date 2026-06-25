@@ -10,12 +10,16 @@
 //! stream closes. The chosen strategy (full buffering) is documented in the
 //! proposal for [#220].
 //!
-//! For Bedrock InvokeModel, body access is disabled entirely (`BodyAccess::None`,
+//! For Bedrock `InvokeModel`, body access is disabled entirely (`BodyAccess::None`,
 //! `BodyMode::Stream`) since token counts arrive as HTTP response headers and
 //! no body parsing is needed.
+//!
 //! Token counts are written as filter metadata under keys
 //! `token.input`, `token.output`, and `token.total` via
-//! [`HttpFilterContext::set_token_usage`].
+//! [`set_token_usage`].
+//!
+//! [`set_token_usage`]: crate::context::HttpFilterContext::set_token_usage
+//! [#220]: https://github.com/praxis-proxy/praxis/issues/220
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -213,6 +217,12 @@ fn extract_from_sse(provider: ProviderKind, data: &[u8]) -> Option<TokenUsage> {
 ///
 /// Used for OpenAI, Google, Azure, and Bedrock Converse, where usage
 /// appears in a single terminal chunk.
+///
+/// **Limitation:** assumes each SSE `data:` field is a single compact JSON
+/// line. Multi-line pretty-printed payloads (e.g. `data: {\n  "usage": ...}`)
+/// are not supported — the continuation lines lack the `data: ` prefix and
+/// are silently skipped. In practice all supported providers send minified
+/// single-line JSON in SSE data fields.
 fn extract_last_usage_from_sse(provider: TokenUsageProvider, text: &str) -> Option<TokenUsage> {
     let mut last: Option<TokenUsage> = None;
     for line in text.lines() {
