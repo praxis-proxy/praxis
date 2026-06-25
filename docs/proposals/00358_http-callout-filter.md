@@ -413,13 +413,10 @@ failures, and open circuit breakers.
 
 #### Connection and TLS isolation
 
-Each filter instance owns its own `reqwest::Client`.
-Clients are keyed by target URL and TLS config; on
-config reload, if a filter's target configuration is
-unchanged, the existing client is reused rather than
-rebuilt, preserving warm connection pools. Clients are
-never shared across different filter instances. This
-prevents:
+Each filter instance owns its own `CalloutClient`,
+which wraps a `reqwest::Client` (connection pool)
+and a `CircuitBreaker`. Clients are never shared
+across different filter instances. This prevents:
 
 1. **Credential leakage** — HTTP/2 coalescing and TLS
    session caching could reuse a connection
@@ -432,6 +429,40 @@ prevents:
 Clients use `rustls-tls`, capped
 `pool_max_idle_per_host`, `no_proxy`, and optional
 mTLS client certificates.
+
+#### Connection pool survival across reloads
+
+On config reload, Praxis rebuilds the filter pipeline
+and drops old filter instances. Without mitigation,
+this kills `reqwest::Client` connection pools and
+causes a burst of new TLS handshakes to callout
+targets.
+
+To preserve warm pools, a `ConnectionPoolRegistry`
+(following the `KvStoreRegistry` pattern) caches
+`reqwest::Client` instances keyed by connection
+config (URL origin, TLS settings, pool size). The
+registry is created once at server startup, stored
+in `ServerState`, and passed through unchanged on
+reload — the same wiring used by `KvStoreRegistry`
+in `watcher.rs` and `reload.rs`.
+
+During `from_config`, a filter requests a
+`reqwest::Client` from the registry. If an existing
+client matches the connection config, it is reused;
+otherwise a new one is built and cached. The
+`CalloutClient` is always rebuilt with a fresh
+`CircuitBreaker` reflecting the current config, so
+changes to `failure_threshold` or `recovery_timeout`
+take effect immediately on reload. Circuit breaker
+state does reset, but this is acceptable: a single
+half-open probe is not a connection storm, and it
+matches Envoy's behavior of resetting circuit
+breakers on config update.
+
+Clients not referenced after a reload are left in
+the registry until their idle connections time out
+naturally via `reqwest`'s pool idle timeout.
 
 #### Loop prevention
 
