@@ -705,7 +705,6 @@ mod unit {
         }
     }
 
-    /// Trip the circuit breaker by sending requests to a failing endpoint.
     async fn trip_breaker(client: &CalloutClient, server: &MockServer) {
         Mock::given(method("GET"))
             .and(path("/trip"))
