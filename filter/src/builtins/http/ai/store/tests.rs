@@ -721,14 +721,14 @@ fn pg_ssl_mode_converts_to_pg_ssl_mode() {
 async fn pg_nonexistent_ssl_root_cert_fails() {
     let url = pg_database_url();
     let suffix = pg_unique_suffix();
-    let result = PostgresResponseStore::new(
+    let result = Box::pin(PostgresResponseStore::new(
         &url,
         &format!("test_responses_{suffix}"),
         &format!("test_conversations_{suffix}"),
         None,
         Some(SslMode::VerifyCa),
         Some("/nonexistent/ca.pem"),
-    )
+    ))
     .await;
 
     let Err(err) = result else {
@@ -743,14 +743,14 @@ async fn pg_nonexistent_ssl_root_cert_fails() {
 async fn make_pg_store() -> PostgresResponseStore {
     let url = pg_database_url();
     let suffix = pg_unique_suffix();
-    PostgresResponseStore::new(
+    Box::pin(PostgresResponseStore::new(
         &url,
         &format!("test_responses_{suffix}"),
         &format!("test_conversations_{suffix}"),
         None,
         Some(SslMode::Disable),
         None,
-    )
+    ))
     .await
     .expect("postgres store creation should succeed")
 }

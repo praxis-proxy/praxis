@@ -2936,14 +2936,14 @@ fn cleanup_sqlite_file(db_path: &PathBuf) {
 async fn init_store(filter: &ResponseStoreFilter) {
     filter
         .store
-        .get_or_init(|| async { filter.build_store().await.ok() })
+        .get_or_init(|| async { Box::pin(filter.build_store()).await.ok() })
         .await;
 }
 
 async fn init_store_and_seed(filter: &ResponseStoreFilter, id: &str, tenant_id: &str, input: serde_json::Value) {
     let store_opt = filter
         .store
-        .get_or_init(|| async { filter.build_store().await.ok() })
+        .get_or_init(|| async { Box::pin(filter.build_store()).await.ok() })
         .await;
     let store = store_opt.as_ref().expect("store should be initialized");
     let record = ResponseRecord {

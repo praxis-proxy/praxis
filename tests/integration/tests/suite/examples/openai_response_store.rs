@@ -60,7 +60,7 @@ async fn response_store_persists_response_to_sqlite() {
         .await
         .expect("should connect to test database");
     let sql = format!("SELECT id, tenant_id, created_at, model, input, messages FROM {RESPONSES_TABLE} WHERE id = ?");
-    let row: sqlx::sqlite::SqliteRow = sqlx::query(&sql)
+    let row: sqlx::sqlite::SqliteRow = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind("resp_abc")
         .fetch_one(&pool)
         .await

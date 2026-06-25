@@ -37,7 +37,7 @@ nix = { workspace = true }
 tikv-jemallocator = { workspace = true }
 
 [build-dependencies]
-cargo_metadata = "0.19"
+cargo_metadata = "0.23.1"
 
 [dev-dependencies]
 tempfile = { workspace = true }

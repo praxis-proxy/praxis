@@ -8,7 +8,7 @@ use std::path::Path;
 use async_trait::async_trait;
 use serde::Deserialize;
 use sqlx::{
-    Row as _,
+    AssertSqlSafe, Row as _,
     postgres::{PgConnectOptions, PgPoolOptions, PgRow, PgSslMode},
 };
 use tracing::info;
@@ -122,13 +122,12 @@ impl PostgresResponseStore {
         let ddl = generate_ddl(&tables)?;
 
         let options = pg_connect_options(database_url, ssl_mode, ssl_root_cert)?;
-        let pool = PgPoolOptions::new()
-            .connect_with(options)
+        let pool = Box::pin(PgPoolOptions::new().connect_with(options))
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
         for statement in &ddl {
-            sqlx::query(statement)
+            sqlx::query(AssertSqlSafe(statement.as_str()))
                 .execute(&pool)
                 .await
                 .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -185,7 +184,7 @@ impl ResponseStore for PostgresResponseStore {
             self.tables.responses
         );
 
-        sqlx::query(&sql)
+        sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(&record.id)
             .bind(&record.tenant_id)
             .bind(record.created_at)
@@ -209,7 +208,7 @@ impl ResponseStore for PostgresResponseStore {
             self.tables.responses
         );
 
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(id)
             .bind(tenant_id)
             .fetch_optional(&self.pool)
@@ -222,7 +221,7 @@ impl ResponseStore for PostgresResponseStore {
     async fn delete_response(&self, tenant_id: &str, id: &str) -> Result<bool, StoreError> {
         let sql = format!("DELETE FROM {} WHERE id = $1 AND tenant_id = $2", self.tables.responses);
 
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(id)
             .bind(tenant_id)
             .execute(&self.pool)
@@ -245,7 +244,7 @@ impl ResponseStore for PostgresResponseStore {
             self.tables.conversations
         );
 
-        sqlx::query(&sql)
+        sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(&record.conversation_id)
             .bind(&record.tenant_id)
             .bind(record.created_at)
@@ -271,7 +270,7 @@ impl ResponseStore for PostgresResponseStore {
             self.tables.conversations
         );
 
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(conversation_id)
             .bind(tenant_id)
             .fetch_optional(&self.pool)
@@ -287,7 +286,7 @@ impl ResponseStore for PostgresResponseStore {
             self.tables.conversations
         );
 
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(conversation_id)
             .bind(tenant_id)
             .execute(&self.pool)

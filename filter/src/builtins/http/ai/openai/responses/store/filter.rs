@@ -132,14 +132,14 @@ impl ResponseStoreFilter {
                     let secret: &str = s.expose_secret();
                     secret
                 });
-                let store = PostgresResponseStore::new(
+                let store = Box::pin(PostgresResponseStore::new(
                     self.config.database_url.expose_secret(),
                     &self.config.responses_table,
                     &self.config.conversations_table,
                     None,
                     self.config.ssl_mode,
                     ssl_root_cert,
-                )
+                ))
                 .await;
                 store.map(|s| {
                     let arc: Arc<dyn ResponseStore> = Arc::new(s);
@@ -151,7 +151,7 @@ impl ResponseStoreFilter {
 
     /// Build the store and log successful initialization.
     async fn build_logged_store(&self) -> Result<Arc<dyn ResponseStore>, StoreError> {
-        let store = self.build_store().await?;
+        let store = Box::pin(self.build_store()).await?;
         debug!(
             backend = ?self.config.backend,
             responses_table = %self.config.responses_table,
@@ -163,7 +163,7 @@ impl ResponseStoreFilter {
 
     /// Initialize a store once, caching failed init permanently.
     async fn init_permanent_store(&self) -> Option<Arc<dyn ResponseStore>> {
-        match self.build_logged_store().await {
+        match Box::pin(self.build_logged_store()).await {
             Ok(store) => Some(store),
             Err(e) => {
                 warn!(
@@ -181,7 +181,7 @@ impl ResponseStoreFilter {
         if matches!(self.config.backend, StorageBackend::Postgres) {
             match self
                 .store
-                .get_or_try_init(|| async { self.build_logged_store().await.map(Some) })
+                .get_or_try_init(|| async { Box::pin(self.build_logged_store()).await.map(Some) })
                 .await
             {
                 Ok(store) => store.as_ref().map(Arc::clone),
@@ -196,7 +196,7 @@ impl ResponseStoreFilter {
             }
         } else {
             self.store
-                .get_or_init(|| async { self.init_permanent_store().await })
+                .get_or_init(|| async { Box::pin(self.init_permanent_store()).await })
                 .await
                 .as_ref()
                 .map(Arc::clone)
@@ -610,7 +610,6 @@ impl HttpFilter for ResponseStoreFilter {
         }
     }
 
-    #[expect(clippy::large_stack_frames, reason = "async handler with multiple await points")]
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if ctx.request.method == http::Method::GET {
             if let Some(action) = self.try_get_retrieval(ctx).await? {

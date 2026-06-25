@@ -5,7 +5,7 @@
 
 use async_trait::async_trait;
 use sqlx::{
-    Row as _, SqlitePool,
+    AssertSqlSafe, Row as _, SqlitePool,
     sqlite::{SqliteConnectOptions, SqlitePoolOptions},
 };
 use tracing::info;
@@ -70,7 +70,7 @@ impl SqliteResponseStore {
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
         for statement in &ddl {
-            sqlx::query(statement)
+            sqlx::query(AssertSqlSafe(statement.as_str()))
                 .execute(&pool)
                 .await
                 .map_err(|e| StoreError::Database(e.to_string()))?;
@@ -125,7 +125,7 @@ impl ResponseStore for SqliteResponseStore {
             self.tables.responses
         );
 
-        sqlx::query(&sql)
+        sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(&record.id)
             .bind(&record.tenant_id)
             .bind(record.created_at)
@@ -149,7 +149,7 @@ impl ResponseStore for SqliteResponseStore {
             self.tables.responses
         );
 
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(id)
             .bind(tenant_id)
             .fetch_optional(&self.pool)
@@ -162,7 +162,7 @@ impl ResponseStore for SqliteResponseStore {
     async fn delete_response(&self, tenant_id: &str, id: &str) -> Result<bool, StoreError> {
         let sql = format!("DELETE FROM {} WHERE id = ? AND tenant_id = ?", self.tables.responses);
 
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(id)
             .bind(tenant_id)
             .execute(&self.pool)
@@ -185,7 +185,7 @@ impl ResponseStore for SqliteResponseStore {
             self.tables.conversations
         );
 
-        sqlx::query(&sql)
+        sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(&record.conversation_id)
             .bind(&record.tenant_id)
             .bind(record.created_at)
@@ -210,7 +210,7 @@ impl ResponseStore for SqliteResponseStore {
             self.tables.conversations
         );
 
-        let row = sqlx::query(&sql)
+        let row = sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(conversation_id)
             .bind(tenant_id)
             .fetch_optional(&self.pool)
@@ -226,7 +226,7 @@ impl ResponseStore for SqliteResponseStore {
             self.tables.conversations
         );
 
-        let result = sqlx::query(&sql)
+        let result = sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(conversation_id)
             .bind(tenant_id)
             .execute(&self.pool)
