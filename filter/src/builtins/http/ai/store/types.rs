@@ -78,7 +78,7 @@ pub struct ConversationRecord {
 /// Items are the individual entries within a conversation (messages,
 /// tool calls, tool outputs, etc.). Stored as opaque JSON blobs with
 /// a monotonic position for ordering.
-#[expect(dead_code, reason = "used by ConversationItemStore in #631")]
+#[derive(Debug)]
 pub struct ConversationItemRecord {
     /// Unique item ID (e.g., `"item_abc123"`).
     pub item_id: String,

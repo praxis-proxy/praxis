@@ -554,20 +554,12 @@ impl ResponseStore for MockStore {
         Ok(false)
     }
 
-    async fn upsert_conversation(&self, _record: &ConversationRecord) -> Result<(), StoreError> {
-        Ok(())
-    }
-
     async fn get_conversation(
         &self,
         _tenant_id: &str,
         _conversation_id: &str,
     ) -> Result<Option<ConversationRecord>, StoreError> {
         Ok(None)
-    }
-
-    async fn delete_conversation(&self, _tenant_id: &str, _conversation_id: &str) -> Result<bool, StoreError> {
-        Ok(false)
     }
 }
 
