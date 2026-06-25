@@ -115,6 +115,7 @@ filter_chains:
           headers:
             Authorization: "Bearer ${LAKERA_API_KEY}"
         request:
+          phase: request_body       # default; sends buffered body
           max_body_bytes: 1048576  # 1 MiB
         response:
           extract:
@@ -259,37 +260,63 @@ reference implementation.
 ```text
 server
   ├── praxis-http-callout (filter, opt-in feature flag)
-  │     ├── praxis-callout (shared client)
+  │     ├── praxis-core (callout module)
   │     ├── praxis-filter (HttpFilter, FilterResultSet)
   │     └── serde_json_path
   │
   └── praxis-filter
-        └── praxis-callout (available to any builtin)
+        └── praxis-core
+              └── callout (available to any builtin)
 
-callout/  (praxis-callout)
+core/src/callout/  (praxis_core::callout)
   └── reqwest [rustls-tls]
 ```
 
-**`praxis-callout`** (`callout/`) — shared HTTP callout
-client library: pooled `reqwest::Client`, circuit
-breaker, timeout, failure mode, tracing. Any filter
-that needs outbound HTTP requests depends on this
-crate. Contains its own circuit breaker (the traffic
+**`praxis_core::callout`** (`core/src/callout/`) —
+shared HTTP callout client module: pooled
+`reqwest::Client`, circuit breaker, timeout, failure
+mode, tracing. Lives in `praxis-core` so custom proxy
+builds using the Praxis framework have access to it
+without depending on `praxis-filter`. Any filter
+that needs outbound HTTP requests uses this module.
+Contains its own circuit breaker (the traffic
 management filter's breaker spans two phases; the
 callout's operates within a single async call).
 
 **`praxis-http-callout`** (`filter/http-callout/`) —
-thin `HttpFilter` wrapper wiring `praxis-callout` into
-the pipeline with config-driven target, JSONPath
+thin `HttpFilter` wrapper wiring the callout client
+into the pipeline with config-driven target, JSONPath
 extraction, and body forwarding. Reference
-implementation. Opt-in via cargo feature flag,
-following the `ext-proc` pattern: `praxis-callout` is
-a regular dependency of `praxis-filter`; the feature
-flag only gates the filter registration.
+implementation. Opt-in via cargo feature flag on
+`praxis-filter`, gating the satellite crate dependency
+and filter registration.
 
-> **Future:** `praxis-callout` is a natural starting
-> point for a broader `integrations` crate if the scope
-> grows to cover Valkey, Postgres, etc.
+#### Why reqwest
+
+The callout client needs an async HTTP client with
+TLS, connection pooling, and timeout support —
+independent of Pingora's upstream pool. `reqwest`
+is chosen because:
+
+- **Battle-tested** — the most widely used async HTTP
+  client in the Rust ecosystem, used by `wiremock`,
+  cloud SDKs, and many production proxies.
+- **Feature coverage** — connection pooling, redirect
+  policy, `no_proxy`, `rustls-tls`, and per-request
+  timeout are built in, avoiding hand-rolled pool
+  management.
+- **Stable API surface** — mature enough that
+  breakage risk is low for a long-lived dependency.
+- **Already in-tree** — `wiremock` (a dev-dependency
+  used across the test suite) depends on `reqwest`
+  transitively, so the incremental dependency cost
+  is minimal.
+
+Alternatives considered: `hyper` directly (requires
+manual pool and TLS management), Pingora's upstream
+pool (wrong abstraction — it routes to configured
+clusters, not arbitrary URLs, and shares connections
+across tenants).
 
 #### Filter struct
 
@@ -386,8 +413,13 @@ failures, and open circuit breakers.
 
 #### Connection and TLS isolation
 
-Each filter instance owns its own `reqwest::Client`,
-never shared across instances. This prevents:
+Each filter instance owns its own `reqwest::Client`.
+Clients are keyed by target URL and TLS config; on
+config reload, if a filter's target configuration is
+unchanged, the existing client is reused rather than
+rebuilt, preserving warm connection pools. Clients are
+never shared across different filter instances. This
+prevents:
 
 1. **Credential leakage** — HTTP/2 coalescing and TLS
    session caching could reuse a connection
@@ -468,31 +500,43 @@ status_on_error: 502
 max_depth: 1                  # default; no re-entry
 circuit_breaker:              # optional
   failure_threshold: 5
-  recovery_timeout: 30s
+  recovery_timeout: 30s       # time in Open before probing
 ```
+
+The circuit breaker uses a standard Closed → Open →
+Half-Open state machine. After `failure_threshold`
+consecutive failures, the breaker transitions to Open
+and rejects all callouts for `recovery_timeout`.
+After the timeout elapses, a single probe request is
+allowed through (Half-Open). If the probe succeeds,
+the breaker closes; if it fails, the breaker reopens
+for another `recovery_timeout` window. Only one probe
+is permitted at a time — concurrent requests during
+the probe window are rejected.
 
 ### Implementation
 
 Proposed PR sequence:
 
-- **PR 1** — `praxis-callout` crate (`callout/`) with
-  the shared HTTP callout client: `reqwest` client pool,
-  circuit breaker, timeout, failure mode handling, and
-  tracing. Unit tests with a local `wiremock` server.
-  This is the reusable primitive any filter can depend
-  on.
+- **PR 1** — `praxis_core::callout` module
+  (`core/src/callout/`) with the shared HTTP callout
+  client: `reqwest` client pool, circuit breaker,
+  timeout, failure mode handling, and tracing. Unit
+  tests with a local `wiremock` server. Lives in
+  `praxis-core` so it is available to custom proxy
+  builds.
 
 - **PR 2** — `praxis-http-callout` satellite crate
   (`filter/http-callout/`) with `HttpCalloutFilter`
   struct, config parsing, SSRF validation, JSONPath
   extraction, body forwarding, and unit tests.
-  Registered in the server binary behind a feature flag.
-
-- **PR 3** — integration test and example config:
+  Registered in the server binary behind a feature
+  flag. Includes integration test and example config:
   Lakera Guard example in `examples/configs/ai/`,
   functional integration test in
   `tests/integration/tests/suite/examples/` using a
-  mock HTTP server that returns Lakera-shaped responses.
+  mock HTTP server that returns Lakera-shaped
+  responses.
 
 ### Relationship to #138 (AI Guardrails)
 
