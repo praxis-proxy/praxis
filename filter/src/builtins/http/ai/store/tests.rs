@@ -10,7 +10,7 @@ use serde_json::json;
 use super::{
     ConversationItemRecord, ConversationRecord, PostgresResponseStore, ResponseRecord, ResponseStoreRegistry,
     SqliteResponseStore, SslMode, StoreError,
-    trait_def::{ConversationItemStore as _, ResponseStore},
+    trait_def::{ConversationItemStore, ResponseStore},
 };
 use crate::builtins::http::ai::openai::responses::store::{ListParams, Order, list_input_items};
 
@@ -444,8 +444,7 @@ async fn upsert_and_get_conversation() {
 
     store.upsert_conversation(&record).await.expect("upsert should succeed");
 
-    let fetched = store
-        .get_conversation("tenant_a", "conv_1")
+    let fetched = ResponseStore::get_conversation(&store, "tenant_a", "conv_1")
         .await
         .expect("get should succeed")
         .expect("record should exist");
@@ -479,8 +478,7 @@ async fn upsert_conversation_overwrites() {
         .await
         .expect("second upsert should succeed");
 
-    let fetched = store
-        .get_conversation("tenant_a", "conv_1")
+    let fetched = ConversationItemStore::get_conversation(&store, "tenant_a", "conv_1")
         .await
         .expect("get should succeed")
         .expect("record should exist");
@@ -496,8 +494,7 @@ async fn upsert_conversation_overwrites() {
 async fn get_missing_conversation_returns_none() {
     let store = make_store().await;
 
-    let result = store
-        .get_conversation("tenant_a", "nonexistent")
+    let result = ConversationItemStore::get_conversation(&store, "tenant_a", "nonexistent")
         .await
         .expect("get should succeed");
 
@@ -516,8 +513,7 @@ async fn conversation_tenant_isolation() {
     };
     store.upsert_conversation(&record).await.expect("upsert should succeed");
 
-    let result = store
-        .get_conversation("tenant_b", "conv_1")
+    let result = ConversationItemStore::get_conversation(&store, "tenant_b", "conv_1")
         .await
         .expect("get should succeed");
 
@@ -543,8 +539,7 @@ async fn delete_existing_conversation() {
 
     assert!(deleted, "delete should return true for existing conversation");
 
-    let fetched = store
-        .get_conversation("tenant_a", "conv_1")
+    let fetched = ConversationItemStore::get_conversation(&store, "tenant_a", "conv_1")
         .await
         .expect("get should succeed");
 
@@ -582,8 +577,7 @@ async fn delete_conversation_tenant_isolation() {
 
     assert!(!deleted, "tenant_b should not be able to delete tenant_a conversation");
 
-    let still_exists = store
-        .get_conversation("tenant_a", "conv_1")
+    let still_exists = ConversationItemStore::get_conversation(&store, "tenant_a", "conv_1")
         .await
         .expect("get should succeed");
 
@@ -801,6 +795,63 @@ async fn conversation_item_upsert_updates_existing() {
         json!({"type": "message", "role": "assistant", "content": "updated"}),
         "upsert should update item data"
     );
+}
+
+#[tokio::test]
+async fn conversation_item_upsert_allows_same_item_id_in_different_conversations() {
+    let store = make_store_with_items().await;
+    let item_conv1 = ConversationItemRecord {
+        item_data: json!({"conversation": "conv_1"}),
+        ..make_conversation_item("item_shared", "tenant_a", "conv_1", 1)
+    };
+    let item_conv2 = ConversationItemRecord {
+        item_data: json!({"conversation": "conv_2"}),
+        ..make_conversation_item("item_shared", "tenant_a", "conv_2", 1)
+    };
+
+    store
+        .create_conversation_items(&[item_conv1])
+        .await
+        .expect("initial item insert should succeed");
+    store
+        .create_conversation_items(&[item_conv2])
+        .await
+        .expect("same item_id in another conversation should insert");
+
+    let conv1_item = store
+        .get_conversation_item("tenant_a", "conv_1", "item_shared")
+        .await
+        .expect("conv_1 get should succeed")
+        .expect("conv_1 item should still exist");
+    let conv2_item = store
+        .get_conversation_item("tenant_a", "conv_2", "item_shared")
+        .await
+        .expect("conv_2 get should succeed")
+        .expect("conv_2 item should exist");
+
+    assert_eq!(conv1_item.conversation_id, "conv_1", "conv_1 row should remain scoped");
+    assert_eq!(conv2_item.conversation_id, "conv_2", "conv_2 row should be inserted");
+    assert_eq!(
+        conv1_item.item_data,
+        json!({"conversation": "conv_1"}),
+        "conv_1 item data should not be overwritten"
+    );
+    assert_eq!(
+        conv2_item.item_data,
+        json!({"conversation": "conv_2"}),
+        "conv_2 item data should be stored separately"
+    );
+
+    let conv1_items = store
+        .list_conversation_items("tenant_a", "conv_1", None, 100, true)
+        .await
+        .expect("conv_1 list should succeed");
+    let conv2_items = store
+        .list_conversation_items("tenant_a", "conv_2", None, 100, true)
+        .await
+        .expect("conv_2 list should succeed");
+    assert_item_ids(&conv1_items, &["item_shared"]);
+    assert_item_ids(&conv2_items, &["item_shared"]);
 }
 
 #[tokio::test]
@@ -1315,8 +1366,7 @@ async fn pg_upsert_and_get_conversation() {
 
     store.upsert_conversation(&record).await.expect("upsert should succeed");
 
-    let fetched = store
-        .get_conversation("tenant_a", "conv_1")
+    let fetched = ResponseStore::get_conversation(&store, "tenant_a", "conv_1")
         .await
         .expect("get should succeed")
         .expect("record should exist");
@@ -1352,8 +1402,7 @@ async fn pg_upsert_conversation_overwrites() {
         .await
         .expect("second upsert should succeed");
 
-    let fetched = store
-        .get_conversation("tenant_a", "conv_1")
+    let fetched = ConversationItemStore::get_conversation(&store, "tenant_a", "conv_1")
         .await
         .expect("get should succeed")
         .expect("record should exist");
@@ -1386,8 +1435,7 @@ async fn pg_delete_existing_conversation() {
 
     assert!(deleted, "delete should return true for existing conversation");
 
-    let fetched = store
-        .get_conversation("tenant_a", "conv_1")
+    let fetched = ConversationItemStore::get_conversation(&store, "tenant_a", "conv_1")
         .await
         .expect("get should succeed");
 
@@ -1408,8 +1456,7 @@ async fn pg_conversation_tenant_isolation() {
     };
     store.upsert_conversation(&record).await.expect("upsert should succeed");
 
-    let result = store
-        .get_conversation("tenant_b", "conv_1")
+    let result = ConversationItemStore::get_conversation(&store, "tenant_b", "conv_1")
         .await
         .expect("get should succeed");
 
@@ -1632,6 +1679,64 @@ async fn pg_conversation_item_upsert_updates_existing() {
         json!({"type": "message", "role": "assistant", "content": "updated"}),
         "upsert should update item data"
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn pg_conversation_item_upsert_allows_same_item_id_in_different_conversations() {
+    let store = make_pg_store_with_items().await;
+    let item_conv1 = ConversationItemRecord {
+        item_data: json!({"conversation": "conv_1"}),
+        ..make_conversation_item("item_shared", "tenant_a", "conv_1", 1)
+    };
+    let item_conv2 = ConversationItemRecord {
+        item_data: json!({"conversation": "conv_2"}),
+        ..make_conversation_item("item_shared", "tenant_a", "conv_2", 1)
+    };
+
+    store
+        .create_conversation_items(&[item_conv1])
+        .await
+        .expect("initial item insert should succeed");
+    store
+        .create_conversation_items(&[item_conv2])
+        .await
+        .expect("same item_id in another conversation should insert");
+
+    let conv1_item = store
+        .get_conversation_item("tenant_a", "conv_1", "item_shared")
+        .await
+        .expect("conv_1 get should succeed")
+        .expect("conv_1 item should still exist");
+    let conv2_item = store
+        .get_conversation_item("tenant_a", "conv_2", "item_shared")
+        .await
+        .expect("conv_2 get should succeed")
+        .expect("conv_2 item should exist");
+
+    assert_eq!(conv1_item.conversation_id, "conv_1", "conv_1 row should remain scoped");
+    assert_eq!(conv2_item.conversation_id, "conv_2", "conv_2 row should be inserted");
+    assert_eq!(
+        conv1_item.item_data,
+        json!({"conversation": "conv_1"}),
+        "conv_1 item data should not be overwritten"
+    );
+    assert_eq!(
+        conv2_item.item_data,
+        json!({"conversation": "conv_2"}),
+        "conv_2 item data should be stored separately"
+    );
+
+    let conv1_items = store
+        .list_conversation_items("tenant_a", "conv_1", None, 100, true)
+        .await
+        .expect("conv_1 list should succeed");
+    let conv2_items = store
+        .list_conversation_items("tenant_a", "conv_2", None, 100, true)
+        .await
+        .expect("conv_2 list should succeed");
+    assert_item_ids(&conv1_items, &["item_shared"]);
+    assert_item_ids(&conv2_items, &["item_shared"]);
 }
 
 #[tokio::test]

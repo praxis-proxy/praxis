@@ -140,6 +140,89 @@ impl PostgresResponseStore {
         );
         Ok(Self { pool, tables })
     }
+
+    /// Insert or update a conversation row shared by both store traits.
+    async fn upsert_conversation_record(&self, record: &ConversationRecord) -> Result<(), StoreError> {
+        let messages = serde_json::to_string(&record.messages).map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let metadata = serde_json::to_string(&record.metadata).map_err(|e| StoreError::Serialization(e.to_string()))?;
+
+        let sql = format!(
+            "INSERT INTO {} \
+             (conversation_id, tenant_id, created_at, metadata, messages) \
+             VALUES ($1, $2, $3, $4, $5) \
+             ON CONFLICT (conversation_id, tenant_id) DO UPDATE SET \
+             messages = EXCLUDED.messages",
+            self.tables.conversations
+        );
+
+        sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(&record.conversation_id)
+            .bind(&record.tenant_id)
+            .bind(record.created_at)
+            .bind(&metadata)
+            .bind(&messages)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StoreError::Database(e.to_string()))?;
+
+        Ok(())
+    }
+
+    /// Retrieve a conversation row shared by both store traits.
+    async fn get_conversation_record(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<ConversationRecord>, StoreError> {
+        let sql = format!(
+            "SELECT conversation_id, tenant_id, created_at, \
+                    metadata, messages \
+             FROM {} \
+             WHERE conversation_id = $1 AND tenant_id = $2",
+            self.tables.conversations
+        );
+
+        let row = sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(conversation_id)
+            .bind(tenant_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(|e| StoreError::Database(e.to_string()))?;
+
+        row.map(|r| row_to_conversation_record(&r)).transpose()
+    }
+
+    /// Delete a conversation row and any configured item rows.
+    async fn delete_conversation_record(&self, tenant_id: &str, conversation_id: &str) -> Result<bool, StoreError> {
+        let mut tx = Box::pin(self.pool.begin())
+            .await
+            .map_err(|e| StoreError::Database(e.to_string()))?;
+
+        if let Some(items_table) = &self.tables.items {
+            let items_sql = format!("DELETE FROM {items_table} WHERE tenant_id = $1 AND conversation_id = $2");
+            sqlx::query(AssertSqlSafe(items_sql.as_str()))
+                .bind(tenant_id)
+                .bind(conversation_id)
+                .execute(&mut *tx)
+                .await
+                .map_err(|e| StoreError::Database(e.to_string()))?;
+        }
+
+        let sql = format!(
+            "DELETE FROM {} WHERE conversation_id = $1 AND tenant_id = $2",
+            self.tables.conversations
+        );
+
+        let result = sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(conversation_id)
+            .bind(tenant_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| StoreError::Database(e.to_string()))?;
+
+        tx.commit().await.map_err(|e| StoreError::Database(e.to_string()))?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 /// Build `PostgreSQL` connection options from URL and optional TLS overrides.
@@ -231,84 +314,12 @@ impl ResponseStore for PostgresResponseStore {
         Ok(result.rows_affected() > 0)
     }
 
-    async fn upsert_conversation(&self, record: &ConversationRecord) -> Result<(), StoreError> {
-        let messages = serde_json::to_string(&record.messages).map_err(|e| StoreError::Serialization(e.to_string()))?;
-        let metadata = serde_json::to_string(&record.metadata).map_err(|e| StoreError::Serialization(e.to_string()))?;
-
-        let sql = format!(
-            "INSERT INTO {} \
-             (conversation_id, tenant_id, created_at, metadata, messages) \
-             VALUES ($1, $2, $3, $4, $5) \
-             ON CONFLICT (conversation_id, tenant_id) DO UPDATE SET \
-             messages = EXCLUDED.messages",
-            self.tables.conversations
-        );
-
-        sqlx::query(AssertSqlSafe(sql.as_str()))
-            .bind(&record.conversation_id)
-            .bind(&record.tenant_id)
-            .bind(record.created_at)
-            .bind(&metadata)
-            .bind(&messages)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| StoreError::Database(e.to_string()))?;
-
-        Ok(())
-    }
-
     async fn get_conversation(
         &self,
         tenant_id: &str,
         conversation_id: &str,
     ) -> Result<Option<ConversationRecord>, StoreError> {
-        let sql = format!(
-            "SELECT conversation_id, tenant_id, created_at, \
-                    metadata, messages \
-             FROM {} \
-             WHERE conversation_id = $1 AND tenant_id = $2",
-            self.tables.conversations
-        );
-
-        let row = sqlx::query(AssertSqlSafe(sql.as_str()))
-            .bind(conversation_id)
-            .bind(tenant_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|e| StoreError::Database(e.to_string()))?;
-
-        row.map(|r| row_to_conversation_record(&r)).transpose()
-    }
-
-    async fn delete_conversation(&self, tenant_id: &str, conversation_id: &str) -> Result<bool, StoreError> {
-        let mut tx = Box::pin(self.pool.begin())
-            .await
-            .map_err(|e| StoreError::Database(e.to_string()))?;
-
-        if let Some(items_table) = &self.tables.items {
-            let items_sql = format!("DELETE FROM {items_table} WHERE tenant_id = $1 AND conversation_id = $2");
-            sqlx::query(AssertSqlSafe(items_sql.as_str()))
-                .bind(tenant_id)
-                .bind(conversation_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| StoreError::Database(e.to_string()))?;
-        }
-
-        let sql = format!(
-            "DELETE FROM {} WHERE conversation_id = $1 AND tenant_id = $2",
-            self.tables.conversations
-        );
-
-        let result = sqlx::query(AssertSqlSafe(sql.as_str()))
-            .bind(conversation_id)
-            .bind(tenant_id)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| StoreError::Database(e.to_string()))?;
-
-        tx.commit().await.map_err(|e| StoreError::Database(e.to_string()))?;
-        Ok(result.rows_affected() > 0)
+        self.get_conversation_record(tenant_id, conversation_id).await
     }
 }
 
@@ -318,6 +329,22 @@ impl ResponseStore for PostgresResponseStore {
 )]
 #[async_trait]
 impl ConversationItemStore for PostgresResponseStore {
+    async fn upsert_conversation(&self, record: &ConversationRecord) -> Result<(), StoreError> {
+        self.upsert_conversation_record(record).await
+    }
+
+    async fn get_conversation(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<ConversationRecord>, StoreError> {
+        self.get_conversation_record(tenant_id, conversation_id).await
+    }
+
+    async fn delete_conversation(&self, tenant_id: &str, conversation_id: &str) -> Result<bool, StoreError> {
+        self.delete_conversation_record(tenant_id, conversation_id).await
+    }
+
     async fn create_conversation_items(&self, items: &[ConversationItemRecord]) -> Result<(), StoreError> {
         let table = self
             .tables
@@ -333,8 +360,7 @@ impl ConversationItemStore for PostgresResponseStore {
             "INSERT INTO {table} \
              (item_id, tenant_id, conversation_id, item_data, created_at, position) \
              VALUES ($1, $2, $3, $4, $5, $6) \
-             ON CONFLICT(item_id, tenant_id) DO UPDATE SET \
-             conversation_id = EXCLUDED.conversation_id, \
+             ON CONFLICT(item_id, tenant_id, conversation_id) DO UPDATE SET \
              item_data = EXCLUDED.item_data, \
              created_at = EXCLUDED.created_at, \
              position = EXCLUDED.position"

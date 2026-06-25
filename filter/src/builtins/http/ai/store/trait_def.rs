@@ -2,7 +2,7 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! The [`ResponseStore`] and [`ConversationItemStore`] async traits
-//! for response and conversation item persistence.
+//! for response persistence and conversation lifecycle/item persistence.
 
 use async_trait::async_trait;
 
@@ -19,6 +19,10 @@ use super::types::{ConversationItemRecord, ConversationRecord, ResponseRecord, S
 ///
 /// `get_response` returns `None` for both "not found" and "wrong
 /// tenant" to avoid information leakage.
+///
+/// Conversation access is read-only here so response rehydration can
+/// load cached conversations without taking ownership of conversation
+/// lifecycle mutations.
 #[async_trait]
 pub trait ResponseStore: Send + Sync {
     /// Insert or update a response record.
@@ -53,6 +57,33 @@ pub trait ResponseStore: Send + Sync {
     /// Returns [`StoreError`] if the database operation fails.
     async fn delete_response(&self, tenant_id: &str, id: &str) -> Result<bool, StoreError>;
 
+    /// Retrieve conversation messages by conversation ID and tenant.
+    ///
+    /// Returns `None` if the conversation does not exist or belongs
+    /// to a different tenant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the database operation fails.
+    async fn get_conversation(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+    ) -> Result<Option<ConversationRecord>, StoreError>;
+}
+
+// -----------------------------------------------------------------------------
+// ConversationItemStore Trait
+// -----------------------------------------------------------------------------
+
+/// Async persistence layer for conversation lifecycle and item records.
+///
+/// Provides full conversation lifecycle management plus CRUD
+/// operations for individual items within a conversation. Every query
+/// is tenant- and conversation-scoped.
+#[async_trait]
+#[cfg_attr(not(test), expect(dead_code, reason = "used by conversations filter in #623"))]
+pub trait ConversationItemStore: Send + Sync {
     /// Insert or update a conversation message cache.
     ///
     /// # Errors
@@ -83,25 +114,11 @@ pub trait ResponseStore: Send + Sync {
     ///
     /// Returns [`StoreError`] if the database operation fails.
     async fn delete_conversation(&self, tenant_id: &str, conversation_id: &str) -> Result<bool, StoreError>;
-}
 
-// -----------------------------------------------------------------------------
-// ConversationItemStore Trait
-// -----------------------------------------------------------------------------
-
-/// Async persistence layer for conversation item records.
-///
-/// Provides CRUD operations for individual items within a
-/// conversation. Every query is tenant- and conversation-scoped.
-/// Implementors must also implement [`ResponseStore`] since they
-/// share the same backing database and connection pool.
-#[async_trait]
-#[cfg_attr(not(test), expect(dead_code, reason = "used by conversations filter in #623"))]
-pub trait ConversationItemStore: Send + Sync {
     /// Insert one or more conversation items.
     ///
     /// Items are inserted individually. Duplicate `item_id` +
-    /// `tenant_id` pairs are upserted.
+    /// `tenant_id` + `conversation_id` triples are upserted.
     ///
     /// # Errors
     ///
