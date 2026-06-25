@@ -10,6 +10,9 @@
 //! stream closes. The chosen strategy (full buffering) is documented in the
 //! proposal for [#220].
 //!
+//! For Bedrock InvokeModel, body access is disabled entirely (`BodyAccess::None`,
+//! `BodyMode::Stream`) since token counts arrive as HTTP response headers and
+//! no body parsing is needed.
 //! Token counts are written as filter metadata under keys
 //! `token.input`, `token.output`, and `token.total` via
 //! [`HttpFilterContext::set_token_usage`].
@@ -60,7 +63,7 @@ enum ProviderKind {
     Google,
     /// AWS Bedrock Converse API (JSON body).
     Bedrock,
-    /// AWS Bedrock InvokeModel API (HTTP response headers).
+    /// AWS Bedrock `InvokeModel` API (HTTP response headers).
     BedrockInvokeModel,
     /// Azure OpenAI (same format as OpenAI).
     Azure,
@@ -80,6 +83,7 @@ enum ProviderKind {
 /// provider: openai   # openai | anthropic | google | bedrock | bedrock_invoke_model | azure
 /// ```
 pub struct TokenCountFilter {
+    /// AI provider whose response format to parse.
     provider: ProviderKind,
 }
 
@@ -105,54 +109,36 @@ impl HttpFilter for TokenCountFilter {
         Ok(FilterAction::Continue)
     }
 
-    /// Detect SSE responses and handle Bedrock InvokeModel header-based extraction.
+    /// Detect SSE responses and handle Bedrock `InvokeModel` header-based extraction.
     ///
-    /// For Bedrock InvokeModel, token counts arrive as HTTP response headers
+    /// For Bedrock `InvokeModel`, token counts arrive as HTTP response headers
     /// (`x-amzn-bedrock-input-token-count`, `x-amzn-bedrock-output-token-count`)
     /// rather than in the JSON body. This is the only provider with a header-based
     /// extraction path.
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let (is_sse, bedrock_input, bedrock_output) =
-            if let Some(resp) = ctx.response_header.as_ref() {
-                let content_type = resp
-                    .headers
-                    .get(http::header::CONTENT_TYPE)
-                    .and_then(|v| v.to_str().ok())
-                    .unwrap_or("");
-
-                let is_sse = content_type.contains("text/event-stream");
-
-                let bedrock_input = if self.provider == ProviderKind::BedrockInvokeModel {
-                    resp.headers
-                        .get("x-amzn-bedrock-input-token-count")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                } else {
-                    None
-                };
-
-                let bedrock_output = if self.provider == ProviderKind::BedrockInvokeModel {
-                    resp.headers
-                        .get("x-amzn-bedrock-output-token-count")
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|s| s.parse::<u64>().ok())
-                } else {
-                    None
-                };
-
-                (is_sse, bedrock_input, bedrock_output)
-            } else {
+        let (is_sse, bedrock_counts) = {
+            let Some(resp) = ctx.response_header.as_ref() else {
                 return Ok(FilterAction::Continue);
             };
+            let is_sse = resp
+                .headers
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|ct| ct.contains("text/event-stream"));
+            let bedrock_counts = if self.provider == ProviderKind::BedrockInvokeModel {
+                Some(bedrock_token_counts(resp))
+            } else {
+                None
+            };
+            (is_sse, bedrock_counts)
+        };
 
         if is_sse {
             ctx.set_metadata(META_IS_SSE, "1");
         }
-
-        if let (Some(i), Some(o)) = (bedrock_input, bedrock_output) {
+        if let Some((Some(i), Some(o))) = bedrock_counts {
             ctx.set_token_usage(i, o, None);
         }
-
         Ok(FilterAction::Continue)
     }
 
@@ -165,8 +151,12 @@ impl HttpFilter for TokenCountFilter {
     }
 
     fn response_body_mode(&self) -> BodyMode {
-        BodyMode::StreamBuffer {
-            max_bytes: Some(MAX_BODY_BYTES),
+        if self.provider == ProviderKind::BedrockInvokeModel {
+            BodyMode::Stream
+        } else {
+            BodyMode::StreamBuffer {
+                max_bytes: Some(MAX_BODY_BYTES),
+            }
         }
     }
 
@@ -248,37 +238,31 @@ fn extract_anthropic_sse(text: &str) -> Option<TokenUsage> {
     let mut output_tokens: Option<u64> = None;
 
     for line in text.lines() {
-        let Some(json) = line.strip_prefix("data: ") else {
-            continue;
-        };
-        let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else {
-            continue;
-        };
+        let Some(json) = line.strip_prefix("data: ") else { continue };
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(json) else { continue };
         match v.get("type").and_then(|t| t.as_str()) {
-            Some("message_start") => {
-                if let Some(n) = v
-                    .get("message")
-                    .and_then(|m| m.get("usage"))
-                    .and_then(|u| u.get("input_tokens"))
-                    .and_then(serde_json::Value::as_u64)
-                {
-                    input_tokens = Some(n);
-                }
-            }
-            Some("message_delta") => {
-                if let Some(n) = v
-                    .get("usage")
-                    .and_then(|u| u.get("output_tokens"))
-                    .and_then(serde_json::Value::as_u64)
-                {
-                    output_tokens = Some(n);
-                }
-            }
+            Some("message_start") => input_tokens = anthropic_input_tokens(&v),
+            Some("message_delta") => output_tokens = anthropic_output_tokens(&v),
             _ => {}
         }
     }
 
     Some(TokenUsage::new(input_tokens?, output_tokens?, None))
+}
+
+/// Read `input_tokens` from an Anthropic `message_start` SSE event.
+fn anthropic_input_tokens(v: &serde_json::Value) -> Option<u64> {
+    v.get("message")
+        .and_then(|m| m.get("usage"))
+        .and_then(|u| u.get("input_tokens"))
+        .and_then(serde_json::Value::as_u64)
+}
+
+/// Read `output_tokens` from an Anthropic `message_delta` SSE event.
+fn anthropic_output_tokens(v: &serde_json::Value) -> Option<u64> {
+    v.get("usage")
+        .and_then(|u| u.get("output_tokens"))
+        .and_then(serde_json::Value::as_u64)
 }
 
 // -----------------------------------------------------------------------------
@@ -293,4 +277,19 @@ fn to_library_provider(kind: ProviderKind) -> TokenUsageProvider {
         ProviderKind::Google => TokenUsageProvider::Google,
         ProviderKind::Bedrock | ProviderKind::BedrockInvokeModel => TokenUsageProvider::Bedrock,
     }
+}
+
+/// Read Bedrock `InvokeModel` token counts from upstream response headers.
+fn bedrock_token_counts(resp: &crate::context::Response) -> (Option<u64>, Option<u64>) {
+    let input = resp
+        .headers
+        .get("x-amzn-bedrock-input-token-count")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    let output = resp
+        .headers
+        .get("x-amzn-bedrock-output-token-count")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.parse::<u64>().ok());
+    (input, output)
 }

@@ -65,13 +65,13 @@ impl HttpFilter for XTokenHeadersFilter {
 
         let mut modified = false;
 
-        if let (Some(i), Some(o), Some(t)) = (input, output, total) {
-            if let Some(resp) = ctx.response_header.as_mut() {
-                resp.headers.insert("x-token-input", HeaderValue::from(i));
-                resp.headers.insert("x-token-output", HeaderValue::from(o));
-                resp.headers.insert("x-token-total", HeaderValue::from(t));
-                modified = true;
-            }
+        if let (Some(i), Some(o), Some(t)) = (input, output, total)
+            && let Some(resp) = ctx.response_header.as_mut()
+        {
+            resp.headers.insert("x-token-input", HeaderValue::from(i));
+            resp.headers.insert("x-token-output", HeaderValue::from(o));
+            resp.headers.insert("x-token-total", HeaderValue::from(t));
+            modified = true;
         }
 
         if modified {
