@@ -109,7 +109,16 @@ async fn response_store_persists_response_to_postgres() {
     let messages: serde_json::Value =
         serde_json::from_str(&messages_raw).expect("messages column should be valid JSON");
     let items = messages.as_array().expect("messages should be an array");
-    assert_eq!(items.len(), 1, "messages should have one output item");
+    assert_eq!(
+        items.len(),
+        2,
+        "messages should include normalized input plus output for rehydration"
+    );
+    assert_eq!(
+        items[0],
+        serde_json::json!({"type": "message", "role": "user", "content": "Hello from postgres"}),
+        "first message should be the normalized user input"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

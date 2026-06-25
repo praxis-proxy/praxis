@@ -7,7 +7,13 @@ use std::collections::BTreeMap;
 
 use serde::Deserialize;
 
-use crate::{FilterError, body::limits::MAX_JSON_BODY_BYTES};
+use crate::{
+    FilterError,
+    builtins::http::ai::{
+        OnInvalidBehavior,
+        config_validation::{validate_header_name, validate_max_body_bytes},
+    },
+};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -31,18 +37,6 @@ const DEFAULT_MAX_RESPONSE_BODY_BYTES: usize = 65_536;
 // -----------------------------------------------------------------------------
 // Behavior Enums
 // -----------------------------------------------------------------------------
-
-/// Invalid A2A message handling.
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(crate) enum InvalidA2aBehavior {
-    /// Reject non-A2A input with HTTP 400.
-    #[default]
-    Reject,
-
-    /// Continue processing without A2A metadata.
-    Continue,
-}
 
 /// Task route lookup miss behavior.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
@@ -256,8 +250,8 @@ pub(crate) struct A2aConfig {
     pub method_aliases: BTreeMap<String, String>,
 
     /// Invalid input handling behavior.
-    #[serde(default)]
-    pub on_invalid: InvalidA2aBehavior,
+    #[serde(default = "OnInvalidBehavior::default_reject")]
+    pub on_invalid: OnInvalidBehavior,
 
     /// Task-ownership routing configuration.
     #[serde(default)]
@@ -274,26 +268,15 @@ fn default_max_body_bytes() -> usize {
 // -----------------------------------------------------------------------------
 
 /// Validate and build the final configuration.
-#[expect(clippy::too_many_lines, reason = "sequential validation of config fields")]
 pub(crate) fn build_config(cfg: A2aConfig) -> Result<A2aConfig, FilterError> {
-    if cfg.max_body_bytes == 0 {
-        return Err("a2a: 'max_body_bytes' must be greater than 0".into());
-    }
+    validate_max_body_bytes("a2a", cfg.max_body_bytes)?;
 
-    if cfg.max_body_bytes > MAX_JSON_BODY_BYTES {
-        return Err(format!(
-            "a2a: max_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
-            cfg.max_body_bytes
-        )
-        .into());
-    }
-
-    validate_header_name("method", cfg.headers.method.as_deref())?;
-    validate_header_name("family", cfg.headers.family.as_deref())?;
-    validate_header_name("task_id", cfg.headers.task_id.as_deref())?;
-    validate_header_name("kind", cfg.headers.kind.as_deref())?;
-    validate_header_name("streaming", cfg.headers.streaming.as_deref())?;
-    validate_header_name("version", cfg.headers.version.as_deref())?;
+    validate_header_name("a2a", "method", cfg.headers.method.as_deref())?;
+    validate_header_name("a2a", "family", cfg.headers.family.as_deref())?;
+    validate_header_name("a2a", "task_id", cfg.headers.task_id.as_deref())?;
+    validate_header_name("a2a", "kind", cfg.headers.kind.as_deref())?;
+    validate_header_name("a2a", "streaming", cfg.headers.streaming.as_deref())?;
+    validate_header_name("a2a", "version", cfg.headers.version.as_deref())?;
 
     if cfg.task_routing.enabled {
         validate_task_routing(&cfg.task_routing)?;
@@ -314,39 +297,19 @@ pub(crate) fn build_config(cfg: A2aConfig) -> Result<A2aConfig, FilterError> {
     Ok(cfg)
 }
 
-/// Validate configured header names using the HTTP header-name parser.
-fn validate_header_name(field: &str, header_name: Option<&str>) -> Result<(), FilterError> {
-    let Some(header_name) = header_name else {
-        return Ok(());
-    };
-    if header_name.is_empty() {
-        return Err(format!("a2a: {field} header name must not be empty").into());
-    }
-    if http::HeaderName::from_bytes(header_name.as_bytes()).is_err() {
-        return Err(format!("a2a: {field} header name is not a valid HTTP header name").into());
-    }
-    Ok(())
-}
-
 /// Validate task routing configuration.
 fn validate_task_routing(tr: &TaskRoutingConfig) -> Result<(), FilterError> {
     if tr.ttl_seconds == 0 {
         return Err("a2a: task_routing.ttl_seconds must be greater than 0".into());
     }
 
-    if tr.max_response_body_bytes == 0 {
-        return Err("a2a: task_routing.max_response_body_bytes must be greater than 0".into());
-    }
+    validate_max_body_bytes("a2a: task_routing", tr.max_response_body_bytes)?;
 
-    if tr.max_response_body_bytes > MAX_JSON_BODY_BYTES {
-        return Err(format!(
-            "a2a: task_routing.max_response_body_bytes ({}) exceeds maximum ({MAX_JSON_BODY_BYTES})",
-            tr.max_response_body_bytes
-        )
-        .into());
-    }
-
-    validate_header_name("task_routing.route_cluster_header", Some(&tr.route_cluster_header))?;
+    validate_header_name(
+        "a2a",
+        "task_routing.route_cluster_header",
+        Some(&tr.route_cluster_header),
+    )?;
 
     // The route header must use the reserved x-praxis-a2a- prefix so that
     // the protocol layer's reserved-header rejection guard prevents clients

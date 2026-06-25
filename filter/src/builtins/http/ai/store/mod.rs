@@ -93,6 +93,12 @@ impl ResponseStoreRegistry {
     pub fn get(&self, name: &str) -> Option<Arc<dyn ResponseStore>> {
         self.stores.get(name).map(|r| Arc::clone(r.value()))
     }
+
+    /// Return whether two registry handles share the same backing storage.
+    #[must_use]
+    pub fn shares_storage_with(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.stores, &other.stores)
+    }
 }
 
 impl Default for ResponseStoreRegistry {

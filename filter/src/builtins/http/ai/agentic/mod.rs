@@ -7,6 +7,7 @@
 //! MCP static catalog behavior inside the built-in HTTP AI filter family.
 
 mod a2a;
+pub(crate) mod body_parsing;
 pub(crate) mod json_rpc;
 mod mcp;
 

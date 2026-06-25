@@ -19,7 +19,7 @@ Use with branch chains to route stateful and stateless requests to different clu
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `on_invalid` | `continue` \| `reject` | no | Behavior when the body cannot be classified. |
+| `on_invalid` | `continue` \| `reject` \| `error` | no | Behavior when the body cannot be classified. |
 | `max_body_bytes` | usize | no | Maximum body size in bytes for `StreamBuffer` mode. |
 | `headers` | ResponsesFormatHeaders | no | Header names for promoted classification facts. |
 | `headers.format` | string | no | Header name for the detected format (e.g. `openai_responses`, `openai_chat_completions`). |

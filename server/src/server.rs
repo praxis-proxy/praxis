@@ -107,9 +107,6 @@ struct ServerState {
     kv_stores: praxis_core::kv::KvStoreRegistry,
     /// Health check cancellation token.
     health_shutdown: Arc<Mutex<CancellationToken>>,
-    /// Response store registry.
-    #[cfg(feature = "ai-inference")]
-    response_stores: praxis_filter::ResponseStoreRegistry,
 }
 
 /// Build filter pipelines, health checks, and registries.
@@ -138,8 +135,6 @@ fn build_server_state(config: &Config, registry: &FilterRegistry) -> ServerState
         health_registry,
         kv_stores,
         health_shutdown,
-        #[cfg(feature = "ai-inference")]
-        response_stores,
     }
 }
 
@@ -187,8 +182,6 @@ fn spawn_watcher(
         kv_stores: state.kv_stores,
         pipelines: Arc::clone(&state.pipelines),
         registry: Arc::new(registry),
-        #[cfg(feature = "ai-inference")]
-        response_stores: state.response_stores,
         shutdown: CancellationToken::new(),
     });
     Some(handle)

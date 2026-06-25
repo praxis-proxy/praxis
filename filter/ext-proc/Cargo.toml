@@ -22,11 +22,15 @@ bytes = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
 praxis-filter = { workspace = true }
+prost-types = { workspace = true }
 praxis-proto = { workspace = true }
+prost-wkt-types = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
+sync_wrapper = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true }
+tokio-stream = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
 

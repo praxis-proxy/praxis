@@ -18,7 +18,7 @@ Extracts A2A protocol metadata from JSON-RPC request bodies and promotes method,
 | `headers.version` | string | no | Header name for A2A version (e.g. `x-praxis-a2a-version`). |
 | `max_body_bytes` | usize | no | Maximum body size in bytes for `StreamBuffer`. |
 | `method_aliases` | object<string, string> | no | Method aliases for compatibility (slash-delimited → `PascalCase`). |
-| `on_invalid` | `reject` \| `continue` | no | Invalid input handling behavior. |
+| `on_invalid` | `continue` \| `reject` \| `error` | no | Invalid input handling behavior. |
 | `task_routing` | TaskRoutingConfig | no | Task-ownership routing configuration. |
 | `task_routing.enabled` | bool | no | Whether task routing is enabled. |
 | `task_routing.max_response_body_bytes` | usize | no | Maximum response body bytes to buffer for task route capture. |

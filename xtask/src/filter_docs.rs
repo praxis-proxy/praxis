@@ -373,11 +373,15 @@ fn discover_all_filters(root: &Path, shared_items: &ModuleItems) -> Vec<FilterEn
 /// Extract all filters from a category directory using anchor-based discovery.
 fn extract_filters(category_dir: &Path, shared_items: &ModuleItems) -> Vec<FilterInfo> {
     let anchors = discover_filter_anchors(category_dir);
+
+    let mut category_shared = shared_items.clone_for_filter();
+    parse_category_shared_types(category_dir, &anchors, &mut category_shared);
+
     let filters: Vec<FilterInfo> = anchors
         .iter()
         .map(|anchor| {
             let files = scope_files_for_anchor(anchor, category_dir, &anchors);
-            let mut items = shared_items.clone_for_filter();
+            let mut items = category_shared.clone_for_filter();
             for path in &files {
                 let Ok(source) = fs::read_to_string(path) else {
                     continue;
@@ -391,6 +395,39 @@ fn extract_filters(category_dir: &Path, shared_items: &ModuleItems) -> Vec<Filte
         })
         .collect();
     merge_filter_variants(filters)
+}
+
+/// Parse non-anchor `.rs` files directly in the category root for shared
+/// enum/struct types (e.g. `on_invalid.rs` in the AI category).  Only
+/// struct field info and enums survive `clone_for_filter`, so module docs
+/// and config structs from these files do not leak into individual filter
+/// docs.
+fn parse_category_shared_types(category_dir: &Path, anchors: &[FilterAnchor], out: &mut ModuleItems) {
+    let Ok(entries) = fs::read_dir(category_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        if path.file_name().is_some_and(|n| n == "mod.rs" || n == "tests.rs") {
+            continue;
+        }
+        if anchors.iter().any(|a| a.file == path) {
+            continue;
+        }
+        let Ok(source) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(file) = syn::parse_file(&source) else {
+            continue;
+        };
+        parse_file_items(&file, out);
+    }
+    out.configs.clear();
+    out.module_docs.clear();
+    out.struct_docs.clear();
 }
 
 /// Discover filter anchor files under a directory tree.
