@@ -2,14 +2,14 @@
 // Copyright (c) 2026 Praxis Contributors
 
 //! Structured error responses for fatal proxy errors.
-//!
-//! Produces RFC 9457 Problem Details (`application/problem+json`)
-//! responses when the proxy cannot reach the upstream.
 
 use bytes::Bytes;
 use pingora_core::ErrorType;
 use pingora_proxy::{FailToProxy, Session};
+use praxis_filter::ErrorResponseFormat;
 use tracing::{debug, error};
+
+use crate::http::pingora::context::PingoraRequestCtx;
 
 /// Classified proxy error with HTTP status and machine-readable fields.
 struct ProxyError {
@@ -24,20 +24,30 @@ struct ProxyError {
 /// Handle a fatal proxy error by writing a structured error response
 /// to the downstream client.
 ///
+/// The response format is determined by [`ErrorResponseFormat`] stored
+/// in the request extensions. AI classifier filters set this to
+/// [`OpenAi`] or [`Anthropic`] during request processing; all other
+/// requests get the default [`ProblemDetails`] (RFC 9457) format.
+///
 /// Guards against double-writes (filter rejections that already sent a
 /// response), dead downstream connections, and HEAD requests (body
 /// suppressed). Writable downstream failures (e.g. client body read
 /// timeout) receive a structured 400 response.
-pub(super) async fn execute(session: &mut Session, e: &pingora_core::Error) -> FailToProxy {
+///
+/// [`OpenAi`]: ErrorResponseFormat::OpenAi
+/// [`Anthropic`]: ErrorResponseFormat::Anthropic
+/// [`ProblemDetails`]: ErrorResponseFormat::ProblemDetails
+pub(super) async fn execute(session: &mut Session, e: &pingora_core::Error, ctx: &PingoraRequestCtx) -> FailToProxy {
     let etype = e.etype().clone();
+    let format = ctx.extensions.get::<ErrorResponseFormat>().copied().unwrap_or_default();
 
     if let ErrorType::HTTPStatus(code) = etype {
-        return handle_http_status(session, code).await;
+        return handle_http_status(session, code, format).await;
     }
 
     let source = e.esource();
     if matches!(source, pingora_core::ErrorSource::Downstream) {
-        return handle_downstream(session, &etype).await;
+        return handle_downstream(session, &etype, format).await;
     }
 
     let err = classify_error(&etype, source);
@@ -50,14 +60,14 @@ pub(super) async fn execute(session: &mut Session, e: &pingora_core::Error) -> F
         return done(err.status);
     }
 
-    write_error_response(session, err).await
+    write_error_response(session, err, format).await
 }
 
 /// Structured response for explicit HTTP status errors.
 ///
 /// Filter rejections typically write their own response before raising
 /// `HTTPStatus`; the double-write guard returns immediately in that case.
-async fn handle_http_status(session: &mut Session, code: u16) -> FailToProxy {
+async fn handle_http_status(session: &mut Session, code: u16, format: ErrorResponseFormat) -> FailToProxy {
     if final_response_written(session) {
         return done(code);
     }
@@ -66,7 +76,7 @@ async fn handle_http_status(session: &mut Session, code: u16) -> FailToProxy {
         message: status_title(code),
         status: code,
     };
-    write_error_response(session, err).await
+    write_error_response(session, err, format).await
 }
 
 /// Handle a downstream-origin error.
@@ -74,7 +84,7 @@ async fn handle_http_status(session: &mut Session, code: u16) -> FailToProxy {
 /// Dead connections (write failure, read failure, closed) are silently
 /// abandoned. Writable failures (e.g. body read timeout) receive a
 /// structured 400 response, matching Pingora's default status choice.
-async fn handle_downstream(session: &mut Session, etype: &ErrorType) -> FailToProxy {
+async fn handle_downstream(session: &mut Session, etype: &ErrorType, format: ErrorResponseFormat) -> FailToProxy {
     if is_connection_dead(etype) {
         debug!("downstream connection dead, skipping error response");
         return done(0);
@@ -87,7 +97,7 @@ async fn handle_downstream(session: &mut Session, etype: &ErrorType) -> FailToPr
         message: "Request error",
         status: 400,
     };
-    write_error_response(session, err).await
+    write_error_response(session, err, format).await
 }
 
 /// Whether the downstream connection is too broken to write a response.
@@ -99,24 +109,49 @@ fn is_connection_dead(etype: &ErrorType) -> bool {
 }
 
 /// Build and write the error response to the downstream session.
-async fn write_error_response(session: &mut Session, err: ProxyError) -> FailToProxy {
-    let body = format!(
-        r#"{{"type":"about:blank","title":"{}","status":{},"detail":"{}"}}"#,
-        status_title(err.status),
-        err.status,
-        err.message,
-    );
+async fn write_error_response(session: &mut Session, err: ProxyError, format: ErrorResponseFormat) -> FailToProxy {
+    let (body, content_type) = format_error_body(&err, format);
     let body_bytes = Bytes::from(body);
 
     session.set_keepalive(None);
 
-    let Some(header) = build_header(err.status, body_bytes.len()) else {
+    let Some(header) = build_header(err.status, body_bytes.len(), content_type) else {
         return done(err.status);
     };
 
     let is_head = session.req_header().method == http::Method::HEAD;
     send_error_response(session, header, body_bytes, is_head).await;
     done(err.status)
+}
+
+/// Format the error body and content-type for the given format.
+fn format_error_body(err: &ProxyError, format: ErrorResponseFormat) -> (String, &'static str) {
+    match format {
+        ErrorResponseFormat::OpenAi => (
+            format!(
+                r#"{{"error":{{"message":"{}","type":"proxy_error","code":"{}"}}}}"#,
+                err.message, err.code,
+            ),
+            "application/json",
+        ),
+        ErrorResponseFormat::Anthropic => (
+            format!(
+                r#"{{"type":"error","error":{{"type":"{}","message":"{}"}},"request_id":null}}"#,
+                anthropic_error_type(err.status),
+                err.message,
+            ),
+            "application/json",
+        ),
+        ErrorResponseFormat::ProblemDetails => (
+            format!(
+                r#"{{"type":"about:blank","title":"{}","status":{},"detail":"{}"}}"#,
+                status_title(err.status),
+                err.status,
+                err.message,
+            ),
+            "application/problem+json",
+        ),
+    }
 }
 
 /// RFC 9457 title for common proxy error status codes.
@@ -128,6 +163,17 @@ fn status_title(status: u16) -> &'static str {
         503 => "Service Unavailable",
         504 => "Gateway Timeout",
         _ => "Proxy Error",
+    }
+}
+
+/// Anthropic error type for the given HTTP status code.
+fn anthropic_error_type(status: u16) -> &'static str {
+    match status {
+        429 => "rate_limit_error",
+        500 => "api_error",
+        504 => "timeout_error",
+        529 => "overloaded_error",
+        _ => "api_error",
     }
 }
 
@@ -144,7 +190,7 @@ async fn send_error_response(session: &mut Session, header: pingora_http::Respon
 }
 
 /// Build a response header with content-type and content-length.
-fn build_header(status: u16, content_length: usize) -> Option<pingora_http::ResponseHeader> {
+fn build_header(status: u16, content_length: usize, content_type: &str) -> Option<pingora_http::ResponseHeader> {
     let mut header = match pingora_http::ResponseHeader::build(status, Some(2)) {
         Ok(h) => h,
         Err(err) => {
@@ -153,9 +199,7 @@ fn build_header(status: u16, content_length: usize) -> Option<pingora_http::Resp
         },
     };
 
-    if header
-        .insert_header("content-type", "application/problem+json")
-        .is_err()
+    if header.insert_header("content-type", content_type).is_err()
         || header
             .insert_header("content-length", content_length.to_string())
             .is_err()
@@ -236,16 +280,81 @@ mod tests {
     }
 
     #[test]
+    fn default_format_is_problem_details() {
+        assert_eq!(ErrorResponseFormat::default(), ErrorResponseFormat::ProblemDetails);
+    }
+
+    #[test]
     fn problem_details_body_has_rfc9457_fields() {
-        let status = 502;
-        let title = status_title(status);
-        let body = format!(
-            r#"{{"type":"about:blank","title":"{title}","status":{status},"detail":"Upstream connection refused"}}"#,
+        let err = ProxyError {
+            code: "upstream_connect_refused",
+            message: "Upstream connection refused",
+            status: 502,
+        };
+        let (body, ct) = format_error_body(&err, ErrorResponseFormat::ProblemDetails);
+        assert_eq!(ct, "application/problem+json");
+        assert!(body.contains(r#""type":"about:blank""#), "body: {body}");
+        assert!(body.contains(r#""title":"Bad Gateway""#), "body: {body}");
+        assert!(body.contains(r#""status":502"#), "body: {body}");
+        assert!(
+            body.contains(r#""detail":"Upstream connection refused""#),
+            "body: {body}"
         );
-        assert!(body.contains(r#""type":"about:blank""#));
-        assert!(body.contains(r#""title":"Bad Gateway""#));
-        assert!(body.contains(r#""status":502"#));
-        assert!(body.contains(r#""detail":"Upstream connection refused""#));
+    }
+
+    #[test]
+    fn openai_body_has_error_envelope() {
+        let err = ProxyError {
+            code: "upstream_connect_refused",
+            message: "Upstream connection refused",
+            status: 502,
+        };
+        let (body, ct) = format_error_body(&err, ErrorResponseFormat::OpenAi);
+        assert_eq!(ct, "application/json");
+        assert!(body.contains(r#""type":"proxy_error""#), "body: {body}");
+        assert!(body.contains(r#""code":"upstream_connect_refused""#), "body: {body}");
+        assert!(
+            body.contains(r#""message":"Upstream connection refused""#),
+            "body: {body}"
+        );
+    }
+
+    #[test]
+    fn anthropic_body_has_error_envelope() {
+        let err = ProxyError {
+            code: "upstream_connect_refused",
+            message: "Upstream connection refused",
+            status: 502,
+        };
+        let (body, ct) = format_error_body(&err, ErrorResponseFormat::Anthropic);
+        assert_eq!(ct, "application/json");
+        assert!(body.contains(r#""type":"error""#), "body: {body}");
+        assert!(body.contains(r#""type":"api_error""#), "body: {body}");
+        assert!(body.contains(r#""request_id":null"#), "body: {body}");
+        assert!(
+            body.contains(r#""message":"Upstream connection refused""#),
+            "body: {body}"
+        );
+    }
+
+    #[test]
+    fn anthropic_timeout_uses_timeout_error_type() {
+        let err = ProxyError {
+            code: "upstream_read_timeout",
+            message: "Upstream read timed out",
+            status: 504,
+        };
+        let (body, _) = format_error_body(&err, ErrorResponseFormat::Anthropic);
+        assert!(body.contains(r#""type":"timeout_error""#), "body: {body}");
+    }
+
+    #[test]
+    fn anthropic_error_type_maps_status_codes() {
+        assert_eq!(anthropic_error_type(429), "rate_limit_error");
+        assert_eq!(anthropic_error_type(504), "timeout_error");
+        assert_eq!(anthropic_error_type(529), "overloaded_error");
+        assert_eq!(anthropic_error_type(500), "api_error");
+        assert_eq!(anthropic_error_type(502), "api_error");
     }
 
     #[test]

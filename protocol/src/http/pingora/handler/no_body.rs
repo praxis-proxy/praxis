@@ -163,11 +163,11 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
         handle_connect_failure(ctx, e)
     }
 
-    async fn fail_to_proxy(&self, session: &mut Session, e: &pingora_core::Error, _ctx: &mut Self::CTX) -> FailToProxy
+    async fn fail_to_proxy(&self, session: &mut Session, e: &pingora_core::Error, ctx: &mut Self::CTX) -> FailToProxy
     where
         Self::CTX: Send + Sync,
     {
-        fail_to_proxy::execute(session, e).await
+        fail_to_proxy::execute(session, e, ctx).await
     }
 
     async fn upstream_request_filter(

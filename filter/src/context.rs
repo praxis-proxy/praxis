@@ -682,6 +682,28 @@ pub struct Response {
 }
 
 // -----------------------------------------------------------------------------
+// ErrorResponseFormat
+// -----------------------------------------------------------------------------
+
+/// Error response format for proxy error responses.
+///
+/// Stored in [`RequestExtensions`] by AI classifier filters to
+/// control the format of error responses produced by
+/// `fail_to_proxy`. When absent, defaults to [`ProblemDetails`].
+///
+/// [`ProblemDetails`]: Self::ProblemDetails
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ErrorResponseFormat {
+    /// RFC 9457 Problem Details (`application/problem+json`).
+    #[default]
+    ProblemDetails,
+    /// OpenAI-compatible error envelope (`application/json`).
+    OpenAi,
+    /// Anthropic Messages API error envelope (`application/json`).
+    Anthropic,
+}
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
