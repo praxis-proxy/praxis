@@ -260,28 +260,30 @@ reference implementation.
 ```text
 server
   ├── praxis-http-callout (filter, opt-in feature flag)
-  │     ├── praxis-core (callout module)
+  │     ├── praxis-core (feature = "callout")
   │     ├── praxis-filter (HttpFilter, FilterResultSet)
   │     └── serde_json_path
   │
   └── praxis-filter
-        └── praxis-core
+        └── praxis-core (feature = "callout")
               └── callout (available to any builtin)
 
-core/src/callout/  (praxis_core::callout)
+core/src/callout/  (praxis_core::callout, feature = "callout")
   └── reqwest [rustls-tls]
 ```
 
 **`praxis_core::callout`** (`core/src/callout/`) —
 shared HTTP callout client module: pooled
 `reqwest::Client`, circuit breaker, timeout, failure
-mode, tracing. Lives in `praxis-core` so custom proxy
-builds using the Praxis framework have access to it
-without depending on `praxis-filter`. Any filter
-that needs outbound HTTP requests uses this module.
-Contains its own circuit breaker (the traffic
-management filter's breaker spans two phases; the
-callout's operates within a single async call).
+mode, tracing. Gated behind the `callout` cargo
+feature flag on `praxis-core` so that downstream
+crates only pay the dependency cost when they need
+outbound HTTP. Lives in `praxis-core` so custom
+proxy builds using the Praxis framework have access
+to it without depending on `praxis-filter`. Contains
+its own circuit breaker (the traffic management
+filter's breaker spans two phases; the callout's
+operates within a single async call).
 
 **`praxis-http-callout`** (`filter/http-callout/`) —
 thin `HttpFilter` wrapper wiring the callout client
@@ -309,11 +311,12 @@ is chosen because:
   breakage risk is low for a long-lived dependency.
 
 **Dependency cost:** reqwest pulls in hyper, h2,
-quinn, tower, and rustls transitively. This is a
-non-trivial addition to `praxis-core`. If the
-dependency footprint becomes a concern, the callout
-module can be gated behind a cargo feature flag on
-core so downstream crates opt in.
+quinn, tower, and rustls transitively. To avoid
+imposing this on downstream crates that only need
+config types, the callout module is gated behind a
+`callout` cargo feature flag on `praxis-core` from
+day one. Crates that need outbound HTTP callouts
+opt in with `praxis-core = { features = ["callout"] }`.
 
 Alternatives considered: `hyper` directly (requires
 manual pool and TLS management), Pingora's upstream
