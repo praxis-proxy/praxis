@@ -118,6 +118,9 @@ fn streaming_backend_error_returns_sse_events() {
     let backend_error = r#"{"error":{"message":"The model does not exist.","type":"NotFoundError","code":404}}"#;
     let backend_guard = Backend::status(404, backend_error)
         .header("content-type", "application/json")
+        .header("content-encoding", "gzip")
+        .header("content-range", "bytes 0-99/100")
+        .header("etag", r#""upstream""#)
         .start_with_shutdown();
     let proxy_port = free_port();
 
@@ -135,23 +138,43 @@ fn streaming_backend_error_returns_sse_events() {
         Some("text/event-stream"),
         "streaming error should have SSE content type"
     );
+    assert_eq!(
+        parse_header(&raw, "content-encoding"),
+        None,
+        "rewritten streaming errors should not keep upstream content-encoding"
+    );
+    assert_eq!(
+        parse_header(&raw, "content-range"),
+        None,
+        "rewritten streaming errors should not keep upstream content-range"
+    );
+    assert_eq!(
+        parse_header(&raw, "etag"),
+        None,
+        "rewritten streaming errors should not keep upstream etag"
+    );
 
     let body = parse_body(&raw);
     let events: Vec<&str> = body.split("\n\n").filter(|s| !s.is_empty()).collect();
     assert_eq!(events.len(), 3, "should have 3 SSE events: {body}");
 
-    for event in &events {
-        assert!(event.starts_with("data: "), "each event should use data-only framing");
-    }
-
-    let created: serde_json::Value = serde_json::from_str(events[0].strip_prefix("data: ").unwrap()).unwrap();
+    let (created_name, created) = parse_sse_event(events[0]);
+    assert_eq!(created_name, "response.created");
     assert_eq!(created["type"], "response.created");
     assert_eq!(created["response"]["status"], "in_progress");
+    assert!(created["response"]["completed_at"].is_null());
+    assert!(created["response"]["error"].is_null());
 
-    let error: serde_json::Value = serde_json::from_str(events[2].strip_prefix("data: ").unwrap()).unwrap();
+    let (in_progress_name, in_progress) = parse_sse_event(events[1]);
+    assert_eq!(in_progress_name, "response.in_progress");
+    assert_eq!(in_progress["type"], "response.in_progress");
+
+    let (error_name, error) = parse_sse_event(events[2]);
+    assert_eq!(error_name, "error");
     assert_eq!(error["type"], "error");
-    assert_eq!(error["code"], "404");
-    assert_eq!(error["message"], "The model does not exist.");
+    assert_eq!(error["error"]["type"], "NotFoundError");
+    assert_eq!(error["error"]["code"], "404");
+    assert_eq!(error["error"]["message"], "The model does not exist.");
 }
 
 #[test]
@@ -159,6 +182,9 @@ fn non_streaming_backend_error_returns_json() {
     let backend_error = r#"{"error":{"message":"The model does not exist.","type":"NotFoundError","code":404}}"#;
     let backend_guard = Backend::status(404, backend_error)
         .header("content-type", "application/json")
+        .header("content-encoding", "gzip")
+        .header("content-range", "bytes 0-99/100")
+        .header("etag", r#""upstream""#)
         .start_with_shutdown();
     let proxy_port = free_port();
 
@@ -180,12 +206,27 @@ fn non_streaming_backend_error_returns_json() {
         Some("application/json"),
         "non-streaming error should have JSON content type"
     );
+    assert_eq!(
+        parse_header(&raw, "content-encoding"),
+        None,
+        "rewritten JSON errors should not keep upstream content-encoding"
+    );
+    assert_eq!(
+        parse_header(&raw, "content-range"),
+        None,
+        "rewritten JSON errors should not keep upstream content-range"
+    );
+    assert_eq!(
+        parse_header(&raw, "etag"),
+        None,
+        "rewritten JSON errors should not keep upstream etag"
+    );
 
     let parsed: serde_json::Value = serde_json::from_str(&parse_body(&raw)).unwrap();
-    assert_eq!(parsed["type"], "error");
-    assert_eq!(parsed["code"], "404");
-    assert_eq!(parsed["message"], "The model does not exist.");
-    assert!(parsed["param"].is_null());
+    assert_eq!(parsed["error"]["type"], "NotFoundError");
+    assert_eq!(parsed["error"]["code"], "404");
+    assert_eq!(parsed["error"]["message"], "The model does not exist.");
+    assert!(parsed["error"]["param"].is_null());
 }
 
 #[test]
@@ -232,4 +273,17 @@ filter_chains:
               - "127.0.0.1:{backend_port}"
 "#
     )
+}
+
+fn parse_sse_event(frame: &str) -> (&str, serde_json::Value) {
+    let mut lines = frame.lines();
+    let event_type = lines
+        .next()
+        .and_then(|line| line.strip_prefix("event: "))
+        .expect("SSE frame should start with event line");
+    let data = lines
+        .next()
+        .and_then(|line| line.strip_prefix("data: "))
+        .expect("SSE frame should contain data line");
+    (event_type, serde_json::from_str(data).expect("SSE data should be JSON"))
 }

@@ -184,6 +184,9 @@ fn should_reformat_error(ctx: &HttpFilterContext<'_>) -> bool {
 fn apply_error_response_headers(ctx: &mut HttpFilterContext<'_>, is_streaming: bool) {
     if let Some(resp) = &mut ctx.response_header {
         resp.headers.remove(http::header::CONTENT_LENGTH);
+        resp.headers.remove(http::header::CONTENT_ENCODING);
+        resp.headers.remove(http::header::CONTENT_RANGE);
+        resp.headers.remove(http::header::ETAG);
 
         if is_streaming {
             resp.status = http::StatusCode::OK;
@@ -243,14 +246,16 @@ fn reformat_error_body(ctx: &HttpFilterContext<'_>, body: &mut Option<Bytes>, en
 
     let backend_body = body.as_deref().and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("");
 
-    let (code, message) = extract_backend_error(backend_body, original_status);
+    let backend_error = extract_backend_error(backend_body, original_status);
 
     let replacement = if is_streaming {
         let response_id = ctx.get_metadata("responses.response_id").unwrap_or("resp_unknown");
         let model = ctx.get_metadata("openai_responses_format.model").unwrap_or("unknown");
-        build_sse_error_body(response_id, model, &code, &message)
+        let store = ctx.get_metadata("responses.store").is_none_or(|v| v != "false");
+        let background = ctx.get_metadata("responses.background").is_some_and(|v| v == "true");
+        build_sse_error_body(response_id, model, store, background, &backend_error)
     } else {
-        build_json_error_body(&code, &message)
+        build_json_error_body(&backend_error)
     };
 
     *body = Some(replacement);
@@ -331,64 +336,169 @@ fn resolve_conversation_id(ctx: &HttpFilterContext<'_>, body: &serde_json::Value
     }
 }
 
+/// Error details normalized from an upstream backend response.
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct BackendError {
+    /// Machine-readable error code.
+    code: String,
+    /// Error category.
+    error_type: String,
+    /// Human-readable error message.
+    message: String,
+}
+
 /// Extract error details from the backend response body.
 ///
 /// Tries common formats: OpenAI (`error.message` + `error.code`), simple
 /// (`message`), `FastAPI` (`detail`). Falls back to the HTTP status code.
-fn extract_backend_error(body: &str, status: u16) -> (String, String) {
+fn extract_backend_error(body: &str, status: u16) -> BackendError {
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
         if let Some(error) = json.get("error") {
-            let message = error
-                .get("message")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("unknown error");
-            let code = error
-                .get("code")
-                .and_then(|v| {
-                    v.as_str()
-                        .map(str::to_owned)
-                        .or_else(|| v.as_u64().map(|n| n.to_string()))
-                })
-                .unwrap_or_else(|| status.to_string());
-            return (code, message.to_owned());
+            return backend_error_from_error_object(error, status);
         }
 
         if let Some(msg) = json.get("message").and_then(serde_json::Value::as_str) {
-            return (status.to_string(), msg.to_owned());
+            return backend_error_from_message(status, msg);
         }
 
         if let Some(detail) = json.get("detail").and_then(serde_json::Value::as_str) {
-            return (status.to_string(), detail.to_owned());
+            return backend_error_from_message(status, detail);
         }
     }
 
-    (status.to_string(), format!("upstream error (HTTP {status})"))
+    fallback_backend_error(status)
 }
 
-/// Build a minimal Responses API response object for error SSE events.
-fn error_response_object(response_id: &str, model: &str) -> serde_json::Value {
+/// Normalize an OpenAI-style `error` object.
+fn backend_error_from_error_object(error: &serde_json::Value, status: u16) -> BackendError {
+    let message = error
+        .get("message")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("unknown error");
+    let error_type = error
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| default_error_type(status));
+    let code = error
+        .get("code")
+        .and_then(normalize_error_code)
+        .unwrap_or_else(|| status.to_string());
+
+    BackendError {
+        code,
+        error_type: error_type.to_owned(),
+        message: message.to_owned(),
+    }
+}
+
+/// Normalize an error code JSON value into a string.
+fn normalize_error_code(value: &serde_json::Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| value.as_u64().map(|n| n.to_string()))
+}
+
+/// Build a backend error from a plain message field.
+fn backend_error_from_message(status: u16, message: &str) -> BackendError {
+    BackendError {
+        code: status.to_string(),
+        error_type: default_error_type(status).to_owned(),
+        message: message.to_owned(),
+    }
+}
+
+/// Build a backend error when the upstream body has no usable details.
+fn fallback_backend_error(status: u16) -> BackendError {
+    BackendError {
+        code: status.to_string(),
+        error_type: default_error_type(status).to_owned(),
+        message: format!("upstream error (HTTP {status})"),
+    }
+}
+
+/// Return an error type fallback for an upstream status code.
+fn default_error_type(status: u16) -> &'static str {
+    match status {
+        404 => "not_found",
+        429 => "too_many_requests",
+        400..=499 => "invalid_request",
+        _ => "server_error",
+    }
+}
+
+/// Build a reusable error payload object.
+fn error_payload(error: &BackendError) -> serde_json::Value {
+    serde_json::json!({
+        "type": error.error_type.as_str(),
+        "code": error.code.as_str(),
+        "message": error.message.as_str(),
+        "param": null,
+    })
+}
+
+/// Build a Responses API response snapshot for error SSE events.
+#[expect(
+    clippy::too_many_lines,
+    reason = "Responses API snapshot intentionally includes the full stable field set"
+)]
+fn error_response_object(response_id: &str, model: &str, store: bool, background: bool) -> serde_json::Value {
     let created_at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
 
     serde_json::json!({
         "id": response_id,
         "object": "response",
         "created_at": created_at,
+        "completed_at": null,
         "status": "in_progress",
+        "incomplete_details": null,
         "model": model,
+        "previous_response_id": null,
+        "instructions": null,
         "output": [],
+        "error": null,
+        "tools": [],
+        "tool_choice": "auto",
+        "truncation": "disabled",
+        "parallel_tool_calls": true,
+        "text": {
+            "format": {
+                "type": "text"
+            }
+        },
+        "top_p": 1.0,
+        "presence_penalty": 0.0,
+        "frequency_penalty": 0.0,
+        "top_logprobs": 0,
+        "temperature": 1.0,
+        "reasoning": null,
+        "usage": null,
+        "max_output_tokens": null,
+        "max_tool_calls": null,
+        "store": store,
+        "background": background,
+        "service_tier": "default",
+        "metadata": {},
+        "safety_identifier": null,
+        "prompt_cache_key": null,
     })
 }
 
 /// Build SSE-formatted error body for streaming Responses API requests.
 ///
-/// Emits three events using `data:`-only framing (no `event:` lines):
-/// `response.created`, `response.in_progress`, `error`.
-fn build_sse_error_body(response_id: &str, model: &str, code: &str, message: &str) -> Bytes {
-    let response_obj = error_response_object(response_id, model);
+/// Emits `response.created`, `response.in_progress`, and `error` events.
+fn build_sse_error_body(
+    response_id: &str,
+    model: &str,
+    store: bool,
+    background: bool,
+    backend_error: &BackendError,
+) -> Bytes {
+    let response_obj = error_response_object(response_id, model, store, background);
 
     let created = serde_json::json!({
         "type": "response.created",
-        "response": response_obj,
+        "response": response_obj.clone(),
         "sequence_number": 0,
     });
     let in_progress = serde_json::json!({
@@ -396,25 +506,23 @@ fn build_sse_error_body(response_id: &str, model: &str, code: &str, message: &st
         "response": response_obj,
         "sequence_number": 1,
     });
+    // OpenResponses `ErrorStreamingEvent` nests error details under `error`.
     let error = serde_json::json!({
         "type": "error",
-        "code": code,
-        "message": message,
-        "param": null,
+        "error": error_payload(backend_error),
         "sequence_number": 2,
     });
 
-    Bytes::from(format!("data: {created}\n\ndata: {in_progress}\n\ndata: {error}\n\n"))
+    Bytes::from(format!(
+        "event: response.created\ndata: {created}\n\nevent: response.in_progress\ndata: {in_progress}\n\nevent: error\ndata: {error}\n\n"
+    ))
 }
 
 /// Build JSON error body for non-streaming Responses API requests.
-fn build_json_error_body(code: &str, message: &str) -> Bytes {
+fn build_json_error_body(backend_error: &BackendError) -> Bytes {
     Bytes::from(
         serde_json::json!({
-            "type": "error",
-            "code": code,
-            "message": message,
-            "param": null,
+            "error": error_payload(backend_error),
         })
         .to_string(),
     )
@@ -881,10 +989,14 @@ mod tests {
     #[test]
     fn extract_backend_error_openai_format() {
         let body = r#"{"error":{"message":"The model does not exist.","type":"NotFoundError","code":404}}"#;
-        let (code, message) = extract_backend_error(body, 404);
-        assert_eq!(code, "404", "code should be extracted from error.code");
+        let error = extract_backend_error(body, 404);
+        assert_eq!(error.code, "404", "code should be extracted from error.code");
         assert_eq!(
-            message, "The model does not exist.",
+            error.error_type, "NotFoundError",
+            "type should be extracted from error.type"
+        );
+        assert_eq!(
+            error.message, "The model does not exist.",
             "message should be extracted from error.message"
         );
     }
@@ -892,39 +1004,44 @@ mod tests {
     #[test]
     fn extract_backend_error_string_code() {
         let body = r#"{"error":{"message":"Invalid API key","code":"invalid_api_key"}}"#;
-        let (code, message) = extract_backend_error(body, 401);
-        assert_eq!(code, "invalid_api_key", "string code should be preserved");
-        assert_eq!(message, "Invalid API key");
+        let error = extract_backend_error(body, 401);
+        assert_eq!(error.code, "invalid_api_key", "string code should be preserved");
+        assert_eq!(error.error_type, "invalid_request");
+        assert_eq!(error.message, "Invalid API key");
     }
 
     #[test]
     fn extract_backend_error_simple_format() {
         let body = r#"{"message":"Something went wrong"}"#;
-        let (code, message) = extract_backend_error(body, 500);
-        assert_eq!(code, "500", "code should fall back to HTTP status");
-        assert_eq!(message, "Something went wrong");
+        let error = extract_backend_error(body, 500);
+        assert_eq!(error.code, "500", "code should fall back to HTTP status");
+        assert_eq!(error.error_type, "server_error");
+        assert_eq!(error.message, "Something went wrong");
     }
 
     #[test]
     fn extract_backend_error_fastapi_format() {
         let body = r#"{"detail":"Not found"}"#;
-        let (code, message) = extract_backend_error(body, 404);
-        assert_eq!(code, "404");
-        assert_eq!(message, "Not found");
+        let error = extract_backend_error(body, 404);
+        assert_eq!(error.code, "404");
+        assert_eq!(error.error_type, "not_found");
+        assert_eq!(error.message, "Not found");
     }
 
     #[test]
     fn extract_backend_error_non_json() {
-        let (code, message) = extract_backend_error("not json", 502);
-        assert_eq!(code, "502");
-        assert_eq!(message, "upstream error (HTTP 502)");
+        let error = extract_backend_error("not json", 502);
+        assert_eq!(error.code, "502");
+        assert_eq!(error.error_type, "server_error");
+        assert_eq!(error.message, "upstream error (HTTP 502)");
     }
 
     #[test]
     fn extract_backend_error_empty_body() {
-        let (code, message) = extract_backend_error("", 500);
-        assert_eq!(code, "500");
-        assert_eq!(message, "upstream error (HTTP 500)");
+        let error = extract_backend_error("", 500);
+        assert_eq!(error.code, "500");
+        assert_eq!(error.error_type, "server_error");
+        assert_eq!(error.message, "upstream error (HTTP 500)");
     }
 
     // -------------------------------------------------------------------------
@@ -932,45 +1049,63 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "single SSE shape regression asserts all emitted frames"
+    )]
     fn build_sse_error_body_has_three_events() {
-        let body = build_sse_error_body("resp_test123", "gpt-4.1", "404", "Model not found");
+        let backend_error = BackendError {
+            code: "404".to_owned(),
+            error_type: "not_found".to_owned(),
+            message: "Model not found".to_owned(),
+        };
+        let body = build_sse_error_body("resp_test123", "gpt-4.1", true, false, &backend_error);
         let text = std::str::from_utf8(&body).unwrap();
 
         let events: Vec<&str> = text.split("\n\n").filter(|s| !s.is_empty()).collect();
         assert_eq!(events.len(), 3, "SSE body should have 3 events");
 
-        assert!(events[0].starts_with("data: "), "event 0 should use data-only framing");
-        assert!(events[1].starts_with("data: "), "event 1 should use data-only framing");
-        assert!(events[2].starts_with("data: "), "event 2 should use data-only framing");
-
-        let e0: serde_json::Value = serde_json::from_str(events[0].strip_prefix("data: ").unwrap()).unwrap();
+        let (name0, e0) = parse_sse_event(events[0]);
+        assert_eq!(name0, "response.created", "event 0 should use named SSE framing");
         assert_eq!(e0["type"], "response.created");
         assert_eq!(e0["sequence_number"], 0);
         assert_eq!(e0["response"]["id"], "resp_test123");
         assert_eq!(e0["response"]["model"], "gpt-4.1");
         assert_eq!(e0["response"]["status"], "in_progress");
+        assert!(e0["response"]["completed_at"].is_null());
+        assert!(e0["response"]["error"].is_null());
+        assert_eq!(e0["response"]["store"], true);
+        assert_eq!(e0["response"]["background"], false);
 
-        let e1: serde_json::Value = serde_json::from_str(events[1].strip_prefix("data: ").unwrap()).unwrap();
+        let (name1, e1) = parse_sse_event(events[1]);
+        assert_eq!(name1, "response.in_progress", "event 1 should use named SSE framing");
         assert_eq!(e1["type"], "response.in_progress");
         assert_eq!(e1["sequence_number"], 1);
 
-        let e2: serde_json::Value = serde_json::from_str(events[2].strip_prefix("data: ").unwrap()).unwrap();
+        let (name2, e2) = parse_sse_event(events[2]);
+        assert_eq!(name2, "error", "event 2 should use named SSE framing");
         assert_eq!(e2["type"], "error");
-        assert_eq!(e2["code"], "404");
-        assert_eq!(e2["message"], "Model not found");
-        assert!(e2["param"].is_null());
+        assert_eq!(e2["error"]["type"], "not_found");
+        assert_eq!(e2["error"]["code"], "404");
+        assert_eq!(e2["error"]["message"], "Model not found");
+        assert!(e2["error"]["param"].is_null());
         assert_eq!(e2["sequence_number"], 2);
     }
 
     #[test]
     fn build_json_error_body_has_correct_shape() {
-        let body = build_json_error_body("404", "Model not found");
+        let backend_error = BackendError {
+            code: "404".to_owned(),
+            error_type: "not_found".to_owned(),
+            message: "Model not found".to_owned(),
+        };
+        let body = build_json_error_body(&backend_error);
         let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-        assert_eq!(parsed["type"], "error");
-        assert_eq!(parsed["code"], "404");
-        assert_eq!(parsed["message"], "Model not found");
-        assert!(parsed["param"].is_null());
+        assert_eq!(parsed["error"]["type"], "not_found");
+        assert_eq!(parsed["error"]["code"], "404");
+        assert_eq!(parsed["error"]["message"], "Model not found");
+        assert!(parsed["error"]["param"].is_null());
     }
 
     // -------------------------------------------------------------------------
@@ -1073,6 +1208,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "single header rewrite regression covers stale representation headers"
+    )]
     async fn on_response_sets_streaming_headers() {
         let filter = make_filter();
         let req = Box::leak(Box::new(crate::test_utils::make_request(
@@ -1087,6 +1226,14 @@ mod tests {
         resp.status = http::StatusCode::NOT_FOUND;
         resp.headers
             .insert(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("42"));
+        resp.headers
+            .insert(http::header::CONTENT_ENCODING, http::HeaderValue::from_static("gzip"));
+        resp.headers.insert(
+            http::header::CONTENT_RANGE,
+            http::HeaderValue::from_static("bytes 0-41/42"),
+        );
+        resp.headers
+            .insert(http::header::ETAG, http::HeaderValue::from_static("\"upstream\""));
         ctx.response_header = Some(&mut resp);
 
         drop(filter.on_response(&mut ctx).await.unwrap());
@@ -1103,6 +1250,15 @@ mod tests {
             resp.headers.get(http::header::CONTENT_LENGTH).is_none(),
             "content-length should be removed"
         );
+        assert!(
+            resp.headers.get(http::header::CONTENT_ENCODING).is_none(),
+            "content-encoding should be removed"
+        );
+        assert!(
+            resp.headers.get(http::header::CONTENT_RANGE).is_none(),
+            "content-range should be removed"
+        );
+        assert!(resp.headers.get(http::header::ETAG).is_none(), "etag should be removed");
     }
 
     #[tokio::test]
@@ -1164,9 +1320,10 @@ mod tests {
         let events: Vec<&str> = output.split("\n\n").filter(|s| !s.is_empty()).collect();
         assert_eq!(events.len(), 3, "should produce 3 SSE events");
 
-        let error_event: serde_json::Value = serde_json::from_str(events[2].strip_prefix("data: ").unwrap()).unwrap();
+        let (event_name, error_event) = parse_sse_event(events[2]);
+        assert_eq!(event_name, "error");
         assert_eq!(error_event["type"], "error");
-        assert_eq!(error_event["message"], "Model not found");
+        assert_eq!(error_event["error"]["message"], "Model not found");
     }
 
     #[test]
@@ -1187,10 +1344,10 @@ mod tests {
         assert!(matches!(action, FilterAction::Continue));
 
         let parsed: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
-        assert_eq!(parsed["type"], "error");
-        assert_eq!(parsed["message"], "Internal error");
-        assert_eq!(parsed["code"], "500");
-        assert!(parsed["param"].is_null());
+        assert_eq!(parsed["error"]["type"], "server_error");
+        assert_eq!(parsed["error"]["message"], "Internal error");
+        assert_eq!(parsed["error"]["code"], "500");
+        assert!(parsed["error"]["param"].is_null());
     }
 
     #[test]
@@ -1234,6 +1391,13 @@ mod tests {
 
     fn make_filter() -> Box<dyn HttpFilter> {
         OpenaiResponsesValidateFilter::from_config(&serde_yaml::Value::Null).unwrap()
+    }
+
+    fn parse_sse_event(frame: &str) -> (&str, serde_json::Value) {
+        let mut lines = frame.lines();
+        let event_type = lines.next().and_then(|line| line.strip_prefix("event: ")).unwrap();
+        let data = lines.next().and_then(|line| line.strip_prefix("data: ")).unwrap();
+        (event_type, serde_json::from_str(data).unwrap())
     }
 
     async fn run_filter(body_str: &str, classifier_metadata: &[(&str, &str)]) -> HttpFilterContext<'static> {

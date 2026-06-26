@@ -637,6 +637,23 @@ fn on_response_body_releases_skipped_non_end_of_stream() {
     );
 }
 
+#[test]
+fn on_response_body_buffers_when_error_reformat_is_armed() {
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    ctx.set_metadata("responses.skip_persist", "true");
+    ctx.set_metadata("responses._reformat_error", "502");
+    let mut body = Some(Bytes::from_static(b"partial"));
+
+    let action = filter.on_response_body(&mut ctx, &mut body, false).unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "error reformat should keep skipped chunks buffered"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn on_response_body_releases_when_skip_persist_is_true() {
     let filter = make_filter();
