@@ -27,6 +27,8 @@ use tracing::{debug, warn};
 
 use super::{context::PingoraRequestCtx, metrics};
 
+/// Structured error responses for fatal proxy errors.
+mod fail_to_proxy;
 /// Shared hop-by-hop header stripping logic.
 mod hop_by_hop;
 /// HTTP handler without body filter hooks.
