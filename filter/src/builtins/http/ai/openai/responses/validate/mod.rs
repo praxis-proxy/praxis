@@ -22,6 +22,8 @@
 
 mod rules;
 
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use tracing::{debug, trace};
@@ -95,6 +97,10 @@ impl HttpFilter for OpenaiResponsesValidateFilter {
         }
     }
 
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadWrite
+    }
+
     async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         Ok(FilterAction::Continue)
     }
@@ -141,11 +147,116 @@ impl HttpFilter for OpenaiResponsesValidateFilter {
 
         Ok(FilterAction::Release)
     }
+
+    async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(detect_and_prepare_error_reformat(ctx))
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        Ok(reformat_error_body(ctx, body, end_of_stream))
+    }
 }
 
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+/// Check whether a backend response should be reformatted as a
+/// Responses API error (non-2xx, not already SSE).
+fn should_reformat_error(ctx: &HttpFilterContext<'_>) -> bool {
+    ctx.response_header.as_ref().is_some_and(|resp| {
+        let is_error = !resp.status.is_success();
+        let already_sse = resp
+            .headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|ct| ct.starts_with("text/event-stream"));
+        is_error && !already_sse
+    })
+}
+
+/// Apply error-reformatting headers to the response.
+fn apply_error_response_headers(ctx: &mut HttpFilterContext<'_>, is_streaming: bool) {
+    if let Some(resp) = &mut ctx.response_header {
+        resp.headers.remove(http::header::CONTENT_LENGTH);
+
+        if is_streaming {
+            resp.status = http::StatusCode::OK;
+            resp.headers.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("text/event-stream"),
+            );
+        } else {
+            resp.headers.insert(
+                http::header::CONTENT_TYPE,
+                http::HeaderValue::from_static("application/json"),
+            );
+        }
+
+        ctx.response_headers_modified = true;
+    }
+}
+
+/// Detect non-2xx backend responses for Responses API requests and prepare
+/// for body reformatting by modifying headers and setting metadata.
+fn detect_and_prepare_error_reformat(ctx: &mut HttpFilterContext<'_>) -> FilterAction {
+    if ctx.get_metadata("openai_responses_format.format") != Some("openai_responses") {
+        return FilterAction::Continue;
+    }
+    if !should_reformat_error(ctx) {
+        return FilterAction::Continue;
+    }
+
+    let status = ctx.response_header.as_ref().map_or(500, |r| r.status.as_u16());
+    let is_streaming = ctx.get_metadata("responses.stream").is_some_and(|v| v == "true");
+
+    ctx.set_metadata("responses._reformat_error", status.to_string());
+    ctx.set_response_body_mode(BodyMode::StreamBuffer {
+        max_bytes: Some(MAX_JSON_BODY_BYTES),
+    });
+    apply_error_response_headers(ctx, is_streaming);
+
+    debug!(
+        original_status = status,
+        is_streaming, "reformatting backend error response"
+    );
+    FilterAction::Continue
+}
+
+/// Replace the backend error body with Responses API format (SSE or JSON).
+fn reformat_error_body(ctx: &HttpFilterContext<'_>, body: &mut Option<Bytes>, end_of_stream: bool) -> FilterAction {
+    let Some(status_str) = ctx.get_metadata("responses._reformat_error") else {
+        return FilterAction::Continue;
+    };
+
+    if !end_of_stream {
+        return FilterAction::Continue;
+    }
+
+    let original_status: u16 = status_str.parse().unwrap_or(500);
+    let is_streaming = ctx.get_metadata("responses.stream").is_some_and(|v| v == "true");
+
+    let backend_body = body.as_deref().and_then(|b| std::str::from_utf8(b).ok()).unwrap_or("");
+
+    let (code, message) = extract_backend_error(backend_body, original_status);
+
+    let replacement = if is_streaming {
+        let response_id = ctx.get_metadata("responses.response_id").unwrap_or("resp_unknown");
+        let model = ctx.get_metadata("openai_responses_format.model").unwrap_or("unknown");
+        build_sse_error_body(response_id, model, &code, &message)
+    } else {
+        build_json_error_body(&code, &message)
+    };
+
+    *body = Some(replacement);
+
+    FilterAction::Continue
+}
 
 /// Parse the request body and run validation checks.
 fn parse_and_validate(ctx: &HttpFilterContext<'_>, body: &Option<Bytes>) -> Result<serde_json::Value, FilterAction> {
@@ -218,6 +329,95 @@ fn resolve_conversation_id(ctx: &HttpFilterContext<'_>, body: &serde_json::Value
         trace!(conversation_id = %id, "conversation ID generated");
         id
     }
+}
+
+/// Extract error details from the backend response body.
+///
+/// Tries common formats: OpenAI (`error.message` + `error.code`), simple
+/// (`message`), `FastAPI` (`detail`). Falls back to the HTTP status code.
+fn extract_backend_error(body: &str, status: u16) -> (String, String) {
+    if let Ok(json) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Some(error) = json.get("error") {
+            let message = error
+                .get("message")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("unknown error");
+            let code = error
+                .get("code")
+                .and_then(|v| {
+                    v.as_str()
+                        .map(str::to_owned)
+                        .or_else(|| v.as_u64().map(|n| n.to_string()))
+                })
+                .unwrap_or_else(|| status.to_string());
+            return (code, message.to_owned());
+        }
+
+        if let Some(msg) = json.get("message").and_then(serde_json::Value::as_str) {
+            return (status.to_string(), msg.to_owned());
+        }
+
+        if let Some(detail) = json.get("detail").and_then(serde_json::Value::as_str) {
+            return (status.to_string(), detail.to_owned());
+        }
+    }
+
+    (status.to_string(), format!("upstream error (HTTP {status})"))
+}
+
+/// Build a minimal Responses API response object for error SSE events.
+fn error_response_object(response_id: &str, model: &str) -> serde_json::Value {
+    let created_at = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
+
+    serde_json::json!({
+        "id": response_id,
+        "object": "response",
+        "created_at": created_at,
+        "status": "in_progress",
+        "model": model,
+        "output": [],
+    })
+}
+
+/// Build SSE-formatted error body for streaming Responses API requests.
+///
+/// Emits three events using `data:`-only framing (no `event:` lines):
+/// `response.created`, `response.in_progress`, `error`.
+fn build_sse_error_body(response_id: &str, model: &str, code: &str, message: &str) -> Bytes {
+    let response_obj = error_response_object(response_id, model);
+
+    let created = serde_json::json!({
+        "type": "response.created",
+        "response": response_obj,
+        "sequence_number": 0,
+    });
+    let in_progress = serde_json::json!({
+        "type": "response.in_progress",
+        "response": response_obj,
+        "sequence_number": 1,
+    });
+    let error = serde_json::json!({
+        "type": "error",
+        "code": code,
+        "message": message,
+        "param": null,
+        "sequence_number": 2,
+    });
+
+    Bytes::from(format!("data: {created}\n\ndata: {in_progress}\n\ndata: {error}\n\n"))
+}
+
+/// Build JSON error body for non-streaming Responses API requests.
+fn build_json_error_body(code: &str, message: &str) -> Bytes {
+    Bytes::from(
+        serde_json::json!({
+            "type": "error",
+            "code": code,
+            "message": message,
+            "param": null,
+        })
+        .to_string(),
+    )
 }
 
 /// Enrich filter context with validated metadata for downstream filters.
@@ -672,6 +872,360 @@ mod tests {
             matches!(action, FilterAction::Reject(_)),
             "POST /input_tokens without body should be rejected, not released"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Response Error Formatting — Helpers
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn extract_backend_error_openai_format() {
+        let body = r#"{"error":{"message":"The model does not exist.","type":"NotFoundError","code":404}}"#;
+        let (code, message) = extract_backend_error(body, 404);
+        assert_eq!(code, "404", "code should be extracted from error.code");
+        assert_eq!(
+            message, "The model does not exist.",
+            "message should be extracted from error.message"
+        );
+    }
+
+    #[test]
+    fn extract_backend_error_string_code() {
+        let body = r#"{"error":{"message":"Invalid API key","code":"invalid_api_key"}}"#;
+        let (code, message) = extract_backend_error(body, 401);
+        assert_eq!(code, "invalid_api_key", "string code should be preserved");
+        assert_eq!(message, "Invalid API key");
+    }
+
+    #[test]
+    fn extract_backend_error_simple_format() {
+        let body = r#"{"message":"Something went wrong"}"#;
+        let (code, message) = extract_backend_error(body, 500);
+        assert_eq!(code, "500", "code should fall back to HTTP status");
+        assert_eq!(message, "Something went wrong");
+    }
+
+    #[test]
+    fn extract_backend_error_fastapi_format() {
+        let body = r#"{"detail":"Not found"}"#;
+        let (code, message) = extract_backend_error(body, 404);
+        assert_eq!(code, "404");
+        assert_eq!(message, "Not found");
+    }
+
+    #[test]
+    fn extract_backend_error_non_json() {
+        let (code, message) = extract_backend_error("not json", 502);
+        assert_eq!(code, "502");
+        assert_eq!(message, "upstream error (HTTP 502)");
+    }
+
+    #[test]
+    fn extract_backend_error_empty_body() {
+        let (code, message) = extract_backend_error("", 500);
+        assert_eq!(code, "500");
+        assert_eq!(message, "upstream error (HTTP 500)");
+    }
+
+    // -------------------------------------------------------------------------
+    // Response Error Formatting — SSE/JSON Builders
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn build_sse_error_body_has_three_events() {
+        let body = build_sse_error_body("resp_test123", "gpt-4.1", "404", "Model not found");
+        let text = std::str::from_utf8(&body).unwrap();
+
+        let events: Vec<&str> = text.split("\n\n").filter(|s| !s.is_empty()).collect();
+        assert_eq!(events.len(), 3, "SSE body should have 3 events");
+
+        assert!(events[0].starts_with("data: "), "event 0 should use data-only framing");
+        assert!(events[1].starts_with("data: "), "event 1 should use data-only framing");
+        assert!(events[2].starts_with("data: "), "event 2 should use data-only framing");
+
+        let e0: serde_json::Value = serde_json::from_str(events[0].strip_prefix("data: ").unwrap()).unwrap();
+        assert_eq!(e0["type"], "response.created");
+        assert_eq!(e0["sequence_number"], 0);
+        assert_eq!(e0["response"]["id"], "resp_test123");
+        assert_eq!(e0["response"]["model"], "gpt-4.1");
+        assert_eq!(e0["response"]["status"], "in_progress");
+
+        let e1: serde_json::Value = serde_json::from_str(events[1].strip_prefix("data: ").unwrap()).unwrap();
+        assert_eq!(e1["type"], "response.in_progress");
+        assert_eq!(e1["sequence_number"], 1);
+
+        let e2: serde_json::Value = serde_json::from_str(events[2].strip_prefix("data: ").unwrap()).unwrap();
+        assert_eq!(e2["type"], "error");
+        assert_eq!(e2["code"], "404");
+        assert_eq!(e2["message"], "Model not found");
+        assert!(e2["param"].is_null());
+        assert_eq!(e2["sequence_number"], 2);
+    }
+
+    #[test]
+    fn build_json_error_body_has_correct_shape() {
+        let body = build_json_error_body("404", "Model not found");
+        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+        assert_eq!(parsed["type"], "error");
+        assert_eq!(parsed["code"], "404");
+        assert_eq!(parsed["message"], "Model not found");
+        assert!(parsed["param"].is_null());
+    }
+
+    // -------------------------------------------------------------------------
+    // Response Error Formatting — on_response Hook
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn on_response_sets_reformat_metadata_for_error() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
+        ctx.set_metadata("responses.stream", "false");
+
+        let mut resp = crate::test_utils::make_response();
+        resp.status = http::StatusCode::NOT_FOUND;
+        resp.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/json"),
+        );
+        ctx.response_header = Some(&mut resp);
+
+        let action = filter.on_response(&mut ctx).await.unwrap();
+        assert!(matches!(action, FilterAction::Continue));
+        assert_eq!(
+            ctx.filter_metadata.get("responses._reformat_error").map(String::as_str),
+            Some("404"),
+            "should set reformat error metadata with status code"
+        );
+        assert!(ctx.response_headers_modified, "headers should be marked as modified");
+    }
+
+    #[tokio::test]
+    async fn on_response_skips_success() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
+
+        let mut resp = crate::test_utils::make_response();
+        ctx.response_header = Some(&mut resp);
+
+        drop(filter.on_response(&mut ctx).await.unwrap());
+        assert!(
+            !ctx.filter_metadata.contains_key("responses._reformat_error"),
+            "should not set reformat metadata for 2xx"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_response_skips_non_responses() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/chat/completions",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("openai_responses_format.format", "openai_chat_completions");
+
+        let mut resp = crate::test_utils::make_response();
+        resp.status = http::StatusCode::NOT_FOUND;
+        ctx.response_header = Some(&mut resp);
+
+        drop(filter.on_response(&mut ctx).await.unwrap());
+        assert!(
+            !ctx.filter_metadata.contains_key("responses._reformat_error"),
+            "should not reformat non-responses API errors"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_response_skips_already_sse() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
+
+        let mut resp = crate::test_utils::make_response();
+        resp.status = http::StatusCode::INTERNAL_SERVER_ERROR;
+        resp.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
+        ctx.response_header = Some(&mut resp);
+
+        drop(filter.on_response(&mut ctx).await.unwrap());
+        assert!(
+            !ctx.filter_metadata.contains_key("responses._reformat_error"),
+            "should not reformat already-SSE responses"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_response_sets_streaming_headers() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
+        ctx.set_metadata("responses.stream", "true");
+
+        let mut resp = crate::test_utils::make_response();
+        resp.status = http::StatusCode::NOT_FOUND;
+        resp.headers
+            .insert(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("42"));
+        ctx.response_header = Some(&mut resp);
+
+        drop(filter.on_response(&mut ctx).await.unwrap());
+
+        assert_eq!(resp.status, http::StatusCode::OK, "streaming errors should return 200");
+        assert_eq!(
+            resp.headers
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream"),
+            "streaming errors should have SSE content type"
+        );
+        assert!(
+            resp.headers.get(http::header::CONTENT_LENGTH).is_none(),
+            "content-length should be removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_response_keeps_status_for_non_streaming() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("openai_responses_format.format", "openai_responses");
+        ctx.set_metadata("responses.stream", "false");
+
+        let mut resp = crate::test_utils::make_response();
+        resp.status = http::StatusCode::NOT_FOUND;
+        ctx.response_header = Some(&mut resp);
+
+        drop(filter.on_response(&mut ctx).await.unwrap());
+
+        assert_eq!(
+            resp.status,
+            http::StatusCode::NOT_FOUND,
+            "non-streaming should keep original status"
+        );
+        assert_eq!(
+            resp.headers
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/json"),
+            "non-streaming errors should have JSON content type"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Response Error Formatting — on_response_body Hook
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn on_response_body_replaces_streaming_error() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("responses._reformat_error", "404");
+        ctx.set_metadata("responses.stream", "true");
+        ctx.set_metadata("responses.response_id", "resp_test123");
+        ctx.set_metadata("openai_responses_format.model", "gpt-4.1");
+
+        let backend_error = r#"{"error":{"message":"Model not found","code":404}}"#;
+        let mut body = Some(Bytes::from(backend_error));
+
+        let action = filter.on_response_body(&mut ctx, &mut body, true).unwrap();
+        assert!(matches!(action, FilterAction::Continue));
+
+        let bytes = body.unwrap();
+        let output = std::str::from_utf8(&bytes).unwrap();
+        let events: Vec<&str> = output.split("\n\n").filter(|s| !s.is_empty()).collect();
+        assert_eq!(events.len(), 3, "should produce 3 SSE events");
+
+        let error_event: serde_json::Value = serde_json::from_str(events[2].strip_prefix("data: ").unwrap()).unwrap();
+        assert_eq!(error_event["type"], "error");
+        assert_eq!(error_event["message"], "Model not found");
+    }
+
+    #[test]
+    fn on_response_body_replaces_non_streaming_error() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("responses._reformat_error", "500");
+        ctx.set_metadata("responses.stream", "false");
+
+        let backend_error = r#"{"error":{"message":"Internal error","type":"server_error"}}"#;
+        let mut body = Some(Bytes::from(backend_error));
+
+        let action = filter.on_response_body(&mut ctx, &mut body, true).unwrap();
+        assert!(matches!(action, FilterAction::Continue));
+
+        let parsed: serde_json::Value = serde_json::from_slice(&body.unwrap()).unwrap();
+        assert_eq!(parsed["type"], "error");
+        assert_eq!(parsed["message"], "Internal error");
+        assert_eq!(parsed["code"], "500");
+        assert!(parsed["param"].is_null());
+    }
+
+    #[test]
+    fn on_response_body_skips_without_flag() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+
+        let original = r#"{"output":"success"}"#;
+        let mut body = Some(Bytes::from(original));
+
+        drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+        assert_eq!(
+            std::str::from_utf8(&body.unwrap()).unwrap(),
+            original,
+            "body should be unchanged when no reformat flag set"
+        );
+    }
+
+    #[test]
+    fn on_response_body_continues_before_eos() {
+        let filter = make_filter();
+        let req = Box::leak(Box::new(crate::test_utils::make_request(
+            http::Method::POST,
+            "/v1/responses",
+        )));
+        let mut ctx = crate::test_utils::make_filter_context(req);
+        ctx.set_metadata("responses._reformat_error", "404");
+
+        let mut body = Some(Bytes::from("partial"));
+        let action = filter.on_response_body(&mut ctx, &mut body, false).unwrap();
+        assert!(matches!(action, FilterAction::Continue));
     }
 
     // -------------------------------------------------------------------------
