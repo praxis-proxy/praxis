@@ -76,11 +76,11 @@ async fn response_store_persists_response_to_postgres() {
         "response body should match the backend's JSON"
     );
 
-    let pool = sqlx::PgPool::connect(&pg.url())
+    let pool = Box::pin(sqlx::PgPool::connect(&pg.url()))
         .await
         .expect("should connect to test database");
     let sql = format!("SELECT id, tenant_id, created_at, model, input, messages FROM {responses_table} WHERE id = $1");
-    let row: sqlx::postgres::PgRow = sqlx::query(&sql)
+    let row: sqlx::postgres::PgRow = sqlx::query(sqlx::AssertSqlSafe(sql.as_str()))
         .bind("resp_pg_abc")
         .fetch_one(&pool)
         .await

@@ -3,7 +3,74 @@
 
 //! Unit tests for token usage extraction.
 
-use super::{TokenUsageProvider, extract_token_usage};
+use super::{TokenUsageProvider, extract_token_usage, set_token_usage};
+
+// -----------------------------------------------------------------------------
+// set_token_usage Tests
+// -----------------------------------------------------------------------------
+
+#[test]
+fn set_token_usage_writes_all_metadata_keys() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    set_token_usage(&mut ctx, 150, 80, Some(230));
+    assert_eq!(ctx.get_metadata("token.input"), Some("150"));
+    assert_eq!(ctx.get_metadata("token.output"), Some("80"));
+    assert_eq!(ctx.get_metadata("token.total"), Some("230"));
+}
+
+#[test]
+fn set_token_usage_computes_total_when_none() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    set_token_usage(&mut ctx, 100, 50, None);
+    assert_eq!(ctx.get_metadata("token.total"), Some("150"));
+}
+
+#[test]
+fn set_token_usage_uses_explicit_total() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    set_token_usage(&mut ctx, 100, 50, Some(200));
+    assert_eq!(
+        ctx.get_metadata("token.total"),
+        Some("200"),
+        "explicit total should override computed sum"
+    );
+}
+
+#[test]
+fn set_token_usage_saturates_on_overflow() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    set_token_usage(&mut ctx, u64::MAX, 1, None);
+    assert_eq!(
+        ctx.get_metadata("token.total"),
+        Some(&*u64::MAX.to_string()),
+        "total should saturate instead of wrapping"
+    );
+}
+
+#[test]
+fn set_token_usage_overwrites_previous() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    set_token_usage(&mut ctx, 100, 50, None);
+    set_token_usage(&mut ctx, 200, 80, Some(280));
+    assert_eq!(ctx.get_metadata("token.input"), Some("200"));
+    assert_eq!(ctx.get_metadata("token.output"), Some("80"));
+    assert_eq!(ctx.get_metadata("token.total"), Some("280"));
+}
+
+#[test]
+fn set_token_usage_zero_values() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    set_token_usage(&mut ctx, 0, 0, None);
+    assert_eq!(ctx.get_metadata("token.input"), Some("0"));
+    assert_eq!(ctx.get_metadata("token.output"), Some("0"));
+    assert_eq!(ctx.get_metadata("token.total"), Some("0"));
+}
 
 // -----------------------------------------------------------------------------
 // Provider-Specific Parsing Tests

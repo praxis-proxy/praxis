@@ -51,15 +51,15 @@ use tracing::{debug, trace, warn};
 
 use super::{
     super::{DEFAULT_STORE_NAME, DEFAULT_TENANT_ID, TENANT_METADATA_KEY, state::ResponsesState},
-    ListParams, Order,
+    InputItemPage, ListParams, Order,
     config::{ResponseStoreConfig, StorageBackend, revalidate_postgres_host, validate_config},
     list_input_items,
 };
 use crate::{
     FilterAction, FilterError, Rejection,
-    body::{BodyAccess, BodyMode, limits::MAX_JSON_BODY_BYTES},
+    body::{BodyAccess, BodyMode, MAX_JSON_BODY_BYTES},
     builtins::http::ai::store::{
-        PostgresResponseStore, ResponseRecord, ResponseStore, SqliteResponseStore, StoreError,
+        PostgresResponseStore, ResponseRecord, ResponseStore, ResponseStoreRegistry, SqliteResponseStore, StoreError,
     },
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
@@ -81,8 +81,8 @@ pub struct ResponseStoreFilter {
     /// Parsed configuration.
     pub(crate) config: ResponseStoreConfig,
 
-    /// Lazily initialized store backend. SQLite init failures are
-    /// cached as `None`; Postgres init failures are retried.
+    /// Lazily initialized store backend. SQLite init failures are cached
+    /// as `None`; Postgres init failures are retried on every code path.
     pub(crate) store: OnceCell<Option<Arc<dyn ResponseStore>>>,
 }
 
@@ -132,14 +132,14 @@ impl ResponseStoreFilter {
                     let secret: &str = s.expose_secret();
                     secret
                 });
-                let store = PostgresResponseStore::new(
+                let store = Box::pin(PostgresResponseStore::new(
                     self.config.database_url.expose_secret(),
                     &self.config.responses_table,
                     &self.config.conversations_table,
                     None,
                     self.config.ssl_mode,
                     ssl_root_cert,
-                )
+                ))
                 .await;
                 store.map(|s| {
                     let arc: Arc<dyn ResponseStore> = Arc::new(s);
@@ -151,7 +151,7 @@ impl ResponseStoreFilter {
 
     /// Build the store and log successful initialization.
     async fn build_logged_store(&self) -> Result<Arc<dyn ResponseStore>, StoreError> {
-        let store = self.build_store().await?;
+        let store = Box::pin(self.build_store()).await?;
         debug!(
             backend = ?self.config.backend,
             responses_table = %self.config.responses_table,
@@ -163,7 +163,7 @@ impl ResponseStoreFilter {
 
     /// Initialize a store once, caching failed init permanently.
     async fn init_permanent_store(&self) -> Option<Arc<dyn ResponseStore>> {
-        match self.build_logged_store().await {
+        match Box::pin(self.build_logged_store()).await {
             Ok(store) => Some(store),
             Err(e) => {
                 warn!(
@@ -181,7 +181,7 @@ impl ResponseStoreFilter {
         if matches!(self.config.backend, StorageBackend::Postgres) {
             match self
                 .store
-                .get_or_try_init(|| async { self.build_logged_store().await.map(Some) })
+                .get_or_try_init(|| async { Box::pin(self.build_logged_store()).await.map(Some) })
                 .await
             {
                 Ok(store) => store.as_ref().map(Arc::clone),
@@ -196,7 +196,7 @@ impl ResponseStoreFilter {
             }
         } else {
             self.store
-                .get_or_init(|| async { self.init_permanent_store().await })
+                .get_or_init(|| async { Box::pin(self.init_permanent_store()).await })
                 .await
                 .as_ref()
                 .map(Arc::clone)
@@ -205,12 +205,7 @@ impl ResponseStoreFilter {
 
     /// Handle `DELETE /v1/responses/{id}` by deleting from the store.
     async fn handle_delete(&self, tenant_id: &str, id: &str) -> Result<FilterAction, FilterError> {
-        let store = self
-            .store
-            .get_or_init(|| async { self.init_permanent_store().await })
-            .await;
-
-        let Some(store) = store else {
+        let Some(store) = self.ensure_store().await else {
             return Ok(FilterAction::Continue);
         };
 
@@ -358,12 +353,13 @@ pub(super) fn extract_response_id(path: &str) -> Option<&str> {
 /// Publish the initialized store into the per-request registry so
 /// downstream filters (rehydrate, compact, etc.) can read from it.
 fn register_store_in_context(ctx: &HttpFilterContext<'_>, store: &Arc<dyn ResponseStore>) {
-    let Some(registry) = ctx.response_stores else {
+    let Some(registry) = ctx.extensions.get::<ResponseStoreRegistry>() else {
         return;
     };
-    // Known limitation: the first default backend wins for this registry.
-    // That matches today's one-store-per-listener setup, but a future
-    // multi-store or live backend migration design should scope this by config.
+    // The response store is intentionally instance-scoped today: a Praxis
+    // process has one default Responses store shared by listener pipelines.
+    // If multi-store-per-instance support is added later, this registry key
+    // must become config- or listener-scoped instead of "default".
     if registry.get(DEFAULT_STORE_NAME).is_some() {
         return;
     }
@@ -614,7 +610,6 @@ impl HttpFilter for ResponseStoreFilter {
         }
     }
 
-    #[expect(clippy::large_stack_frames, reason = "async handler with multiple await points")]
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if ctx.request.method == http::Method::GET {
             if let Some(action) = self.try_get_retrieval(ctx).await? {
@@ -759,10 +754,7 @@ impl ResponseStoreFilter {
 
     /// Lazily initialize the store and return a clone of the `Arc`.
     async fn ensure_store(&self) -> Option<Arc<dyn ResponseStore>> {
-        self.store
-            .get_or_init(|| async { self.init_permanent_store().await })
-            .await
-            .clone()
+        self.get_or_init_store().await
     }
 
     /// Serve `GET /v1/responses/{id}`.
@@ -827,35 +819,42 @@ impl ResponseStoreFilter {
 /// Build a paginated input items response from a stored record.
 fn build_input_items_response(id: &str, record: &ResponseRecord, params: &ListParams) -> FilterAction {
     match list_input_items(record, params) {
-        Ok(page) => {
-            let first_id = page.data.first().and_then(|v| v.get("id")).and_then(|v| v.as_str());
-            let last_id = page.data.last().and_then(|v| v.get("id")).and_then(|v| v.as_str());
-
-            let body = serde_json::json!({
-                "object": "list",
-                "data": page.data,
-                "has_more": page.has_more,
-                "first_id": first_id,
-                "last_id": last_id,
-            });
-            debug!(
-                response_id = id,
-                count = page.data.len(),
-                has_more = page.has_more,
-                "serving input items"
-            );
-            let bytes = serde_json::to_vec(&body).unwrap_or_default();
-            FilterAction::Reject(
-                Rejection::status(200)
-                    .with_header("content-type", "application/json")
-                    .with_body(bytes),
-            )
+        Ok(page) => build_input_items_ok(id, &page),
+        Err(StoreError::InvalidInput(msg)) => {
+            debug!(response_id = id, error = %msg, "invalid input_items pagination parameter");
+            FilterAction::Reject(reject_invalid_input(&msg))
         },
         Err(e) => {
             warn!(response_id = id, error = %e, "input_items pagination failed");
             FilterAction::Reject(reject_store_error())
         },
     }
+}
+
+/// Serialize a successful input items page into a 200 JSON response.
+fn build_input_items_ok(id: &str, page: &InputItemPage) -> FilterAction {
+    let first_id = page.data.first().and_then(|v| v.get("id")).and_then(|v| v.as_str());
+    let last_id = page.data.last().and_then(|v| v.get("id")).and_then(|v| v.as_str());
+
+    let body = serde_json::json!({
+        "object": "list",
+        "data": page.data,
+        "has_more": page.has_more,
+        "first_id": first_id,
+        "last_id": last_id,
+    });
+    debug!(
+        response_id = id,
+        count = page.data.len(),
+        has_more = page.has_more,
+        "serving input items"
+    );
+    let bytes = serde_json::to_vec(&body).unwrap_or_default();
+    FilterAction::Reject(
+        Rejection::status(200)
+            .with_header("content-type", "application/json")
+            .with_body(bytes),
+    )
 }
 
 /// Parse cursor-based pagination parameters from a query string.
@@ -904,6 +903,19 @@ fn reject_not_found(id: &str) -> Rejection {
         }
     });
     Rejection::status(404)
+        .with_header("content-type", "application/json")
+        .with_body(serde_json::to_vec(&body).unwrap_or_default())
+}
+
+/// Build a 400 rejection for invalid client-supplied parameters.
+fn reject_invalid_input(message: &str) -> Rejection {
+    let body = serde_json::json!({
+        "error": {
+            "message": message,
+            "type": "invalid_request_error",
+        }
+    });
+    Rejection::status(400)
         .with_header("content-type", "application/json")
         .with_body(serde_json::to_vec(&body).unwrap_or_default())
 }

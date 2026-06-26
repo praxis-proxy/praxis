@@ -7,7 +7,7 @@
 #   Client -> HTTP -> Praxis :8080 -> TLS (no verify) -> Backend :8443
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/protocols/tls-verify-disabled.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/tls-verify-disabled.yaml
 #   curl http://localhost:8080/
 
 listeners:

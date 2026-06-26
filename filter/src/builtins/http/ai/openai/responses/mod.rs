@@ -18,6 +18,9 @@
 //! to validate parameter combinations and extract additional fields.
 
 mod config;
+#[cfg(feature = "ai-inference")]
+pub(crate) mod model_rewrite;
+pub(crate) mod proxy;
 #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on modules")]
 #[allow(
     dead_code,
@@ -26,6 +29,8 @@ mod config;
 pub(crate) mod state;
 pub(crate) mod store;
 
+#[cfg(feature = "ai-inference")]
+pub use model_rewrite::ModelRewriteFilter;
 pub use store::ResponseStoreFilter;
 
 #[cfg(test)]
@@ -90,7 +95,7 @@ pub(crate) const DEFAULT_TENANT_ID: &str = "default";
 ///
 /// Routing mode for Responses API: `stateful` when the request contains
 /// `previous_response_id`, non-empty `tools`, `store=true` (default when
-/// omitted), `background=true`, `conversation`, or `prompt_id`;
+/// omitted), `background=true`, `conversation`, or `prompt.id`;
 /// `stateless` when `store=false` with no other stateful markers.
 ///
 /// Use with branch chains to route stateful and stateless requests to
@@ -418,7 +423,11 @@ fn promote_boolean_results(
 }
 
 #[cfg(feature = "ai-inference")]
+pub(crate) mod rehydrate;
+#[cfg(feature = "ai-inference")]
 pub(crate) mod validate;
 
+#[cfg(feature = "ai-inference")]
+pub use rehydrate::RehydrateFilter;
 #[cfg(feature = "ai-inference")]
 pub use validate::OpenaiResponsesValidateFilter;

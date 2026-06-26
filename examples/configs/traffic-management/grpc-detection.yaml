@@ -6,7 +6,7 @@
 # proving detection works end-to-end.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/traffic-management/grpc-detection.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/grpc-detection.yaml
 #   curl -H "content-type: application/grpc" http://localhost:8080/
 #   curl http://localhost:8080/
 listeners:

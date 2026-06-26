@@ -133,12 +133,12 @@ fn append_items_ddl(stmts: &mut Vec<String>, i: &str) {
             item_data         TEXT NOT NULL,
             created_at        BIGINT NOT NULL,
             position          BIGINT NOT NULL,
-            PRIMARY KEY (item_id, tenant_id)
+            PRIMARY KEY (item_id, tenant_id, conversation_id)
         )"
     ));
     stmts.push(format!(
         "CREATE INDEX IF NOT EXISTS idx_{i}_conversation \
-         ON {i}(conversation_id, tenant_id, position)"
+         ON {i}(conversation_id, tenant_id, position, item_id)"
     ));
 }
 

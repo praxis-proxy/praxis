@@ -1,7 +1,7 @@
 # AI Inference Model Routing
 #
 # Requires the ai-inference feature:
-#   cargo build -p praxis --features ai-inference
+#   cargo build -p praxis-proxy --features ai-inference
 #
 # Routes LLM API requests to different backends based on the
 # "model" field in the JSON request body. Uses the model_to_header

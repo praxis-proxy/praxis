@@ -5,7 +5,7 @@
 # internal listener skips security.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/pipeline/composed-chains.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/pipeline/composed-chains.yaml
 
 listeners:
   - name: public

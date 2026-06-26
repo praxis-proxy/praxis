@@ -57,7 +57,7 @@ pub(crate) struct ClassifiedRequest {
     pub has_conversation: bool,
     /// Whether `previous_response_id` is present and non-null.
     pub has_previous_response_id: bool,
-    /// Whether `prompt.prompt_id` is present and non-null.
+    /// Whether `prompt.id` is present and non-null.
     pub has_prompt_id: bool,
     /// Whether `tools` is a non-empty array.
     pub has_tools: bool,
@@ -87,7 +87,7 @@ pub(crate) struct ClassifiedRequest {
 /// - `POST   /v1/responses/compact`
 /// - `DELETE /v1/responses/{id}`
 pub(crate) fn is_responses_path(method: &http::Method, path: &str) -> bool {
-    let path = path.strip_suffix('/').filter(|p| !p.is_empty()).unwrap_or(path);
+    let path = normalize_trailing_slash(path);
     let segments: Vec<&str> = path.split('/').collect();
 
     match (method, segments.as_slice()) {
@@ -106,6 +106,14 @@ pub(crate) fn is_responses_path(method: &http::Method, path: &str) -> bool {
         (&http::Method::POST, ["", "v1", "responses", id, "cancel"]) if !id.is_empty() => true,
         _ => false,
     }
+}
+
+/// Check whether a method + path pair is the Responses API create endpoint.
+///
+/// Returns `true` only for `POST /v1/responses` (with optional trailing slash).
+/// Sub-resource POSTs like `/v1/responses/{id}/cancel` return `false`.
+pub(crate) fn is_responses_create(method: &http::Method, path: &str) -> bool {
+    method == http::Method::POST && normalize_trailing_slash(path) == "/v1/responses"
 }
 
 // -----------------------------------------------------------------------------
@@ -139,7 +147,7 @@ pub(crate) fn classify_request_body(body: &[u8]) -> ClassifiedRequest {
         has_prompt_id: obj
             .get("prompt")
             .and_then(serde_json::Value::as_object)
-            .and_then(|prompt| prompt.get("prompt_id"))
+            .and_then(|prompt| prompt.get("id"))
             .is_some_and(|v| !v.is_null()),
         has_tools: obj
             .get("tools")
@@ -211,6 +219,11 @@ fn has_anthropic_signals(obj: &serde_json::Map<String, serde_json::Value>) -> bo
 // -----------------------------------------------------------------------------
 // Private Utilities
 // -----------------------------------------------------------------------------
+
+/// Strip a single trailing slash unless the path is the root `/`.
+fn normalize_trailing_slash(path: &str) -> &str {
+    path.strip_suffix('/').filter(|p| !p.is_empty()).unwrap_or(path)
+}
 
 /// Build a result with no extracted facts.
 pub(crate) fn empty_result(format: AiRequestFormat) -> ClassifiedRequest {
@@ -584,10 +597,10 @@ mod tests {
 
     #[test]
     fn prompt_id_nested_detected() {
-        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"prompt_id":"pmpt_123"}}"#;
+        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"id":"pmpt_123"}}"#;
         let result = classify_request_body(body);
 
-        assert!(result.has_prompt_id, "nested prompt.prompt_id should be detected");
+        assert!(result.has_prompt_id, "nested prompt.id should be detected");
     }
 
     #[test]
@@ -600,10 +613,10 @@ mod tests {
 
     #[test]
     fn prompt_id_null_not_detected() {
-        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"prompt_id":null}}"#;
+        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"id":null}}"#;
         let result = classify_request_body(body);
 
-        assert!(!result.has_prompt_id, "null prompt_id should not be detected");
+        assert!(!result.has_prompt_id, "null prompt.id should not be detected");
     }
 
     #[test]
@@ -619,12 +632,12 @@ mod tests {
 
     #[test]
     fn prompt_object_prompt_id_field_detected() {
-        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"prompt_id":"pmpt_123"}}"#;
+        let body = br#"{"model":"gpt-4.1","input":"test","prompt":{"id":"pmpt_123"}}"#;
         let result = classify_request_body(body);
 
         assert!(
             result.has_prompt_id,
-            "prompt.prompt_id should be detected as the prompt identifier"
+            "prompt.id should be detected as the prompt identifier"
         );
     }
 
@@ -641,7 +654,7 @@ mod tests {
 
     #[test]
     fn prompt_object_classifies_as_responses() {
-        let body = br#"{"model":"gpt-4.1","prompt":{"prompt_id":"pmpt_123","variables":{"city":"SF"}}}"#;
+        let body = br#"{"model":"gpt-4.1","prompt":{"id":"pmpt_123","variables":{"city":"SF"}}}"#;
         let result = classify_request_body(body);
 
         assert_eq!(
@@ -649,7 +662,7 @@ mod tests {
             AiRequestFormat::Responses,
             "prompt object should classify as responses even without input"
         );
-        assert!(result.has_prompt_id, "prompt_id should be detected");
+        assert!(result.has_prompt_id, "prompt.id should be detected");
     }
 
     #[test]
@@ -856,6 +869,66 @@ mod tests {
         assert!(
             !is_responses_path(&http::Method::GET, "/v1/responses//input_items"),
             "GET /v1/responses//input_items should not collapse empty id segment"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Create-Endpoint Classification
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn create_matches_post_v1_responses() {
+        assert!(
+            is_responses_create(&http::Method::POST, "/v1/responses"),
+            "POST /v1/responses should match create"
+        );
+    }
+
+    #[test]
+    fn create_matches_post_v1_responses_trailing_slash() {
+        assert!(
+            is_responses_create(&http::Method::POST, "/v1/responses/"),
+            "POST /v1/responses/ should match create"
+        );
+    }
+
+    #[test]
+    fn create_rejects_get() {
+        assert!(
+            !is_responses_create(&http::Method::GET, "/v1/responses"),
+            "GET /v1/responses should not match create"
+        );
+    }
+
+    #[test]
+    fn create_rejects_cancel_subresource() {
+        assert!(
+            !is_responses_create(&http::Method::POST, "/v1/responses/resp_abc/cancel"),
+            "POST /v1/responses/{{id}}/cancel should not match create"
+        );
+    }
+
+    #[test]
+    fn create_rejects_input_tokens() {
+        assert!(
+            !is_responses_create(&http::Method::POST, "/v1/responses/input_tokens"),
+            "POST /v1/responses/input_tokens should not match create"
+        );
+    }
+
+    #[test]
+    fn create_rejects_compact() {
+        assert!(
+            !is_responses_create(&http::Method::POST, "/v1/responses/compact"),
+            "POST /v1/responses/compact should not match create"
+        );
+    }
+
+    #[test]
+    fn create_rejects_chat_completions() {
+        assert!(
+            !is_responses_create(&http::Method::POST, "/v1/chat/completions"),
+            "POST /v1/chat/completions should not match create"
         );
     }
 

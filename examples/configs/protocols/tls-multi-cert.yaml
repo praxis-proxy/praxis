@@ -9,7 +9,7 @@
 #   Client -> TLS(other)           -> Praxis :8443 -> HTTP -> Backend :3000
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/protocols/tls-multi-cert.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/tls-multi-cert.yaml
 #   curl --resolve api.example.com:8443:127.0.0.1 https://api.example.com:8443/
 #   curl --resolve web.example.com:8443:127.0.0.1 https://web.example.com:8443/
 

@@ -9,7 +9,7 @@
 #
 # Usage:
 #   mkcert -install && mkcert localhost 127.0.0.1
-#   cargo run -p praxis -- -c examples/configs/protocols/tcp-tls-termination.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/tcp-tls-termination.yaml
 
 listeners:
   - name: secure-db

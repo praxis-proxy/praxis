@@ -4,7 +4,7 @@
 # Measures elapsed time from request receipt to response headers.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/traffic-management/timeout.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/timeout.yaml
 #   curl -v http://localhost:8080/slow   # 504 if backend > 5 s
 
 listeners:

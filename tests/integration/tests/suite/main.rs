@@ -63,6 +63,8 @@ mod mcp;
 mod mcp_broker;
 #[cfg(feature = "ai-inference")]
 mod openai_responses_format;
+#[cfg(feature = "ai-inference")]
+mod openai_responses_model_rewrite;
 mod path_rewrite;
 mod payload_processing;
 mod per_listener_pipeline;

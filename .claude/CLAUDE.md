@@ -23,7 +23,7 @@ make doc            # rustdoc with -D warnings, including private items
 make audit          # cargo audit + cargo deny check
 make coverage-check # fail if line coverage < 95%
 make container      # container image build
-cargo run -p praxis # run the proxy
+cargo run -p praxis-proxy # run the proxy
 ```
 
 Run a single test:
@@ -72,7 +72,10 @@ server -> protocol -> filter -> core -> tls
 - **tls** (`praxis-tls`): TLS config types, SNI
   resolution (including wildcards), cert loading
 - **proto** (`praxis-proto`): vendored Envoy ext_proc
-  protobuf definitions (opt-in `ext-proc` feature)
+  protobuf definitions
+- **ext-proc** (`praxis-ext-proc`): Envoy ext_proc
+  filter (anti-pattern; opt-in `ext-proc` feature,
+  default-on for migration compatibility)
 
 **Test crates** (under `tests/`):
 
@@ -126,7 +129,7 @@ so the README generator can extract descriptions:
 # README table (first sentence is taken).
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/...
+#   cargo run -p praxis-proxy -- -c examples/configs/...
 ```
 
 Example config tests must exercise the actual

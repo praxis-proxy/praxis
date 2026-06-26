@@ -40,8 +40,8 @@ pub(crate) use schemas::{validate_identifier as validate_table_identifier, valid
 pub use self::{
     postgres::{PostgresResponseStore, SslMode},
     sqlite::SqliteResponseStore,
-    trait_def::ResponseStore,
-    types::{ConversationRecord, ResponseRecord, StoreError},
+    trait_def::{ConversationItemStore, ResponseStore},
+    types::{ConversationItemRecord, ConversationRecord, ResponseRecord, StoreError},
 };
 
 // -----------------------------------------------------------------------------

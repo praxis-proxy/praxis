@@ -201,6 +201,12 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     #[cfg(feature = "ai-inference")]
     register_http(
         factories,
+        "openai_responses_model_rewrite",
+        crate::builtins::ModelRewriteFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
         "openai_responses_validate",
         crate::builtins::OpenaiResponsesValidateFilter::from_config,
     );
@@ -209,6 +215,18 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
         factories,
         "openai_response_store",
         crate::builtins::ResponseStoreFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "openai_responses_rehydrate",
+        crate::builtins::RehydrateFilter::from_config,
+    );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "responses_proxy",
+        crate::builtins::ResponsesProxyFilter::from_config,
     );
 }
 
@@ -364,6 +382,11 @@ mod tests {
         );
         #[cfg(feature = "ai-inference")]
         assert!(
+            names.contains(&"openai_responses_model_rewrite"),
+            "openai_responses_model_rewrite should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
             names.contains(&"openai_responses_validate"),
             "validate should be registered"
         );
@@ -371,6 +394,16 @@ mod tests {
         assert!(
             names.contains(&"openai_response_store"),
             "response_store should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"openai_responses_rehydrate"),
+            "openai_responses_rehydrate should be registered"
+        );
+        #[cfg(feature = "ai-inference")]
+        assert!(
+            names.contains(&"responses_proxy"),
+            "responses_proxy should be registered"
         );
     }
 

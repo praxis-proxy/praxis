@@ -3,7 +3,7 @@
 # Add, overwrite, and remove headers on requests and responses.
 #
 # Usage:
-#   cargo run -p praxis -- -c examples/configs/transformation/header-manipulation.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/transformation/header-manipulation.yaml
 #   curl -v http://localhost:8080/
 #
 # Request to upstream gains: X-Forwarded-By, X-Request-Source.

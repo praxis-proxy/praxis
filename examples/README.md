@@ -5,7 +5,7 @@ Configuration examples organized by category.
 ## Running an Example
 
 ```console
-cargo run -p praxis -- -c examples/configs/traffic-management/basic-reverse-proxy.yaml
+cargo run -p praxis-proxy -- -c examples/configs/traffic-management/basic-reverse-proxy.yaml
 curl http://localhost:8080/
 ```
 
@@ -35,8 +35,11 @@ page.
 | [model-to-header-routing.yaml](configs/ai/model-to-header-routing.yaml) | Routes LLM API requests to different backends based on the "model" field in the JSON request body |
 | [format-routing.yaml](configs/ai/openai/responses/format-routing.yaml) | Routes AI API traffic by detected body format |
 | [full-flow.yaml](configs/ai/openai/responses/full-flow.yaml) | Combines format classification, request validation, and backend routing into a single pipeline |
+| [model-rewrite.yaml](configs/ai/openai/responses/model-rewrite.yaml) | Rewrites or injects the top-level `model` field in Responses API request bodies before forwarding to the inference backend |
+| [rehydrate.yaml](configs/ai/openai/responses/rehydrate.yaml) | Validates `previous_response_id` by fetching the stored response, confirming its status is completed, and promoting the ID to filter metadata |
 | [request-validate.yaml](configs/ai/openai/responses/request-validate.yaml) | Validates Responses API requests and rejects invalid parameter combinations |
 | [response-store.yaml](configs/ai/openai/responses/response-store.yaml) | Persists non-streaming Responses API responses to a database and serves stored data via GET endpoints and handles DELETE /v1/responses/{id} locally |
+| [responses-proxy.yaml](configs/ai/openai/responses/responses-proxy.yaml) | Proxies OpenAI Responses API requests to a native /v1/responses backend |
 | [responses-routing.yaml](configs/ai/openai/responses/responses-routing.yaml) | Routes Responses API traffic by detected mode |
 | [prompt-enrichment.yaml](configs/ai/prompt-enrichment.yaml) | Injects system messages into OpenAI-compatible chat completion requests before forwarding to the upstream provider |
 | [token-usage-headers.yaml](configs/ai/token-usage-headers.yaml) | Inject Praxis-Token-Input, Praxis-Token-Output, and Praxis-Token-Total headers into downstream responses when token counts are available in filter metadata |

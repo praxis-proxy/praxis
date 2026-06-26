@@ -7,22 +7,12 @@ use serde::Deserialize;
 
 use crate::{
     FilterError,
+    body::DEFAULT_JSON_BODY_MAX_BYTES,
     builtins::http::ai::{
         OnInvalidBehavior,
         config_validation::{validate_header_name, validate_max_body_bytes},
     },
 };
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Default maximum request body size for `StreamBuffer` mode (10 MiB).
-///
-/// Matches the shared default for JSON body inspection filters.
-/// Operators needing larger payloads (e.g. inline file data URLs) can
-/// override via `max_body_bytes` in config.
-const DEFAULT_MAX_BODY_BYTES: usize = 10_485_760; // 10 MiB
 
 // -----------------------------------------------------------------------------
 // Behavior Enums
@@ -126,7 +116,7 @@ pub(crate) struct ResponsesFormatConfig {
 
 /// Default max body bytes.
 fn default_max_body_bytes() -> usize {
-    DEFAULT_MAX_BODY_BYTES
+    DEFAULT_JSON_BODY_MAX_BYTES
 }
 
 // -----------------------------------------------------------------------------

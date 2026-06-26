@@ -397,7 +397,7 @@ async fn on_request_registers_store_in_response_stores() {
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let registry = ResponseStoreRegistry::new();
-    ctx.response_stores = Some(&registry);
+    ctx.extensions.insert(registry.clone());
     ctx.set_metadata("openai_responses_format.format", "openai_responses");
 
     let action = filter.on_request(&mut ctx).await.unwrap();
@@ -431,7 +431,7 @@ async fn on_request_body_registers_store_for_previous_response_id_even_when_stor
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
     let mut ctx = crate::test_utils::make_filter_context(&req);
     let registry = ResponseStoreRegistry::new();
-    ctx.response_stores = Some(&registry);
+    ctx.extensions.insert(registry.clone());
     ctx.set_metadata("openai_responses_format.format", "openai_responses");
     ctx.set_metadata("openai_responses_format.store", "false");
     ctx.set_metadata("openai_responses_format.has_previous_response_id", "true");
@@ -1134,6 +1134,132 @@ async fn pipeline_non_responses_post_does_not_open_sqlite_store() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_persists_rehydrated_messages_when_response_omits_input() {
+    let (db_url, db_path) = temp_sqlite_url("pipeline_persists_rehydrated_messages");
+    let seeded_store = SqliteResponseStore::new(&db_url, "test_responses", "test_conversations", None)
+        .await
+        .unwrap();
+    seeded_store
+        .upsert_response(&ResponseRecord {
+            id: "resp_prev".to_owned(),
+            tenant_id: "default".to_owned(),
+            created_at: 1_719_800_000,
+            model: "gpt-4.1".to_owned(),
+            response_object: json!({
+                "id": "resp_prev",
+                "created_at": 1_719_800_000,
+                "model": "gpt-4.1",
+                "status": "completed",
+                "output": [{"type": "message", "role": "assistant", "content": "Hi"}]
+            }),
+            input: json!("Hello"),
+            messages: json!([
+                {"type": "message", "role": "user", "content": "Hello"},
+                {"type": "message", "role": "assistant", "content": "Hi"}
+            ]),
+        })
+        .await
+        .unwrap();
+    drop(seeded_store);
+
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(&format!(
+        r#"
+- filter: openai_responses_format
+- filter: openai_response_store
+  backend: sqlite
+  database_url: "{db_url}"
+  responses_table: test_responses
+  conversations_table: test_conversations
+- filter: openai_responses_rehydrate
+"#
+    ))
+    .unwrap();
+    let registry = FilterRegistry::with_builtins();
+    let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    if let Some(stores) = pipeline.response_stores() {
+        ctx.extensions.insert(stores.clone());
+    }
+
+    let request_json = json!({
+        "model": "gpt-4.1",
+        "input": "What next?",
+        "previous_response_id": "resp_prev"
+    });
+    let mut request_body = Some(Bytes::from(serde_json::to_vec(&request_json).unwrap()));
+    let request_body_action = pipeline
+        .execute_http_request_body(&mut ctx, &mut request_body, true)
+        .await
+        .unwrap();
+    assert!(
+        matches!(request_body_action, FilterAction::Release),
+        "request body phase should classify, register the store, and rehydrate"
+    );
+
+    let request_action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(request_action, FilterAction::Continue),
+        "request phase should continue after pre-read rehydration"
+    );
+
+    let mut resp = crate::test_utils::make_response();
+    resp.headers
+        .insert(http::header::CONTENT_TYPE, "application/json".parse().unwrap());
+    ctx.response_header = Some(&mut resp);
+    let response_action = pipeline.execute_http_response(&mut ctx).await.unwrap();
+    assert!(
+        matches!(response_action, FilterAction::Continue),
+        "response phase should arm persistence buffering"
+    );
+    ctx.response_header = None;
+
+    let response_json = json!({
+        "id": "resp_next",
+        "created_at": 1_719_900_000,
+        "model": "gpt-4.1",
+        "status": "completed",
+        "output": [{"type": "message", "role": "assistant", "content": "Next answer"}]
+    });
+    let mut response_body = Some(Bytes::from(serde_json::to_vec(&response_json).unwrap()));
+    let response_body_action = pipeline
+        .execute_http_response_body(&mut ctx, &mut response_body, true)
+        .unwrap();
+    assert!(
+        matches!(response_body_action, FilterAction::Continue),
+        "response body phase should persist and continue"
+    );
+
+    let store = SqliteResponseStore::new(&db_url, "test_responses", "test_conversations", None)
+        .await
+        .unwrap();
+    let record = store
+        .get_response("default", "resp_next")
+        .await
+        .unwrap()
+        .expect("pipeline should persist the rehydrated response");
+    assert_eq!(
+        record.input, request_json["input"],
+        "stored input should remain the current request input"
+    );
+    assert_eq!(
+        record.messages,
+        json!([
+            {"type": "message", "role": "user", "content": "Hello"},
+            {"type": "message", "role": "assistant", "content": "Hi"},
+            {"type": "message", "role": "user", "content": "What next?"},
+            {"type": "message", "role": "assistant", "content": "Next answer"}
+        ]),
+        "stored messages should preserve previous turns, current input, and output"
+    );
+
+    drop(store);
+    drop(pipeline);
+    cleanup_sqlite_file(&db_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn store_init_failure_is_permanent() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
@@ -1211,6 +1337,78 @@ allow_private_database_url: true
         ctx.get_metadata("responses.skip_persist"),
         Some("true"),
         "current request should still skip persistence after failed init"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_store_init_failure_is_not_cached_on_get() {
+    let socket_dir = std::env::temp_dir().join(format!(
+        "praxis_missing_postgres_socket_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?host={}"
+responses_table: responses
+conversations_table: conversations
+allow_private_database_url: true
+"#,
+        socket_dir.display()
+    ))
+    .unwrap();
+    let cfg: ResponseStoreConfig = parse_filter_config("openai_response_store", &yaml).unwrap();
+    validate_config(&cfg).unwrap();
+    let filter = ResponseStoreFilter::new(cfg);
+
+    let req = crate::test_utils::make_request(http::Method::GET, "/v1/responses/resp_test123");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(filter.on_request(&mut ctx).await.unwrap());
+
+    assert!(
+        filter.store.get().is_none(),
+        "failed postgres initialization on GET should leave OnceCell unset for retry"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn postgres_store_init_failure_is_not_cached_on_delete() {
+    let socket_dir = std::env::temp_dir().join(format!(
+        "praxis_missing_postgres_socket_{}_{}",
+        std::process::id(),
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after epoch")
+            .as_nanos()
+    ));
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+backend: postgres
+database_url: "postgres://user:pass@203.0.113.10:5432/praxis?host={}"
+responses_table: responses
+conversations_table: conversations
+allow_private_database_url: true
+"#,
+        socket_dir.display()
+    ))
+    .unwrap();
+    let cfg: ResponseStoreConfig = parse_filter_config("openai_response_store", &yaml).unwrap();
+    validate_config(&cfg).unwrap();
+    let filter = ResponseStoreFilter::new(cfg);
+
+    let req = crate::test_utils::make_request(http::Method::DELETE, "/v1/responses/resp_test123");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(filter.on_request(&mut ctx).await.unwrap());
+
+    assert!(
+        filter.store.get().is_none(),
+        "failed postgres initialization on DELETE should leave OnceCell unset for retry"
     );
 }
 
@@ -2400,6 +2598,44 @@ async fn get_input_items_with_cursor() {
     assert_eq!(body["has_more"], false, "should indicate no more items after this page");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn get_input_items_with_malformed_cursor_returns_400() {
+    let filter = make_filter();
+    init_store_and_seed(
+        &filter,
+        "resp_bad_cursor",
+        "default",
+        json!([
+            {"id": "item_1", "type": "message"},
+            {"id": "item_2", "type": "message"}
+        ]),
+    )
+    .await;
+
+    let req = crate::test_utils::make_request(
+        http::Method::GET,
+        "/v1/responses/resp_bad_cursor/input_items?after=not-a-cursor",
+    );
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let rejection = expect_reject(action);
+    assert_eq!(rejection.status, 400, "malformed cursor should return 400");
+    assert_has_json_content_type(&rejection);
+
+    let body: serde_json::Value = serde_json::from_slice(rejection.body.as_deref().unwrap()).unwrap();
+    assert_eq!(
+        body["error"]["type"], "invalid_request_error",
+        "malformed cursor should return an invalid request error"
+    );
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("invalid input_items cursor")),
+        "error message should explain the invalid input_items cursor"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // DELETE
 // -----------------------------------------------------------------------------
@@ -2700,14 +2936,14 @@ fn cleanup_sqlite_file(db_path: &PathBuf) {
 async fn init_store(filter: &ResponseStoreFilter) {
     filter
         .store
-        .get_or_init(|| async { filter.build_store().await.ok() })
+        .get_or_init(|| async { Box::pin(filter.build_store()).await.ok() })
         .await;
 }
 
 async fn init_store_and_seed(filter: &ResponseStoreFilter, id: &str, tenant_id: &str, input: serde_json::Value) {
     let store_opt = filter
         .store
-        .get_or_init(|| async { filter.build_store().await.ok() })
+        .get_or_init(|| async { Box::pin(filter.build_store()).await.ok() })
         .await;
     let store = store_opt.as_ref().expect("store should be initialized");
     let record = ResponseRecord {

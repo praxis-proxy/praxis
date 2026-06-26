@@ -25,7 +25,7 @@
 #
 # Usage:
 #   mkcert -install && mkcert localhost 127.0.0.1
-#   cargo run -p praxis -- -c examples/configs/protocols/tls-version-constraint.yaml
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/tls-version-constraint.yaml
 #   curl --tlsv1.3 https://localhost:8443/    # succeeds
 #   curl --tlsv1.2 https://localhost:8443/    # rejected
 

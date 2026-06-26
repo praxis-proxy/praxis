@@ -32,3 +32,6 @@ tracing = { workspace = true }
 futures = { workspace = true }
 tokio-rustls = { workspace = true }
 tokio-tungstenite = { workspace = true }
+
+[features]
+ai-inference = ["praxis-filter/ai-inference"]

@@ -19,17 +19,23 @@ pub use http::AnthropicToOpenaiFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::AnthropicValidateFilter;
 #[cfg(feature = "ai-inference")]
+pub use http::ModelRewriteFilter;
+#[cfg(feature = "ai-inference")]
 pub use http::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::OpenaiResponsesValidateFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
+pub use http::RehydrateFilter;
+#[cfg(feature = "ai-inference")]
 pub use http::ResponseStoreFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::ResponseStoreRegistry;
 #[cfg(feature = "ai-inference")]
 pub use http::ResponsesFormatFilter;
+#[cfg(feature = "ai-inference")]
+pub use http::ResponsesProxyFilter;
 pub use http::{
     A2aFilter, AccessLogFilter, CircuitBreakerFilter, CompressionFilter, ContainsValue, CorsFilter,
     CredentialInjectionFilter, CsrfFilter, DisallowedOriginMode, ForwardedHeadersFilter, GrpcDetectionFilter,
@@ -39,5 +45,5 @@ pub use http::{
     TokenUsageHeadersFilter, UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,
 };
 #[cfg(feature = "ai-inference")]
-pub use http::{TokenUsage, TokenUsageProvider, extract_token_usage};
+pub use http::{TokenUsage, TokenUsageProvider, extract_token_usage, set_token_usage};
 pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};

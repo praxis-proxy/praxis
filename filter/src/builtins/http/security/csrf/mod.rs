@@ -21,7 +21,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use async_trait::async_trait;
 use praxis_core::config::InsecureOptions;
-use rand::Rng as _;
+use rand::RngExt as _;
 use tracing::{debug, trace, warn};
 
 use self::{

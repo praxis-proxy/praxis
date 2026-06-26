@@ -41,6 +41,8 @@ mod openai_response_store_postgres;
 #[cfg(feature = "ai-inference")]
 mod openai_responses_format;
 #[cfg(feature = "ai-inference")]
+mod openai_responses_model_rewrite;
+#[cfg(feature = "ai-inference")]
 mod openai_responses_validate;
 mod p2c;
 mod path_based_routing;
@@ -50,6 +52,10 @@ mod payload_processing;
 mod prompt_enrichment;
 mod protocols;
 mod redirect;
+#[cfg(feature = "ai-inference")]
+mod rehydrate;
+#[cfg(feature = "ai-inference")]
+mod responses_proxy;
 #[cfg(feature = "ai-inference")]
 mod responses_routing;
 mod round_robin;

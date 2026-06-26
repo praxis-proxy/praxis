@@ -15,7 +15,7 @@ use std::fmt;
 /// messages used for multi-turn conversation rehydration. JSON
 /// columns use [`serde_json::Value`] — the store is intentionally
 /// schema-agnostic about their contents.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ResponseRecord {
     /// Unique response ID (e.g., `"resp_abc123"`).
     pub id: String,
@@ -78,7 +78,7 @@ pub struct ConversationRecord {
 /// Items are the individual entries within a conversation (messages,
 /// tool calls, tool outputs, etc.). Stored as opaque JSON blobs with
 /// a monotonic position for ordering.
-#[expect(dead_code, reason = "used by ConversationItemStore in #631")]
+#[derive(Debug)]
 pub struct ConversationItemRecord {
     /// Unique item ID (e.g., `"item_abc123"`).
     pub item_id: String,
@@ -112,6 +112,9 @@ pub enum StoreError {
     /// Database connection or query failure.
     Database(String),
 
+    /// Client-supplied input is invalid (e.g. malformed cursor).
+    InvalidInput(String),
+
     /// JSON serialization or deserialization failure.
     Serialization(String),
 
@@ -123,6 +126,7 @@ impl fmt::Display for StoreError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Database(msg) => write!(f, "database error: {msg}"),
+            Self::InvalidInput(msg) => write!(f, "invalid input: {msg}"),
             Self::Serialization(msg) => write!(f, "serialization error: {msg}"),
             Self::Unavailable(msg) => write!(f, "store unavailable: {msg}"),
         }

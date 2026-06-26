@@ -50,6 +50,7 @@ use crate::{
     FilterError,
     body::{BodyCapabilities, BodyMode},
     builtins::http::payload_processing::compression_config::CompressionConfig,
+    extensions::RequestExtensions,
 };
 
 // -----------------------------------------------------------------------------
@@ -211,10 +212,17 @@ impl FilterPipeline {
         self.response_stores.as_ref()
     }
 
-    /// Set the shared [`ResponseStoreRegistry`] for this pipeline.
-    #[cfg(feature = "ai-inference")]
-    pub fn set_response_stores(&mut self, stores: ResponseStoreRegistry) {
-        self.response_stores = Some(stores);
+    /// Inject pipeline-level resources into per-request extensions.
+    ///
+    /// Called by the protocol adapter when building each request's
+    /// filter context. Keeps AI-specific types encapsulated within
+    /// the filter crate so callers never name AI types directly.
+    pub fn prepare_extensions(&self, extensions: &mut RequestExtensions) {
+        #[cfg(feature = "ai-inference")]
+        if let Some(stores) = self.response_stores.as_ref() {
+            extensions.insert(stores.clone());
+        }
+        let _ = extensions;
     }
 
     /// The wall-clock time source.

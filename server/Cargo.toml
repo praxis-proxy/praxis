@@ -1,5 +1,5 @@
 [package]
-name = "praxis"
+name = "praxis-proxy"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -8,7 +8,6 @@ description = "Cloud and AI-native proxy server"
 license.workspace = true
 repository.workspace = true
 readme = "../README.md"
-publish = false
 
 [lib]
 name = "praxis"
@@ -38,12 +37,12 @@ nix = { workspace = true }
 tikv-jemallocator = { workspace = true }
 
 [build-dependencies]
-cargo_metadata = "0.19"
+cargo_metadata = "0.23.1"
 
 [dev-dependencies]
 tempfile = { workspace = true }
 
 [features]
 default = ["ai-inference"]
-ai-inference = ["praxis-filter/ai-inference", "praxis-protocol/ai-inference"]
+ai-inference = ["praxis-filter/ai-inference", "praxis-protocol/response-store"]
 ext-proc = ["praxis-filter/ext-proc"]
