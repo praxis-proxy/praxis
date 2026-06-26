@@ -461,10 +461,20 @@ otherwise a new one is built and cached. The
 `CircuitBreaker` reflecting the current config, so
 changes to `failure_threshold` or `recovery_timeout`
 take effect immediately on reload. Circuit breaker
-state does reset, but this is acceptable: a single
-half-open probe is not a connection storm, and it
-matches Envoy's behavior of resetting circuit
-breakers on config update.
+state does reset. For load-shedding breakers this is
+uncontroversial, but the callout breaker also serves
+a safety role: a fail-closed guardrail that was
+correctly shedding traffic to an unreachable service
+will briefly re-enable callouts after a reload. This
+is acceptable because the breaker trips again after
+`failure_threshold` consecutive failures — typically
+one to five requests — and fail-closed mode rejects
+those requests, so the exposure window is bounded by
+the threshold, not the outage duration. The
+alternative — preserving breaker state across
+reloads — would prevent config changes to
+`failure_threshold` and `recovery_timeout` from
+taking effect, which is worse for operability.
 
 Clients not referenced after a reload are left in
 the registry until their idle connections time out
