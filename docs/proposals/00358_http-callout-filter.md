@@ -307,10 +307,13 @@ is chosen because:
   management.
 - **Stable API surface** — mature enough that
   breakage risk is low for a long-lived dependency.
-- **Already in-tree** — `wiremock` (a dev-dependency
-  used across the test suite) depends on `reqwest`
-  transitively, so the incremental dependency cost
-  is minimal.
+
+**Dependency cost:** reqwest pulls in hyper, h2,
+quinn, tower, and rustls transitively. This is a
+non-trivial addition to `praxis-core`. If the
+dependency footprint becomes a concern, the callout
+module can be gated behind a cargo feature flag on
+core so downstream crates opt in.
 
 Alternatives considered: `hyper` directly (requires
 manual pool and TLS management), Pingora's upstream
