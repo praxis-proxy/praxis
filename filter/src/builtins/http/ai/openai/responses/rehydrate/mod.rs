@@ -14,7 +14,7 @@
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde_json::Value;
-use tracing::{debug, warn};
+use tracing::{debug, trace, warn};
 
 use super::{DEFAULT_STORE_NAME, DEFAULT_TENANT_ID, TENANT_METADATA_KEY, state::ResponsesState};
 use crate::{
@@ -24,6 +24,27 @@ use crate::{
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
+
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Metadata key for MCP tools discovered in the previous response.
+const MCP_TOOLS_METADATA_KEY: &str = "responses.previous_mcp_tools";
+
+/// Metadata key for previous response input token count.
+const PREV_USAGE_INPUT_KEY: &str = "responses.previous_usage_input_tokens";
+
+/// Metadata key for previous response output token count.
+const PREV_USAGE_OUTPUT_KEY: &str = "responses.previous_usage_output_tokens";
+
+/// Metadata key for previous response total token count.
+const PREV_USAGE_TOTAL_KEY: &str = "responses.previous_usage_total_tokens";
+
+/// Maximum metadata value length (bytes). Matches the limit
+/// enforced by [`HttpFilterContext::set_metadata`].
+///
+/// [`HttpFilterContext::set_metadata`]: crate::filter::HttpFilterContext::set_metadata
+const MAX_METADATA_VALUE_BYTES: usize = 256;
 
 // -----------------------------------------------------------------------------
 // RehydrateFilter
@@ -161,6 +182,9 @@ async fn validate_previous_response(
         return Ok(action);
     }
 
+    extract_mcp_tools(ctx, &record);
+    extract_previous_usage(ctx, &record);
+
     ctx.extensions.insert(build_state(parsed_body, record.messages));
 
     debug!(previous_response_id = %prev_id, "previous response validated, state populated");
@@ -249,6 +273,99 @@ fn validate_response_status(record: &ResponseRecord) -> Result<(), FilterAction>
 }
 
 // -----------------------------------------------------------------------------
+// MCP Tool & Usage Extraction
+// -----------------------------------------------------------------------------
+
+/// Extract MCP tool listings from the previous response output
+/// and set a compact metadata signal for downstream filters.
+///
+/// Scans `record.response_object["output"]` for items with
+/// `"type": "mcp_list_tools"` and builds a compact JSON array
+/// of `{"server_label": "x", "tools": ["name1", "name2"]}`.
+///
+/// If the serialized value exceeds [`MAX_METADATA_VALUE_BYTES`],
+/// a boolean `"true"` is set instead.
+fn extract_mcp_tools(ctx: &mut HttpFilterContext<'_>, record: &ResponseRecord) {
+    let summaries = collect_mcp_tool_summaries(record);
+    if summaries.is_empty() {
+        return;
+    }
+
+    let compact = Value::Array(summaries);
+    match serde_json::to_string(&compact) {
+        Ok(s) if s.len() <= MAX_METADATA_VALUE_BYTES => {
+            trace!(mcp_tools = %s, "extracted MCP tool listings");
+            ctx.set_metadata(MCP_TOOLS_METADATA_KEY, s);
+        },
+        Ok(_) => {
+            trace!("MCP tool listings exceed metadata limit");
+            ctx.set_metadata(MCP_TOOLS_METADATA_KEY, "true");
+        },
+        Err(e) => {
+            warn!(error = %e, "failed to serialize MCP tool summary");
+        },
+    }
+}
+
+/// Build compact summaries from `mcp_list_tools` output items.
+///
+/// Each summary contains the `server_label` and an array of
+/// tool names (without schemas or descriptions).
+fn collect_mcp_tool_summaries(record: &ResponseRecord) -> Vec<Value> {
+    let Some(output) = record.response_object.get("output").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    output
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("mcp_list_tools"))
+        .filter_map(|item| {
+            let label = item.get("server_label").and_then(Value::as_str)?;
+            let names: Vec<Value> = item
+                .get("tools")
+                .and_then(Value::as_array)
+                .map(|tools| {
+                    tools
+                        .iter()
+                        .filter_map(|t| t.get("name").and_then(Value::as_str).map(Value::from))
+                        .collect()
+                })
+                .unwrap_or_default();
+            Some(serde_json::json!({
+                "server_label": label,
+                "tools": names,
+            }))
+        })
+        .collect()
+}
+
+/// Extract token usage from the previous response and set
+/// metadata keys for downstream auto-compaction.
+///
+/// Reads `record.response_object["usage"]` and writes
+/// `input_tokens`, `output_tokens`, and `total_tokens` as
+/// individual string metadata values.
+fn extract_previous_usage(ctx: &mut HttpFilterContext<'_>, record: &ResponseRecord) {
+    let Some(usage) = record.response_object.get("usage") else {
+        return;
+    };
+
+    if let Some(input) = usage.get("input_tokens").and_then(Value::as_u64) {
+        ctx.set_metadata(PREV_USAGE_INPUT_KEY, input.to_string());
+    }
+
+    if let Some(output) = usage.get("output_tokens").and_then(Value::as_u64) {
+        ctx.set_metadata(PREV_USAGE_OUTPUT_KEY, output.to_string());
+    }
+
+    if let Some(total) = usage.get("total_tokens").and_then(Value::as_u64) {
+        ctx.set_metadata(PREV_USAGE_TOTAL_KEY, total.to_string());
+    }
+
+    trace!("extracted previous response usage");
+}
+
+// -----------------------------------------------------------------------------
 // Rejection Helpers
 // -----------------------------------------------------------------------------
 
@@ -296,6 +413,7 @@ fn reject_server_error(message: &str) -> FilterAction {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
+    clippy::needless_pass_by_value,
     clippy::panic,
     clippy::needless_raw_strings,
     clippy::needless_raw_string_hashes,

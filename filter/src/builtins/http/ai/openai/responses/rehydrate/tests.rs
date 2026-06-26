@@ -469,6 +469,329 @@ async fn rejects_when_store_fetch_fails() {
 }
 
 // -----------------------------------------------------------------------------
+// MCP Tool Recovery
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn extracts_mcp_tools_from_previous_response() {
+    let output = json!([
+        {"type": "message", "content": [{"type": "output_text", "text": "Hi"}]},
+        {
+            "id": "mcpl_abc",
+            "type": "mcp_list_tools",
+            "server_label": "my-server",
+            "tools": [
+                {"name": "get_weather", "description": "Get weather", "input_schema": {}},
+                {"name": "search", "description": "Search docs", "input_schema": {}}
+            ]
+        }
+    ]);
+    let usage = json!({"input_tokens": 100, "output_tokens": 50, "total_tokens": 150});
+    let store = MockStore::with_output_and_usage("resp_mcp", output, usage);
+    let registry = setup_registry(store);
+
+    let filter = RehydrateFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extensions.insert(registry.clone());
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let mut body = Some(Bytes::from(
+        r#"{"input":"Follow up","previous_response_id":"resp_mcp"}"#,
+    ));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should release after rehydration"
+    );
+
+    let mcp_meta = ctx
+        .get_metadata("responses.previous_mcp_tools")
+        .expect("should set MCP tools metadata");
+    let parsed: Value = serde_json::from_str(mcp_meta).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "should have one server entry");
+    assert_eq!(arr[0]["server_label"], "my-server", "server label should match");
+    let tools = arr[0]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 2, "should have two tool names");
+    assert_eq!(tools[0], "get_weather", "first tool name should match");
+    assert_eq!(tools[1], "search", "second tool name should match");
+}
+
+#[tokio::test]
+async fn no_mcp_metadata_when_output_has_no_mcp_items() {
+    let output = json!([
+        {"type": "message", "content": [{"type": "output_text", "text": "Hi"}]}
+    ]);
+    let usage = json!({"input_tokens": 10, "output_tokens": 5, "total_tokens": 15});
+    let store = MockStore::with_output_and_usage("resp_no_mcp", output, usage);
+    let registry = setup_registry(store);
+
+    let filter = RehydrateFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extensions.insert(registry.clone());
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let mut body = Some(Bytes::from(r#"{"input":"Hi","previous_response_id":"resp_no_mcp"}"#));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should release after rehydration"
+    );
+    assert!(
+        ctx.get_metadata("responses.previous_mcp_tools").is_none(),
+        "should not set MCP metadata when no mcp_list_tools items"
+    );
+}
+
+#[tokio::test]
+async fn extracts_mcp_tools_from_multiple_servers() {
+    let output = json!([
+        {
+            "id": "mcpl_1",
+            "type": "mcp_list_tools",
+            "server_label": "weather-server",
+            "tools": [{"name": "get_weather", "description": "d", "input_schema": {}}]
+        },
+        {"type": "message", "content": [{"type": "output_text", "text": "Hi"}]},
+        {
+            "id": "mcpl_2",
+            "type": "mcp_list_tools",
+            "server_label": "search-server",
+            "tools": [
+                {"name": "search", "description": "d", "input_schema": {}},
+                {"name": "index", "description": "d", "input_schema": {}}
+            ]
+        }
+    ]);
+    let store = MockStore::with_output_and_usage("resp_multi", output, Value::Null);
+    let registry = setup_registry(store);
+
+    let filter = RehydrateFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extensions.insert(registry.clone());
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let mut body = Some(Bytes::from(r#"{"input":"Hi","previous_response_id":"resp_multi"}"#));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should release after rehydration"
+    );
+
+    let mcp_meta = ctx
+        .get_metadata("responses.previous_mcp_tools")
+        .expect("should set MCP tools metadata");
+    let parsed: Value = serde_json::from_str(mcp_meta).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 2, "should have two server entries");
+    assert_eq!(arr[0]["server_label"], "weather-server", "first server label");
+    assert_eq!(arr[1]["server_label"], "search-server", "second server label");
+    assert_eq!(
+        arr[1]["tools"].as_array().unwrap().len(),
+        2,
+        "second server should have two tools"
+    );
+}
+
+#[tokio::test]
+async fn mcp_tools_overflow_sets_boolean_flag() {
+    let many_tools: Vec<Value> = (0..30)
+        .map(|i| json!({"name": format!("very_long_tool_name_number_{i}"), "description": "d", "input_schema": {}}))
+        .collect();
+    let output = json!([{
+        "id": "mcpl_big",
+        "type": "mcp_list_tools",
+        "server_label": "big-server",
+        "tools": many_tools,
+    }]);
+    let store = MockStore::with_output_and_usage("resp_big", output, Value::Null);
+    let registry = setup_registry(store);
+
+    let filter = RehydrateFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extensions.insert(registry.clone());
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let mut body = Some(Bytes::from(r#"{"input":"Hi","previous_response_id":"resp_big"}"#));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should release after rehydration"
+    );
+    assert_eq!(
+        ctx.get_metadata("responses.previous_mcp_tools"),
+        Some("true"),
+        "should fall back to boolean flag when compact JSON exceeds 256 bytes"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Usage Extraction
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn extracts_usage_from_previous_response() {
+    let output = json!([{"type": "message", "content": [{"type": "output_text", "text": "Hi"}]}]);
+    let usage = json!({"input_tokens": 500, "output_tokens": 200, "total_tokens": 700});
+    let store = MockStore::with_output_and_usage("resp_usage", output, usage);
+    let registry = setup_registry(store);
+
+    let filter = RehydrateFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extensions.insert(registry.clone());
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let mut body = Some(Bytes::from(r#"{"input":"Hi","previous_response_id":"resp_usage"}"#));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should release after rehydration"
+    );
+    assert_eq!(
+        ctx.get_metadata("responses.previous_usage_input_tokens"),
+        Some("500"),
+        "input tokens"
+    );
+    assert_eq!(
+        ctx.get_metadata("responses.previous_usage_output_tokens"),
+        Some("200"),
+        "output tokens"
+    );
+    assert_eq!(
+        ctx.get_metadata("responses.previous_usage_total_tokens"),
+        Some("700"),
+        "total tokens"
+    );
+}
+
+#[tokio::test]
+async fn no_usage_metadata_when_usage_missing() {
+    let output = json!([{"type": "message", "content": [{"type": "output_text", "text": "Hi"}]}]);
+    let store = MockStore::with_output_and_usage("resp_no_usage", output, Value::Null);
+    let registry = setup_registry(store);
+
+    let filter = RehydrateFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extensions.insert(registry.clone());
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let mut body = Some(Bytes::from(r#"{"input":"Hi","previous_response_id":"resp_no_usage"}"#));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should release after rehydration"
+    );
+    assert!(
+        ctx.get_metadata("responses.previous_usage_input_tokens").is_none(),
+        "should not set input tokens"
+    );
+    assert!(
+        ctx.get_metadata("responses.previous_usage_output_tokens").is_none(),
+        "should not set output tokens"
+    );
+    assert!(
+        ctx.get_metadata("responses.previous_usage_total_tokens").is_none(),
+        "should not set total tokens"
+    );
+}
+
+#[tokio::test]
+async fn extracts_partial_usage_fields() {
+    let output = json!([{"type": "message", "content": [{"type": "output_text", "text": "Hi"}]}]);
+    let usage = json!({"input_tokens": 42});
+    let store = MockStore::with_output_and_usage("resp_partial", output, usage);
+    let registry = setup_registry(store);
+
+    let filter = RehydrateFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extensions.insert(registry.clone());
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let mut body = Some(Bytes::from(r#"{"input":"Hi","previous_response_id":"resp_partial"}"#));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should release after rehydration"
+    );
+    assert_eq!(
+        ctx.get_metadata("responses.previous_usage_input_tokens"),
+        Some("42"),
+        "should set input tokens"
+    );
+    assert!(
+        ctx.get_metadata("responses.previous_usage_output_tokens").is_none(),
+        "should not set output tokens when missing"
+    );
+    assert!(
+        ctx.get_metadata("responses.previous_usage_total_tokens").is_none(),
+        "should not set total tokens when missing"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Fallback + MCP
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn fallback_reconstruction_includes_mcp_list_tools() {
+    let mut records = std::collections::HashMap::new();
+    records.insert(
+        "resp_mcp_fb".to_owned(),
+        ResponseRecord {
+            id: "resp_mcp_fb".to_owned(),
+            tenant_id: "default".to_owned(),
+            created_at: 1000,
+            model: "gpt-4.1".to_owned(),
+            response_object: json!({
+                "id": "resp_mcp_fb",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "mcpl_fb",
+                        "type": "mcp_list_tools",
+                        "server_label": "fb-server",
+                        "tools": [{"name": "fb_tool", "description": "d", "input_schema": {}}]
+                    },
+                    {"type": "message", "content": [{"type": "output_text", "text": "result"}]}
+                ]
+            }),
+            input: json!("Hello"),
+            messages: json!([]),
+        },
+    );
+    let store = MockStore {
+        records,
+        should_fail: false,
+    };
+    let registry = setup_registry(store);
+
+    let filter = RehydrateFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extensions.insert(registry.clone());
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let mut body = Some(Bytes::from(r#"{"input":"Next","previous_response_id":"resp_mcp_fb"}"#));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should release after fallback rehydration"
+    );
+
+    assert!(
+        ctx.get_metadata("responses.previous_mcp_tools").is_some(),
+        "should set MCP tools metadata even with empty messages"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
@@ -494,6 +817,34 @@ impl MockStore {
                 }),
                 input,
                 messages,
+            },
+        );
+        Self {
+            records,
+            should_fail: false,
+        }
+    }
+
+    fn with_output_and_usage(id: &str, output: Value, usage: Value) -> Self {
+        let mut records = std::collections::HashMap::new();
+        records.insert(
+            id.to_owned(),
+            ResponseRecord {
+                id: id.to_owned(),
+                tenant_id: "default".to_owned(),
+                created_at: 1000,
+                model: "gpt-4.1".to_owned(),
+                response_object: json!({
+                    "id": id,
+                    "status": "completed",
+                    "output": output,
+                    "usage": usage,
+                }),
+                input: json!("Hello"),
+                messages: json!([
+                    {"role": "user", "content": "Hello"},
+                    {"role": "assistant", "content": "Hi"}
+                ]),
             },
         );
         Self {
