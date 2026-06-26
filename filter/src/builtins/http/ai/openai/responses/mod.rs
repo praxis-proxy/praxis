@@ -18,6 +18,7 @@
 //! to validate parameter combinations and extract additional fields.
 
 mod config;
+pub(crate) mod error;
 #[cfg(feature = "ai-inference")]
 pub(crate) mod model_rewrite;
 pub(crate) mod proxy;
