@@ -357,6 +357,16 @@ a string and written to `FilterResultSet`:
 - Arrays/objects: compact JSON
 - `null` or no match: nothing written
 
+Branch chains compare extracted values as exact
+string matches (`on_result.value: "true"`). For
+object or array values, the compact JSON
+representation is written verbatim — branch chains
+would need to match the exact serialized form, which
+is brittle. Prefer JSONPath expressions that extract
+leaf scalars (e.g. `$.flagged` rather than
+`$.categories`) when the result feeds a branch
+condition.
+
 [`serde_json_path`]: https://crates.io/crates/serde_json_path
 
 #### Request flow
