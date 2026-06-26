@@ -554,7 +554,7 @@ response:
     - retry-after             #   returned to client on reject
 failure_mode: closed          # or open
 status_on_error: 502
-max_depth: 1                  # default; no re-entry
+max_depth: 1                  # default; depth >= 1 is rejected (no re-entry)
 circuit_breaker:              # optional
   failure_threshold: 5
   recovery_timeout: 30s       # time in Open before probing
