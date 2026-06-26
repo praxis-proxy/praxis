@@ -11,6 +11,8 @@
 //!
 //! [`ResponsesState`]: super::state::ResponsesState
 
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use bytes::Bytes;
 use serde_json::Value;
@@ -276,12 +278,13 @@ fn validate_response_status(record: &ResponseRecord) -> Result<(), FilterAction>
 // MCP Tool & Usage Extraction
 // -----------------------------------------------------------------------------
 
-/// Extract MCP tool listings from the previous response output
-/// and set a compact metadata signal for downstream filters.
+/// Extract MCP tool listings from stored history or previous
+/// response output and set a compact metadata signal for downstream
+/// filters.
 ///
-/// Scans `record.response_object["output"]` for items with
-/// `"type": "mcp_list_tools"` and builds a compact JSON array
-/// of `{"server_label": "x", "tools": ["name1", "name2"]}`.
+/// Scans stored message history and `record.response_object["output"]`
+/// for items with `"type": "mcp_list_tools"` and builds a compact
+/// JSON array of `{"server_label": "x", "tools": ["name1", "name2"]}`.
 ///
 /// If the serialized value exceeds [`MAX_METADATA_VALUE_BYTES`],
 /// a boolean `"true"` is set instead.
@@ -312,31 +315,51 @@ fn extract_mcp_tools(ctx: &mut HttpFilterContext<'_>, record: &ResponseRecord) {
 /// Each summary contains the `server_label` and an array of
 /// tool names (without schemas or descriptions).
 fn collect_mcp_tool_summaries(record: &ResponseRecord) -> Vec<Value> {
-    let Some(output) = record.response_object.get("output").and_then(Value::as_array) else {
-        return Vec::new();
-    };
+    let mut summaries = Vec::new();
+    let mut seen = HashSet::new();
 
-    output
-        .iter()
-        .filter(|item| item.get("type").and_then(Value::as_str) == Some("mcp_list_tools"))
-        .filter_map(|item| {
-            let label = item.get("server_label").and_then(Value::as_str)?;
-            let names: Vec<Value> = item
-                .get("tools")
-                .and_then(Value::as_array)
-                .map(|tools| {
-                    tools
-                        .iter()
-                        .filter_map(|t| t.get("name").and_then(Value::as_str).map(Value::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            Some(serde_json::json!({
-                "server_label": label,
-                "tools": names,
-            }))
-        })
-        .collect()
+    if let Some(messages) = record.messages.as_array() {
+        collect_mcp_tool_summaries_from_items(messages, &mut seen, &mut summaries);
+    }
+
+    if let Some(output) = record.response_object.get("output").and_then(Value::as_array) {
+        collect_mcp_tool_summaries_from_items(output, &mut seen, &mut summaries);
+    }
+
+    summaries
+}
+
+/// Append compact MCP tool summaries from a sequence of response items.
+fn collect_mcp_tool_summaries_from_items(
+    items: &[Value],
+    seen: &mut HashSet<(String, Vec<String>)>,
+    summaries: &mut Vec<Value>,
+) {
+    summaries.extend(
+        items
+            .iter()
+            .filter(|item| item.get("type").and_then(Value::as_str) == Some("mcp_list_tools"))
+            .filter_map(|item| {
+                let label = item.get("server_label").and_then(Value::as_str)?;
+                let names: Vec<String> = item
+                    .get("tools")
+                    .and_then(Value::as_array)
+                    .map(|tools| {
+                        tools
+                            .iter()
+                            .filter_map(|t| t.get("name").and_then(Value::as_str).map(ToOwned::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !seen.insert((label.to_owned(), names.clone())) {
+                    return None;
+                }
+                Some(serde_json::json!({
+                    "server_label": label,
+                    "tools": names,
+                }))
+            }),
+    );
 }
 
 /// Extract token usage from the previous response and set

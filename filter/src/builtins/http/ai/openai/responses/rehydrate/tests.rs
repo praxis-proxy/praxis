@@ -597,6 +597,69 @@ async fn extracts_mcp_tools_from_multiple_servers() {
 }
 
 #[tokio::test]
+async fn extracts_mcp_tools_from_stored_history_when_latest_output_has_none() {
+    let mut records = std::collections::HashMap::new();
+    records.insert(
+        "resp_chain".to_owned(),
+        ResponseRecord {
+            id: "resp_chain".to_owned(),
+            tenant_id: "default".to_owned(),
+            created_at: 1000,
+            model: "gpt-4.1".to_owned(),
+            response_object: json!({
+                "id": "resp_chain",
+                "status": "completed",
+                "output": [
+                    {"type": "message", "content": [{"type": "output_text", "text": "Latest turn"}]}
+                ]
+            }),
+            input: json!("Second turn"),
+            messages: json!([
+                {"type": "message", "role": "user", "content": "First turn"},
+                {
+                    "id": "mcpl_earlier",
+                    "type": "mcp_list_tools",
+                    "server_label": "weather-server",
+                    "tools": [{"name": "get_weather", "description": "d", "input_schema": {}}]
+                },
+                {"type": "message", "role": "assistant", "content": "Latest turn"}
+            ]),
+        },
+    );
+    let store = MockStore {
+        records,
+        should_fail: false,
+    };
+    let registry = setup_registry(store);
+
+    let filter = RehydrateFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extensions.insert(registry.clone());
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let mut body = Some(Bytes::from(
+        r#"{"input":"Third turn","previous_response_id":"resp_chain"}"#,
+    ));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should release after chained rehydration"
+    );
+
+    let mcp_meta = ctx
+        .get_metadata("responses.previous_mcp_tools")
+        .expect("should set MCP tools metadata from stored history");
+    let parsed: Value = serde_json::from_str(mcp_meta).unwrap();
+    let arr = parsed.as_array().unwrap();
+    assert_eq!(arr.len(), 1, "should recover one earlier server entry");
+    assert_eq!(arr[0]["server_label"], "weather-server", "server label should match");
+    let tools = arr[0]["tools"].as_array().unwrap();
+    assert_eq!(tools.len(), 1, "should recover one earlier tool");
+    assert_eq!(tools[0], "get_weather", "tool name should match");
+}
+
+#[tokio::test]
 async fn mcp_tools_overflow_sets_boolean_flag() {
     let many_tools: Vec<Value> = (0..30)
         .map(|i| json!({"name": format!("very_long_tool_name_number_{i}"), "description": "d", "input_schema": {}}))
