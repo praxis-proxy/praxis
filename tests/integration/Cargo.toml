@@ -8,9 +8,10 @@ readme = "../../README.md"
 publish = false
 
 [features]
-default = ["ai-inference"]
+default = ["ai-inference", "http-callout"]
 ai-inference = ["praxis-filter/ai-inference", "praxis-test-utils/ai-inference"]
 cpex-policy-engine = ["praxis-filter/cpex-policy-engine"]
+http-callout = ["praxis-core/callout"]
 no-mac-cert-rotation-tests = [] # We use this to disable testing cert rotation on macOS
 
 [lints]
@@ -27,6 +28,7 @@ http = { workspace = true }
 jsonwebtoken = "9"
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
+praxis-http-callout = { workspace = true }
 praxis-protocol = { workspace = true }
 praxis-test-utils = { workspace = true }
 rustls = { workspace = true }

@@ -1,0 +1,35 @@
+[package]
+name = "praxis-proxy-http-callout"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "HTTP callout filter for Praxis"
+license.workspace = true
+repository.workspace = true
+readme = "../../README.md"
+publish = false
+
+[lib]
+name = "praxis_http_callout"
+
+[lints]
+workspace = true
+
+[package.metadata.praxis-filters]
+
+[dependencies]
+async-trait = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+praxis-core = { workspace = true, features = ["callout"] }
+praxis-filter = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+serde_json_path = { workspace = true }
+serde_yaml = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock = { workspace = true }

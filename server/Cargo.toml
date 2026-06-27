@@ -25,6 +25,7 @@ clap = { workspace = true }
 notify = { workspace = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
+praxis-http-callout = { workspace = true, optional = true }
 praxis-protocol = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
@@ -43,7 +44,8 @@ cargo_metadata = "0.23.1"
 tempfile = { workspace = true }
 
 [features]
-default = ["ai-inference"]
+default = ["ai-inference", "http-callout"]
 ai-inference = ["praxis-filter/ai-inference", "praxis-protocol/response-store"]
 ext-proc = ["praxis-filter/ext-proc"]
 cpex-policy-engine = ["praxis-filter/cpex-policy-engine"]
+http-callout = ["dep:praxis-http-callout", "praxis-core/callout"]
