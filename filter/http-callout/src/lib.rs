@@ -15,6 +15,9 @@
 mod config;
 mod extract;
 
+#[cfg(test)]
+mod tests;
+
 use std::borrow::Cow;
 
 use async_trait::async_trait;
