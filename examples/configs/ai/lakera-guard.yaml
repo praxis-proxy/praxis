@@ -1,0 +1,66 @@
+# Lakera Guard Content Safety
+#
+# Sends each request body to Lakera Guard for content
+# moderation. Flagged requests are rejected with 403;
+# clean requests continue to the upstream backend.
+#
+# Requires the LAKERA_API_KEY environment variable.
+#
+# Usage:
+#   LAKERA_API_KEY=... cargo run -p praxis-proxy -- -c examples/configs/ai/lakera-guard.yaml
+
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [safety-check, routing]
+
+filter_chains:
+  - name: safety-check
+    filters:
+      - filter: http_callout
+        target:
+          url: "https://api.lakera.ai/v2/guard"
+          timeout: "2s"
+          headers:
+            - name: "Authorization"
+              value: "Bearer ${LAKERA_API_KEY}"
+            - name: "Content-Type"
+              value: "application/json"
+        request:
+          phase: request_body
+          max_body_bytes: 1048576
+        response:
+          extract:
+            - json_path: "$.flagged"
+              result_key: "flagged"
+        on_failure: closed
+        status_on_error: 403
+        circuit_breaker:
+          failure_threshold: 5
+          recovery_timeout: "30s"
+        branch_chains:
+          - name: block_flagged
+            on_result:
+              filter: http_callout
+              key: flagged
+              result: "true"
+            rejoin: terminal
+            chains:
+              - name: reject_flagged
+                filters:
+                  - filter: static_response
+                    status: 403
+                    body: "request blocked by content safety"
+
+  - name: routing
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
