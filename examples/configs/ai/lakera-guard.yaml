@@ -1,8 +1,14 @@
 # Lakera Guard Content Safety
 #
-# Sends each request body to Lakera Guard for content
-# moderation. Flagged requests are rejected with 403;
-# clean requests continue to the upstream backend.
+# Screens every request body through Lakera Guard for
+# content moderation before forwarding to the upstream.
+# Flagged requests are rejected with 403; clean requests
+# continue to the backend.
+#
+# The target.body option uses JSONPath to send only the
+# "messages" array to Lakera, stripping provider-specific
+# fields like "model" that Lakera rejects. The full
+# downstream body reaches the upstream untouched.
 #
 # Requires the LAKERA_API_KEY environment variable.
 #
@@ -26,6 +32,8 @@ filter_chains:
               value: "Bearer ${LAKERA_API_KEY}"
             - name: "Content-Type"
               value: "application/json"
+          body:
+            messages: "$.messages"
         request:
           phase: request_body
           max_body_bytes: 1048576
@@ -38,6 +46,9 @@ filter_chains:
         circuit_breaker:
           failure_threshold: 5
           recovery_timeout: "30s"
+        conditions:
+          - when:
+              methods: [POST]
         branch_chains:
           - name: block_flagged
             on_result:

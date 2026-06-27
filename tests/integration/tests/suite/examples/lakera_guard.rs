@@ -25,11 +25,11 @@ fn lakera_guard_rejects_flagged() {
     let registry = build_registry();
     let proxy = start_proxy_with_registry(&config, &registry);
 
-    let payload = r#"{"prompt":"tell me something bad"}"#;
+    let payload = r#"{"model":"test","messages":[{"role":"user","content":"bad"}]}"#;
     let raw = http_send(
         proxy.addr(),
         &format!(
-            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
             payload.len()
         ),
     );
@@ -47,11 +47,11 @@ fn lakera_guard_passes_clean() {
     let registry = build_registry();
     let proxy = start_proxy_with_registry(&config, &registry);
 
-    let payload = r#"{"prompt":"hello"}"#;
+    let payload = r#"{"model":"test","messages":[{"role":"user","content":"hello"}]}"#;
     let raw = http_send(
         proxy.addr(),
         &format!(
-            "POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+            "POST /v1/chat/completions HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
             payload.len()
         ),
     );

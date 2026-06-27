@@ -29,11 +29,11 @@ use praxis_core::callout::{
 use praxis_filter::{
     BodyAccess, BodyMode, FilterAction, FilterError, HttpFilter, HttpFilterContext, Rejection, parse_filter_config,
 };
-use tracing::debug;
+use tracing::{debug, info, warn};
 
 use crate::{
     config::{FailureModeConfig, HttpCalloutConfig, Phase, expand_env_vars, validate_callout_url},
-    extract::CompiledExtraction,
+    extract::{BodyShaper, CompiledExtraction},
 };
 
 // -----------------------------------------------------------------------------
@@ -56,6 +56,9 @@ const FILTER_NAME: &str = "http_callout";
 ///
 /// [`FilterResultSet`]: praxis_filter::FilterResultSet
 struct HttpCalloutFilter {
+    /// Pre-compiled body shaper for reshaping the callout body.
+    body_shaper: BodyShaper,
+
     /// Reusable HTTP callout client.
     client: CalloutClient,
 
@@ -99,6 +102,7 @@ impl HttpCalloutFilter {
 
         validate_callout_url(&cfg.target.url)?;
 
+        let body_shaper = BodyShaper::compile(&cfg.target.body)?;
         let headers = parse_static_headers(&cfg)?;
         let forward_headers = parse_header_names(&cfg.target.forward_headers, "forward_header")?;
         let extractions = compile_extractions(&cfg)?;
@@ -108,6 +112,7 @@ impl HttpCalloutFilter {
         let client = build_callout_client(&cfg)?;
 
         Ok(Box::new(Self {
+            body_shaper,
             client,
             extractions,
             forward_headers,
@@ -160,8 +165,12 @@ impl HttpCalloutFilter {
                 for extraction in &self.extractions {
                     extraction.evaluate(&json, results)?;
                 }
+                debug!(
+                    results = ?results,
+                    "extracted callout results"
+                );
             } else {
-                debug!("callout response body is not valid JSON; skipping extraction");
+                warn!("callout response body is not valid JSON; skipping extraction");
             }
         }
 
@@ -195,23 +204,57 @@ impl HttpCalloutFilter {
         FilterAction::Reject(rejection)
     }
 
+    /// Apply body shaping if configured, otherwise pass through.
+    fn shape_body(&self, body: Option<Vec<u8>>) -> Option<Vec<u8>> {
+        match body {
+            Some(raw) if !self.body_shaper.is_empty() => {
+                let result = self.body_shaper.shape(&raw);
+                if result.is_none() {
+                    warn!(url = %self.url, "body shaping failed (not valid JSON); forwarding raw body");
+                }
+                result.or(Some(raw))
+            },
+            other => other,
+        }
+    }
+
+    /// Map a [`CalloutResult`] to a [`FilterAction`], logging the
+    /// outcome.
+    fn handle_result(
+        &self,
+        result: CalloutResult,
+        ctx: &mut HttpFilterContext<'_>,
+    ) -> Result<FilterAction, FilterError> {
+        match result {
+            CalloutResult::Success(response) => {
+                info!(url = %self.url, status = response.status, "callout succeeded");
+                self.handle_success(&response, ctx)
+            },
+            CalloutResult::Failed => {
+                warn!(url = %self.url, "callout failed; continuing (fail-open)");
+                Ok(FilterAction::Continue)
+            },
+            CalloutResult::Rejected(rejection) => {
+                info!(url = %self.url, status = rejection.status, "callout rejected request");
+                Ok(self.build_rejection(None, rejection.status))
+            },
+        }
+    }
+
     /// Execute the callout and process the result.
     async fn execute_callout(
         &self,
         ctx: &mut HttpFilterContext<'_>,
         body: Option<Vec<u8>>,
     ) -> Result<FilterAction, FilterError> {
-        let request = self.build_request(ctx, body);
-        let result = self.client.execute(request).await;
+        let body_len = body.as_ref().map_or(0, Vec::len);
+        let callout_body = self.shape_body(body);
 
-        match result {
-            CalloutResult::Success(response) => self.handle_success(&response, ctx),
-            CalloutResult::Failed => {
-                debug!("callout failed (open mode); continuing");
-                Ok(FilterAction::Continue)
-            },
-            CalloutResult::Rejected(rejection) => Ok(self.build_rejection(None, rejection.status)),
-        }
+        debug!(url = %self.url, body_bytes = body_len, "executing callout");
+
+        let request = self.build_request(ctx, callout_body);
+        let result = self.client.execute(request).await;
+        self.handle_result(result, ctx)
     }
 }
 

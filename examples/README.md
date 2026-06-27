@@ -31,7 +31,7 @@ page.
 | [unified-gateway.yaml](configs/ai/anthropic/unified-gateway.yaml) | Routes traffic by classifier-promoted headers so a single listener handles Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses requests |
 | [credential-injection.yaml](configs/ai/credential-injection.yaml) | Injects per-cluster API credentials into upstream requests and strips client-provided credentials to prevent forwarding |
 | [json-rpc-routing.yaml](configs/ai/json-rpc-routing.yaml) | Routes JSON-RPC 2.0 requests to different backends based on the "method" field in the JSON request body |
-| [lakera-guard.yaml](configs/ai/lakera-guard.yaml) | Sends each request body to Lakera Guard for content moderation |
+| [lakera-guard.yaml](configs/ai/lakera-guard.yaml) | Screens every request body through Lakera Guard for content moderation before forwarding to the upstream |
 | [mcp-classifier-routing.yaml](configs/ai/mcp-classifier-routing.yaml) | Routes MCP requests by body-derived method and tool name |
 | [model-to-header-routing.yaml](configs/ai/model-to-header-routing.yaml) | Routes LLM API requests to different backends based on the "model" field in the JSON request body |
 | [format-routing.yaml](configs/ai/openai/responses/format-routing.yaml) | Routes AI API traffic by detected body format |

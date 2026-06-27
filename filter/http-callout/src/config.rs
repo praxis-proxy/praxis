@@ -45,7 +45,7 @@ pub(crate) struct HttpCalloutConfig {
 // Target
 // -----------------------------------------------------------------------------
 
-/// Callout target: URL, timeout, and headers.
+/// Callout target: URL, timeout, headers, and body shaping.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TargetConfig {
@@ -63,6 +63,17 @@ pub(crate) struct TargetConfig {
     /// Headers to copy from the downstream request.
     #[serde(default)]
     pub forward_headers: Vec<String>,
+
+    /// Reshape the downstream request body for the callout.
+    ///
+    /// Each key becomes a field in the callout JSON body; each
+    /// value is a `JSONPath` expression evaluated against the
+    /// downstream body. When set, only the listed fields are
+    /// sent — the downstream body goes to upstream untouched.
+    ///
+    /// When absent, the downstream body is forwarded verbatim.
+    #[serde(default)]
+    pub body: std::collections::HashMap<String, String>,
 }
 
 /// A static header entry with optional env-var expansion in the value.

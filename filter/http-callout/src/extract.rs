@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! `JSONPath` extraction from callout response bodies.
+//! `JSONPath` extraction and body shaping for the HTTP callout filter.
+
+use std::collections::HashMap;
 
 use praxis_filter::{FilterError, FilterResultSet};
 use serde_json::Value;
@@ -65,6 +67,66 @@ impl CompiledExtraction {
 
         results.set(self.result_key.clone(), value)?;
         Ok(())
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Body Shaping
+// -----------------------------------------------------------------------------
+
+/// Pre-compiled field→`JSONPath` mappings for reshaping the callout
+/// request body.
+///
+/// When present, the downstream body is parsed as JSON and a new
+/// object is constructed with only the mapped fields. The original
+/// downstream body continues to the upstream untouched.
+#[derive(Debug)]
+pub(crate) struct BodyShaper {
+    /// Compiled field mappings: `(output_field_name, jsonpath)`.
+    fields: Vec<(String, JsonPath)>,
+}
+
+impl BodyShaper {
+    /// Compile a set of field→`JSONPath` mappings at config time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if any `JSONPath` expression is invalid.
+    pub(crate) fn compile(mappings: &HashMap<String, String>) -> Result<Self, FilterError> {
+        let mut fields = Vec::with_capacity(mappings.len());
+        for (field, expr) in mappings {
+            let path = JsonPath::parse(expr).map_err(|e| -> FilterError {
+                format!("http_callout: invalid body JSONPath for field '{field}': {e}").into()
+            })?;
+            fields.push((field.clone(), path));
+        }
+        // Sort for deterministic output.
+        fields.sort_by(|(a, _), (b, _)| a.cmp(b));
+        Ok(Self { fields })
+    }
+
+    /// Whether any field mappings are configured.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.fields.is_empty()
+    }
+
+    /// Reshape a raw body using the compiled `JSONPath` mappings.
+    ///
+    /// Parses `raw` as JSON, evaluates each mapping, and builds a
+    /// new JSON object. Returns `None` if `raw` is not valid JSON.
+    pub(crate) fn shape(&self, raw: &[u8]) -> Option<Vec<u8>> {
+        let source: Value = serde_json::from_slice(raw).ok()?;
+        let mut output = serde_json::Map::with_capacity(self.fields.len());
+
+        for (field, path) in &self.fields {
+            let node_list = path.query(&source);
+            let nodes: Vec<&Value> = node_list.all();
+            if let Some(value) = nodes.first() {
+                output.insert(field.clone(), (*value).clone());
+            }
+        }
+
+        serde_json::to_vec(&Value::Object(output)).ok()
     }
 }
 
@@ -190,5 +252,114 @@ mod tests {
         let mut rs = FilterResultSet::new();
         ext.evaluate(&json, &mut rs).unwrap();
         assert!(rs.get("key").is_none(), "no-match should be skipped");
+    }
+
+    // -------------------------------------------------------------------------
+    // BodyShaper
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn body_shaper_empty_mappings() {
+        let shaper = BodyShaper::compile(&HashMap::new()).unwrap();
+        assert!(shaper.is_empty(), "empty mappings should be empty");
+    }
+
+    #[test]
+    fn body_shaper_picks_single_field() {
+        let mut mappings = HashMap::new();
+        mappings.insert("messages".into(), "$.messages".into());
+        let shaper = BodyShaper::compile(&mappings).unwrap();
+
+        let input = serde_json::to_vec(&json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+
+        let output = shaper.shape(&input).unwrap();
+        let parsed: Value = serde_json::from_slice(&output).unwrap();
+
+        assert!(parsed.get("messages").is_some(), "messages should be present");
+        assert!(parsed.get("model").is_none(), "model should be stripped");
+    }
+
+    #[test]
+    fn body_shaper_picks_multiple_fields() {
+        let mut mappings = HashMap::new();
+        mappings.insert("messages".into(), "$.messages".into());
+        mappings.insert("stream".into(), "$.stream".into());
+        let shaper = BodyShaper::compile(&mappings).unwrap();
+
+        let input = serde_json::to_vec(&json!({
+            "model": "gpt-4",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+            "temperature": 0.7
+        }))
+        .unwrap();
+
+        let output = shaper.shape(&input).unwrap();
+        let parsed: Value = serde_json::from_slice(&output).unwrap();
+
+        assert!(parsed.get("messages").is_some(), "messages should be present");
+        assert!(parsed.get("stream").is_some(), "stream should be present");
+        assert!(parsed.get("model").is_none(), "model should be stripped");
+        assert!(parsed.get("temperature").is_none(), "temperature should be stripped");
+    }
+
+    #[test]
+    fn body_shaper_missing_field_omitted() {
+        let mut mappings = HashMap::new();
+        mappings.insert("messages".into(), "$.messages".into());
+        mappings.insert("absent".into(), "$.nonexistent".into());
+        let shaper = BodyShaper::compile(&mappings).unwrap();
+
+        let input = serde_json::to_vec(&json!({
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+
+        let output = shaper.shape(&input).unwrap();
+        let parsed: Value = serde_json::from_slice(&output).unwrap();
+
+        assert!(parsed.get("messages").is_some(), "messages should be present");
+        assert!(parsed.get("absent").is_none(), "missing field should be omitted");
+    }
+
+    #[test]
+    fn body_shaper_invalid_json_returns_none() {
+        let mut mappings = HashMap::new();
+        mappings.insert("x".into(), "$.x".into());
+        let shaper = BodyShaper::compile(&mappings).unwrap();
+
+        assert!(shaper.shape(b"not json").is_none(), "invalid JSON should return None");
+    }
+
+    #[test]
+    fn body_shaper_invalid_jsonpath_rejected() {
+        let mut mappings = HashMap::new();
+        mappings.insert("x".into(), "$[invalid".into());
+        let err = BodyShaper::compile(&mappings).expect_err("expected error");
+        assert!(
+            err.to_string().contains("invalid body JSONPath"),
+            "should report invalid JSONPath: {err}"
+        );
+    }
+
+    #[test]
+    fn body_shaper_nested_extraction() {
+        let mut mappings = HashMap::new();
+        mappings.insert("content".into(), "$.messages[0].content".into());
+        let shaper = BodyShaper::compile(&mappings).unwrap();
+
+        let input = serde_json::to_vec(&json!({
+            "messages": [{"role": "user", "content": "hello world"}]
+        }))
+        .unwrap();
+
+        let output = shaper.shape(&input).unwrap();
+        let parsed: Value = serde_json::from_slice(&output).unwrap();
+
+        assert_eq!(parsed["content"], "hello world", "should extract nested value");
     }
 }

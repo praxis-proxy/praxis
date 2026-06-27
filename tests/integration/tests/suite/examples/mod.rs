@@ -24,11 +24,11 @@ mod default_config;
 mod full_flow;
 mod grpc_detection;
 mod guardrails;
-#[cfg(feature = "http-callout")]
-mod lakera_guard;
 mod header_manipulation;
 mod health_checks;
 mod hostname_upstream;
+#[cfg(feature = "http-callout")]
+mod lakera_guard;
 mod least_connections;
 mod logging;
 mod max_body_guard;

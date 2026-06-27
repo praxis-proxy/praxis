@@ -627,6 +627,62 @@ mod filter_tests {
     }
 
     // -------------------------------------------------------------------------
+    // Body Shaping
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn body_shaping_strips_extra_fields() {
+        let mock_server = MockServer::start().await;
+
+        // The mock expects a body with only "messages", no "model".
+        Mock::given(method("POST"))
+            .and(path("/guard"))
+            .and(wiremock::matchers::body_json(serde_json::json!({
+                "messages": [{"role": "user", "content": "hi"}]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"flagged": false})))
+            .mount(&mock_server)
+            .await;
+
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(&format!(
+            r#"
+            target:
+              url: "{}/guard"
+              body:
+                messages: "$.messages"
+            request:
+              phase: request_body
+            response:
+              extract:
+                - json_path: "$.flagged"
+                  result_key: "flagged"
+            "#,
+            mock_server.uri()
+        ))
+        .unwrap();
+
+        let filter = HttpCalloutFilter::from_config(&yaml).unwrap();
+
+        let req = praxis_filter::Request {
+            method: http::Method::POST,
+            uri: "/test".parse().unwrap(),
+            headers: http::HeaderMap::new(),
+        };
+        let mut ctx = make_test_context(&req);
+
+        // Downstream body has "model" which Lakera would reject.
+        let mut body = Some(bytes::Bytes::from(
+            r#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#,
+        ));
+
+        let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(matches!(action, FilterAction::Continue), "shaped body should succeed");
+
+        let results = ctx.filter_results.get("http_callout").expect("should have results");
+        assert_eq!(results.get("flagged"), Some("false"));
+    }
+
+    // -------------------------------------------------------------------------
     // Circuit Breaker
     // -------------------------------------------------------------------------
 
