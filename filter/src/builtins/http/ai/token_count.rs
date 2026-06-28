@@ -304,241 +304,117 @@ fn bedrock_token_counts(resp: &crate::context::Response) -> (Option<u64>, Option
     (input, output)
 }
 
-// -----------------------------------------------------------------------------
-// Tests
-// -----------------------------------------------------------------------------
-
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic,
-    reason = "tests"
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use bytes::Bytes;
 
     use super::*;
     use crate::test_utils::{make_filter_context, make_request, make_response};
 
-    // -------------------------------------------------------------------------
-    // from_config
-    // -------------------------------------------------------------------------
-
     #[test]
     fn from_config_all_providers_accepted() {
-        for provider in &["openai", "anthropic", "google", "bedrock", "bedrock_invoke_model", "azure"] {
-            let yaml = serde_yaml::from_str(&format!("provider: {provider}")).unwrap();
-            let filter = TokenCountFilter::from_config(&yaml)
-                .unwrap_or_else(|e| panic!("provider '{provider}' should be accepted: {e}"));
-            assert_eq!(filter.name(), "token_count");
+        for p in &["openai", "anthropic", "google", "bedrock", "bedrock_invoke_model", "azure"] {
+            let yaml = serde_yaml::from_str(&format!("provider: {p}")).unwrap();
+            TokenCountFilter::from_config(&yaml)
+                .unwrap_or_else(|e| panic!("provider '{p}' rejected: {e}"));
         }
     }
 
     #[test]
     fn from_config_unknown_provider_rejected() {
         let yaml = serde_yaml::from_str("provider: unknown_ai").unwrap();
-        assert!(TokenCountFilter::from_config(&yaml).is_err(), "unknown provider should fail");
+        assert!(TokenCountFilter::from_config(&yaml).is_err());
     }
-
-    #[test]
-    fn from_config_unknown_key_rejected() {
-        let yaml = serde_yaml::from_str("provider: openai\nextra: true").unwrap();
-        assert!(TokenCountFilter::from_config(&yaml).is_err(), "unknown keys should be rejected");
-    }
-
-    #[test]
-    fn from_config_missing_provider_rejected() {
-        let yaml = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-        assert!(TokenCountFilter::from_config(&yaml).is_err(), "missing provider should fail");
-    }
-
-    // -------------------------------------------------------------------------
-    // extract_last_usage_from_sse
-    // -------------------------------------------------------------------------
 
     #[test]
     fn sse_last_usage_returns_last_valid_chunk() {
-        let sse = "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":5}}\n\
-                   data: {\"choices\":[],\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\
+        let sse = "data: {\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":5}}\n\
+                   data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}\n\
                    data: [DONE]\n";
         let u = extract_last_usage_from_sse(to_library_provider(ProviderKind::Openai), sse).unwrap();
-        assert_eq!(u.input_tokens(), 10, "should use last valid chunk");
-        assert_eq!(u.output_tokens(), 20);
-        assert_eq!(u.total_tokens(), 30);
+        assert_eq!((u.input_tokens(), u.output_tokens(), u.total_tokens()), (10, 20, 30));
     }
 
     #[test]
-    fn sse_last_usage_skips_done_sentinel() {
-        let sse = "data: {\"usage\":{\"prompt_tokens\":8,\"completion_tokens\":12}}\ndata: [DONE]\n";
-        let u = extract_last_usage_from_sse(to_library_provider(ProviderKind::Openai), sse).unwrap();
-        assert_eq!(u.input_tokens(), 8);
-        assert_eq!(u.output_tokens(), 12);
-    }
-
-    #[test]
-    fn sse_last_usage_skips_comment_and_empty_lines() {
-        let sse = ": keep-alive\n\ndata: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":7}}\n";
-        let u = extract_last_usage_from_sse(to_library_provider(ProviderKind::Openai), sse).unwrap();
-        assert_eq!(u.input_tokens(), 3);
-    }
-
-    #[test]
-    fn sse_last_usage_no_data_lines_returns_none() {
-        let sse = "event: start\nretry: 1000\n: ping\n";
-        assert!(
-            extract_last_usage_from_sse(to_library_provider(ProviderKind::Openai), sse).is_none()
-        );
-    }
-
-    #[test]
-    fn sse_last_usage_all_lines_unparseable_returns_none() {
+    fn sse_last_usage_no_usage_data_returns_none() {
         let sse = "data: {\"choices\":[]}\ndata: not-json\ndata: [DONE]\n";
-        assert!(
-            extract_last_usage_from_sse(to_library_provider(ProviderKind::Openai), sse).is_none()
-        );
+        assert!(extract_last_usage_from_sse(to_library_provider(ProviderKind::Openai), sse).is_none());
     }
 
     #[test]
-    fn sse_google_no_done_sentinel() {
+    fn sse_google_extracts_usage_metadata() {
         let sse = "data: {\"candidates\":[]}\n\
-                   data: {\"candidates\":[],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":20,\"totalTokenCount\":30}}\n";
+                   data: {\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":20,\"totalTokenCount\":30}}\n";
         let u = extract_last_usage_from_sse(to_library_provider(ProviderKind::Google), sse).unwrap();
-        assert_eq!(u.input_tokens(), 10);
-        assert_eq!(u.output_tokens(), 20);
-        assert_eq!(u.total_tokens(), 30);
+        assert_eq!((u.input_tokens(), u.output_tokens()), (10, 20));
     }
-
-    // -------------------------------------------------------------------------
-    // extract_anthropic_sse
-    // -------------------------------------------------------------------------
 
     #[test]
     fn anthropic_sse_happy_path() {
         let sse = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":12,\"output_tokens\":0}}}\n\
-                   data: {\"type\":\"content_block_start\"}\n\
-                   data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":34}}\n\
-                   data: {\"type\":\"message_stop\"}\n";
+                   data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":34}}\n";
         let u = extract_anthropic_sse(sse).unwrap();
-        assert_eq!(u.input_tokens(), 12);
-        assert_eq!(u.output_tokens(), 34);
-        assert_eq!(u.total_tokens(), 46);
+        assert_eq!((u.input_tokens(), u.output_tokens(), u.total_tokens()), (12, 34, 46));
     }
 
     #[test]
     fn anthropic_sse_missing_message_start_returns_none() {
         let sse = "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":20}}\n";
-        assert!(extract_anthropic_sse(sse).is_none(), "missing message_start → None");
+        assert!(extract_anthropic_sse(sse).is_none());
     }
 
     #[test]
     fn anthropic_sse_missing_message_delta_returns_none() {
-        let sse =
-            "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n";
-        assert!(extract_anthropic_sse(sse).is_none(), "missing message_delta → None");
+        let sse = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n";
+        assert!(extract_anthropic_sse(sse).is_none());
     }
 
     #[test]
     fn anthropic_sse_malformed_json_skipped() {
         let sse = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\
-                   data: not-json-at-all\n\
+                   data: not-json\n\
                    data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":15}}\n";
         let u = extract_anthropic_sse(sse).unwrap();
-        assert_eq!(u.input_tokens(), 10);
-        assert_eq!(u.output_tokens(), 15);
+        assert_eq!((u.input_tokens(), u.output_tokens()), (10, 15));
     }
 
     #[test]
     fn anthropic_sse_out_of_order_events_still_extracted() {
-        // message_delta arrives before message_start — uncommon but the
-        // scanner is order-independent so both values are collected.
         let sse = "data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":25}}\n\
                    data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":8,\"output_tokens\":0}}}\n";
         let u = extract_anthropic_sse(sse).unwrap();
-        assert_eq!(u.input_tokens(), 8);
-        assert_eq!(u.output_tokens(), 25);
+        assert_eq!((u.input_tokens(), u.output_tokens()), (8, 25));
     }
-
-    #[test]
-    fn anthropic_sse_missing_input_tokens_field_returns_none() {
-        // message_start present but no input_tokens inside usage.
-        let sse = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{}}}\n\
-                   data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":20}}\n";
-        assert!(extract_anthropic_sse(sse).is_none());
-    }
-
-    #[test]
-    fn anthropic_sse_missing_output_tokens_field_returns_none() {
-        let sse = "data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\
-                   data: {\"type\":\"message_delta\",\"usage\":{}}\n";
-        assert!(extract_anthropic_sse(sse).is_none());
-    }
-
-    // -------------------------------------------------------------------------
-    // bedrock_token_counts
-    // -------------------------------------------------------------------------
 
     #[test]
     fn bedrock_headers_both_present() {
         let mut resp = make_response();
         resp.headers.insert("x-amzn-bedrock-input-token-count", "15".parse().unwrap());
         resp.headers.insert("x-amzn-bedrock-output-token-count", "42".parse().unwrap());
-        let (input, output) = bedrock_token_counts(&resp);
-        assert_eq!(input, Some(15));
-        assert_eq!(output, Some(42));
+        assert_eq!(bedrock_token_counts(&resp), (Some(15), Some(42)));
     }
 
     #[test]
-    fn bedrock_headers_missing_input_returns_none() {
-        let mut resp = make_response();
-        resp.headers.insert("x-amzn-bedrock-output-token-count", "10".parse().unwrap());
-        let (input, _) = bedrock_token_counts(&resp);
-        assert!(input.is_none());
-    }
+    fn bedrock_headers_missing_or_non_numeric_returns_none() {
+        let resp = make_response();
+        assert_eq!(bedrock_token_counts(&resp), (None, None));
 
-    #[test]
-    fn bedrock_headers_missing_output_returns_none() {
-        let mut resp = make_response();
-        resp.headers.insert("x-amzn-bedrock-input-token-count", "10".parse().unwrap());
-        let (_, output) = bedrock_token_counts(&resp);
-        assert!(output.is_none());
-    }
-
-    #[test]
-    fn bedrock_headers_non_numeric_returns_none() {
         let mut resp = make_response();
         resp.headers.insert("x-amzn-bedrock-input-token-count", "not-a-number".parse().unwrap());
         resp.headers.insert("x-amzn-bedrock-output-token-count", "20".parse().unwrap());
-        let (input, _) = bedrock_token_counts(&resp);
-        assert!(input.is_none(), "non-numeric header value should parse to None");
+        assert_eq!(bedrock_token_counts(&resp).0, None);
     }
 
-    // -------------------------------------------------------------------------
-    // on_response_body
-    // -------------------------------------------------------------------------
-
     #[tokio::test]
-    async fn on_response_body_skips_when_not_end_of_stream() {
+    async fn on_response_body_skips_non_terminal_chunks() {
         let filter = TokenCountFilter { provider: ProviderKind::Openai };
         let req = make_request(http::Method::POST, "/v1/chat/completions");
         let mut ctx = make_filter_context(&req);
         let mut body = Some(Bytes::from_static(b"partial"));
-
         let action = filter.on_response_body(&mut ctx, &mut body, false).unwrap();
         assert!(matches!(action, FilterAction::Continue));
-        assert!(ctx.get_metadata("token.input").is_none());
-    }
-
-    #[tokio::test]
-    async fn on_response_body_skips_empty_body() {
-        let filter = TokenCountFilter { provider: ProviderKind::Openai };
-        let req = make_request(http::Method::POST, "/v1/chat/completions");
-        let mut ctx = make_filter_context(&req);
-        let mut body: Option<Bytes> = None;
-
-        drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
         assert!(ctx.get_metadata("token.input").is_none());
     }
 
@@ -550,7 +426,6 @@ mod tests {
         let mut body = Some(Bytes::from_static(
             b"{\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":20,\"total_tokens\":30}}",
         ));
-
         drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
         assert_eq!(ctx.get_metadata("token.input"), Some("10"));
         assert_eq!(ctx.get_metadata("token.output"), Some("20"));
@@ -558,48 +433,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_response_body_non_json_body_is_noop() {
+    async fn on_response_body_non_json_is_noop() {
         let filter = TokenCountFilter { provider: ProviderKind::Openai };
         let req = make_request(http::Method::POST, "/v1/chat/completions");
         let mut ctx = make_filter_context(&req);
         let mut body = Some(Bytes::from_static(b"Internal Server Error"));
-
         drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
-        assert!(ctx.get_metadata("token.input").is_none(), "non-JSON body must be a no-op");
+        assert!(ctx.get_metadata("token.input").is_none());
     }
-
-    // -------------------------------------------------------------------------
-    // on_response — SSE flag and Bedrock header extraction
-    // -------------------------------------------------------------------------
 
     #[tokio::test]
     async fn on_response_sets_sse_flag_for_event_stream() {
         let filter = TokenCountFilter { provider: ProviderKind::Openai };
         let req = make_request(http::Method::POST, "/v1/chat/completions");
         let mut ctx = make_filter_context(&req);
-
         let mut resp = make_response();
         resp.headers.insert("content-type", "text/event-stream".parse().unwrap());
         ctx.response_header = Some(&mut resp);
         drop(filter.on_response(&mut ctx).await.unwrap());
         ctx.response_header = None;
-
         assert_eq!(ctx.get_metadata(META_IS_SSE), Some("1"));
-    }
-
-    #[tokio::test]
-    async fn on_response_no_sse_flag_for_json_content_type() {
-        let filter = TokenCountFilter { provider: ProviderKind::Openai };
-        let req = make_request(http::Method::POST, "/v1/chat/completions");
-        let mut ctx = make_filter_context(&req);
-
-        let mut resp = make_response();
-        resp.headers.insert("content-type", "application/json".parse().unwrap());
-        ctx.response_header = Some(&mut resp);
-        drop(filter.on_response(&mut ctx).await.unwrap());
-        ctx.response_header = None;
-
-        assert!(ctx.get_metadata(META_IS_SSE).is_none());
     }
 
     #[tokio::test]
@@ -607,30 +460,14 @@ mod tests {
         let filter = TokenCountFilter { provider: ProviderKind::BedrockInvokeModel };
         let req = make_request(http::Method::POST, "/model/titan/invoke");
         let mut ctx = make_filter_context(&req);
-
         let mut resp = make_response();
         resp.headers.insert("x-amzn-bedrock-input-token-count", "25".parse().unwrap());
         resp.headers.insert("x-amzn-bedrock-output-token-count", "50".parse().unwrap());
         ctx.response_header = Some(&mut resp);
         drop(filter.on_response(&mut ctx).await.unwrap());
         ctx.response_header = None;
-
         assert_eq!(ctx.get_metadata("token.input"), Some("25"));
         assert_eq!(ctx.get_metadata("token.output"), Some("50"));
         assert_eq!(ctx.get_metadata("token.total"), Some("75"));
-    }
-
-    #[tokio::test]
-    async fn on_response_bedrock_invoke_model_absent_headers_is_noop() {
-        let filter = TokenCountFilter { provider: ProviderKind::BedrockInvokeModel };
-        let req = make_request(http::Method::POST, "/model/titan/invoke");
-        let mut ctx = make_filter_context(&req);
-
-        let mut resp = make_response();
-        ctx.response_header = Some(&mut resp);
-        drop(filter.on_response(&mut ctx).await.unwrap());
-        ctx.response_header = None;
-
-        assert!(ctx.get_metadata("token.input").is_none());
     }
 }

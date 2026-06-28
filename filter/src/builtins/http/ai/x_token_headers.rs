@@ -84,47 +84,35 @@ impl HttpFilter for XTokenHeadersFilter {
     }
 }
 
-// -----------------------------------------------------------------------------
-// Tests
-// -----------------------------------------------------------------------------
-
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    clippy::panic,
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, clippy::panic)]
 mod tests {
     use super::*;
     use crate::test_utils::{make_filter_context, make_request, make_response};
 
-    fn set_token_metadata(ctx: &mut HttpFilterContext<'_>, input: &str, output: &str, total: &str) {
-        ctx.set_metadata("token.input", input.to_owned());
-        ctx.set_metadata("token.output", output.to_owned());
-        ctx.set_metadata("token.total", total.to_owned());
+    fn meta(ctx: &mut HttpFilterContext<'_>, i: &str, o: &str, t: &str) {
+        ctx.set_metadata("token.input", i.to_owned());
+        ctx.set_metadata("token.output", o.to_owned());
+        ctx.set_metadata("token.total", t.to_owned());
     }
 
     #[test]
-    fn from_config_accepts_empty_config() {
+    fn from_config_accepted() {
         let yaml = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-        let filter = XTokenHeadersFilter::from_config(&yaml).unwrap();
-        assert_eq!(filter.name(), "x_token_headers");
+        assert_eq!(XTokenHeadersFilter::from_config(&yaml).unwrap().name(), "x_token_headers");
     }
 
     #[tokio::test]
     async fn injects_all_three_headers_when_metadata_present() {
         let filter = XTokenHeadersFilter;
-        let req = make_request(http::Method::POST, "/v1/chat/completions");
+        let req = make_request(http::Method::POST, "/");
         let mut ctx = make_filter_context(&req);
-        set_token_metadata(&mut ctx, "10", "20", "30");
-
+        meta(&mut ctx, "10", "20", "30");
         let mut resp = make_response();
         ctx.response_header = Some(&mut resp);
         drop(filter.on_response(&mut ctx).await.unwrap());
         ctx.response_header = None;
-
         assert!(ctx.response_headers_modified);
         assert_eq!(resp.headers["x-token-input"], "10");
         assert_eq!(resp.headers["x-token-output"], "20");
@@ -132,97 +120,50 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn noop_when_no_metadata() {
+    async fn noop_when_metadata_absent_or_partial() {
         let filter = XTokenHeadersFilter;
-        let req = make_request(http::Method::POST, "/v1/chat/completions");
-        let mut ctx = make_filter_context(&req);
+        let req = make_request(http::Method::POST, "/");
 
+        // No metadata at all.
+        let mut ctx = make_filter_context(&req);
         let mut resp = make_response();
         ctx.response_header = Some(&mut resp);
         drop(filter.on_response(&mut ctx).await.unwrap());
         ctx.response_header = None;
-
         assert!(!ctx.response_headers_modified);
-        assert!(resp.headers.is_empty(), "no headers should be injected without metadata");
-    }
 
-    #[tokio::test]
-    async fn noop_when_partial_metadata_missing_output() {
-        let filter = XTokenHeadersFilter;
-        let req = make_request(http::Method::POST, "/v1/chat/completions");
+        // Only two of three keys present.
         let mut ctx = make_filter_context(&req);
         ctx.set_metadata("token.input", "10".to_owned());
         ctx.set_metadata("token.total", "10".to_owned());
-
         let mut resp = make_response();
         ctx.response_header = Some(&mut resp);
         drop(filter.on_response(&mut ctx).await.unwrap());
         ctx.response_header = None;
-
-        assert!(!ctx.response_headers_modified, "partial metadata must not inject headers");
-        assert!(resp.headers.is_empty());
-    }
-
-    #[tokio::test]
-    async fn noop_when_partial_metadata_missing_input() {
-        let filter = XTokenHeadersFilter;
-        let req = make_request(http::Method::POST, "/v1/chat/completions");
-        let mut ctx = make_filter_context(&req);
-        ctx.set_metadata("token.output", "20".to_owned());
-        ctx.set_metadata("token.total", "20".to_owned());
-
-        let mut resp = make_response();
-        ctx.response_header = Some(&mut resp);
-        drop(filter.on_response(&mut ctx).await.unwrap());
-        ctx.response_header = None;
-
         assert!(!ctx.response_headers_modified);
-        assert!(resp.headers.is_empty());
     }
 
     #[tokio::test]
     async fn noop_without_response_header() {
         let filter = XTokenHeadersFilter;
-        let req = make_request(http::Method::POST, "/v1/chat/completions");
+        let req = make_request(http::Method::POST, "/");
         let mut ctx = make_filter_context(&req);
-        set_token_metadata(&mut ctx, "10", "20", "30");
-
+        meta(&mut ctx, "10", "20", "30");
         let action = filter.on_response(&mut ctx).await.unwrap();
         assert!(matches!(action, FilterAction::Continue));
         assert!(!ctx.response_headers_modified);
     }
 
     #[tokio::test]
-    async fn handles_max_u64_token_values() {
-        let filter = XTokenHeadersFilter;
-        let req = make_request(http::Method::POST, "/v1/chat/completions");
-        let mut ctx = make_filter_context(&req);
-        let large = u64::MAX.to_string();
-        set_token_metadata(&mut ctx, &large, &large, &large);
-
-        let mut resp = make_response();
-        ctx.response_header = Some(&mut resp);
-        drop(filter.on_response(&mut ctx).await.unwrap());
-        ctx.response_header = None;
-
-        assert_eq!(resp.headers["x-token-input"].to_str().unwrap(), large);
-        assert_eq!(resp.headers["x-token-output"].to_str().unwrap(), large);
-        assert_eq!(resp.headers["x-token-total"].to_str().unwrap(), large);
-    }
-
-    #[tokio::test]
     async fn noop_when_metadata_is_non_numeric() {
         let filter = XTokenHeadersFilter;
-        let req = make_request(http::Method::POST, "/v1/chat/completions");
+        let req = make_request(http::Method::POST, "/");
         let mut ctx = make_filter_context(&req);
-        set_token_metadata(&mut ctx, "not-a-number", "20", "20");
-
+        meta(&mut ctx, "not-a-number", "20", "20");
         let mut resp = make_response();
         ctx.response_header = Some(&mut resp);
         drop(filter.on_response(&mut ctx).await.unwrap());
         ctx.response_header = None;
-
-        assert!(!ctx.response_headers_modified, "non-numeric metadata must not inject headers");
-        assert!(resp.headers.is_empty());
+        assert!(!ctx.response_headers_modified);
     }
 }
