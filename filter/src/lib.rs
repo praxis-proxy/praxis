@@ -41,8 +41,8 @@ pub mod ai {
         AiGuardrailsFilter, AnthropicMessagesFormatFilter, AnthropicMessagesProtocolFilter,
         AnthropicStreamEventsFilter, AnthropicToOpenaiFilter, AnthropicValidateFilter, ModelRewriteFilter,
         ModelToHeaderFilter, OpenaiResponsesValidateFilter, PromptEnrichFilter, RehydrateFilter, ResponseStoreFilter,
-        ResponseStoreRegistry, ResponsesFormatFilter, ResponsesProxyFilter, TokenUsage, TokenUsageProvider,
-        extract_token_usage, set_token_usage,
+        ResponseStoreRegistry, ResponsesFormatFilter, ResponsesProxyFilter, TokenCountFilter, TokenUsage,
+        TokenUsageProvider, extract_token_usage, set_token_usage,
     };
 }
 pub use context::{HttpFilterContext, Request, Response};

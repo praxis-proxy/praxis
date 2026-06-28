@@ -47,5 +47,7 @@ pub use http::{
     TokenUsageHeadersFilter, UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,
 };
 #[cfg(feature = "ai-inference")]
+pub use http::TokenCountFilter;
+#[cfg(feature = "ai-inference")]
 pub use http::{TokenUsage, TokenUsageProvider, extract_token_usage, set_token_usage};
 pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};

@@ -22,6 +22,8 @@ mod prompt_enrich;
 pub(crate) mod store;
 #[cfg(feature = "ai-inference")]
 pub(crate) mod token_usage;
+#[cfg(feature = "ai-inference")]
+mod token_count;
 
 mod token_usage_headers;
 
@@ -60,4 +62,6 @@ pub use openai::ResponsesProxyFilter;
 pub use prompt_enrich::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
 pub use store::ResponseStoreRegistry;
+#[cfg(feature = "ai-inference")]
+pub use token_count::TokenCountFilter;
 pub use token_usage_headers::TokenUsageHeadersFilter;

@@ -1,0 +1,43 @@
+# Response-Based Token Counting
+#
+# Extract token usage from AI provider response bodies and expose the
+# counts as response headers via the token_usage_headers filter.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/ai/token-counting.yaml
+#   curl -v -X POST http://localhost:8080/v1/chat/completions \
+#     -H "Content-Type: application/json" \
+#     -d '{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}'
+#
+# The token_count filter reads the upstream response body once and writes
+# token.input, token.output, and token.total to FilterContext. The
+# token_usage_headers filter then injects these as Praxis-Token-* response
+# headers for infrastructure-level consumption (billing, monitoring, logging).
+#
+# Supported provider values:
+#   openai | anthropic | google | bedrock | bedrock_invoke_model | azure
+
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - token-counting
+
+filter_chains:
+  - name: token-counting
+    filters:
+      - filter: token_count
+        provider: openai   # openai | anthropic | google | bedrock | bedrock_invoke_model | azure
+
+      - filter: token_usage_headers
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: ai-provider
+
+      - filter: load_balancer
+        clusters:
+          - name: ai-provider
+            endpoints:
+              - "127.0.0.1:3000"

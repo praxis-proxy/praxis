@@ -230,6 +230,12 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
         "responses_proxy",
         crate::builtins::ResponsesProxyFilter::from_config,
     );
+    #[cfg(feature = "ai-inference")]
+    register_http(
+        factories,
+        "token_count",
+        crate::builtins::TokenCountFilter::from_config,
+    );
 }
 
 /// Register a single HTTP filter factory by name.
@@ -409,6 +415,8 @@ mod tests {
         );
         #[cfg(feature = "cpex-policy-engine")]
         assert!(names.contains(&"policy"), "policy should be registered");
+        #[cfg(feature = "ai-inference")]
+        assert!(names.contains(&"token_count"), "token_count should be registered");
     }
 
     #[test]
