@@ -266,18 +266,27 @@ fn google_streaming_no_done_sentinel_extracts_token_counts() {
 // -----------------------------------------------------------------------------
 
 #[test]
-fn token_count_response_body_passes_through_unchanged() {
-    let backend = Backend::fixed(OPENAI_JSON).header("content-type", "application/json").start_with_shutdown();
+fn non_json_response_body_passes_through_unchanged() {
+    // Verify the filter handles a non-JSON body (e.g. a plain-text error page)
+    // without crashing: parse silently fails, no token headers are injected,
+    // and the original body is forwarded byte-for-byte.
+    let backend = Backend::fixed("Internal Server Error")
+        .header("content-type", "text/plain")
+        .start_with_shutdown();
     let proxy_port = free_port();
     let config = token_count_config(proxy_port, backend.port(), "openai");
     let proxy = start_proxy(&config);
 
     let raw = http_send(proxy.addr(), &json_post("/v1/chat/completions", "{}"));
-    assert_eq!(parse_status(&raw), 200);
+    assert_eq!(parse_status(&raw), 200, "non-JSON upstream response should still return 200");
     assert_eq!(
         parse_body(&raw),
-        OPENAI_JSON,
-        "response body must be byte-for-byte unchanged"
+        "Internal Server Error",
+        "non-JSON body must be forwarded byte-for-byte"
+    );
+    assert!(
+        parse_header(&raw, "x-token-input").is_none(),
+        "X-Token-Input must be absent when body is not valid JSON"
     );
 }
 
