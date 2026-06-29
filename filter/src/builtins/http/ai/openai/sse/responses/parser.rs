@@ -107,6 +107,11 @@ impl ResponsesSseParser {
     /// Record whether an event signals stream completion.
     fn record_completion(&mut self, event: &ResponsesEvent, now: Instant) -> Result<(), SseParseError> {
         if matches!(event, ResponsesEvent::Error(_)) {
+            if self.completion_state == CompletionState::Error {
+                return Err(SseParseError::EventAfterTerminal {
+                    event_type: event.event_type().to_owned(),
+                });
+            }
             self.mark_complete(CompletionState::Error, now);
             return Ok(());
         }
@@ -289,6 +294,26 @@ mod tests {
             parser.completion_state,
             CompletionState::Error,
             "stream-level error should replace prior lifecycle completion"
+        );
+    }
+
+    #[test]
+    fn second_error_after_stream_error_fails() {
+        let mut parser = ResponsesSseParser::new(&config());
+        let first_error = sse_bytes("error", &json!({"message": "first failure"}));
+        let second_error = sse_bytes("error", &json!({"message": "second failure"}));
+
+        parser.parse_chunk(&first_error).unwrap();
+        let result = parser.parse_chunk(&second_error);
+
+        assert!(
+            matches!(
+                result,
+                Err(SseParseError::EventAfterTerminal {
+                    event_type
+                }) if event_type == "error"
+            ),
+            "second stream-level error after terminal error should fail"
         );
     }
 
