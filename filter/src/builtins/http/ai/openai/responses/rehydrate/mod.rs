@@ -16,9 +16,11 @@ use bytes::Bytes;
 use serde_json::Value;
 use tracing::{debug, warn};
 
-use super::{DEFAULT_STORE_NAME, DEFAULT_TENANT_ID, TENANT_METADATA_KEY, state::ResponsesState};
+use super::{
+    DEFAULT_STORE_NAME, DEFAULT_TENANT_ID, TENANT_METADATA_KEY, error::responses_error_rejection, state::ResponsesState,
+};
 use crate::{
-    FilterAction, FilterError, Rejection,
+    FilterAction, FilterError,
     body::{BodyAccess, BodyMode, MAX_JSON_BODY_BYTES},
     builtins::http::ai::store::{ResponseRecord, ResponseStoreRegistry},
     factory::parse_filter_config,
@@ -113,7 +115,11 @@ impl HttpFilter for RehydrateFilter {
             return Ok(FilterAction::Release);
         }
 
-        validate_previous_response(ctx, body).await
+        let streaming = ctx
+            .get_metadata("openai_responses_format.stream")
+            .is_some_and(|v| v == "true");
+
+        validate_previous_response(ctx, body, streaming).await
     }
 }
 
@@ -136,12 +142,13 @@ fn is_responses_cancel_path(path: &str) -> bool {
 async fn validate_previous_response(
     ctx: &mut HttpFilterContext<'_>,
     body: &Option<Bytes>,
+    streaming: bool,
 ) -> Result<FilterAction, FilterError> {
     let Some(bytes) = body.as_ref() else {
         return Ok(FilterAction::Release);
     };
 
-    let (parsed_body, prev_id) = match parse_body_and_extract_id(bytes) {
+    let (parsed_body, prev_id) = match parse_body_and_extract_id(bytes, streaming) {
         Ok((body, Some(id))) => (body, id),
         Ok((_, None)) => return Ok(FilterAction::Release),
         Err(action) => return Ok(action),
@@ -152,12 +159,12 @@ async fn validate_previous_response(
         .unwrap_or(DEFAULT_TENANT_ID)
         .to_owned();
 
-    let record = match fetch_previous_response(ctx, &tenant_id, &prev_id).await {
+    let record = match fetch_previous_response(ctx, &tenant_id, &prev_id, streaming).await {
         Ok(r) => r,
         Err(action) => return Ok(action),
     };
 
-    if let Err(action) = validate_response_status(&record) {
+    if let Err(action) = validate_response_status(&record, streaming) {
         return Ok(action);
     }
 
@@ -185,16 +192,16 @@ fn build_state(parsed_body: Value, messages: Value) -> ResponsesState {
 ///
 /// Returns the parsed body alongside the optional ID so callers
 /// can reuse it for [`ResponsesState`] construction.
-fn parse_body_and_extract_id(bytes: &[u8]) -> Result<(Value, Option<String>), FilterAction> {
+fn parse_body_and_extract_id(bytes: &[u8], streaming: bool) -> Result<(Value, Option<String>), FilterAction> {
     let parsed: Value = serde_json::from_slice(bytes).map_err(|e| {
         debug!(error = %e, "rehydrate: invalid request JSON");
-        reject_invalid(&format!("invalid request body: {e}"))
+        reject_invalid(&format!("invalid request body: {e}"), streaming)
     })?;
 
     let id = match parsed.get("previous_response_id") {
         None | Some(Value::Null) => None,
         Some(Value::String(s)) => Some(s.clone()),
-        Some(_) => return Err(reject_invalid("previous_response_id must be a string")),
+        Some(_) => return Err(reject_invalid("previous_response_id must be a string", streaming)),
     };
 
     Ok((parsed, id))
@@ -209,30 +216,31 @@ async fn fetch_previous_response(
     ctx: &HttpFilterContext<'_>,
     tenant_id: &str,
     prev_id: &str,
+    streaming: bool,
 ) -> Result<ResponseRecord, FilterAction> {
     let registry = ctx.extensions.get::<ResponseStoreRegistry>().ok_or_else(|| {
         warn!("rehydrate: response store registry not available");
-        reject_server_error("response store is not available")
+        reject_server_error("response store is not available", streaming)
     })?;
 
     let store = registry.get(DEFAULT_STORE_NAME).ok_or_else(|| {
         warn!("rehydrate: default response store not registered");
-        reject_server_error("response store is not available")
+        reject_server_error("response store is not available", streaming)
     })?;
 
     let record = store.get_response(tenant_id, prev_id).await.map_err(|e| {
         warn!(error = %e, "rehydrate: failed to fetch previous response");
-        reject_server_error("failed to fetch previous response")
+        reject_server_error("failed to fetch previous response", streaming)
     })?;
 
     record.ok_or_else(|| {
         debug!(id = %prev_id, "rehydrate: previous response not found");
-        reject_invalid(&format!("response '{prev_id}' not found"))
+        reject_invalid(&format!("response '{prev_id}' not found"), streaming)
     })
 }
 
 /// Validate that the stored response has status `"completed"`.
-fn validate_response_status(record: &ResponseRecord) -> Result<(), FilterAction> {
+fn validate_response_status(record: &ResponseRecord, streaming: bool) -> Result<(), FilterAction> {
     let status = record
         .response_object
         .get("status")
@@ -240,9 +248,10 @@ fn validate_response_status(record: &ResponseRecord) -> Result<(), FilterAction>
         .unwrap_or("unknown");
 
     if status != "completed" {
-        return Err(reject_invalid(&format!(
-            "cannot continue from response with status '{status}'"
-        )));
+        return Err(reject_invalid(
+            &format!("cannot continue from response with status '{status}'"),
+            streaming,
+        ));
     }
 
     Ok(())
@@ -252,38 +261,19 @@ fn validate_response_status(record: &ResponseRecord) -> Result<(), FilterAction>
 // Rejection Helpers
 // -----------------------------------------------------------------------------
 
-/// Build a 400 rejection with a JSON error body.
-fn reject_invalid(message: &str) -> FilterAction {
-    let body = serde_json::json!({
-        "error": {
-            "message": message,
-            "type": "invalid_request_error"
-        }
-    })
-    .to_string();
-
-    FilterAction::Reject(
-        Rejection::status(400)
-            .with_header("content-type", "application/json")
-            .with_body(Bytes::from(body)),
-    )
+/// Build a 400 rejection with a Responses API error body.
+fn reject_invalid(message: &str, streaming: bool) -> FilterAction {
+    FilterAction::Reject(responses_error_rejection(
+        400,
+        "invalid_request_error",
+        message,
+        streaming,
+    ))
 }
 
-/// Build a 500 rejection with a JSON error body.
-fn reject_server_error(message: &str) -> FilterAction {
-    let body = serde_json::json!({
-        "error": {
-            "message": message,
-            "type": "server_error"
-        }
-    })
-    .to_string();
-
-    FilterAction::Reject(
-        Rejection::status(500)
-            .with_header("content-type", "application/json")
-            .with_body(Bytes::from(body)),
-    )
+/// Build a 500 rejection with a Responses API error body.
+fn reject_server_error(message: &str, streaming: bool) -> FilterAction {
+    FilterAction::Reject(responses_error_rejection(500, "server_error", message, streaming))
 }
 
 // -----------------------------------------------------------------------------
