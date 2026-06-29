@@ -93,6 +93,7 @@ impl SseFrameParser {
                     frames.push(frame);
                 }
                 self.line_buf.clear();
+                self.scratch_bytes = self.buffered_bytes();
 
                 if b == b'\r' {
                     if let Some(&next) = chunk.get(i + 1) {
@@ -105,15 +106,10 @@ impl SseFrameParser {
                 }
             } else {
                 self.line_buf.push(b);
+                self.scratch_bytes = self.scratch_bytes.saturating_add(1);
             }
 
-            self.scratch_bytes = self.buffered_bytes();
-            if self.scratch_bytes > self.max_buffer_bytes {
-                return Err(SseParseError::BufferOverflow {
-                    buffered_bytes: self.scratch_bytes,
-                    limit: self.max_buffer_bytes,
-                });
-            }
+            self.check_buffer_limit()?;
 
             i += 1;
         }
@@ -128,6 +124,18 @@ impl SseFrameParser {
             .len()
             .saturating_add(self.data_buf.len())
             .saturating_add(self.event_type.as_ref().map_or(0, String::len))
+    }
+
+    /// Check whether the current retained byte count exceeds the buffer limit.
+    fn check_buffer_limit(&self) -> Result<(), SseParseError> {
+        if self.scratch_bytes > self.max_buffer_bytes {
+            return Err(SseParseError::BufferOverflow {
+                buffered_bytes: self.scratch_bytes,
+                limit: self.max_buffer_bytes,
+            });
+        }
+
+        Ok(())
     }
 
     /// Check whether another completed frame would exceed the event budget.
@@ -502,6 +510,22 @@ mod tests {
         assert!(
             matches!(result, Err(SseParseError::BufferOverflow { .. })),
             "retained event type bytes should count toward the buffer limit"
+        );
+    }
+
+    #[test]
+    fn lossy_event_type_expansion_counts_after_line_processing() {
+        let mut parser = SseFrameParser::new(11);
+        let result = parser.parse_chunk(b"event: \xFF\xFF\xFF\xFF\n");
+        assert!(
+            matches!(
+                result,
+                Err(SseParseError::BufferOverflow {
+                    buffered_bytes: 12,
+                    limit: 11
+                })
+            ),
+            "lossy UTF-8 expansion in event type should be checked after line processing"
         );
     }
 
