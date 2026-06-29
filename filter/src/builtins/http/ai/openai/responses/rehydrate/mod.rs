@@ -176,7 +176,7 @@ async fn validate_previous_response(
         return Ok(action);
     }
 
-    populate_state_and_metadata(ctx, parsed_body, &record);
+    populate_state_and_usage_metadata(ctx, parsed_body, &record);
 
     debug!(previous_response_id = %prev_id, "previous response validated, state populated");
     ctx.set_metadata("responses.previous_response_id", prev_id);
@@ -184,8 +184,8 @@ async fn validate_previous_response(
     Ok(FilterAction::Release)
 }
 
-/// Promote previous response metadata and insert request state.
-fn populate_state_and_metadata(ctx: &mut HttpFilterContext<'_>, parsed_body: Value, record: &ResponseRecord) {
+/// Insert rehydrated request state and promote previous usage metadata.
+fn populate_state_and_usage_metadata(ctx: &mut HttpFilterContext<'_>, parsed_body: Value, record: &ResponseRecord) {
     let previous_tools = collect_mcp_tool_listings(record);
 
     let previous_usage = record.response_object.get("usage").filter(|usage| !usage.is_null());
