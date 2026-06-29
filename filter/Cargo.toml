@@ -17,6 +17,10 @@ name = "praxis_filter"
 default = ["ai-inference"]
 ai-inference = ["dep:secrecy", "dep:sqlx", "dep:tokio"]
 ext-proc = ["dep:praxis-proto", "dep:tonic", "dep:prost-wkt-types"]
+cpex-policy-engine = [
+    "dep:cpex",
+    "dep:tokio",
+]
 
 [package.metadata.cargo-machete]
 ignored = ["praxis-proto", "prost-wkt-types", "tonic"]
@@ -27,6 +31,7 @@ workspace = true
 [dependencies]
 async-trait = { workspace = true }
 bytes = { workspace = true }
+cpex = { workspace = true, optional = true }
 dashmap = { workspace = true }
 http = { workspace = true }
 percent-encoding = { workspace = true }
@@ -41,10 +46,19 @@ serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 sqlx = { workspace = true, optional = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, optional = true }
+# Optional, shared by `ai-inference` and `cpex-policy-engine`. The
+# `cpex-policy-engine` feature drives plugin `initialize()` at filter
+# construction (the praxis
+# filter-factory signature is sync, so we block on a single-thread
+# runtime); the time/net features let JWT identity plugins fetch JWKS
+# at init time.
+tokio = { workspace = true, optional = true, features = ["rt", "time", "net"] }
 tonic = { workspace = true, optional = true }
 tracing = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
+chrono = { workspace = true }
+jsonwebtoken = "9"
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

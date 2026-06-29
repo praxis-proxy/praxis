@@ -120,6 +120,8 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     register_http(factories, "circuit_breaker", CircuitBreakerFilter::from_config);
     register_http(factories, "compression", CompressionFilter::from_config);
     register_http(factories, "cors", CorsFilter::from_config);
+    #[cfg(feature = "cpex-policy-engine")]
+    register_http(factories, "policy", crate::PolicyFilter::from_config);
     register_http(factories, "csrf", CsrfFilter::from_config);
     register_http(
         factories,
@@ -405,6 +407,8 @@ mod tests {
             names.contains(&"responses_proxy"),
             "responses_proxy should be registered"
         );
+        #[cfg(feature = "cpex-policy-engine")]
+        assert!(names.contains(&"policy"), "policy should be registered");
     }
 
     #[test]

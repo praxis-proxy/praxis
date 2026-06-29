@@ -1,0 +1,82 @@
+# Policy Security Filter (experimental)
+#
+# Embeds the CPEX policy engine in-process to enforce multi-source JWT
+# identity, APL route policy, RFC 8693 OAuth 2.0 token exchange, PII
+# scanning, audit emission, and (under `body_access: read_write`)
+# request / response body rewriting.
+#
+# Experimental: requires the `cpex-policy-engine` cargo feature, which
+# is off by default.
+#
+# The policy filter consumes `mcp.method` / `mcp.name` metadata stashed
+# by praxis's built-in `mcp` filter, which MUST be ordered before it
+# in the chain.
+#
+# `config_path` points at the CPEX policy YAML (plugins + routes) that
+# the filter loads once at construction. It is operator-supplied, not
+# shipped here: a real policy carries your own issuers, secrets, routes,
+# PDPs, and delegators. See the praxis-demos repo
+# (`demos/cpex/cpex.yaml`) for a fully-featured policy, and
+# `tests/integration/fixtures/cpex-policy.yaml` for the minimal
+# single-HS256-identity-plugin policy the integration test loads.
+#
+# `require_mcp_metadata: true` (the default) fail-closes when the
+# `mcp` filter is missing or ordered after `policy` — this guards
+# against a misconfigured chain silently bypassing policy.
+#
+# This example builds only when the `cpex-policy-engine` cargo feature
+# is enabled:
+#
+#   cargo run --features cpex-policy-engine -p praxis-proxy -- \
+#     -c examples/configs/security/policy.yaml
+#
+# Exercise (assumes the backend at :3000 echoes 200):
+#
+#   # Missing Authorization → 401 with WWW-Authenticate and
+#   # X-Policy-Violation header:
+#   curl -i -X POST http://localhost:8080/mcp \
+#     -H "Content-Type: application/json" \
+#     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+#          "params":{"name":"echo","arguments":{}}}'
+#
+#   # Token rejected by HS256 signature mismatch → 401:
+#   curl -i -X POST http://localhost:8080/mcp \
+#     -H "Authorization: Bearer bogus.token.bytes" \
+#     -H "Content-Type: application/json" \
+#     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+#          "params":{"name":"echo","arguments":{}}}'
+#
+# Supply your own policy document at `config_path` before running this
+# example; the minimal test fixture uses a placeholder shared secret
+# that must not be used beyond local experimentation.
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: mcp
+        # Default mode parses MCP JSON-RPC bodies and stashes
+        # mcp.method / mcp.name in filter_metadata. Must precede policy.
+
+      - filter: policy
+        config_path: /etc/praxis/cpex-policy.yaml
+        # Fail-closed when mcp.method is missing. Set to `false` only
+        # when intentionally fronting non-MCP traffic through the policy
+        # filter for identity-only enforcement.
+        require_mcp_metadata: true
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

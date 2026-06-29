@@ -24,6 +24,8 @@ pub use http::ModelRewriteFilter;
 pub use http::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::OpenaiResponsesValidateFilter;
+#[cfg(feature = "cpex-policy-engine")]
+pub use http::PolicyFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::PromptEnrichFilter;
 #[cfg(feature = "ai-inference")]
