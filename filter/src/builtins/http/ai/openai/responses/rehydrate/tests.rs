@@ -516,6 +516,16 @@ async fn extracts_mcp_tools_from_previous_response() {
     assert_eq!(tools.len(), 2, "should have two tool names");
     assert_eq!(tools[0], "get_weather", "first tool name should match");
     assert_eq!(tools[1], "search", "second tool name should match");
+
+    let state = ctx
+        .extensions
+        .get::<ResponsesState>()
+        .expect("ResponsesState should be populated");
+    assert_eq!(state.previous_tools.len(), 1, "should store full previous tool listing");
+    assert_eq!(
+        state.previous_tools[0]["tools"][0]["description"], "Get weather",
+        "ResponsesState should preserve full tool definitions"
+    );
 }
 
 #[tokio::test]
@@ -593,6 +603,83 @@ async fn extracts_mcp_tools_from_multiple_servers() {
         arr[1]["tools"].as_array().unwrap().len(),
         2,
         "second server should have two tools"
+    );
+}
+
+#[tokio::test]
+async fn deduplicates_mcp_tools_independent_of_tool_order() {
+    let mut records = std::collections::HashMap::new();
+    records.insert(
+        "resp_dedupe".to_owned(),
+        ResponseRecord {
+            id: "resp_dedupe".to_owned(),
+            tenant_id: "default".to_owned(),
+            created_at: 1000,
+            model: "gpt-4.1".to_owned(),
+            response_object: json!({
+                "id": "resp_dedupe",
+                "status": "completed",
+                "output": [{
+                    "id": "mcpl_output",
+                    "type": "mcp_list_tools",
+                    "server_label": "shared-server",
+                    "tools": [
+                        {"name": "beta", "description": "d", "input_schema": {}},
+                        {"name": "alpha", "description": "d", "input_schema": {}}
+                    ]
+                }]
+            }),
+            input: json!("Hello"),
+            messages: json!([
+                {
+                    "id": "mcpl_history",
+                    "type": "mcp_list_tools",
+                    "server_label": "shared-server",
+                    "tools": [
+                        {"name": "alpha", "description": "d", "input_schema": {}},
+                        {"name": "beta", "description": "d", "input_schema": {}}
+                    ]
+                }
+            ]),
+        },
+    );
+    let store = MockStore {
+        records,
+        should_fail: false,
+    };
+    let registry = setup_registry(store);
+
+    let filter = RehydrateFilter;
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.extensions.insert(registry.clone());
+    ctx.set_metadata("openai_responses_format.format", "openai_responses");
+    let mut body = Some(Bytes::from(r#"{"input":"Next","previous_response_id":"resp_dedupe"}"#));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Release),
+        "should release after rehydration"
+    );
+
+    let mcp_meta = ctx
+        .get_metadata("responses.previous_mcp_tools")
+        .expect("should set MCP tools metadata");
+    let parsed: Value = serde_json::from_str(mcp_meta).unwrap();
+    assert_eq!(
+        parsed.as_array().unwrap().len(),
+        1,
+        "same server/tools should dedupe even when order differs"
+    );
+
+    let state = ctx
+        .extensions
+        .get::<ResponsesState>()
+        .expect("ResponsesState should be populated");
+    assert_eq!(
+        state.previous_tools.len(),
+        1,
+        "ResponsesState should not retain duplicate MCP listings"
     );
 }
 
@@ -690,6 +777,16 @@ async fn mcp_tools_overflow_sets_boolean_flag() {
         Some("true"),
         "should fall back to boolean flag when compact JSON exceeds 256 bytes"
     );
+
+    let state = ctx
+        .extensions
+        .get::<ResponsesState>()
+        .expect("ResponsesState should be populated");
+    assert_eq!(
+        state.previous_tools.len(),
+        1,
+        "metadata overflow should not drop full previous tools from state"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -700,7 +797,7 @@ async fn mcp_tools_overflow_sets_boolean_flag() {
 async fn extracts_usage_from_previous_response() {
     let output = json!([{"type": "message", "content": [{"type": "output_text", "text": "Hi"}]}]);
     let usage = json!({"input_tokens": 500, "output_tokens": 200, "total_tokens": 700});
-    let store = MockStore::with_output_and_usage("resp_usage", output, usage);
+    let store = MockStore::with_output_and_usage("resp_usage", output, usage.clone());
     let registry = setup_registry(store);
 
     let filter = RehydrateFilter;
@@ -729,6 +826,16 @@ async fn extracts_usage_from_previous_response() {
         ctx.get_metadata("responses.previous_usage_total_tokens"),
         Some("700"),
         "total tokens"
+    );
+
+    let state = ctx
+        .extensions
+        .get::<ResponsesState>()
+        .expect("ResponsesState should be populated");
+    assert_eq!(
+        state.previous_usage.as_ref(),
+        Some(&usage),
+        "previous usage should be stored in ResponsesState"
     );
 }
 
@@ -761,6 +868,15 @@ async fn no_usage_metadata_when_usage_missing() {
     assert!(
         ctx.get_metadata("responses.previous_usage_total_tokens").is_none(),
         "should not set total tokens"
+    );
+
+    let state = ctx
+        .extensions
+        .get::<ResponsesState>()
+        .expect("ResponsesState should be populated");
+    assert!(
+        state.previous_usage.is_none(),
+        "missing usage should not populate previous_usage"
     );
 }
 
@@ -852,6 +968,27 @@ async fn fallback_reconstruction_includes_mcp_list_tools() {
         ctx.get_metadata("responses.previous_mcp_tools").is_some(),
         "should set MCP tools metadata even with empty messages"
     );
+
+    let state = ctx
+        .extensions
+        .get::<ResponsesState>()
+        .expect("ResponsesState should be populated");
+    assert_eq!(
+        state.messages.len(),
+        4,
+        "fallback should reconstruct previous input/output before current input"
+    );
+    assert_eq!(state.messages[0]["content"], "Hello", "previous input should be first");
+    assert_eq!(
+        state.messages[1]["type"], "mcp_list_tools",
+        "previous output items should be preserved"
+    );
+    assert_eq!(
+        state.messages[2]["type"], "message",
+        "previous message output should follow"
+    );
+    assert_eq!(state.messages[3]["content"], "Next", "current input should be last");
+    assert_eq!(state.previous_tools.len(), 1, "fallback should populate previous tools");
 }
 
 // -----------------------------------------------------------------------------
@@ -890,6 +1027,17 @@ impl MockStore {
 
     fn with_output_and_usage(id: &str, output: Value, usage: Value) -> Self {
         let mut records = std::collections::HashMap::new();
+        let mut response_object = json!({
+            "id": id,
+            "status": "completed",
+            "output": output,
+        });
+        if !usage.is_null() {
+            response_object
+                .as_object_mut()
+                .expect("response_object should be an object")
+                .insert("usage".to_owned(), usage);
+        }
         records.insert(
             id.to_owned(),
             ResponseRecord {
@@ -897,12 +1045,7 @@ impl MockStore {
                 tenant_id: "default".to_owned(),
                 created_at: 1000,
                 model: "gpt-4.1".to_owned(),
-                response_object: json!({
-                    "id": id,
-                    "status": "completed",
-                    "output": output,
-                    "usage": usage,
-                }),
+                response_object,
                 input: json!("Hello"),
                 messages: json!([
                     {"role": "user", "content": "Hello"},

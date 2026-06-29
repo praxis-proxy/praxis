@@ -27,6 +27,7 @@ use crate::{
     filter::{HttpFilter, HttpFilterContext},
 };
 
+// -----------------------------------------------------------------------------
 // Constants
 // -----------------------------------------------------------------------------
 
@@ -184,10 +185,7 @@ async fn validate_previous_response(
         return Ok(action);
     }
 
-    extract_mcp_tools(ctx, &record);
-    extract_previous_usage(ctx, &record);
-
-    ctx.extensions.insert(build_state(parsed_body, record.messages));
+    populate_state_and_metadata(ctx, parsed_body, &record);
 
     debug!(previous_response_id = %prev_id, "previous response validated, state populated");
     ctx.set_metadata("responses.previous_response_id", prev_id);
@@ -195,16 +193,87 @@ async fn validate_previous_response(
     Ok(FilterAction::Release)
 }
 
+/// Promote previous response metadata and insert request state.
+fn populate_state_and_metadata(ctx: &mut HttpFilterContext<'_>, parsed_body: Value, record: &ResponseRecord) {
+    let previous_tools = collect_mcp_tool_listings(record);
+    write_mcp_tools_metadata(ctx, &previous_tools);
+
+    let previous_usage = record.response_object.get("usage").filter(|usage| !usage.is_null());
+    write_previous_usage_metadata(ctx, previous_usage);
+
+    ctx.extensions.insert(build_state(
+        parsed_body,
+        record,
+        previous_tools,
+        previous_usage.cloned(),
+    ));
+}
+
 /// Build [`ResponsesState`] by prepending stored messages before the current input.
 // TODO(#697): enforce a max rehydrated history size.
-fn build_state(parsed_body: Value, messages: Value) -> ResponsesState {
+fn build_state(
+    parsed_body: Value,
+    record: &ResponseRecord,
+    previous_tools: Vec<Value>,
+    previous_usage: Option<Value>,
+) -> ResponsesState {
     let mut state = ResponsesState::from_request_body(parsed_body);
-    let stored = match messages {
-        Value::Array(arr) => arr,
-        _ => Vec::new(),
-    };
+    let stored = stored_messages_for_rehydrate(record);
     state.messages.splice(0..0, stored);
+    state.previous_tools = previous_tools;
+    state.previous_usage = previous_usage;
     state
+}
+
+/// Return stored history, reconstructing from public fields for
+/// records created before hidden messages were persisted.
+fn stored_messages_for_rehydrate(record: &ResponseRecord) -> Vec<Value> {
+    if let Some(messages) = record.messages.as_array().filter(|messages| !messages.is_empty()) {
+        return messages.clone();
+    }
+
+    reconstruct_messages_from_public_response(record)
+}
+
+/// Reconstruct previous input/output items from public stored fields.
+fn reconstruct_messages_from_public_response(record: &ResponseRecord) -> Vec<Value> {
+    let mut messages = Vec::new();
+
+    append_stored_input_items(&mut messages, record.input.clone());
+
+    if let Some(output) = record.response_object.get("output").filter(|output| !output.is_null()) {
+        append_stored_output_items(&mut messages, output.clone());
+    }
+
+    messages
+}
+
+/// Append stored response input as Responses API item params.
+fn append_stored_input_items(messages: &mut Vec<Value>, input: Value) {
+    match input {
+        Value::Null => {},
+        Value::String(text) => messages.push(user_message_item(&text)),
+        Value::Array(items) => messages.extend(items),
+        other => messages.push(other),
+    }
+}
+
+/// Append stored response output items.
+fn append_stored_output_items(messages: &mut Vec<Value>, output: Value) {
+    if let Value::Array(items) = output {
+        messages.extend(items);
+    } else {
+        messages.push(output);
+    }
+}
+
+/// Build a Responses API user message item from string input.
+fn user_message_item(text: &str) -> Value {
+    serde_json::json!({
+        "type": "message",
+        "role": "user",
+        "content": text,
+    })
 }
 
 /// Parse the request body and extract `previous_response_id`.
@@ -278,22 +347,16 @@ fn validate_response_status(record: &ResponseRecord) -> Result<(), FilterAction>
 // MCP Tool & Usage Extraction
 // -----------------------------------------------------------------------------
 
-/// Extract MCP tool listings from stored history or previous
-/// response output and set a compact metadata signal for downstream
-/// filters.
-///
-/// Scans stored message history and `record.response_object["output"]`
-/// for items with `"type": "mcp_list_tools"` and builds a compact
-/// JSON array of `{"server_label": "x", "tools": ["name1", "name2"]}`.
+/// Set a compact MCP tool metadata signal for downstream filters.
 ///
 /// If the serialized value exceeds [`MAX_METADATA_VALUE_BYTES`],
 /// a boolean `"true"` is set instead.
-fn extract_mcp_tools(ctx: &mut HttpFilterContext<'_>, record: &ResponseRecord) {
-    let summaries = collect_mcp_tool_summaries(record);
-    if summaries.is_empty() {
+fn write_mcp_tools_metadata(ctx: &mut HttpFilterContext<'_>, listings: &[Value]) {
+    if listings.is_empty() {
         return;
     }
 
+    let summaries = compact_mcp_tool_summaries(listings);
     let compact = Value::Array(summaries);
     match serde_json::to_string(&compact) {
         Ok(s) if s.len() <= MAX_METADATA_VALUE_BYTES => {
@@ -310,66 +373,83 @@ fn extract_mcp_tools(ctx: &mut HttpFilterContext<'_>, record: &ResponseRecord) {
     }
 }
 
-/// Build compact summaries from `mcp_list_tools` output items.
-///
-/// Each summary contains the `server_label` and an array of
-/// tool names (without schemas or descriptions).
-fn collect_mcp_tool_summaries(record: &ResponseRecord) -> Vec<Value> {
-    let mut summaries = Vec::new();
+/// Recover MCP tool listings from stored history and response output.
+fn collect_mcp_tool_listings(record: &ResponseRecord) -> Vec<Value> {
+    let mut listings = Vec::new();
     let mut seen = HashSet::new();
 
     if let Some(messages) = record.messages.as_array() {
-        collect_mcp_tool_summaries_from_items(messages, &mut seen, &mut summaries);
+        collect_mcp_tool_listings_from_items(messages, &mut seen, &mut listings);
     }
 
     if let Some(output) = record.response_object.get("output").and_then(Value::as_array) {
-        collect_mcp_tool_summaries_from_items(output, &mut seen, &mut summaries);
+        collect_mcp_tool_listings_from_items(output, &mut seen, &mut listings);
     }
 
-    summaries
+    listings
 }
 
-/// Append compact MCP tool summaries from a sequence of response items.
-fn collect_mcp_tool_summaries_from_items(
+/// Append MCP tool listings from a sequence of response items.
+fn collect_mcp_tool_listings_from_items(
     items: &[Value],
     seen: &mut HashSet<(String, Vec<String>)>,
-    summaries: &mut Vec<Value>,
+    listings: &mut Vec<Value>,
 ) {
-    summaries.extend(
-        items
-            .iter()
-            .filter(|item| item.get("type").and_then(Value::as_str) == Some("mcp_list_tools"))
-            .filter_map(|item| {
-                let label = item.get("server_label").and_then(Value::as_str)?;
-                let names: Vec<String> = item
-                    .get("tools")
-                    .and_then(Value::as_array)
-                    .map(|tools| {
-                        tools
-                            .iter()
-                            .filter_map(|t| t.get("name").and_then(Value::as_str).map(ToOwned::to_owned))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-                if !seen.insert((label.to_owned(), names.clone())) {
-                    return None;
-                }
-                Some(serde_json::json!({
-                    "server_label": label,
-                    "tools": names,
-                }))
-            }),
-    );
+    listings.extend(items.iter().filter_map(|item| {
+        if item.get("type").and_then(Value::as_str) != Some("mcp_list_tools") {
+            return None;
+        }
+
+        let label = item.get("server_label").and_then(Value::as_str)?;
+        let tools = item.get("tools").and_then(Value::as_array)?;
+        let names = mcp_tool_names(tools);
+        let mut dedupe_names = names.clone();
+        dedupe_names.sort();
+        dedupe_names.dedup();
+
+        if !seen.insert((label.to_owned(), dedupe_names)) {
+            return None;
+        }
+
+        Some(serde_json::json!({
+            "server_label": label,
+            "tools": tools,
+        }))
+    }));
+}
+
+/// Build compact summaries from recovered MCP listings.
+fn compact_mcp_tool_summaries(listings: &[Value]) -> Vec<Value> {
+    listings
+        .iter()
+        .filter_map(|listing| {
+            let label = listing.get("server_label").and_then(Value::as_str)?;
+            let tools = listing.get("tools").and_then(Value::as_array)?;
+            let names = mcp_tool_names(tools);
+
+            Some(serde_json::json!({
+                "server_label": label,
+                "tools": names,
+            }))
+        })
+        .collect()
+}
+
+/// Extract tool names from MCP tool definitions.
+fn mcp_tool_names(tools: &[Value]) -> Vec<String> {
+    tools
+        .iter()
+        .filter_map(|tool| tool.get("name").and_then(Value::as_str).map(ToOwned::to_owned))
+        .collect()
 }
 
 /// Extract token usage from the previous response and set
 /// metadata keys for downstream auto-compaction.
 ///
-/// Reads `record.response_object["usage"]` and writes
-/// `input_tokens`, `output_tokens`, and `total_tokens` as
-/// individual string metadata values.
-fn extract_previous_usage(ctx: &mut HttpFilterContext<'_>, record: &ResponseRecord) {
-    let Some(usage) = record.response_object.get("usage") else {
+/// Writes `input_tokens`, `output_tokens`, and `total_tokens` as
+/// individual string metadata values when present.
+fn write_previous_usage_metadata(ctx: &mut HttpFilterContext<'_>, usage: Option<&Value>) {
+    let Some(usage) = usage else {
         return;
     };
 

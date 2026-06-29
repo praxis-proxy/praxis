@@ -78,6 +78,12 @@ pub(crate) struct ResponsesState {
     /// history for this response and prepends it to `messages`.
     pub previous_response_id: Option<String>,
 
+    /// MCP tool listings recovered from the previous response.
+    pub previous_tools: Vec<serde_json::Value>,
+
+    /// Token usage reported by the previous response.
+    pub previous_usage: Option<serde_json::Value>,
+
     /// Parsed request body as received from the client.
     pub request_body: serde_json::Value,
 
@@ -115,6 +121,8 @@ impl ResponsesState {
             .cloned()
             .unwrap_or_else(|| serde_json::Value::String("auto".to_owned()));
 
+        let tools = extract_array_field(&body, "tools");
+
         Self {
             context_management: body.get("context_management").cloned(),
             conversation: body.get("conversation").cloned(),
@@ -126,12 +134,14 @@ impl ResponsesState {
             output_items: Vec::new(),
             parallel_tool_calls: extract_bool_or(&body, "parallel_tool_calls", true),
             previous_response_id: extract_string(&body, "previous_response_id"),
+            previous_tools: Vec::new(),
+            previous_usage: None,
+            request_body: body,
             response_object: serde_json::Value::Null,
             tool_calls: Vec::new(),
             tool_choice,
-            tools: extract_array_field(&body, "tools"),
+            tools,
             usage: serde_json::Value::Null,
-            request_body: body,
         }
     }
 }
