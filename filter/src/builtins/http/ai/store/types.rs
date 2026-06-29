@@ -60,6 +60,9 @@ pub struct ConversationRecord {
     pub tenant_id: String,
 
     /// Unix timestamp when the conversation was created.
+    ///
+    /// Conversation upserts preserve the original creation time;
+    /// metadata and message refreshes must not rewrite this value.
     pub created_at: i64,
 
     /// User-defined metadata as JSON (up to 16 key-value pairs).

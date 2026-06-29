@@ -94,7 +94,8 @@ impl SqliteResponseStore {
              (conversation_id, tenant_id, created_at, metadata, messages) \
              VALUES (?, ?, ?, ?, ?) \
              ON CONFLICT(conversation_id, tenant_id) \
-             DO UPDATE SET messages = excluded.messages",
+             DO UPDATE SET messages = excluded.messages, \
+             metadata = excluded.metadata",
             self.tables.conversations
         );
 

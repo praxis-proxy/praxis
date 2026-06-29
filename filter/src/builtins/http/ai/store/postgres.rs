@@ -151,7 +151,8 @@ impl PostgresResponseStore {
              (conversation_id, tenant_id, created_at, metadata, messages) \
              VALUES ($1, $2, $3, $4, $5) \
              ON CONFLICT (conversation_id, tenant_id) DO UPDATE SET \
-             messages = EXCLUDED.messages",
+             messages = EXCLUDED.messages, \
+             metadata = EXCLUDED.metadata",
             self.tables.conversations
         );
 

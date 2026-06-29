@@ -470,8 +470,11 @@ async fn upsert_conversation_overwrites() {
     store.upsert_conversation(&record).await.expect("upsert should succeed");
 
     let updated = ConversationRecord {
+        conversation_id: "conv_1".to_owned(),
+        tenant_id: "tenant_a".to_owned(),
+        created_at: 2000,
+        metadata: json!({"topic": "updated"}),
         messages: json!([{"role": "user", "content": "v2"}]),
-        ..record
     };
     store
         .upsert_conversation(&updated)
@@ -488,6 +491,12 @@ async fn upsert_conversation_overwrites() {
         json!([{"role": "user", "content": "v2"}]),
         "messages should be updated"
     );
+    assert_eq!(
+        fetched.metadata,
+        json!({"topic": "updated"}),
+        "metadata should be updated"
+    );
+    assert_eq!(fetched.created_at, 1000, "created_at should preserve creation time");
 }
 
 #[tokio::test]
@@ -1394,8 +1403,11 @@ async fn pg_upsert_conversation_overwrites() {
     store.upsert_conversation(&record).await.expect("upsert should succeed");
 
     let updated = ConversationRecord {
+        conversation_id: "conv_1".to_owned(),
+        tenant_id: "tenant_a".to_owned(),
+        created_at: 2000,
+        metadata: json!({"topic": "updated"}),
         messages: json!([{"role": "user", "content": "v2"}]),
-        ..record
     };
     store
         .upsert_conversation(&updated)
@@ -1412,6 +1424,12 @@ async fn pg_upsert_conversation_overwrites() {
         json!([{"role": "user", "content": "v2"}]),
         "messages should be updated"
     );
+    assert_eq!(
+        fetched.metadata,
+        json!({"topic": "updated"}),
+        "metadata should be updated"
+    );
+    assert_eq!(fetched.created_at, 1000, "created_at should preserve creation time");
 }
 
 #[tokio::test]
