@@ -6,19 +6,11 @@
 use std::collections::HashMap;
 
 use praxis_test_utils::{
-    Backend, free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown,
+    Backend, Recording, free_port, http_send, json_post, parse_body, parse_status, start_backend_with_shutdown,
     start_header_echo_backend, start_proxy,
 };
 
 use super::load_example_config;
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-const CHAT_COMPLETIONS_RESPONSE: &str = r#"{"id":"chatcmpl-test","model":"gpt-4","choices":[{"message":{"role":"assistant","content":"Hello from a Chat Completions backend."},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":4}}"#;
-
-const CHAT_COMPLETIONS_SSE_RESPONSE: &str = "data: {\"id\":\"chatcmpl-test\",\"model\":\"gpt-4\",\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"index\":0}]}\n\ndata: {\"id\":\"chatcmpl-test\",\"model\":\"gpt-4\",\"choices\":[{\"delta\":{\"content\":\"Hello\"},\"index\":0}]}\n\ndata: {\"id\":\"chatcmpl-test\",\"model\":\"gpt-4\",\"choices\":[{\"delta\":{},\"index\":0,\"finish_reason\":\"stop\"}],\"usage\":{\"completion_tokens\":1}}\n\ndata: [DONE]\n\n";
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -114,7 +106,10 @@ fn anthropic_messages_protocol_injects_default_version() {
 
 #[test]
 fn anthropic_to_openai_transforms_response_body() {
-    let backend_guard = Backend::fixed(CHAT_COMPLETIONS_RESPONSE)
+    let recording = Recording::load("anthropic/messages/to_openai_non_streaming.json");
+    let response_body = recording.response_body();
+    let request_body = recording.request_body();
+    let backend_guard = Backend::fixed(&response_body)
         .header("content-type", "application/json")
         .start_with_shutdown();
     let proxy_port = free_port();
@@ -126,8 +121,7 @@ fn anthropic_to_openai_transforms_response_body() {
     );
     let proxy = start_proxy(&config);
 
-    let body = r#"{"model":"claude-opus-4-8","max_tokens":1024,"messages":[{"role":"user","content":"Hello"}]}"#;
-    let raw = http_send(proxy.addr(), &json_post("/v1/messages", body));
+    let raw = http_send(proxy.addr(), &json_post("/v1/messages", &request_body));
     let transformed: serde_json::Value = serde_json::from_str(&parse_body(&raw)).expect("response body should be JSON");
 
     assert_eq!(parse_status(&raw), 200, "transformation should return 200");
@@ -144,7 +138,10 @@ fn anthropic_to_openai_transforms_response_body() {
 
 #[test]
 fn anthropic_to_openai_transforms_streaming_response_body() {
-    let backend_guard = Backend::fixed(CHAT_COMPLETIONS_SSE_RESPONSE)
+    let recording = Recording::load("anthropic/messages/to_openai_streaming.json");
+    let response_body = recording.response_body();
+    let request_body = recording.request_body();
+    let backend_guard = Backend::fixed(&response_body)
         .header("content-type", "text/event-stream")
         .start_with_shutdown();
     let proxy_port = free_port();
@@ -156,9 +153,7 @@ fn anthropic_to_openai_transforms_streaming_response_body() {
     );
     let proxy = start_proxy(&config);
 
-    let body =
-        r#"{"model":"claude-opus-4-8","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"Hello"}]}"#;
-    let raw = http_send(proxy.addr(), &json_post("/v1/messages", body));
+    let raw = http_send(proxy.addr(), &json_post("/v1/messages", &request_body));
     let transformed = parse_body(&raw);
 
     assert_eq!(parse_status(&raw), 200, "stream transformation should return 200");

@@ -1,0 +1,39 @@
+{
+  "source": "Curated Anthropic Messages non-streaming recording: multi-turn conversation",
+  "request": {
+    "model": "mock-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "My name is Alice."
+      },
+      {
+        "role": "assistant",
+        "content": "Hello Alice! Nice to meet you."
+      },
+      {
+        "role": "user",
+        "content": "What is my name?"
+      }
+    ],
+    "max_tokens": 64
+  },
+  "response": {
+    "id": "msg_test789",
+    "type": "message",
+    "role": "assistant",
+    "model": "mock-model",
+    "content": [
+      {
+        "type": "text",
+        "text": "Your name is Alice."
+      }
+    ],
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "usage": {
+      "input_tokens": 30,
+      "output_tokens": 6
+    }
+  }
+}
