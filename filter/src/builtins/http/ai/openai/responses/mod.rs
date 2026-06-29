@@ -57,7 +57,7 @@ use tracing::{debug, trace};
 use self::config::{ResponsesFormatConfig, build_config};
 use super::super::OnInvalidBehavior;
 use crate::{
-    FilterAction, FilterError, Rejection,
+    FilterAction, FilterError,
     body::{BodyAccess, BodyMode},
     builtins::http::{
         ai::classifier::{AiRequestFormat, ClassifiedRequest, classify_request_body, empty_result, is_responses_path},
@@ -225,13 +225,12 @@ fn handle_invalid_format(format: AiRequestFormat, config: &ResponsesFormatConfig
             };
 
             trace!(reason = message, "rejecting unrecognized body");
-            Some(FilterAction::Reject(
-                Rejection::status(400)
-                    .with_header("content-type", "application/json")
-                    .with_body(Bytes::from(format!(
-                        r#"{{"error":{{"message":"{message}","type":"invalid_request_error"}}}}"#
-                    ))),
-            ))
+            Some(FilterAction::Reject(error::responses_error_rejection(
+                400,
+                "invalid_request_error",
+                message,
+                false,
+            )))
         },
     }
 }
