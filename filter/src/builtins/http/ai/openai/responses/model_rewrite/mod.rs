@@ -44,8 +44,9 @@ use bytes::Bytes;
 use tracing::{debug, trace, warn};
 
 use self::config::{ModelRewriteConfig, OnInvalidBehavior, validate_config};
+use super::error::responses_error_rejection;
 use crate::{
-    FilterAction, FilterError, Rejection,
+    FilterAction, FilterError,
     body::{BodyAccess, BodyMode},
     builtins::http::{ai::classifier::is_responses_create, value_safety::is_safe_promoted_value},
     factory::parse_filter_config,
@@ -137,13 +138,18 @@ impl ModelRewriteFilter {
         let Some(raw) = body.as_ref() else {
             return Ok(FilterAction::Continue);
         };
+
+        let streaming = ctx
+            .get_metadata("openai_responses_format.stream")
+            .is_some_and(|v| v == "true");
+
         let mut value: serde_json::Value = match serde_json::from_slice(raw) {
             Ok(v) => v,
-            Err(_) => return Ok(invalid_body_action(self.on_invalid)),
+            Err(_) => return Ok(invalid_body_action(self.on_invalid, streaming)),
         };
 
         let Some(obj) = value.as_object_mut() else {
-            return Ok(invalid_body_action(self.on_invalid));
+            return Ok(invalid_body_action(self.on_invalid, streaming));
         };
 
         let result = apply_rewrite(obj, &self.model_aliases, self.default_model.as_deref());
@@ -507,15 +513,14 @@ fn set_filter_result(
 }
 
 /// Map [`OnInvalidBehavior`] to the appropriate [`FilterAction`].
-fn invalid_body_action(behavior: OnInvalidBehavior) -> FilterAction {
+fn invalid_body_action(behavior: OnInvalidBehavior, streaming: bool) -> FilterAction {
     match behavior {
         OnInvalidBehavior::Continue => FilterAction::Continue,
-        OnInvalidBehavior::Reject => FilterAction::Reject(
-            Rejection::status(400)
-                .with_header("content-type", "application/json")
-                .with_body(Bytes::from(
-                    r#"{"error":{"message":"invalid JSON body","type":"invalid_request_error"}}"#,
-                )),
-        ),
+        OnInvalidBehavior::Reject => FilterAction::Reject(responses_error_rejection(
+            400,
+            "invalid_request_error",
+            "invalid JSON body",
+            streaming,
+        )),
     }
 }

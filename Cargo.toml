@@ -75,6 +75,7 @@ serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = "1.0.150"
 rcgen = "0.14.8"
 regex = "1.12.4"
+reqwest = { version = "0.12.28", default-features = false, features = ["rustls-tls"] }
 rustls = "0.23.41"
 rustls-pemfile = "2.2.0"
 # NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.
@@ -95,6 +96,7 @@ tokio-stream = "0.1.18"
 tokio-util = "0.7.18"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+wiremock = "0.6.5"
 zeroize = "1.9.0"
 
 [profile.release]

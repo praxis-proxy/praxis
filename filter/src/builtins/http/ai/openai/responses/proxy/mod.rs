@@ -38,9 +38,9 @@ use bytes::Bytes;
 use tracing::{debug, trace};
 
 use self::config::{ResponsesProxyConfig, build_config};
-use super::state::ResponsesState;
+use super::{error::responses_error_rejection, state::ResponsesState};
 use crate::{
-    FilterAction, FilterError, Rejection,
+    FilterAction, FilterError,
     body::{BodyAccess, BodyMode},
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
@@ -107,7 +107,11 @@ impl ResponsesProxyFilter {
     }
 
     /// Serialize the rebuilt body from conversation state.
-    fn serialize_body(&self, state: &ResponsesState) -> Result<Result<Vec<u8>, FilterAction>, FilterError> {
+    fn serialize_body(
+        &self,
+        state: &ResponsesState,
+        streaming: bool,
+    ) -> Result<Result<Vec<u8>, FilterAction>, FilterError> {
         let mut outbound = state.request_body.clone();
         if let Some(obj) = outbound.as_object_mut() {
             obj.insert("input".to_owned(), serde_json::Value::Array(state.messages.clone()));
@@ -124,7 +128,12 @@ impl ResponsesProxyFilter {
                 max_bytes = self.config.max_body_bytes,
                 "rebuilt request body exceeds maximum size"
             );
-            return Ok(Err(FilterAction::Reject(Rejection::status(413))));
+            return Ok(Err(FilterAction::Reject(responses_error_rejection(
+                413,
+                "invalid_request_error",
+                "request body exceeds maximum size",
+                streaming,
+            ))));
         }
 
         debug!(
@@ -173,7 +182,11 @@ impl HttpFilter for ResponsesProxyFilter {
             return Ok(FilterAction::Continue);
         };
 
-        let serialized = match self.serialize_body(state)? {
+        let streaming = ctx
+            .get_metadata("openai_responses_format.stream")
+            .is_some_and(|v| v == "true");
+
+        let serialized = match self.serialize_body(state, streaming)? {
             Ok(bytes) => bytes,
             Err(action) => return Ok(action),
         };
