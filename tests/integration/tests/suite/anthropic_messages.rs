@@ -3,46 +3,25 @@
 
 //! Integration tests for Anthropic Messages API filters.
 //!
-//! Ported from OGX's `test_messages.py`, with proxy-boundary tests
-//! for backend-owned validation cases. Tests validate the full
-//! request/response cycle through Praxis with passthrough and transform
-//! filter chains.
+//! Tests validate the full request/response cycle through Praxis with
+//! passthrough and transform filter chains. Response data is loaded
+//! from recording fixtures in `tests/integration/fixtures/anthropic/messages/`.
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    Backend, free_port, http_send, parse_body, parse_status, start_backend_with_shutdown, start_proxy,
+    Backend, Recording, free_port, http_send, parse_body, parse_status, start_backend_with_shutdown, start_proxy,
 };
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-const BASIC_RESPONSE: &str = r#"{"id":"msg_test123","type":"message","role":"assistant","model":"mock-model","content":[{"type":"text","text":"The answer is 4."}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":15,"output_tokens":8}}"#;
-
-const SYSTEM_RESPONSE: &str = r#"{"id":"msg_test456","type":"message","role":"assistant","model":"mock-model","content":[{"type":"text","text":"Arrr, I be a helpful pirate assistant!"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":25,"output_tokens":12}}"#;
-
-const MULTI_TURN_RESPONSE: &str = r#"{"id":"msg_test789","type":"message","role":"assistant","model":"mock-model","content":[{"type":"text","text":"Your name is Alice."}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":30,"output_tokens":6}}"#;
-
-const TEMPERATURE_RESPONSE: &str = r#"{"id":"msg_temp01","type":"message","role":"assistant","model":"mock-model","content":[{"type":"text","text":"Hello!"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":10,"output_tokens":3}}"#;
-
-const STOP_SEQUENCES_RESPONSE: &str = r#"{"id":"msg_stop01","type":"message","role":"assistant","model":"mock-model","content":[{"type":"text","text":"Count: 1"}],"stop_reason":"stop_sequence","stop_sequence":",","usage":{"input_tokens":20,"output_tokens":4}}"#;
-
-const TOOL_DEFS_RESPONSE: &str = r#"{"id":"msg_tool01","type":"message","role":"assistant","model":"mock-model","content":[{"type":"tool_use","id":"toolu_test01","name":"get_weather","input":{"location":"San Francisco, CA"}}],"stop_reason":"tool_use","stop_sequence":null,"usage":{"input_tokens":40,"output_tokens":20}}"#;
-
-const TOOL_RESULT_RESPONSE: &str = r#"{"id":"msg_tool02","type":"message","role":"assistant","model":"mock-model","content":[{"type":"text","text":"15 times 7 equals 105."}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":50,"output_tokens":10}}"#;
-
-const CONTENT_BLOCK_RESPONSE: &str = r#"{"id":"msg_block01","type":"message","role":"assistant","model":"mock-model","content":[{"type":"text","text":"2"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":12,"output_tokens":2}}"#;
-
-const SSE_RESPONSE: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_stream01\",\"type\":\"message\",\"role\":\"assistant\",\"model\":\"mock-model\",\"content\":[],\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\n\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" there\"}}\n\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\n\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":2}}\n\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n\n";
 
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
-// OGX: test_messages_non_streaming_basic
 #[test]
 fn non_streaming_basic() {
-    let backend = Backend::fixed(BASIC_RESPONSE)
+    let recording = Recording::load("anthropic/messages/basic.json");
+    let response_body = recording.response_body();
+    let request_body = recording.request_body();
+    let backend = Backend::fixed(&response_body)
         .header("content-type", "application/json")
         .header("anthropic-version", "2023-06-01")
         .start_with_shutdown();
@@ -50,13 +29,7 @@ fn non_streaming_basic() {
     let config = Config::from_yaml(&passthrough_yaml(proxy_port, backend.port())).unwrap();
     let proxy = start_proxy(&config);
 
-    let raw = http_send(
-        proxy.addr(),
-        &anthropic_post(
-            "/v1/messages",
-            r#"{"model":"mock-model","messages":[{"role":"user","content":"What is 2+2? Reply with just the number."}],"max_tokens":64}"#,
-        ),
-    );
+    let raw = http_send(proxy.addr(), &anthropic_post("/v1/messages", &request_body));
     let status = parse_status(&raw);
     let body = parse_body(&raw);
     let data: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -96,10 +69,12 @@ fn non_streaming_basic() {
     }
 }
 
-// OGX: test_messages_non_streaming_with_system
 #[test]
 fn non_streaming_with_system() {
-    let backend = Backend::fixed(SYSTEM_RESPONSE)
+    let recording = Recording::load("anthropic/messages/system.json");
+    let response_body = recording.response_body();
+    let request_body = recording.request_body();
+    let backend = Backend::fixed(&response_body)
         .header("content-type", "application/json")
         .header("anthropic-version", "2023-06-01")
         .start_with_shutdown();
@@ -107,13 +82,7 @@ fn non_streaming_with_system() {
     let config = Config::from_yaml(&passthrough_yaml(proxy_port, backend.port())).unwrap();
     let proxy = start_proxy(&config);
 
-    let raw = http_send(
-        proxy.addr(),
-        &anthropic_post(
-            "/v1/messages",
-            r#"{"model":"mock-model","messages":[{"role":"user","content":"What are you?"}],"system":"You are a helpful pirate. Always respond in pirate speak.","max_tokens":128}"#,
-        ),
-    );
+    let raw = http_send(proxy.addr(), &anthropic_post("/v1/messages", &request_body));
     let status = parse_status(&raw);
     let body = parse_body(&raw);
     let data: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -130,10 +99,12 @@ fn non_streaming_with_system() {
     );
 }
 
-// OGX: test_messages_non_streaming_multi_turn
 #[test]
 fn non_streaming_multi_turn() {
-    let backend = Backend::fixed(MULTI_TURN_RESPONSE)
+    let recording = Recording::load("anthropic/messages/multi_turn.json");
+    let response_body = recording.response_body();
+    let request_body = recording.request_body();
+    let backend = Backend::fixed(&response_body)
         .header("content-type", "application/json")
         .header("anthropic-version", "2023-06-01")
         .start_with_shutdown();
@@ -141,13 +112,7 @@ fn non_streaming_multi_turn() {
     let config = Config::from_yaml(&passthrough_yaml(proxy_port, backend.port())).unwrap();
     let proxy = start_proxy(&config);
 
-    let raw = http_send(
-        proxy.addr(),
-        &anthropic_post(
-            "/v1/messages",
-            r#"{"model":"mock-model","messages":[{"role":"user","content":"My name is Alice."},{"role":"assistant","content":"Hello Alice! Nice to meet you."},{"role":"user","content":"What is my name?"}],"max_tokens":64}"#,
-        ),
-    );
+    let raw = http_send(proxy.addr(), &anthropic_post("/v1/messages", &request_body));
     let status = parse_status(&raw);
     let body = parse_body(&raw);
     let data: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -162,10 +127,12 @@ fn non_streaming_multi_turn() {
     assert!(text.contains("alice"), "response should mention Alice");
 }
 
-// OGX: test_messages_streaming_basic
 #[test]
 fn streaming_basic() {
-    let backend = Backend::fixed(SSE_RESPONSE)
+    let recording = Recording::load("anthropic/messages/streaming_basic.json");
+    let response_body = recording.response_body();
+    let request_body = recording.request_body();
+    let backend = Backend::fixed(&response_body)
         .header("content-type", "text/event-stream")
         .header("cache-control", "no-cache")
         .start_with_shutdown();
@@ -173,13 +140,7 @@ fn streaming_basic() {
     let config = Config::from_yaml(&passthrough_yaml(proxy_port, backend.port())).unwrap();
     let proxy = start_proxy(&config);
 
-    let raw = http_send(
-        proxy.addr(),
-        &anthropic_post(
-            "/v1/messages",
-            r#"{"model":"mock-model","messages":[{"role":"user","content":"Say hello in one sentence."}],"max_tokens":64,"stream":true}"#,
-        ),
-    );
+    let raw = http_send(proxy.addr(), &anthropic_post("/v1/messages", &request_body));
     let body = parse_body(&raw);
 
     let events = parse_sse_events(&body);
@@ -211,10 +172,11 @@ fn streaming_basic() {
     }
 }
 
-// OGX: test_messages_streaming_collects_full_text
 #[test]
 fn streaming_collects_full_text() {
-    let backend = Backend::fixed(SSE_RESPONSE)
+    let recording = Recording::load("anthropic/messages/streaming_basic.json");
+    let response_body = recording.response_body();
+    let backend = Backend::fixed(&response_body)
         .header("content-type", "text/event-stream")
         .header("cache-control", "no-cache")
         .start_with_shutdown();
@@ -242,10 +204,12 @@ fn streaming_collects_full_text() {
     assert!(!full_text.is_empty(), "collected text should not be empty");
 }
 
-// OGX: test_messages_non_streaming_with_temperature
 #[test]
 fn non_streaming_with_temperature() {
-    let backend = Backend::fixed(TEMPERATURE_RESPONSE)
+    let recording = Recording::load("anthropic/messages/temperature.json");
+    let response_body = recording.response_body();
+    let request_body = recording.request_body();
+    let backend = Backend::fixed(&response_body)
         .header("content-type", "application/json")
         .header("anthropic-version", "2023-06-01")
         .start_with_shutdown();
@@ -253,13 +217,7 @@ fn non_streaming_with_temperature() {
     let config = Config::from_yaml(&passthrough_yaml(proxy_port, backend.port())).unwrap();
     let proxy = start_proxy(&config);
 
-    let raw = http_send(
-        proxy.addr(),
-        &anthropic_post(
-            "/v1/messages",
-            r#"{"model":"mock-model","messages":[{"role":"user","content":"Say hello."}],"max_tokens":32,"temperature":0.0}"#,
-        ),
-    );
+    let raw = http_send(proxy.addr(), &anthropic_post("/v1/messages", &request_body));
     let status = parse_status(&raw);
     let body = parse_body(&raw);
     let data: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -272,10 +230,12 @@ fn non_streaming_with_temperature() {
     );
 }
 
-// OGX: test_messages_non_streaming_with_stop_sequences
 #[test]
 fn non_streaming_with_stop_sequences() {
-    let backend = Backend::fixed(STOP_SEQUENCES_RESPONSE)
+    let recording = Recording::load("anthropic/messages/stop_sequences.json");
+    let response_body = recording.response_body();
+    let request_body = recording.request_body();
+    let backend = Backend::fixed(&response_body)
         .header("content-type", "application/json")
         .header("anthropic-version", "2023-06-01")
         .start_with_shutdown();
@@ -283,13 +243,7 @@ fn non_streaming_with_stop_sequences() {
     let config = Config::from_yaml(&passthrough_yaml(proxy_port, backend.port())).unwrap();
     let proxy = start_proxy(&config);
 
-    let raw = http_send(
-        proxy.addr(),
-        &anthropic_post(
-            "/v1/messages",
-            r#"{"model":"mock-model","messages":[{"role":"user","content":"Count: 1, 2, 3, 4, 5, 6, 7, 8, 9, 10"}],"max_tokens":128,"stop_sequences":[","]}"#,
-        ),
-    );
+    let raw = http_send(proxy.addr(), &anthropic_post("/v1/messages", &request_body));
     let status = parse_status(&raw);
     let body = parse_body(&raw);
     let data: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -298,10 +252,12 @@ fn non_streaming_with_stop_sequences() {
     assert_eq!(data["type"], "message", "type should be message");
 }
 
-// OGX: test_messages_with_tool_definitions
 #[test]
 fn with_tool_definitions() {
-    let backend = Backend::fixed(TOOL_DEFS_RESPONSE)
+    let recording = Recording::load("anthropic/messages/tool_defs.json");
+    let response_body = recording.response_body();
+    let request_body = recording.request_body();
+    let backend = Backend::fixed(&response_body)
         .header("content-type", "application/json")
         .header("anthropic-version", "2023-06-01")
         .start_with_shutdown();
@@ -309,13 +265,7 @@ fn with_tool_definitions() {
     let config = Config::from_yaml(&passthrough_yaml(proxy_port, backend.port())).unwrap();
     let proxy = start_proxy(&config);
 
-    let raw = http_send(
-        proxy.addr(),
-        &anthropic_post(
-            "/v1/messages",
-            r#"{"model":"mock-model","messages":[{"role":"user","content":"What's the weather in San Francisco?"}],"tools":[{"name":"get_weather","description":"Get the current weather in a given location","input_schema":{"type":"object","properties":{"location":{"type":"string","description":"The city and state"}},"required":["location"]}}],"max_tokens":256}"#,
-        ),
-    );
+    let raw = http_send(proxy.addr(), &anthropic_post("/v1/messages", &request_body));
     let status = parse_status(&raw);
     let body = parse_body(&raw);
     let data: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -338,10 +288,12 @@ fn with_tool_definitions() {
     }
 }
 
-// OGX: test_messages_tool_use_round_trip
 #[test]
 fn tool_use_round_trip() {
-    let backend = Backend::fixed(TOOL_RESULT_RESPONSE)
+    let recording = Recording::load("anthropic/messages/tool_result.json");
+    let response_body = recording.response_body();
+    let request_body = recording.request_body();
+    let backend = Backend::fixed(&response_body)
         .header("content-type", "application/json")
         .header("anthropic-version", "2023-06-01")
         .start_with_shutdown();
@@ -349,13 +301,7 @@ fn tool_use_round_trip() {
     let config = Config::from_yaml(&passthrough_yaml(proxy_port, backend.port())).unwrap();
     let proxy = start_proxy(&config);
 
-    let raw = http_send(
-        proxy.addr(),
-        &anthropic_post(
-            "/v1/messages",
-            r#"{"model":"mock-model","messages":[{"role":"user","content":"Use the calculator tool to compute 15 * 7."},{"role":"assistant","content":[{"type":"tool_use","id":"toolu_test01","name":"calculator","input":{"expression":"15 * 7"}}]},{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_test01","content":"105"}]}],"tools":[{"name":"calculator","description":"Perform basic arithmetic.","input_schema":{"type":"object","properties":{"expression":{"type":"string"}},"required":["expression"]}}],"max_tokens":256}"#,
-        ),
-    );
+    let raw = http_send(proxy.addr(), &anthropic_post("/v1/messages", &request_body));
     let status = parse_status(&raw);
     let body = parse_body(&raw);
     let data: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -411,10 +357,12 @@ fn backend_owned_empty_messages_reaches_backend() {
     assert_eq!(parse_body(&raw), "backend-owned", "request should reach the backend");
 }
 
-// OGX: test_messages_response_headers
 #[test]
 fn response_headers() {
-    let backend = Backend::fixed(BASIC_RESPONSE)
+    let recording = Recording::load("anthropic/messages/response_headers.json");
+    let response_body = recording.response_body();
+    let request_body = recording.request_body();
+    let backend = Backend::fixed(&response_body)
         .header("content-type", "application/json")
         .header("anthropic-version", "2023-06-01")
         .start_with_shutdown();
@@ -422,13 +370,7 @@ fn response_headers() {
     let config = Config::from_yaml(&passthrough_yaml(proxy_port, backend.port())).unwrap();
     let proxy = start_proxy(&config);
 
-    let raw = http_send(
-        proxy.addr(),
-        &anthropic_post(
-            "/v1/messages",
-            r#"{"model":"mock-model","messages":[{"role":"user","content":"Hi"}],"max_tokens":16}"#,
-        ),
-    );
+    let raw = http_send(proxy.addr(), &anthropic_post("/v1/messages", &request_body));
     let status = parse_status(&raw);
 
     assert_eq!(status, 200, "expected 200");
@@ -439,10 +381,12 @@ fn response_headers() {
     );
 }
 
-// OGX: test_messages_content_block_array
 #[test]
 fn content_block_array() {
-    let backend = Backend::fixed(CONTENT_BLOCK_RESPONSE)
+    let recording = Recording::load("anthropic/messages/content_block.json");
+    let response_body = recording.response_body();
+    let request_body = recording.request_body();
+    let backend = Backend::fixed(&response_body)
         .header("content-type", "application/json")
         .header("anthropic-version", "2023-06-01")
         .start_with_shutdown();
@@ -450,13 +394,7 @@ fn content_block_array() {
     let config = Config::from_yaml(&passthrough_yaml(proxy_port, backend.port())).unwrap();
     let proxy = start_proxy(&config);
 
-    let raw = http_send(
-        proxy.addr(),
-        &anthropic_post(
-            "/v1/messages",
-            r#"{"model":"mock-model","messages":[{"role":"user","content":[{"type":"text","text":"What is 1+1? Reply with just the number."}]}],"max_tokens":32}"#,
-        ),
-    );
+    let raw = http_send(proxy.addr(), &anthropic_post("/v1/messages", &request_body));
     let status = parse_status(&raw);
     let body = parse_body(&raw);
     let data: serde_json::Value = serde_json::from_str(&body).unwrap();

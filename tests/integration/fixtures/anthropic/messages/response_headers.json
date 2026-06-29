@@ -1,0 +1,31 @@
+{
+  "source": "Curated Anthropic Messages non-streaming recording: response header passthrough",
+  "request": {
+    "model": "mock-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hi"
+      }
+    ],
+    "max_tokens": 16
+  },
+  "response": {
+    "id": "msg_test123",
+    "type": "message",
+    "role": "assistant",
+    "model": "mock-model",
+    "content": [
+      {
+        "type": "text",
+        "text": "The answer is 4."
+      }
+    ],
+    "stop_reason": "end_turn",
+    "stop_sequence": null,
+    "usage": {
+      "input_tokens": 15,
+      "output_tokens": 8
+    }
+  }
+}

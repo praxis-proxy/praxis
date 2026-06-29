@@ -524,7 +524,8 @@ Reasoning:
 - `response.reasoning_summary_part.done` — reasoning summary part finalized
 
 Error:
-- `error` — streaming error with `type`, `code`, `message`, `param`, optional `headers`, `sequence_number`
+- `error` — streaming error with `type`, `sequence_number`, and nested `error` payload
+  containing `type`, `code`, `message`, `param`, and optional `headers`
 
 **Behavior:**
 - If backend sent native Responses SSE: pass through (minimal transformation)

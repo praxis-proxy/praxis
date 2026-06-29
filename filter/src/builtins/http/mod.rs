@@ -46,6 +46,8 @@ pub use ai::token_usage::{TokenUsage, TokenUsageProvider, extract_token_usage, s
 pub use ai::{A2aFilter, JsonRpcFilter, McpFilter, TokenUsageHeadersFilter};
 pub use observability::{AccessLogFilter, RequestIdFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter};
+#[cfg(feature = "cpex-policy-engine")]
+pub use security::PolicyFilter;
 pub use security::{
     ContainsValue, CorsFilter, CredentialInjectionFilter, CsrfFilter, DisallowedOriginMode, ForwardedHeadersFilter,
     GuardrailsAction, GuardrailsFilter, IpAclFilter, PiiKind, RuleTargetKind,

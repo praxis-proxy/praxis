@@ -1,0 +1,51 @@
+{
+  "source": "Curated Anthropic Messages non-streaming recording: tool definitions",
+  "request": {
+    "model": "mock-model",
+    "messages": [
+      {
+        "role": "user",
+        "content": "What's the weather in San Francisco?"
+      }
+    ],
+    "tools": [
+      {
+        "name": "get_weather",
+        "description": "Get the current weather in a given location",
+        "input_schema": {
+          "type": "object",
+          "properties": {
+            "location": {
+              "type": "string",
+              "description": "The city and state"
+            }
+          },
+          "required": ["location"]
+        }
+      }
+    ],
+    "max_tokens": 256
+  },
+  "response": {
+    "id": "msg_tool01",
+    "type": "message",
+    "role": "assistant",
+    "model": "mock-model",
+    "content": [
+      {
+        "type": "tool_use",
+        "id": "toolu_test01",
+        "name": "get_weather",
+        "input": {
+          "location": "San Francisco, CA"
+        }
+      }
+    ],
+    "stop_reason": "tool_use",
+    "stop_sequence": null,
+    "usage": {
+      "input_tokens": 40,
+      "output_tokens": 20
+    }
+  }
+}

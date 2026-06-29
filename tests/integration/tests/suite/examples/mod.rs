@@ -48,6 +48,8 @@ mod p2c;
 mod path_based_routing;
 mod path_rewriting;
 mod payload_processing;
+#[cfg(feature = "cpex-policy-engine")]
+mod policy;
 #[cfg(feature = "ai-inference")]
 mod prompt_enrichment;
 mod protocols;
