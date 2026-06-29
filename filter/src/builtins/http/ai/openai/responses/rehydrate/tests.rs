@@ -505,23 +505,20 @@ async fn extracts_mcp_tools_from_previous_response() {
         "should release after rehydration"
     );
 
-    let mcp_meta = ctx
-        .get_metadata("responses.previous_mcp_tools")
-        .expect("should set MCP tools metadata");
-    let parsed: Value = serde_json::from_str(mcp_meta).unwrap();
-    let arr = parsed.as_array().unwrap();
-    assert_eq!(arr.len(), 1, "should have one server entry");
-    assert_eq!(arr[0]["server_label"], "my-server", "server label should match");
-    let tools = arr[0]["tools"].as_array().unwrap();
-    assert_eq!(tools.len(), 2, "should have two tool names");
-    assert_eq!(tools[0], "get_weather", "first tool name should match");
-    assert_eq!(tools[1], "search", "second tool name should match");
-
     let state = ctx
         .extensions
         .get::<ResponsesState>()
         .expect("ResponsesState should be populated");
     assert_eq!(state.previous_tools.len(), 1, "should store full previous tool listing");
+    assert_eq!(
+        state.previous_tools[0]["server_label"], "my-server",
+        "server label should match"
+    );
+    assert_eq!(
+        state.previous_tools[0]["tools"].as_array().unwrap().len(),
+        2,
+        "should preserve both tools"
+    );
     assert_eq!(
         state.previous_tools[0]["tools"][0]["description"], "Get weather",
         "ResponsesState should preserve full tool definitions"
@@ -529,7 +526,7 @@ async fn extracts_mcp_tools_from_previous_response() {
 }
 
 #[tokio::test]
-async fn no_mcp_metadata_when_output_has_no_mcp_items() {
+async fn no_previous_tools_when_output_has_no_mcp_items() {
     let output = json!([
         {"type": "message", "content": [{"type": "output_text", "text": "Hi"}]}
     ]);
@@ -549,9 +546,13 @@ async fn no_mcp_metadata_when_output_has_no_mcp_items() {
         matches!(action, FilterAction::Release),
         "should release after rehydration"
     );
+    let state = ctx
+        .extensions
+        .get::<ResponsesState>()
+        .expect("ResponsesState should be populated");
     assert!(
-        ctx.get_metadata("responses.previous_mcp_tools").is_none(),
-        "should not set MCP metadata when no mcp_list_tools items"
+        state.previous_tools.is_empty(),
+        "should not store previous tools when no mcp_list_tools items"
     );
 }
 
@@ -591,16 +592,21 @@ async fn extracts_mcp_tools_from_multiple_servers() {
         "should release after rehydration"
     );
 
-    let mcp_meta = ctx
-        .get_metadata("responses.previous_mcp_tools")
-        .expect("should set MCP tools metadata");
-    let parsed: Value = serde_json::from_str(mcp_meta).unwrap();
-    let arr = parsed.as_array().unwrap();
-    assert_eq!(arr.len(), 2, "should have two server entries");
-    assert_eq!(arr[0]["server_label"], "weather-server", "first server label");
-    assert_eq!(arr[1]["server_label"], "search-server", "second server label");
+    let state = ctx
+        .extensions
+        .get::<ResponsesState>()
+        .expect("ResponsesState should be populated");
+    assert_eq!(state.previous_tools.len(), 2, "should have two server entries");
     assert_eq!(
-        arr[1]["tools"].as_array().unwrap().len(),
+        state.previous_tools[0]["server_label"], "weather-server",
+        "first server label"
+    );
+    assert_eq!(
+        state.previous_tools[1]["server_label"], "search-server",
+        "second server label"
+    );
+    assert_eq!(
+        state.previous_tools[1]["tools"].as_array().unwrap().len(),
         2,
         "second server should have two tools"
     );
@@ -660,16 +666,6 @@ async fn deduplicates_mcp_tools_independent_of_tool_order() {
     assert!(
         matches!(action, FilterAction::Release),
         "should release after rehydration"
-    );
-
-    let mcp_meta = ctx
-        .get_metadata("responses.previous_mcp_tools")
-        .expect("should set MCP tools metadata");
-    let parsed: Value = serde_json::from_str(mcp_meta).unwrap();
-    assert_eq!(
-        parsed.as_array().unwrap().len(),
-        1,
-        "same server/tools should dedupe even when order differs"
     );
 
     let state = ctx
@@ -734,20 +730,38 @@ async fn extracts_mcp_tools_from_stored_history_when_latest_output_has_none() {
         "should release after chained rehydration"
     );
 
-    let mcp_meta = ctx
-        .get_metadata("responses.previous_mcp_tools")
-        .expect("should set MCP tools metadata from stored history");
-    let parsed: Value = serde_json::from_str(mcp_meta).unwrap();
-    let arr = parsed.as_array().unwrap();
-    assert_eq!(arr.len(), 1, "should recover one earlier server entry");
-    assert_eq!(arr[0]["server_label"], "weather-server", "server label should match");
-    let tools = arr[0]["tools"].as_array().unwrap();
+    let state = ctx
+        .extensions
+        .get::<ResponsesState>()
+        .expect("ResponsesState should be populated");
+    assert_eq!(state.previous_tools.len(), 1, "should recover one earlier server entry");
+    assert_eq!(
+        state.previous_tools[0]["server_label"], "weather-server",
+        "server label should match"
+    );
+    let tools = state.previous_tools[0]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 1, "should recover one earlier tool");
-    assert_eq!(tools[0], "get_weather", "tool name should match");
+    assert_eq!(tools[0]["name"], "get_weather", "tool name should match");
+    assert!(
+        state
+            .messages
+            .iter()
+            .all(|item| item.get("type").and_then(Value::as_str) != Some("mcp_list_tools")),
+        "stored MCP list items should not be replayed as request input"
+    );
+    assert_eq!(
+        state.persisted_messages.len(),
+        4,
+        "persistence history should keep stored MCP metadata plus current input"
+    );
+    assert_eq!(
+        state.persisted_messages[1]["type"], "mcp_list_tools",
+        "persistence history should preserve stored MCP metadata"
+    );
 }
 
 #[tokio::test]
-async fn mcp_tools_overflow_sets_boolean_flag() {
+async fn large_mcp_tool_listing_is_preserved_in_state() {
     let many_tools: Vec<Value> = (0..30)
         .map(|i| json!({"name": format!("very_long_tool_name_number_{i}"), "description": "d", "input_schema": {}}))
         .collect();
@@ -772,12 +786,6 @@ async fn mcp_tools_overflow_sets_boolean_flag() {
         matches!(action, FilterAction::Release),
         "should release after rehydration"
     );
-    assert_eq!(
-        ctx.get_metadata("responses.previous_mcp_tools"),
-        Some("true"),
-        "should fall back to boolean flag when compact JSON exceeds 256 bytes"
-    );
-
     let state = ctx
         .extensions
         .get::<ResponsesState>()
@@ -785,7 +793,12 @@ async fn mcp_tools_overflow_sets_boolean_flag() {
     assert_eq!(
         state.previous_tools.len(),
         1,
-        "metadata overflow should not drop full previous tools from state"
+        "large listing should not drop previous tools from state"
+    );
+    assert_eq!(
+        state.previous_tools[0]["tools"].as_array().unwrap().len(),
+        30,
+        "large listing should preserve every tool definition"
     );
 }
 
@@ -919,7 +932,7 @@ async fn extracts_partial_usage_fields() {
 // -----------------------------------------------------------------------------
 
 #[tokio::test]
-async fn fallback_reconstruction_includes_mcp_list_tools() {
+async fn fallback_reconstruction_excludes_mcp_list_tools_but_preserves_outputs() {
     let mut records = std::collections::HashMap::new();
     records.insert(
         "resp_mcp_fb".to_owned(),
@@ -938,6 +951,7 @@ async fn fallback_reconstruction_includes_mcp_list_tools() {
                         "server_label": "fb-server",
                         "tools": [{"name": "fb_tool", "description": "d", "input_schema": {}}]
                     },
+                    {"id": "ws_fb", "type": "web_search_call", "status": "completed"},
                     {"type": "message", "content": [{"type": "output_text", "text": "result"}]}
                 ]
             }),
@@ -964,11 +978,6 @@ async fn fallback_reconstruction_includes_mcp_list_tools() {
         "should release after fallback rehydration"
     );
 
-    assert!(
-        ctx.get_metadata("responses.previous_mcp_tools").is_some(),
-        "should set MCP tools metadata even with empty messages"
-    );
-
     let state = ctx
         .extensions
         .get::<ResponsesState>()
@@ -976,18 +985,34 @@ async fn fallback_reconstruction_includes_mcp_list_tools() {
     assert_eq!(
         state.messages.len(),
         4,
-        "fallback should reconstruct previous input/output before current input"
+        "fallback should reconstruct previous replay items before current input"
     );
     assert_eq!(state.messages[0]["content"], "Hello", "previous input should be first");
+    assert!(
+        state
+            .messages
+            .iter()
+            .all(|item| item.get("type").and_then(Value::as_str) != Some("mcp_list_tools")),
+        "fallback should not replay output-only MCP list items as request input"
+    );
     assert_eq!(
-        state.messages[1]["type"], "mcp_list_tools",
-        "previous output items should be preserved"
+        state.messages[1]["type"], "web_search_call",
+        "non-MCP previous output should be preserved"
     );
     assert_eq!(
         state.messages[2]["type"], "message",
         "previous message output should follow"
     );
     assert_eq!(state.messages[3]["content"], "Next", "current input should be last");
+    assert_eq!(
+        state.persisted_messages.len(),
+        5,
+        "persistence history should keep previous input, all output items, and current input"
+    );
+    assert_eq!(
+        state.persisted_messages[1]["type"], "mcp_list_tools",
+        "fallback persistence history should preserve MCP list metadata"
+    );
     assert_eq!(state.previous_tools.len(), 1, "fallback should populate previous tools");
 }
 

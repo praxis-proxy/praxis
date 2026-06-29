@@ -31,9 +31,6 @@ use crate::{
 // Constants
 // -----------------------------------------------------------------------------
 
-/// Metadata key for MCP tools discovered in the previous response.
-const MCP_TOOLS_METADATA_KEY: &str = "responses.previous_mcp_tools";
-
 /// Metadata key for previous response input token count.
 const PREV_USAGE_INPUT_KEY: &str = "responses.previous_usage_input_tokens";
 
@@ -42,12 +39,6 @@ const PREV_USAGE_OUTPUT_KEY: &str = "responses.previous_usage_output_tokens";
 
 /// Metadata key for previous response total token count.
 const PREV_USAGE_TOTAL_KEY: &str = "responses.previous_usage_total_tokens";
-
-/// Maximum metadata value length (bytes). Matches the limit
-/// enforced by [`HttpFilterContext::set_metadata`].
-///
-/// [`HttpFilterContext::set_metadata`]: crate::filter::HttpFilterContext::set_metadata
-const MAX_METADATA_VALUE_BYTES: usize = 256;
 
 // -----------------------------------------------------------------------------
 // RehydrateFilter
@@ -196,7 +187,6 @@ async fn validate_previous_response(
 /// Promote previous response metadata and insert request state.
 fn populate_state_and_metadata(ctx: &mut HttpFilterContext<'_>, parsed_body: Value, record: &ResponseRecord) {
     let previous_tools = collect_mcp_tool_listings(record);
-    write_mcp_tools_metadata(ctx, &previous_tools);
 
     let previous_usage = record.response_object.get("usage").filter(|usage| !usage.is_null());
     write_previous_usage_metadata(ctx, previous_usage);
@@ -219,7 +209,9 @@ fn build_state(
 ) -> ResponsesState {
     let mut state = ResponsesState::from_request_body(parsed_body);
     let stored = stored_messages_for_rehydrate(record);
-    state.messages.splice(0..0, stored);
+    let replay = replay_messages_from_stored(&stored);
+    state.messages.splice(0..0, replay);
+    state.persisted_messages.splice(0..0, stored);
     state.previous_tools = previous_tools;
     state.previous_usage = previous_usage;
     state
@@ -242,7 +234,7 @@ fn reconstruct_messages_from_public_response(record: &ResponseRecord) -> Vec<Val
     append_stored_input_items(&mut messages, record.input.clone());
 
     if let Some(output) = record.response_object.get("output").filter(|output| !output.is_null()) {
-        append_stored_output_items(&mut messages, output.clone());
+        append_stored_output_items(&mut messages, output);
     }
 
     messages
@@ -258,13 +250,27 @@ fn append_stored_input_items(messages: &mut Vec<Value>, input: Value) {
     }
 }
 
-/// Append stored response output items.
-fn append_stored_output_items(messages: &mut Vec<Value>, output: Value) {
+/// Append stored response output items to the persisted conversation history.
+fn append_stored_output_items(messages: &mut Vec<Value>, output: &Value) {
     if let Value::Array(items) = output {
-        messages.extend(items);
+        messages.extend(items.iter().cloned());
     } else {
-        messages.push(output);
+        messages.push(output.clone());
     }
+}
+
+/// Return stored items that should be replayed as backend request input.
+fn replay_messages_from_stored(stored: &[Value]) -> Vec<Value> {
+    stored
+        .iter()
+        .filter(|item| !is_output_only_metadata_item(item))
+        .cloned()
+        .collect()
+}
+
+/// Return whether a stored output item carries metadata rather than replay context.
+fn is_output_only_metadata_item(item: &Value) -> bool {
+    item.get("type").and_then(Value::as_str) == Some("mcp_list_tools")
 }
 
 /// Build a Responses API user message item from string input.
@@ -347,32 +353,6 @@ fn validate_response_status(record: &ResponseRecord) -> Result<(), FilterAction>
 // MCP Tool & Usage Extraction
 // -----------------------------------------------------------------------------
 
-/// Set a compact MCP tool metadata signal for downstream filters.
-///
-/// If the serialized value exceeds [`MAX_METADATA_VALUE_BYTES`],
-/// a boolean `"true"` is set instead.
-fn write_mcp_tools_metadata(ctx: &mut HttpFilterContext<'_>, listings: &[Value]) {
-    if listings.is_empty() {
-        return;
-    }
-
-    let summaries = compact_mcp_tool_summaries(listings);
-    let compact = Value::Array(summaries);
-    match serde_json::to_string(&compact) {
-        Ok(s) if s.len() <= MAX_METADATA_VALUE_BYTES => {
-            trace!(mcp_tools = %s, "extracted MCP tool listings");
-            ctx.set_metadata(MCP_TOOLS_METADATA_KEY, s);
-        },
-        Ok(_) => {
-            trace!("MCP tool listings exceed metadata limit");
-            ctx.set_metadata(MCP_TOOLS_METADATA_KEY, "true");
-        },
-        Err(e) => {
-            warn!(error = %e, "failed to serialize MCP tool summary");
-        },
-    }
-}
-
 /// Recover MCP tool listings from stored history and response output.
 fn collect_mcp_tool_listings(record: &ResponseRecord) -> Vec<Value> {
     let mut listings = Vec::new();
@@ -416,23 +396,6 @@ fn collect_mcp_tool_listings_from_items(
             "tools": tools,
         }))
     }));
-}
-
-/// Build compact summaries from recovered MCP listings.
-fn compact_mcp_tool_summaries(listings: &[Value]) -> Vec<Value> {
-    listings
-        .iter()
-        .filter_map(|listing| {
-            let label = listing.get("server_label").and_then(Value::as_str)?;
-            let tools = listing.get("tools").and_then(Value::as_array)?;
-            let names = mcp_tool_names(tools);
-
-            Some(serde_json::json!({
-                "server_label": label,
-                "tools": names,
-            }))
-        })
-        .collect()
 }
 
 /// Extract tool names from MCP tool definitions.
