@@ -20,6 +20,7 @@ pub mod example_config;
 pub mod filters;
 pub mod net;
 pub mod proxy;
+pub mod recording;
 
 pub use agentic::{
     A2aMockConfig, A2aMockServerGuard, A2aRecordedRequest, McpMockConfig, McpMockServerGuard, McpRecordedRequest,
@@ -33,3 +34,4 @@ pub use proxy::{
     start_full_proxy, start_proxy, start_proxy_with_registry, start_reloadable_proxy, start_tls_proxy,
     start_tls_proxy_no_wait,
 };
+pub use recording::Recording;

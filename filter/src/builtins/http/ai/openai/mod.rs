@@ -4,6 +4,8 @@
 //! `OpenAI` API filters: Responses API pipeline.
 
 pub(crate) mod responses;
+#[cfg(feature = "ai-inference")]
+pub(crate) mod sse;
 #[expect(clippy::allow_attributes, reason = "dead_code expect unfulfilled on module")]
 #[allow(
     dead_code,

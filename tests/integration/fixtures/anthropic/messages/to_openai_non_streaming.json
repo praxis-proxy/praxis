@@ -1,0 +1,30 @@
+{
+  "source": "Curated Chat Completions non-streaming recording for Anthropic-to-OpenAI translation",
+  "request": {
+    "model": "claude-opus-4-8",
+    "max_tokens": 1024,
+    "messages": [
+      {
+        "role": "user",
+        "content": "Hello"
+      }
+    ]
+  },
+  "response": {
+    "id": "chatcmpl-test",
+    "model": "gpt-4",
+    "choices": [
+      {
+        "message": {
+          "role": "assistant",
+          "content": "Hello from a Chat Completions backend."
+        },
+        "finish_reason": "stop"
+      }
+    ],
+    "usage": {
+      "prompt_tokens": 11,
+      "completion_tokens": 4
+    }
+  }
+}

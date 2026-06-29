@@ -3353,6 +3353,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-pemfile",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
