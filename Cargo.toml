@@ -39,9 +39,10 @@ async-trait = "0.1.89"
 benchmarks = { path = "benchmarks" }
 bytes = "1.12.0"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-dashmap = "6.2.1"
+cpex = { version = "0.2.0", features = ["jwt", "oauth", "pii", "audit", "cedar", "cel", "valkey"] }
 clap = { version = "4.6.1", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
+dashmap = "6.2.1"
 futures = "0.3.32"
 h2 = "0.4.15"
 http = "1.4.2"

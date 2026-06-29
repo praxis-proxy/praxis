@@ -1,0 +1,35 @@
+# CPEX policy fixture for the `security/policy.yaml` example integration
+# test. The example itself points `config_path` at an operator-supplied
+# deployment path; the test rewrites that to this file so the policy
+# filter constructs against a real policy without shipping one under
+# examples/.
+#
+# Minimal shape: one HS256 JWT identity plugin, no routes. The policy
+# filter resolves identity in on_request (deny on missing/invalid
+# JWT); on_request_body sees no APL route annotations, so policy
+# dispatch is a no-op and the request passes through.
+#
+# This is enough to exercise the integration's wiring without
+# requiring a Keycloak / JWKS endpoint to run the example. Production
+# deployments swap HS256 for RS256+JWKS, add routes, attach
+# delegators, and so on. See the CPEX demo in the praxis-demos
+# repository (`demos/cpex/cpex.yaml`) for a fully-featured policy.
+
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    mode: sequential
+    priority: 10
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "https://idp.example.com"
+          audiences: ["praxis-cpex-example"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT"
+          leeway_seconds: 60
+      claim_mapper: standard
