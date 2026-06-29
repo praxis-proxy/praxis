@@ -5,6 +5,9 @@
 
 //! Core configuration, error types, and server factory for Praxis.
 
+/// Reusable HTTP callout client with circuit breaking and loop prevention.
+#[cfg(feature = "callout")]
+pub mod callout;
 /// YAML configuration parsing and validation.
 pub mod config;
 /// Upstream connection options and endpoint types.

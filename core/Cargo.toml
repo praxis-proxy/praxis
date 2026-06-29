@@ -16,14 +16,24 @@ name = "praxis_core"
 [lints]
 workspace = true
 
+[features]
+callout = ["dep:http", "dep:reqwest", "dep:tokio"]
+
 [dependencies]
 dashmap = { workspace = true }
+http = { workspace = true, optional = true }
 pingora-core = { workspace = true }
 praxis-tls = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
+reqwest = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["time"], optional = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+wiremock = { workspace = true }
