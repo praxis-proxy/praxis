@@ -68,6 +68,10 @@ impl ResponsesSseParser {
         for frame in &frames {
             self.event_count += 1;
 
+            if is_done_sentinel(frame) {
+                continue;
+            }
+
             let event = ResponsesEvent::from_frame(frame)?;
             self.record_completion(&event, now)?;
             events.push(event);
@@ -136,6 +140,11 @@ impl ResponsesSseParser {
             self.completed_at = Some(now);
         }
     }
+}
+
+/// Return whether an SSE frame is the OpenAI-compatible stream sentinel.
+fn is_done_sentinel(frame: &super::super::SseFrame) -> bool {
+    frame.data == b"[DONE]"
 }
 
 #[cfg(test)]
@@ -261,12 +270,25 @@ mod tests {
     }
 
     #[test]
-    fn done_sentinel_is_rejected() {
+    fn done_sentinel_is_ignored() {
         let mut parser = ResponsesSseParser::new(&config());
-        let result = parser.parse_chunk(b"data: [DONE]\n\n");
+        let events = parser.parse_chunk(b"data: [DONE]\n\n").unwrap();
+        assert!(events.is_empty(), "[DONE] should not dispatch as a typed event");
+    }
+
+    #[test]
+    fn done_sentinel_after_terminal_is_allowed() {
+        let mut parser = ResponsesSseParser::new(&config());
+        parser
+            .parse_chunk(&sse_bytes("response.completed", &json!({"id": "resp_1"})))
+            .unwrap();
+
+        let events = parser.parse_chunk(b"data: [DONE]\n\n").unwrap();
+
+        assert!(events.is_empty(), "[DONE] should not dispatch as a typed event");
         assert!(
-            matches!(result, Err(SseParseError::MalformedJson { .. })),
-            "[DONE] is not a Responses JSON event"
+            parser.validate_complete().is_ok(),
+            "[DONE] after a terminal lifecycle event should not mark the stream invalid"
         );
     }
 
