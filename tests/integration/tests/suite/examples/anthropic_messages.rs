@@ -13,6 +13,13 @@ use praxis_test_utils::{
 use super::load_example_config;
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+const ANTHROPIC_RATE_LIMIT_ERROR: &str =
+    r#"{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"},"request_id":"req_test"}"#;
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
@@ -168,6 +175,32 @@ fn anthropic_to_openai_transforms_streaming_response_body() {
     assert!(
         transformed.contains("event: message_stop"),
         "stream should include Anthropic message_stop"
+    );
+}
+
+#[test]
+fn anthropic_to_openai_streaming_error_body_passes_through() {
+    let backend_guard = Backend::status(429, ANTHROPIC_RATE_LIMIT_ERROR)
+        .header("content-type", "application/json")
+        .start_with_shutdown();
+    let proxy_port = free_port();
+
+    let config = load_example_config(
+        "ai/anthropic/messages-to-openai.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let body =
+        r#"{"model":"claude-opus-4-8","max_tokens":1024,"stream":true,"messages":[{"role":"user","content":"Hello"}]}"#;
+    let raw = http_send(proxy.addr(), &json_post("/v1/messages", body));
+
+    assert_eq!(parse_status(&raw), 429, "upstream error status should pass through");
+    assert_eq!(
+        parse_body(&raw),
+        ANTHROPIC_RATE_LIMIT_ERROR,
+        "JSON error body should pass through unchanged"
     );
 }
 
