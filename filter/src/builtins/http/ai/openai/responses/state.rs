@@ -106,6 +106,29 @@ pub(crate) struct ResponsesState {
     pub usage: serde_json::Value,
 }
 
+impl Default for ResponsesState {
+    fn default() -> Self {
+        Self {
+            context_management: None,
+            conversation: None,
+            include: Vec::new(),
+            input: Vec::new(),
+            iteration: 0,
+            max_tool_calls: None,
+            messages: Vec::new(),
+            output_items: Vec::new(),
+            parallel_tool_calls: true,
+            previous_response_id: None,
+            request_body: serde_json::Value::Null,
+            response_object: serde_json::Value::Null,
+            tool_calls: Vec::new(),
+            tool_choice: serde_json::Value::String("auto".to_owned()),
+            tools: Vec::new(),
+            usage: serde_json::Value::Null,
+        }
+    }
+}
+
 impl ResponsesState {
     /// Create initial state from a parsed request body.
     pub(crate) fn from_request_body(body: serde_json::Value) -> Self {
@@ -407,6 +430,27 @@ mod tests {
         let body = json!({"model": "gpt-4o", "input": "test"});
         let state = ResponsesState::from_request_body(body);
         assert!(state.parallel_tool_calls);
+    }
+
+    #[test]
+    fn default_produces_expected_values() {
+        let state = ResponsesState::default();
+        assert!(state.context_management.is_none());
+        assert!(state.conversation.is_none());
+        assert!(state.include.is_empty());
+        assert!(state.input.is_empty());
+        assert_eq!(state.iteration, 0);
+        assert!(state.max_tool_calls.is_none());
+        assert!(state.messages.is_empty());
+        assert!(state.output_items.is_empty());
+        assert!(state.parallel_tool_calls);
+        assert!(state.previous_response_id.is_none());
+        assert!(state.request_body.is_null());
+        assert!(state.response_object.is_null());
+        assert!(state.tool_calls.is_empty());
+        assert_eq!(state.tool_choice, json!("auto"));
+        assert!(state.tools.is_empty());
+        assert!(state.usage.is_null());
     }
 
     #[test]
