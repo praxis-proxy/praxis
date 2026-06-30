@@ -264,6 +264,7 @@ events. Processes SSE chunks incrementally as they arrive.
 
 ```yaml
 filter: anthropic_stream_events
+max_partial_event_bytes: 10485760
 response_conditions:
   - when:
       headers:

@@ -7,8 +7,23 @@ Transforms streaming SSE responses between `OpenAI` and Anthropic formats, proce
 
 Requires Cargo feature: `ai-inference`.
 
-## Example
+## Configuration
+
+| Field | Type | Required | Description |
+|-------|------|---------|-------------|
+| `max_partial_event_bytes` | usize | no | Maximum incomplete SSE event bytes retained between chunks. |
+
+## Examples
+
+### Example 1
 
 ```yaml
 filter: anthropic_stream_events
+```
+
+### Example 2
+
+```yaml
+filter: anthropic_stream_events
+max_partial_event_bytes: 10485760
 ```
