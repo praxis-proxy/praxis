@@ -26,6 +26,9 @@ filter_chains:
       - filter: anthropic_to_openai
         max_body_bytes: 1048576
 
+      # response_conditions is optional: the filter self-arms via
+      # metadata and Content-Type checks internally. Adding it
+      # skips filter dispatch entirely for non-SSE responses.
       - filter: anthropic_stream_events
         max_partial_event_bytes: 10485760
         response_conditions:
