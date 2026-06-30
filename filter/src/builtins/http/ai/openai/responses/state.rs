@@ -62,7 +62,8 @@ pub(crate) struct ResponsesState {
     /// `previous_response_id` is set, `rehydrate` prepends stored
     /// history. `tool_dispatch` appends tool results during agentic
     /// loops. `responses_proxy` reads this as the authoritative
-    /// conversation to send to the backend.
+    /// conversation to send to the backend. Output-only metadata
+    /// items must be omitted from this field.
     pub messages: Vec<serde_json::Value>,
 
     /// Output items accumulated across the current response.
@@ -72,11 +73,24 @@ pub(crate) struct ResponsesState {
     /// iteration. Defaults to `true` per the API spec.
     pub parallel_tool_calls: bool,
 
+    /// Full message history to persist for future rehydration.
+    ///
+    /// This may include output-only metadata items omitted from
+    /// [`Self::messages`] because it is not forwarded to backend
+    /// inference.
+    pub persisted_messages: Vec<serde_json::Value>,
+
     /// ID of a previous response to continue from.
     ///
     /// When set, `rehydrate` fetches the stored conversation
     /// history for this response and prepends it to `messages`.
     pub previous_response_id: Option<String>,
+
+    /// MCP tool listings recovered from the previous response.
+    pub previous_tools: Vec<serde_json::Value>,
+
+    /// Token usage reported by the previous response.
+    pub previous_usage: Option<serde_json::Value>,
 
     /// Parsed request body as received from the client.
     pub request_body: serde_json::Value,
@@ -106,14 +120,43 @@ pub(crate) struct ResponsesState {
     pub usage: serde_json::Value,
 }
 
+impl Default for ResponsesState {
+    fn default() -> Self {
+        Self {
+            context_management: None,
+            conversation: None,
+            include: Vec::new(),
+            input: Vec::new(),
+            iteration: 0,
+            max_tool_calls: None,
+            messages: Vec::new(),
+            output_items: Vec::new(),
+            parallel_tool_calls: true,
+            persisted_messages: Vec::new(),
+            previous_response_id: None,
+            previous_tools: Vec::new(),
+            previous_usage: None,
+            request_body: serde_json::Value::Null,
+            response_object: serde_json::Value::Null,
+            tool_calls: Vec::new(),
+            tool_choice: serde_json::Value::String("auto".to_owned()),
+            tools: Vec::new(),
+            usage: serde_json::Value::Null,
+        }
+    }
+}
+
 impl ResponsesState {
     /// Create initial state from a parsed request body.
     pub(crate) fn from_request_body(body: serde_json::Value) -> Self {
         let messages = normalize_input(&body);
+        let persisted_messages = messages.clone();
         let tool_choice = body
             .get("tool_choice")
             .cloned()
             .unwrap_or_else(|| serde_json::Value::String("auto".to_owned()));
+
+        let tools = extract_array_field(&body, "tools");
 
         Self {
             context_management: body.get("context_management").cloned(),
@@ -125,13 +168,16 @@ impl ResponsesState {
             messages,
             output_items: Vec::new(),
             parallel_tool_calls: extract_bool_or(&body, "parallel_tool_calls", true),
+            persisted_messages,
             previous_response_id: extract_string(&body, "previous_response_id"),
+            previous_tools: Vec::new(),
+            previous_usage: None,
+            request_body: body,
             response_object: serde_json::Value::Null,
             tool_calls: Vec::new(),
             tool_choice,
-            tools: extract_array_field(&body, "tools"),
+            tools,
             usage: serde_json::Value::Null,
-            request_body: body,
         }
     }
 }
@@ -268,6 +314,10 @@ mod tests {
         assert_eq!(
             state.input, state.messages,
             "input and messages should be identical at construction"
+        );
+        assert_eq!(
+            state.input, state.persisted_messages,
+            "input and persisted_messages should be identical at construction"
         );
     }
 
@@ -407,6 +457,27 @@ mod tests {
         let body = json!({"model": "gpt-4o", "input": "test"});
         let state = ResponsesState::from_request_body(body);
         assert!(state.parallel_tool_calls);
+    }
+
+    #[test]
+    fn default_produces_expected_values() {
+        let state = ResponsesState::default();
+        assert!(state.context_management.is_none());
+        assert!(state.conversation.is_none());
+        assert!(state.include.is_empty());
+        assert!(state.input.is_empty());
+        assert_eq!(state.iteration, 0);
+        assert!(state.max_tool_calls.is_none());
+        assert!(state.messages.is_empty());
+        assert!(state.output_items.is_empty());
+        assert!(state.parallel_tool_calls);
+        assert!(state.previous_response_id.is_none());
+        assert!(state.request_body.is_null());
+        assert!(state.response_object.is_null());
+        assert!(state.tool_calls.is_empty());
+        assert_eq!(state.tool_choice, json!("auto"));
+        assert!(state.tools.is_empty());
+        assert!(state.usage.is_null());
     }
 
     #[test]

@@ -1277,6 +1277,139 @@ async fn pipeline_persists_rehydrated_messages_when_response_omits_input() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn pipeline_persists_fallback_mcp_metadata_for_future_rehydrate() {
+    let (db_url, db_path) = temp_sqlite_url("pipeline_persists_fallback_mcp_metadata");
+    let seeded_store = SqliteResponseStore::new(&db_url, "test_responses", "test_conversations", None)
+        .await
+        .unwrap();
+    seeded_store
+        .upsert_response(&ResponseRecord {
+            id: "resp_prev".to_owned(),
+            tenant_id: "default".to_owned(),
+            created_at: 1_719_800_000,
+            model: "gpt-4.1".to_owned(),
+            response_object: json!({
+                "id": "resp_prev",
+                "created_at": 1_719_800_000,
+                "model": "gpt-4.1",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "mcpl_prev",
+                        "type": "mcp_list_tools",
+                        "server_label": "weather-server",
+                        "tools": [{"name": "get_weather", "description": "d", "input_schema": {}}]
+                    },
+                    {"type": "message", "role": "assistant", "content": "Tools loaded"}
+                ]
+            }),
+            input: json!("Hello"),
+            messages: json!([]),
+        })
+        .await
+        .unwrap();
+    drop(seeded_store);
+
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(&format!(
+        r#"
+- filter: openai_responses_format
+- filter: openai_response_store
+  backend: sqlite
+  database_url: "{db_url}"
+  responses_table: test_responses
+  conversations_table: test_conversations
+- filter: openai_responses_rehydrate
+"#
+    ))
+    .unwrap();
+    let registry = FilterRegistry::with_builtins();
+    let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    if let Some(stores) = pipeline.response_stores() {
+        ctx.extensions.insert(stores.clone());
+    }
+
+    let request_json = json!({
+        "model": "gpt-4.1",
+        "input": "What next?",
+        "previous_response_id": "resp_prev"
+    });
+    let mut request_body = Some(Bytes::from(serde_json::to_vec(&request_json).unwrap()));
+    let request_body_action = pipeline
+        .execute_http_request_body(&mut ctx, &mut request_body, true)
+        .await
+        .unwrap();
+    assert!(
+        matches!(request_body_action, FilterAction::Release),
+        "request body phase should classify, register the store, and rehydrate"
+    );
+
+    let request_action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(request_action, FilterAction::Continue),
+        "request phase should continue after pre-read rehydration"
+    );
+
+    let mut resp = crate::test_utils::make_response();
+    resp.headers
+        .insert(http::header::CONTENT_TYPE, "application/json".parse().unwrap());
+    ctx.response_header = Some(&mut resp);
+    let response_action = pipeline.execute_http_response(&mut ctx).await.unwrap();
+    assert!(
+        matches!(response_action, FilterAction::Continue),
+        "response phase should arm persistence buffering"
+    );
+    ctx.response_header = None;
+
+    let response_json = json!({
+        "id": "resp_next",
+        "created_at": 1_719_900_000,
+        "model": "gpt-4.1",
+        "status": "completed",
+        "output": [{"type": "message", "role": "assistant", "content": "Next answer"}]
+    });
+    let mut response_body = Some(Bytes::from(serde_json::to_vec(&response_json).unwrap()));
+    let response_body_action = pipeline
+        .execute_http_response_body(&mut ctx, &mut response_body, true)
+        .unwrap();
+    assert!(
+        matches!(response_body_action, FilterAction::Continue),
+        "response body phase should persist and continue"
+    );
+
+    let store = SqliteResponseStore::new(&db_url, "test_responses", "test_conversations", None)
+        .await
+        .unwrap();
+    let record = store
+        .get_response("default", "resp_next")
+        .await
+        .unwrap()
+        .expect("pipeline should persist the rehydrated response");
+    assert_eq!(
+        record.messages,
+        json!([
+            {"type": "message", "role": "user", "content": "Hello"},
+            {
+                "id": "mcpl_prev",
+                "type": "mcp_list_tools",
+                "server_label": "weather-server",
+                "tools": [{"name": "get_weather", "description": "d", "input_schema": {}}]
+            },
+            {"type": "message", "role": "assistant", "content": "Tools loaded"},
+            {"type": "message", "role": "user", "content": "What next?"},
+            {"type": "message", "role": "assistant", "content": "Next answer"}
+        ]),
+        "stored messages should preserve fallback MCP metadata for later continuations"
+    );
+
+    drop(store);
+    drop(pipeline);
+    cleanup_sqlite_file(&db_path);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn store_init_failure_is_permanent() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"

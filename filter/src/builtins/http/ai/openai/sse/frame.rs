@@ -51,7 +51,7 @@ impl SseFrameParser {
 
     /// Feed a chunk of bytes, returning any complete SSE frames.
     pub fn parse_chunk(&mut self, chunk: &[u8]) -> Result<Vec<SseFrame>, SseParseError> {
-        self.parse_chunk_inner(chunk, None)
+        self.parse_chunk_inner(chunk, None, |_| true)
     }
 
     /// Feed a chunk and stop before emitting more frames than the event budget allows.
@@ -61,7 +61,18 @@ impl SseFrameParser {
         current_events: usize,
         max_events: usize,
     ) -> Result<Vec<SseFrame>, SseParseError> {
-        self.parse_chunk_inner(chunk, Some((current_events, max_events)))
+        self.parse_chunk_with_counted_event_limit(chunk, current_events, max_events, |_| true)
+    }
+
+    /// Feed a chunk and count only selected frames against the event budget.
+    pub fn parse_chunk_with_counted_event_limit(
+        &mut self,
+        chunk: &[u8],
+        current_events: usize,
+        max_events: usize,
+        count_frame: impl FnMut(&SseFrame) -> bool,
+    ) -> Result<Vec<SseFrame>, SseParseError> {
+        self.parse_chunk_inner(chunk, Some((current_events, max_events)), count_frame)
     }
 
     /// Feed a chunk with optional event-budget enforcement.
@@ -70,6 +81,7 @@ impl SseFrameParser {
         &mut self,
         chunk: &[u8],
         event_limit: Option<(usize, usize)>,
+        mut count_frame: impl FnMut(&SseFrame) -> bool,
     ) -> Result<Vec<SseFrame>, SseParseError> {
         if chunk.is_empty() {
             self.scratch_bytes = self.buffered_bytes();
@@ -77,6 +89,7 @@ impl SseFrameParser {
         }
 
         let mut frames = Vec::new();
+        let mut counted_in_chunk = 0;
         let mut i = 0;
 
         if self.prev_cr && chunk.first() == Some(&b'\n') {
@@ -86,10 +99,11 @@ impl SseFrameParser {
 
         while let Some(&b) = chunk.get(i) {
             if b == b'\n' || b == b'\r' {
-                if self.line_buf.is_empty() && self.has_data {
-                    Self::check_event_limit(event_limit, frames.len())?;
-                }
                 if let Some(frame) = self.process_line() {
+                    if count_frame(&frame) {
+                        Self::check_event_limit(event_limit, counted_in_chunk)?;
+                        counted_in_chunk = counted_in_chunk.saturating_add(1);
+                    }
                     frames.push(frame);
                 }
                 self.line_buf.clear();
