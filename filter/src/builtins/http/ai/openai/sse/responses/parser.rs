@@ -60,17 +60,20 @@ impl ResponsesSseParser {
         self.started_at.get_or_insert(now);
         self.check_timeout(now)?;
 
-        let frames = self
-            .frame_parser
-            .parse_chunk_with_event_limit(chunk, self.event_count, self.max_events)?;
+        let frames = self.frame_parser.parse_chunk_with_counted_event_limit(
+            chunk,
+            self.event_count,
+            self.max_events,
+            |frame| !is_done_sentinel(frame),
+        )?;
         let mut events = Vec::with_capacity(frames.len());
 
         for frame in &frames {
-            self.event_count += 1;
-
             if is_done_sentinel(frame) {
                 continue;
             }
+
+            self.event_count += 1;
 
             let event = ResponsesEvent::from_frame(frame)?;
             self.record_completion(&event, now)?;
@@ -289,6 +292,26 @@ mod tests {
         assert!(
             parser.validate_complete().is_ok(),
             "[DONE] after a terminal lifecycle event should not mark the stream invalid"
+        );
+    }
+
+    #[test]
+    fn done_sentinel_after_max_event_terminal_is_allowed() {
+        let cfg = SseParserConfig {
+            max_events: 1,
+            ..config()
+        };
+        let mut parser = ResponsesSseParser::new(&cfg);
+        parser
+            .parse_chunk(&sse_bytes("response.completed", &json!({"id": "resp_1"})))
+            .unwrap();
+
+        let events = parser.parse_chunk(b"data: [DONE]\n\n").unwrap();
+
+        assert!(events.is_empty(), "[DONE] should not count against max_events");
+        assert!(
+            parser.validate_complete().is_ok(),
+            "[DONE] after the max counted terminal event should not exceed max_events"
         );
     }
 
