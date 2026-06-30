@@ -34,8 +34,9 @@
 //! filter. The original request `input` is carried through typed
 //! per-filter state because it can be arbitrary JSON and is not part
 //! of the Responses API response object. When rehydrate populated
-//! [`ResponsesState`], that state is used as the stored message
-//! history.
+//! [`ResponsesState`], its persistence history is used as the
+//! stored message history so output-only metadata can survive
+//! future rehydration without being replayed as backend input.
 //!
 //! [`filter_metadata`]: crate::HttpFilterContext::filter_metadata
 //! [`ResponsesState`]: super::super::state::ResponsesState
@@ -718,7 +719,7 @@ impl HttpFilter for ResponseStoreFilter {
         let state_messages = ctx
             .extensions
             .get::<ResponsesState>()
-            .map(|state| state.messages.clone());
+            .map(|state| state.persisted_messages.clone());
         let Some(record) = parse_response_record(bytes, &tenant_id, request_input, state_messages) else {
             return Ok(FilterAction::Continue);
         };
