@@ -52,6 +52,10 @@ const OUTPUT_TOKENS_KEY: &str = "anthropic_stream.output_tokens";
 /// Metadata key for the current content block index.
 const BLOCK_INDEX_KEY: &str = "anthropic_stream.block_index";
 
+/// Metadata key set when the upstream returns a non-2xx status, signaling
+/// that the body should pass through without SSE transformation.
+const ERROR_PASSTHROUGH_KEY: &str = "anthropic_stream.error_passthrough";
+
 // -----------------------------------------------------------------------------
 // AnthropicStreamEventsFilter
 // -----------------------------------------------------------------------------
@@ -113,6 +117,11 @@ impl HttpFilter for AnthropicStreamEventsFilter {
         }
 
         if let Some(resp) = &mut ctx.response_header {
+            if !resp.status.is_success() {
+                ctx.set_metadata(ERROR_PASSTHROUGH_KEY, "true");
+                return Ok(FilterAction::Continue);
+            }
+
             resp.headers.remove(http::header::CONTENT_LENGTH);
             resp.headers.insert(
                 http::header::CONTENT_TYPE,
@@ -129,7 +138,7 @@ impl HttpFilter for AnthropicStreamEventsFilter {
         body: &mut Option<Bytes>,
         _end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        if is_known_non_streaming_transform(ctx) {
+        if is_known_non_streaming_transform(ctx) || is_error_passthrough(ctx) {
             return Ok(FilterAction::Continue);
         }
 
@@ -179,6 +188,14 @@ fn is_known_non_streaming_transform(ctx: &HttpFilterContext<'_>) -> bool {
     ctx.filter_metadata
         .get("anthropic_to_openai.streaming")
         .is_some_and(|v| v != "true")
+}
+
+/// Check whether the upstream returned a non-2xx status, meaning the body
+/// should pass through without SSE transformation.
+fn is_error_passthrough(ctx: &HttpFilterContext<'_>) -> bool {
+    ctx.filter_metadata
+        .get(ERROR_PASSTHROUGH_KEY)
+        .is_some_and(|v| v == "true")
 }
 
 /// Process a single SSE event block (lines between double-newlines).
@@ -681,6 +698,52 @@ mod tests {
             out.contains("input_json_delta") && out.contains(r#""partial_json":"{\"city\":"#),
             "tool arguments should stream as input_json_delta"
         );
+    }
+
+    #[tokio::test]
+    async fn error_response_preserves_headers() {
+        let filter = make_filter();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/messages");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut resp = crate::test_utils::make_response();
+        resp.status = http::StatusCode::TOO_MANY_REQUESTS;
+        resp.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("application/json"),
+        );
+        ctx.response_header = Some(&mut resp);
+
+        drop(filter.on_response(&mut ctx).await.unwrap());
+
+        let content_type = ctx
+            .response_header
+            .as_ref()
+            .unwrap()
+            .headers
+            .get(http::header::CONTENT_TYPE);
+        assert_eq!(
+            content_type,
+            Some(&http::HeaderValue::from_static("application/json")),
+            "error response should preserve original content type"
+        );
+        assert!(
+            !ctx.response_headers_modified,
+            "error response should not mark response headers modified"
+        );
+    }
+
+    #[test]
+    fn error_response_body_passes_through() {
+        let (filter, mut ctx) = make_filter_and_context();
+        ctx.set_metadata(ERROR_PASSTHROUGH_KEY, "true");
+
+        let error_body =
+            r#"{"type":"error","error":{"type":"rate_limit_error","message":"Rate limited"},"request_id":"req_test"}"#;
+        let mut body = Some(Bytes::from(error_body));
+        drop(filter.on_response_body(&mut ctx, &mut body, true).unwrap());
+
+        let out = String::from_utf8(body.unwrap().to_vec()).unwrap();
+        assert_eq!(out, error_body, "error body should pass through unchanged");
     }
 
     #[test]

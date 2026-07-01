@@ -83,17 +83,26 @@ mod tests {
     #[test]
     fn load_non_streaming() {
         let r = Recording::load("anthropic/messages/basic.json");
-        assert!(!r.is_streaming());
-        assert!(r.response.is_some());
-        assert!(r.response_sse.is_none());
+        assert!(!r.is_streaming(), "basic fixture should be non-streaming");
+        assert!(r.response.is_some(), "basic fixture should include a JSON response");
+        assert!(
+            r.response_sse.is_none(),
+            "basic fixture should not include an SSE response"
+        );
     }
 
     #[test]
     fn load_streaming() {
         let r = Recording::load("anthropic/messages/streaming_basic.json");
-        assert!(r.is_streaming());
-        assert!(r.response_sse.is_some());
-        assert!(r.response.is_none());
+        assert!(r.is_streaming(), "streaming fixture should be streaming");
+        assert!(
+            r.response_sse.is_some(),
+            "streaming fixture should include an SSE response"
+        );
+        assert!(
+            r.response.is_none(),
+            "streaming fixture should not include a JSON response"
+        );
     }
 
     #[test]
