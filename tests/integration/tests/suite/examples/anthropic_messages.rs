@@ -117,7 +117,7 @@ fn anthropic_to_openai_transforms_response_body() {
     let config = load_example_config(
         "ai/anthropic/messages-to-openai.yaml",
         proxy_port,
-        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+        HashMap::from([("127.0.0.1:8000", backend_guard.port())]),
     );
     let proxy = start_proxy(&config);
 
@@ -149,7 +149,7 @@ fn anthropic_to_openai_transforms_streaming_response_body() {
     let config = load_example_config(
         "ai/anthropic/messages-to-openai.yaml",
         proxy_port,
-        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+        HashMap::from([("127.0.0.1:8000", backend_guard.port())]),
     );
     let proxy = start_proxy(&config);
 

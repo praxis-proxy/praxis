@@ -500,6 +500,41 @@ async fn upsert_conversation_overwrites() {
 }
 
 #[tokio::test]
+async fn update_conversation_messages_preserves_metadata() {
+    let store = make_store().await;
+    let record = ConversationRecord {
+        conversation_id: "conv_1".to_owned(),
+        tenant_id: "tenant_a".to_owned(),
+        created_at: 1000,
+        metadata: json!({"version": "v1"}),
+        messages: json!([{"role": "user", "content": "v1"}]),
+    };
+    store.upsert_conversation(&record).await.expect("upsert should succeed");
+
+    let updated = store
+        .update_conversation_messages("tenant_a", "conv_1", &json!([{"role": "assistant", "content": "v2"}]))
+        .await
+        .expect("message update should succeed");
+    assert!(updated, "conversation should be updated");
+
+    let fetched = ConversationItemStore::get_conversation(&store, "tenant_a", "conv_1")
+        .await
+        .expect("get should succeed")
+        .expect("record should exist");
+
+    assert_eq!(
+        fetched.metadata,
+        json!({"version": "v1"}),
+        "metadata should be preserved"
+    );
+    assert_eq!(
+        fetched.messages,
+        json!([{"role": "assistant", "content": "v2"}]),
+        "messages should be updated"
+    );
+}
+
+#[tokio::test]
 async fn get_missing_conversation_returns_none() {
     let store = make_store().await;
 
@@ -726,30 +761,6 @@ async fn max_item_position_returns_highest() {
 }
 
 #[tokio::test]
-async fn delete_conversation_items_removes_all() {
-    let store = make_store_with_items().await;
-    let items = [
-        make_conversation_item("item_1", "tenant_a", "conv_1", 1),
-        make_conversation_item("item_2", "tenant_a", "conv_1", 2),
-    ];
-    store
-        .create_conversation_items(&items)
-        .await
-        .expect("item insert should succeed");
-
-    store
-        .delete_conversation_items("tenant_a", "conv_1")
-        .await
-        .expect("delete_conversation_items should succeed");
-
-    let remaining = store
-        .list_conversation_items("tenant_a", "conv_1", None, 100, true)
-        .await
-        .expect("list should succeed");
-    assert!(remaining.is_empty(), "all items should be deleted");
-}
-
-#[tokio::test]
 async fn conversation_item_tenant_isolation() {
     let store = make_store_with_items().await;
     let item = make_conversation_item("item_1", "tenant_a", "conv_1", 1);
@@ -772,7 +783,7 @@ async fn conversation_item_tenant_isolation() {
 }
 
 #[tokio::test]
-async fn conversation_item_upsert_updates_existing() {
+async fn conversation_item_insert_rejects_existing() {
     let store = make_store_with_items().await;
     let original = make_conversation_item("item_1", "tenant_a", "conv_1", 1);
     let updated = ConversationItemRecord {
@@ -789,20 +800,20 @@ async fn conversation_item_upsert_updates_existing() {
     store
         .create_conversation_items(&[updated])
         .await
-        .expect("duplicate item insert should upsert");
+        .expect_err("duplicate item insert should fail");
 
     let fetched = store
         .get_conversation_item("tenant_a", "conv_1", "item_1")
         .await
         .expect("get should succeed")
-        .expect("item should exist after upsert");
+        .expect("item should exist after duplicate insert");
 
-    assert_eq!(fetched.position, 2, "upsert should update position");
-    assert_eq!(fetched.created_at, 2000, "upsert should update created_at");
+    assert_eq!(fetched.position, 1, "duplicate insert should preserve position");
+    assert_eq!(fetched.created_at, 1000, "duplicate insert should preserve created_at");
     assert_eq!(
         fetched.item_data,
-        json!({"type": "message", "role": "assistant", "content": "updated"}),
-        "upsert should update item data"
+        json!({"type": "message", "role": "user", "content": "test"}),
+        "duplicate insert should preserve item data"
     );
 }
 
@@ -915,7 +926,7 @@ async fn list_conversation_items_nonexistent_cursor_returns_empty() {
 }
 
 #[tokio::test]
-async fn delete_conversation_cascades_to_items() {
+async fn delete_conversation_preserves_items() {
     let store = make_store_with_items().await;
     let conv = ConversationRecord {
         conversation_id: "conv_1".to_owned(),
@@ -948,10 +959,7 @@ async fn delete_conversation_cascades_to_items() {
         .list_conversation_items("tenant_a", "conv_1", None, 100, true)
         .await
         .expect("list should succeed");
-    assert!(
-        remaining.is_empty(),
-        "items should be cascade-deleted with conversation"
-    );
+    assert_item_ids(&remaining, &["item_1", "item_2"]);
 }
 
 #[tokio::test]
@@ -1005,12 +1013,6 @@ async fn conversation_item_methods_fail_without_items_table() {
     assert!(
         matches!(err, StoreError::Unavailable(_)),
         "max_position should return Unavailable"
-    );
-
-    let err = store.delete_conversation_items("tenant_a", "conv_1").await.unwrap_err();
-    assert!(
-        matches!(err, StoreError::Unavailable(_)),
-        "delete_items should return Unavailable"
     );
 }
 
@@ -1434,6 +1436,43 @@ async fn pg_upsert_conversation_overwrites() {
 
 #[tokio::test]
 #[ignore]
+async fn pg_update_conversation_messages_preserves_metadata() {
+    let store = make_pg_store().await;
+
+    let record = ConversationRecord {
+        conversation_id: "conv_1".to_owned(),
+        tenant_id: "tenant_a".to_owned(),
+        created_at: 1000,
+        metadata: json!({"version": "v1"}),
+        messages: json!([{"role": "user", "content": "v1"}]),
+    };
+    store.upsert_conversation(&record).await.expect("upsert should succeed");
+
+    let updated = store
+        .update_conversation_messages("tenant_a", "conv_1", &json!([{"role": "assistant", "content": "v2"}]))
+        .await
+        .expect("message update should succeed");
+    assert!(updated, "conversation should be updated");
+
+    let fetched = ConversationItemStore::get_conversation(&store, "tenant_a", "conv_1")
+        .await
+        .expect("get should succeed")
+        .expect("record should exist");
+
+    assert_eq!(
+        fetched.metadata,
+        json!({"version": "v1"}),
+        "metadata should be preserved"
+    );
+    assert_eq!(
+        fetched.messages,
+        json!([{"role": "assistant", "content": "v2"}]),
+        "messages should be updated"
+    );
+}
+
+#[tokio::test]
+#[ignore]
 async fn pg_delete_existing_conversation() {
     let store = make_pg_store().await;
 
@@ -1617,31 +1656,6 @@ async fn pg_max_item_position_returns_highest() {
 
 #[tokio::test]
 #[ignore]
-async fn pg_delete_conversation_items_removes_all() {
-    let store = make_pg_store_with_items().await;
-    let items = [
-        make_conversation_item("item_1", "tenant_a", "conv_1", 1),
-        make_conversation_item("item_2", "tenant_a", "conv_1", 2),
-    ];
-    store
-        .create_conversation_items(&items)
-        .await
-        .expect("item insert should succeed");
-
-    store
-        .delete_conversation_items("tenant_a", "conv_1")
-        .await
-        .expect("delete_conversation_items should succeed");
-
-    let remaining = store
-        .list_conversation_items("tenant_a", "conv_1", None, 100, true)
-        .await
-        .expect("list should succeed");
-    assert!(remaining.is_empty(), "all items should be deleted");
-}
-
-#[tokio::test]
-#[ignore]
 async fn pg_conversation_item_tenant_isolation() {
     let store = make_pg_store_with_items().await;
     let item = make_conversation_item("item_1", "tenant_a", "conv_1", 1);
@@ -1665,7 +1679,7 @@ async fn pg_conversation_item_tenant_isolation() {
 
 #[tokio::test]
 #[ignore]
-async fn pg_conversation_item_upsert_updates_existing() {
+async fn pg_conversation_item_insert_rejects_existing() {
     let store = make_pg_store_with_items().await;
     let original = make_conversation_item("item_1", "tenant_a", "conv_1", 1);
     let updated = ConversationItemRecord {
@@ -1682,20 +1696,20 @@ async fn pg_conversation_item_upsert_updates_existing() {
     store
         .create_conversation_items(&[updated])
         .await
-        .expect("duplicate item insert should upsert");
+        .expect_err("duplicate item insert should fail");
 
     let fetched = store
         .get_conversation_item("tenant_a", "conv_1", "item_1")
         .await
         .expect("get should succeed")
-        .expect("item should exist after upsert");
+        .expect("item should exist after duplicate insert");
 
-    assert_eq!(fetched.position, 2, "upsert should update position");
-    assert_eq!(fetched.created_at, 2000, "upsert should update created_at");
+    assert_eq!(fetched.position, 1, "duplicate insert should preserve position");
+    assert_eq!(fetched.created_at, 1000, "duplicate insert should preserve created_at");
     assert_eq!(
         fetched.item_data,
-        json!({"type": "message", "role": "assistant", "content": "updated"}),
-        "upsert should update item data"
+        json!({"type": "message", "role": "user", "content": "test"}),
+        "duplicate insert should preserve item data"
     );
 }
 
@@ -1812,7 +1826,7 @@ async fn pg_list_conversation_items_nonexistent_cursor_returns_empty() {
 
 #[tokio::test]
 #[ignore]
-async fn pg_delete_conversation_cascades_to_items() {
+async fn pg_delete_conversation_preserves_items() {
     let store = make_pg_store_with_items().await;
     let conv = ConversationRecord {
         conversation_id: "conv_1".to_owned(),
@@ -1845,10 +1859,7 @@ async fn pg_delete_conversation_cascades_to_items() {
         .list_conversation_items("tenant_a", "conv_1", None, 100, true)
         .await
         .expect("list should succeed");
-    assert!(
-        remaining.is_empty(),
-        "items should be cascade-deleted with conversation"
-    );
+    assert_item_ids(&remaining, &["item_1", "item_2"]);
 }
 
 // -----------------------------------------------------------------------------

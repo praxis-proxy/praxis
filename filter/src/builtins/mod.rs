@@ -23,6 +23,8 @@ pub use http::ModelRewriteFilter;
 #[cfg(feature = "ai-inference")]
 pub use http::ModelToHeaderFilter;
 #[cfg(feature = "ai-inference")]
+pub use http::OpenaiConversationsFilter;
+#[cfg(feature = "ai-inference")]
 pub use http::OpenaiResponsesValidateFilter;
 #[cfg(feature = "cpex-policy-engine")]
 pub use http::PolicyFilter;

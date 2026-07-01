@@ -29,7 +29,10 @@ use std::sync::Arc;
 
 use dashmap::{DashMap, mapref::entry::Entry};
 /// Validate response-store table identifiers.
-pub(crate) use schemas::{validate_identifier as validate_table_identifier, validate_postgres_table_identifiers};
+pub(crate) use schemas::{
+    validate_identifier as validate_table_identifier, validate_postgres_table_identifiers,
+    validate_postgres_table_set_identifiers,
+};
 
 #[expect(
     clippy::allow_attributes,

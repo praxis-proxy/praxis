@@ -35,6 +35,8 @@ mod max_connections;
 mod model_to_header;
 mod multi_listener;
 #[cfg(feature = "ai-inference")]
+mod openai_conversations;
+#[cfg(feature = "ai-inference")]
 mod openai_response_store;
 #[cfg(feature = "ai-inference")]
 mod openai_response_store_postgres;

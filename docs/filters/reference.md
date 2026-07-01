@@ -19,6 +19,7 @@ Built-in filters organized by protocol and category.
 | [`json_rpc`](http/ai/json_rpc.md) | - | Extracts JSON-RPC 2.0 envelope metadata from request bodies and promotes method, id, and kind to request headers and filter results for routing. |
 | [`mcp`](http/ai/mcp.md) | - | Extracts MCP protocol metadata from JSON-RPC request bodies and promotes method, tool/resource/prompt name, JSON-RPC kind, protocol version, and session presence to request headers/filter results; stores session ID in durable metadata. |
 | [`model_to_header`](http/ai/model_to_header.md) | `ai-inference` | Promotes the JSON `"model"` field from the request body to a request header. |
+| [`openai_conversations`](http/ai/openai_conversations.md) | `ai-inference` | Handles all `/v1/conversations` endpoints locally. |
 | [`openai_response_store`](http/ai/openai_response_store.md) | `ai-inference` | Persists non-streaming Responses API responses to the configured response store backend. |
 | [`openai_responses_format`](http/ai/openai_responses_format.md) | `ai-inference` | Classifies AI API request bodies and promotes routing facts to headers, metadata, and filter results without mutating the body. |
 | [`openai_responses_model_rewrite`](http/ai/openai_responses_model_rewrite.md) | `ai-inference` | Rewrites the `model` field in Responses API request bodies. |

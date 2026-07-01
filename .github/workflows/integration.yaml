@@ -69,3 +69,12 @@ jobs:
 
       - name: Integration tests (PostgreSQL, requires container engine)
         run: cargo test -p praxis-tests-integration --test suite -- openai_response_store_postgres --ignored
+
+      - name: Build proxy binary for SDK tests
+        run: cargo build -p praxis-proxy
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@f0ec1fc3b38f5e7cd731bb6ce540c5af426746bb # v6.3.1
+
+      - name: OpenAI SDK compatibility tests
+        run: uv run tests/integration/sdk/openai/test_openai_conversations.py

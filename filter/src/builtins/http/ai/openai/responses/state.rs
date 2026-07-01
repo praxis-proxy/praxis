@@ -163,21 +163,15 @@ impl ResponsesState {
             conversation: body.get("conversation").cloned(),
             include: extract_string_array(&body, "include"),
             input: messages.clone(),
-            iteration: 0,
             max_tool_calls: extract_u32(&body, "max_tool_calls"),
             messages,
-            output_items: Vec::new(),
             parallel_tool_calls: extract_bool_or(&body, "parallel_tool_calls", true),
             persisted_messages,
             previous_response_id: extract_string(&body, "previous_response_id"),
-            previous_tools: Vec::new(),
-            previous_usage: None,
             request_body: body,
-            response_object: serde_json::Value::Null,
-            tool_calls: Vec::new(),
             tool_choice,
             tools,
-            usage: serde_json::Value::Null,
+            ..Default::default()
         }
     }
 }
