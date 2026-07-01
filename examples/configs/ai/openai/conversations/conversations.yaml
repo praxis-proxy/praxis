@@ -1,0 +1,48 @@
+# Conversations
+#
+# Local /v1/conversations endpoints for conversation lifecycle,
+# backed by the ConversationItemStore. All requests are handled
+# locally — none are forwarded upstream.
+#
+#   POST   /v1/conversations        — create conversation
+#   GET    /v1/conversations/{id}   — get conversation
+#   POST   /v1/conversations/{id}   — update conversation
+#   DELETE /v1/conversations/{id}   — delete conversation
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/ai/openai/conversations/conversations.yaml
+
+listeners:
+  - name: conversations-gateway
+    address: "127.0.0.1:8080"
+    filter_chains: [conversations-pipeline]
+
+filter_chains:
+  - name: conversations-pipeline
+    filters:
+      - filter: openai_conversations
+        backend: sqlite
+        # In-memory:
+        #   database_url: "sqlite::memory:"
+        # File-backed:
+        database_url: "sqlite://conversations.db?mode=rwc"
+        # conversations_table defaults to "openai_conversations"
+        # items_table defaults to "openai_conversation_items"
+        #
+        # PostgreSQL backend:
+        #   backend: postgres
+        #   database_url: "postgres://user:pass@db.example.com:5432/praxis"
+        #   allow_private_database_url: true
+        #   ssl_mode: prefer
+        #   ssl_root_cert: /path/to/ca.pem
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "fallback-backend"
+
+      - filter: load_balancer
+        clusters:
+          - name: "fallback-backend"
+            endpoints:
+              - "127.0.0.1:8000"

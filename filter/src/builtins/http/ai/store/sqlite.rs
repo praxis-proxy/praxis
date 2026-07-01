@@ -135,24 +135,8 @@ impl SqliteResponseStore {
         row.map(|r| row_to_conversation_record(&r)).transpose()
     }
 
-    /// Delete a conversation row and any configured item rows.
+    /// Delete only a conversation row.
     async fn delete_conversation_record(&self, tenant_id: &str, conversation_id: &str) -> Result<bool, StoreError> {
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| StoreError::Database(e.to_string()))?;
-
-        if let Some(items_table) = &self.tables.items {
-            let items_sql = format!("DELETE FROM {items_table} WHERE tenant_id = ? AND conversation_id = ?");
-            sqlx::query(AssertSqlSafe(items_sql.as_str()))
-                .bind(tenant_id)
-                .bind(conversation_id)
-                .execute(&mut *tx)
-                .await
-                .map_err(|e| StoreError::Database(e.to_string()))?;
-        }
-
         let sql = format!(
             "DELETE FROM {} WHERE conversation_id = ? AND tenant_id = ?",
             self.tables.conversations
@@ -161,11 +145,10 @@ impl SqliteResponseStore {
         let result = sqlx::query(AssertSqlSafe(sql.as_str()))
             .bind(conversation_id)
             .bind(tenant_id)
-            .execute(&mut *tx)
+            .execute(&self.pool)
             .await
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
-        tx.commit().await.map_err(|e| StoreError::Database(e.to_string()))?;
         Ok(result.rows_affected() > 0)
     }
 }
@@ -276,6 +259,29 @@ impl ConversationItemStore for SqliteResponseStore {
         self.upsert_conversation_record(record).await
     }
 
+    async fn update_conversation_messages(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+        messages: &serde_json::Value,
+    ) -> Result<bool, StoreError> {
+        let messages = serde_json::to_string(messages).map_err(|e| StoreError::Serialization(e.to_string()))?;
+        let sql = format!(
+            "UPDATE {} SET messages = ? WHERE conversation_id = ? AND tenant_id = ?",
+            self.tables.conversations
+        );
+
+        let result = sqlx::query(AssertSqlSafe(sql.as_str()))
+            .bind(&messages)
+            .bind(conversation_id)
+            .bind(tenant_id)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| StoreError::Database(e.to_string()))?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     async fn get_conversation(
         &self,
         tenant_id: &str,
@@ -304,11 +310,7 @@ impl ConversationItemStore for SqliteResponseStore {
         let sql = format!(
             "INSERT INTO {table} \
              (item_id, tenant_id, conversation_id, item_data, created_at, position) \
-             VALUES (?, ?, ?, ?, ?, ?) \
-             ON CONFLICT(item_id, tenant_id, conversation_id) DO UPDATE SET \
-             item_data = excluded.item_data, \
-             created_at = excluded.created_at, \
-             position = excluded.position"
+             VALUES (?, ?, ?, ?, ?, ?)"
         );
 
         for item in items {
@@ -392,6 +394,41 @@ impl ConversationItemStore for SqliteResponseStore {
         };
 
         rows.iter().map(row_to_conversation_item_record).collect()
+    }
+
+    async fn get_existing_conversation_item_ids(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+        item_ids: &[&str],
+    ) -> Result<Vec<String>, StoreError> {
+        let table = self
+            .tables
+            .items
+            .as_deref()
+            .ok_or_else(|| StoreError::Unavailable("items table not configured".to_owned()))?;
+
+        if item_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let placeholders: String = std::iter::repeat_n("?", item_ids.len()).collect::<Vec<_>>().join(", ");
+        let sql = format!(
+            "SELECT item_id FROM {table} \
+             WHERE tenant_id = ? AND conversation_id = ? AND item_id IN ({placeholders})"
+        );
+
+        let mut query = sqlx::query_scalar::<_, String>(AssertSqlSafe(sql.as_str()))
+            .bind(tenant_id)
+            .bind(conversation_id);
+        for id in item_ids {
+            query = query.bind(*id);
+        }
+
+        query
+            .fetch_all(&self.pool)
+            .await
+            .map_err(|e| StoreError::Database(e.to_string()))
     }
 
     async fn get_conversation_item(
@@ -498,25 +535,6 @@ impl ConversationItemStore for SqliteResponseStore {
             .map_err(|e| StoreError::Database(e.to_string()))?;
 
         row.try_get("max_pos").map_err(|e| StoreError::Database(e.to_string()))
-    }
-
-    async fn delete_conversation_items(&self, tenant_id: &str, conversation_id: &str) -> Result<(), StoreError> {
-        let table = self
-            .tables
-            .items
-            .as_deref()
-            .ok_or_else(|| StoreError::Unavailable("items table not configured".to_owned()))?;
-
-        let sql = format!("DELETE FROM {table} WHERE tenant_id = ? AND conversation_id = ?");
-
-        sqlx::query(AssertSqlSafe(sql.as_str()))
-            .bind(tenant_id)
-            .bind(conversation_id)
-            .execute(&self.pool)
-            .await
-            .map_err(|e| StoreError::Database(e.to_string()))?;
-
-        Ok(())
     }
 }
 

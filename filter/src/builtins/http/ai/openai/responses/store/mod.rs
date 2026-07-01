@@ -13,6 +13,7 @@ mod config;
 mod filter;
 mod input_items;
 
+pub(crate) use input_items::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT};
 pub use input_items::{InputItemPage, ListParams, Order, list_input_items};
 
 pub use self::filter::ResponseStoreFilter;

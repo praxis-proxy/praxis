@@ -3,6 +3,8 @@
 
 //! `OpenAI` API filters: Responses API pipeline.
 
+#[cfg(feature = "ai-inference")]
+pub(crate) mod conversations;
 pub(crate) mod responses;
 #[cfg(feature = "ai-inference")]
 pub(crate) mod sse;
@@ -13,6 +15,8 @@ pub(crate) mod sse;
 )]
 pub(crate) mod translation;
 
+#[cfg(feature = "ai-inference")]
+pub use conversations::OpenaiConversationsFilter;
 #[cfg(feature = "ai-inference")]
 pub use responses::ModelRewriteFilter;
 #[cfg(feature = "ai-inference")]
