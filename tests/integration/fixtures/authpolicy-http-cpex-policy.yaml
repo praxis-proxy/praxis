@@ -1,0 +1,44 @@
+# CPEX policy fixture for the `security/authpolicy-http.yaml` example
+# integration test. The example points `config_path` at an operator-supplied
+# deployment path; the test rewrites that to this file so the policy filter
+# constructs without shipping a policy under examples/.
+#
+# Shape: one HS256 JWT identity plugin (fail-closed) + a `global` HTTP
+# authorization policy that admits only GET requests. Non-GET requests are
+# denied with a custom response (403 + JSON body + header) carried via the
+# transpiled `denyWith` (CPEX `response:` block). This is the entity-less
+# generic-HTTP authz path the AuthPolicy transpiler targets.
+#
+# Production deployments swap HS256 for RS256 + JWKS and author richer CEL
+# authorization; see the AuthPolicy transpiler output for a real policy.
+
+plugin_settings:
+  routing_enabled: true
+
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "https://idp.example.com"
+          audiences: ["praxis-cpex-example"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT"
+      claim_mapper: standard
+
+global:
+  apl:
+    policy:
+      # Admit only GET; deny any other method. (Comparisons use the
+      # predicate:action form; `require(...)` is truthiness-only.)
+      - "http.method != 'GET': deny"
+  response:
+    status: 403
+    body: "{\"error\":\"only GET is permitted\"}"
+    headers:
+      X-Authz-Denied: "method-not-allowed"

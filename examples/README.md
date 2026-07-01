@@ -104,6 +104,7 @@ page.
 
 | File | Description |
 | ------ | ------------- |
+| [authpolicy-http.yaml](configs/security/authpolicy-http.yaml) | Generic-HTTP authorization for non-MCP traffic using the CPEX policy engine: the `policy` filter runs in the experimental `enforcement: http` mode, resolving JWT identity and evaluating the CPEX `global` policy over the HTTP request line, headers, and identity claims |
 | [cors.yaml](configs/security/cors.yaml) | Spec-compliant CORS filter with preflight handling, origin validation, and credential support |
 | [csrf.yaml](configs/security/csrf.yaml) | Cross-site request forgery protection via origin validation |
 | [downstream-read-timeout.yaml](configs/security/downstream-read-timeout.yaml) | Protects against slow client attacks by limiting how long the proxy waits for data from downstream clients |

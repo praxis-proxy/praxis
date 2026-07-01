@@ -11,6 +11,7 @@ publish = false
 default = ["ext-proc"]
 cpex-policy-engine = ["praxis-filter/cpex-policy-engine"]
 ext-proc = ["praxis/ext-proc"]
+experimental-http-authz = ["praxis-filter/experimental-http-authz", "cpex-policy-engine"]
 no-mac-cert-rotation-tests = [] # We use this to disable testing cert rotation on macOS
 
 [lints]

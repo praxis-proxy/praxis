@@ -1,0 +1,42 @@
+# AuthPolicy-style HTTP authorization (experimental)
+#
+# Generic-HTTP authorization for non-MCP traffic using the CPEX policy
+# engine: the `policy` filter runs in the experimental `enforcement: http`
+# mode, resolving JWT identity and evaluating the CPEX `global` policy over
+# the HTTP request line, headers, and identity claims. Denials become plain
+# HTTP responses (with a custom `denyWith` status/body/headers). This is the
+# runtime target of the `cargo xtask transpile-authpolicy` transpiler, which
+# converts a Kuadrant AuthPolicy into the referenced CPEX policy document.
+#
+# Requires building with the `experimental-http-authz` feature, which is off
+# by default:
+#
+# Usage:
+#   cargo run -p praxis-proxy --features experimental-http-authz -- -c examples/configs/security/authpolicy-http.yaml
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      # Generic-HTTP authorization. `config_path` points at the CPEX policy
+      # document (transpiled from an AuthPolicy). No `mcp` filter is needed
+      # in `http` mode — authorization runs over the HTTP request directly.
+      - filter: policy
+        config_path: /etc/praxis/authpolicy-http-cpex-policy.yaml
+        enforcement: http
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

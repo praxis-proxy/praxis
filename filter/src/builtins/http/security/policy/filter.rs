@@ -499,6 +499,14 @@ impl HttpFilter for PolicyFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
+        // In `http` mode authorization already ran (and allowed) in
+        // `on_request` over the CPEX `global` policy — the body phase is
+        // MCP-only, so skip it entirely rather than trip the mcp.method gate.
+        #[cfg(feature = "experimental-http-authz")]
+        if self.cfg.enforcement == super::config::EnforcementMode::Http {
+            return Ok(FilterAction::BodyDone);
+        }
+
         // CMF dispatch only fires once the full body has been seen
         // (so the protocol classifier filter has finished parsing and writing its
         // metadata). For streaming chunks we just pass.
