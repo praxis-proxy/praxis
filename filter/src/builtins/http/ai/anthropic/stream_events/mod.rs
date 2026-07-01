@@ -1010,6 +1010,27 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn on_response_arms_with_mixed_case_content_type() {
+        let filter = make_filter();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/messages");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut resp = crate::test_utils::make_response();
+        resp.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("Text/Event-Stream"),
+        );
+        ctx.response_header = Some(&mut resp);
+        ctx.set_metadata("anthropic_to_openai.streaming", "true".to_owned());
+
+        drop(filter.on_response(&mut ctx).await.unwrap());
+
+        assert!(
+            is_armed(&ctx),
+            "filter should arm with case-insensitive Content-Type matching"
+        );
+    }
+
+    #[tokio::test]
     async fn on_response_does_not_arm_for_non_streaming_request() {
         let filter = make_filter();
         let req = crate::test_utils::make_request(http::Method::POST, "/v1/messages");
@@ -1092,14 +1113,7 @@ mod tests {
         drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
 
         let out = String::from_utf8(body.unwrap().to_vec()).unwrap();
-        assert!(
-            !out.contains("message_start"),
-            "unarmed filter should not transform body"
-        );
-        assert!(
-            out.contains("gpt-4"),
-            "unarmed filter should pass through body unchanged"
-        );
+        assert_eq!(out, chunk, "unarmed filter should pass through body unchanged");
     }
 
     #[test]
