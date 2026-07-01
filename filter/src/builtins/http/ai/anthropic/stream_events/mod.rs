@@ -55,9 +55,8 @@ const BLOCK_INDEX_KEY: &str = "anthropic_stream.block_index";
 /// Metadata key for incomplete UTF-8 bytes (hex-encoded) between chunks.
 const UTF8_BUFFER_KEY: &str = "anthropic_stream.utf8_buffer";
 
-/// Metadata key set when the upstream returns a non-2xx status, signaling
-/// that the body should pass through without SSE transformation.
-const ERROR_PASSTHROUGH_KEY: &str = "anthropic_stream.error_passthrough";
+/// Metadata key indicating the filter is armed for streaming transformation.
+const ARMED_KEY: &str = "anthropic_stream.armed";
 
 // -----------------------------------------------------------------------------
 // AnthropicStreamEventsFilter
@@ -65,6 +64,13 @@ const ERROR_PASSTHROUGH_KEY: &str = "anthropic_stream.error_passthrough";
 
 /// Transforms streaming SSE responses between `OpenAI` and
 /// Anthropic formats, processing each chunk as it arrives.
+///
+/// Arms automatically when an upstream classifier or transform
+/// filter sets `anthropic_messages_format.stream` or
+/// `anthropic_to_openai.streaming` metadata to `"true"` and
+/// the backend response has `Content-Type: text/event-stream`
+/// (with or without parameters such as `charset=utf-8`).
+/// No `response_conditions` configuration is needed.
 ///
 /// # YAML
 ///
@@ -123,16 +129,13 @@ impl HttpFilter for AnthropicStreamEventsFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        if is_known_non_streaming_transform(ctx) {
+        if !should_arm(ctx) {
             return Ok(FilterAction::Continue);
         }
 
-        if let Some(resp) = &mut ctx.response_header {
-            if !resp.status.is_success() {
-                ctx.set_metadata(ERROR_PASSTHROUGH_KEY, "true");
-                return Ok(FilterAction::Continue);
-            }
+        ctx.set_metadata(ARMED_KEY, "true".to_owned());
 
+        if let Some(resp) = &mut ctx.response_header {
             resp.headers.remove(http::header::CONTENT_LENGTH);
             resp.headers.insert(
                 http::header::CONTENT_TYPE,
@@ -149,7 +152,7 @@ impl HttpFilter for AnthropicStreamEventsFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        if is_known_non_streaming_transform(ctx) || is_error_passthrough(ctx) {
+        if !is_armed(ctx) {
             return Ok(FilterAction::Continue);
         }
 
@@ -349,19 +352,54 @@ fn store_line_buffer(
     Ok(())
 }
 
-/// Check whether the paired transform filter already identified a JSON response path.
-fn is_known_non_streaming_transform(ctx: &HttpFilterContext<'_>) -> bool {
-    ctx.filter_metadata
-        .get("anthropic_to_openai.streaming")
-        .is_some_and(|v| v != "true")
+/// Whether the filter has been armed in the response phase.
+fn is_armed(ctx: &HttpFilterContext<'_>) -> bool {
+    ctx.filter_metadata.get(ARMED_KEY).is_some_and(|v| v == "true")
 }
 
-/// Check whether the upstream returned a non-2xx status, meaning the body
-/// should pass through without SSE transformation.
-fn is_error_passthrough(ctx: &HttpFilterContext<'_>) -> bool {
+/// Whether the filter should arm: streaming request, SSE Content-Type, success status.
+fn should_arm(ctx: &HttpFilterContext<'_>) -> bool {
+    if !is_streaming_request(ctx) {
+        return false;
+    }
+
+    let is_sse = ctx
+        .response_header
+        .as_ref()
+        .and_then(|r| r.headers.get(http::header::CONTENT_TYPE))
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(is_event_stream_content_type);
+
+    if !is_sse {
+        debug!("streaming request but non-SSE response; skipping stream transformation");
+        return false;
+    }
+
+    let is_success = ctx.response_header.as_ref().is_none_or(|r| r.status.is_success());
+    if !is_success {
+        debug!("streaming SSE response with non-2xx status; passing through error body");
+        return false;
+    }
+
+    true
+}
+
+/// Whether an upstream filter classified this as a streaming request.
+fn is_streaming_request(ctx: &HttpFilterContext<'_>) -> bool {
     ctx.filter_metadata
-        .get(ERROR_PASSTHROUGH_KEY)
+        .get("anthropic_messages_format.stream")
         .is_some_and(|v| v == "true")
+        || ctx
+            .filter_metadata
+            .get("anthropic_to_openai.streaming")
+            .is_some_and(|v| v == "true")
+}
+
+/// Whether a `Content-Type` header value indicates `text/event-stream`.
+fn is_event_stream_content_type(ct: &str) -> bool {
+    ct.split(';')
+        .next()
+        .is_some_and(|media| media.trim().eq_ignore_ascii_case("text/event-stream"))
 }
 
 /// Process a single SSE event block (lines between double-newlines).
@@ -926,7 +964,95 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn on_response_skips_known_non_streaming_transform() {
+    async fn on_response_arms_when_streaming_request_and_sse_response() {
+        let filter = make_filter();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/messages");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut resp = crate::test_utils::make_response();
+        resp.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
+        ctx.response_header = Some(&mut resp);
+        ctx.set_metadata("anthropic_messages_format.stream", "true".to_owned());
+
+        drop(filter.on_response(&mut ctx).await.unwrap());
+
+        assert!(
+            is_armed(&ctx),
+            "filter should be armed when streaming request meets SSE response"
+        );
+        assert!(
+            ctx.response_headers_modified,
+            "response headers should be marked modified"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_response_arms_with_charset_parameter() {
+        let filter = make_filter();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/messages");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut resp = crate::test_utils::make_response();
+        resp.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream; charset=utf-8"),
+        );
+        ctx.response_header = Some(&mut resp);
+        ctx.set_metadata("anthropic_to_openai.streaming", "true".to_owned());
+
+        drop(filter.on_response(&mut ctx).await.unwrap());
+
+        assert!(
+            is_armed(&ctx),
+            "filter should arm even with charset parameter in Content-Type"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_response_arms_with_mixed_case_content_type() {
+        let filter = make_filter();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/messages");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut resp = crate::test_utils::make_response();
+        resp.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("Text/Event-Stream"),
+        );
+        ctx.response_header = Some(&mut resp);
+        ctx.set_metadata("anthropic_to_openai.streaming", "true".to_owned());
+
+        drop(filter.on_response(&mut ctx).await.unwrap());
+
+        assert!(
+            is_armed(&ctx),
+            "filter should arm with case-insensitive Content-Type matching"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_response_does_not_arm_for_non_streaming_request() {
+        let filter = make_filter();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/messages");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut resp = crate::test_utils::make_response();
+        resp.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
+        ctx.response_header = Some(&mut resp);
+
+        drop(filter.on_response(&mut ctx).await.unwrap());
+
+        assert!(!is_armed(&ctx), "filter should not arm without streaming metadata");
+        assert!(
+            !ctx.response_headers_modified,
+            "response headers should not be modified for non-streaming request"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_response_does_not_arm_for_non_sse_response() {
         let filter = make_filter();
         let req = crate::test_utils::make_request(http::Method::POST, "/v1/messages");
         let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -936,7 +1062,7 @@ mod tests {
             http::HeaderValue::from_static("application/json"),
         );
         ctx.response_header = Some(&mut resp);
-        ctx.set_metadata("anthropic_to_openai.streaming", "false");
+        ctx.set_metadata("anthropic_to_openai.streaming", "true".to_owned());
 
         drop(filter.on_response(&mut ctx).await.unwrap());
 
@@ -949,12 +1075,45 @@ mod tests {
         assert_eq!(
             content_type,
             Some(&http::HeaderValue::from_static("application/json")),
-            "non-streaming transform should preserve JSON response content type"
+            "non-SSE response should preserve original content type"
         );
+        assert!(!is_armed(&ctx), "filter should not arm for non-SSE response");
+    }
+
+    #[tokio::test]
+    async fn on_response_arms_via_messages_format_metadata() {
+        let filter = make_filter();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/messages");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut resp = crate::test_utils::make_response();
+        resp.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
+        ctx.response_header = Some(&mut resp);
+        ctx.set_metadata("anthropic_messages_format.stream", "true".to_owned());
+
+        drop(filter.on_response(&mut ctx).await.unwrap());
+
         assert!(
-            !ctx.response_headers_modified,
-            "non-streaming transform should not mark response headers modified"
+            is_armed(&ctx),
+            "filter should arm via anthropic_messages_format.stream metadata"
         );
+    }
+
+    #[test]
+    fn on_response_body_passes_through_when_not_armed() {
+        let filter = make_filter();
+        let req = crate::test_utils::make_request(http::Method::POST, "/v1/messages");
+        let mut ctx = crate::test_utils::make_filter_context(Box::leak(Box::new(req)));
+
+        let chunk =
+            "data: {\"id\":\"c1\",\"model\":\"gpt-4\",\"choices\":[{\"delta\":{\"content\":\"Hi\"},\"index\":0}]}\n\n";
+        let mut body = Some(Bytes::from(chunk));
+        drop(filter.on_response_body(&mut ctx, &mut body, false).unwrap());
+
+        let out = String::from_utf8(body.unwrap().to_vec()).unwrap();
+        assert_eq!(out, chunk, "unarmed filter should pass through body unchanged");
     }
 
     #[test]
@@ -1004,19 +1163,16 @@ mod tests {
     async fn error_response_passes_through_unchanged() {
         let filter = make_filter();
         let (mut ctx, mut resp) = make_error_context(http::StatusCode::TOO_MANY_REQUESTS);
+        resp.headers.insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/event-stream"),
+        );
         ctx.response_header = Some(&mut resp);
+        ctx.set_metadata("anthropic_to_openai.streaming", "true".to_owned());
 
         drop(filter.on_response(&mut ctx).await.unwrap());
 
-        assert_eq!(
-            ctx.response_header
-                .as_ref()
-                .unwrap()
-                .headers
-                .get(http::header::CONTENT_TYPE),
-            Some(&http::HeaderValue::from_static("application/json")),
-            "error response should preserve original content type"
-        );
+        assert!(!is_armed(&ctx), "filter should not arm for error response");
         assert!(
             !ctx.response_headers_modified,
             "error response should not modify headers"
@@ -1430,9 +1586,8 @@ mod tests {
 
     fn make_filter_and_context_from_yaml(yaml: &str) -> (Box<dyn HttpFilter>, HttpFilterContext<'static>) {
         let req = crate::test_utils::make_request(http::Method::POST, "/v1/messages");
-        (
-            make_filter_from_yaml(yaml),
-            crate::test_utils::make_filter_context(Box::leak(Box::new(req))),
-        )
+        let mut ctx = crate::test_utils::make_filter_context(Box::leak(Box::new(req)));
+        ctx.set_metadata(ARMED_KEY, "true".to_owned());
+        (make_filter_from_yaml(yaml), ctx)
     }
 }
