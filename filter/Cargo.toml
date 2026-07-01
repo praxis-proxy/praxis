@@ -52,7 +52,7 @@ thiserror = { workspace = true }
 # filter-factory signature is sync, so we block on a single-thread
 # runtime); the time/net features let JWT identity plugins fetch JWKS
 # at init time.
-tokio = { workspace = true, optional = true, features = ["rt", "time", "net"] }
+tokio = { workspace = true, optional = true, features = ["rt", "sync", "time", "net"] }
 tonic = { workspace = true, optional = true }
 tracing = { workspace = true }
 zeroize = { workspace = true }

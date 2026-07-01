@@ -10,10 +10,10 @@ use crate::builtins::http::ai::store::{ResponseRecord, StoreError};
 // -----------------------------------------------------------------------------
 
 /// Default page size for input item list operations (matches `OpenAI` default).
-const DEFAULT_PAGE_LIMIT: u32 = 20;
+pub(crate) const DEFAULT_PAGE_LIMIT: u32 = 20;
 
 /// Maximum page size for input item list operations (matches `OpenAI` maximum).
-const MAX_PAGE_LIMIT: u32 = 100;
+pub(crate) const MAX_PAGE_LIMIT: u32 = 100;
 
 // -----------------------------------------------------------------------------
 // Order

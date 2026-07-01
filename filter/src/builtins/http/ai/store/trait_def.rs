@@ -82,7 +82,6 @@ pub trait ResponseStore: Send + Sync {
 /// operations for individual items within a conversation. Every query
 /// is tenant- and conversation-scoped.
 #[async_trait]
-#[cfg_attr(not(test), expect(dead_code, reason = "used by conversations filter in #623"))]
 pub trait ConversationItemStore: Send + Sync {
     /// Insert or update a conversation message cache.
     ///
@@ -90,6 +89,21 @@ pub trait ConversationItemStore: Send + Sync {
     ///
     /// Returns [`StoreError`] if the database operation fails.
     async fn upsert_conversation(&self, record: &ConversationRecord) -> Result<(), StoreError>;
+
+    /// Update only the denormalized message cache for a conversation.
+    ///
+    /// Returns `true` if a record was updated, `false` if no matching
+    /// conversation existed for this tenant.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the database operation fails.
+    async fn update_conversation_messages(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+        messages: &serde_json::Value,
+    ) -> Result<bool, StoreError>;
 
     /// Retrieve conversation messages by conversation ID and tenant.
     ///
@@ -108,17 +122,21 @@ pub trait ConversationItemStore: Send + Sync {
     /// Delete a conversation by ID, scoped to a tenant.
     ///
     /// Returns `true` if a record was deleted, `false` if no
-    /// matching record existed for this tenant.
+    /// matching record existed for this tenant. This does not delete
+    /// conversation item rows; items are deleted only through
+    /// [`delete_conversation_item`].
     ///
     /// # Errors
     ///
     /// Returns [`StoreError`] if the database operation fails.
+    ///
+    /// [`delete_conversation_item`]: ConversationItemStore::delete_conversation_item
     async fn delete_conversation(&self, tenant_id: &str, conversation_id: &str) -> Result<bool, StoreError>;
 
     /// Insert one or more conversation items.
     ///
     /// Items are inserted individually. Duplicate `item_id` +
-    /// `tenant_id` + `conversation_id` triples are upserted.
+    /// `tenant_id` + `conversation_id` triples fail.
     ///
     /// # Errors
     ///
@@ -148,6 +166,20 @@ pub trait ConversationItemStore: Send + Sync {
         limit: u32,
         ascending: bool,
     ) -> Result<Vec<ConversationItemRecord>, StoreError>;
+
+    /// Return the subset of `item_ids` that already exist in a
+    /// conversation, in a single round-trip.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StoreError`] if the items table is not configured
+    /// or a database operation fails.
+    async fn get_existing_conversation_item_ids(
+        &self,
+        tenant_id: &str,
+        conversation_id: &str,
+        item_ids: &[&str],
+    ) -> Result<Vec<String>, StoreError>;
 
     /// Retrieve a single item by ID, scoped to tenant and
     /// conversation.
@@ -208,12 +240,4 @@ pub trait ConversationItemStore: Send + Sync {
     /// Returns [`StoreError`] if the items table is not configured
     /// or a database operation fails.
     async fn max_item_position(&self, tenant_id: &str, conversation_id: &str) -> Result<i64, StoreError>;
-
-    /// Delete all items belonging to a conversation.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`StoreError`] if the items table is not configured
-    /// or a database operation fails.
-    async fn delete_conversation_items(&self, tenant_id: &str, conversation_id: &str) -> Result<(), StoreError>;
 }

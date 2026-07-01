@@ -85,10 +85,20 @@ pub(crate) fn validate_postgres_table_identifiers(
     responses_table: &str,
     conversations_table: &str,
 ) -> Result<(), StoreError> {
+    validate_postgres_table_set_identifiers(responses_table, conversations_table, None)
+}
+
+/// Validate table identifiers for a store that may also configure
+/// conversation item rows.
+pub(crate) fn validate_postgres_table_set_identifiers(
+    responses_table: &str,
+    conversations_table: &str,
+    items_table: Option<&str>,
+) -> Result<(), StoreError> {
     let tables = TableNames {
         responses: responses_table.to_owned(),
         conversations: conversations_table.to_owned(),
-        items: None,
+        items: items_table.map(ToOwned::to_owned),
     };
     validate_postgres_identifiers(&tables)
 }
