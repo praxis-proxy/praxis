@@ -127,6 +127,16 @@ impl PolicyFilter {
         reason = "linear construction + init steps; splitting obscures the startup flow"
     )]
     pub fn new(cfg: PolicyFilterConfig) -> Result<Self, FilterError> {
+        // `enforcement: http` is experimental and only functions when the
+        // `experimental-http-authz` feature is compiled in. Fail fast at
+        // construction rather than silently running the request through the
+        // MCP path (which would fail-close on non-MCP traffic).
+        if cfg.enforcement == super::config::EnforcementMode::Http && !cfg!(feature = "experimental-http-authz") {
+            return Err("policy: `enforcement: http` requires building with the \
+                        `experimental-http-authz` feature"
+                .into());
+        }
+
         let yaml = std::fs::read_to_string(&cfg.config_path).map_err(|e| -> FilterError {
             format!("policy: failed to read config_path {}: {e}", cfg.config_path).into()
         })?;
@@ -289,6 +299,112 @@ impl PolicyFilter {
 
         ext
     }
+
+    /// One-shot tokio runtime-flavor check. `on_response_body` drives async
+    /// work via `block_in_place`, which panics on a current-thread runtime
+    /// (praxis `work_stealing: false`); refuse up front rather than crash
+    /// mid-response. After the first request this collapses to a single
+    /// atomic load.
+    fn ensure_multithread_runtime(&self) -> Result<(), FilterError> {
+        match self.runtime_check.load(Ordering::Acquire) {
+            RUNTIME_UNCHECKED => {
+                let flavor = tokio::runtime::Handle::current().runtime_flavor();
+                if matches!(flavor, tokio::runtime::RuntimeFlavor::CurrentThread) {
+                    self.runtime_check.store(RUNTIME_REJECTED, Ordering::Release);
+                    return Err(current_thread_runtime_error());
+                }
+                self.runtime_check.store(RUNTIME_OK, Ordering::Release);
+            },
+            RUNTIME_REJECTED => return Err(current_thread_runtime_error()),
+            _ => {}, // RUNTIME_OK — fall through.
+        }
+        Ok(())
+    }
+
+    /// Default MCP-mode identity gate: resolve identity in `on_request` so
+    /// un-authenticated traffic is rejected before the body-buffer cost is
+    /// paid. Authorization for MCP traffic runs later, in `on_request_body`.
+    async fn mcp_identity_gate(&self, ctx: &HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let (result, _bg) = self
+            .mgr
+            .invoke_named::<IdentityHook>(
+                HOOK_IDENTITY_RESOLVE,
+                Self::identity_payload(Self::snapshot_headers(ctx)),
+                Extensions::default(),
+                None,
+            )
+            .await;
+
+        if !result.continue_processing {
+            tracing::debug!(target: "policy.filter", "identity deny (on_request)");
+            return Ok(FilterAction::Reject(auth_rejection(result.violation.as_ref())));
+        }
+        tracing::trace!(target: "policy.filter", "identity allow (on_request)");
+        Ok(FilterAction::Continue)
+    }
+
+    /// Experimental (`enforcement: http`): resolve identity, populate the
+    /// HTTP request line + headers into the CPEX bag, and evaluate the CPEX
+    /// `global` policy via the `cmf.http_request` hook. A deny maps to a
+    /// plain HTTP response ([`super::error::http_authz_rejection`]); an
+    /// identity failure is the usual 401. Authorization runs here (not the
+    /// body phase) because it needs no request body.
+    #[cfg(feature = "experimental-http-authz")]
+    #[expect(clippy::large_stack_frames, reason = "async handler over large CMF types")]
+    async fn on_request_http_authz(&self, ctx: &HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        use cpex::cpex_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_HTTP_REQUEST};
+
+        let identity = match self.resolve_identity(Self::snapshot_headers(ctx)).await {
+            Ok(id) => id,
+            Err(rej) => return Ok(FilterAction::Reject(rej)),
+        };
+        let mut extensions = Self::extensions_from_identity(ctx, &identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL);
+        Self::attach_http_attributes(ctx, &mut extensions);
+
+        let payload = MessagePayload {
+            message: Message::text(Role::User, ""),
+        };
+        let (result, _bg) = self
+            .mgr
+            .invoke_named::<CmfHook>(HOOK_CMF_HTTP_REQUEST, payload, extensions, None)
+            .await;
+
+        if !result.continue_processing {
+            tracing::debug!(target: "policy.filter", "http authz deny (on_request)");
+            return Ok(FilterAction::Reject(super::error::http_authz_rejection(
+                result.violation.as_ref(),
+            )));
+        }
+        tracing::trace!(target: "policy.filter", "http authz allow (on_request)");
+        Ok(FilterAction::Continue)
+    }
+
+    /// Populate `ext.http` with the request line + headers so CEL/APL
+    /// predicates over `http.method` / `http.path` / `http.host` /
+    /// `http.request_headers.*` evaluate. `host` is sourced from the parsed
+    /// request authority (Praxis validates Host upstream — see the Pingora
+    /// boundary docs), never a raw unvalidated header.
+    #[cfg(feature = "experimental-http-authz")]
+    fn attach_http_attributes(ctx: &HttpFilterContext<'_>, ext: &mut Extensions) {
+        use cpex::cpex_core::extensions::HttpExtension;
+
+        let req = ctx.request;
+        let host = req.uri.authority().map(|a| a.host().to_owned()).or_else(|| {
+            req.headers
+                .get(http::header::HOST)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned)
+        });
+        let http = HttpExtension {
+            method: Some(req.method.as_str().to_owned()),
+            path: Some(req.uri.path().to_owned()),
+            host,
+            scheme: req.uri.scheme_str().map(str::to_owned),
+            request_headers: Self::snapshot_headers(ctx),
+            ..Default::default()
+        };
+        ext.http = Some(Arc::new(http));
+    }
 }
 
 /// Request-scoped carrier for the identity resolved in the request phase,
@@ -352,45 +468,24 @@ impl HttpFilter for PolicyFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        // One-shot runtime-flavor check. `on_response_body` uses
-        // `block_in_place` to drive async work from a sync trait
-        // method, and that primitive panics on a current-thread
-        // tokio runtime (praxis `work_stealing: false`). Rather than
-        // crash mid-response, refuse to operate up front. After the
-        // first request this collapses to a single atomic load.
-        match self.runtime_check.load(Ordering::Acquire) {
-            RUNTIME_UNCHECKED => {
-                let flavor = tokio::runtime::Handle::current().runtime_flavor();
-                if matches!(flavor, tokio::runtime::RuntimeFlavor::CurrentThread) {
-                    self.runtime_check.store(RUNTIME_REJECTED, Ordering::Release);
-                    return Err(current_thread_runtime_error());
-                }
-                self.runtime_check.store(RUNTIME_OK, Ordering::Release);
-            },
-            RUNTIME_REJECTED => return Err(current_thread_runtime_error()),
-            _ => {}, // RUNTIME_OK — fall through.
+        self.ensure_multithread_runtime()?;
+
+        // Experimental generic-HTTP authorization for non-MCP traffic —
+        // evaluate the CPEX `global` policy here (authorization is an
+        // admission check; no body needed). Gated by the
+        // `experimental-http-authz` feature; `new` rejects `enforcement:
+        // http` when the feature is not compiled in.
+        #[cfg(feature = "experimental-http-authz")]
+        if self.cfg.enforcement == super::config::EnforcementMode::Http {
+            // Box the (large CMF-typed) future so it lives on the heap
+            // rather than inflating this method's stack frame.
+            return Box::pin(self.on_request_http_authz(ctx)).await;
         }
 
-        // Early identity gate. Saves the per-request body-buffer cost
-        // on un-auth'd traffic — if there's no valid token, we never
-        // reach `on_request_body` and the body never gets buffered.
-        let (result, _bg) = self
-            .mgr
-            .invoke_named::<IdentityHook>(
-                HOOK_IDENTITY_RESOLVE,
-                Self::identity_payload(Self::snapshot_headers(ctx)),
-                Extensions::default(),
-                None,
-            )
-            .await;
-
-        if !result.continue_processing {
-            tracing::debug!(target: "policy.filter", "identity deny (on_request)");
-            return Ok(FilterAction::Reject(auth_rejection(result.violation.as_ref())));
-        }
-
-        tracing::trace!(target: "policy.filter", "identity allow (on_request)");
-        Ok(FilterAction::Continue)
+        // Default MCP mode: early identity gate. Saves the per-request
+        // body-buffer cost on un-auth'd traffic — if there's no valid token,
+        // we never reach `on_request_body` and the body never gets buffered.
+        self.mcp_identity_gate(ctx).await
     }
 
     #[expect(
