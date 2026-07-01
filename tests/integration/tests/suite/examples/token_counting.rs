@@ -208,7 +208,7 @@ fn token_counting_example_config_loads() {
     let config = super::load_example_config(
         "ai/token-counting.yaml",
         proxy_port,
-        HashMap::from([("127.0.0.1:3000", backend_port)]),
+        HashMap::from([("127.0.0.1:8000", backend_port)]),
     );
     let proxy = start_proxy(&config);
     let raw = http_send(
