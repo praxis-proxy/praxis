@@ -1061,8 +1061,6 @@ mod tests {
     fn split_utf8_character_buffered_across_chunks() {
         let (filter, mut ctx) = make_filter_and_context();
 
-        // € (Euro sign) encodes as [0xE2, 0x82, 0xAC] in UTF-8.
-        // Split so the first two bytes end chunk 1.
         let mut chunk1 = Vec::new();
         chunk1.extend_from_slice(b"data: {\"id\":\"c1\",\"model\":\"gpt-4\",\"choices\":[{\"delta\":{\"content\":\"");
         chunk1.extend_from_slice(&[0xE2, 0x82]);
@@ -1073,7 +1071,7 @@ mod tests {
             "incomplete UTF-8 at chunk boundary should produce no output"
         );
 
-        let mut chunk2 = vec![0xAC]; // completing €
+        let mut chunk2 = vec![0xAC];
         chunk2.extend_from_slice(b"\"},\"index\":0}]}\n\n");
         let mut body2 = Some(Bytes::from(chunk2));
         drop(filter.on_response_body(&mut ctx, &mut body2, false).unwrap());
@@ -1200,7 +1198,6 @@ mod tests {
     fn crlf_split_across_chunks_not_false_boundary() {
         let (filter, mut ctx) = make_filter_and_context();
 
-        // CRLF split: \r at end of chunk 1, \n at start of chunk 2.
         let chunk1 = "data: {\"id\":\"c1\",\"model\":\"gpt-4\",\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"index\":0}]}\r";
         let mut body1 = Some(Bytes::from(chunk1));
         drop(filter.on_response_body(&mut ctx, &mut body1, false).unwrap());
@@ -1369,6 +1366,17 @@ mod tests {
         assert!(
             result.is_err(),
             "streaming filter should reject a zero partial event limit"
+        );
+    }
+
+    #[test]
+    fn exceeds_max_partial_event_limit_rejected() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("max_partial_event_bytes: 67108865").unwrap();
+        let result = AnthropicStreamEventsFilter::from_config(&yaml);
+
+        assert!(
+            result.is_err(),
+            "streaming filter should reject a limit above MAX_JSON_BODY_BYTES"
         );
     }
 
