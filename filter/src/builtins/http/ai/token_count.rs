@@ -3,21 +3,9 @@
 
 //! Response-based token counting filter.
 //!
-//! Extracts token usage from AI provider response bodies (or HTTP response
-//! headers for Bedrock InvokeModel) and writes the counts to
-//! [`crate::FilterContext`] metadata under the well-known keys `token.input`,
-//! `token.output`, and `token.total`.
-//!
-//! Downstream filters (rate limiting, logging, cost tracking, header
-//! injection) can read these keys from [`crate::FilterContext`] without coupling
-//! to provider-specific response schemas.
-//!
-//! # Architecture
-//!
-//! All provider-specific JSON parsing is delegated to the existing
-//! `token_usage` library (`filter/src/builtins/http/ai/token_usage/`).
-//! This module handles only the filter lifecycle: buffering, SSE detection,
-//! and dispatch.
+//! Extracts token usage from provider responses and writes counts to
+//! [`crate::FilterContext`] metadata under `token.input`, `token.output`,
+//! and `token.total`. JSON parsing is delegated to the `token_usage` library.
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -33,47 +21,21 @@ use crate::{
 
 use super::token_usage::{TokenUsage, TokenUsageProvider, extract_token_usage, set_token_usage};
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-/// Maximum buffered response body size: 8 MiB.
 const MAX_BODY_BYTES: usize = 8 * 1024 * 1024;
-
-/// Metadata key used to record that the response is an SSE stream.
 const META_IS_SSE: &str = "token_count.is_sse";
-
-/// Bedrock InvokeModel HTTP response header carrying the input token count.
 const HEADER_BEDROCK_INPUT: &str = "x-amzn-bedrock-input-token-count";
-
-/// Bedrock InvokeModel HTTP response header carrying the output token count.
 const HEADER_BEDROCK_OUTPUT: &str = "x-amzn-bedrock-output-token-count";
 
-// ---------------------------------------------------------------------------
-// Config
-// ---------------------------------------------------------------------------
-
-/// Parsed YAML configuration for the `token_count` filter.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TokenCountConfig {
     provider: ProviderKind,
 }
 
-/// AI provider identifier that selects the token extraction strategy.
-///
-/// Serde `rename_all = "snake_case"` maps YAML values (`openai`,
-/// `anthropic`, `google`, `bedrock`, `bedrock_invoke_model`, `azure`)
-/// to the corresponding enum variants.
-///
-/// Note: `TokenUsageProvider` in `token_usage/mod.rs` uses `OpenAi`
-/// (capital I). A private `to_library_provider` method converts between
-/// the two at the call site.
+/// AI provider selecting the token extraction strategy.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ProviderKind {
-    /// Explicit rename: `open_ai` (snake_case of `OpenAi`) is not a valid
-    /// provider name; the YAML key is `openai`.
     #[serde(rename = "openai")]
     OpenAi,
     Anthropic,
@@ -84,10 +46,7 @@ enum ProviderKind {
 }
 
 impl ProviderKind {
-    /// Map to the `token_usage` library's provider enum.
-    ///
-    /// Returns `None` for `BedrockInvokeModel`, which uses header-based
-    /// extraction and does not delegate to the JSON parsing library.
+    /// Returns `None` for `BedrockInvokeModel` (header-only path).
     fn to_library_provider(self) -> Option<TokenUsageProvider> {
         match self {
             Self::OpenAi => Some(TokenUsageProvider::OpenAi),
@@ -100,56 +59,19 @@ impl ProviderKind {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Filter
-// ---------------------------------------------------------------------------
-
 /// Extracts token usage from AI provider responses and writes counts to
-/// `FilterContext` for downstream consumers.
-///
-/// Provider identity is configured explicitly via the `provider:` YAML key.
-/// Auto-detection is not implemented: Azure and OpenAI share identical JSON
-/// schemas, so auto-detection would be ambiguous for those two providers.
-///
-/// # Modes
-///
-/// | Provider | Source | Body access |
-/// |---|---|---|
-/// | `openai` / `azure` / `google` / `bedrock` | JSON body (non-streaming) | Buffer until EOS |
-/// | `openai` / `azure` / `google` / `bedrock` / `anthropic` | SSE body (streaming) | Buffer all chunks until stream close |
-/// | `anthropic` | Two SSE events (`message_start` + `message_delta`) | Buffer all chunks |
-/// | `bedrock_invoke_model` | HTTP response headers | No body access |
-///
-/// # YAML
-///
-/// ```yaml
-/// filter: token_count
-/// provider: openai
-/// ```
+/// [`crate::FilterContext`] for downstream consumers.
 ///
 /// Supported `provider` values: `openai`, `anthropic`, `google`, `bedrock`,
-/// `bedrock_invoke_model`, `azure`.
-///
-/// # Example
-///
-/// ```rust
-/// use praxis_filter::ai::TokenCountFilter;
-///
-/// let yaml = serde_yaml::from_str("provider: openai").unwrap();
-/// let filter = TokenCountFilter::from_config(&yaml).unwrap();
-/// assert_eq!(filter.name(), "token_count");
-/// ```
+/// `bedrock_invoke_model`, `azure`. Provider must be set explicitly; Azure
+/// and OpenAI share the same JSON schema so auto-detection is ambiguous.
 pub struct TokenCountFilter {
     provider: ProviderKind,
 }
 
 impl TokenCountFilter {
-    /// Create from parsed YAML config.
-    ///
     /// # Errors
-    ///
-    /// Returns [`FilterError`] if the `provider` field is missing, uses an
-    /// unknown variant, or if unexpected YAML keys are present.
+    /// Returns [`FilterError`] if `provider` is missing, unknown, or unexpected keys are present.
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: TokenCountConfig = parse_filter_config("token_count", config)?;
         Ok(Box::new(Self { provider: cfg.provider }))
@@ -166,11 +88,7 @@ impl HttpFilter for TokenCountFilter {
         Ok(FilterAction::Continue)
     }
 
-    /// Detects SSE responses and marks them in `FilterContext` metadata.
-    ///
-    /// For `bedrock_invoke_model`, reads token counts directly from HTTP
-    /// response headers via `extract_bedrock_headers`; no body buffering
-    /// follows because `response_body_access` returns `BodyAccess::None`.
+    /// Detects SSE responses; for `bedrock_invoke_model` reads counts from headers directly.
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if self.provider == ProviderKind::BedrockInvokeModel {
             extract_bedrock_headers(ctx);
@@ -192,8 +110,6 @@ impl HttpFilter for TokenCountFilter {
         Ok(FilterAction::Continue)
     }
 
-    /// `None` for `bedrock_invoke_model` (header-only path);
-    /// `ReadOnly` for all other providers (body must be buffered for parsing).
     fn response_body_access(&self) -> BodyAccess {
         if self.provider == ProviderKind::BedrockInvokeModel {
             BodyAccess::None
@@ -202,9 +118,6 @@ impl HttpFilter for TokenCountFilter {
         }
     }
 
-    /// `Stream` for `bedrock_invoke_model` (no buffering needed);
-    /// `StreamBuffer` capped at 8 MiB for all other providers so that the
-    /// full body (or assembled SSE stream) is available in one call.
     fn response_body_mode(&self) -> BodyMode {
         if self.provider == ProviderKind::BedrockInvokeModel {
             BodyMode::Stream
@@ -215,11 +128,7 @@ impl HttpFilter for TokenCountFilter {
         }
     }
 
-    /// Triggered once at `end_of_stream` (guaranteed by `StreamBuffer`).
-    ///
-    /// Reads the `is_sse` flag written in `on_response`, dispatches to the
-    /// appropriate extractor (`extract_from_sse` or `extract_token_usage`),
-    /// and writes the result via [`set_token_usage`].
+    /// Triggered once at `end_of_stream`; dispatches to SSE or JSON extractor.
     fn on_response_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -236,8 +145,6 @@ impl HttpFilter for TokenCountFilter {
         };
 
         let Some(library_provider) = self.provider.to_library_provider() else {
-            // BedrockInvokeModel: handled in on_response; body access is None
-            // so this branch should never be reached in practice.
             return Ok(FilterAction::Continue);
         };
 
@@ -268,16 +175,7 @@ impl HttpFilter for TokenCountFilter {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Bedrock InvokeModel header extraction
-// ---------------------------------------------------------------------------
-
-/// Read Bedrock InvokeModel token counts from HTTP response headers and
-/// write them to `FilterContext` via [`set_token_usage`].
-///
-/// Token counts arrive as `x-amzn-bedrock-input-token-count` and
-/// `x-amzn-bedrock-output-token-count`. If either header is absent or
-/// unparseable the filter is a no-op.
+/// Reads Bedrock InvokeModel token counts from response headers; no-op if either is absent.
 fn extract_bedrock_headers(ctx: &mut HttpFilterContext<'_>) {
     let input = ctx
         .response_header
@@ -302,15 +200,7 @@ fn extract_bedrock_headers(ctx: &mut HttpFilterContext<'_>) {
     trace!(input, output, "Bedrock InvokeModel token counts extracted from response headers");
 }
 
-// ---------------------------------------------------------------------------
-// SSE extraction dispatch
-// ---------------------------------------------------------------------------
-
-/// Dispatch SSE body to the appropriate provider extractor.
-///
-/// Anthropic requires a two-event scan because input and output token counts
-/// appear in different SSE event types. All other providers place token
-/// counts in a single terminal chunk.
+/// Dispatches SSE body to the appropriate provider extractor.
 fn extract_from_sse(provider: TokenUsageProvider, data: &[u8]) -> Option<TokenUsage> {
     match provider {
         TokenUsageProvider::Anthropic => extract_anthropic_sse(data),
@@ -318,12 +208,7 @@ fn extract_from_sse(provider: TokenUsageProvider, data: &[u8]) -> Option<TokenUs
     }
 }
 
-/// Scan all `data:` lines and return the token usage from the last chunk
-/// that parses successfully.
-///
-/// Skips `[DONE]` sentinels and lines that do not parse as the provider's
-/// JSON schema. Usage typically appears once in the terminal chunk for
-/// OpenAI, Azure, Google Gemini, and Bedrock Converse.
+/// Returns token usage from the last parseable `data:` line; skips `[DONE]`.
 fn extract_last_usage_from_sse(provider: TokenUsageProvider, data: &[u8]) -> Option<TokenUsage> {
     let text = std::str::from_utf8(data).ok()?;
     let mut last: Option<TokenUsage> = None;
@@ -341,12 +226,6 @@ fn extract_last_usage_from_sse(provider: TokenUsageProvider, data: &[u8]) -> Opt
     last
 }
 
-// ---------------------------------------------------------------------------
-// Anthropic SSE helpers
-// ---------------------------------------------------------------------------
-
-/// Anthropic SSE `message_start` event: carries input token count in
-/// `message.usage.input_tokens`.
 #[derive(Deserialize)]
 struct AnthropicMessageStart {
     #[serde(rename = "type")]
@@ -364,8 +243,6 @@ struct AnthropicStartUsage {
     input_tokens: u64,
 }
 
-/// Anthropic SSE `message_delta` event: carries output token count in
-/// `usage.output_tokens`.
 #[derive(Deserialize)]
 struct AnthropicMessageDelta {
     #[serde(rename = "type")]
@@ -378,13 +255,7 @@ struct AnthropicDeltaUsage {
     output_tokens: u64,
 }
 
-/// Two-event scan for Anthropic SSE token usage.
-///
-/// Anthropic splits token counts across two SSE event types:
-/// - `message_start` → `message.usage.input_tokens`
-/// - `message_delta` → `usage.output_tokens`
-///
-/// Returns `None` if either field is absent in the buffered stream.
+/// Extracts Anthropic SSE token usage from `message_start` and `message_delta` events.
 fn extract_anthropic_sse(data: &[u8]) -> Option<TokenUsage> {
     let text = std::str::from_utf8(data).ok()?;
     let mut input_tokens: Option<u64> = None;
@@ -420,10 +291,6 @@ fn extract_anthropic_sse(data: &[u8]) -> Option<TokenUsage> {
     Some(TokenUsage::new(input, output, None))
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(
@@ -436,10 +303,6 @@ fn extract_anthropic_sse(data: &[u8]) -> Option<TokenUsage> {
 mod tests {
     use super::*;
     use crate::test_utils::{make_filter_context, make_request};
-
-    // -----------------------------------------------------------------------
-    // from_config
-    // -----------------------------------------------------------------------
 
     #[test]
     fn from_config_openai() {
@@ -504,10 +367,6 @@ mod tests {
         assert!(result.is_err(), "unknown keys should be rejected");
     }
 
-    // -----------------------------------------------------------------------
-    // Non-streaming JSON extraction
-    // -----------------------------------------------------------------------
-
     #[tokio::test]
     async fn extracts_openai_json_body() {
         let filter = TokenCountFilter { provider: ProviderKind::OpenAi };
@@ -570,10 +429,6 @@ mod tests {
         assert!(matches!(action, FilterAction::Continue));
         assert!(ctx.get_metadata("token.input").is_none());
     }
-
-    // -----------------------------------------------------------------------
-    // SSE extraction
-    // -----------------------------------------------------------------------
 
     #[test]
     fn extract_last_usage_openai_sse() {
@@ -638,10 +493,6 @@ mod tests {
         assert!(result.is_none(), "missing message_start should return None");
     }
 
-    // -----------------------------------------------------------------------
-    // Bedrock InvokeModel header extraction
-    // -----------------------------------------------------------------------
-
     #[tokio::test]
     async fn extracts_bedrock_invoke_model_from_headers() {
         let filter = TokenCountFilter { provider: ProviderKind::BedrockInvokeModel };
@@ -680,9 +531,43 @@ mod tests {
         assert!(ctx.get_metadata("token.total").is_none());
     }
 
-    // -----------------------------------------------------------------------
-    // SSE flag detection
-    // -----------------------------------------------------------------------
+    #[tokio::test]
+    async fn bedrock_only_input_header_is_noop() {
+        let filter = TokenCountFilter { provider: ProviderKind::BedrockInvokeModel };
+        let req = make_request(http::Method::POST, "/model/amazon.titan/invoke");
+        let mut ctx = make_filter_context(&req);
+
+        let mut resp = crate::test_utils::make_response();
+        resp.headers
+            .insert("x-amzn-bedrock-input-token-count", "25".parse().unwrap());
+        ctx.response_header = Some(&mut resp);
+
+        filter.on_response(&mut ctx).await.unwrap();
+        ctx.response_header = None;
+
+        assert!(ctx.get_metadata("token.input").is_none(), "partial headers should not write metadata");
+        assert!(ctx.get_metadata("token.output").is_none());
+        assert!(ctx.get_metadata("token.total").is_none());
+    }
+
+    #[tokio::test]
+    async fn bedrock_only_output_header_is_noop() {
+        let filter = TokenCountFilter { provider: ProviderKind::BedrockInvokeModel };
+        let req = make_request(http::Method::POST, "/model/amazon.titan/invoke");
+        let mut ctx = make_filter_context(&req);
+
+        let mut resp = crate::test_utils::make_response();
+        resp.headers
+            .insert("x-amzn-bedrock-output-token-count", "50".parse().unwrap());
+        ctx.response_header = Some(&mut resp);
+
+        filter.on_response(&mut ctx).await.unwrap();
+        ctx.response_header = None;
+
+        assert!(ctx.get_metadata("token.input").is_none(), "partial headers should not write metadata");
+        assert!(ctx.get_metadata("token.output").is_none());
+        assert!(ctx.get_metadata("token.total").is_none());
+    }
 
     #[tokio::test]
     async fn on_response_sets_sse_flag_for_event_stream() {
