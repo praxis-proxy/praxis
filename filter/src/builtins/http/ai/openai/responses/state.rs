@@ -471,7 +471,10 @@ mod tests {
         assert!(state.messages.is_empty());
         assert!(state.output_items.is_empty());
         assert!(state.parallel_tool_calls);
+        assert!(state.persisted_messages.is_empty());
         assert!(state.previous_response_id.is_none());
+        assert!(state.previous_tools.is_empty());
+        assert!(state.previous_usage.is_none());
         assert!(state.request_body.is_null());
         assert!(state.response_object.is_null());
         assert!(state.tool_calls.is_empty());
