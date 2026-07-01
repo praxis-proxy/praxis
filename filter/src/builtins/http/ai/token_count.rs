@@ -5,11 +5,11 @@
 //!
 //! Extracts token usage from AI provider response bodies (or HTTP response
 //! headers for Bedrock InvokeModel) and writes the counts to
-//! [`FilterContext`] metadata under the well-known keys `token.input`,
+//! [`crate::FilterContext`] metadata under the well-known keys `token.input`,
 //! `token.output`, and `token.total`.
 //!
 //! Downstream filters (rate limiting, logging, cost tracking, header
-//! injection) can read these keys from [`FilterContext`] without coupling
+//! injection) can read these keys from [`crate::FilterContext`] without coupling
 //! to provider-specific response schemas.
 //!
 //! # Architecture
@@ -169,7 +169,7 @@ impl HttpFilter for TokenCountFilter {
     /// Detects SSE responses and marks them in `FilterContext` metadata.
     ///
     /// For `bedrock_invoke_model`, reads token counts directly from HTTP
-    /// response headers via [`extract_bedrock_headers`]; no body buffering
+    /// response headers via `extract_bedrock_headers`; no body buffering
     /// follows because `response_body_access` returns `BodyAccess::None`.
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if self.provider == ProviderKind::BedrockInvokeModel {
