@@ -33,7 +33,7 @@ pub(crate) fn transform_request(body: &[u8]) -> Result<Vec<u8>, String> {
     chat.insert("messages".to_owned(), Value::Array(messages));
 
     if let Some(max_tokens) = obj.get("max_tokens") {
-        chat.insert("max_tokens".to_owned(), max_tokens.clone());
+        chat.insert("max_completion_tokens".to_owned(), max_tokens.clone());
     }
 
     if let Some(stream) = obj.get("stream") {
@@ -455,7 +455,7 @@ mod tests {
         let parsed: Value = serde_json::from_slice(&result).unwrap();
 
         assert_eq!(parsed["model"], "claude-opus-4-8", "model preserved");
-        assert_eq!(parsed["max_tokens"], 1024, "max_tokens preserved");
+        assert_eq!(parsed["max_completion_tokens"], 1024, "max_tokens mapped to max_completion_tokens");
         assert_eq!(parsed["messages"][0]["role"], "user", "user message role");
         assert_eq!(parsed["messages"][0]["content"], "Hello", "user message content");
     }
