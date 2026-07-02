@@ -1,0 +1,77 @@
+name: Unicode Safety Check
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+#
+# Scans PR diffs for hidden Unicode (tag chars, zero-width joiners, bidi
+# overrides, PUA) used in ASCII smuggling / AI context poisoning attacks.
+#
+# Uses unicode-safety-check v3.0.0 via its release binary rather than the
+# composite action: praxis-proxy org policy only allows GitHub-verified
+# Marketplace actions (see odh-model-controller#823 for the upstream pattern).
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions: {}
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Detect hidden unicode characters
+  # ----------------------------------------------------------------------------
+
+  unicode-safety:
+    name: Detect hidden unicode characters
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+
+      - name: Detect hidden unicode characters
+        shell: bash
+        env:
+          SCANNER_VERSION: "3.0.0"
+          SCANNER_RELEASE_SHA: "0ee6d0bec92c640765f97a0514a9cf1613a34162"
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE_SHA="${{ github.event.pull_request.base.sha }}"
+          else
+            git fetch origin main
+            BASE_SHA="$(git merge-base origin/main HEAD)"
+          fi
+
+          TARBALL="unicode-safety-check-x86_64-unknown-linux-gnu.tar.gz"
+          BASE_URL="https://github.com/dcondrey/unicode-safety-check/releases/download/v${SCANNER_VERSION}"
+          curl -fsSL "${BASE_URL}/${TARBALL}" -o "/tmp/${TARBALL}"
+          curl -fsSL "${BASE_URL}/SHA256SUMS" -o /tmp/SHA256SUMS
+          EXPECTED_SHA="$(grep "${TARBALL}" /tmp/SHA256SUMS | awk '{print $1}')"
+          ACTUAL_SHA="$(sha256sum "/tmp/${TARBALL}" | awk '{print $1}')"
+          if [ -z "${EXPECTED_SHA}" ] || [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+            echo "::error::Checksum mismatch for ${TARBALL} (release ${SCANNER_RELEASE_SHA})"
+            exit 1
+          fi
+          tar -xzf "/tmp/${TARBALL}" -C /tmp
+          chmod +x /tmp/unicode-safety-check
+
+          git diff --name-only --diff-filter=AMR "${BASE_SHA}" HEAD > /tmp/unicode_check_files.txt
+          if [ ! -s /tmp/unicode_check_files.txt ]; then
+            echo "No changed files to scan."
+            exit 0
+          fi
+
+          /tmp/unicode-safety-check \
+            --file-list /tmp/unicode_check_files.txt \
+            --base-sha "${BASE_SHA}" \
+            --no-color
