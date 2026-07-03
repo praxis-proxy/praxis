@@ -128,8 +128,11 @@ admin:
   verbose: true
 ```
 
-By default, binding admin to a public interface
-(`0.0.0.0` / `[::]`) is a validation error.
+By default, the admin endpoint must bind to a loopback
+address (`127.0.0.1` or `[::1]`). Binding to any
+non-loopback address (including `0.0.0.0` / `[::]` or a
+LAN IP) is a validation error unless
+`insecure_options.allow_public_admin: true` is set.
 
 ## Annotated Example
 
