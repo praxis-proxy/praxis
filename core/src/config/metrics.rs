@@ -3,7 +3,7 @@
 
 //! Metrics and observability configuration.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 // -----------------------------------------------------------------------------
 // MetricsConfig
@@ -22,7 +22,7 @@ use serde::Deserialize;
 /// let metrics: MetricsConfig = serde_yaml::from_str("filter_duration: true").unwrap();
 /// assert!(metrics.filter_duration);
 /// ```
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MetricsConfig {
     /// Record per-filter hook duration histograms (`praxis_filter_duration_seconds`).
