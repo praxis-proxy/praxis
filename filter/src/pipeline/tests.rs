@@ -3427,10 +3427,7 @@ mod filter_duration_metrics_tests {
             "gated_filter"
         }
 
-        async fn on_request(
-            &self,
-            _ctx: &mut crate::HttpFilterContext<'_>,
-        ) -> Result<FilterAction, FilterError> {
+        async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
             Ok(FilterAction::Continue)
         }
     }
@@ -3444,17 +3441,11 @@ mod filter_duration_metrics_tests {
             "all_streams"
         }
 
-        async fn on_request(
-            &self,
-            _ctx: &mut crate::HttpFilterContext<'_>,
-        ) -> Result<FilterAction, FilterError> {
+        async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
             Ok(FilterAction::Continue)
         }
 
-        async fn on_response(
-            &self,
-            _ctx: &mut crate::HttpFilterContext<'_>,
-        ) -> Result<FilterAction, FilterError> {
+        async fn on_response(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
             Ok(FilterAction::Continue)
         }
 
@@ -3485,10 +3476,25 @@ mod filter_duration_metrics_tests {
         }
     }
 
+    struct DisabledOnlyFilter;
+
+    #[async_trait]
+    impl HttpFilter for DisabledOnlyFilter {
+        fn name(&self) -> &'static str {
+            "disabled_only"
+        }
+
+        async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+    }
+
     #[tokio::test]
     async fn filter_duration_metric_emitted_on_request_headers() {
-        let _guard = RECORDER_LOCK.lock().unwrap();
-        install_test_recorder();
+        {
+            let _guard = RECORDER_LOCK.lock().unwrap();
+            install_test_recorder();
+        }
 
         let pipeline = make_filter_duration_pipeline(vec![Box::new(AllStreamsFilter)]);
         let req = crate::test_utils::make_request(Method::GET, "/");
@@ -3501,8 +3507,10 @@ mod filter_duration_metrics_tests {
 
     #[tokio::test]
     async fn filter_duration_metric_emitted_on_request_body() {
-        let _guard = RECORDER_LOCK.lock().unwrap();
-        install_test_recorder();
+        {
+            let _guard = RECORDER_LOCK.lock().unwrap();
+            install_test_recorder();
+        }
 
         let pipeline = make_filter_duration_pipeline(vec![Box::new(AllStreamsFilter)]);
         let req = crate::test_utils::make_request(Method::POST, "/");
@@ -3522,8 +3530,10 @@ mod filter_duration_metrics_tests {
 
     #[tokio::test]
     async fn filter_duration_metric_emitted_on_response_headers() {
-        let _guard = RECORDER_LOCK.lock().unwrap();
-        install_test_recorder();
+        {
+            let _guard = RECORDER_LOCK.lock().unwrap();
+            install_test_recorder();
+        }
 
         let pipeline = make_filter_duration_pipeline(vec![Box::new(AllStreamsFilter)]);
         let req = crate::test_utils::make_request(Method::GET, "/");
@@ -3539,8 +3549,10 @@ mod filter_duration_metrics_tests {
 
     #[tokio::test]
     async fn filter_duration_metric_emitted_on_response_body() {
-        let _guard = RECORDER_LOCK.lock().unwrap();
-        install_test_recorder();
+        {
+            let _guard = RECORDER_LOCK.lock().unwrap();
+            install_test_recorder();
+        }
 
         let pipeline = make_filter_duration_pipeline(vec![Box::new(AllStreamsFilter)]);
         let req = crate::test_utils::make_request(Method::GET, "/");
@@ -3558,13 +3570,13 @@ mod filter_duration_metrics_tests {
 
     #[tokio::test]
     async fn filter_duration_metric_skipped_when_condition_not_met() {
-        let _guard = RECORDER_LOCK.lock().unwrap();
-        install_test_recorder();
+        {
+            let _guard = RECORDER_LOCK.lock().unwrap();
+            install_test_recorder();
+        }
 
-        let pipeline = make_filter_duration_pipeline_with_conditions(vec![(
-            Box::new(GatedFilter),
-            vec![when_path("/api")],
-        )]);
+        let pipeline =
+            make_filter_duration_pipeline_with_conditions(vec![(Box::new(GatedFilter), vec![when_path("/api")])]);
         let req = crate::test_utils::make_request(Method::GET, "/health");
         let mut ctx = crate::test_utils::make_filter_context(&req);
 
@@ -3579,23 +3591,9 @@ mod filter_duration_metrics_tests {
 
     #[tokio::test]
     async fn filter_duration_not_recorded_when_disabled() {
-        let _guard = RECORDER_LOCK.lock().unwrap();
-        install_test_recorder();
-
-        struct DisabledOnlyFilter;
-
-        #[async_trait]
-        impl HttpFilter for DisabledOnlyFilter {
-            fn name(&self) -> &'static str {
-                "disabled_only"
-            }
-
-            async fn on_request(
-                &self,
-                _ctx: &mut crate::HttpFilterContext<'_>,
-            ) -> Result<FilterAction, FilterError> {
-                Ok(FilterAction::Continue)
-            }
+        {
+            let _guard = RECORDER_LOCK.lock().unwrap();
+            install_test_recorder();
         }
 
         let pipeline = make_pipeline(vec![Box::new(DisabledOnlyFilter)]);

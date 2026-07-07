@@ -35,12 +35,7 @@ pub struct MetricsConfig {
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
-#[allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    reason = "tests"
-)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
 
@@ -53,7 +48,10 @@ mod tests {
     #[test]
     fn parse_empty_yields_defaults() {
         let metrics: MetricsConfig = serde_yaml::from_str("{}").unwrap();
-        assert!(!metrics.filter_duration, "empty yaml should default filter_duration to false");
+        assert!(
+            !metrics.filter_duration,
+            "empty yaml should default filter_duration to false"
+        );
     }
 
     #[test]

@@ -10,14 +10,13 @@ use super::{
     FilterPipeline,
     branch::BranchOutcome,
     http_utils::{
-        BodyFilterOutcome, HeaderFilterOutcome, accumulate_body_bytes, as_request_body_filter,
-        as_response_body_filter, released_or_continue, run_request_body_filter, run_request_filter,
-        run_response_body_filter, run_response_filter, skip_by_response_conditions,
+        BodyFilterOutcome, HeaderFilterOutcome, accumulate_body_bytes, as_request_body_filter, as_response_body_filter,
+        released_or_continue, run_request_body_filter, run_request_filter, run_response_body_filter,
+        run_response_filter, skip_by_response_conditions,
     },
 };
 use crate::{
-    FilterError, actions::FilterAction, any_filter::AnyFilter, condition::should_execute,
-    context::HttpFilterContext,
+    FilterError, actions::FilterAction, any_filter::AnyFilter, condition::should_execute, context::HttpFilterContext,
 };
 
 // -----------------------------------------------------------------------------
@@ -61,7 +60,8 @@ impl FilterPipeline {
                 continue;
             }
             ctx.current_filter_id = Some(pf.filter_id);
-            let outcome = run_request_filter(http_filter, ctx, pf.failure_mode, self.record_filter_duration_metrics).await;
+            let outcome =
+                run_request_filter(http_filter, ctx, pf.failure_mode, self.record_filter_duration_metrics).await;
             ctx.current_filter_id = None;
             match outcome? {
                 HeaderFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
@@ -109,7 +109,8 @@ impl FilterPipeline {
                 continue;
             }
             ctx.current_filter_id = Some(pf.filter_id);
-            let outcome = run_response_filter(http_filter, ctx, pf.failure_mode, self.record_filter_duration_metrics).await;
+            let outcome =
+                run_response_filter(http_filter, ctx, pf.failure_mode, self.record_filter_duration_metrics).await;
             ctx.current_filter_id = None;
             match outcome? {
                 HeaderFilterOutcome::Continue => {},
@@ -131,6 +132,7 @@ impl FilterPipeline {
     ///
     /// [`BodyDone`]: FilterAction::BodyDone
     #[expect(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
+    #[expect(clippy::too_many_lines, reason = "body hook loop with metrics dispatch")]
     pub async fn execute_http_request_body(
         &self,
         ctx: &mut HttpFilterContext<'_>,

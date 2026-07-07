@@ -266,7 +266,10 @@ mod tests {
     #[test]
     fn metrics_defaults_filter_duration_off() {
         let config = Config::from_yaml(VALID_YAML).unwrap();
-        assert!(!config.metrics.filter_duration, "filter_duration should default to false");
+        assert!(
+            !config.metrics.filter_duration,
+            "filter_duration should default to false"
+        );
     }
 
     #[test]

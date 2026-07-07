@@ -173,6 +173,7 @@ pub(super) enum HeaderFilterOutcome {
 }
 
 /// Run a single request header filter hook with tracing and metrics.
+#[expect(clippy::too_many_lines, reason = "metrics instrumentation adds branches per hook")]
 pub(super) async fn run_request_filter(
     http_filter: &dyn crate::filter::HttpFilter,
     ctx: &mut HttpFilterContext<'_>,
@@ -213,6 +214,7 @@ pub(super) async fn run_request_filter(
 }
 
 /// Run a single request body filter hook with tracing and metrics.
+#[expect(clippy::too_many_arguments, reason = "metrics_enabled flag is required per hook")]
 pub(super) async fn run_request_body_filter(
     http_filter: &dyn crate::filter::HttpFilter,
     ctx: &mut HttpFilterContext<'_>,
@@ -239,6 +241,7 @@ pub(super) async fn run_request_body_filter(
 }
 
 /// Run a single response body filter hook with tracing and metrics.
+#[expect(clippy::too_many_arguments, reason = "metrics_enabled flag is required per hook")]
 pub(super) fn run_response_body_filter(
     http_filter: &dyn crate::filter::HttpFilter,
     ctx: &mut HttpFilterContext<'_>,
@@ -268,6 +271,7 @@ pub(super) fn run_response_body_filter(
 ///
 /// When `failure_mode` is [`FailureMode::Open`], errors are logged as
 /// warnings and the filter is treated as if it returned `Continue`.
+#[expect(clippy::too_many_lines, reason = "metrics instrumentation adds branches per hook")]
 pub(super) async fn run_response_filter(
     http_filter: &dyn crate::filter::HttpFilter,
     ctx: &mut HttpFilterContext<'_>,

@@ -24,7 +24,10 @@ fn admin_interface_config_parses() {
     assert_eq!(config.listeners.len(), 1, "expected one listener");
     assert!(config.admin.address.is_some(), "admin address should be set");
     assert!(config.admin.verbose, "admin verbose should be true");
-    assert!(config.metrics.filter_duration, "filter_duration should be enabled in example");
+    assert!(
+        config.metrics.filter_duration,
+        "filter_duration should be enabled in example"
+    );
 }
 
 #[test]
