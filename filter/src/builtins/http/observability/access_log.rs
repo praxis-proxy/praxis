@@ -8,11 +8,12 @@ use std::{
 };
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use serde::Deserialize;
 use tracing::info;
 
 use crate::{
-    FilterAction, FilterError,
+    BodyAccess, FilterAction, FilterError,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -107,6 +108,33 @@ impl AccessLogFilter {
             .fetch_add(1, Ordering::Relaxed)
             .is_multiple_of(self.sample_every)
     }
+
+    /// Returns `true` for responses that Pingora delivers without a body phase.
+    fn is_bodyless(status: http::StatusCode, req_method: &http::Method) -> bool {
+        status.as_u16() < 200
+            || status == http::StatusCode::NO_CONTENT
+            || status == http::StatusCode::NOT_MODIFIED
+            || req_method == http::Method::HEAD
+    }
+
+    /// Emit a structured access log entry for the current request.
+    fn emit_access_log(ctx: &HttpFilterContext<'_>, status: u16) {
+        let path = sanitize_for_log(ctx.request.uri.path());
+        let client_ip = ctx.client_addr.map(|a| a.to_string()).unwrap_or_default();
+        info!(
+            method = %ctx.request.method,
+            path = %path,
+            client_ip = %client_ip,
+            status,
+            duration_ms = truncate_u128(ctx.request_start.elapsed().as_millis()),
+            cluster = ctx.cluster_name().unwrap_or("-"),
+            upstream = ctx.upstream_addr().unwrap_or("-"),
+            request_id = ctx.request_id().unwrap_or("-"),
+            request_body_bytes = ctx.request_body_bytes,
+            response_body_bytes = ctx.response_body_bytes,
+            "access"
+        );
+    }
 }
 
 #[async_trait]
@@ -120,24 +148,33 @@ impl HttpFilter for AccessLogFilter {
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        if self.should_log()
-            && let Some(resp) = &ctx.response_header
-        {
-            let path = sanitize_for_log(ctx.request.uri.path());
-            let client_ip = ctx.client_addr.map(|a| a.to_string()).unwrap_or_default();
-            info!(
-                method = %ctx.request.method,
-                path = %path,
-                client_ip = %client_ip,
-                status = resp.status.as_u16(),
-                duration_ms = truncate_u128(ctx.request_start.elapsed().as_millis()),
-                cluster = ctx.cluster_name().unwrap_or("-"),
-                upstream = ctx.upstream_addr().unwrap_or("-"),
-                request_id = ctx.request_id().unwrap_or("-"),
-                request_body_bytes = ctx.request_body_bytes,
-                response_body_bytes = ctx.response_body_bytes,
-                "access"
-            );
+        if let Some(resp) = &ctx.response_header {
+            let status = resp.status.as_u16();
+            let bodyless = Self::is_bodyless(resp.status, &ctx.request.method);
+
+            // response_header is None during on_response_body, so capture the status here
+            ctx.insert_filter_state(status);
+
+            if bodyless && self.should_log() {
+                Self::emit_access_log(ctx, status);
+            }
+        }
+        Ok(FilterAction::Continue)
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if end_of_stream && self.should_log() {
+            let status = ctx.get_filter_state::<u16>().copied().unwrap_or(0);
+            Self::emit_access_log(ctx, status);
         }
         Ok(FilterAction::Continue)
     }
@@ -428,6 +465,175 @@ mod tests {
         assert!(
             matches!(action, FilterAction::Continue),
             "on_response with populated context should continue"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_response_stores_status_in_filter_state() {
+        let filter = AccessLogFilter {
+            sample_every: 1,
+            counter: AtomicU64::default(),
+        };
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(42);
+        let mut resp = crate::context::Response {
+            headers: http::HeaderMap::new(),
+            status: http::StatusCode::NOT_FOUND,
+        };
+        ctx.response_header = Some(&mut resp);
+        let _action = filter.on_response(&mut ctx).await.unwrap();
+        assert_eq!(
+            ctx.get_filter_state::<u16>().copied(),
+            Some(404),
+            "on_response should store status code in filter state"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_response_no_header_skips_filter_state() {
+        let filter = AccessLogFilter {
+            sample_every: 1,
+            counter: AtomicU64::default(),
+        };
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(42);
+        let _action = filter.on_response(&mut ctx).await.unwrap();
+        assert!(
+            ctx.get_filter_state::<u16>().is_none(),
+            "on_response without header should not store filter state"
+        );
+    }
+
+    // -----------------------------------------------------------------------------
+    // Bodyless response detection
+    //
+    // Pingora skips response_body_filter for 204, 304, and HEAD responses,
+    // so on_response must emit the access log directly for these cases.
+    // -----------------------------------------------------------------------------
+
+    #[test]
+    fn is_bodyless_detects_1xx() {
+        assert!(
+            AccessLogFilter::is_bodyless(http::StatusCode::CONTINUE, &http::Method::GET),
+            "100 Continue should be bodyless"
+        );
+    }
+
+    #[test]
+    fn is_bodyless_detects_204() {
+        assert!(
+            AccessLogFilter::is_bodyless(http::StatusCode::NO_CONTENT, &http::Method::DELETE),
+            "204 No Content should be bodyless"
+        );
+    }
+
+    #[test]
+    fn is_bodyless_detects_304() {
+        assert!(
+            AccessLogFilter::is_bodyless(http::StatusCode::NOT_MODIFIED, &http::Method::GET),
+            "304 Not Modified should be bodyless"
+        );
+    }
+
+    #[test]
+    fn is_bodyless_detects_head() {
+        assert!(
+            AccessLogFilter::is_bodyless(http::StatusCode::OK, &http::Method::HEAD),
+            "HEAD request should be bodyless regardless of status"
+        );
+    }
+
+    #[test]
+    fn is_bodyless_returns_false_for_normal_response() {
+        assert!(
+            !AccessLogFilter::is_bodyless(http::StatusCode::OK, &http::Method::GET),
+            "normal 200 GET should not be bodyless"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_response_stores_status_for_bodyless() {
+        let filter = AccessLogFilter {
+            sample_every: 1,
+            counter: AtomicU64::default(),
+        };
+        let req = crate::test_utils::make_request(http::Method::DELETE, "/api/users/42");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(42);
+        let mut resp = crate::context::Response {
+            headers: http::HeaderMap::new(),
+            status: http::StatusCode::NO_CONTENT,
+        };
+        ctx.response_header = Some(&mut resp);
+        let _action = filter.on_response(&mut ctx).await.unwrap();
+        assert_eq!(
+            ctx.get_filter_state::<u16>().copied(),
+            Some(204),
+            "on_response should store status for bodyless responses"
+        );
+    }
+
+    #[test]
+    fn on_response_body_continues_before_end_of_stream() {
+        let filter = AccessLogFilter {
+            sample_every: 1,
+            counter: AtomicU64::default(),
+        };
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(42);
+        let mut body = Some(Bytes::from_static(b"partial"));
+        let action = filter.on_response_body(&mut ctx, &mut body, false).unwrap();
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "on_response_body should continue before end_of_stream"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_response_body_uses_status_from_on_response() {
+        let filter = AccessLogFilter {
+            sample_every: 1,
+            counter: AtomicU64::default(),
+        };
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(42);
+
+        let mut resp = crate::context::Response {
+            headers: http::HeaderMap::new(),
+            status: http::StatusCode::OK,
+        };
+        ctx.response_header = Some(&mut resp);
+        let _action = filter.on_response(&mut ctx).await.unwrap();
+        ctx.response_header = None;
+
+        ctx.response_body_bytes = 1234;
+        let mut body = None;
+        let action = filter.on_response_body(&mut ctx, &mut body, true).unwrap();
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "on_response_body should continue at end_of_stream"
+        );
+        assert_eq!(
+            ctx.get_filter_state::<u16>().copied(),
+            Some(200),
+            "status set by on_response should survive into on_response_body"
+        );
+    }
+
+    #[test]
+    fn response_body_access_is_read_only() {
+        let filter = AccessLogFilter {
+            sample_every: 1,
+            counter: AtomicU64::default(),
+        };
+        assert_eq!(
+            filter.response_body_access(),
+            BodyAccess::ReadOnly,
+            "access_log should declare ReadOnly response body access"
         );
     }
 
