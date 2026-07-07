@@ -15,6 +15,7 @@ filter_chains:         # Named, reusable filter chains.
 clusters:              # Optional. Standalone cluster defs (health checks).
 admin:                 # Optional. Admin health endpoint.
 body_limits:           # Optional. Global body size ceilings.
+metrics:               # Optional. Prometheus metric collection toggles.
 runtime:               # Optional. Thread pool and logging tuning.
 shutdown_timeout_secs: # Optional. Graceful drain time (default: 30).
 insecure_options:      # Optional. Dev/test overrides. See developing/getting-started.md.
@@ -71,6 +72,7 @@ continues serving with the old config.
 **Dynamically reloadable:**
 
 - Filter pipeline configuration
+- Metrics collection settings (`metrics.filter_duration`)
 - Router routes and path mappings
 - Load balancer endpoints and weights
 - Rate limit and circuit breaker settings
@@ -106,7 +108,11 @@ See [hot-reload.yaml] for an example.
   checks, `/ready` returns `{"status":"ok"}`.
 - `/metrics` returns Prometheus text exposition format
   with HTTP request metrics (`praxis_http_requests_total`,
-  `praxis_http_request_duration_seconds`).
+  `praxis_http_request_duration_seconds`). When
+  `metrics.filter_duration` is enabled, also exposes
+  per-filter hook duration histograms
+  (`praxis_filter_duration_seconds`, labels: `filter`,
+  `phase`, `stream`).
 
 Any other path returns `404 NOT FOUND`. Useful for orchestrator
 health checks and monitoring without exposing them on
@@ -392,6 +398,28 @@ omitted. Setting either to `null` removes the ceiling
 but requires `insecure_options.allow_unbounded_body:
 true`; without that flag, startup fails with a
 validation error.
+
+## Metrics
+
+Optional Prometheus metric collection toggles. HTTP
+request metrics on `/metrics` are always recorded when
+the admin endpoint is enabled. Per-filter hook duration
+histograms are opt-in.
+
+```yaml
+metrics:
+  filter_duration: true
+```
+
+`filter_duration` defaults to `false`. When enabled,
+records wall-clock duration for each HTTP filter hook
+(request/response headers and body). Histogram labels:
+`filter` (filter name), `phase` (`request` or
+`response`), `stream` (`headers` or `body`).
+
+Requires `admin.address` to scrape via `/metrics`.
+Enabling `filter_duration` without admin logs a startup
+warning; metrics are recorded but not exposed.
 
 ## Header and Request Limits
 

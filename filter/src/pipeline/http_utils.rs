@@ -15,6 +15,7 @@ use crate::{
     body::BodyAccess,
     condition::{should_execute, should_execute_response_ref},
     context::{HttpFilterContext, Response},
+    metrics::{PHASE_REQUEST, PHASE_RESPONSE, STREAM_BODY, STREAM_HEADERS, record_filter_duration},
 };
 
 // -----------------------------------------------------------------------------
@@ -171,14 +172,27 @@ pub(super) enum HeaderFilterOutcome {
     Rejected(Rejection),
 }
 
-/// Run a single request header filter hook with tracing.
+/// Run a single request header filter hook with tracing and metrics.
 pub(super) async fn run_request_filter(
     http_filter: &dyn crate::filter::HttpFilter,
     ctx: &mut HttpFilterContext<'_>,
     failure_mode: FailureMode,
+    metrics_enabled: bool,
 ) -> Result<HeaderFilterOutcome, FilterError> {
     trace!(filter = http_filter.name(), "on_request");
-    let request_result = http_filter.on_request(ctx).await;
+    let request_result = if metrics_enabled {
+        let start = std::time::Instant::now();
+        let result = http_filter.on_request(ctx).await;
+        record_filter_duration(
+            http_filter.name(),
+            PHASE_REQUEST,
+            STREAM_HEADERS,
+            start.elapsed().as_secs_f64(),
+        );
+        result
+    } else {
+        http_filter.on_request(ctx).await
+    };
     match request_result {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
             Ok(HeaderFilterOutcome::Continue)
@@ -198,38 +212,56 @@ pub(super) async fn run_request_filter(
     }
 }
 
-/// Run a single request body filter hook with tracing.
+/// Run a single request body filter hook with tracing and metrics.
 pub(super) async fn run_request_body_filter(
     http_filter: &dyn crate::filter::HttpFilter,
     ctx: &mut HttpFilterContext<'_>,
     body: &mut Option<Bytes>,
     end_of_stream: bool,
     failure_mode: FailureMode,
+    metrics_enabled: bool,
 ) -> Result<BodyFilterOutcome, FilterError> {
     trace!(filter = http_filter.name(), "on_request_body");
-    dispatch_body_result(
-        http_filter.on_request_body(ctx, body, end_of_stream).await,
-        http_filter.name(),
-        "request body",
-        failure_mode,
-    )
+    let body_result = if metrics_enabled {
+        let start = std::time::Instant::now();
+        let result = http_filter.on_request_body(ctx, body, end_of_stream).await;
+        record_filter_duration(
+            http_filter.name(),
+            PHASE_REQUEST,
+            STREAM_BODY,
+            start.elapsed().as_secs_f64(),
+        );
+        result
+    } else {
+        http_filter.on_request_body(ctx, body, end_of_stream).await
+    };
+    dispatch_body_result(body_result, http_filter.name(), "request body", failure_mode)
 }
 
-/// Run a single response body filter hook with tracing.
+/// Run a single response body filter hook with tracing and metrics.
 pub(super) fn run_response_body_filter(
     http_filter: &dyn crate::filter::HttpFilter,
     ctx: &mut HttpFilterContext<'_>,
     body: &mut Option<Bytes>,
     end_of_stream: bool,
     failure_mode: FailureMode,
+    metrics_enabled: bool,
 ) -> Result<BodyFilterOutcome, FilterError> {
     trace!(filter = http_filter.name(), "on_response_body");
-    dispatch_body_result(
-        http_filter.on_response_body(ctx, body, end_of_stream),
-        http_filter.name(),
-        "response body",
-        failure_mode,
-    )
+    let body_result = if metrics_enabled {
+        let start = std::time::Instant::now();
+        let result = http_filter.on_response_body(ctx, body, end_of_stream);
+        record_filter_duration(
+            http_filter.name(),
+            PHASE_RESPONSE,
+            STREAM_BODY,
+            start.elapsed().as_secs_f64(),
+        );
+        result
+    } else {
+        http_filter.on_response_body(ctx, body, end_of_stream)
+    };
+    dispatch_body_result(body_result, http_filter.name(), "response body", failure_mode)
 }
 
 /// Run a single response header filter and track header modification.
@@ -240,10 +272,23 @@ pub(super) async fn run_response_filter(
     http_filter: &dyn crate::filter::HttpFilter,
     ctx: &mut HttpFilterContext<'_>,
     failure_mode: FailureMode,
+    metrics_enabled: bool,
 ) -> Result<HeaderFilterOutcome, FilterError> {
     trace!(filter = http_filter.name(), "on_response");
     let pre_len = ctx.response_header.as_ref().map_or(0, |r| r.headers.len());
-    let response_result = http_filter.on_response(ctx).await;
+    let response_result = if metrics_enabled {
+        let start = std::time::Instant::now();
+        let result = http_filter.on_response(ctx).await;
+        record_filter_duration(
+            http_filter.name(),
+            PHASE_RESPONSE,
+            STREAM_HEADERS,
+            start.elapsed().as_secs_f64(),
+        );
+        result
+    } else {
+        http_filter.on_response(ctx).await
+    };
     match response_result {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
             if !ctx.response_headers_modified {

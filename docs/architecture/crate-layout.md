@@ -66,6 +66,7 @@ praxis-core                     Configuration, errors, and server factory
 │   ├── filters                 FilterChainConfig and FilterEntry structs
 │   ├── insecure_options        Security override flags for development
 │   ├── listener                Bind address, protocol, TLS, chain refs
+│   ├── metrics                 Prometheus metric collection toggles
 │   ├── parse                   YAML safety checks (size, alias expansion)
 │   ├── route                   Route definitions for router filter
 │   ├── runtime                 Worker threads, work-stealing, log overrides
@@ -121,6 +122,7 @@ praxis-filter                   Filter pipeline engine
 │   ├── p2c                     Power-of-two-choices endpoint selection
 │   ├── round_robin             Weighted round-robin via cumulative thresholds
 │   └── strategy                Strategy selection and dispatch
+├── metrics                     Per-filter hook duration histogram recording
 ├── path_match                  Segment-boundary path prefix matching
 ├── pipeline/                   Pipeline execution engine
 │   ├── body                    Body capabilities computation

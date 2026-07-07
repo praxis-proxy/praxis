@@ -146,7 +146,8 @@ deployment guidance.
   via `tracing`
 - **Prometheus metrics** - `/metrics` on the admin
   listener exposes request counts and duration
-  histograms in Prometheus text exposition format
+  histograms. Optional per-filter hook duration
+  histograms (`metrics.filter_duration`, default off).
 - **Admin health endpoints** - `/ready` and `/healthy`
   on a dedicated admin listener. `/ready` returns
   per-cluster health status with healthy/unhealthy/total

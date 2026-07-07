@@ -61,7 +61,7 @@ impl FilterPipeline {
                 continue;
             }
             ctx.current_filter_id = Some(pf.filter_id);
-            let outcome = run_request_filter(http_filter, ctx, pf.failure_mode).await;
+            let outcome = run_request_filter(http_filter, ctx, pf.failure_mode, self.record_filter_duration_metrics).await;
             ctx.current_filter_id = None;
             match outcome? {
                 HeaderFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
@@ -109,7 +109,7 @@ impl FilterPipeline {
                 continue;
             }
             ctx.current_filter_id = Some(pf.filter_id);
-            let outcome = run_response_filter(http_filter, ctx, pf.failure_mode).await;
+            let outcome = run_response_filter(http_filter, ctx, pf.failure_mode, self.record_filter_duration_metrics).await;
             ctx.current_filter_id = None;
             match outcome? {
                 HeaderFilterOutcome::Continue => {},
@@ -149,7 +149,15 @@ impl FilterPipeline {
                 continue;
             };
             ctx.current_filter_id = Some(pf.filter_id);
-            let outcome = run_request_body_filter(http_filter, ctx, body, end_of_stream, pf.failure_mode).await;
+            let outcome = run_request_body_filter(
+                http_filter,
+                ctx,
+                body,
+                end_of_stream,
+                pf.failure_mode,
+                self.record_filter_duration_metrics,
+            )
+            .await;
             ctx.current_filter_id = None;
             match outcome? {
                 BodyFilterOutcome::Continue => {},
@@ -213,7 +221,14 @@ impl FilterPipeline {
                 continue;
             };
             ctx.current_filter_id = Some(pf.filter_id);
-            let outcome = run_response_body_filter(http_filter, ctx, body, end_of_stream, pf.failure_mode);
+            let outcome = run_response_body_filter(
+                http_filter,
+                ctx,
+                body,
+                end_of_stream,
+                pf.failure_mode,
+                self.record_filter_duration_metrics,
+            );
             ctx.current_filter_id = None;
             match outcome? {
                 BodyFilterOutcome::Continue => {},

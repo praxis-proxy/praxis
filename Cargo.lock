@@ -3133,6 +3133,8 @@ dependencies = [
  "dashmap 6.2.1",
  "http",
  "jsonwebtoken",
+ "metrics",
+ "metrics-exporter-prometheus",
  "percent-encoding",
  "praxis-proxy-core",
  "rand 0.10.2",
