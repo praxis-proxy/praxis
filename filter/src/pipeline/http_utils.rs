@@ -158,7 +158,81 @@ pub(super) fn skip_by_response_conditions_with_header(
     false
 }
 
-/// Run a single response filter and track header modification.
+// -----------------------------------------------------------------------------
+// Filter Hook Runners
+// -----------------------------------------------------------------------------
+
+/// Outcome of running a single header filter hook (`on_request` or `on_response`).
+pub(super) enum HeaderFilterOutcome {
+    /// Filter executed successfully; continue pipeline.
+    Continue,
+
+    /// Filter rejected the request or response.
+    Rejected(Rejection),
+}
+
+/// Run a single request header filter hook with tracing.
+pub(super) async fn run_request_filter(
+    http_filter: &dyn crate::filter::HttpFilter,
+    ctx: &mut HttpFilterContext<'_>,
+    failure_mode: FailureMode,
+) -> Result<HeaderFilterOutcome, FilterError> {
+    trace!(filter = http_filter.name(), "on_request");
+    let request_result = http_filter.on_request(ctx).await;
+    match request_result {
+        Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
+            Ok(HeaderFilterOutcome::Continue)
+        },
+        Ok(FilterAction::Reject(rejection)) => {
+            debug!(
+                filter = http_filter.name(),
+                status = rejection.status,
+                "filter rejected request"
+            );
+            Ok(HeaderFilterOutcome::Rejected(rejection))
+        },
+        Err(e) => {
+            check_failure_mode(http_filter.name(), e, "request", failure_mode)?;
+            Ok(HeaderFilterOutcome::Continue)
+        },
+    }
+}
+
+/// Run a single request body filter hook with tracing.
+pub(super) async fn run_request_body_filter(
+    http_filter: &dyn crate::filter::HttpFilter,
+    ctx: &mut HttpFilterContext<'_>,
+    body: &mut Option<Bytes>,
+    end_of_stream: bool,
+    failure_mode: FailureMode,
+) -> Result<BodyFilterOutcome, FilterError> {
+    trace!(filter = http_filter.name(), "on_request_body");
+    dispatch_body_result(
+        http_filter.on_request_body(ctx, body, end_of_stream).await,
+        http_filter.name(),
+        "request body",
+        failure_mode,
+    )
+}
+
+/// Run a single response body filter hook with tracing.
+pub(super) fn run_response_body_filter(
+    http_filter: &dyn crate::filter::HttpFilter,
+    ctx: &mut HttpFilterContext<'_>,
+    body: &mut Option<Bytes>,
+    end_of_stream: bool,
+    failure_mode: FailureMode,
+) -> Result<BodyFilterOutcome, FilterError> {
+    trace!(filter = http_filter.name(), "on_response_body");
+    dispatch_body_result(
+        http_filter.on_response_body(ctx, body, end_of_stream),
+        http_filter.name(),
+        "response body",
+        failure_mode,
+    )
+}
+
+/// Run a single response header filter and track header modification.
 ///
 /// When `failure_mode` is [`FailureMode::Open`], errors are logged as
 /// warnings and the filter is treated as if it returned `Continue`.
@@ -166,9 +240,11 @@ pub(super) async fn run_response_filter(
     http_filter: &dyn crate::filter::HttpFilter,
     ctx: &mut HttpFilterContext<'_>,
     failure_mode: FailureMode,
-) -> Result<Option<Rejection>, FilterError> {
+) -> Result<HeaderFilterOutcome, FilterError> {
+    trace!(filter = http_filter.name(), "on_response");
     let pre_len = ctx.response_header.as_ref().map_or(0, |r| r.headers.len());
-    match http_filter.on_response(ctx).await {
+    let response_result = http_filter.on_response(ctx).await;
+    match response_result {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
             if !ctx.response_headers_modified {
                 let post_len = ctx.response_header.as_ref().map_or(0, |r| r.headers.len());
@@ -176,7 +252,7 @@ pub(super) async fn run_response_filter(
                     ctx.response_headers_modified = true;
                 }
             }
-            Ok(None)
+            Ok(HeaderFilterOutcome::Continue)
         },
         Ok(FilterAction::Reject(rejection)) => {
             warn!(
@@ -184,11 +260,11 @@ pub(super) async fn run_response_filter(
                 status = rejection.status,
                 "filter rejected response"
             );
-            Ok(Some(rejection))
+            Ok(HeaderFilterOutcome::Rejected(rejection))
         },
         Err(e) => {
             check_failure_mode(http_filter.name(), e, "response", failure_mode)?;
-            Ok(None)
+            Ok(HeaderFilterOutcome::Continue)
         },
     }
 }
@@ -311,6 +387,86 @@ mod tests {
         let err: FilterError = "test error".into();
         let result = dispatch_body_result(Err(err), "test", "request", FailureMode::Closed);
         assert!(result.is_err(), "error with FailureMode::Closed should propagate");
+    }
+
+    #[test]
+    fn skip_by_response_conditions_empty_conditions() {
+        let filter = crate::builtins::StaticResponseFilter::from_config(
+            &serde_yaml::from_str::<serde_yaml::Value>("status: 200").unwrap(),
+        )
+        .unwrap();
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut resp = crate::test_utils::make_response();
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.response_header = Some(&mut resp);
+        assert!(
+            !skip_by_response_conditions(filter.as_ref(), &[], &ctx),
+            "empty conditions should not skip"
+        );
+    }
+
+    #[test]
+    fn skip_by_response_conditions_matching_when_does_not_skip() {
+        use praxis_core::config::{ResponseCondition, ResponseConditionMatch};
+
+        let filter = crate::builtins::StaticResponseFilter::from_config(
+            &serde_yaml::from_str::<serde_yaml::Value>("status: 200").unwrap(),
+        )
+        .unwrap();
+        let conds = vec![ResponseCondition::When(ResponseConditionMatch {
+            status: Some(vec![200]),
+            headers: None,
+        })];
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut resp = crate::test_utils::make_response();
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.response_header = Some(&mut resp);
+        assert!(
+            !skip_by_response_conditions(filter.as_ref(), &conds, &ctx),
+            "matching 'when' condition should not skip"
+        );
+    }
+
+    #[test]
+    fn skip_by_response_conditions_non_matching_when_skips() {
+        use praxis_core::config::{ResponseCondition, ResponseConditionMatch};
+
+        let filter = crate::builtins::StaticResponseFilter::from_config(
+            &serde_yaml::from_str::<serde_yaml::Value>("status: 200").unwrap(),
+        )
+        .unwrap();
+        let conds = vec![ResponseCondition::When(ResponseConditionMatch {
+            status: Some(vec![404]),
+            headers: None,
+        })];
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut resp = crate::test_utils::make_response();
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.response_header = Some(&mut resp);
+        assert!(
+            skip_by_response_conditions(filter.as_ref(), &conds, &ctx),
+            "non-matching 'when' condition should skip"
+        );
+    }
+
+    #[test]
+    fn skip_by_response_conditions_no_response_header_does_not_skip() {
+        use praxis_core::config::{ResponseCondition, ResponseConditionMatch};
+
+        let filter = crate::builtins::StaticResponseFilter::from_config(
+            &serde_yaml::from_str::<serde_yaml::Value>("status: 200").unwrap(),
+        )
+        .unwrap();
+        let conds = vec![ResponseCondition::When(ResponseConditionMatch {
+            status: Some(vec![200]),
+            headers: None,
+        })];
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        assert!(
+            !skip_by_response_conditions(filter.as_ref(), &conds, &ctx),
+            "no response header should not skip"
+        );
     }
 
     #[test]
