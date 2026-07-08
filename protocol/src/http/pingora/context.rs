@@ -7,7 +7,6 @@ use std::{collections::VecDeque, net::IpAddr, sync::Arc, time::Instant};
 
 use bytes::Bytes;
 use praxis_core::connectivity::Upstream;
-use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, Response};
 use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, Response, TrustedHeaderMutation};
 use tokio::sync::OwnedSemaphorePermit;
 
