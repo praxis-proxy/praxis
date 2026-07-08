@@ -135,7 +135,9 @@ impl PolicyFilter {
         cpex::install_builtins(&mgr);
 
         mgr.load_config_yaml(&yaml)
-            .map_err(|e: Box<PluginError>| -> FilterError { format!("policy: load_config_yaml failed: {e}").into() })?;
+            .map_err(|e: Box<PluginError>| -> FilterError {
+                format!("policy: load_config_yaml failed for {}: {e}", cfg.config_path).into()
+            })?;
 
         // `initialize()` is async. The praxis filter-factory signature
         // is sync, so we drive init to completion here. We spawn a
