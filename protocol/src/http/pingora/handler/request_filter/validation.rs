@@ -28,43 +28,68 @@ use super::stream_buffer::build_trace_response;
 /// [RFC 9110 Section 7.2]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.2
 /// [RFC 9112 Section 3.2]: https://datatracker.ietf.org/doc/html/rfc9112#section-3.2
 pub(super) fn validate_host_header(session: &mut Session) -> Option<Rejection> {
-    let is_http11 = session.req_header().version == http::Version::HTTP_11;
+    let version = session.req_header().version;
     let hosts = session.req_header().headers.get_all(http::header::HOST);
+
+    match check_host_values(version, &hosts) {
+        HostCheck::Valid => None,
+        HostCheck::Reject(rejection) => Some(rejection),
+        HostCheck::Canonicalize(canonical) => {
+            debug!("canonicalizing duplicate identical Host headers");
+            let _remove = session.req_header_mut().remove_header("host");
+            let _insert = session.req_header_mut().insert_header(http::header::HOST, canonical);
+            None
+        },
+    }
+}
+
+/// Result of pure host header validation.
+enum HostCheck {
+    /// Single valid host header present (or absent on HTTP/1.0).
+    Valid,
+    /// Duplicate identical hosts — caller should collapse to one.
+    Canonicalize(http::HeaderValue),
+    /// Reject with the given status.
+    Reject(Rejection),
+}
+
+/// Pure validation of Host header values, independent of
+/// Pingora [`Session`].
+///
+/// [`Session`]: pingora_proxy::Session
+fn check_host_values(version: http::Version, hosts: &http::header::GetAll<'_, http::HeaderValue>) -> HostCheck {
     let mut iter = hosts.iter();
 
     let Some(first) = iter.next() else {
-        if is_http11 {
+        if version == http::Version::HTTP_11 {
             debug!("rejecting HTTP/1.1 request with missing Host header");
-            return Some(Rejection::status(400));
+            return HostCheck::Reject(Rejection::status(400));
         }
-        return None;
+        return HostCheck::Valid;
     };
 
     if first.as_bytes().iter().all(u8::is_ascii_whitespace) {
         debug!("rejecting request with empty or whitespace-only Host header");
-        return Some(Rejection::status(400));
+        return HostCheck::Reject(Rejection::status(400));
     }
 
-    let second = iter.next()?;
+    let Some(second) = iter.next() else {
+        return HostCheck::Valid;
+    };
 
     if second.as_bytes() != first.as_bytes() {
         debug!("rejecting request with conflicting Host headers");
-        return Some(Rejection::status(400));
+        return HostCheck::Reject(Rejection::status(400));
     }
 
     for v in iter {
         if v.as_bytes() != first.as_bytes() {
             debug!("rejecting request with conflicting Host headers");
-            return Some(Rejection::status(400));
+            return HostCheck::Reject(Rejection::status(400));
         }
     }
 
-    debug!("canonicalizing duplicate identical Host headers");
-    let canonical = first.clone();
-    let _remove = session.req_header_mut().remove_header("host");
-    let _insert = session.req_header_mut().insert_header(http::header::HOST, canonical);
-
-    None
+    HostCheck::Canonicalize(first.clone())
 }
 
 // -----------------------------------------------------------------------------
@@ -122,6 +147,113 @@ fn parse_max_forwards(session: &Session) -> Option<u32> {
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
+    use super::*;
+
+    // -----------------------------------------------------------------------
+    // Host Header Validation (RFC 9110 §7.2 / RFC 9112 §3.2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn missing_host_http11_rejected() {
+        let headers = http::HeaderMap::new();
+        let result = check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(result, HostCheck::Reject(_)),
+            "HTTP/1.1 without Host must be rejected"
+        );
+    }
+
+    #[test]
+    fn missing_host_http10_allowed() {
+        let headers = http::HeaderMap::new();
+        let result = check_host_values(http::Version::HTTP_10, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(result, HostCheck::Valid),
+            "HTTP/1.0 without Host should be allowed"
+        );
+    }
+
+    #[test]
+    fn single_valid_host_accepted() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, "example.com".parse().unwrap());
+        let result = check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(result, HostCheck::Valid),
+            "single valid Host should be accepted"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_host_rejected() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, "   ".parse().unwrap());
+        let result = check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(result, HostCheck::Reject(_)),
+            "whitespace-only Host must be rejected"
+        );
+    }
+
+    #[test]
+    fn empty_host_rejected() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::HOST, "".parse().unwrap());
+        let result = check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST));
+        assert!(matches!(result, HostCheck::Reject(_)), "empty Host must be rejected");
+    }
+
+    #[test]
+    fn conflicting_duplicate_hosts_rejected() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(http::header::HOST, "a.example.com".parse().unwrap());
+        headers.append(http::header::HOST, "b.example.com".parse().unwrap());
+        let result = check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(result, HostCheck::Reject(_)),
+            "conflicting Host headers must be rejected"
+        );
+    }
+
+    #[test]
+    fn three_hosts_third_conflicts_rejected() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(http::header::HOST, "same.com".parse().unwrap());
+        headers.append(http::header::HOST, "same.com".parse().unwrap());
+        headers.append(http::header::HOST, "different.com".parse().unwrap());
+        let result = check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(result, HostCheck::Reject(_)),
+            "third conflicting Host must be rejected"
+        );
+    }
+
+    #[test]
+    fn identical_duplicate_hosts_canonicalized() {
+        let mut headers = http::HeaderMap::new();
+        headers.append(http::header::HOST, "example.com".parse().unwrap());
+        headers.append(http::header::HOST, "example.com".parse().unwrap());
+        let result = check_host_values(http::Version::HTTP_11, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(&result, HostCheck::Canonicalize(v) if v.as_bytes() == b"example.com"),
+            "identical duplicate Hosts should be canonicalized"
+        );
+    }
+
+    #[test]
+    fn missing_host_http2_allowed() {
+        let headers = http::HeaderMap::new();
+        let result = check_host_values(http::Version::HTTP_2, &headers.get_all(http::header::HOST));
+        assert!(
+            matches!(result, HostCheck::Valid),
+            "HTTP/2 without Host should be allowed"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Max-Forwards
+    // -----------------------------------------------------------------------
+
     #[test]
     fn max_forwards_applies_to_trace() {
         assert!(

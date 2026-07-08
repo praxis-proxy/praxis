@@ -37,6 +37,7 @@ Built-in filters organized by protocol and category.
 | Filter | Feature | Description |
 |--------|---------|-------------|
 | [`circuit_breaker`](http/traffic_management/circuit_breaker.md) | - | Rejects requests to clusters whose circuit is open. |
+| [`endpoint_selector`](http/traffic_management/endpoint_selector.md) | - | Selects an upstream endpoint from a trusted mutation source. |
 | [`grpc_detection`](http/traffic_management/grpc_detection.md) | - | Detects gRPC requests from the `content-type` header and promotes the variant to filter metadata and results for downstream routing. |
 | [`load_balancer`](http/traffic_management/load_balancer.md) | - | Selects an upstream endpoint using the cluster's configured strategy. |
 | [`rate_limit`](http/traffic_management/rate_limit.md) | - | Token bucket rate limiter that rejects excess traffic with 429. |

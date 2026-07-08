@@ -15,14 +15,10 @@ name = "praxis_filter"
 
 [features]
 default = []
-ext-proc = ["dep:praxis-proto", "dep:tonic", "dep:prost-wkt-types"]
 cpex-policy-engine = [
     "dep:cpex",
     "dep:tokio",
 ]
-
-[package.metadata.cargo-machete]
-ignored = ["praxis-proto", "prost-wkt-types", "tonic"]
 
 [lints]
 workspace = true
@@ -35,18 +31,16 @@ dashmap = { workspace = true }
 http = { workspace = true }
 percent-encoding = { workspace = true }
 praxis-core = { workspace = true }
-praxis-proto = { workspace = true, optional = true }
 rand = { workspace = true }
-prost-wkt-types = { workspace = true, optional = true }
 regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+smallvec = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 # Used by `cpex-policy-engine` for plugin `initialize()` at filter
 # construction and JWT identity plugins that fetch JWKS at init time.
 tokio = { workspace = true, optional = true, features = ["rt", "sync", "time", "net"] }
-tonic = { workspace = true, optional = true }
 tracing = { workspace = true }
 zeroize = { workspace = true }
 

@@ -119,3 +119,51 @@ fn parse_workload(name: &str, args: &Args) -> Workload {
         },
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(clippy::unwrap_used, reason = "tests")]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn resolve_proxy_names_always_includes_praxis() {
+        let names = resolve_proxy_names(&[]);
+        assert_eq!(names, vec!["praxis"], "empty input should default to praxis only");
+    }
+
+    #[test]
+    fn resolve_proxy_names_deduplicates() {
+        let names = resolve_proxy_names(&["praxis".into(), "envoy".into(), "envoy".into()]);
+        assert_eq!(names, vec!["praxis", "envoy"], "duplicates should be removed");
+    }
+
+    #[test]
+    fn resolve_proxy_names_case_insensitive() {
+        let names = resolve_proxy_names(&["PRAXIS".into(), "Envoy".into()]);
+        assert_eq!(
+            names,
+            vec!["praxis", "envoy"],
+            "names should be lowercased and praxis not duplicated"
+        );
+    }
+
+    #[test]
+    fn resolve_proxy_names_praxis_always_first() {
+        let names = resolve_proxy_names(&["nginx".into(), "envoy".into()]);
+        assert_eq!(
+            names.first().map(String::as_str),
+            Some("praxis"),
+            "praxis should always be the first entry"
+        );
+    }
+
+    #[test]
+    fn all_workloads_constant_has_expected_count() {
+        assert_eq!(ALL_WORKLOADS.len(), 8, "ALL_WORKLOADS should have 8 entries");
+    }
+}

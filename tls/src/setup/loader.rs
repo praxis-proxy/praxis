@@ -211,4 +211,72 @@ mod tests {
             "error should mention no private key found, got: {err}"
         );
     }
+
+    #[test]
+    fn cert_key_mismatch_returns_error() {
+        let certs_a = gen_test_certs();
+        let certs_b = gen_test_certs();
+        let pair = CertKeyPair {
+            cert_path: certs_a.cert_path.to_str().expect("path").to_owned(),
+            default: false,
+            key_path: certs_b.key_path.to_str().expect("path").to_owned(),
+            server_names: Vec::new(),
+        };
+        let err = load_certified_key(&pair).expect_err("mismatched cert/key should fail");
+        assert!(
+            err.to_string().contains("do not match"),
+            "error should mention cert/key mismatch, got: {err}"
+        );
+    }
+
+    #[test]
+    fn garbage_pem_cert_returns_error() {
+        let certs = gen_test_certs();
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let garbage = dir.path().join("garbage.pem");
+        std::fs::write(&garbage, b"\x00\x01\x02\xff garbage data").expect("write garbage");
+        let pair = CertKeyPair {
+            cert_path: garbage.to_str().expect("path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("path").to_owned(),
+            server_names: Vec::new(),
+        };
+        let err = load_cert_and_key(&pair).expect_err("garbage PEM should fail");
+        assert!(
+            err.to_string().contains("no certificates found"),
+            "error should mention no certificates, got: {err}"
+        );
+    }
+
+    #[test]
+    fn key_file_with_cert_content_returns_error() {
+        let certs = gen_test_certs();
+        let pair = CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("path").to_owned(),
+            default: false,
+            key_path: certs.cert_path.to_str().expect("path").to_owned(),
+            server_names: Vec::new(),
+        };
+        let err = load_cert_and_key(&pair).expect_err("cert as key should fail");
+        assert!(
+            err.to_string().contains("no private key found"),
+            "using cert file as key should say no key found, got: {err}"
+        );
+    }
+
+    #[test]
+    fn cert_file_with_key_content_returns_error() {
+        let certs = gen_test_certs();
+        let pair = CertKeyPair {
+            cert_path: certs.key_path.to_str().expect("path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("path").to_owned(),
+            server_names: Vec::new(),
+        };
+        let err = load_cert_and_key(&pair).expect_err("key as cert should fail");
+        assert!(
+            err.to_string().contains("no certificates found"),
+            "using key file as cert should say no certs found, got: {err}"
+        );
+    }
 }

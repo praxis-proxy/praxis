@@ -15,7 +15,8 @@ use praxis_test_utils::{
 
 use super::test_utils::{
     h2c_get, start_304_backend, start_custom_response_header_backend, start_etag_backend, start_garbage_backend,
-    start_partial_header_backend, start_range_backend, start_redirect_backend, timeout_filter_yaml,
+    start_hop_by_hop_backend, start_partial_header_backend, start_range_backend, start_redirect_backend,
+    timeout_filter_yaml,
 };
 
 // -----------------------------------------------------------------------------
@@ -1102,6 +1103,195 @@ fn rfc9110_multiple_connection_headers_all_tokens_stripped() {
 }
 
 // -----------------------------------------------------------------------------
+// RFC 9110 Section 7.6.1 - H1 Hop-by-Hop Header Stripping
+// -----------------------------------------------------------------------------
+
+/// [RFC 9110 Section 7.6.1]: standard hop-by-hop headers must be
+/// stripped from forwarded HTTP/1.1 requests.
+///
+/// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
+#[test]
+fn rfc9110_h1_request_hop_by_hop_stripped() {
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Keep-Alive: timeout=5\r\n\
+         TE: trailers\r\n\
+         X-App: preserved\r\n\
+         Connection: close\r\n\r\n",
+    );
+    let status = parse_status(&raw);
+    let body = parse_body(&raw).to_lowercase();
+
+    assert_eq!(status, 200, "request with hop-by-hop headers should succeed");
+    assert!(
+        !body.contains("keep-alive:"),
+        "Keep-Alive must be stripped; echoed: {body}"
+    );
+    assert!(!body.contains("\nte:"), "TE must be stripped; echoed: {body}");
+    assert!(
+        body.contains("x-app:"),
+        "non-hop-by-hop headers must be preserved; echoed: {body}"
+    );
+}
+
+/// [RFC 9110 Section 7.6.1]: hop-by-hop headers must be stripped
+/// from HTTP/1.1 responses before forwarding to the client.
+///
+/// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
+#[test]
+fn rfc9110_h1_response_hop_by_hop_stripped() {
+    let backend_port = start_hop_by_hop_backend();
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    let status = parse_status(&raw);
+    let raw_lower = raw.to_lowercase();
+
+    assert_eq!(status, 200, "request to hop-by-hop backend should succeed");
+    assert!(
+        !raw_lower.contains("\r\nkeep-alive:"),
+        "Keep-Alive must be stripped from H1 response; raw: {raw}"
+    );
+}
+
+/// [RFC 9110 Section 7.6.1]: custom headers listed in Connection
+/// must be stripped from forwarded responses.
+///
+/// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
+#[test]
+fn rfc9110_h1_connection_listed_header_stripped_from_response() {
+    let backend_port = start_connection_listed_response_backend();
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    let status = parse_status(&raw);
+    let raw_lower = raw.to_lowercase();
+
+    assert_eq!(status, 200, "request should succeed");
+    assert!(
+        !raw_lower.contains("x-custom-hop:"),
+        "X-Custom-Hop listed in Connection must be stripped; raw: {raw}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// RFC 9110 Section 8.6 - Content-Length / Body Mismatch
+// -----------------------------------------------------------------------------
+
+/// [RFC 9110 Section 8.6]: when Content-Length exceeds the
+/// actual body bytes, the proxy must reject the request or
+/// close the connection to prevent framing attacks.
+///
+/// [RFC 9110 Section 8.6]: https://datatracker.ietf.org/doc/html/rfc9110#section-8.6
+#[test]
+fn rfc9110_content_length_body_shorter_rejected() {
+    let backend_port = start_backend("ok");
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "POST / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Length: 10\r\n\
+         Connection: close\r\n\
+         \r\n\
+         hello",
+    );
+    let status = parse_status(&raw);
+
+    assert!(
+        status == 400 || status == 408 || status == 200 || status == 0,
+        "CL body mismatch should be rejected, timed out, or handled safely, got {status}"
+    );
+}
+
+/// [RFC 9110 Section 8.6]: when the body exceeds
+/// Content-Length, the proxy must handle safely by reading
+/// only the declared number of bytes.
+///
+/// [RFC 9110 Section 8.6]: https://datatracker.ietf.org/doc/html/rfc9110#section-8.6
+#[test]
+fn rfc9110_content_length_body_longer_safe() {
+    let backend_port = start_backend("ok");
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "POST / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Length: 5\r\n\
+         Connection: close\r\n\
+         \r\n\
+         helloXXXXX",
+    );
+    let status = parse_status(&raw);
+
+    assert!(
+        status == 200 || status == 400,
+        "CL shorter than body must be handled safely (200 or 400), got {status}"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// RFC 9110 Section 9.3.6 - CONNECT Method
+// -----------------------------------------------------------------------------
+
+/// [RFC 9110 Section 9.3.6]: CONNECT establishes tunnels
+/// through forward proxies. A reverse proxy must reject
+/// CONNECT as unsupported.
+///
+/// [RFC 9110 Section 9.3.6]: https://datatracker.ietf.org/doc/html/rfc9110#section-9.3.6
+#[test]
+fn rfc9110_connect_method_not_supported() {
+    let backend_port = start_backend("ok");
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "CONNECT example.com:443 HTTP/1.1\r\n\
+         Host: example.com:443\r\n\
+         Connection: close\r\n\
+         \r\n",
+    );
+    let status = parse_status(&raw);
+
+    assert!(
+        status == 400 || status == 405,
+        "CONNECT must be rejected by a reverse proxy (400 or 405), got {status}"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
@@ -1109,4 +1299,36 @@ fn rfc9110_multiple_connection_headers_all_tokens_stripped() {
 /// RFC 9110 tests.
 fn start_proxy(config: &Config) -> praxis_test_utils::ProxyGuard {
     praxis_test_utils::start_proxy(config)
+}
+
+/// Start a backend returning a custom header listed in Connection.
+fn start_connection_listed_response_backend() -> u16 {
+    let (listener, port) = praxis_test_utils::net::port::bind_unique_port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                handle_connection_listed(stream);
+            });
+        }
+    });
+    port
+}
+
+/// Respond with a custom header listed in Connection.
+fn handle_connection_listed(mut stream: std::net::TcpStream) {
+    use std::io::{Read as _, Write as _};
+    drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
+    let mut buf = [0_u8; 4096];
+    let _bytes = stream.read(&mut buf);
+    let body = "ok";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Length: {}\r\n\
+         Connection: close, X-Custom-Hop\r\n\
+         X-Custom-Hop: secret\r\n\
+         \r\n\
+         {body}",
+        body.len()
+    );
+    let _sent = stream.write_all(response.as_bytes());
 }

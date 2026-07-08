@@ -23,14 +23,12 @@ upstream library callbacks (Pingora) into filter pipeline
 invocations. `Protocol` trait, `ListenerPipelines`, HTTP and
 TCP implementations.
 
-**`praxis-proto`** : Vendored Envoy ext_proc protocol buffer
-definitions compiled into Rust types with tonic/prost gRPC
-stubs. Used by `praxis-ext-proc`.
-
 **`praxis-ext-proc`** : Envoy-compatible external processing
 filter (anti-pattern — see [filter docs](../filters/README.md#external-processing-anti-pattern)).
-Opt-in via the `ext-proc` cargo feature on
-`praxis-filter`. Not enabled by default.
+Self-contained crate with vendored Envoy protobuf
+definitions, gRPC stubs, and the filter implementation.
+Not included in the default feature set; registered
+explicitly by callers.
 
 **`praxis-tls`** : TLS configuration types and runtime
 setup. Defines `ListenerTls` (certificate list, client CA,
@@ -172,10 +170,6 @@ praxis-filter                   Filter pipeline engine
             ├── sni_router      SNI-based upstream routing
             └── tcp_load_balancer  Cluster-backed TCP endpoint selection
 
-praxis-proto                    Envoy ext_proc protobuf definitions (opt-in via ext-proc feature)
-├── envoy/service/common/v3     Common Envoy service types
-└── envoy/service/ext_proc/v3   External processor gRPC service
-
 praxis-protocol                 Protocol adapters
 ├── pipelines                   Maps listener names to resolved pipelines
 ├── http/                       HTTP (Pingora)
@@ -245,7 +239,6 @@ graph LR
     praxis-protocol --> praxis-core
     praxis-protocol --> praxis-tls
     praxis-filter --> praxis-core
-    praxis-filter -.->|ext-proc| praxis-proto
     praxis-core --> praxis-tls
 ```
 

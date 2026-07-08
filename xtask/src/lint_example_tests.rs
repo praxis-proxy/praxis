@@ -50,6 +50,7 @@ const SKIP: &[&str] = &[
     "security/downstream-read-timeout.yaml",
     "security/forwarded-headers.yaml",
     // --- Traffic management ---
+    "traffic-management/ext-proc-endpoint-selector.yaml",
     "traffic-management/rate-limiting.yaml",
     "traffic-management/timeout.yaml",
 ];

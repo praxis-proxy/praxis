@@ -12,6 +12,7 @@ use std::{
 };
 
 use praxis_core::health::ClusterHealthState;
+use smallvec::SmallVec;
 
 use super::endpoint::WeightedEndpoint;
 
@@ -147,9 +148,9 @@ impl PowerOfTwoChoices {
 
     /// Filter to healthy endpoints, falling back to all on panic mode.
     #[expect(clippy::indexing_slicing, reason = "bounds checked by ep.index < len()")]
-    fn healthy_candidates(&self, health: Option<&ClusterHealthState>) -> Vec<&WeightedEndpoint> {
+    fn healthy_candidates(&self, health: Option<&ClusterHealthState>) -> SmallVec<[&WeightedEndpoint; 8]> {
         if let Some(state) = health {
-            let healthy: Vec<_> = self
+            let healthy: SmallVec<[_; 8]> = self
                 .endpoints
                 .iter()
                 .filter(|ep| ep.index < state.endpoints().len() && state.endpoints()[ep.index].is_healthy())

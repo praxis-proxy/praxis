@@ -335,6 +335,16 @@ mod tests {
         );
     }
 
+    #[test]
+    fn deny_unknown_fields_rejects_extra_field() {
+        let yaml = "cert_path: /etc/ssl/cert.pem\nkey_path: /etc/ssl/key.pem\nbogus: true\n";
+        let err = serde_yaml::from_str::<CertKeyPair>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("unknown field"),
+            "extra field should be rejected by deny_unknown_fields: {err}"
+        );
+    }
+
     // ---------------------------------------------------------------------------
     // Test Utilities
     // ---------------------------------------------------------------------------

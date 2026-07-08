@@ -27,6 +27,7 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 pingora-core = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "io-util", "time", "sync"] }
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 futures = { workspace = true }
 tokio-rustls = { workspace = true }

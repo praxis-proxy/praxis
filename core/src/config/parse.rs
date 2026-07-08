@@ -188,4 +188,50 @@ mod tests {
     fn safety_check_passes_valid_yaml() {
         check_yaml_safety("a: 1\n").expect("valid small YAML should pass all safety checks");
     }
+
+    #[test]
+    fn expansion_check_unparseable_yaml_passes() {
+        let result = check_yaml_expansion("{{{{invalid yaml", MAX_EXPANDED_BYTES);
+        assert!(
+            result.is_ok(),
+            "unparseable YAML should pass expansion check (deferred to real parse)"
+        );
+    }
+
+    #[test]
+    fn count_digits_zero_returns_one() {
+        assert_eq!(count_digits(0), 1, "0 has one digit");
+    }
+
+    #[test]
+    fn count_digits_single() {
+        assert_eq!(count_digits(9), 1, "9 has one digit");
+    }
+
+    #[test]
+    fn count_digits_multi() {
+        assert_eq!(count_digits(100), 3, "100 has three digits");
+        assert_eq!(count_digits(999), 3, "999 has three digits");
+        assert_eq!(count_digits(1000), 4, "1000 has four digits");
+    }
+
+    #[test]
+    fn estimate_null_size() {
+        assert_eq!(estimate_value_size(&serde_yaml::Value::Null), 4, "null is 4 bytes");
+    }
+
+    #[test]
+    fn estimate_bool_size() {
+        assert_eq!(
+            estimate_value_size(&serde_yaml::Value::Bool(true)),
+            5,
+            "bool is 5 bytes"
+        );
+    }
+
+    #[test]
+    fn estimate_string_includes_quotes() {
+        let v = serde_yaml::Value::String("abc".to_owned());
+        assert_eq!(estimate_value_size(&v), 5, "3-char string + 2 quote bytes = 5");
+    }
 }

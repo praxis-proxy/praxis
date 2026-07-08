@@ -8,20 +8,22 @@
 //! from request/response state and applying [`HeaderMutation`]
 //! and [`ImmediateResponse`] results back to the context.
 //!
-//! [`HttpHeaders`]: praxis_proto::envoy::service::ext_proc::v3::HttpHeaders
-//! [`HeaderMutation`]: praxis_proto::envoy::service::ext_proc::v3::HeaderMutation
-//! [`ImmediateResponse`]: praxis_proto::envoy::service::ext_proc::v3::ImmediateResponse
+//! [`HttpHeaders`]: crate::proto::envoy::service::ext_proc::v3::HttpHeaders
+//! [`HeaderMutation`]: crate::proto::envoy::service::ext_proc::v3::HeaderMutation
+//! [`ImmediateResponse`]: crate::proto::envoy::service::ext_proc::v3::ImmediateResponse
 
 use std::borrow::Cow;
 
 use bytes::Bytes;
-use praxis_filter::{FilterAction, HttpFilterContext, Rejection};
-use praxis_proto::envoy::service::{
-    common::v3::{HeaderValue, HeaderValueOption},
-    ext_proc::v3::{HeaderMutation, HeadersResponse, HttpHeaders, ImmediateResponse},
-};
+use praxis_filter::{FilterAction, HttpFilterContext, Rejection, TrustedHeaderMutation};
 
-use crate::Phase;
+use crate::{
+    Phase,
+    proto::envoy::service::{
+        common::v3::{HeaderValue, HeaderValueOption, header_value_option::HeaderAppendAction},
+        ext_proc::v3::{HeaderMap, HeaderMutation, HeadersResponse, HttpHeaders, ImmediateResponse},
+    },
+};
 
 // -----------------------------------------------------------------------------
 // Request → Proto
@@ -56,7 +58,7 @@ pub(crate) fn request_to_proto_headers(ctx: &HttpFilterContext<'_>) -> HttpHeade
     }
 
     HttpHeaders {
-        headers: Some(praxis_proto::envoy::service::ext_proc::v3::HeaderMap { headers }),
+        headers: Some(HeaderMap { headers }),
         end_of_stream: false,
     }
 }
@@ -78,7 +80,7 @@ pub(crate) fn response_to_proto_headers(ctx: &HttpFilterContext<'_>) -> HttpHead
     }
 
     HttpHeaders {
-        headers: Some(praxis_proto::envoy::service::ext_proc::v3::HeaderMap { headers }),
+        headers: Some(HeaderMap { headers }),
         end_of_stream: false,
     }
 }
@@ -118,7 +120,7 @@ pub(crate) fn apply_headers_response(hr: &HeadersResponse, ctx: &mut HttpFilterC
 /// Pseudo-headers (`:` prefix) are skipped because Praxis sets
 /// method, path, scheme, and authority through dedicated fields.
 ///
-/// [`HeaderAppendAction`]: praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction
+/// [`HeaderAppendAction`]: crate::proto::envoy::service::common::v3::header_value_option::HeaderAppendAction
 /// [`extra_request_headers`]: HttpFilterContext::extra_request_headers
 /// [`request_headers_to_set`]: HttpFilterContext::request_headers_to_set
 pub(crate) fn apply_request_header_mutation(mutation: &HeaderMutation, ctx: &mut HttpFilterContext<'_>) {
@@ -126,14 +128,15 @@ pub(crate) fn apply_request_header_mutation(mutation: &HeaderMutation, ctx: &mut
     set_request_headers(&mutation.set_headers, ctx);
 }
 
-/// Queue request header removals, skipping pseudo-headers.
+/// Queue request header removals, skipping pseudo-headers and `Host`.
 fn remove_request_headers(names: &[String], ctx: &mut HttpFilterContext<'_>) {
     for name in names {
-        if is_pseudo_header(name) {
+        if is_pseudo_header(name) || is_request_authority(name) {
             continue;
         }
         if let Ok(header_name) = http::HeaderName::try_from(name.as_str()) {
-            ctx.request_headers_to_remove.push(header_name);
+            ctx.request_headers_to_remove.push(header_name.clone());
+            ctx.pre_read_mutations.push(TrustedHeaderMutation::Remove(header_name));
         }
     }
 }
@@ -142,7 +145,7 @@ fn remove_request_headers(names: &[String], ctx: &mut HttpFilterContext<'_>) {
 fn set_request_headers(headers: &[HeaderValueOption], ctx: &mut HttpFilterContext<'_>) {
     for hvo in headers {
         let Some(hv) = &hvo.header else { continue };
-        if is_pseudo_header(&hv.key) {
+        if is_pseudo_header(&hv.key) || is_request_authority(&hv.key) {
             continue;
         }
         let Ok(name) = http::HeaderName::try_from(hv.key.as_str()) else {
@@ -159,30 +162,36 @@ fn dispatch_request_header(
     name: http::HeaderName,
     ctx: &mut HttpFilterContext<'_>,
 ) {
-    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+    use crate::proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
 
     let value = header_value_string(hv);
 
     match resolve_append_action(hvo) {
         HeaderAppendAction::OverwriteIfExistsOrAdd => {
             if let Ok(v) = http::HeaderValue::try_from(&value) {
-                ctx.request_headers_to_set.push((name, v));
+                ctx.request_headers_to_set.push((name.clone(), v.clone()));
+                ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(name, v));
             }
         },
         HeaderAppendAction::OverwriteIfExists => {
             if ctx.request.headers.contains_key(&name)
                 && let Ok(v) = http::HeaderValue::try_from(&value)
             {
-                ctx.request_headers_to_set.push((name, v));
+                ctx.request_headers_to_set.push((name.clone(), v.clone()));
+                ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(name, v));
             }
         },
         HeaderAppendAction::AddIfAbsent => {
             if !ctx.request.headers.contains_key(&name) {
-                ctx.extra_request_headers.push((Cow::Owned(hv.key.clone()), value));
+                ctx.extra_request_headers
+                    .push((Cow::Owned(hv.key.clone()), value.clone()));
+                ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(name, value));
             }
         },
         HeaderAppendAction::AppendIfExistsOrAdd => {
-            ctx.extra_request_headers.push((Cow::Owned(hv.key.clone()), value));
+            ctx.extra_request_headers
+                .push((Cow::Owned(hv.key.clone()), value.clone()));
+            ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(name, value));
         },
     }
 }
@@ -235,7 +244,7 @@ fn dispatch_response_header(
     val: http::HeaderValue,
     resp: &mut praxis_filter::Response,
 ) -> bool {
-    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+    use crate::proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
 
     match resolve_append_action(hvo) {
         HeaderAppendAction::AppendIfExistsOrAdd => {
@@ -333,6 +342,15 @@ pub(crate) fn is_pseudo_header(name: &str) -> bool {
     name.starts_with(':')
 }
 
+/// Returns `true` if the header is protocol-controlled request authority.
+///
+/// `Host` is the HTTP/1.1 singleton authority header. Applying a default
+/// `AppendIfExistsOrAdd` `ext_proc` mutation would create duplicate `Host`
+/// fields on the forwarded request, so request mutations never alter it.
+fn is_request_authority(name: &str) -> bool {
+    name.eq_ignore_ascii_case("host")
+}
+
 /// Build a [`HeaderValue`] proto with the given key and value.
 fn proto_header(key: &str, value: &str) -> HeaderValue {
     HeaderValue {
@@ -349,14 +367,10 @@ fn proto_header(key: &str, value: &str) -> HeaderValue {
 /// [`AppendIfExistsOrAdd`] and `false` to
 /// [`OverwriteIfExistsOrAdd`], matching proto3 default semantics.
 ///
-/// [`HeaderAppendAction`]: praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction
-/// [`AppendIfExistsOrAdd`]: praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction::AppendIfExistsOrAdd
-/// [`OverwriteIfExistsOrAdd`]: praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction::OverwriteIfExistsOrAdd
-fn resolve_append_action(
-    hvo: &HeaderValueOption,
-) -> praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction {
-    use praxis_proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
-
+/// [`HeaderAppendAction`]: crate::proto::envoy::service::common::v3::header_value_option::HeaderAppendAction
+/// [`AppendIfExistsOrAdd`]: crate::proto::envoy::service::common::v3::header_value_option::HeaderAppendAction::AppendIfExistsOrAdd
+/// [`OverwriteIfExistsOrAdd`]: crate::proto::envoy::service::common::v3::header_value_option::HeaderAppendAction::OverwriteIfExistsOrAdd
+fn resolve_append_action(hvo: &HeaderValueOption) -> HeaderAppendAction {
     if hvo.append_action != 0 {
         return HeaderAppendAction::try_from(hvo.append_action).unwrap_or(HeaderAppendAction::AppendIfExistsOrAdd);
     }
@@ -368,5 +382,196 @@ fn resolve_append_action(
         HeaderAppendAction::AppendIfExistsOrAdd
     } else {
         HeaderAppendAction::OverwriteIfExistsOrAdd
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+mod tests {
+    use super::*;
+    use crate::proto::envoy::service::common::v3::{HttpStatus, header_value_option::HeaderAppendAction};
+
+    // -----------------------------------------------------------------------
+    // header_value_string
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn header_value_string_prefers_raw_value() {
+        let hv = HeaderValue {
+            key: "x-test".to_owned(),
+            value: "fallback".to_owned(),
+            raw_value: b"primary".to_vec(),
+        };
+        assert_eq!(
+            header_value_string(&hv),
+            "primary",
+            "should prefer raw_value when non-empty"
+        );
+    }
+
+    #[test]
+    fn header_value_string_falls_back_to_value() {
+        let hv = HeaderValue {
+            key: "x-test".to_owned(),
+            value: "fallback".to_owned(),
+            raw_value: Vec::new(),
+        };
+        assert_eq!(
+            header_value_string(&hv),
+            "fallback",
+            "should use value when raw_value is empty"
+        );
+    }
+
+    #[test]
+    fn header_value_string_non_utf8_raw_value() {
+        let hv = HeaderValue {
+            key: "x-bin".to_owned(),
+            value: String::new(),
+            raw_value: vec![0xFF, 0xFE],
+        };
+        let s = header_value_string(&hv);
+        assert!(
+            s.contains('\u{FFFD}'),
+            "non-UTF-8 bytes should produce replacement chars, got: {s}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // is_pseudo_header
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pseudo_header_detected() {
+        assert!(is_pseudo_header(":method"), ":method is a pseudo-header");
+        assert!(is_pseudo_header(":path"), ":path is a pseudo-header");
+    }
+
+    #[test]
+    fn regular_header_not_pseudo() {
+        assert!(!is_pseudo_header("host"), "host is not a pseudo-header");
+        assert!(!is_pseudo_header("x-custom"), "x-custom is not a pseudo-header");
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_append_action
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_append_action_default_is_append() {
+        let hvo = HeaderValueOption {
+            header: None,
+            append: None,
+            append_action: 0,
+        };
+        let action = resolve_append_action(&hvo);
+        assert_eq!(
+            action,
+            HeaderAppendAction::AppendIfExistsOrAdd,
+            "default should be AppendIfExistsOrAdd"
+        );
+    }
+
+    #[test]
+    fn resolve_append_action_explicit_overwrite() {
+        let hvo = HeaderValueOption {
+            header: None,
+            append: None,
+            append_action: HeaderAppendAction::OverwriteIfExistsOrAdd as i32,
+        };
+        let action = resolve_append_action(&hvo);
+        assert_eq!(
+            action,
+            HeaderAppendAction::OverwriteIfExistsOrAdd,
+            "explicit overwrite should be OverwriteIfExistsOrAdd"
+        );
+    }
+
+    #[test]
+    fn resolve_append_action_deprecated_append_false() {
+        let hvo = HeaderValueOption {
+            header: None,
+            append: Some(false),
+            append_action: 0,
+        };
+        let action = resolve_append_action(&hvo);
+        assert_eq!(
+            action,
+            HeaderAppendAction::OverwriteIfExistsOrAdd,
+            "deprecated append=false should map to OverwriteIfExistsOrAdd"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // immediate_to_rejection
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn immediate_to_rejection_default_status_200() {
+        let imm = ImmediateResponse {
+            status: None,
+            headers: None,
+            body: String::new(),
+            grpc_status: None,
+            details: String::new(),
+        };
+        let action = immediate_to_rejection(&imm);
+        assert!(
+            matches!(&action, FilterAction::Reject(r) if r.status == 200),
+            "missing status should default to 200"
+        );
+    }
+
+    #[test]
+    fn immediate_to_rejection_custom_status() {
+        let imm = ImmediateResponse {
+            status: Some(HttpStatus { code: 403 }),
+            headers: None,
+            body: String::new(),
+            grpc_status: None,
+            details: String::new(),
+        };
+        let action = immediate_to_rejection(&imm);
+        assert!(
+            matches!(&action, FilterAction::Reject(r) if r.status == 403),
+            "should use the configured status code"
+        );
+    }
+
+    #[test]
+    fn immediate_to_rejection_negative_status_falls_back_to_500() {
+        let imm = ImmediateResponse {
+            status: Some(HttpStatus { code: -1 }),
+            headers: None,
+            body: String::new(),
+            grpc_status: None,
+            details: String::new(),
+        };
+        let action = immediate_to_rejection(&imm);
+        assert!(
+            matches!(&action, FilterAction::Reject(r) if r.status == 500),
+            "negative status should fall back to 500"
+        );
+    }
+
+    #[test]
+    fn immediate_to_rejection_with_body() {
+        let imm = ImmediateResponse {
+            status: Some(HttpStatus { code: 429 }),
+            headers: None,
+            body: "rate limited".to_owned(),
+            grpc_status: None,
+            details: String::new(),
+        };
+        let action = immediate_to_rejection(&imm);
+        assert!(
+            matches!(&action, FilterAction::Reject(r) if r.body.as_deref() == Some(b"rate limited".as_slice())),
+            "rejection should include the body"
+        );
     }
 }

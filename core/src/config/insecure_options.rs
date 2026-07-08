@@ -58,7 +58,7 @@ pub struct InsecureOptions {
     /// Allow health checks to loopback/metadata addresses.
     pub allow_private_health_checks: bool,
 
-    /// Allow admin endpoint on `0.0.0.0` / `[::]`.
+    /// Allow admin endpoint on non-loopback addresses (`0.0.0.0`, LAN IPs, etc.).
     pub allow_public_admin: bool,
 
     /// Allow running as root (UID 0).

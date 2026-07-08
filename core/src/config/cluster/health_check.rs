@@ -312,4 +312,31 @@ passive_unhealthy_threshold: 3
             "passive_healthy_threshold should be None"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // HealthCheckType Display
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn display_http() {
+        assert_eq!(
+            HealthCheckType::Http.to_string(),
+            "http",
+            "Http display should be 'http'"
+        );
+    }
+
+    #[test]
+    fn display_tcp() {
+        assert_eq!(HealthCheckType::Tcp.to_string(), "tcp", "Tcp display should be 'tcp'");
+    }
+
+    #[test]
+    fn display_grpc() {
+        assert_eq!(
+            HealthCheckType::Grpc.to_string(),
+            "grpc",
+            "Grpc display should be 'grpc'"
+        );
+    }
 }

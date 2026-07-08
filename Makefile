@@ -49,7 +49,7 @@ endif
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience \
 	bench \
-	lint generate-filter-docs fmt doc audit semver coverage coverage-check \
+	lint generate-filter-docs fmt doc audit semver publish-dry-run coverage coverage-check \
 	fuzz fuzz-build \
 	require-container-engine \
 	container container-run \
@@ -209,13 +209,25 @@ audit:
 	cargo audit
 	cargo deny check
 
+PUBLISH_CRATES := praxis-proxy-tls praxis-proxy-core \
+	praxis-proxy-filter praxis-proxy-protocol praxis-proxy
+
+publish-dry-run:
+	@for crate in $(PUBLISH_CRATES); do \
+		printf "packaging %-25s " "$$crate" ; \
+		cargo package -p "$$crate" --list > /dev/null 2>&1 \
+			&& echo "ok" \
+			|| { echo "FAILED"; exit 1; }; \
+	done
+	cargo publish -p praxis-proxy-tls --dry-run
+
 coverage:
 	cargo llvm-cov --workspace --html --output-dir target/coverage \
 		--exclude benchmarks \
 		--exclude praxis-tests-conformance \
 		--exclude xtask \
 		--ignore-filename-regex '(target/|tests/)' \
-		--fail-under-lines 95
+		--fail-under-lines 96
 
 coverage-check:
 	cargo llvm-cov --workspace --json \
@@ -223,7 +235,7 @@ coverage-check:
 		--exclude praxis-tests-conformance \
 		--exclude xtask \
 		--ignore-filename-regex '(target/|tests/)' \
-		--fail-under-lines 95 \
+		--fail-under-lines 96 \
 		--output-path coverage.json
 
 # -------------------------------------------------------------------
@@ -372,8 +384,9 @@ help:
 	@echo "  generate-filter-docs generate per-filter docs under docs/filters/"
 	@echo "  fmt                  format with nightly rustfmt"
 	@echo "  audit                cargo audit + cargo deny"
+	@echo "  publish-dry-run      validate crate packaging for crates.io"
 	@echo "  coverage             HTML coverage report"
-	@echo "  coverage-check       fail if line coverage < 95%%"
+	@echo "  coverage-check       fail if line coverage < 96%%"
 	@echo ""
 	@echo "Container:"
 	@echo "  container            build container image"
