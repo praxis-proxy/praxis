@@ -51,7 +51,8 @@ use crate::{
     BodySendMode,
     proto::envoy::service::ext_proc::v3::{
         BodyResponse, HeadersResponse, ImmediateResponse, ProcessingRequest, ProcessingResponse, ProtocolConfiguration,
-        TrailersResponse, external_processor_client::ExternalProcessorClient, processing_request, processing_response,
+        TrailersResponse, body_mutation, external_processor_client::ExternalProcessorClient, processing_request,
+        processing_response,
     },
 };
 
@@ -103,6 +104,10 @@ pub(crate) enum ExchangeError {
     #[error("ext_proc message timeout")]
     Timeout,
 
+    /// An override duration would overflow the deadline.
+    #[error("ext_proc deadline overflow")]
+    DeadlineOverflow,
+
     /// The server closed the stream without a required response.
     #[error("ext_proc server closed stream without response")]
     EmptyStream,
@@ -114,10 +119,6 @@ pub(crate) enum ExchangeError {
     /// The exchange entered a terminal state.
     #[error("ext_proc exchange closed")]
     Closed,
-
-    /// A processing deadline could not be represented.
-    #[error("ext_proc deadline overflow")]
-    DeadlineOverflow,
 
     /// A message violated within-direction ordering.
     #[error("ext_proc ordering violation: {0}")]
@@ -149,10 +150,7 @@ pub(crate) enum ExchangeEvent {
         metadata: Option<prost_wkt_types::Struct>,
     },
     /// Request trailers response.
-    #[expect(
-        dead_code,
-        reason = "classified by receive; consumed in follow-up response lifecycle PR"
-    )]
+    #[expect(dead_code, reason = "classified by receive; consumed in response-phase processing")]
     RequestTrailers {
         /// Processor response payload.
         response: TrailersResponse,
@@ -160,10 +158,7 @@ pub(crate) enum ExchangeEvent {
         metadata: Option<prost_wkt_types::Struct>,
     },
     /// Response headers response.
-    #[expect(
-        dead_code,
-        reason = "classified by receive; consumed in follow-up response lifecycle PR"
-    )]
+    #[expect(dead_code, reason = "classified by receive; consumed in response-phase processing")]
     ResponseHeaders {
         /// Processor response payload.
         response: HeadersResponse,
@@ -171,10 +166,7 @@ pub(crate) enum ExchangeEvent {
         metadata: Option<prost_wkt_types::Struct>,
     },
     /// Response body response.
-    #[expect(
-        dead_code,
-        reason = "classified by receive; consumed in follow-up response lifecycle PR"
-    )]
+    #[expect(dead_code, reason = "classified by receive; consumed in response-phase processing")]
     ResponseBody {
         /// Processor response payload.
         response: BodyResponse,
@@ -182,10 +174,7 @@ pub(crate) enum ExchangeEvent {
         metadata: Option<prost_wkt_types::Struct>,
     },
     /// Response trailers response.
-    #[expect(
-        dead_code,
-        reason = "classified by receive; consumed in follow-up response lifecycle PR"
-    )]
+    #[expect(dead_code, reason = "classified by receive; consumed in response-phase processing")]
     ResponseTrailers {
         /// Processor response payload.
         response: TrailersResponse,
@@ -443,25 +432,29 @@ impl ExtProcExchange {
     /// it. The gRPC stream is established when [`send`] or
     /// [`receive`] first drives the pending future.
     ///
+    /// For the full-duplex path with preloaded request headers,
+    /// use [`open_with_request_headers`] instead.
+    ///
     /// [`send`]: Self::send
     /// [`receive`]: Self::receive
-    #[expect(clippy::unnecessary_wraps, reason = "follow-up PR adds preload that can fail")]
-    pub(crate) fn open(channel: Channel, config: &ExchangeConfig) -> Result<Self, ExchangeError> {
+    /// [`open_with_request_headers`]: Self::open_with_request_headers
+    #[cfg_attr(not(test), expect(dead_code, reason = "standard no-preload path used by tests"))]
+    pub(crate) fn open(channel: Channel, config: &ExchangeConfig) -> Self {
         let (tx, rx) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
+        let protocol_config = ProtocolConfiguration {
+            request_body_mode: config.request_body_mode.to_proto_i32(),
+            response_body_mode: config.response_body_mode.to_proto_i32(),
+            send_body_without_waiting_for_header_response: false,
+        };
         let request_stream = ReceiverStream::new(rx);
         let mut client = ExternalProcessorClient::new(channel);
         let pending: PinnedProcessFuture = Box::pin(async move { client.process(request_stream).await });
-
-        Ok(Self {
+        Self {
             active_processing: None,
             first_sent: false,
             max_message_timeout: config.max_message_timeout,
             message_timeout: config.message_timeout,
-            protocol_config: ProtocolConfiguration {
-                request_body_mode: config.request_body_mode.to_proto_i32(),
-                response_body_mode: config.response_body_mode.to_proto_i32(),
-                send_body_without_waiting_for_header_response: false,
-            },
+            protocol_config,
             request_body_mode: config.request_body_mode,
             request_output: OutputPhase::None,
             request_send: DirectionSendState::new(),
@@ -471,7 +464,92 @@ impl ExtProcExchange {
             response_send: DirectionSendState::new(),
             bootstrap: BootstrapState::Pending(sync_wrapper::SyncWrapper::new(pending)),
             terminal: false,
-        })
+        }
+    }
+
+    /// Open a new exchange with request headers preloaded atomically.
+    ///
+    /// Queues the headers message with [`ProtocolConfiguration`] into
+    /// the channel and commits the send-phase transition in one step.
+    /// The returned exchange is immediately in the `Headers` send
+    /// phase with `first_sent = true`.
+    ///
+    /// Restricted to full-duplex request mode — non-full-duplex
+    /// callers must use [`open`] followed by [`send`].
+    ///
+    /// [`open`]: Self::open
+    /// [`send`]: Self::send
+    /// [`RequestHeaders`]: processing_request::Request::RequestHeaders
+    #[expect(clippy::too_many_lines, reason = "struct initialization + state commit")]
+    pub(crate) fn open_with_request_headers(
+        channel: Channel,
+        config: &ExchangeConfig,
+        headers: processing_request::Request,
+    ) -> Result<Self, ExchangeError> {
+        if !config.request_body_mode.is_full_duplex() {
+            return Err(ExchangeError::OrderingViolation(
+                "open_with_request_headers requires full-duplex request body mode".to_owned(),
+            ));
+        }
+        if !matches!(&headers, processing_request::Request::RequestHeaders(_)) {
+            return Err(ExchangeError::OrderingViolation(format!(
+                "preload must be RequestHeaders, got {}",
+                request_variant_name(&headers)
+            )));
+        }
+
+        let (tx, rx) = mpsc::channel(REQUEST_CHANNEL_CAPACITY);
+        let protocol_config = ProtocolConfiguration {
+            request_body_mode: config.request_body_mode.to_proto_i32(),
+            response_body_mode: config.response_body_mode.to_proto_i32(),
+            send_body_without_waiting_for_header_response: false,
+        };
+
+        let mut exchange = Self {
+            active_processing: None,
+            first_sent: true,
+            max_message_timeout: config.max_message_timeout,
+            message_timeout: config.message_timeout,
+            protocol_config,
+            request_body_mode: config.request_body_mode,
+            request_output: OutputPhase::None,
+            request_send: DirectionSendState::new(),
+            request_tx: Some(tx.clone()),
+            response_body_mode: config.response_body_mode,
+            response_output: OutputPhase::None,
+            response_send: DirectionSendState::new(),
+            bootstrap: BootstrapState::Closed,
+            terminal: false,
+        };
+
+        let transition = exchange.compute_send_transition(&headers)?;
+        let checked_deadline = transition
+            .active_state
+            .map(|_| {
+                tokio::time::Instant::now()
+                    .checked_add(exchange.message_timeout)
+                    .ok_or(ExchangeError::DeadlineOverflow)
+            })
+            .transpose()?;
+
+        let msg = ProcessingRequest {
+            request: Some(headers),
+            protocol_config: Some(protocol_config),
+            metadata_context: None,
+            attributes: std::collections::HashMap::new(),
+            observability_mode: false,
+        };
+        tx.try_send(msg)
+            .map_err(|_send| ExchangeError::OrderingViolation("pre-load into empty channel failed".to_owned()))?;
+
+        exchange.apply_send_transition(&transition, checked_deadline);
+
+        let request_stream = ReceiverStream::new(rx);
+        let mut client = ExternalProcessorClient::new(channel);
+        let pending: PinnedProcessFuture = Box::pin(async move { client.process(request_stream).await });
+        exchange.bootstrap = BootstrapState::Pending(sync_wrapper::SyncWrapper::new(pending));
+
+        Ok(exchange)
     }
 
     /// Send a processing request with transactional state update.
@@ -497,7 +575,6 @@ impl ExtProcExchange {
         }
 
         let timeout = transition.active_state.map(|_| self.message_timeout);
-        // Clone the sender to avoid aliasing `&mut self` with the permit borrow.
         let tx = self.request_tx.clone().ok_or(ExchangeError::SendFailed)?;
         let permit = self.reserve_while_bootstrapping(&tx).await?;
 
@@ -557,15 +634,6 @@ impl ExtProcExchange {
     /// Consume remaining response stream messages to allow clean
     /// h2 stream closure. Prevents `RST_STREAM` on exchange drop
     /// when the server has trailing data.
-    ///
-    /// Only drains when the bootstrap is [`Ready`]. If the
-    /// bootstrap is still [`Pending`], this is a no-op — callers
-    /// must ensure at least one successful [`receive`] before
-    /// calling `drain_trailing` for clean closure.
-    ///
-    /// [`Ready`]: BootstrapState::Ready
-    /// [`Pending`]: BootstrapState::Pending
-    /// [`receive`]: Self::receive
     pub(crate) async fn drain_trailing(&mut self) {
         if let BootstrapState::Ready(ref mut stream) = self.bootstrap {
             while stream.message().await.is_ok_and(|m| m.is_some()) {}
@@ -573,6 +641,10 @@ impl ExtProcExchange {
     }
 
     /// Whether the exchange has entered a terminal state.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "used by integration tests and response-phase processing")
+    )]
     pub(crate) fn is_terminal(&self) -> bool {
         self.terminal
     }
@@ -581,7 +653,7 @@ impl ExtProcExchange {
     ///
     /// Outbound closure is direction-local: the bootstrap/response
     /// stream may still contain buffered responses.
-    #[expect(dead_code, reason = "used by integration tests and follow-up PRs")]
+    #[expect(dead_code, reason = "used by integration tests and response-phase processing")]
     pub(crate) fn is_outbound_closed(&self) -> bool {
         self.request_tx.is_none()
     }
@@ -645,17 +717,11 @@ impl ExtProcExchange {
     pub(crate) fn output_phases(&self) -> (OutputPhase, OutputPhase) {
         (self.request_output, self.response_output)
     }
-}
 
-// -----------------------------------------------------------------------------
-// Send Transition — Computation
-// -----------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Send Transition — Computation
+    // -------------------------------------------------------------------------
 
-#[expect(
-    clippy::multiple_inherent_impl,
-    reason = "sectioned state-machine implementation keeps domains reviewable"
-)]
-impl ExtProcExchange {
     /// Compute the proposed send transition without mutating state.
     ///
     /// Validates ordering, body-mode gating, and active processing
@@ -667,7 +733,7 @@ impl ExtProcExchange {
     /// per-message timeout.
     #[expect(
         clippy::too_many_lines,
-        reason = "six direction×type variants with mode-aware active-state logic"
+        reason = "six direction x type variants with mode-aware active-state logic"
     )]
     fn compute_send_transition(&self, request: &processing_request::Request) -> Result<SendTransition, ExchangeError> {
         let transition = match request {
@@ -801,22 +867,16 @@ impl ExtProcExchange {
         }
         Ok(())
     }
-}
 
-// -----------------------------------------------------------------------------
-// Send Transition — Application
-// -----------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Send Transition — Application
+    // -------------------------------------------------------------------------
 
-#[expect(
-    clippy::multiple_inherent_impl,
-    reason = "sectioned state-machine implementation keeps domains reviewable"
-)]
-impl ExtProcExchange {
     /// Apply the committed transition atomically (no await).
     ///
-    /// The deadline is created after `reserve().await` and before
-    /// `permit.send()`, so producer backpressure is excluded from
-    /// the processing deadline.
+    /// The deadline was created by [`commit_message`] after
+    /// `reserve().await` and before `permit.send()`, so producer
+    /// backpressure is excluded from the processing deadline.
     fn apply_send_transition(&mut self, t: &SendTransition, checked_deadline: Option<tokio::time::Instant>) {
         let state = match t.direction {
             Direction::Request => &mut self.request_send,
@@ -835,49 +895,11 @@ impl ExtProcExchange {
             });
         }
     }
-}
 
-// -----------------------------------------------------------------------------
-// Send Phase Validation Helpers
-// -----------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
+    // Receive Implementation
+    // -------------------------------------------------------------------------
 
-/// Require the current phase to be `expected`.
-fn require_phase(current: SendPhase, expected: SendPhase, msg: &str) -> Result<(), ExchangeError> {
-    if current != expected {
-        return Err(ExchangeError::OrderingViolation(msg.to_owned()));
-    }
-    Ok(())
-}
-
-/// Require the current phase to accept a body message.
-fn require_body_phase(current: SendPhase, label: &str) -> Result<(), ExchangeError> {
-    if !matches!(current, SendPhase::Headers | SendPhase::BodyOpen) {
-        return Err(ExchangeError::OrderingViolation(format!(
-            "{label} requires headers sent and no EOS/trailers"
-        )));
-    }
-    Ok(())
-}
-
-/// Require the current phase to accept trailers.
-fn require_trailer_phase(current: SendPhase, label: &str) -> Result<(), ExchangeError> {
-    if !matches!(current, SendPhase::Headers | SendPhase::BodyOpen) {
-        return Err(ExchangeError::OrderingViolation(format!(
-            "{label} requires headers sent and no EOS"
-        )));
-    }
-    Ok(())
-}
-
-// -----------------------------------------------------------------------------
-// Receive Implementation
-// -----------------------------------------------------------------------------
-
-#[expect(
-    clippy::multiple_inherent_impl,
-    reason = "sectioned state-machine implementation keeps domains reviewable"
-)]
-impl ExtProcExchange {
     /// Ensure the bootstrap has resolved to a ready response
     /// stream. Awaits the pending Process future if necessary.
     async fn ensure_response_stream(&mut self) -> Result<(), ExchangeError> {
@@ -896,11 +918,11 @@ impl ExtProcExchange {
     /// Internal receive with deferred stream resolution, override
     /// loop, and classification.
     ///
-    /// 1. Resolves the deferred response stream if needed.
+    /// 1. Ensures the response stream has been resolved from the pending bootstrap future.
     /// 2. Reads a response with optional deadline from active processing.
     /// 3. Runs the override loop: if `override_message_timeout` is present on the envelope, it is an override envelope.
-    ///    Valid overrides replace the deadline and continue reading. Invalid overrides are silently ignored (the entire
-    ///    envelope is discarded, including any populated response oneof). Override envelopes never reach
+    ///    Valid overrides replace the deadline and continue reading. Invalid overrides are silently ignored. The entire
+    ///    envelope is discarded, including any populated response oneof. Override envelopes never reach
     ///    [`classify_and_validate`].
     /// 4. Classifies the response against expected type and validates output ordering.
     ///
@@ -1165,6 +1187,54 @@ impl ExtProcExchange {
 }
 
 // -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
+
+/// Return a human-readable name for a `ProcessingRequest` variant.
+fn request_variant_name(req: &processing_request::Request) -> &'static str {
+    match req {
+        processing_request::Request::RequestHeaders(_) => "RequestHeaders",
+        processing_request::Request::RequestBody(_) => "RequestBody",
+        processing_request::Request::RequestTrailers(_) => "RequestTrailers",
+        processing_request::Request::ResponseHeaders(_) => "ResponseHeaders",
+        processing_request::Request::ResponseBody(_) => "ResponseBody",
+        processing_request::Request::ResponseTrailers(_) => "ResponseTrailers",
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Send Phase Validation Helpers
+// -----------------------------------------------------------------------------
+
+/// Require the current phase to be `expected`.
+fn require_phase(current: SendPhase, expected: SendPhase, msg: &str) -> Result<(), ExchangeError> {
+    if current != expected {
+        return Err(ExchangeError::OrderingViolation(msg.to_owned()));
+    }
+    Ok(())
+}
+
+/// Require the current phase to accept a body message.
+fn require_body_phase(current: SendPhase, label: &str) -> Result<(), ExchangeError> {
+    if !matches!(current, SendPhase::Headers | SendPhase::BodyOpen) {
+        return Err(ExchangeError::OrderingViolation(format!(
+            "{label} requires headers sent and no EOS/trailers"
+        )));
+    }
+    Ok(())
+}
+
+/// Require the current phase to accept trailers.
+fn require_trailer_phase(current: SendPhase, label: &str) -> Result<(), ExchangeError> {
+    if !matches!(current, SendPhase::Headers | SendPhase::BodyOpen) {
+        return Err(ExchangeError::OrderingViolation(format!(
+            "{label} requires headers sent and no EOS"
+        )));
+    }
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
 // Duration Parsing
 // -----------------------------------------------------------------------------
 
@@ -1241,9 +1311,7 @@ fn validate_body_output(output: &mut OutputPhase, body_resp: &BodyResponse, labe
         .as_ref()
         .and_then(|c| c.body_mutation.as_ref())
         .and_then(|bm| match &bm.mutation {
-            Some(crate::proto::envoy::service::ext_proc::v3::body_mutation::Mutation::StreamedResponse(sr)) => {
-                Some(sr.end_of_stream)
-            },
+            Some(body_mutation::Mutation::StreamedResponse(sr)) => Some(sr.end_of_stream),
             _ => None,
         })
         .unwrap_or(false);
@@ -1259,7 +1327,8 @@ fn validate_body_output(output: &mut OutputPhase, body_resp: &BodyResponse, labe
 /// Validate that the body response mutation type matches the
 /// direction's body send mode.
 ///
-/// - [`BodySendMode::FullDuplexStreamed`] requires a [`StreamedBodyResponse`] mutation.
+/// - [`BodySendMode::FullDuplexStreamed`] allows absent mutation (no-op body preservation) or a
+///   [`StreamedBodyResponse`] mutation. A present non-streamed mutation is rejected.
 /// - All other modes reject [`StreamedBodyResponse`] mutations.
 ///
 /// [`StreamedBodyResponse`]: crate::proto::envoy::service::ext_proc::v3::StreamedBodyResponse
@@ -1268,20 +1337,15 @@ fn validate_body_mutation_mode(
     body_mode: BodySendMode,
     label: &str,
 ) -> Result<(), ExchangeError> {
-    let has_streamed = body_resp
-        .response
-        .as_ref()
-        .and_then(|c| c.body_mutation.as_ref())
-        .is_some_and(|bm| {
-            matches!(
-                bm.mutation,
-                Some(crate::proto::envoy::service::ext_proc::v3::body_mutation::Mutation::StreamedResponse(_))
-            )
-        });
+    let mutation = body_resp.response.as_ref().and_then(|c| c.body_mutation.as_ref());
 
-    if body_mode.is_full_duplex() && !has_streamed {
+    let has_streamed =
+        mutation.is_some_and(|bm| matches!(bm.mutation, Some(body_mutation::Mutation::StreamedResponse(_))));
+    let has_non_streamed = mutation.is_some() && !has_streamed;
+
+    if body_mode.is_full_duplex() && has_non_streamed {
         return Err(ExchangeError::OrderingViolation(format!(
-            "{label}: full-duplex mode requires StreamedBodyResponse mutation"
+            "{label}: full-duplex mode requires StreamedBodyResponse or absent body mutation"
         )));
     }
     if !body_mode.is_full_duplex() && has_streamed {
@@ -1317,7 +1381,7 @@ async fn read_with_optional_deadline(
 /// after this returns.
 /// `timeout` is `Some(duration)` when the committed message
 /// requires a processing deadline, `None` otherwise.
-#[cfg(test)]
+#[cfg_attr(not(test), expect(dead_code, reason = "used by deterministic send tests"))]
 pub(crate) async fn commit_message(
     tx: &mpsc::Sender<ProcessingRequest>,
     msg: ProcessingRequest,

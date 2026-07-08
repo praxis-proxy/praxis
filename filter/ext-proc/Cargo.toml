@@ -27,6 +27,7 @@ prost = { workspace = true }
 prost-wkt-types = { workspace = true }
 tonic-prost = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 sync_wrapper = { workspace = true }
 thiserror = { workspace = true }
@@ -45,6 +46,4 @@ tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
 praxis-core = { workspace = true }
-prost-types = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
-tokio-stream = { workspace = true }

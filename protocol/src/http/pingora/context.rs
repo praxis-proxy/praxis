@@ -7,7 +7,7 @@ use std::{collections::VecDeque, net::IpAddr, sync::Arc, time::Instant};
 
 use bytes::Bytes;
 use praxis_core::connectivity::Upstream;
-use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request};
+use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, TrustedHeaderMutation};
 use tokio::sync::OwnedSemaphorePermit;
 
 // -----------------------------------------------------------------------------
@@ -93,6 +93,20 @@ pub struct PingoraRequestCtx {
     ///
     /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
     pub filter_metadata: std::collections::HashMap<String, String>,
+
+    /// Ordered log of trusted header mutations from pre-read body
+    /// processing. Swapped into each [`HttpFilterContext`] and written
+    /// back after filter execution.
+    ///
+    /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+    pub pre_read_mutations: Vec<TrustedHeaderMutation>,
+
+    /// Structured per-request metadata keyed by namespace.
+    /// Swapped into each [`HttpFilterContext`] and written back
+    /// after filter execution.
+    ///
+    /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+    pub structured_metadata: std::collections::HashMap<String, serde_json::Value>,
 
     /// Post-mutation request body length produced during `StreamBuffer`
     /// pre-read.
@@ -251,6 +265,8 @@ macro_rules! filter_context {
             request_headers_to_remove: Vec::new(),
             request_headers_to_set: Vec::new(),
             filter_metadata: std::mem::take(&mut $ctx.filter_metadata),
+            pre_read_mutations: std::mem::take(&mut $ctx.pre_read_mutations),
+            structured_metadata: std::mem::take(&mut $ctx.structured_metadata),
             filter_results: std::mem::take(&mut $ctx.filter_results),
             filter_state: std::mem::take(&mut $ctx.filter_state),
             health_registry: $pipeline.health_registry(),
@@ -398,6 +414,8 @@ impl Default for PingoraRequestCtx {
             downstream_tls: false,
             extensions: praxis_filter::RequestExtensions::new(),
             filter_metadata: std::collections::HashMap::new(),
+            pre_read_mutations: Vec::new(),
+            structured_metadata: std::collections::HashMap::new(),
             mutated_request_body_len: None,
             pinned_pipeline: None,
             filter_results: std::collections::HashMap::new(),

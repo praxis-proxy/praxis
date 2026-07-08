@@ -232,7 +232,7 @@ fn warn_insecure_options(config: &Config) {
     );
     insecure_warn(
         o.allow_public_admin,
-        "allow_public_admin: admin may bind all interfaces",
+        "allow_public_admin: admin may bind non-loopback addresses",
     );
     insecure_warn(
         o.allow_tls_without_sni,

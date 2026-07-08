@@ -5,12 +5,78 @@
 
 use std::{any::Any, borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
 
-use http::{HeaderMap, Method, StatusCode, Uri};
+use http::{HeaderMap, Method, StatusCode, Uri, header::HeaderName};
 use praxis_core::{
     connectivity::Upstream, health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, time::TimeSource,
 };
 
 use crate::{body::BodyMode, extensions::RequestExtensions, pipeline::body::merge_body_mode, results::FilterResultSet};
+
+/// Maximum number of keys per namespace in structured metadata.
+///
+/// Prevents unbounded accumulation from streaming processors that
+/// send unique keys across many response messages. Existing keys
+/// can still be overwritten past this limit.
+const MAX_STRUCTURED_METADATA_KEYS: usize = 64;
+
+// -----------------------------------------------------------------------------
+// TrustedHeaderMutation
+// -----------------------------------------------------------------------------
+
+/// Trusted header mutation recorded during pre-read body processing.
+///
+/// Pre-read filters run *before* the request-phase pipeline. Mutations
+/// they produce cannot be applied immediately because the request
+/// headers have already been captured. Instead, they are stored as an
+/// ordered log and replayed when the pipeline runs.
+///
+/// Downstream-supplied headers are untrusted. Only mutations in this
+/// log are considered authoritative by provenance-aware filters such
+/// as `endpoint_selector`.
+#[derive(Debug, Clone)]
+pub enum TrustedHeaderMutation {
+    /// Remove the header from the request.
+    Remove(HeaderName),
+
+    /// Set (overwrite) the header to a specific value.
+    ///
+    /// Stores [`http::header::HeaderValue`] to preserve non-text bytes
+    /// faithfully.
+    Set(HeaderName, http::header::HeaderValue),
+
+    /// Add the header with a string value.
+    ///
+    /// Uses `String` rather than [`HeaderValue`] because pre-read
+    /// `extra_request_headers` are string-typed. Trusted routing
+    /// values are always text (e.g. `host:port` addresses).
+    ///
+    /// [`HeaderValue`]: http::header::HeaderValue
+    Add(HeaderName, String),
+}
+
+impl TrustedHeaderMutation {
+    /// Whether this mutation targets the given header name.
+    pub fn matches_header(&self, name: &HeaderName) -> bool {
+        match self {
+            Self::Remove(n) | Self::Set(n, _) | Self::Add(n, _) => n == name,
+        }
+    }
+}
+
+/// Tri-state result from [`HttpFilterContext::pending_header_value`].
+///
+/// Distinguishes "not mentioned" from "explicitly removed" so that
+/// callers like `endpoint_selector` know whether to fall through to
+/// pre-read provenance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PendingHeaderResult {
+    /// The header was not mentioned in any pending mutation list.
+    Absent,
+    /// The header was explicitly removed by a pending mutation.
+    Removed,
+    /// The header has a resolved pending value.
+    Value(String),
+}
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -88,10 +154,10 @@ pub struct HttpFilterContext<'a> {
     pub extra_request_headers: Vec<(Cow<'static, str>, String)>,
 
     /// Headers to remove from the upstream request.
-    pub request_headers_to_remove: Vec<http::header::HeaderName>,
+    pub request_headers_to_remove: Vec<HeaderName>,
 
     /// Headers to set (overwrite) on the upstream request.
-    pub request_headers_to_set: Vec<(http::header::HeaderName, http::header::HeaderValue)>,
+    pub request_headers_to_set: Vec<(HeaderName, http::header::HeaderValue)>,
 
     /// Durable per-request metadata that persists across all
     /// Pingora lifecycle phases (request, request-body, response,
@@ -104,6 +170,24 @@ pub struct HttpFilterContext<'a> {
     ///
     /// [`filter_results`]: Self::filter_results
     pub filter_metadata: HashMap<String, String>,
+
+    /// Ordered log of trusted header mutations from pre-read body
+    /// processing. Replayed by [`apply_pre_read_mutations`] after
+    /// the request-phase pipeline runs.
+    ///
+    /// [`apply_pre_read_mutations`]: Self
+    pub pre_read_mutations: Vec<TrustedHeaderMutation>,
+
+    /// Structured per-request metadata keyed by namespace.
+    ///
+    /// Unlike [`filter_metadata`] which stores flat string
+    /// key-value pairs, this stores nested JSON values per
+    /// namespace. Used by filters that need to pass structured
+    /// data (e.g. `ext_proc` dynamic metadata) across lifecycle
+    /// phases.
+    ///
+    /// [`filter_metadata`]: Self::filter_metadata
+    pub structured_metadata: HashMap<String, serde_json::Value>,
 
     /// Filter result map: `filter_name` -> result entries.
     ///
@@ -319,6 +403,206 @@ impl HttpFilterContext<'_> {
         let boxed = self.filter_state.remove(&idx)?;
         Some(*boxed.downcast::<T>().ok()?)
     }
+
+    /// Resolve the effective value of a trusted header from the
+    /// pre-read mutation log.
+    ///
+    /// Walks the ordered mutation log forward, applying each mutation
+    /// in sequence. Only trusted sources (pre-read filter mutations)
+    /// are considered; the original request headers are intentionally
+    /// excluded.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - A `Set` mutation contains a non-text [`HeaderValue`]
+    /// - Multiple distinct values remain after all mutations (ambiguous final state)
+    ///
+    /// [`HeaderValue`]: http::header::HeaderValue
+    pub fn resolve_trusted_header(&self, name: &HeaderName) -> Result<Option<String>, String> {
+        let values = collect_trusted_values(&self.pre_read_mutations, name)?;
+        require_unique_value(values, name, "trusted")
+    }
+
+    /// Resolve the effective pending value of a header from the
+    /// mutation lists (not the original request).
+    ///
+    /// Returns a tri-state [`PendingHeaderResult`] so callers can
+    /// distinguish "not mentioned" from "explicitly removed."
+    /// Applies mutations in HTTP order: remove → set → add.
+    ///
+    /// Multiple distinct values are rejected as ambiguous. This is
+    /// intentionally stricter than the normal pipeline's last-write-wins
+    /// semantics because routing-critical headers (used by
+    /// `endpoint_selector`) must have a single unambiguous value.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if a pending `Set` value contains
+    /// non-text bytes, or if the final state has multiple
+    /// distinct values.
+    pub fn pending_header_value(&self, name: &HeaderName) -> Result<PendingHeaderResult, String> {
+        // The pipeline normalizes pending mutations as remove → set → add:
+        // a remove clears any prior value, a set establishes a new one, and
+        // adds accumulate. When both remove and set are present for the same
+        // header, the set wins because it is applied after the remove.
+        let removed = self.request_headers_to_remove.iter().any(|n| n == name);
+        let set_value = find_last_set(&self.request_headers_to_set, name)?;
+        let extras = collect_extras(&self.extra_request_headers, name);
+
+        let mut all: Vec<String> = Vec::new();
+        if let Some(s) = set_value {
+            all.push(s);
+        }
+        all.extend(extras);
+
+        if all.is_empty() {
+            return Ok(if removed {
+                PendingHeaderResult::Removed
+            } else {
+                PendingHeaderResult::Absent
+            });
+        }
+
+        match require_unique_value(all, name, "pending")? {
+            Some(v) => Ok(PendingHeaderResult::Value(v)),
+            None => Ok(if removed {
+                PendingHeaderResult::Removed
+            } else {
+                PendingHeaderResult::Absent
+            }),
+        }
+    }
+
+    /// Set a structured metadata value under a namespace.
+    ///
+    /// Each namespace is stored as a JSON object; `key` becomes
+    /// a field within that object. If the namespace does not yet
+    /// exist, a new empty object is created first.
+    ///
+    /// A per-namespace key limit of 64
+    /// prevents unbounded accumulation from streaming processors.
+    /// New keys are silently dropped once the limit is reached;
+    /// existing keys can still be overwritten.
+    pub fn set_structured_metadata(&mut self, namespace: &str, key: &str, value: serde_json::Value) {
+        let ns = self
+            .structured_metadata
+            .entry(namespace.to_owned())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let serde_json::Value::Object(map) = ns {
+            if map.len() >= MAX_STRUCTURED_METADATA_KEYS && !map.contains_key(key) {
+                tracing::warn!(
+                    namespace,
+                    key,
+                    limit = MAX_STRUCTURED_METADATA_KEYS,
+                    "structured metadata key limit reached; dropping new key"
+                );
+                return;
+            }
+            map.insert(key.to_owned(), value);
+        }
+    }
+
+    /// Get a structured metadata value from a namespace.
+    ///
+    /// Returns `None` when the namespace is absent, when it is
+    /// not a JSON object, or when `key` is not present within it.
+    pub fn get_structured_metadata(&self, namespace: &str, key: &str) -> Option<&serde_json::Value> {
+        self.structured_metadata.get(namespace)?.as_object()?.get(key)
+    }
+
+    /// Merge a complete namespace object, overwriting existing keys.
+    ///
+    /// Keys already present in the namespace are overwritten;
+    /// keys absent from `values` are left untouched. New keys
+    /// that would exceed the per-namespace limit of 64
+    /// are silently dropped.
+    pub fn merge_structured_metadata(&mut self, namespace: &str, values: serde_json::Map<String, serde_json::Value>) {
+        let ns = self
+            .structured_metadata
+            .entry(namespace.to_owned())
+            .or_insert_with(|| serde_json::Value::Object(serde_json::Map::new()));
+        if let serde_json::Value::Object(map) = ns {
+            for (key, value) in values {
+                if map.len() >= MAX_STRUCTURED_METADATA_KEYS && !map.contains_key(&key) {
+                    tracing::warn!(
+                        namespace,
+                        key,
+                        limit = MAX_STRUCTURED_METADATA_KEYS,
+                        "structured metadata key limit reached during merge; dropping new key"
+                    );
+                    continue;
+                }
+                map.insert(key, value);
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Header Resolution Helpers
+// -----------------------------------------------------------------------------
+
+/// Walk the trusted mutation log forward and collect the effective values.
+fn collect_trusted_values(mutations: &[TrustedHeaderMutation], name: &HeaderName) -> Result<Vec<String>, String> {
+    let mut values: Vec<String> = Vec::new();
+    for mutation in mutations {
+        match mutation {
+            TrustedHeaderMutation::Remove(n) if n == name => values.clear(),
+            TrustedHeaderMutation::Set(n, v) if n == name => {
+                let s = v
+                    .to_str()
+                    .map_err(|_err| format!("trusted header '{name}' contains non-text bytes"))?;
+                values.clear();
+                values.push(s.to_owned());
+            },
+            TrustedHeaderMutation::Add(n, v) if n == name => values.push(v.clone()),
+            _ => {},
+        }
+    }
+    Ok(values)
+}
+
+/// Find the last matching set value for a header name.
+fn find_last_set(
+    headers_to_set: &[(HeaderName, http::header::HeaderValue)],
+    name: &HeaderName,
+) -> Result<Option<String>, String> {
+    for (n, v) in headers_to_set.iter().rev() {
+        if n == name {
+            let s = v
+                .to_str()
+                .map_err(|_err| format!("pending header '{name}' contains non-text bytes"))?;
+            return Ok(Some(s.to_owned()));
+        }
+    }
+    Ok(None)
+}
+
+/// Collect all matching extra header values for a header name.
+fn collect_extras(extras: &[(Cow<'_, str>, String)], name: &HeaderName) -> Vec<String> {
+    let name_str = name.as_str();
+    extras
+        .iter()
+        .filter(|(n, _)| n.eq_ignore_ascii_case(name_str))
+        .map(|(_, v)| v.clone())
+        .collect()
+}
+
+/// Require that all values in a list are identical, returning the unique value.
+fn require_unique_value(values: Vec<String>, name: &HeaderName, source: &str) -> Result<Option<String>, String> {
+    let mut iter = values.into_iter();
+    let Some(first) = iter.next() else {
+        return Ok(None);
+    };
+    for v in iter {
+        if v != first {
+            return Err(format!(
+                "{source} header '{name}' has ambiguous values: '{first}' vs '{v}'"
+            ));
+        }
+    }
+    Ok(Some(first))
 }
 
 // -----------------------------------------------------------------------------
@@ -887,5 +1171,425 @@ mod tests {
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.insert_filter_state(42_u64);
         assert!(ctx.filter_state.is_empty(), "state map should remain empty");
+    }
+
+    // -------------------------------------------------------------------------
+    // TrustedHeaderMutation Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn matches_header_remove() {
+        let mutation = TrustedHeaderMutation::Remove("x-dest".parse().unwrap());
+        assert!(mutation.matches_header(&"x-dest".parse().unwrap()));
+        assert!(!mutation.matches_header(&"x-other".parse().unwrap()));
+    }
+
+    #[test]
+    fn matches_header_set() {
+        let mutation = TrustedHeaderMutation::Set("x-dest".parse().unwrap(), "val".parse().unwrap());
+        assert!(mutation.matches_header(&"x-dest".parse().unwrap()));
+        assert!(!mutation.matches_header(&"x-other".parse().unwrap()));
+    }
+
+    #[test]
+    fn matches_header_add() {
+        let mutation = TrustedHeaderMutation::Add("x-dest".parse().unwrap(), "val".to_owned());
+        assert!(mutation.matches_header(&"x-dest".parse().unwrap()));
+        assert!(!mutation.matches_header(&"x-other".parse().unwrap()));
+    }
+
+    // -------------------------------------------------------------------------
+    // resolve_trusted_header Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn resolve_trusted_header_empty_log() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            None,
+            "empty mutation log should resolve to None"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_add() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host:8080".to_owned(),
+        ));
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            Some("host:8080".to_owned()),
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_set() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(
+            "x-dest".parse().unwrap(),
+            "host:9090".parse().unwrap(),
+        ));
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            Some("host:9090".to_owned()),
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_remove_hides_earlier_add() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host:8080".to_owned(),
+        ));
+        ctx.pre_read_mutations
+            .push(TrustedHeaderMutation::Remove("x-dest".parse().unwrap()));
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            None,
+            "remove after add should resolve to None"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_set_overrides_add() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "first:8080".to_owned(),
+        ));
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(
+            "x-dest".parse().unwrap(),
+            "second:9090".parse().unwrap(),
+        ));
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            Some("second:9090".to_owned()),
+            "set after add should override"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_duplicate_add_same_value_ok() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host:8080".to_owned(),
+        ));
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host:8080".to_owned(),
+        ));
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            Some("host:8080".to_owned()),
+            "duplicate identical adds should be allowed"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_ambiguous_add_errors() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host-a:8080".to_owned(),
+        ));
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host-b:9090".to_owned(),
+        ));
+        let err = ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap_err();
+        assert!(
+            err.contains("ambiguous"),
+            "distinct adds should produce ambiguity error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_set_then_add_same_value_ok() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(
+            "x-dest".parse().unwrap(),
+            "host:8080".parse().unwrap(),
+        ));
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host:8080".to_owned(),
+        ));
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            Some("host:8080".to_owned()),
+            "set then identical add should succeed"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_set_then_distinct_add_errors() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(
+            "x-dest".parse().unwrap(),
+            "host-a:8080".parse().unwrap(),
+        ));
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host-b:9090".to_owned(),
+        ));
+        let err = ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap_err();
+        assert!(
+            err.contains("ambiguous"),
+            "set then distinct add should produce ambiguity error: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_temporary_ambiguity_resolved_by_remove() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host-a:8080".to_owned(),
+        ));
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host-b:9090".to_owned(),
+        ));
+        ctx.pre_read_mutations
+            .push(TrustedHeaderMutation::Remove("x-dest".parse().unwrap()));
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            None,
+            "Add(a) -> Add(b) -> Remove should resolve to None"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_temporary_ambiguity_resolved_by_set() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host-a:8080".to_owned(),
+        ));
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "host-b:9090".to_owned(),
+        ));
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(
+            "x-dest".parse().unwrap(),
+            "final:7070".parse().unwrap(),
+        ));
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            Some("final:7070".to_owned()),
+            "Add(a) -> Add(b) -> Set(c) should resolve to c"
+        );
+    }
+
+    #[test]
+    fn resolve_trusted_header_remove_then_set_produces_set() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "old:8080".to_owned(),
+        ));
+        ctx.pre_read_mutations
+            .push(TrustedHeaderMutation::Remove("x-dest".parse().unwrap()));
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Set(
+            "x-dest".parse().unwrap(),
+            "new:9090".parse().unwrap(),
+        ));
+        assert_eq!(
+            ctx.resolve_trusted_header(&"x-dest".parse().unwrap()).unwrap(),
+            Some("new:9090".to_owned()),
+            "remove then set should produce the set value"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // pending_header_value Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn pending_header_value_empty() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        assert_eq!(
+            ctx.pending_header_value(&"x-dest".parse().unwrap()).unwrap(),
+            PendingHeaderResult::Absent,
+            "no pending mutations should resolve to Absent"
+        );
+    }
+
+    #[test]
+    fn pending_header_value_from_set() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.request_headers_to_set
+            .push(("x-dest".parse().unwrap(), "set-val:9090".parse().unwrap()));
+        assert_eq!(
+            ctx.pending_header_value(&"x-dest".parse().unwrap()).unwrap(),
+            PendingHeaderResult::Value("set-val:9090".to_owned()),
+        );
+    }
+
+    #[test]
+    fn pending_header_value_from_extra() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.extra_request_headers
+            .push((Cow::Borrowed("x-dest"), "extra-val:7070".to_owned()));
+        assert_eq!(
+            ctx.pending_header_value(&"x-dest".parse().unwrap()).unwrap(),
+            PendingHeaderResult::Value("extra-val:7070".to_owned()),
+        );
+    }
+
+    #[test]
+    fn pending_header_value_set_after_remove_produces_set_value() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.request_headers_to_remove.push("x-dest".parse().unwrap());
+        ctx.request_headers_to_set
+            .push(("x-dest".parse().unwrap(), "set-val:9090".parse().unwrap()));
+        assert_eq!(
+            ctx.pending_header_value(&"x-dest".parse().unwrap()).unwrap(),
+            PendingHeaderResult::Value("set-val:9090".to_owned()),
+            "set after remove should produce the set value"
+        );
+    }
+
+    #[test]
+    fn pending_header_value_remove_without_set_is_removed() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.request_headers_to_remove.push("x-dest".parse().unwrap());
+        assert_eq!(
+            ctx.pending_header_value(&"x-dest".parse().unwrap()).unwrap(),
+            PendingHeaderResult::Removed,
+            "remove without subsequent set should resolve to Removed"
+        );
+    }
+
+    #[test]
+    fn pending_header_value_distinct_extras_error() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.extra_request_headers
+            .push((Cow::Borrowed("x-dest"), "val-a:7070".to_owned()));
+        ctx.extra_request_headers
+            .push((Cow::Borrowed("x-dest"), "val-b:8080".to_owned()));
+        let err = ctx.pending_header_value(&"x-dest".parse().unwrap()).unwrap_err();
+        assert!(err.contains("ambiguous"), "distinct extras should error: {err}");
+    }
+
+    // -------------------------------------------------------------------------
+    // Structured Metadata Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn structured_metadata_absent_by_default() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        assert!(
+            ctx.get_structured_metadata("ns", "key").is_none(),
+            "structured_metadata should be empty by default"
+        );
+    }
+
+    #[test]
+    fn set_and_get_structured_metadata() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_structured_metadata("ext_proc", "model", serde_json::json!("gpt-4"));
+        assert_eq!(
+            ctx.get_structured_metadata("ext_proc", "model"),
+            Some(&serde_json::json!("gpt-4")),
+            "get should return the value set by set_structured_metadata"
+        );
+    }
+
+    #[test]
+    fn merge_structured_metadata_overwrites_existing() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.set_structured_metadata("ns", "key", serde_json::json!("old"));
+        let mut merge = serde_json::Map::new();
+        merge.insert("key".to_owned(), serde_json::json!("new"));
+        merge.insert("extra".to_owned(), serde_json::json!(42));
+        ctx.merge_structured_metadata("ns", merge);
+        assert_eq!(
+            ctx.get_structured_metadata("ns", "key"),
+            Some(&serde_json::json!("new")),
+            "merge should overwrite existing key"
+        );
+        assert_eq!(
+            ctx.get_structured_metadata("ns", "extra"),
+            Some(&serde_json::json!(42)),
+            "merge should add new key"
+        );
+    }
+
+    #[test]
+    fn structured_metadata_key_limit_enforced() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        for i in 0..MAX_STRUCTURED_METADATA_KEYS {
+            ctx.set_structured_metadata("ns", &format!("key-{i}"), serde_json::json!(i));
+        }
+        assert_eq!(
+            ctx.get_structured_metadata("ns", "key-0"),
+            Some(&serde_json::json!(0)),
+            "first key should exist"
+        );
+
+        ctx.set_structured_metadata("ns", "overflow", serde_json::json!("dropped"));
+        assert!(
+            ctx.get_structured_metadata("ns", "overflow").is_none(),
+            "key beyond limit should be dropped"
+        );
+
+        ctx.set_structured_metadata("ns", "key-0", serde_json::json!("updated"));
+        assert_eq!(
+            ctx.get_structured_metadata("ns", "key-0"),
+            Some(&serde_json::json!("updated")),
+            "existing key can still be overwritten past limit"
+        );
+    }
+
+    #[test]
+    fn merge_structured_metadata_respects_key_limit() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        for i in 0..MAX_STRUCTURED_METADATA_KEYS {
+            ctx.set_structured_metadata("ns", &format!("key-{i}"), serde_json::json!(i));
+        }
+
+        let mut merge = serde_json::Map::new();
+        merge.insert("key-0".to_owned(), serde_json::json!("overwritten"));
+        merge.insert("new-key".to_owned(), serde_json::json!("dropped"));
+        ctx.merge_structured_metadata("ns", merge);
+
+        assert_eq!(
+            ctx.get_structured_metadata("ns", "key-0"),
+            Some(&serde_json::json!("overwritten")),
+            "merge should overwrite existing key past limit"
+        );
+        assert!(
+            ctx.get_structured_metadata("ns", "new-key").is_none(),
+            "merge should drop new key past limit"
+        );
     }
 }

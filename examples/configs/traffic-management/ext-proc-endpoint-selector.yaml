@@ -1,0 +1,40 @@
+# External Processor with Endpoint Selection
+#
+# Demonstrates ext_proc full-duplex streaming with endpoint_selector
+# for dynamic upstream routing via an external processing service.
+# Requires an ext_proc-compatible gRPC processor at the configured target.
+#
+# Usage:
+#   cargo run -p praxis --features ext-proc -- \
+#     -c examples/configs/traffic-management/ext-proc-endpoint-selector.yaml
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: ext_proc
+        target: "http://127.0.0.1:9002"
+        message_timeout_ms: 200
+        lifecycle_timeout_ms: 5000
+        status_on_error: 503
+        processing_mode:
+          request_body_mode: full_duplex_streamed
+          response_header_mode: skip
+
+      - filter: endpoint_selector
+        source_header: x-gateway-destination-endpoint
+        required: true
+        status_on_required_failure: 503
+        strip_header: true
+        # Optional selected-upstream tuning. Omit for Pingora defaults.
+        # connection:
+        #   connection_timeout_ms: 1000
+        #   total_connection_timeout_ms: 2000
+        # TLS is also optional. Certificate material is cached when the
+        # configuration loads, never while handling a request.
+        # tls:
+        #   sni: inference.example.internal

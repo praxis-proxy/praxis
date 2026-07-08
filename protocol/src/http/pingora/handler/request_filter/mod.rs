@@ -8,7 +8,7 @@ use std::{borrow::Cow, sync::Arc};
 use pingora_core::Result;
 use pingora_proxy::Session;
 use praxis_core::connectivity::normalize_mapped_ipv4;
-use praxis_filter::{BodyMode, FilterAction, FilterError, FilterPipeline, Rejection, Request};
+use praxis_filter::{BodyMode, FilterAction, FilterError, FilterPipeline, Rejection, Request, TrustedHeaderMutation};
 use tracing::warn;
 
 use super::super::{
@@ -100,19 +100,9 @@ pub(in crate::http) async fn execute(
     if matches!(caps.request_body_mode, BodyMode::StreamBuffer { .. }) {
         tracing::debug!("pre-reading request body for StreamBuffer inspection");
         match stream_buffer::pre_read_body(pipeline, session, ctx, &request).await {
-            Ok(extra_headers) => {
-                tracing::debug!(count = extra_headers.len(), "injecting promoted headers");
-                for (name, value) in extra_headers {
-                    if let (Ok(hname), Ok(hval)) = (
-                        http::header::HeaderName::from_bytes(name.as_bytes()),
-                        http::header::HeaderValue::from_str(&value),
-                    ) {
-                        let _insert = session.req_header_mut().insert_header(hname.clone(), hval.clone());
-                        request.headers.insert(hname, hval);
-                    } else {
-                        tracing::warn!(header = %name, "skipping invalid promoted header");
-                    }
-                }
+            Ok(pre_read) => {
+                apply_pre_read_mutations(session, &mut request, &pre_read.mutations);
+                ctx.pre_read_mutations = pre_read.mutations;
             },
             Err(PreReadError::Rejected(rejection)) => {
                 send_rejection(session, rejection).await;
@@ -171,7 +161,7 @@ pub(in crate::http) async fn execute(
 #[expect(clippy::too_many_lines, reason = "writeback destructuring")]
 async fn run_pipeline(
     pipeline: &FilterPipeline,
-    request: Request,
+    mut request: Request,
     ctx: &mut PingoraRequestCtx,
 ) -> std::result::Result<PipelineResult, FilterError> {
     let baseline_request_body_mode = ctx.request_body_mode;
@@ -190,6 +180,10 @@ async fn run_pipeline(
         filter_state,
         executed_indices,
         body_done,
+        // Pre-read mutations were consumed by endpoint_selector during
+        // on_request. Cleared below to prevent stale provenance reuse.
+        _pre_read_mutations,
+        structured_metadata,
     ) = {
         let mut filter_ctx = ctx.build_filter_context(pipeline, &request, None);
 
@@ -209,15 +203,27 @@ async fn run_pipeline(
             filter_ctx.filter_state,
             filter_ctx.executed_filter_indices,
             filter_ctx.body_done_indices,
+            filter_ctx.pre_read_mutations,
+            filter_ctx.structured_metadata,
         )
     };
 
+    // Apply pipeline headers_to_remove to request_snapshot so that
+    // later phases (body, response) see stripped headers.
+    for name in &headers_to_remove {
+        request.headers.remove(name);
+    }
     ctx.request_snapshot = Some(request);
     ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;
     ctx.filter_state = filter_state;
     ctx.cached_executed_filter_indices = executed_indices;
     ctx.cached_body_done_indices = body_done;
+    // Pre-read mutations were consumed by the request pipeline (e.g.
+    // endpoint_selector). Clear them so later phases cannot reuse stale
+    // routing authority from a previous request phase.
+    ctx.pre_read_mutations = Vec::new();
+    ctx.structured_metadata = structured_metadata;
     ctx.metrics_cluster_shared = cluster.as_ref().map(|c| ::metrics::SharedString::from(Arc::clone(c)));
     ctx.metrics_cluster.clone_from(&cluster);
 
@@ -242,6 +248,68 @@ async fn run_pipeline(
             headers_to_set: Vec::new(),
         }),
         Err(e) => Err(e),
+    }
+}
+
+/// Apply pre-read mutations to both the Pingora session and the Praxis request.
+///
+/// Replays the ordered mutation log against the session and the request
+/// so that both the protocol layer and filter layer see consistent headers.
+fn apply_pre_read_mutations(session: &mut Session, request: &mut Request, mutations: &[TrustedHeaderMutation]) {
+    apply_pre_read_mutations_to_session(session, mutations);
+    apply_pre_read_mutations_to_request(request, mutations);
+}
+
+/// Apply pre-read mutations to the Praxis [`Request`] struct.
+fn apply_pre_read_mutations_to_request(request: &mut Request, mutations: &[TrustedHeaderMutation]) {
+    for mutation in mutations {
+        match mutation {
+            TrustedHeaderMutation::Remove(name) => {
+                request.headers.remove(name);
+            },
+            TrustedHeaderMutation::Set(name, value) => {
+                request.headers.insert(name.clone(), value.clone());
+            },
+            TrustedHeaderMutation::Add(name, value) => match http::header::HeaderValue::from_str(value) {
+                Ok(hval) => {
+                    request.headers.append(name.clone(), hval);
+                },
+                Err(err) => {
+                    warn!(
+                        header = %name,
+                        error = %err,
+                        "skipping invalid trusted pre-read add mutation for request"
+                    );
+                },
+            },
+        }
+    }
+}
+
+/// Apply pre-read mutations to the Pingora session headers.
+fn apply_pre_read_mutations_to_session(session: &mut Session, mutations: &[TrustedHeaderMutation]) {
+    let req_headers = session.req_header_mut();
+    for mutation in mutations {
+        match mutation {
+            TrustedHeaderMutation::Remove(name) => {
+                let _remove = req_headers.remove_header(name);
+            },
+            TrustedHeaderMutation::Set(name, value) => {
+                let _insert = req_headers.insert_header(name.clone(), value.clone());
+            },
+            TrustedHeaderMutation::Add(name, value) => match http::header::HeaderValue::from_str(value) {
+                Ok(hval) => {
+                    let _append = req_headers.append_header(name.clone(), hval);
+                },
+                Err(err) => {
+                    warn!(
+                        header = %name,
+                        error = %err,
+                        "skipping invalid trusted pre-read add mutation for session"
+                    );
+                },
+            },
+        }
     }
 }
 
@@ -513,6 +581,89 @@ mod tests {
             clamped,
             BodyMode::StreamBuffer { max_bytes: Some(512) },
             "runtime limit within baseline ceiling should be unchanged"
+        );
+    }
+
+    #[tokio::test]
+    async fn pre_read_mutations_cleared_after_pipeline() {
+        let mut ctx = make_ctx();
+        ctx.pre_read_mutations = vec![TrustedHeaderMutation::Add(
+            http::header::HeaderName::from_static("x-routed-by"),
+            "pre-read-filter".to_owned(),
+        )];
+
+        drop(run_pipeline(&empty_pipeline(), make_request(), &mut ctx).await.unwrap());
+
+        assert!(
+            ctx.pre_read_mutations.is_empty(),
+            "pre_read_mutations should be cleared after run_pipeline to prevent stale provenance reuse"
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_preserves_headers_without_removals() {
+        let mut ctx = make_ctx();
+        let mut request = make_request();
+        request.headers.insert(
+            http::header::HeaderName::from_static("x-internal-debug"),
+            http::header::HeaderValue::from_static("true"),
+        );
+
+        drop(run_pipeline(&empty_pipeline(), request, &mut ctx).await.unwrap());
+
+        let snapshot = ctx.request_snapshot.as_ref().expect("snapshot should exist");
+        assert!(
+            snapshot.headers.contains_key("x-internal-debug"),
+            "empty pipeline should not strip x-internal-debug"
+        );
+    }
+
+    #[test]
+    fn header_removal_strips_from_snapshot() {
+        let mut request = make_request();
+        request.headers.insert(
+            http::header::HeaderName::from_static("x-strip"),
+            http::header::HeaderValue::from_static("val"),
+        );
+        request.headers.insert(
+            http::header::HeaderName::from_static("x-keep"),
+            http::header::HeaderValue::from_static("val"),
+        );
+
+        let to_remove = vec![http::header::HeaderName::from_static("x-strip")];
+        for name in &to_remove {
+            request.headers.remove(name);
+        }
+
+        assert!(!request.headers.contains_key("x-strip"));
+        assert!(request.headers.contains_key("x-keep"));
+    }
+
+    #[tokio::test]
+    async fn structured_metadata_persists_through_pipeline() {
+        let mut ctx = make_ctx();
+        ctx.structured_metadata.insert(
+            "ext_proc".to_owned(),
+            serde_json::json!({"model": "test-model", "score": 0.95}),
+        );
+
+        drop(run_pipeline(&empty_pipeline(), make_request(), &mut ctx).await.unwrap());
+
+        let md = ctx.structured_metadata.get("ext_proc");
+        assert!(
+            md.is_some(),
+            "structured_metadata set before pipeline should survive after run_pipeline"
+        );
+        let obj = md.unwrap().as_object().expect("ext_proc metadata should be an object");
+        assert_eq!(
+            obj.get("model"),
+            Some(&serde_json::json!("test-model")),
+            "model field should be preserved"
+        );
+        assert_eq!(
+            obj.get("score"),
+            Some(&serde_json::json!(0.95)),
+            "score field should be preserved"
         );
     }
 

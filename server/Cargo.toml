@@ -17,6 +17,9 @@ path = "src/lib.rs"
 name = "praxis"
 path = "src/main.rs"
 
+[package.metadata.cargo-machete]
+ignored = ["praxis-ext-proc"]
+
 [lints]
 workspace = true
 
@@ -25,6 +28,7 @@ clap = { workspace = true }
 notify = { workspace = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
+praxis-ext-proc = { workspace = true, optional = true }
 praxis-protocol = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
@@ -44,4 +48,5 @@ tempfile = { workspace = true }
 
 [features]
 default = []
+ext-proc = ["dep:praxis-ext-proc"]
 cpex-policy-engine = ["praxis-filter/cpex-policy-engine"]
