@@ -108,7 +108,7 @@ fn header_value_matches(name: &str, actual: &http::HeaderValue, expected: &str) 
 
     if name.eq_ignore_ascii_case("content-type") {
         if has_parameters(expected) {
-            return actual == expected;
+            return media_type(actual).eq_ignore_ascii_case(media_type(expected)) && params(actual) == params(expected);
         }
         return media_type(actual).eq_ignore_ascii_case(media_type(expected));
     }
@@ -126,6 +126,11 @@ fn has_parameters(value: &str) -> bool {
     value
         .split_once(';')
         .is_some_and(|(_, params)| !params.trim().is_empty())
+}
+
+/// Extract the parameter portion of a header value (everything after the first `;`).
+fn params(value: &str) -> &str {
+    value.split_once(';').map_or("", |(_, p)| p)
 }
 
 // -----------------------------------------------------------------------------
@@ -312,6 +317,20 @@ mod tests {
     fn content_type_expected_parameters_match_exactly() {
         let mut headers = HeaderMap::new();
         headers.insert("content-type", HeaderValue::from_static("application/json; profile=a"));
+        let resp = make_response(200, headers);
+        assert!(should_execute_response(
+            &[resp_when(resp_header_match(&[(
+                "content-type",
+                "application/json; profile=a"
+            )]))],
+            &resp
+        ));
+    }
+
+    #[test]
+    fn content_type_expected_parameters_case_insensitive_media_type() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("Application/JSON; profile=a"));
         let resp = make_response(200, headers);
         assert!(should_execute_response(
             &[resp_when(resp_header_match(&[(
