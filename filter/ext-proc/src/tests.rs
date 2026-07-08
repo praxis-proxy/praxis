@@ -27,12 +27,15 @@ use praxis_filter::parse_filter_config;
 use super::*;
 use crate::{
     duplex::{ExchangeConfig, ExchangeError, ExchangeEvent, ExtProcExchange},
+    mutations,
     proto::envoy::service::{
         common::v3::{HeaderValue, HeaderValueOption, HttpStatus},
         ext_proc::v3::{
-            CommonResponse, HeaderMutation, HeadersResponse, HttpBody, HttpHeaders, HttpTrailers, ImmediateResponse,
+            BodySendMode as ProtoBodySendMode, CommonResponse, HeaderMutation, HeadersResponse, HttpBody, HttpHeaders,
+            HttpTrailers, ImmediateResponse,
         },
     },
+    proto_value_to_json,
 };
 
 // -----------------------------------------------------------------------------
@@ -430,8 +433,8 @@ deferred_close_timeout_ms: 10000"#,
 }
 
 #[tokio::test]
-async fn rejects_all_request_body_send_mode_variants() {
-    for mode in ["streamed", "buffered", "buffered_partial", "full_duplex_streamed"] {
+async fn rejects_non_full_duplex_request_body_send_mode_variants() {
+    for mode in ["streamed", "buffered", "buffered_partial"] {
         let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
             r#"
 target: "http://127.0.0.1:50051"
@@ -1135,6 +1138,66 @@ fn apply_request_header_mutation_add_if_absent_adds_missing() {
         "add-if-absent should add missing headers"
     );
     assert_eq!(ctx.extra_request_headers[0].0, "x-new", "header name should match");
+}
+
+#[test]
+fn apply_request_header_mutation_records_ordered_pre_read_mutations() {
+    use crate::proto::envoy::service::common::v3::header_value_option::HeaderAppendAction;
+
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+    let header_name = http::HeaderName::from_static("x-dest");
+
+    let append_mutation = HeaderMutation {
+        set_headers: vec![make_hvo("x-dest", "initial")],
+        remove_headers: vec![],
+    };
+    mutations::apply_request_header_mutation(&append_mutation, &mut ctx);
+
+    let remove_then_set = HeaderMutation {
+        set_headers: vec![make_hvo_with_append(
+            "x-dest",
+            "final",
+            HeaderAppendAction::OverwriteIfExistsOrAdd as i32,
+            None,
+        )],
+        remove_headers: vec!["x-dest".to_owned()],
+    };
+    mutations::apply_request_header_mutation(&remove_then_set, &mut ctx);
+
+    assert_eq!(
+        ctx.pre_read_mutations.len(),
+        3,
+        "should preserve Add, Remove, Set ordering across processor responses"
+    );
+    assert!(
+        matches!(
+            &ctx.pre_read_mutations[0],
+            praxis_filter::TrustedHeaderMutation::Add(name, value)
+                if name == header_name && value == "initial"
+        ),
+        "first mutation should be the appended initial value"
+    );
+    assert!(
+        matches!(
+            &ctx.pre_read_mutations[1],
+            praxis_filter::TrustedHeaderMutation::Remove(name) if name == header_name
+        ),
+        "second mutation should remove the destination"
+    );
+    assert!(
+        matches!(
+            &ctx.pre_read_mutations[2],
+            praxis_filter::TrustedHeaderMutation::Set(name, value)
+                if name == header_name && value == "final"
+        ),
+        "third mutation should set the final destination"
+    );
+    assert_eq!(
+        ctx.resolve_trusted_header(&header_name).unwrap().as_deref(),
+        Some("final"),
+        "ordered trusted log should resolve to the final value"
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -2053,8 +2116,8 @@ fn make_response() -> praxis_filter::Response {
 static TEST_ID_GENERATOR: std::sync::LazyLock<praxis_core::id::IdGenerator> =
     std::sync::LazyLock::new(|| praxis_core::id::IdGenerator::with_seed(0));
 
-#[expect(clippy::too_many_lines, reason = "unavoidable: single large statement")]
 /// Build a minimal [`HttpFilterContext`] for unit tests.
+#[expect(clippy::too_many_lines, reason = "test utility enumerates all context fields")]
 fn make_ctx(req: &praxis_filter::Request) -> HttpFilterContext<'_> {
     HttpFilterContext {
         body_done_indices: Vec::new(),
@@ -2069,6 +2132,8 @@ fn make_ctx(req: &praxis_filter::Request) -> HttpFilterContext<'_> {
         request_headers_to_remove: Vec::new(),
         request_headers_to_set: Vec::new(),
         filter_metadata: HashMap::new(),
+        structured_metadata: HashMap::new(),
+        pre_read_mutations: Vec::new(),
         filter_results: HashMap::new(),
         filter_state: HashMap::new(),
         health_registry: None,
@@ -2076,10 +2141,10 @@ fn make_ctx(req: &praxis_filter::Request) -> HttpFilterContext<'_> {
         kv_stores: None,
         request: req,
         request_body_bytes: 0,
-        request_body_mode: praxis_filter::BodyMode::Stream,
+        request_body_mode: BodyMode::Stream,
         request_start: Instant::now(),
         response_body_bytes: 0,
-        response_body_mode: praxis_filter::BodyMode::Stream,
+        response_body_mode: BodyMode::Stream,
         response_header: None,
         response_headers_modified: false,
         rewritten_path: None,
@@ -2457,6 +2522,9 @@ enum DuplexBehavior {
         resp_header_value: String,
     },
 
+    /// Read headers + body EOS. Body response has header mutation but no body mutation.
+    HeaderOnlyBodyResponse { header_name: String, header_value: String },
+
     /// Never respond (timeout testing).
     Hang,
 
@@ -2624,6 +2692,52 @@ impl ExternalProcessor for DuplexMockProcessor {
                             break;
                         }
                     }
+                },
+                DuplexBehavior::HeaderOnlyBodyResponse {
+                    header_name,
+                    header_value,
+                } => {
+                    let _headers_msg = stream.message().await.unwrap().unwrap();
+                    loop {
+                        let body_msg = stream.message().await.unwrap().unwrap();
+                        if let Some(processing_request::Request::RequestBody(b)) = &body_msg.request
+                            && b.end_of_stream
+                        {
+                            break;
+                        }
+                    }
+                    let header_resp = ProcessingResponse {
+                        response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                            response: None,
+                        })),
+                        ..Default::default()
+                    };
+                    drop(tx.send(Ok(header_resp)).await);
+                    use crate::proto::envoy::service::{
+                        common::v3::{HeaderValue, HeaderValueOption},
+                        ext_proc::v3::{CommonResponse, HeaderMutation},
+                    };
+                    let body_resp = ProcessingResponse {
+                        response: Some(processing_response::Response::RequestBody(BodyResponse {
+                            response: Some(CommonResponse {
+                                header_mutation: Some(HeaderMutation {
+                                    set_headers: vec![HeaderValueOption {
+                                        header: Some(HeaderValue {
+                                            key: header_name,
+                                            raw_value: header_value.into_bytes(),
+                                            ..Default::default()
+                                        }),
+                                        ..Default::default()
+                                    }],
+                                    ..Default::default()
+                                }),
+                                body_mutation: None,
+                                ..Default::default()
+                            }),
+                        })),
+                        ..Default::default()
+                    };
+                    drop(tx.send(Ok(body_resp)).await);
                 },
                 DuplexBehavior::Hang => {
                     futures::future::pending::<()>().await;
@@ -2803,7 +2917,7 @@ async fn duplex_first_message_includes_protocol_config() {
         response_body_mode: BodySendMode::FullDuplexStreamed,
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let _resp = exchange.receive().await.unwrap();
 
@@ -2873,7 +2987,7 @@ async fn duplex_second_message_omits_protocol_config() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _r1 = exchange.receive().await.unwrap();
     exchange.send(make_request_body(b"data", true)).await.unwrap();
@@ -2896,7 +3010,7 @@ async fn duplex_request_headers_round_trip() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let resp = exchange.receive().await.unwrap();
     assert!(
@@ -2909,7 +3023,7 @@ async fn duplex_request_headers_round_trip() {
 async fn duplex_request_body_round_trip() {
     let (addr, _guard) = start_duplex_processor(DuplexBehavior::HeadersAndBody).await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _hdr_resp = exchange.receive().await.unwrap();
     exchange.send(make_request_body(b"hello", true)).await.unwrap();
@@ -2928,7 +3042,7 @@ async fn duplex_delayed_routing_no_deadlock() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     exchange.send(make_request_body(b"chunk1", false)).await.unwrap();
@@ -2954,7 +3068,7 @@ async fn duplex_multiple_sends_before_any_receive() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     exchange.send(make_request_body(b"all-at-once", true)).await.unwrap();
@@ -2981,7 +3095,7 @@ async fn duplex_response_headers_on_same_stream() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     let _req_resp = exchange.receive().await.unwrap();
@@ -3001,7 +3115,7 @@ async fn duplex_streamed_body_chunks() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     exchange.send(make_request_body(b"body", true)).await.unwrap();
@@ -3028,7 +3142,7 @@ async fn duplex_immediate_response_on_headers() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     let resp = exchange.receive().await.unwrap();
@@ -3046,7 +3160,7 @@ async fn duplex_immediate_response_on_body() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     let _hdr = exchange.receive().await.unwrap();
@@ -3062,7 +3176,7 @@ async fn duplex_immediate_response_on_body() {
 async fn duplex_unexpected_response_type_rejected() {
     let (addr, _guard) = start_duplex_processor(DuplexBehavior::UnexpectedResponseType).await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     let result = exchange.receive().await;
@@ -3076,7 +3190,7 @@ async fn duplex_unexpected_response_type_rejected() {
 async fn duplex_empty_stream_error() {
     let (addr, _guard) = start_duplex_processor(DuplexBehavior::CloseEarly).await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     let result = exchange.receive().await;
@@ -3094,7 +3208,7 @@ async fn duplex_timeout_before_response() {
         message_timeout: Duration::from_millis(50),
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let result = exchange.receive().await;
     assert!(
@@ -3118,7 +3232,7 @@ async fn duplex_timeout_override_accepted() {
         max_message_timeout: Some(Duration::from_secs(5)),
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let resp = exchange.receive().await.unwrap();
     assert!(
@@ -3142,7 +3256,7 @@ async fn duplex_timeout_override_clamped() {
         max_message_timeout: Some(Duration::from_millis(200)),
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let result = exchange.receive().await;
     assert!(
@@ -3161,7 +3275,7 @@ async fn duplex_timeout_override_ignored_without_max() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     // Override envelope is consumed and ignored (no max_timeout
@@ -3193,7 +3307,7 @@ async fn duplex_transport_error() {
         message_timeout: Duration::from_millis(500),
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     let send_result = exchange.send(make_request_headers()).await;
     if send_result.is_err() {
         return;
@@ -3252,7 +3366,7 @@ async fn duplex_finish_sending_causes_server_eof() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _resp = exchange.receive().await.unwrap();
     exchange.finish_sending();
@@ -3275,7 +3389,7 @@ async fn duplex_receive_after_finish_sending() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     exchange.send(make_request_body(b"data", true)).await.unwrap();
@@ -3301,7 +3415,7 @@ async fn duplex_send_after_finish_sending_fails() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
 
     exchange.finish_sending();
     let result = exchange.send(make_request_headers()).await;
@@ -3315,7 +3429,7 @@ async fn duplex_send_after_finish_sending_fails() {
 async fn duplex_drop_exchange_cleans_up() {
     let (addr, _guard) = start_duplex_processor(DuplexBehavior::Hang).await;
     let channel = connect_channel(addr).await;
-    let exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let exchange = ExtProcExchange::open(channel, &default_exchange_config());
     drop(exchange);
 }
 
@@ -3374,7 +3488,7 @@ async fn duplex_concurrent_exchanges_no_crosstalk() {
     for i in 0_u64..100 {
         let channel = shared_channel.clone();
         handles.push(tokio::spawn(async move {
-            let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+            let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
             let unique_id = format!("exchange-{i}");
             let headers = processing_request::Request::RequestHeaders(HttpHeaders {
                 headers: Some(proto::envoy::service::ext_proc::v3::HeaderMap {
@@ -3454,7 +3568,7 @@ async fn duplex_terminal_state_after_timeout() {
         message_timeout: Duration::from_millis(50),
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let _timeout = exchange.receive().await;
     assert!(exchange.is_terminal(), "exchange should be closed after timeout");
@@ -3533,7 +3647,7 @@ async fn duplex_response_body_round_trip() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     let _req_hdr = exchange.receive().await.unwrap();
@@ -3613,7 +3727,7 @@ async fn duplex_server_observes_client_cancellation() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _resp = exchange.receive().await.unwrap();
     drop(exchange);
@@ -3638,7 +3752,7 @@ async fn duplex_repeated_clean_close() {
     let shared_channel = connect_channel(addr).await;
 
     for i in 0..20 {
-        let mut exchange = ExtProcExchange::open(shared_channel.clone(), &default_exchange_config()).unwrap();
+        let mut exchange = ExtProcExchange::open(shared_channel.clone(), &default_exchange_config());
         exchange.send(make_request_headers()).await.unwrap();
         let resp = exchange.receive().await.unwrap();
         assert!(
@@ -3661,7 +3775,7 @@ async fn duplex_request_body_before_headers_rejected() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config());
     let result = exchange.send(make_request_body(b"data", false)).await;
     assert!(
         matches!(result, Err(ExchangeError::OrderingViolation(_))),
@@ -3677,7 +3791,7 @@ async fn duplex_duplicate_request_headers_rejected() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let result = exchange.send(make_request_headers()).await;
     assert!(
@@ -3690,7 +3804,7 @@ async fn duplex_duplicate_request_headers_rejected() {
 async fn duplex_body_after_eos_rejected() {
     let (addr, _guard) = start_duplex_processor(DuplexBehavior::HeadersAndBody).await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     exchange.send(make_request_body(b"data", true)).await.unwrap();
     let result = exchange.send(make_request_body(b"more", false)).await;
@@ -3710,7 +3824,7 @@ async fn duplex_legal_response_while_request_open() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _req_resp = exchange.receive().await.unwrap();
     exchange.send(make_response_headers()).await.unwrap();
@@ -3777,7 +3891,7 @@ async fn duplex_request_trailers_send_and_classify() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _hdr = exchange.receive().await.unwrap();
 
@@ -3849,7 +3963,7 @@ async fn duplex_dynamic_metadata_preserved() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let event = exchange.receive().await.unwrap();
     match event {
@@ -3879,7 +3993,7 @@ async fn duplex_full_duplex_no_per_message_timeout() {
         request_body_mode: BodySendMode::FullDuplexStreamed,
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     exchange.send(make_request_body(b"data", true)).await.unwrap();
     let event = exchange.receive().await.unwrap();
@@ -3897,7 +4011,7 @@ async fn duplex_immediate_response_sets_terminal() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let event = exchange.receive().await.unwrap();
     assert!(
@@ -3970,7 +4084,7 @@ async fn duplex_override_envelope_ignores_response_data() {
         max_message_timeout: Some(Duration::from_secs(5)),
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let event = exchange.receive().await.unwrap();
     match &event {
@@ -3998,7 +4112,7 @@ async fn duplex_body_mode_none_rejects_body_send() {
     })
     .await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _hdr = exchange.receive().await.unwrap();
     let result = exchange.send(make_request_body(b"rejected", false)).await;
@@ -4012,7 +4126,7 @@ async fn duplex_body_mode_none_rejects_body_send() {
 async fn duplex_non_full_duplex_body_creates_active_state() {
     let (addr, _guard) = start_duplex_processor(DuplexBehavior::HeadersAndBody).await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     let hdr_resp = exchange.receive().await.unwrap();
@@ -4033,7 +4147,7 @@ async fn duplex_non_full_duplex_body_creates_active_state() {
 async fn duplex_second_non_fd_send_while_active_rejected() {
     let (addr, _guard) = start_duplex_processor(DuplexBehavior::HeadersAndBody).await;
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     let result = exchange.send(make_request_body(b"chunk", false)).await;
@@ -4105,7 +4219,7 @@ async fn duplex_response_trailers_send_and_classify() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     let _req_hdr = exchange.receive().await.unwrap();
@@ -4192,7 +4306,7 @@ async fn duplex_metadata_on_body_event() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _hdr = exchange.receive().await.unwrap();
     exchange.send(make_request_body(b"data", true)).await.unwrap();
@@ -4270,7 +4384,7 @@ async fn duplex_metadata_on_immediate_event() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let event = exchange.receive().await.unwrap();
     match event {
@@ -4359,7 +4473,7 @@ async fn duplex_override_ignored_in_full_duplex() {
         max_message_timeout: Some(Duration::from_secs(10)),
         ..full_duplex_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let hdr_event = exchange.receive().await.unwrap();
     assert!(
@@ -4427,7 +4541,7 @@ async fn duplex_repeated_override_ignored() {
         max_message_timeout: Some(Duration::from_secs(10)),
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let event = exchange.receive().await.unwrap();
     match &event {
@@ -4493,7 +4607,7 @@ async fn duplex_zero_duration_override_ignored() {
         max_message_timeout: Some(Duration::from_secs(10)),
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let event = exchange.receive().await.unwrap();
     match &event {
@@ -4559,7 +4673,7 @@ async fn duplex_backpressure_deterministic() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
 
     let chunk_size = 16_384; // 16 KiB
@@ -4598,7 +4712,7 @@ async fn duplex_deadline_starts_at_send_commit() {
         message_timeout: Duration::from_millis(50),
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
 
     let before_send = tokio::time::Instant::now();
     exchange.send(make_request_headers()).await.unwrap();
@@ -4667,7 +4781,7 @@ async fn duplex_unsolicited_response_rejected() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let result = exchange.receive().await;
     assert!(
@@ -4698,7 +4812,7 @@ async fn duplex_full_duplex_headers_no_timeout() {
         request_body_mode: BodySendMode::FullDuplexStreamed,
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let event = exchange.receive().await.unwrap();
     assert!(
@@ -4792,7 +4906,7 @@ async fn duplex_full_duplex_trailers_while_deferred() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config());
 
     exchange.send(make_request_headers()).await.unwrap();
     exchange.send(make_request_body(b"chunk1", false)).await.unwrap();
@@ -4894,7 +5008,7 @@ async fn duplex_streamed_body_response_in_non_fd_rejected() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _hdr = exchange.receive().await.unwrap();
     exchange.send(make_request_body(b"data", true)).await.unwrap();
@@ -4937,9 +5051,15 @@ async fn duplex_non_streamed_body_response_in_fd_rejected() {
                 drop(tx.send(Ok(header_resp)).await);
 
                 let _body = stream.message().await.unwrap().unwrap();
+                use crate::proto::envoy::service::ext_proc::v3::{BodyMutation, CommonResponse, body_mutation};
                 let body_resp = ProcessingResponse {
                     response: Some(processing_response::Response::RequestBody(BodyResponse {
-                        response: None,
+                        response: Some(CommonResponse {
+                            body_mutation: Some(BodyMutation {
+                                mutation: Some(body_mutation::Mutation::Body(b"replaced".to_vec())),
+                            }),
+                            ..Default::default()
+                        }),
                     })),
                     ..Default::default()
                 };
@@ -4967,7 +5087,7 @@ async fn duplex_non_streamed_body_response_in_fd_rejected() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _hdr = exchange.receive().await.unwrap();
     exchange.send(make_request_body(b"data", true)).await.unwrap();
@@ -5050,7 +5170,7 @@ async fn duplex_request_body_response_without_body_send_rejected() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _hdr = exchange.receive().await.unwrap();
     let result = exchange.receive().await;
@@ -5136,7 +5256,7 @@ async fn duplex_request_trailer_response_without_trailer_send_rejected() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     exchange.send(make_request_body(b"data", true)).await.unwrap();
     let _hdr = exchange.receive().await.unwrap();
@@ -5224,7 +5344,7 @@ async fn duplex_response_body_response_without_body_send_rejected() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _req_hdr = exchange.receive().await.unwrap();
     exchange.send(make_response_headers()).await.unwrap();
@@ -5301,7 +5421,7 @@ async fn duplex_response_trailer_response_without_trailer_send_rejected() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &full_duplex_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _req_hdr = exchange.receive().await.unwrap();
     exchange.send(make_response_headers()).await.unwrap();
@@ -5378,7 +5498,7 @@ async fn duplex_duplicate_non_fd_body_response_rejected() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &streamed_body_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _hdr = exchange.receive().await.unwrap();
     exchange.send(make_request_body(b"data", true)).await.unwrap();
@@ -5438,7 +5558,7 @@ async fn duplex_cross_direction_non_fd_response_without_active_match_rejected() 
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let result = exchange.receive().await;
     assert!(
@@ -5497,7 +5617,7 @@ async fn duplex_unsolicited_immediate_before_first_send_rejected() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     let result = exchange.receive().await;
     assert!(
         matches!(result, Err(ExchangeError::OrderingViolation(_))),
@@ -5569,7 +5689,7 @@ async fn duplex_rejected_response_does_not_advance_output_phase() {
         request_body_mode: BodySendMode::Streamed,
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
 
     let (req_before, resp_before) = exchange.output_phases();
@@ -5644,7 +5764,7 @@ async fn duplex_negative_override_ignored() {
         max_message_timeout: Some(Duration::from_secs(10)),
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let event = exchange.receive().await.unwrap();
     assert!(
@@ -5705,7 +5825,7 @@ async fn duplex_negative_nanos_override_ignored() {
         max_message_timeout: Some(Duration::from_secs(10)),
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let event = exchange.receive().await.unwrap();
     assert!(
@@ -5769,7 +5889,7 @@ async fn duplex_out_of_range_nanos_override_ignored() {
         max_message_timeout: Some(Duration::from_secs(10)),
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let event = exchange.receive().await.unwrap();
     assert!(
@@ -5833,7 +5953,7 @@ async fn duplex_sub_millisecond_override_ignored() {
         max_message_timeout: Some(Duration::from_secs(10)),
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let event = exchange.receive().await.unwrap();
     assert!(
@@ -5856,11 +5976,48 @@ async fn duplex_deadline_overflow_returns_error_not_panic() {
         message_timeout: Duration::MAX,
         ..default_exchange_config()
     };
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     let result = exchange.send(make_request_headers()).await;
     assert!(
         matches!(result, Err(ExchangeError::DeadlineOverflow)),
         "Duration::MAX should fail at send with deadline overflow, not panic"
+    );
+}
+
+#[tokio::test]
+async fn open_with_request_headers_rejects_non_headers() {
+    use crate::proto::envoy::service::ext_proc::v3::HttpBody;
+
+    let channel = Channel::from_static("http://[::1]:1").connect_lazy();
+    let config = full_duplex_exchange_config();
+    let body_req = processing_request::Request::RequestBody(HttpBody {
+        body: Vec::new(),
+        end_of_stream: false,
+    });
+    match ExtProcExchange::open_with_request_headers(channel, &config, body_req) {
+        Err(ExchangeError::OrderingViolation(msg)) => {
+            assert!(msg.contains("RequestBody"), "expected RequestBody in message: {msg}");
+        },
+        Err(other) => panic!("expected OrderingViolation, got: {other:?}"),
+        Ok(_) => panic!("expected error for non-RequestHeaders preload"),
+    }
+}
+
+#[tokio::test]
+async fn open_with_request_headers_commits_state_and_receives() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::EchoHeaders {
+        name: "x-test".to_owned(),
+        value: "ok".to_owned(),
+    })
+    .await;
+    let channel = connect_channel(addr).await;
+    let mut exchange =
+        ExtProcExchange::open_with_request_headers(channel, &full_duplex_exchange_config(), make_request_headers())
+            .unwrap();
+    let event = exchange.receive().await.unwrap();
+    assert!(
+        matches!(event, ExchangeEvent::RequestHeaders { .. }),
+        "should receive RequestHeaders response immediately — state was committed at construction"
     );
 }
 
@@ -5930,7 +6087,7 @@ async fn duplex_trailer_metadata_preserved() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _hdr = exchange.receive().await.unwrap();
     exchange.send(make_request_trailers()).await.unwrap();
@@ -6053,7 +6210,7 @@ async fn duplex_repeated_close_with_eof_count() {
     let shared_channel = connect_channel(addr).await;
 
     for i in 0..100 {
-        let mut exchange = ExtProcExchange::open(shared_channel.clone(), &default_exchange_config()).unwrap();
+        let mut exchange = ExtProcExchange::open(shared_channel.clone(), &default_exchange_config());
         exchange.send(make_request_headers()).await.unwrap();
         let resp = exchange.receive().await.unwrap();
         assert!(
@@ -6069,7 +6226,7 @@ async fn duplex_repeated_close_with_eof_count() {
     let observed = eof_count.load(std::sync::atomic::Ordering::SeqCst);
     assert_eq!(observed, 100, "server should observe exactly 100 EOFs, got {observed}");
 
-    let mut final_exchange = ExtProcExchange::open(shared_channel.clone(), &default_exchange_config()).unwrap();
+    let mut final_exchange = ExtProcExchange::open(shared_channel.clone(), &default_exchange_config());
     final_exchange.send(make_request_headers()).await.unwrap();
     let resp = final_exchange.receive().await.unwrap();
     assert!(
@@ -6135,7 +6292,7 @@ async fn duplex_cross_direction_started_non_fd_duplicate_body_rejected() {
 
     let channel = connect_channel(addr).await;
     let config = streamed_body_exchange_config();
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
     exchange.send(make_request_headers()).await.unwrap();
     let _rh = exchange.receive().await.unwrap();
 
@@ -6213,7 +6370,7 @@ async fn driver_delayed_response_headers_current_thread() {
     .await;
     let channel = connect_channel(addr).await;
     let config = full_duplex_exchange_config();
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
 
     exchange.send(make_request_headers()).await.unwrap();
     exchange.send(make_request_body(b"chunk1", false)).await.unwrap();
@@ -6284,7 +6441,7 @@ async fn driver_one_process_invocation() {
     wait_for_server(addr).await;
 
     let channel = connect_channel(addr).await;
-    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config()).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &default_exchange_config());
     exchange.send(make_request_headers()).await.unwrap();
     let _resp = exchange.receive().await.unwrap();
     drop(exchange.send(make_request_headers()).await);
@@ -6309,7 +6466,7 @@ async fn driver_outbound_half_close_preserves_drain() {
     .await;
     let channel = connect_channel(addr).await;
     let config = full_duplex_exchange_config();
-    let mut exchange = ExtProcExchange::open(channel, &config).unwrap();
+    let mut exchange = ExtProcExchange::open(channel, &config);
 
     exchange.send(make_request_headers()).await.unwrap();
     let _hdr = exchange.receive().await.unwrap();
@@ -6322,5 +6479,1239 @@ async fn driver_outbound_half_close_preserves_drain() {
     assert!(
         matches!(&event, ExchangeEvent::Immediate { response, .. } if response.status.as_ref().is_some_and(|s| s.code == 403)),
         "should receive ImmediateResponse with exact 403 status"
+    );
+}
+
+// =============================================================================
+// PR3 Integration Tests: ExtProcFilter full-duplex body processing
+// =============================================================================
+
+#[tokio::test]
+async fn config_accepts_full_duplex_streamed() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: skip
+"#,
+    )
+    .unwrap();
+
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+    assert_eq!(filter.name(), "ext_proc", "full_duplex_streamed should be accepted");
+}
+
+#[tokio::test]
+async fn config_rejects_streamed_buffered_partial() {
+    for mode in ["streamed", "buffered", "buffered_partial"] {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+            r#"
+target: "http://127.0.0.1:50051"
+processing_mode:
+  request_body_mode: {mode}
+"#,
+        ))
+        .unwrap();
+
+        let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("request_body_mode"),
+            "{mode} should mention request_body_mode: {msg}"
+        );
+        assert!(
+            msg.contains("not yet supported"),
+            "{mode} should indicate not yet supported: {msg}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn full_duplex_filter_body_access_read_write() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: skip
+"#,
+    )
+    .unwrap();
+
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+    assert_eq!(
+        filter.request_body_access(),
+        BodyAccess::ReadWrite,
+        "full-duplex filter should declare ReadWrite body access"
+    );
+}
+
+#[tokio::test]
+async fn full_duplex_filter_body_mode_stream_buffer() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://127.0.0.1:50051"
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: skip
+"#,
+    )
+    .unwrap();
+
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+    assert_eq!(
+        filter.request_body_mode(),
+        BodyMode::StreamBuffer { max_bytes: None },
+        "full-duplex filter should declare StreamBuffer body mode"
+    );
+}
+
+#[tokio::test]
+async fn header_only_mode_unchanged() {
+    let (addr, _guard) = start_mock_processor(MockBehavior::AddHeader {
+        name: "x-header-only".to_owned(),
+        value: "works".to_owned(),
+    })
+    .await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 5000
+"#,
+    ))
+    .unwrap();
+
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    assert_eq!(
+        filter.request_body_access(),
+        BodyAccess::None,
+        "header-only mode should declare no body access"
+    );
+    assert_eq!(
+        filter.request_body_mode(),
+        BodyMode::Stream,
+        "header-only mode should declare Stream body mode"
+    );
+
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "header-only on_request should succeed via one-shot callout"
+    );
+    let injected = ctx.extra_request_headers.iter().find(|(k, _)| k == "x-header-only");
+    assert!(
+        injected.is_some(),
+        "header mutation from one-shot callout should be applied"
+    );
+}
+
+#[tokio::test]
+async fn full_duplex_headers_sent_before_body() {
+    struct OrderTrackingProcessor {
+        order: std::sync::Arc<tokio::sync::Mutex<Vec<String>>>,
+    }
+
+    #[async_trait]
+    impl ExternalProcessor for OrderTrackingProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let order = self.order.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                while let Ok(Some(msg)) = stream.message().await {
+                    let label = match &msg.request {
+                        Some(processing_request::Request::RequestHeaders(_)) => "headers",
+                        Some(processing_request::Request::RequestBody(b)) => {
+                            if b.end_of_stream {
+                                "body_eos"
+                            } else {
+                                "body_chunk"
+                            }
+                        },
+                        _ => "other",
+                    };
+                    order.lock().await.push(label.to_owned());
+
+                    let label_str = label.to_owned();
+                    if label_str == "body_eos" {
+                        let header_resp = ProcessingResponse {
+                            response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                                response: None,
+                            })),
+                            ..Default::default()
+                        };
+                        drop(tx.send(Ok(header_resp)).await);
+
+                        use crate::proto::envoy::service::ext_proc::v3::{
+                            BodyMutation, CommonResponse, StreamedBodyResponse, body_mutation,
+                        };
+                        let body_resp = ProcessingResponse {
+                            response: Some(processing_response::Response::RequestBody(BodyResponse {
+                                response: Some(CommonResponse {
+                                    body_mutation: Some(BodyMutation {
+                                        mutation: Some(body_mutation::Mutation::StreamedResponse(
+                                            StreamedBodyResponse {
+                                                body: Vec::new(),
+                                                end_of_stream: true,
+                                            },
+                                        )),
+                                    }),
+                                    ..Default::default()
+                                }),
+                            })),
+                            ..Default::default()
+                        };
+                        drop(tx.send(Ok(body_resp)).await);
+                    }
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let order = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(OrderTrackingProcessor { order: order.clone() });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 5000
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: skip
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::POST, "/data");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let mut body = Some(Bytes::from("pre-read chunk"));
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "on_request_body (pre-read) should succeed"
+    );
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "on_request after pre-read should succeed (idempotent)"
+    );
+
+    let mut eos_body = None;
+    let action = filter.on_request_body(&mut ctx, &mut eos_body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "on_request_body EOS should succeed"
+    );
+
+    let observed = order.lock().await;
+    assert!(
+        observed.len() >= 2,
+        "processor should have received at least headers and body_eos, got: {observed:?}"
+    );
+    assert_eq!(
+        observed[0], "headers",
+        "first message to processor should be headers: {observed:?}"
+    );
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn full_duplex_body_chunks_sent_incrementally() {
+    struct ChunkRecordingProcessor {
+        chunks: std::sync::Arc<tokio::sync::Mutex<Vec<Vec<u8>>>>,
+    }
+
+    #[async_trait]
+    impl ExternalProcessor for ChunkRecordingProcessor {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let chunks = self.chunks.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                let _headers = stream.message().await.unwrap().unwrap();
+
+                loop {
+                    let msg = stream.message().await.unwrap().unwrap();
+                    if let Some(processing_request::Request::RequestBody(b)) = msg.request {
+                        chunks.lock().await.push(b.body.clone());
+                        if b.end_of_stream {
+                            break;
+                        }
+                    }
+                }
+
+                let header_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(header_resp)).await);
+
+                use crate::proto::envoy::service::ext_proc::v3::{
+                    BodyMutation, CommonResponse, StreamedBodyResponse, body_mutation,
+                };
+                let body_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestBody(BodyResponse {
+                        response: Some(CommonResponse {
+                            body_mutation: Some(BodyMutation {
+                                mutation: Some(body_mutation::Mutation::StreamedResponse(StreamedBodyResponse {
+                                    body: Vec::new(),
+                                    end_of_stream: true,
+                                })),
+                            }),
+                            ..Default::default()
+                        }),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(body_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let chunks = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(ChunkRecordingProcessor { chunks: chunks.clone() });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 5000
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: skip
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::POST, "/stream");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "on_request should succeed");
+
+    for chunk_data in [b"chunk1".as_slice(), b"chunk2", b"chunk3"] {
+        let mut body = Some(Bytes::from(chunk_data.to_vec()));
+        let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "intermediate body chunk should succeed"
+        );
+    }
+
+    let mut eos_body = None;
+    let action = filter.on_request_body(&mut ctx, &mut eos_body, true).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "EOS body should succeed");
+
+    let observed = chunks.lock().await;
+    assert_eq!(
+        observed.len(),
+        4,
+        "processor should receive 3 chunks + 1 EOS body: {observed:?}"
+    );
+    assert_eq!(observed[0], b"chunk1", "first chunk should be 'chunk1'");
+    assert_eq!(observed[1], b"chunk2", "second chunk should be 'chunk2'");
+    assert_eq!(observed[2], b"chunk3", "third chunk should be 'chunk3'");
+    assert!(observed[3].is_empty(), "EOS body should be empty: {:?}", observed[3]);
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn full_duplex_eos_does_not_resend_body() {
+    struct EosBodyRecorder {
+        eos_body: std::sync::Arc<tokio::sync::Mutex<Option<Vec<u8>>>>,
+    }
+
+    #[async_trait]
+    impl ExternalProcessor for EosBodyRecorder {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let eos_body = self.eos_body.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(16);
+            tokio::spawn(async move {
+                let _headers = stream.message().await.unwrap().unwrap();
+
+                loop {
+                    let msg = stream.message().await.unwrap().unwrap();
+                    if let Some(processing_request::Request::RequestBody(b)) = msg.request
+                        && b.end_of_stream
+                    {
+                        *eos_body.lock().await = Some(b.body.clone());
+                        break;
+                    }
+                }
+
+                let header_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestHeaders(HeadersResponse {
+                        response: None,
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(header_resp)).await);
+
+                use crate::proto::envoy::service::ext_proc::v3::{
+                    BodyMutation, CommonResponse, StreamedBodyResponse, body_mutation,
+                };
+                let body_resp = ProcessingResponse {
+                    response: Some(processing_response::Response::RequestBody(BodyResponse {
+                        response: Some(CommonResponse {
+                            body_mutation: Some(BodyMutation {
+                                mutation: Some(body_mutation::Mutation::StreamedResponse(StreamedBodyResponse {
+                                    body: Vec::new(),
+                                    end_of_stream: true,
+                                })),
+                            }),
+                            ..Default::default()
+                        }),
+                    })),
+                    ..Default::default()
+                };
+                drop(tx.send(Ok(body_resp)).await);
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let eos_body = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let svc = ExternalProcessorServer::new(EosBodyRecorder {
+        eos_body: eos_body.clone(),
+    });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(svc)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 5000
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: skip
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::POST, "/eos-test");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let _action = filter.on_request(&mut ctx).await.unwrap();
+    let mut body = Some(Bytes::from("accumulated data"));
+    let _action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+
+    let mut eos_body_param = Some(Bytes::from("accumulated data"));
+    let _action = filter
+        .on_request_body(&mut ctx, &mut eos_body_param, true)
+        .await
+        .unwrap();
+
+    let observed = eos_body.lock().await;
+    let eos = observed.as_ref().expect("EOS body should have been recorded");
+    assert!(
+        eos.is_empty(),
+        "EOS body sent to processor should be empty, not contain accumulated data: {eos:?}"
+    );
+
+    let _ = shutdown_tx.send(());
+}
+
+#[tokio::test]
+async fn full_duplex_deferred_routing_response() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::DelayedRouting {
+        header_name: "x-gateway-destination-endpoint".to_owned(),
+        header_value: "10.0.0.1:8080".to_owned(),
+    })
+    .await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 5000
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: skip
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::POST, "/route");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "on_request should return Continue"
+    );
+
+    let mut body = Some(Bytes::from(r#"{"prompt":"hello"}"#));
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "body chunk should return Continue"
+    );
+
+    let mut eos_body = None;
+    let action = filter.on_request_body(&mut ctx, &mut eos_body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "EOS should return Continue after drain"
+    );
+
+    let endpoint_header = ctx
+        .extra_request_headers
+        .iter()
+        .find(|(k, _)| k == "x-gateway-destination-endpoint");
+    assert!(
+        endpoint_header.is_some(),
+        "x-gateway-destination-endpoint should be injected by the processor"
+    );
+    assert_eq!(
+        endpoint_header.unwrap().1,
+        "10.0.0.1:8080",
+        "endpoint value should match"
+    );
+}
+
+#[tokio::test]
+async fn full_duplex_immediate_response_rejects() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::ImmediateOnHeaders {
+        status: 403,
+        body: "blocked by policy".to_owned(),
+    })
+    .await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 5000
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: skip
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::POST, "/blocked");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "on_request in full-duplex returns Continue regardless"
+    );
+
+    let mut eos_body = None;
+    let action = filter.on_request_body(&mut ctx, &mut eos_body, true).await.unwrap();
+    let rejection = match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject from ImmediateResponse during drain, got {other:?}"),
+    };
+    assert_eq!(rejection.status, 403, "rejection status should match ImmediateResponse");
+}
+
+#[tokio::test]
+async fn full_duplex_exchange_timeout() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::Hang).await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 50
+status_on_error: 504
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: skip
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::POST, "/timeout");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "on_request should succeed even with hanging processor"
+    );
+
+    let mut eos_body = None;
+    let action = filter.on_request_body(&mut ctx, &mut eos_body, true).await.unwrap();
+    let rejection = match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject from timeout, got {other:?}"),
+    };
+    assert_eq!(
+        rejection.status, 504,
+        "timeout should produce rejection with status_on_error"
+    );
+}
+
+#[tokio::test]
+async fn full_duplex_configured_lifecycle_timeout() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::Hang).await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 50
+lifecycle_timeout_ms: 100
+status_on_error: 503
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: skip
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::POST, "/configured-timeout");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+
+    let start = Instant::now();
+    let mut eos_body = None;
+    let action = filter.on_request_body(&mut ctx, &mut eos_body, true).await.unwrap();
+    let elapsed = start.elapsed();
+
+    let rejection = match action {
+        FilterAction::Reject(r) => r,
+        other => panic!("expected Reject from configured lifecycle timeout, got {other:?}"),
+    };
+    assert_eq!(rejection.status, 503, "configured lifecycle timeout should produce 503");
+    assert!(
+        elapsed < Duration::from_secs(3),
+        "lifecycle timeout should fire near configured 100ms, not default 5s (took {elapsed:?})"
+    );
+}
+
+#[test]
+fn config_rejects_lifecycle_timeout_exceeding_max() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://localhost:9999"
+lifecycle_timeout_ms: 400000
+processing_mode:
+  response_header_mode: skip
+"#,
+    )
+    .unwrap();
+    match ExtProcFilter::from_config(&yaml) {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("exceeds maximum"),
+                "should reject lifecycle_timeout_ms > 300000: {msg}"
+            );
+        },
+        Ok(_) => panic!("expected error for lifecycle_timeout_ms > 300000"),
+    }
+}
+
+#[test]
+fn config_rejects_lifecycle_timeout_below_message_timeout() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+target: "http://localhost:9999"
+message_timeout_ms: 5000
+lifecycle_timeout_ms: 1000
+processing_mode:
+  response_header_mode: skip
+"#,
+    )
+    .unwrap();
+    match ExtProcFilter::from_config(&yaml) {
+        Err(e) => {
+            let msg = e.to_string();
+            assert!(
+                msg.contains("lifecycle_timeout_ms") && msg.contains("message_timeout_ms"),
+                "should reject lifecycle < message: {msg}"
+            );
+        },
+        Ok(_) => panic!("expected error for lifecycle_timeout_ms < message_timeout_ms"),
+    }
+}
+
+// =============================================================================
+// proto_value_to_json Tests
+// =============================================================================
+
+#[test]
+fn proto_value_nan_maps_to_null() {
+    let value = prost_wkt_types::Value {
+        kind: Some(prost_wkt_types::value::Kind::NumberValue(f64::NAN)),
+    };
+    assert_eq!(
+        proto_value_to_json(&value),
+        serde_json::Value::Null,
+        "NaN should map to null"
+    );
+}
+
+#[test]
+fn proto_value_infinity_maps_to_null() {
+    let value = prost_wkt_types::Value {
+        kind: Some(prost_wkt_types::value::Kind::NumberValue(f64::INFINITY)),
+    };
+    assert_eq!(
+        proto_value_to_json(&value),
+        serde_json::Value::Null,
+        "infinity should map to null"
+    );
+}
+
+#[test]
+fn proto_value_neg_infinity_maps_to_null() {
+    let value = prost_wkt_types::Value {
+        kind: Some(prost_wkt_types::value::Kind::NumberValue(f64::NEG_INFINITY)),
+    };
+    assert_eq!(
+        proto_value_to_json(&value),
+        serde_json::Value::Null,
+        "negative infinity should map to null"
+    );
+}
+
+#[test]
+fn proto_value_finite_number_preserved() {
+    let value = prost_wkt_types::Value {
+        kind: Some(prost_wkt_types::value::Kind::NumberValue(42.5)),
+    };
+    assert_eq!(
+        proto_value_to_json(&value),
+        serde_json::json!(42.5),
+        "finite number should be preserved"
+    );
+}
+
+#[test]
+fn proto_value_nested_nan_maps_to_null() {
+    let mut fields = HashMap::new();
+    fields.insert(
+        "score".to_owned(),
+        prost_wkt_types::Value {
+            kind: Some(prost_wkt_types::value::Kind::NumberValue(f64::NAN)),
+        },
+    );
+    fields.insert(
+        "name".to_owned(),
+        prost_wkt_types::Value {
+            kind: Some(prost_wkt_types::value::Kind::StringValue("test".to_owned())),
+        },
+    );
+    let value = prost_wkt_types::Value {
+        kind: Some(prost_wkt_types::value::Kind::StructValue(prost_wkt_types::Struct {
+            fields,
+        })),
+    };
+    let json = proto_value_to_json(&value);
+    assert_eq!(json["score"], serde_json::Value::Null, "nested NaN should map to null");
+    assert_eq!(
+        json["name"],
+        serde_json::json!("test"),
+        "sibling string should be preserved"
+    );
+}
+
+// =============================================================================
+// Bodyless Request Through on_request
+// =============================================================================
+
+#[tokio::test]
+async fn bodyless_get_through_on_request_creates_exchange_state() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::EchoHeaders {
+        name: "x-echo".to_owned(),
+        value: "ok".to_owned(),
+    })
+    .await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 5000
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: skip
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::GET, "/health");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "bodyless GET on_request should return Continue, got {action:?}"
+    );
+
+    let state = ctx.get_filter_state::<ExtProcState>();
+    assert!(state.is_some(), "on_request should store ExtProcState in filter_state");
+    assert!(
+        state.unwrap().headers_sent,
+        "ExtProcState.headers_sent should be true after on_request"
+    );
+}
+
+// =============================================================================
+// on_response Pass-Through in Full-Duplex Mode
+// =============================================================================
+
+#[tokio::test]
+async fn on_response_passthrough_in_full_duplex_mode() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::Hang).await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 5000
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: skip
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::POST, "/api");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_response(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "on_response in full-duplex mode should return Continue without callout, got {action:?}"
+    );
+}
+
+#[tokio::test]
+async fn full_duplex_header_only_body_response_preserves_body() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::HeaderOnlyBodyResponse {
+        header_name: "x-injected".to_owned(),
+        header_value: "from-processor".to_owned(),
+    })
+    .await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 2000
+lifecycle_timeout_ms: 5000
+status_on_error: 503
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: skip
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::POST, "/body-preserve");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+
+    let original_body = Bytes::from("original request body");
+    let mut body = Some(original_body.clone());
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "should complete successfully, got {action:?}"
+    );
+    assert_eq!(
+        body,
+        Some(original_body),
+        "original body must be preserved when processor sends no body mutation"
+    );
+    assert!(
+        ctx.extra_request_headers
+            .iter()
+            .any(|(name, value)| name == "x-injected" && value == "from-processor"),
+        "header mutation from the body response must be queued alongside the preserved body"
+    );
+}
+
+#[tokio::test]
+async fn full_duplex_coalesced_body_response_respects_request_body_limit() {
+    let (addr, _guard) = start_duplex_processor(DuplexBehavior::StreamedBodyChunks {
+        chunks: vec![b"abcde".to_vec()],
+    })
+    .await;
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+target: "http://{addr}"
+message_timeout_ms: 2000
+lifecycle_timeout_ms: 5000
+status_on_error: 503
+processing_mode:
+  request_body_mode: full_duplex_streamed
+  response_header_mode: skip
+"#,
+    ))
+    .unwrap();
+    let filter = ExtProcFilter::from_config(&yaml).unwrap();
+
+    let req = make_request(Method::POST, "/body-limit");
+    let mut ctx = make_ctx(&req);
+    ctx.current_filter_id = Some(42);
+    ctx.set_request_body_mode(BodyMode::StreamBuffer { max_bytes: Some(4) });
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+
+    let mut body = Some(Bytes::from_static(b"original"));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(Rejection { status: 503, .. })),
+        "oversized coalesced body mutation should use status_on_error, got {action:?}"
+    );
+}
+
+#[tokio::test]
+async fn open_with_request_headers_rejects_non_full_duplex() {
+    let channel = Channel::from_static("http://[::1]:1").connect_lazy();
+    let config = default_exchange_config();
+    match ExtProcExchange::open_with_request_headers(channel, &config, make_request_headers()) {
+        Err(ExchangeError::OrderingViolation(msg)) => {
+            assert!(msg.contains("full-duplex"), "should mention full-duplex: {msg}");
+        },
+        Err(other) => panic!("expected OrderingViolation, got: {other:?}"),
+        Ok(_) => panic!("expected error for non-full-duplex preload"),
+    }
+}
+
+#[tokio::test]
+async fn open_with_request_headers_envelope_contains_protocol_config() {
+    use crate::proto::envoy::service::ext_proc::v3::HttpBody;
+
+    struct PreloadedConfigRecorder {
+        configs: std::sync::Arc<tokio::sync::Mutex<Vec<Option<ProtocolConfiguration>>>>,
+    }
+
+    #[async_trait]
+    impl ExternalProcessor for PreloadedConfigRecorder {
+        type ProcessStream = Pin<Box<dyn Stream<Item = Result<ProcessingResponse, tonic::Status>> + Send>>;
+
+        async fn process(
+            &self,
+            request: tonic::Request<tonic::Streaming<ProcessingRequest>>,
+        ) -> Result<tonic::Response<Self::ProcessStream>, tonic::Status> {
+            let mut stream = request.into_inner();
+            let configs = self.configs.clone();
+            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            tokio::spawn(async move {
+                while let Ok(Some(msg)) = stream.message().await {
+                    configs.lock().await.push(msg.protocol_config);
+                    let response = build_noop_response(&msg);
+                    drop(tx.send(Ok(response)).await);
+                }
+            });
+            Ok(tonic::Response::new(Box::pin(
+                tokio_stream::wrappers::ReceiverStream::new(rx),
+            )))
+        }
+    }
+
+    let configs = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
+    let service = ExternalProcessorServer::new(PreloadedConfigRecorder {
+        configs: configs.clone(),
+    });
+    tokio::spawn(async move {
+        tonic::transport::Server::builder()
+            .add_service(service)
+            .serve_with_incoming_shutdown(tokio_stream::wrappers::TcpListenerStream::new(listener), async {
+                let _ = shutdown_rx.await;
+            })
+            .await
+            .unwrap();
+    });
+    wait_for_server(addr).await;
+
+    let channel = connect_channel(addr).await;
+    let config = full_duplex_exchange_config();
+    let mut exchange = ExtProcExchange::open_with_request_headers(channel, &config, make_request_headers()).unwrap();
+
+    exchange
+        .send(processing_request::Request::RequestBody(HttpBody {
+            body: Vec::new(),
+            end_of_stream: true,
+        }))
+        .await
+        .unwrap();
+
+    assert!(matches!(
+        exchange.receive().await.unwrap(),
+        ExchangeEvent::RequestHeaders { .. }
+    ));
+    assert!(matches!(
+        exchange.receive().await.unwrap(),
+        ExchangeEvent::RequestBody { .. }
+    ));
+
+    let configs = configs.lock().await;
+    assert_eq!(
+        configs.len(),
+        2,
+        "processor should receive preloaded headers and one body message"
+    );
+    let first = configs[0]
+        .as_ref()
+        .expect("preloaded RequestHeaders envelope must include ProtocolConfiguration");
+    assert_eq!(
+        first.request_body_mode,
+        ProtoBodySendMode::FullDuplexStreamed as i32,
+        "preloaded protocol config must advertise full-duplex request body mode"
+    );
+    assert_eq!(
+        first.response_body_mode,
+        ProtoBodySendMode::FullDuplexStreamed as i32,
+        "preloaded protocol config must preserve response body mode"
+    );
+    assert!(
+        !first.send_body_without_waiting_for_header_response,
+        "preloaded protocol config must preserve the explicit false setting"
+    );
+    assert!(
+        configs[1].is_none(),
+        "body message after preloaded headers must omit ProtocolConfiguration"
+    );
+
+    drop(exchange);
+    let _ = shutdown_tx.send(());
+}
+
+// =============================================================================
+// Host mutation protection tests
+// =============================================================================
+
+#[test]
+fn host_set_mutation_is_skipped() {
+    use crate::proto::envoy::service::{
+        common::v3::{HeaderValue, HeaderValueOption},
+        ext_proc::v3::HeaderMutation,
+    };
+
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+
+    let mutation = HeaderMutation {
+        set_headers: vec![HeaderValueOption {
+            header: Some(HeaderValue {
+                key: "Host".to_owned(),
+                raw_value: b"evil.example.com".to_vec(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        ..Default::default()
+    };
+    mutations::apply_request_header_mutation(&mutation, &mut ctx);
+
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "Host set must not enter extra_request_headers"
+    );
+    assert!(
+        ctx.request_headers_to_set.is_empty(),
+        "Host set must not enter request_headers_to_set"
+    );
+    assert!(
+        ctx.pre_read_mutations.is_empty(),
+        "Host set must not enter pre_read_mutations"
+    );
+}
+
+#[test]
+fn host_remove_mutation_is_skipped() {
+    use crate::proto::envoy::service::ext_proc::v3::HeaderMutation;
+
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+
+    let mutation = HeaderMutation {
+        remove_headers: vec!["host".to_owned()],
+        ..Default::default()
+    };
+    mutations::apply_request_header_mutation(&mutation, &mut ctx);
+
+    assert!(
+        ctx.request_headers_to_remove.is_empty(),
+        "Host remove must not enter request_headers_to_remove"
+    );
+    assert!(
+        ctx.pre_read_mutations.is_empty(),
+        "Host remove must not enter pre_read_mutations"
+    );
+}
+
+#[test]
+fn host_case_insensitive_protection() {
+    use crate::proto::envoy::service::{
+        common::v3::{HeaderValue, HeaderValueOption},
+        ext_proc::v3::HeaderMutation,
+    };
+
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+
+    let mutation = HeaderMutation {
+        set_headers: vec![HeaderValueOption {
+            header: Some(HeaderValue {
+                key: "HOST".to_owned(),
+                raw_value: b"upper.example.com".to_vec(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        }],
+        remove_headers: vec!["hOsT".to_owned()],
+    };
+    mutations::apply_request_header_mutation(&mutation, &mut ctx);
+
+    assert!(ctx.extra_request_headers.is_empty());
+    assert!(ctx.request_headers_to_set.is_empty());
+    assert!(ctx.request_headers_to_remove.is_empty());
+    assert!(ctx.pre_read_mutations.is_empty());
+}
+
+#[test]
+fn host_protection_does_not_block_ordinary_headers() {
+    use crate::proto::envoy::service::{
+        common::v3::{HeaderValue, HeaderValueOption},
+        ext_proc::v3::HeaderMutation,
+    };
+
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_ctx(&req);
+
+    let mutation = HeaderMutation {
+        set_headers: vec![
+            HeaderValueOption {
+                header: Some(HeaderValue {
+                    key: "Host".to_owned(),
+                    raw_value: b"skipped.example.com".to_vec(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            HeaderValueOption {
+                header: Some(HeaderValue {
+                    key: "x-gateway-destination-endpoint".to_owned(),
+                    raw_value: b"10.0.0.1:8080".to_vec(),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    mutations::apply_request_header_mutation(&mutation, &mut ctx);
+
+    assert!(
+        ctx.extra_request_headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("x-gateway-destination-endpoint")),
+        "ordinary header must still be applied"
+    );
+    assert!(
+        !ctx.extra_request_headers
+            .iter()
+            .any(|(n, _)| n.eq_ignore_ascii_case("host")),
+        "Host must not appear in extras"
+    );
+    assert_eq!(
+        ctx.pre_read_mutations.len(),
+        1,
+        "only the non-Host mutation should be in pre_read"
     );
 }

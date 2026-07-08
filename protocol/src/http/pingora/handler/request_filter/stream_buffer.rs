@@ -3,12 +3,14 @@
 
 //! StreamBuffer pre-read logic and TRACE response construction.
 
-use std::{borrow::Cow, collections::VecDeque, fmt::Write as _};
+use std::{collections::VecDeque, fmt::Write as _};
 
 use pingora_proxy::Session;
 use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
-use praxis_filter::{BodyBuffer, BodyMode, FilterAction, FilterError, FilterPipeline, Rejection, Request};
-use tracing::debug;
+use praxis_filter::{
+    BodyBuffer, BodyMode, FilterAction, FilterError, FilterPipeline, Rejection, Request, TrustedHeaderMutation,
+};
+use tracing::{debug, warn};
 
 use crate::http::pingora::context::PingoraRequestCtx;
 
@@ -69,6 +71,12 @@ pub(super) fn build_trace_response(session: &Session) -> Rejection {
 // StreamBuffer Pre-Read
 // -----------------------------------------------------------------------------
 
+/// Holds ordered trusted mutation log for provenance resolution.
+pub(super) struct PreReadMutations {
+    /// Ordered trusted header mutation log.
+    pub mutations: Vec<TrustedHeaderMutation>,
+}
+
 /// Errors that can occur during body pre-reading in `StreamBuffer` mode.
 pub(super) enum PreReadError {
     /// A filter rejected the request during body processing.
@@ -83,10 +91,9 @@ pub(super) enum PreReadError {
 
 /// Pre-read the request body from the session and run body filters.
 ///
-/// Returns any extra headers that body filters promoted (e.g.
-/// `json_body_field` extracting a model name). The accumulated body
-/// is stored in `ctx.pre_read_body` for later forwarding by
-/// `request_body_filter`.
+/// Returns the ordered trusted mutation log emitted by body filters.
+/// The accumulated body is stored in `ctx.pre_read_body` for later
+/// forwarding by `request_body_filter`.
 #[expect(
     clippy::too_many_lines,
     unused_assignments,
@@ -97,11 +104,11 @@ pub(super) async fn pre_read_body(
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
     request: &Request,
-) -> Result<Vec<(Cow<'static, str>, String)>, PreReadError> {
+) -> Result<PreReadMutations, PreReadError> {
     let caps = pipeline.body_capabilities();
     let max_bytes = match caps.request_body_mode {
         BodyMode::StreamBuffer { max_bytes } => max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES),
-        _ => return Ok(Vec::new()),
+        _ => return Ok(PreReadMutations { mutations: Vec::new() }),
     };
 
     // Pingora only calls `request_body_filter` after pre-read when its
@@ -111,7 +118,7 @@ pub(super) async fn pre_read_body(
     session.downstream_session.enable_retry_buffering();
 
     let mut buffer = BodyBuffer::new(max_bytes);
-    let mut all_extra_headers = Vec::new();
+    let mut mutation_log: Vec<TrustedHeaderMutation> = Vec::new();
     let mut released = false;
     let mut eos_body = None;
     let mut original_body_bytes: u64 = 0;
@@ -168,7 +175,36 @@ pub(super) async fn pre_read_body(
         ctx.filter_results = filter_ctx.filter_results;
         ctx.cached_executed_filter_indices = filter_ctx.executed_filter_indices;
         ctx.cached_body_done_indices = filter_ctx.body_done_indices;
-        all_extra_headers.extend(filter_ctx.extra_request_headers);
+        ctx.structured_metadata = filter_ctx.structured_metadata;
+
+        if filter_ctx.pre_read_mutations.is_empty() {
+            // Fallback for filters that only populate the legacy grouped
+            // mutation queues. This preserves their existing remove -> set
+            // -> add application order.
+            //
+            // A pre-read chain must use one mutation mechanism for forwarded
+            // header provenance: either the ordered pre_read_mutations log or
+            // these legacy grouped queues. Mixing them would make ordering
+            // ambiguous, so the ordered log takes precedence when present.
+            for name in &filter_ctx.request_headers_to_remove {
+                mutation_log.push(TrustedHeaderMutation::Remove(name.clone()));
+            }
+            for (name, value) in &filter_ctx.request_headers_to_set {
+                mutation_log.push(TrustedHeaderMutation::Set(name.clone(), value.clone()));
+            }
+            for (name, value) in &filter_ctx.extra_request_headers {
+                if let (Ok(hname), Ok(_)) = (
+                    http::header::HeaderName::from_bytes(name.as_bytes()),
+                    http::header::HeaderValue::from_str(value),
+                ) {
+                    mutation_log.push(TrustedHeaderMutation::Add(hname, value.clone()));
+                } else {
+                    warn!(header = %name, "skipping invalid promoted header");
+                }
+            }
+        } else {
+            mutation_log.extend(filter_ctx.pre_read_mutations);
+        }
 
         match action {
             Ok(FilterAction::Continue | FilterAction::BodyDone) => {},
@@ -209,7 +245,9 @@ pub(super) async fn pre_read_body(
 
     ctx.request_body_released = true;
 
-    Ok(all_extra_headers)
+    Ok(PreReadMutations {
+        mutations: mutation_log,
+    })
 }
 
 // ---------------------------------------------------------------------------

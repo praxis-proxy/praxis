@@ -127,6 +127,11 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
         "credential_injection",
         CredentialInjectionFilter::from_config,
     );
+    register_http(
+        factories,
+        "endpoint_selector",
+        crate::builtins::EndpointSelectorFilter::from_config,
+    );
     register_http(factories, "headers", HeaderFilter::from_config);
     register_http(factories, "forwarded_headers", ForwardedHeadersFilter::from_config);
     register_http(factories, "grpc_detection", GrpcDetectionFilter::from_config);
@@ -218,6 +223,10 @@ mod tests {
         assert!(
             names.contains(&"credential_injection"),
             "credential_injection should be registered"
+        );
+        assert!(
+            names.contains(&"endpoint_selector"),
+            "endpoint_selector should be registered"
         );
         assert!(
             names.contains(&"forwarded_headers"),

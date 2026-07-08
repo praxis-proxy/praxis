@@ -19,8 +19,8 @@ pub use security::{
     GuardrailsAction, GuardrailsFilter, IpAclFilter, PiiKind, RuleTargetKind,
 };
 pub use traffic_management::{
-    CircuitBreakerFilter, GrpcDetectionFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter,
-    RedirectStatus, RouterFilter, StaticResponseFilter, TimeoutFilter,
+    CircuitBreakerFilter, EndpointSelectorFilter, GrpcDetectionFilter, LoadBalancerFilter, RateLimitFilter,
+    RateLimitMode, RedirectFilter, RedirectStatus, RouterFilter, StaticResponseFilter, TimeoutFilter,
 };
 pub use transformation::{
     HeaderFilter, PathRewriteFilter, UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,

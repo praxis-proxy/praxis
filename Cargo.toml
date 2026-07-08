@@ -54,7 +54,7 @@ pingora-core = { version = "0.8.2", package = "quixotic-plecostomus-core", featu
 pingora-http = { version = "0.8.2", package = "quixotic-plecostomus-http" }
 pingora-proxy = { version = "0.8.2", package = "quixotic-plecostomus-proxy", features = ["rustls"] }
 percent-encoding = "2.3.2"
-praxis-ext-proc = { path = "filter/ext-proc", package = "praxis-proxy-ext-proc" }
+praxis-ext-proc = { version = "0.4.0", path = "filter/ext-proc", package = "praxis-proxy-ext-proc" }
 prost = "0.14.4"
 prost-build = "0.14.4"
 prost-types = "0.14.4"
