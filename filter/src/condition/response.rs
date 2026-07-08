@@ -91,13 +91,46 @@ fn matches_status_headers(m: &ResponseConditionMatch, status: http::StatusCode, 
     if let Some(required) = &m.headers {
         for (name, value) in required {
             match headers.get(name) {
-                Some(v) if v.to_str().ok() == Some(value.as_str()) => {},
+                Some(v) if header_value_matches(name, v, value) => {},
                 _ => return false,
             }
         }
     }
 
     true
+}
+
+/// Compare a header value, using media-type-aware matching for `Content-Type`.
+fn header_value_matches(name: &str, actual: &http::HeaderValue, expected: &str) -> bool {
+    let Ok(actual) = actual.to_str() else {
+        return false;
+    };
+
+    if name.eq_ignore_ascii_case("content-type") {
+        if has_parameters(expected) {
+            return media_type(actual).eq_ignore_ascii_case(media_type(expected)) && params(actual) == params(expected);
+        }
+        return media_type(actual).eq_ignore_ascii_case(media_type(expected));
+    }
+
+    actual == expected
+}
+
+/// Extract the media type portion of a header value, stripping parameters.
+fn media_type(value: &str) -> &str {
+    value.split(';').next().unwrap_or_default().trim()
+}
+
+/// Returns `true` if the value contains non-empty media-type parameters.
+fn has_parameters(value: &str) -> bool {
+    value
+        .split_once(';')
+        .is_some_and(|(_, params)| !params.trim().is_empty())
+}
+
+/// Extract the parameter portion of a header value (everything after the first `;`).
+fn params(value: &str) -> &str {
+    value.split_once(';').map_or("", |(_, p)| p)
 }
 
 // -----------------------------------------------------------------------------
@@ -224,6 +257,113 @@ mod tests {
             !should_execute_response(&conditions, &resp),
             "missing header should fail condition"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Content-Type media-type matching
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn content_type_strips_parameters() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("text/event-stream; charset=utf-8"),
+        );
+        let resp = make_response(200, headers);
+        assert!(should_execute_response(
+            &[resp_when(resp_header_match(&[("content-type", "text/event-stream")]))],
+            &resp
+        ));
+    }
+
+    #[test]
+    fn content_type_case_insensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("Application/JSON"));
+        let resp = make_response(200, headers);
+        assert!(should_execute_response(
+            &[resp_when(resp_header_match(&[("content-type", "application/json")]))],
+            &resp
+        ));
+    }
+
+    #[test]
+    fn content_type_wrong_media_type() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("text/plain; charset=utf-8"));
+        let resp = make_response(200, headers);
+        assert!(!should_execute_response(
+            &[resp_when(resp_header_match(&[("content-type", "text/event-stream")]))],
+            &resp
+        ));
+    }
+
+    #[test]
+    fn content_type_case_insensitive_with_parameters() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "content-type",
+            HeaderValue::from_static("Text/Event-Stream; charset=utf-8"),
+        );
+        let resp = make_response(200, headers);
+        assert!(should_execute_response(
+            &[resp_when(resp_header_match(&[("content-type", "text/event-stream")]))],
+            &resp
+        ));
+    }
+
+    #[test]
+    fn content_type_expected_parameters_match_exactly() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/json; profile=a"));
+        let resp = make_response(200, headers);
+        assert!(should_execute_response(
+            &[resp_when(resp_header_match(&[(
+                "content-type",
+                "application/json; profile=a"
+            )]))],
+            &resp
+        ));
+    }
+
+    #[test]
+    fn content_type_expected_parameters_case_insensitive_media_type() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("Application/JSON; profile=a"));
+        let resp = make_response(200, headers);
+        assert!(should_execute_response(
+            &[resp_when(resp_header_match(&[(
+                "content-type",
+                "application/json; profile=a"
+            )]))],
+            &resp
+        ));
+    }
+
+    #[test]
+    fn content_type_expected_parameters_mismatch() {
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/json; profile=b"));
+        let resp = make_response(200, headers);
+        assert!(!should_execute_response(
+            &[resp_when(resp_header_match(&[(
+                "content-type",
+                "application/json; profile=a"
+            )]))],
+            &resp
+        ));
+    }
+
+    #[test]
+    fn non_content_type_header_stays_exact() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-custom", HeaderValue::from_static("value; extra"));
+        let resp = make_response(200, headers);
+        assert!(!should_execute_response(
+            &[resp_when(resp_header_match(&[("x-custom", "value")]))],
+            &resp
+        ));
     }
 
     // -------------------------------------------------------------------------
