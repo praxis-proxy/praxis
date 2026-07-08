@@ -268,9 +268,13 @@ async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx)
         let extensions = filter_ctx.extensions;
         let metadata = filter_ctx.filter_metadata;
         let state = filter_ctx.filter_state;
+        let exec_idx = filter_ctx.executed_filter_indices;
+        let body_idx = filter_ctx.body_done_indices;
         ctx.extensions = extensions;
         ctx.filter_metadata = metadata;
         ctx.filter_state = state;
+        ctx.cached_executed_filter_indices = exec_idx;
+        ctx.cached_body_done_indices = body_idx;
     }
 }
 

@@ -39,10 +39,14 @@
 
 mod backend_failure;
 mod backend_recovery;
+mod circuit_breaker_resilience;
 mod concurrent_load;
+mod health_check_recovery;
 mod large_payload;
 mod multi_listener_isolation;
 mod rate_limit_burst;
+mod retry;
+mod slow_client;
 mod throughput_body;
 mod throughput_filter_chain;
 mod throughput_production;

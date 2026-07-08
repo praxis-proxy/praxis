@@ -58,5 +58,5 @@ jobs:
             ${{ runner.os }}-rust-1.96.0-coverage-
           save-always: true
 
-      - name: Check coverage (≥95% lines)
+      - name: Check coverage (≥96% lines)
         run: make coverage-check

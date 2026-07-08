@@ -51,6 +51,8 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         request_headers_to_remove: Vec::new(),
         request_headers_to_set: Vec::new(),
         filter_metadata: std::collections::HashMap::new(),
+        pre_read_mutations: Vec::new(),
+        structured_metadata: std::collections::HashMap::new(),
         filter_results: std::collections::HashMap::new(),
         filter_state: std::collections::HashMap::new(),
         health_registry: None,

@@ -131,6 +131,9 @@ pub struct RateLimitFilter {
     /// Maximum bucket capacity.
     pub(self) burst: f64,
 
+    /// Pre-formatted burst value for the `X-RateLimit-Limit` header.
+    pub(self) burst_string: String,
+
     /// Monotonic clock reference; all timestamps are offsets from this.
     pub(self) epoch: Instant,
 }
@@ -186,10 +189,13 @@ impl RateLimitFilter {
             RateLimitMode::PerIp => RateLimitState::PerIp(DashMap::new()),
         };
 
+        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "burst fits u64")]
+        let burst_string = (burst as u64).to_string();
         Ok(Box::new(Self {
             state,
             rate: cfg.rate,
             burst,
+            burst_string,
             epoch: Instant::now(),
         }))
     }

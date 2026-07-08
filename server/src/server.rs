@@ -424,7 +424,7 @@ pub fn fatal(err: &dyn std::fmt::Display) -> ! {
     reason = "tests"
 )]
 mod tests {
-    use super::check_root_privilege;
+    use super::*;
 
     #[test]
     fn root_uid_without_override_returns_error() {
@@ -470,19 +470,129 @@ mod tests {
 
     #[test]
     fn resolve_config_path_explicit() {
-        let path = super::resolve_config_path(Some("/tmp/test.yaml"));
+        let path = resolve_config_path(Some("/tmp/test.yaml"));
         assert_eq!(
             path,
-            Some(std::path::PathBuf::from("/tmp/test.yaml")),
+            Some(PathBuf::from("/tmp/test.yaml")),
             "explicit path should be returned as-is"
         );
     }
 
     #[test]
     fn resolve_config_path_none_no_file() {
-        let path = super::resolve_config_path(None);
+        let path = resolve_config_path(None);
         if !std::path::Path::new("praxis.yaml").exists() {
             assert!(path.is_none(), "should return None when praxis.yaml does not exist");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // insecure_warn
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn insecure_warn_inactive_does_not_panic() {
+        insecure_warn(false, "test_option: this should not panic");
+    }
+
+    #[test]
+    fn insecure_warn_active_does_not_panic() {
+        insecure_warn(true, "test_option: active warning");
+    }
+
+    // -----------------------------------------------------------------------
+    // init_runtime_limits
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn init_runtime_limits_no_limits_does_not_panic() {
+        let runtime = praxis_core::config::RuntimeConfig::default();
+        init_runtime_limits(&runtime);
+    }
+
+    #[test]
+    fn init_runtime_limits_with_memory_does_not_panic() {
+        let runtime = praxis_core::config::RuntimeConfig {
+            max_memory_bytes: Some(1_073_741_824),
+            ..Default::default()
+        };
+        init_runtime_limits(&runtime);
+    }
+
+    // -----------------------------------------------------------------------
+    // warn_insecure_key_permissions (Unix)
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    #[test]
+    fn key_permissions_restrictive_no_warning() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let key_path = dir.path().join("key.pem");
+        let cert_path = dir.path().join("cert.pem");
+        std::fs::write(&key_path, "fake-key").expect("write key");
+        std::fs::write(&cert_path, "fake-cert").expect("write cert");
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+
+        let config = config_with_tls(cert_path.to_str().expect("cert"), key_path.to_str().expect("key"));
+        warn_insecure_key_permissions(&config);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_permissions_permissive_does_not_panic() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let key_path = dir.path().join("key.pem");
+        let cert_path = dir.path().join("cert.pem");
+        std::fs::write(&key_path, "fake-key").expect("write key");
+        std::fs::write(&cert_path, "fake-cert").expect("write cert");
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        let config = config_with_tls(cert_path.to_str().expect("cert"), key_path.to_str().expect("key"));
+        warn_insecure_key_permissions(&config);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn key_permissions_missing_file_does_not_panic() {
+        let config = config_with_tls("/nonexistent/cert.pem", "/nonexistent/key.pem");
+        warn_insecure_key_permissions(&config);
+    }
+
+    // -----------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------
+
+    #[cfg(unix)]
+    fn config_with_tls(cert_path: &str, key_path: &str) -> Config {
+        let yaml = format!(
+            r#"
+listeners:
+  - name: tls
+    address: "127.0.0.1:8443"
+    filter_chains: [main]
+    tls:
+      certificates:
+        - cert_path: "{cert_path}"
+          key_path: "{key_path}"
+          server_names: ["localhost"]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+"#
+        );
+        Config::from_yaml(&yaml).expect("test config should parse")
     }
 }

@@ -41,8 +41,10 @@ impl FilterPipeline {
     #[expect(clippy::indexing_slicing, reason = "while loop bounds idx")]
     #[expect(clippy::too_many_lines, reason = "filter identity tracking adds lines per branch")]
     pub async fn execute_http_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        ctx.executed_filter_indices = vec![false; self.filters.len()];
-        ctx.body_done_indices = vec![false; self.filters.len()];
+        ctx.executed_filter_indices.clear();
+        ctx.executed_filter_indices.resize(self.filters.len(), false);
+        ctx.body_done_indices.clear();
+        ctx.body_done_indices.resize(self.filters.len(), false);
         let mut idx = 0;
         while idx < self.filters.len() {
             let pf = &self.filters[idx];

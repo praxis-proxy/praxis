@@ -156,7 +156,7 @@ listeners:
     );
 
     let config = Config::from_yaml(&yaml).unwrap();
-    start_full_proxy(config);
+    let _proxy = start_full_proxy(&config);
 
     let addr = format!("127.0.0.1:{proxy_port}");
     wait_for_tls(&addr, &raw_config);
@@ -728,7 +728,7 @@ listeners:
     );
 
     let config = Config::from_yaml(&yaml).unwrap();
-    start_full_proxy(config);
+    let _proxy = start_full_proxy(&config);
 
     let addr = format!("127.0.0.1:{proxy_port}");
     wait_for_tls(&addr, &mtls_config);
@@ -774,7 +774,7 @@ listeners:
     );
 
     let config = Config::from_yaml(&yaml).unwrap();
-    start_full_proxy(config);
+    let _proxy = start_full_proxy(&config);
 
     let addr = format!("127.0.0.1:{proxy_port}");
     wait_for_tls(&addr, &mtls_config);
@@ -820,7 +820,7 @@ filter_chains:
     );
 
     let config = Config::from_yaml(&yaml).expect("valid YAML config");
-    start_full_proxy(config);
+    let _proxy = start_full_proxy(&config);
 
     let addr = format!("127.0.0.1:{proxy_port}");
     praxis_test_utils::wait_for_http(&addr);
@@ -1301,7 +1301,7 @@ filter_chains:
     );
 
     let config = Config::from_yaml(&yaml).expect("valid YAML config");
-    start_full_proxy(config);
+    let _proxy = start_full_proxy(&config);
 
     let addr = format!("127.0.0.1:{proxy_port}");
     praxis_test_utils::wait_for_http(&addr);
@@ -1825,7 +1825,7 @@ filter_chains:
     );
 
     let config = Config::from_yaml(&yaml).unwrap();
-    start_full_proxy(config);
+    let _proxy = start_full_proxy(&config);
 
     let addr = format!("127.0.0.1:{proxy_port}");
     wait_for_https(&addr, &client_config);
@@ -1902,7 +1902,7 @@ filter_chains:
     );
 
     let config = Config::from_yaml(&yaml).unwrap();
-    start_full_proxy(config);
+    let _proxy = start_full_proxy(&config);
 
     let addr = format!("127.0.0.1:{proxy_port}");
     wait_for_https(&addr, &client_config);

@@ -27,10 +27,31 @@ include!(concat!(env!("OUT_DIR"), "/external_filters.rs"));
 /// that need a custom registry should use [`run_server_with_registry`]
 /// instead.
 ///
+/// # Panics
+///
+/// Panics if the feature-gated `ext_proc` filter conflicts with an
+/// existing built-in or auto-discovered filter name. This indicates a
+/// static registry construction bug and should fail startup rather than
+/// silently disabling the configured filter.
+///
 /// [`FilterRegistry`]: praxis_filter::FilterRegistry
 #[must_use]
+#[cfg_attr(
+    feature = "ext-proc",
+    expect(
+        clippy::expect_used,
+        reason = "static filter registration conflict is a programmer error"
+    )
+)]
 pub fn build_full_registry() -> praxis_filter::FilterRegistry {
     let mut registry = praxis_filter::FilterRegistry::with_builtins();
     register_external_filters(&mut registry);
+    #[cfg(feature = "ext-proc")]
+    registry
+        .register(
+            "ext_proc",
+            praxis_filter::http_builtin(praxis_ext_proc::ExtProcFilter::from_config),
+        )
+        .expect("ext_proc filter name must not conflict with existing registry entries");
     registry
 }

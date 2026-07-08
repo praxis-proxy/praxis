@@ -302,6 +302,7 @@ fn per_ip_eviction_skips_when_below_threshold() {
         state: RateLimitState::PerIp(DashMap::new()),
         rate,
         burst,
+        burst_string: (burst as u64).to_string(),
         epoch: Instant::now(),
     };
     filter.maybe_evict(&map, 999_999_999_999);
@@ -389,6 +390,7 @@ fn hard_cap_rejects_new_ips() {
         state: RateLimitState::PerIp(map),
         rate,
         burst,
+        burst_string: (burst as u64).to_string(),
         epoch: Instant::now(),
     };
 
@@ -419,6 +421,7 @@ fn hard_cap_allows_known_ips() {
         state: RateLimitState::PerIp(map),
         rate,
         burst,
+        burst_string: (burst as u64).to_string(),
         epoch: Instant::now(),
     };
 
@@ -537,6 +540,7 @@ fn make_eviction_filter(rate: f64, burst: f64) -> RateLimitFilter {
         state: RateLimitState::PerIp(DashMap::new()),
         rate,
         burst,
+        burst_string: (burst as u64).to_string(),
         epoch: Instant::now(),
     }
 }
@@ -553,6 +557,7 @@ fn make_filter(mode: &str, rate: f64, burst: u32) -> RateLimitFilter {
         state,
         rate,
         burst: burst_f,
+        burst_string: u64::from(burst).to_string(),
         epoch: Instant::now(),
     }
 }

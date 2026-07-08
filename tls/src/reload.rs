@@ -241,6 +241,28 @@ mod tests {
         }
     }
 
+    #[test]
+    fn arc_handle_reflects_reload() {
+        let (_c1, pair1) = make_pair();
+        let resolver = ReloadableCertResolver::new(&pair1).expect("initial load");
+        let handle = resolver.arc();
+        let before = handle.load_full();
+        assert!(
+            !before.cert.is_empty(),
+            "arc() handle should return non-empty cert chain"
+        );
+
+        let (_c2, pair2) = make_pair();
+        resolver.reload(&pair2).expect("reload should succeed");
+        let after = handle.load_full();
+
+        assert_ne!(
+            before.cert[0].as_ref(),
+            after.cert[0].as_ref(),
+            "arc() handle should reflect reloaded cert"
+        );
+    }
+
     // ---------------------------------------------------------------------------
     // Test Utilities
     // ---------------------------------------------------------------------------

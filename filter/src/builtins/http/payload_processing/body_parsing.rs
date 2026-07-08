@@ -112,3 +112,146 @@ pub fn handle_json_rpc_parse_error(e: &JsonRpcParseError, on_invalid: OnInvalidB
         _ => dispatch_on_invalid(on_invalid),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::needless_raw_strings,
+    reason = "tests"
+)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dispatch_on_invalid_continue_returns_continue() {
+        let action = dispatch_on_invalid(OnInvalidBehavior::Continue);
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "Continue should return Continue"
+        );
+    }
+
+    #[test]
+    fn dispatch_on_invalid_reject_returns_400() {
+        let action = dispatch_on_invalid(OnInvalidBehavior::Reject);
+        assert!(
+            matches!(&action, FilterAction::Reject(r) if r.status == 400),
+            "Reject should return 400"
+        );
+    }
+
+    #[test]
+    fn dispatch_on_invalid_error_returns_400() {
+        let action = dispatch_on_invalid(OnInvalidBehavior::Error);
+        assert!(
+            matches!(&action, FilterAction::Reject(r) if r.status == 400),
+            "Error should return 400"
+        );
+    }
+
+    #[test]
+    fn parse_error_unsupported_batch_always_rejects() {
+        let action = handle_json_rpc_parse_error(&JsonRpcParseError::UnsupportedBatch, OnInvalidBehavior::Continue);
+        assert!(
+            matches!(action, FilterAction::Reject(_)),
+            "UnsupportedBatch should always reject"
+        );
+    }
+
+    #[test]
+    fn parse_error_empty_batch_always_rejects() {
+        let action = handle_json_rpc_parse_error(&JsonRpcParseError::EmptyBatch, OnInvalidBehavior::Continue);
+        assert!(
+            matches!(action, FilterAction::Reject(_)),
+            "EmptyBatch should always reject"
+        );
+    }
+
+    #[test]
+    fn parse_error_missing_method_dispatches_on_invalid() {
+        let action = handle_json_rpc_parse_error(&JsonRpcParseError::MissingMethod, OnInvalidBehavior::Continue);
+        assert!(
+            matches!(action, FilterAction::Continue),
+            "MissingMethod with Continue should continue"
+        );
+    }
+
+    #[test]
+    fn parse_body_none_returns_ok_none() {
+        let result = parse_json_rpc_body(&None, true, &default_config(), OnInvalidBehavior::Continue);
+        assert!(matches!(result, Ok(None)), "None body should return Ok(None)");
+    }
+
+    #[test]
+    fn parse_body_not_end_of_stream_returns_ok_none() {
+        let body = Some(Bytes::from(r#"{"jsonrpc":"2.0","method":"test"}"#));
+        let result = parse_json_rpc_body(&body, false, &default_config(), OnInvalidBehavior::Continue);
+        assert!(matches!(result, Ok(None)), "partial body should return Ok(None)");
+    }
+
+    #[test]
+    fn parse_body_valid_json_rpc_returns_envelope() {
+        let body = Some(Bytes::from(r#"{"jsonrpc":"2.0","method":"eth_call","id":1}"#));
+        let result = parse_json_rpc_body(&body, true, &default_config(), OnInvalidBehavior::Continue);
+        assert!(result.is_ok(), "valid JSON-RPC should return Ok");
+        let parsed = result.unwrap();
+        assert!(parsed.is_some(), "valid JSON-RPC should return Some");
+        assert_eq!(parsed.unwrap().method, "eth_call", "method should be extracted");
+    }
+
+    #[test]
+    fn parse_body_invalid_json_with_continue() {
+        let body = Some(Bytes::from("not json"));
+        let result = parse_json_rpc_body(&body, true, &default_config(), OnInvalidBehavior::Continue);
+        assert!(
+            matches!(result, Err(Ok(FilterAction::Continue))),
+            "invalid JSON + Continue should continue"
+        );
+    }
+
+    #[test]
+    fn parse_body_invalid_json_with_reject() {
+        let body = Some(Bytes::from("not json"));
+        let result = parse_json_rpc_body(&body, true, &default_config(), OnInvalidBehavior::Reject);
+        assert!(
+            matches!(result, Err(Ok(FilterAction::Reject(_)))),
+            "invalid JSON + Reject should reject"
+        );
+    }
+
+    #[test]
+    fn parse_body_missing_method_dispatches() {
+        let body = Some(Bytes::from(r#"{"jsonrpc":"2.0","id":1}"#));
+        let result = parse_json_rpc_body(&body, true, &default_config(), OnInvalidBehavior::Continue);
+        assert!(
+            matches!(result, Err(Ok(FilterAction::Continue))),
+            "missing method + Continue should continue"
+        );
+    }
+
+    #[test]
+    fn parse_body_batch_request_rejected() {
+        let body = Some(Bytes::from(
+            r#"[{"jsonrpc":"2.0","method":"a","id":1},{"jsonrpc":"2.0","method":"b","id":2}]"#,
+        ));
+        let result = parse_json_rpc_body(&body, true, &default_config(), OnInvalidBehavior::Continue);
+        assert!(
+            matches!(result, Err(Ok(FilterAction::Reject(_)))),
+            "batch with Reject policy should reject"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------
+
+    fn default_config() -> JsonRpcConfig {
+        serde_json::from_str("{}").expect("default config")
+    }
+}

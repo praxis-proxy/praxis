@@ -471,6 +471,36 @@ mod tests {
     }
 
     #[test]
+    fn regex_cache_continues_working_at_capacity() {
+        let store = InMemoryKvBackend::new();
+        store.set("key-42", Arc::from("val"));
+
+        for i in 0..MAX_REGEX_CACHE_SIZE {
+            let pattern = format!("^pattern-{i}$");
+            let result = store.lookup(&pattern, MatchType::Regex).unwrap();
+            assert!(result.is_none(), "pattern-{i} should not match any key");
+        }
+        assert_eq!(
+            store.regex_cache.len(),
+            MAX_REGEX_CACHE_SIZE,
+            "cache should be at capacity"
+        );
+
+        let result = store.lookup("^key-\\d+$", MatchType::Regex).unwrap();
+        assert!(
+            result.is_some(),
+            "regex lookup should still succeed after cache is full"
+        );
+        assert_eq!(result.unwrap().1.as_ref(), "val", "matched value should be correct");
+
+        assert_eq!(
+            store.regex_cache.len(),
+            MAX_REGEX_CACHE_SIZE,
+            "cache size should not grow beyond capacity"
+        );
+    }
+
+    #[test]
     fn concurrent_lookups_during_writes() {
         let store = Arc::new(InMemoryKvBackend::new());
         for i in 0..50 {

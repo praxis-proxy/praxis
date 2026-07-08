@@ -720,6 +720,55 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn reenter_without_max_iterations_always_fires() {
+        let counter = Arc::new(AtomicUsize::new(0));
+        let branches = vec![make_branch(
+            "unlimited",
+            None,
+            RejoinTarget::ReEnter(0),
+            None,
+            vec![counting_pf(Arc::clone(&counter))],
+        )];
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        for i in 1..=10 {
+            let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
+            assert!(
+                matches!(outcome, BranchOutcome::ReEnter(0)),
+                "iteration {i} should re-enter when max_iterations is None"
+            );
+        }
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            10,
+            "branch should fire every time when max_iterations is None"
+        );
+    }
+
+    #[tokio::test]
+    async fn nested_branch_skip_to_discarded() {
+        let inner_branch = make_branch("inner_skip", None, RejoinTarget::SkipTo(42), None, vec![]);
+        let outer_filter = PipelineFilter {
+            filter_id: NEXT_TEST_ID.fetch_add(1, Ordering::SeqCst),
+            branches: vec![inner_branch],
+            conditions: vec![],
+            failure_mode: FailureMode::default(),
+            filter: AnyFilter::Http(Box::new(NoopFilter)),
+            name: None,
+            response_conditions: vec![],
+        };
+        let outer_branches = vec![make_branch("outer", None, RejoinTarget::Next, None, vec![outer_filter])];
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let outcome = evaluate_branches(&outer_branches, &mut ctx).await.unwrap();
+        assert!(
+            matches!(outcome, BranchOutcome::Continue),
+            "nested SkipTo should be discarded and outer should continue"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------

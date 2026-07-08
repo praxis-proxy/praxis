@@ -63,11 +63,23 @@ pub(super) struct RuleEval {
 impl CompiledRule {
     /// Evaluate the rule against `haystack`, returning both
     /// the match outcome and any PII kind together.
-    pub(super) fn eval(&self, haystack: &str) -> RuleEval {
+    ///
+    /// For [`RuleMatcher::Contains`], pass a pre-lowercased
+    /// haystack via `lowered` to avoid re-allocating per rule.
+    /// When `lowered` is `None`, the haystack is lowercased
+    /// inline (suitable for short header values).
+    pub(super) fn eval(&self, haystack: &str, lowered: Option<&str>) -> RuleEval {
         match &self.matcher {
-            RuleMatcher::Contains(needle) => RuleEval {
-                matched: haystack.to_lowercase().contains(needle.as_str()),
-                pii_kind: None,
+            RuleMatcher::Contains(needle) => {
+                let matched = if let Some(lower) = lowered {
+                    lower.contains(needle.as_str())
+                } else {
+                    haystack.to_lowercase().contains(needle.as_str())
+                };
+                RuleEval {
+                    matched,
+                    pii_kind: None,
+                }
             },
             RuleMatcher::Pattern(re) => RuleEval {
                 matched: re.is_match(haystack),
@@ -191,7 +203,7 @@ mod tests {
     fn contains_matcher_matches_substring() {
         let rule = body_contains("DROP TABLE");
         assert!(
-            rule.eval("SELECT 1; DROP TABLE users").matched,
+            rule.eval("SELECT 1; DROP TABLE users", None).matched,
             "should match substring"
         );
     }
@@ -200,7 +212,7 @@ mod tests {
     fn contains_matcher_rejects_non_match() {
         let rule = body_contains("DROP TABLE");
         assert!(
-            !rule.eval("SELECT 1 FROM users").matched,
+            !rule.eval("SELECT 1 FROM users", None).matched,
             "should not match unrelated text"
         );
     }
@@ -209,15 +221,15 @@ mod tests {
     fn contains_matcher_is_case_insensitive() {
         let rule = body_contains("DROP TABLE");
         assert!(
-            rule.eval("drop table users").matched,
+            rule.eval("drop table users", None).matched,
             "contains should match lowercase input"
         );
         assert!(
-            rule.eval("Drop Table users").matched,
+            rule.eval("Drop Table users", None).matched,
             "contains should match mixed-case input"
         );
         assert!(
-            rule.eval("DROP TABLE users").matched,
+            rule.eval("DROP TABLE users", None).matched,
             "contains should match uppercase input"
         );
     }
@@ -226,17 +238,20 @@ mod tests {
     fn contains_matcher_case_insensitive_mixed_needle() {
         let rule = body_contains("xSs");
         assert!(
-            rule.eval("has XSS injection").matched,
+            rule.eval("has XSS injection", None).matched,
             "case-insensitive needle should match"
         );
-        assert!(rule.eval("has xss injection").matched, "lowercase needle should match");
+        assert!(
+            rule.eval("has xss injection", None).matched,
+            "lowercase needle should match"
+        );
     }
 
     #[test]
     fn pattern_matcher_matches_regex() {
         let rule = body_pattern(r"DROP\s+TABLE");
         assert!(
-            rule.eval("DROP   TABLE users").matched,
+            rule.eval("DROP   TABLE users", None).matched,
             "regex should match whitespace variants"
         );
     }
@@ -245,7 +260,7 @@ mod tests {
     fn pattern_matcher_rejects_non_match() {
         let rule = body_pattern(r"DROP\s+TABLE");
         assert!(
-            !rule.eval("SELECT 1 FROM users").matched,
+            !rule.eval("SELECT 1 FROM users", None).matched,
             "regex should not match unrelated text"
         );
     }
@@ -258,7 +273,7 @@ mod tests {
             matcher: RuleMatcher::Pii(vec![PiiKind::Ssn]),
             negate: false,
         };
-        let ev = rule.eval("my ssn is 123-45-6789");
+        let ev = rule.eval("my ssn is 123-45-6789", None);
         assert!(ev.matched);
         assert_eq!(ev.pii_kind, Some(PiiKind::Ssn));
     }
@@ -271,7 +286,7 @@ mod tests {
             matcher: RuleMatcher::Pii(vec![PiiKind::Ssn]),
             negate: false,
         };
-        let ev = rule.eval("no sensitive data here");
+        let ev = rule.eval("no sensitive data here", None);
         assert!(!ev.matched);
         assert_eq!(ev.pii_kind, None);
     }
@@ -279,7 +294,7 @@ mod tests {
     #[test]
     fn contains_eval_pii_kind_is_always_none() {
         let rule = body_contains("DROP TABLE");
-        let ev = rule.eval("DROP TABLE users");
+        let ev = rule.eval("DROP TABLE users", None);
         assert!(ev.matched);
         assert_eq!(ev.pii_kind, None, "non-PII matchers never produce a pii_kind");
     }

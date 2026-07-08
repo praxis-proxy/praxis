@@ -190,7 +190,7 @@ filter_chains: []
 "#
     );
     let config = Config::from_yaml(&yaml).unwrap();
-    start_full_proxy(config);
+    let _proxy = start_full_proxy(&config);
     wait_for_tcp(&addr);
 
     let held = TcpStream::connect(&addr).expect("first TCP connect should succeed");

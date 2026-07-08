@@ -33,6 +33,7 @@ pingora-proxy = { workspace = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-tls = { workspace = true, features = ["hot-reload"] }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["sync"] }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

@@ -27,12 +27,13 @@ pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, Bod
 #[cfg(feature = "cpex-policy-engine")]
 pub use builtins::PolicyFilter;
 pub use builtins::{
-    CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, GuardrailsAction,
-    GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode, RedirectStatus, RouterFilter, RuleTargetKind,
-    has_dot_dot_traversal, http::payload_processing::compression_config::CompressionConfig, normalize_rewritten_path,
+    CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, EndpointSelectorFilter,
+    GuardrailsAction, GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode, RedirectStatus, RouterFilter,
+    RuleTargetKind, has_dot_dot_traversal, http::payload_processing::compression_config::CompressionConfig,
+    normalize_rewritten_path,
 };
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
-pub use context::{HttpFilterContext, Request, Response};
+pub use context::{HttpFilterContext, PendingHeaderResult, Request, Response, TrustedHeaderMutation};
 pub use extensions::RequestExtensions;
 pub use factory::{FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config, tcp_builtin};
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
@@ -404,6 +405,8 @@ pub(crate) mod test_utils {
             request_headers_to_remove: Vec::new(),
             request_headers_to_set: Vec::new(),
             filter_metadata: std::collections::HashMap::new(),
+            pre_read_mutations: Vec::new(),
+            structured_metadata: std::collections::HashMap::new(),
             filter_results: std::collections::HashMap::new(),
             filter_state: std::collections::HashMap::new(),
             health_registry: None,

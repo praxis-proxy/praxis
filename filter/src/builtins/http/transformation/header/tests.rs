@@ -29,7 +29,7 @@ async fn request_add_populates_extra_headers() {
         "should add exactly one request header"
     );
     let (name, value) = &ctx.extra_request_headers[0];
-    assert_eq!(name, "X-Forwarded-By", "header name should match");
+    assert_eq!(name, "x-forwarded-by", "header name should match");
     assert_eq!(value, "praxis", "header value should match");
 }
 
@@ -622,7 +622,11 @@ fn make_header_filter(yaml: &str) -> HeaderFilter {
     drop(HeaderFilter::from_config(&config).unwrap());
     let cfg: HeaderFilterConfig = serde_yaml::from_value(config).unwrap();
     HeaderFilter {
-        request_add: cfg.request_add.into_iter().map(|p| (p.name, p.value)).collect(),
+        request_add: cfg
+            .request_add
+            .into_iter()
+            .map(|p| (hdr_name(&p.name), p.value))
+            .collect(),
         request_remove: cfg.request_remove.into_iter().map(|n| hdr_name(&n)).collect(),
         request_set: cfg
             .request_set

@@ -223,23 +223,26 @@ impl PolicyFilter {
             .collect()
     }
 
-    /// Build a fresh `IdentityPayload` from request headers. `raw_token`
-    /// is left empty: each registered identity plugin reads its own
-    /// configured header from `headers` instead.
-    fn identity_payload(ctx: &HttpFilterContext<'_>) -> IdentityPayload {
-        IdentityPayload::new(String::new(), TokenSource::Bearer).with_headers(Self::snapshot_headers(ctx))
+    /// Build a fresh `IdentityPayload` from pre-snapshotted headers.
+    /// `raw_token` is left empty: each registered identity plugin
+    /// reads its own configured header from `headers` instead.
+    fn identity_payload(headers: std::collections::HashMap<String, String>) -> IdentityPayload {
+        IdentityPayload::new(String::new(), TokenSource::Bearer).with_headers(headers)
     }
 
     /// Resolve identity by invoking the identity hook chain. Returns the
     /// resolved [`IdentityPayload`] (subject / client / workload / raw
     /// credentials / delegation) or a rejection when no identity
     /// continues. Cheap — the JWT verifier hits its in-process key cache.
-    async fn resolve_identity(&self, ctx: &HttpFilterContext<'_>) -> Result<IdentityPayload, Rejection> {
+    async fn resolve_identity(
+        &self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Result<IdentityPayload, Rejection> {
         let (id_result, _bg) = self
             .mgr
             .invoke_named::<IdentityHook>(
                 HOOK_IDENTITY_RESOLVE,
-                Self::identity_payload(ctx),
+                Self::identity_payload(headers),
                 Extensions::default(),
                 None,
             )
@@ -264,7 +267,7 @@ impl PolicyFilter {
     /// identity hook: a token that expires between the request and the
     /// (already-served) response must not turn into a false deny.
     fn extensions_from_identity(
-        ctx: &HttpFilterContext<'_>,
+        headers: &std::collections::HashMap<String, String>,
         identity: &IdentityPayload,
         entity_type: &str,
         entity_name: &str,
@@ -276,17 +279,7 @@ impl PolicyFilter {
         meta.entity_name = Some(entity_name.to_owned());
         ext.meta = Some(Arc::new(meta));
 
-        // Thread a per-conversation session id from the `X-Session-Id`
-        // request header into `agent.session_id`. cpex's session resolver
-        // subject-scopes it (`H(subject:session_id)`), so session-scoped
-        // taint labels (`taint(label, session)`) persist across requests
-        // in the same conversation and stay isolated between principals.
-        // Absent header → cpex falls back to its identity-derived session.
-        if let Some(session_id) = Self::snapshot_headers(ctx)
-            .get("x-session-id")
-            .filter(|value| !value.is_empty())
-            .cloned()
-        {
+        if let Some(session_id) = headers.get("x-session-id").filter(|value| !value.is_empty()).cloned() {
             let mut agent = ext.agent.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
             agent.session_id = Some(session_id);
             ext.agent = Some(Arc::new(agent));
@@ -383,7 +376,7 @@ impl HttpFilter for PolicyFilter {
             .mgr
             .invoke_named::<IdentityHook>(
                 HOOK_IDENTITY_RESOLVE,
-                Self::identity_payload(ctx),
+                Self::identity_payload(Self::snapshot_headers(ctx)),
                 Extensions::default(),
                 None,
             )
@@ -453,13 +446,17 @@ impl HttpFilter for PolicyFilter {
             return Ok(FilterAction::BodyDone);
         };
 
+        // Snapshot headers once for both identity resolution and
+        // extensions building (avoids iterating the header map twice).
+        let headers = Self::snapshot_headers(ctx);
+
         // Resolve identity once here, then stash it so the response phase
         // can rebuild `Extensions` without re-validating the token.
-        let identity = match self.resolve_identity(ctx).await {
+        let identity = match self.resolve_identity(headers.clone()).await {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
-        let extensions = Self::extensions_from_identity(ctx, &identity, entity_type, &entity_name);
+        let extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &entity_name);
         ctx.extensions.insert(ResolvedIdentity(identity));
 
         // Parse the JSON-RPC body to build the typed CMF content part.
@@ -552,7 +549,6 @@ impl HttpFilter for PolicyFilter {
 
     #[expect(
         clippy::too_many_lines,
-        clippy::cognitive_complexity,
         reason = "linear response-phase flow (rebuild identity, dispatch, deny/rewrite); splitting obscures it"
     )]
     fn on_response_body(
@@ -621,7 +617,8 @@ impl HttpFilter for PolicyFilter {
             ));
             return Ok(FilterAction::Continue);
         };
-        let extensions = Self::extensions_from_identity(ctx, identity, entity_type, &entity_name);
+        let headers = Self::snapshot_headers(ctx);
+        let extensions = Self::extensions_from_identity(&headers, identity, entity_type, &entity_name);
 
         let content = build_response_content_for_method(&method, &entity_name, &id_str, &body_bytes);
         if content.is_empty() {
@@ -812,7 +809,6 @@ fn missing_protocol_metadata_rejection() -> Rejection {
 /// the operator can fix the overlapping delegators.
 #[expect(
     clippy::too_many_lines,
-    clippy::cognitive_complexity,
     reason = "single linear pass attaching delegated tokens with first-writer-wins dedupe"
 )]
 pub(super) fn attach_delegated_tokens(ctx: &mut HttpFilterContext<'_>, extensions: Option<&Extensions>) -> usize {

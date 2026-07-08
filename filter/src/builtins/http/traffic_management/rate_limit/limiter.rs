@@ -49,7 +49,7 @@ impl RateLimitFilter {
         let remaining_int = remaining.max(0.0) as u64;
 
         let headers = vec![
-            (HEADER_RATELIMIT_LIMIT, (self.burst as u64).to_string()),
+            (HEADER_RATELIMIT_LIMIT, self.burst_string.clone()),
             (HEADER_RATELIMIT_REMAINING, format!("{remaining_int}")),
             (HEADER_RATELIMIT_RESET, format!("{reset_unix}")),
         ];
