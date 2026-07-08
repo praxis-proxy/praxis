@@ -16,8 +16,8 @@ State is all managed locally.
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
 | `mode` | `global` \| `per_ip` | yes | Whether to use a single global bucket or per-IP buckets. |
-| `rate` | f64 | yes | Tokens replenished per second. |
-| `burst` | u32 | yes | Maximum bucket capacity. |
+| `rate` | number | yes | Tokens replenished per second. |
+| `burst` | integer | yes | Maximum bucket capacity. |
 
 ## Example
 

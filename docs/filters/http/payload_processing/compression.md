@@ -9,17 +9,17 @@ Enables Pingora's built-in response compression when present in a filter chain.
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `level` | u32 | no | Default compression level for all algorithms (1..=12). |
+| `level` | integer | no | Default compression level for all algorithms (1..=12). |
 | `gzip` | AlgorithmConfig | no | Gzip algorithm settings. |
 | `gzip.enabled` | bool | no | Whether this algorithm is enabled. |
-| `gzip.level` | u32 | no | Compression level for this algorithm. |
+| `gzip.level` | integer | no | Compression level for this algorithm. |
 | `brotli` | AlgorithmConfig | no | Brotli algorithm settings. |
 | `brotli.enabled` | bool | no | Whether this algorithm is enabled. |
-| `brotli.level` | u32 | no | Compression level for this algorithm. |
+| `brotli.level` | integer | no | Compression level for this algorithm. |
 | `zstd` | AlgorithmConfig | no | Zstd algorithm settings. |
 | `zstd.enabled` | bool | no | Whether this algorithm is enabled. |
-| `zstd.level` | u32 | no | Compression level for this algorithm. |
-| `min_size_bytes` | usize | no | Minimum body size in bytes; smaller responses skip compression. |
+| `zstd.level` | integer | no | Compression level for this algorithm. |
+| `min_size_bytes` | integer | no | Minimum body size in bytes; smaller responses skip compression. |
 | `content_types` | string[] | no | MIME type prefixes that qualify for compression. |
 
 ## Example

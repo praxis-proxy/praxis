@@ -1367,9 +1367,9 @@ fn render_type_path(tp: &syn::TypePath, enums: &BTreeMap<String, EnumInfo>) -> S
         "String" => "string".to_owned(),
         "SecretString" => "string (secret)".to_owned(),
         "Value" => "any".to_owned(),
-        "bool" | "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize" | "f32" | "f64" => {
-            ident
-        },
+        "bool" => ident,
+        "u8" | "u16" | "u32" | "u64" | "usize" | "i8" | "i16" | "i32" | "i64" | "isize" => "integer".to_owned(),
+        "f32" | "f64" => "number".to_owned(),
         other => enums
             .get(other)
             .map_or_else(|| other.to_owned(), |info| render_enum_type(info, enums)),
@@ -2104,7 +2104,7 @@ mod tests {
     fn render_filter_doc_has_field_row() {
         let result = render_filter_doc(&sample_filter_entry());
         assert!(
-            result.contains("| `timeout_ms` | u64 | yes | Max time in milliseconds. |"),
+            result.contains("| `timeout_ms` | integer | yes | Max time in milliseconds. |"),
             "should have field row"
         );
         assert!(
@@ -2124,7 +2124,7 @@ mod tests {
         let result = render_filter_doc(&entry);
 
         assert!(
-            result.contains("| `timeout_ms` | u64 | yes | Maximum allowed time. Use `0 \\| 1` only in tests. |"),
+            result.contains("| `timeout_ms` | integer | yes | Maximum allowed time. Use `0 \\| 1` only in tests. |"),
             "field table rows should render prose without fenced doctests"
         );
         assert!(
@@ -2589,6 +2589,19 @@ mod tests {
         );
     }
 
+    #[test]
+    fn numeric_types_render_language_neutral() {
+        let enums = BTreeMap::new();
+        let u64_ty: syn::Type = syn::parse_str("u64").unwrap();
+        assert_eq!(render_type(&u64_ty, &enums), "integer", "unsigned integers");
+        let usize_ty: syn::Type = syn::parse_str("usize").unwrap();
+        assert_eq!(render_type(&usize_ty, &enums), "integer", "usize");
+        let i32_ty: syn::Type = syn::parse_str("i32").unwrap();
+        assert_eq!(render_type(&i32_ty, &enums), "integer", "signed integers");
+        let f64_ty: syn::Type = syn::parse_str("f64").unwrap();
+        assert_eq!(render_type(&f64_ty, &enums), "number", "floats");
+    }
+
     // Test Utilities
 
     /// Build a sample [`FilterEntry`] for rendering tests.
@@ -2604,7 +2617,7 @@ mod tests {
                 config_notes: vec![],
                 fields: vec![FieldInfo {
                     name: "timeout_ms".to_owned(),
-                    type_str: "u64".to_owned(),
+                    type_str: "integer".to_owned(),
                     doc: "Max time in milliseconds.".to_owned(),
                     required: RequiredKind::Yes,
                 }],

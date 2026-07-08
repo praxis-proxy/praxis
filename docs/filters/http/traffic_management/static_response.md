@@ -17,7 +17,7 @@ Useful for health checks, status endpoints, or stub routes. Combine with conditi
 | `headers` | HeaderEntry[] | no | Response headers to include. |
 | `headers[].name` | string | yes | Header field name. |
 | `headers[].value` | string | yes | Header field value. |
-| `status` | u16 | yes | HTTP status code to return. |
+| `status` | integer | yes | HTTP status code to return. |
 
 ## Example
 

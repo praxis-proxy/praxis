@@ -20,7 +20,7 @@ Accepts either single-field syntax (`field` + `header`) or multi-field syntax (`
 | `fields` | JsonBodyFieldMapping[] | no | Multi-field: list of field-to-header mappings. |
 | `fields[].field` | string | yes | Top-level JSON field name to extract. |
 | `fields[].header` | string | yes | Request header name to promote the extracted value into. |
-| `max_body_bytes` | usize | no | Maximum request body size in bytes for `StreamBuffer` mode. |
+| `max_body_bytes` | integer | no | Maximum request body size in bytes for `StreamBuffer` mode. |
 
 ## Examples
 

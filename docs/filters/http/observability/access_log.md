@@ -9,7 +9,7 @@ Logs structured access records for each request and response.
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `sample_rate` | f64 | no | Fraction of requests to log (0.0, 1.0]. Defaults to 1.0. |
+| `sample_rate` | number | no | Fraction of requests to log (0.0, 1.0]. Defaults to 1.0. |
 
 ## Example
 

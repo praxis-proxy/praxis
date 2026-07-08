@@ -20,7 +20,7 @@ Wildcard subdomain patterns (e.g. `https://*.example.com`) are supported in `all
 | `allow_headers` | string[] | no | Allowed request headers. |
 | `expose_headers` | string[] | no | Response headers exposed to the client. |
 | `allow_credentials` | bool | no | Whether to include `Access-Control-Allow-Credentials: true`. |
-| `max_age` | u32 | no | Preflight cache duration in seconds. |
+| `max_age` | integer | no | Preflight cache duration in seconds. |
 | `allow_private_network` | bool | no | Whether to support Private Network Access. |
 | `disallowed_origin_mode` | `omit` \| `reject` | no | Behavior when origin is not in the allow list. |
 | `allow_null_origin` | bool | no | Whether to allow `Origin: null`. |

@@ -18,7 +18,7 @@ Longest prefix wins. Routes without `host` match any host. Header restrictions u
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
 | `json_alias_header` | string | no | Header name for the promoted JSON field value during alias resolution. |
-| `json_alias_max_body_bytes` | usize | no | Maximum body bytes to buffer when resolving JSON aliases. |
+| `json_alias_max_body_bytes` | integer | no | Maximum body bytes to buffer when resolving JSON aliases. |
 | `routes` | RouterRouteConfig[] | no | Route table entries. |
 | `routes[].path` | string | one of | The exact path to match. |
 | `routes[].path_prefix` | string | one of | Path prefix. The longest matching prefix wins. |

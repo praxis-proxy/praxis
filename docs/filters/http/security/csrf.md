@@ -18,7 +18,7 @@ A bare wildcard (`"*"`) cannot be mixed with other origins.
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
 | `enable_sec_fetch_site` | bool | no | Whether to also validate the `Sec-Fetch-Site` header. |
-| `enforce_percentage` | u8 | no | Percentage of requests to enforce (0..=100). |
+| `enforce_percentage` | integer | no | Percentage of requests to enforce (0..=100). |
 | `safe_methods` | string[] | no | HTTP methods that bypass CSRF checks. |
 | `trusted_origins` | string[] | yes | Allowed origin values (scheme + host + optional port). |
 

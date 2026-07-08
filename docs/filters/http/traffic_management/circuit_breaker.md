@@ -17,8 +17,8 @@ When consecutive upstream failures reach the threshold, the circuit opens and su
 |-------|------|---------|-------------|
 | `clusters` | ClusterCircuitBreakerConfig[] | yes | Per-cluster circuit breaker settings. |
 | `clusters[].name` | string | yes | Cluster name (must match a cluster in the load balancer). |
-| `clusters[].consecutive_failures` | u32 | yes | Number of consecutive upstream failures before the circuit trips to Open. |
-| `clusters[].recovery_window_secs` | u64 | yes | Seconds the circuit stays Open before transitioning to Half-Open. |
+| `clusters[].consecutive_failures` | integer | yes | Number of consecutive upstream failures before the circuit trips to Open. |
+| `clusters[].recovery_window_secs` | integer | yes | Seconds the circuit stays Open before transitioning to Half-Open. |
 
 ## Example
 

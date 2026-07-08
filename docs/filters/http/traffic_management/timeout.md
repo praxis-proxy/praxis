@@ -13,7 +13,7 @@ This does not cancel the upstream connection; the upstream has already responded
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `timeout_ms` | u64 | yes | Maximum allowed elapsed time from request receipt to response headers, in milliseconds. Requests that exceed this limit receive a 504. |
+| `timeout_ms` | integer | yes | Maximum allowed elapsed time from request receipt to response headers, in milliseconds. Requests that exceed this limit receive a 504. |
 
 ## Example
 
