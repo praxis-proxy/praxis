@@ -100,7 +100,7 @@ deployment guidance.
 **Configuration-level protections:**
 
 - Listeners default to localhost binding
-- Admin endpoints reject public interfaces
+- Admin endpoints must bind to loopback unless `allow_public_admin` is set
 - TLS paths reject directory traversal (`..`)
 - Health check targets validated against SSRF
   (loopback, link-local, and cloud metadata blocked)

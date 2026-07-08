@@ -11,6 +11,14 @@ use serde::Deserialize;
 
 /// Admin endpoint settings for health check listeners.
 ///
+/// When `address` is set, validation requires a loopback bind
+/// (`127.0.0.1`, `[::1]`, or IPv4-mapped loopback such as
+/// `[::ffff:127.0.0.1]`). Non-loopback addresses require
+/// `insecure_options.allow_public_admin: true`.
+///
+/// No authentication is performed; access control relies on
+/// loopback binding and network-level restrictions.
+///
 /// ```
 /// use praxis_core::config::AdminConfig;
 ///
@@ -29,9 +37,9 @@ use serde::Deserialize;
 pub struct AdminConfig {
     /// Admin endpoint bind address.
     ///
-    /// Defaults to disabled. When enabled, binds to loopback only.
-    /// No authentication is performed; access control relies on
-    /// network-level restrictions (loopback binding, firewall).
+    /// Defaults to disabled (`None`). When set, must be loopback unless
+    /// `insecure_options.allow_public_admin: true` is configured at the
+    /// top level.
     pub address: Option<String>,
 
     /// Include per-cluster detail in `/ready` response.

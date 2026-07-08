@@ -18,6 +18,7 @@ use super::{
 };
 use crate::{
     config::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, Config, InsecureOptions, ProtocolKind},
+    connectivity::normalize_mapped_ipv4,
     errors::ProxyError,
 };
 
@@ -161,27 +162,26 @@ fn validate_cluster_names(clusters: &[crate::config::Cluster]) -> Result<(), Pro
 // Admin Address Validation
 // -----------------------------------------------------------------------------
 
-/// Reject admin addresses that bind to all interfaces unless explicitly allowed.
+/// Reject admin addresses that bind outside loopback unless explicitly allowed.
 fn validate_admin_address(addr: Option<&str>, allow_public: bool) -> Result<(), ProxyError> {
     let Some(addr) = addr else { return Ok(()) };
     let socket_addr: std::net::SocketAddr = addr
         .parse()
         .map_err(|_parse_err| ProxyError::Config(format!("invalid admin_address '{addr}'")))?;
-    if socket_addr.ip().is_unspecified() {
-        if allow_public {
-            warn!(
-                admin_address = %addr,
-                "admin endpoint binds to all interfaces; allowed by insecure_options.allow_public_admin"
-            );
-        } else {
-            return Err(ProxyError::Config(format!(
-                "admin endpoint '{addr}' binds to all interfaces; \
-                 bind to 127.0.0.1 or a management network, or set \
-                 insecure_options.allow_public_admin: true to allow"
-            )));
-        }
+    if normalize_mapped_ipv4(socket_addr.ip()).is_loopback() {
+        return Ok(());
     }
-    Ok(())
+    if allow_public {
+        warn!(
+            admin_address = %addr,
+            "admin endpoint binds to a non-loopback address; allowed by insecure_options.allow_public_admin"
+        );
+        return Ok(());
+    }
+    Err(ProxyError::Config(format!(
+        "admin endpoint '{addr}' must bind to a loopback address (127.0.0.1 or [::1]); \
+         set insecure_options.allow_public_admin: true to allow non-loopback binding"
+    )))
 }
 
 // -----------------------------------------------------------------------------
@@ -310,8 +310,98 @@ filter_chains:
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(
-            err.to_string().contains("binds to all interfaces"),
+            err.to_string().contains("must bind to a loopback address"),
             "should reject public admin: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_non_loopback_admin_address() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+admin:
+  address: "10.0.0.5:9901"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("must bind to a loopback address"),
+            "should reject non-loopback admin: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_lan_admin_address() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+admin:
+  address: "192.168.1.50:9901"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("must bind to a loopback address"),
+            "should reject LAN admin binding: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_ipv6_loopback_admin_address() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+admin:
+  address: "[::1]:9901"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let config = Config::from_yaml(yaml).unwrap();
+        assert_eq!(
+            config.admin.address.as_deref(),
+            Some("[::1]:9901"),
+            "IPv6 loopback admin address should be accepted"
+        );
+    }
+
+    #[test]
+    fn accept_ipv4_mapped_loopback_admin_address() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+admin:
+  address: "[::ffff:127.0.0.1]:9901"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let config = Config::from_yaml(yaml).unwrap();
+        assert_eq!(
+            config.admin.address.as_deref(),
+            Some("[::ffff:127.0.0.1]:9901"),
+            "IPv4-mapped loopback admin address should be accepted"
         );
     }
 
@@ -337,6 +427,31 @@ filter_chains:
             config.admin.address.as_deref(),
             Some("0.0.0.0:9901"),
             "allow_public_admin should permit public admin binding"
+        );
+    }
+
+    #[test]
+    fn allow_public_admin_with_lan_override() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+admin:
+  address: "192.168.1.50:9901"
+insecure_options:
+  allow_public_admin: true
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let config = Config::from_yaml(yaml).unwrap();
+        assert_eq!(
+            config.admin.address.as_deref(),
+            Some("192.168.1.50:9901"),
+            "allow_public_admin should permit non-loopback LAN admin binding"
         );
     }
 

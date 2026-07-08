@@ -13,8 +13,9 @@ ambiguous configuration:
   configured otherwise.
 - TLS certificate verification is enabled by default
   for upstream connections.
-- Admin endpoints are restricted to localhost; public
-  binding is a validation error.
+- Admin endpoints are restricted to loopback; non-loopback
+  binding is a validation error unless
+  `insecure_options.allow_public_admin` is set.
 - `unsafe_code = "deny"` in workspace lints; no unsafe
   Rust in the Praxis codebase.
 - Rustls for TLS (no OpenSSL, no C FFI in the TLS
