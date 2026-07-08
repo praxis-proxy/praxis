@@ -8,6 +8,9 @@
 #
 # Use case: clean requests that pass guardrails don't
 # need extra middleware processing.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/branching/conditional-skip-to.yaml
 
 listeners:
   - name: web

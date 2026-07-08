@@ -42,9 +42,9 @@ impl Strategy {
     pub(crate) fn select(&self, hash_key: Option<&str>, health: Option<&ClusterHealthState>) -> Option<Arc<str>> {
         match self {
             Self::RoundRobin(rr) => rr.select(health),
-            Self::LeastConnections(lc) => Some(lc.select(health)),
-            Self::ConsistentHash(ch) => Some(ch.select(hash_key, health)),
-            Self::PowerOfTwoChoices(p2c) => Some(p2c.select(health)),
+            Self::LeastConnections(lc) => lc.select(health),
+            Self::ConsistentHash(ch) => ch.select(hash_key, health),
+            Self::PowerOfTwoChoices(p2c) => p2c.select(health),
         }
     }
 

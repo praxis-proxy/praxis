@@ -20,7 +20,8 @@
   routing with optional `Host` header and request header
   matching; longest prefix wins
 - **Load balancing** - round-robin, least-connections,
-  consistent-hash, weighted endpoints
+  consistent-hash, power-of-two-choices (P2C),
+  weighted endpoints
 - **Static responses** - return fixed status, headers,
   and body without upstream
 - **Rate limiting** - token bucket rate limiter with
@@ -62,22 +63,16 @@
   validated. Filters receive chunks incrementally for
   low-latency inspection, then release the accumulated
   buffer to the upstream. This is the enabling primitive
-  for AI inference (model routing from the first few
-  KB of the request body), agentic protocol parsing
-  (JSON-RPC envelope extraction), and security systems
-  (guardrails payload scanning, content classification).
+  for protocol parsing (JSON-RPC envelope extraction),
+  body-based routing, and security systems (guardrails
+  payload scanning, content classification).
   See the [payload processing][payload-processing]
   docs for the full body access model.
 - **Body-based routing**: the built-in `json_body_field`
   filter extracts top-level fields from JSON request
   bodies and promotes values to request headers, enabling
-  AI inference model routing, content-based cluster
-  selection, and request classification.
-- **Prompt enrichment**: inject system or user messages
-  into OpenAI-compatible chat completion request bodies
-  at the proxy layer. Static configured messages are
-  prepended or appended to the `messages` array before
-  forwarding upstream.
+  content-based cluster selection and request
+  classification.
 - **Response compression**: gzip, brotli, and zstd
   response compression with per-algorithm levels,
   content type filtering, and minimum size thresholds.
@@ -202,137 +197,8 @@ deployment guidance.
 [protocol-abstraction]:./architecture/overview.md#protocol-adapters
 [tls-docs]:./operating/tls.md
 
-## AI Inference
-
-Praxis is designed as an AI-native proxy. AI inference
-capabilities are built on the [filter pipeline][filters]
-and [StreamBuffer][payload-processing] body access
-pattern, making them composable with all other filters
-rather than bolted-on external processors.
-
-### Current
-
-- **Model-based routing** (`model_to_header`): extracts
-  the `model` field from JSON request bodies and
-  promotes it to an `X-Model` header, enabling
-  header-based routing to provider-specific clusters.
-  Uses StreamBuffer to inspect the body before upstream
-  selection.
-- **Credential injection** (`credential_injection`):
-  per-cluster API key injection with client credential
-  stripping. Supports inline values and environment
-  variable sources. Pair with a source discriminator
-  (IP ACL, client auth) to control which clients get
-  credential upgrades.
-- **Prompt enrichment** (`prompt_enrich`): inject system
-  or user messages into OpenAI-compatible chat
-  completion request bodies at the proxy layer. Static
-  configured messages are prepended or appended to the
-  `messages` array before forwarding upstream.
-- **Responses API classification**
-  (`openai_responses_format`): classifies OpenAI
-  Responses API and Chat Completions API requests by
-  inspecting the request body. Promotes format, model,
-  stream, and routing mode (stateless/stateful) to
-  configurable headers, metadata, and filter results
-  for downstream routing via branch chains.
-- **Responses API validation**
-  (`openai_responses_validate`): validates Responses
-  API parameter combinations (stream/background,
-  background/store conflicts), extracts conversation
-  IDs, and generates cryptographically random response
-  and conversation IDs with `resp_` and `conv_`
-  prefixes.
-
-### Planned
-
-The following capabilities are on the roadmap. Each
-builds on the StreamBuffer body access pattern and the
-filter pipeline.
-
-- **Token counting**: input/output token counts from
-  request and response bodies
-- **Provider routing**: unified routing across LLM
-  providers with API translation
-- **Provider failover**: ordered failover chains with
-  automatic API translation on failure
-- **Token-based rate limiting**: per-client token quotas
-  with sliding window or token bucket
-- **Cost attribution**: token counting mapped to user,
-  session, model, and endpoint
-- **SSE streaming inspection**: per-event filter hooks
-  for streaming responses
-- **Semantic caching**: prompt deduplication via vector
-  similarity search
-
-### StreamBuffer as AI Primitive
-
-StreamBuffer is the key differentiator for AI inference
-workloads. Traditional proxies operate on headers only,
-requiring external processors for body inspection.
-Praxis inspects request bodies inline:
-
-1. Buffer the first N bytes (typically the JSON
-   envelope containing the model name, parameters,
-   and prompt prefix).
-2. Extract routing signals (model, provider, token
-   budget, tool name).
-3. Select the upstream based on body content.
-4. Forward the buffered prefix, then stream the
-   remainder with zero additional buffering latency.
-
-This peek-then-stream pattern avoids the latency and
-operational complexity of external processor
-architectures while providing full body visibility
-where it matters.
-
-## AI Agentic
-
-Praxis targets first-class support for AI agent
-protocols, positioning MCP and A2A as headline
-capabilities alongside HTTP and TCP proxying.
-
-### Current
-
-- **JSON-RPC 2.0 foundation** (`json_rpc`): request
-  envelope parsing and method/id extraction for HTTP
-  POST bodies, enabling method-based routing for
-  MCP/A2A-style traffic
-- **MCP proxying** (`mcp`): Model Context Protocol
-  broker with tool discovery and routing via the
-  filter pipeline
-- **A2A proxying** (`a2a`): Agent-to-Agent protocol
-  support with task routing via the filter pipeline
-- **gRPC detection** (`grpc_detection`): classifies
-  gRPC requests by content-type variant (protobuf,
-  JSON, other codec) and promotes the classification
-  to metadata and filter results for branch-based
-  routing
-
-### Planned
-
-- **Stateful agent sessions**: shared session storage,
-  affinity, and lifecycle hooks for MCP and A2A
-
-## Build Features
-
-AI filters are controlled via Cargo features (enabled
-by default):
-
-- `ai-inference`: model routing, prompt enrichment,
-  Responses API classification and validation
-- `ai-agentic`: MCP, A2A, JSON-RPC, gRPC detection
-
-To disable AI features:
-
-```console
-cargo build -p praxis-proxy --no-default-features
-```
-
 ## Extensions
 
 - **Rust extensions**: compile-time custom filters with
   zero overhead via the `HttpFilter`/`TcpFilter` traits
   and `register_filters!` macro.
-
-[filters]:./filters/README.md

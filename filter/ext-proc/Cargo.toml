@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 authors.workspace = true
 description = "Envoy-compatible ext_proc filter for Praxis"
-license.workspace = true
+license = "MIT AND Apache-2.0 AND BSD-3-Clause"
 repository.workspace = true
 readme = "../../README.md"
 publish = false
@@ -23,8 +23,9 @@ futures = { workspace = true }
 http = { workspace = true }
 praxis-filter = { workspace = true }
 prost-types = { workspace = true }
-praxis-proto = { workspace = true }
+prost = { workspace = true }
 prost-wkt-types = { workspace = true }
+tonic-prost = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 sync_wrapper = { workspace = true }
@@ -33,6 +34,14 @@ tokio = { workspace = true }
 tokio-stream = { workspace = true }
 tonic = { workspace = true }
 tracing = { workspace = true }
+
+[package.metadata.cargo-machete]
+ignored = ["prost", "prost-types", "prost-wkt-types", "tonic-prost"]
+
+[build-dependencies]
+prost-build = { workspace = true }
+protox = { workspace = true }
+tonic-prost-build = { workspace = true }
 
 [dev-dependencies]
 praxis-core = { workspace = true }

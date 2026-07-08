@@ -10,11 +10,12 @@
 # the correct inference backend while the user ID is
 # forwarded for upstream logging and rate limiting.
 #
-# Example request:
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/payload-processing/multi-field-extraction.yaml
 #
 #   curl -X POST http://localhost:8080/v1/chat/completions \
 #     -H "Content-Type: application/json" \
-#     -d '{"model": "claude-sonnet-4-5", "user_id": "u-42", ...}'
+#     -d '{"model": "model-alpha-1", "user_id": "u-42", ...}'
 #
 # Both X-Model and X-User-Id headers are injected before
 # the router runs. The router matches on X-Model to select
@@ -43,21 +44,21 @@ filter_chains:
         routes:
           - path_prefix: "/"
             headers:
-              x-model: "claude-sonnet-4-5"
-            cluster: claude_sonnet
+              x-model: "model-alpha-1"
+            cluster: alpha_cluster
           - path_prefix: "/"
             headers:
-              x-model: "claude-3"
-            cluster: claude3
+              x-model: "model-alpha-2"
+            cluster: alpha_v2
           - path_prefix: "/"
             cluster: default
       - filter: load_balancer
         clusters:
-          - name: claude_sonnet
+          - name: alpha_cluster
             endpoints:
               - "10.0.1.1:8080"
               - "10.0.1.2:8080"
-          - name: claude3
+          - name: alpha_v2
             endpoints:
               - "10.0.2.1:8080"
           - name: default

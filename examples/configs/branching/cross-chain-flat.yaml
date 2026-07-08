@@ -13,6 +13,9 @@
 # headers filter does not produce filter results. When a
 # result-producing filter (e.g. a classifier) is added,
 # it would write results that trigger this branch.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/branching/cross-chain-flat.yaml
 
 listeners:
   - name: web

@@ -12,5 +12,5 @@ mod mode;
 pub use access::BodyAccess;
 pub use buffer::{BodyBuffer, BodyBufferOverflow};
 pub use builder::BodyCapabilities;
-pub(crate) use limits::{DEFAULT_JSON_BODY_MAX_BYTES, MAX_JSON_BODY_BYTES};
+pub use limits::{DEFAULT_JSON_BODY_MAX_BYTES, MAX_JSON_BODY_BYTES};
 pub use mode::BodyMode;

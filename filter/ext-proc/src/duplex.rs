@@ -39,19 +39,21 @@
 //! No background tasks are spawned. The bounded request channel
 //! feeds tonic's h2 connection driver, which polls it lazily.
 //!
-//! [`ExternalProcessor.Process`]: praxis_proto::envoy::service::ext_proc::v3::external_processor_client::ExternalProcessorClient::process
+//! [`ExternalProcessor.Process`]: crate::proto::envoy::service::ext_proc::v3::external_processor_client::ExternalProcessorClient::process
 
 use std::time::Duration;
 
-use praxis_proto::envoy::service::ext_proc::v3::{
-    BodyResponse, HeadersResponse, ImmediateResponse, ProcessingRequest, ProcessingResponse, ProtocolConfiguration,
-    TrailersResponse, external_processor_client::ExternalProcessorClient, processing_request, processing_response,
-};
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 
-use crate::BodySendMode;
+use crate::{
+    BodySendMode,
+    proto::envoy::service::ext_proc::v3::{
+        BodyResponse, HeadersResponse, ImmediateResponse, ProcessingRequest, ProcessingResponse, ProtocolConfiguration,
+        TrailersResponse, external_processor_client::ExternalProcessorClient, processing_request, processing_response,
+    },
+};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -1239,7 +1241,7 @@ fn validate_body_output(output: &mut OutputPhase, body_resp: &BodyResponse, labe
         .as_ref()
         .and_then(|c| c.body_mutation.as_ref())
         .and_then(|bm| match &bm.mutation {
-            Some(praxis_proto::envoy::service::ext_proc::v3::body_mutation::Mutation::StreamedResponse(sr)) => {
+            Some(crate::proto::envoy::service::ext_proc::v3::body_mutation::Mutation::StreamedResponse(sr)) => {
                 Some(sr.end_of_stream)
             },
             _ => None,
@@ -1260,7 +1262,7 @@ fn validate_body_output(output: &mut OutputPhase, body_resp: &BodyResponse, labe
 /// - [`BodySendMode::FullDuplexStreamed`] requires a [`StreamedBodyResponse`] mutation.
 /// - All other modes reject [`StreamedBodyResponse`] mutations.
 ///
-/// [`StreamedBodyResponse`]: praxis_proto::envoy::service::ext_proc::v3::StreamedBodyResponse
+/// [`StreamedBodyResponse`]: crate::proto::envoy::service::ext_proc::v3::StreamedBodyResponse
 fn validate_body_mutation_mode(
     body_resp: &BodyResponse,
     body_mode: BodySendMode,
@@ -1273,7 +1275,7 @@ fn validate_body_mutation_mode(
         .is_some_and(|bm| {
             matches!(
                 bm.mutation,
-                Some(praxis_proto::envoy::service::ext_proc::v3::body_mutation::Mutation::StreamedResponse(_))
+                Some(crate::proto::envoy::service::ext_proc::v3::body_mutation::Mutation::StreamedResponse(_))
             )
         });
 

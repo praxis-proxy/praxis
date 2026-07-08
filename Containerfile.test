@@ -12,7 +12,7 @@
 # Build:  make test-container
 # Run:    make test-container-run
 
-FROM rust:1.94-alpine
+FROM rust:1.96-alpine
 
 ENV OPENSSL_STATIC=1
 

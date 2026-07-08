@@ -105,8 +105,8 @@ mod tests {
         let entries = vec![
             make_entry("ip_acl", "allow: [\"10.0.0.0/8\"]"),
             make_entry(
-                "mcp",
-                "servers:\n  - name: weather\n    cluster: weather-mcp\n    tools: []",
+                "custom_filter",
+                "servers:\n  - name: weather\n    cluster: weather-svc\n    tools: []",
             ),
         ];
         let clusters = extract_selected_clusters(&entries);

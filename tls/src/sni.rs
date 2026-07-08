@@ -774,6 +774,23 @@ mod tests {
         );
     }
 
+    #[test]
+    fn trailing_dot_hostname_rejected() {
+        assert_eq!(
+            validate_dns_hostname("example.com."),
+            Err(SniParseError::InvalidHostname),
+            "trailing dot produces an empty label which should be rejected"
+        );
+    }
+
+    #[test]
+    fn single_label_hostname_accepted() {
+        assert!(
+            validate_dns_hostname("localhost").is_ok(),
+            "single-label hostname like 'localhost' should be accepted"
+        );
+    }
+
     // -----------------------------------------------------------------------------
     // Test Utilities
     // -----------------------------------------------------------------------------

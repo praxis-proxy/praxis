@@ -213,8 +213,9 @@ listeners:
     upstream: "10.0.0.1:5432"
 ```
 
-Optional `tcp_idle_timeout_ms` closes connections that have
-been idle longer than the specified duration:
+Optional `tcp_session_timeout_ms` sets a hard deadline
+for TCP connections. Active connections are terminated
+after this duration regardless of activity:
 
 ```yaml
 listeners:
@@ -222,7 +223,7 @@ listeners:
     address: "0.0.0.0:5432"
     protocol: tcp
     upstream: "10.0.0.1:5432"
-    tcp_idle_timeout_ms: 300000   # 5 minutes
+    tcp_session_timeout_ms: 300000   # 5 minutes
 ```
 
 Optional `tcp_max_duration_secs` caps the total session
@@ -567,7 +568,6 @@ by category:
 
 | Directory | Contents |
 | ----------- | ---------- |
-| `ai` | AI inference model-to-header routing |
 | `traffic-management` | Router, load balancer, timeouts, static responses, redirects, rate limiting, health checks |
 | `payload-processing` | Body processing: compression, field extraction, stream buffering, size limits |
 | `security` | Forwarded headers, IP ACL, guardrails, CORS, downstream read timeout |

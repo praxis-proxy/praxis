@@ -345,16 +345,16 @@ fn reserved_internal_headers_stripped_from_upstream_response() {
     let raw = http_send(proxy.addr(), &request);
 
     assert!(
-        parse_header(&raw, "x-praxis-mcp-method").is_none(),
+        parse_header(&raw, "x-praxis-filter-action").is_none(),
         "x-praxis-* headers should be stripped from upstream response: {raw}"
     );
     assert!(
-        parse_header(&raw, "x-mcp-servername").is_none(),
-        "x-mcp-* headers should be stripped from upstream response: {raw}"
+        parse_header(&raw, "x-ext-protocol-servername").is_none(),
+        "x-ext-protocol-* headers should be stripped from upstream response: {raw}"
     );
     assert!(
-        parse_header(&raw, "x-a2a-method").is_none(),
-        "x-a2a-* headers should be stripped from upstream response: {raw}"
+        parse_header(&raw, "x-ext-agent-method").is_none(),
+        "x-ext-agent-* headers should be stripped from upstream response: {raw}"
     );
     assert!(
         parse_header(&raw, "x-request-id").is_some(),
@@ -418,12 +418,12 @@ filter_chains:
       - filter: json_rpc
         max_body_bytes: 65536
         headers:
-          method: x-praxis-mcp-method
+          method: x-praxis-rpc-method
       - filter: router
         routes:
           - path_prefix: "/"
             headers:
-              x-praxis-mcp-method: "tools/call"
+              x-praxis-rpc-method: "service/invoke"
             cluster: "tools-call"
           - path_prefix: "/"
             cluster: "default"
@@ -442,7 +442,7 @@ filter_chains:
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather"}}"#;
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"service/invoke","params":{"name":"get_weather"}}"#;
     let request = format!(
         "POST / HTTP/1.1\r\n\
          Host: localhost\r\n\
@@ -458,7 +458,7 @@ filter_chains:
 
     assert_eq!(
         response_body, "tools-call-backend",
-        "router should use body-derived tools/call header: {response_body}"
+        "router should use body-derived service/invoke header: {response_body}"
     );
 }
 
@@ -480,12 +480,12 @@ filter_chains:
       - filter: json_rpc
         max_body_bytes: 65536
         headers:
-          method: x-praxis-mcp-method
+          method: x-praxis-rpc-method
       - filter: router
         routes:
           - path_prefix: "/"
             headers:
-              x-praxis-mcp-method: "tools/call"
+              x-praxis-rpc-method: "service/invoke"
             cluster: "tools-call"
           - path_prefix: "/"
             cluster: "default"
@@ -504,13 +504,13 @@ filter_chains:
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather"}}"#;
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"service/invoke","params":{"name":"get_weather"}}"#;
     let request = format!(
         "POST / HTTP/1.1\r\n\
          Host: localhost\r\n\
          Content-Type: application/json\r\n\
          Content-Length: {}\r\n\
-         X-Praxis-Mcp-Method: initialize\r\n\
+         X-Praxis-Ext-Method: initialize\r\n\
          \r\n\
          {body}",
         body.len(),
@@ -542,7 +542,7 @@ filter_chains:
       - filter: json_rpc
         max_body_bytes: 65536
         headers:
-          method: x-praxis-mcp-method
+          method: x-praxis-rpc-method
       - filter: router
         routes:
           - path_prefix: "/"
@@ -558,7 +558,7 @@ filter_chains:
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"get_weather"}}"#;
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"service/invoke","params":{"name":"get_weather"}}"#;
     let request = format!(
         "POST / HTTP/1.1\r\n\
          Host: localhost\r\n\
@@ -574,8 +574,8 @@ filter_chains:
     let echoed_lower = echoed.to_lowercase();
 
     assert!(
-        !echoed_lower.contains("x-praxis-mcp-method"),
-        "filter-generated x-praxis-mcp-method should be stripped before upstream: {echoed}"
+        !echoed_lower.contains("x-praxis-rpc-method"),
+        "filter-generated x-praxis-rpc-method should be stripped before upstream: {echoed}"
     );
 }
 
@@ -594,9 +594,9 @@ fn reserved_x_praxis_headers_rejected_from_client() {
     let request = format!(
         "GET / HTTP/1.1\r\n\
          Host: localhost\r\n\
-         X-Praxis-Mcp-Method: spoofed\r\n\
-         X-Praxis-Mcp-Name: spoofed-tool\r\n\
-         X-Praxis-A2a-Method: spoofed-a2a\r\n\
+         X-Praxis-Ext-Method: spoofed\r\n\
+         X-Praxis-Rpc-Name: spoofed-tool\r\n\
+         X-Praxis-Ext-Method: spoofed-ext\r\n\
          X-Safe-Header: should-remain\r\n\
          \r\n"
     );
@@ -610,7 +610,7 @@ fn reserved_x_praxis_headers_rejected_from_client() {
 }
 
 #[test]
-fn reserved_x_mcp_headers_rejected_from_client() {
+fn reserved_x_ext_protocol_headers_rejected_from_client() {
     let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
@@ -620,8 +620,8 @@ fn reserved_x_mcp_headers_rejected_from_client() {
     let request = format!(
         "GET / HTTP/1.1\r\n\
          Host: localhost\r\n\
-         X-Mcp-Servername: evil-server\r\n\
-         X-Mcp-Toolname: evil-tool\r\n\
+         X-Ext-Protocol-Server: evil-server\r\n\
+         X-Ext-Protocol-Tool: evil-tool\r\n\
          \r\n"
     );
     let raw = http_send(proxy.addr(), &request);
@@ -629,12 +629,12 @@ fn reserved_x_mcp_headers_rejected_from_client() {
     assert_eq!(
         parse_status(&raw),
         400,
-        "x-mcp-* headers supplied by clients should be rejected: {raw}"
+        "x-ext-protocol-* headers supplied by clients should be rejected: {raw}"
     );
 }
 
 #[test]
-fn reserved_x_a2a_headers_rejected_from_client() {
+fn reserved_x_ext_agent_headers_rejected_from_client() {
     let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
@@ -644,8 +644,8 @@ fn reserved_x_a2a_headers_rejected_from_client() {
     let request = format!(
         "GET / HTTP/1.1\r\n\
          Host: localhost\r\n\
-         X-A2a-Method: spoofed\r\n\
-         X-A2a-Family: spoofed\r\n\
+         X-Ext-Agent-Method: spoofed\r\n\
+         X-Ext-Agent-Family: spoofed\r\n\
          \r\n"
     );
     let raw = http_send(proxy.addr(), &request);
@@ -653,12 +653,12 @@ fn reserved_x_a2a_headers_rejected_from_client() {
     assert_eq!(
         parse_status(&raw),
         400,
-        "x-a2a-* headers supplied by clients should be rejected: {raw}"
+        "x-ext-agent-* headers supplied by clients should be rejected: {raw}"
     );
 }
 
 #[test]
-fn standard_mcp_protocol_headers_preserved() {
+fn standard_ext_protocol_headers_preserved() {
     let backend_guard = start_header_echo_backend();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_guard.port());
@@ -668,10 +668,10 @@ fn standard_mcp_protocol_headers_preserved() {
     let request = format!(
         "GET / HTTP/1.1\r\n\
          Host: localhost\r\n\
-         MCP-Session-Id: session-123\r\n\
-         Mcp-Method: tools/call\r\n\
-         Mcp-Name: get_weather\r\n\
-         MCP-Protocol-Version: 2025-03-26\r\n\
+         Ext-Session-Id: session-123\r\n\
+         Ext-Method: process\r\n\
+         Ext-Name: get_weather\r\n\
+         Ext-Protocol-Version: 2025-03-26\r\n\
          \r\n"
     );
     let raw = http_send(proxy.addr(), &request);
@@ -679,19 +679,19 @@ fn standard_mcp_protocol_headers_preserved() {
     let body_lower = body.to_lowercase();
 
     assert!(
-        body_lower.contains("mcp-session-id: session-123"),
-        "MCP-Session-Id should be preserved: {body}"
+        body_lower.contains("ext-session-id: session-123"),
+        "Ext-Session-Id should be preserved: {body}"
     );
     assert!(
-        body_lower.contains("mcp-method: tools/call"),
-        "Mcp-Method should be preserved: {body}"
+        body_lower.contains("ext-method: process"),
+        "Ext-Method should be preserved: {body}"
     );
     assert!(
-        body_lower.contains("mcp-name: get_weather"),
-        "Mcp-Name should be preserved: {body}"
+        body_lower.contains("ext-name: get_weather"),
+        "Ext-Name should be preserved: {body}"
     );
     assert!(
-        body_lower.contains("mcp-protocol-version: 2025-03-26"),
-        "MCP-Protocol-Version should be preserved: {body}"
+        body_lower.contains("ext-protocol-version: 2025-03-26"),
+        "Ext-Protocol-Version should be preserved: {body}"
     );
 }

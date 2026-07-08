@@ -3,13 +3,13 @@
 
 //! JSON-RPC body parsing + typed CMF content-part builders.
 //!
-//! Praxis's `mcp` filter parses JSON-RPC bodies and stashes
-//! `mcp.method` / `mcp.name` in `filter_metadata`, but it doesn't
-//! materialize `params.arguments` (or `result.content`) into a typed
-//! form that APL `args.*` / `result.*` predicates can evaluate. This
-//! module does that second parse, builds the matching `ContentPart`,
-//! and re-serializes mutated payloads back into JSON-RPC envelopes
-//! when `body_access: read_write` is on.
+//! The upstream protocol classifier filter (from `praxis-ai`) parses JSON-RPC bodies
+//! and stashes `protocol.method` / `protocol.name` in `filter_metadata`, but
+//! it doesn't materialize `params.arguments` (or `result.content`)
+//! into a typed form that APL `args.*` / `result.*` predicates can
+//! evaluate. This module does that second parse, builds the matching
+//! `ContentPart`, and re-serializes mutated payloads back into
+//! JSON-RPC envelopes when `body_access: read_write` is on.
 
 use bytes::Bytes;
 use cpex::cpex_core::cmf::{
@@ -38,7 +38,7 @@ pub(super) fn json_rpc_id(body: &Bytes) -> String {
 
 /// Typed companion to [`json_rpc_id`]. Returns the raw `id` JSON value
 /// from the request body — preserves the original shape (string or
-/// number) so an MCP error envelope echoes back exactly what the
+/// number) so a JSON-RPC error envelope echoes back exactly what the
 /// client sent. Returns `Value::Null` when the body is missing or
 /// malformed; per JSON-RPC 2.0, an error response MAY use `null` when
 /// the original id could not be determined.
@@ -53,9 +53,10 @@ pub(super) fn json_rpc_id_value(body: &Bytes) -> serde_json::Value {
 // Request-side: body → typed ContentPart list
 // -----------------------------------------------------------------------------
 
-/// Build the typed CMF `ContentPart` list for an MCP method. Parses
-/// `params` out of the JSON-RPC body so APL `args.*` / `prompt.args.*`
-/// / `resource.*` predicates have something to evaluate against. On
+/// Build the typed CMF `ContentPart` list for a JSON-RPC method.
+/// Parses `params` out of the body so APL `args.*` /
+/// `prompt.args.*` / `resource.*` predicates have something to
+/// evaluate against. On
 /// malformed or absent body, falls back to an empty content list — the
 /// caller can still dispatch CMF (entity coords drive routing), just
 /// without typed args available to predicates.
@@ -75,7 +76,7 @@ pub(super) fn build_content_for_method(
         .unwrap_or(serde_json::Value::Null);
 
     match method {
-        "tools/call" => {
+        "service/invoke" => {
             let arguments = params
                 .get("arguments")
                 .and_then(|v| v.as_object())
@@ -90,7 +91,7 @@ pub(super) fn build_content_for_method(
                 },
             }]
         },
-        "prompts/get" => {
+        "template/get" => {
             let arguments = params
                 .get("arguments")
                 .and_then(|v| v.as_object())
@@ -105,10 +106,10 @@ pub(super) fn build_content_for_method(
                 },
             }]
         },
-        "resources/read" => {
-            // For `resources/read`, `params.uri` is the resource
-            // identifier; `mcp.name` is set to the same URI by praxis's
-            // `mcp` filter (it treats `uri` as the "selector"). Carry
+        "resource/read" => {
+            // For `resource/read`, `params.uri` is the resource
+            // identifier; `protocol.name` is set to the same URI by the
+            // protocol classifier filter (it treats `uri` as the "selector"). Carry
             // it through as the `ResourceReference`.
             let uri = params
                 .get("uri")
@@ -140,10 +141,10 @@ pub(super) fn build_content_for_method(
 /// when the body changed, `None` when nothing needed rewriting
 /// (no matching content part, malformed original, etc.).
 ///
-/// Touched fields by MCP method:
-///   * `tools/call`     → `params.arguments` (from the first `ContentPart::ToolCall.arguments`)
-///   * `prompts/get`    → `params.arguments` (from the first `ContentPart::PromptRequest.arguments`)
-///   * `resources/read` → `params.uri` (from `ContentPart::ResourceRef.uri`)
+/// Touched fields by JSON-RPC method:
+///   * `service/invoke`     → `params.arguments` (from the first `ContentPart::ToolCall.arguments`)
+///   * `template/get`    → `params.arguments` (from the first `ContentPart::PromptRequest.arguments`)
+///   * `resource/read` → `params.uri` (from `ContentPart::ResourceRef.uri`)
 ///
 /// All other JSON-RPC envelope fields (`jsonrpc`, `id`, `method`,
 /// `params.name`) pass through unchanged. This minimizes the
@@ -160,11 +161,11 @@ pub(super) fn reserialize_json_rpc_body(original: &Bytes, method: &str, message:
     let params_obj = params.as_object_mut()?;
 
     match method {
-        "tools/call" | "prompts/get" => {
+        "service/invoke" | "template/get" => {
             for part in &message.content {
                 let new_args = match part {
-                    ContentPart::ToolCall { content } if method == "tools/call" => Some(&content.arguments),
-                    ContentPart::PromptRequest { content } if method == "prompts/get" => Some(&content.arguments),
+                    ContentPart::ToolCall { content } if method == "service/invoke" => Some(&content.arguments),
+                    ContentPart::PromptRequest { content } if method == "template/get" => Some(&content.arguments),
                     _ => None,
                 };
                 if let Some(args) = new_args {
@@ -179,7 +180,7 @@ pub(super) fn reserialize_json_rpc_body(original: &Bytes, method: &str, message:
             }
             None
         },
-        "resources/read" => {
+        "resource/read" => {
             for part in &message.content {
                 if let ContentPart::ResourceRef { content } = part {
                     params_obj.insert("uri".to_owned(), serde_json::Value::String(content.uri.clone()));
@@ -198,12 +199,12 @@ pub(super) fn reserialize_json_rpc_body(original: &Bytes, method: &str, message:
 
 /// Build the typed CMF `ContentPart` list from a JSON-RPC *response*
 /// body — the post-phase mirror of [`build_content_for_method`]. Today
-/// only `tools/call` produces a structured `ToolResult`; `prompts/get`
-/// and `resources/read` return TBD shapes the filter can extend later.
+/// only `service/invoke` produces a structured `ToolResult`; `template/get`
+/// and `resource/read` return TBD shapes the filter can extend later.
 ///
-/// The actual tool data lives in MCP's `result.content[].text` (a
-/// JSON-stringified payload, per the MCP Tools spec) and/or
-/// `result.structuredContent` (newer 2025-06-18 shape). We try
+/// The actual tool data lives in `result.content[].text` (a
+/// JSON-stringified payload) and/or `result.structuredContent`
+/// (newer 2025-06-18 shape). We try
 /// `structuredContent` first; on miss, fold **every** text block (not
 /// just the first) so APL evaluates against all of the response's text
 /// content. A lone text block that parses as JSON is exposed as that
@@ -226,7 +227,7 @@ pub(super) fn build_response_content_for_method(
     correlation_id: &str,
     body: &Bytes,
 ) -> Vec<ContentPart> {
-    if method != "tools/call" {
+    if method != "service/invoke" {
         return Vec::new();
     }
     let envelope: serde_json::Value = match serde_json::from_slice::<serde_json::Value>(body) {
@@ -287,17 +288,18 @@ pub(super) fn build_response_content_for_method(
 /// When the original response carried a `result.content` array, the
 /// **entire** array is replaced with a single canonical text block
 /// holding the vetted `ToolResult.content` (JSON-stringified — the
-/// legacy MCP shape every client supports). Collapsing to one block is
+/// legacy JSON-RPC shape every client supports). Collapsing to one block is
 /// deliberate: [`build_response_content_for_method`] folds every text
 /// block into the single value APL evaluates, so any *other* block left
 /// in place here would be content the policy never inspected and never
 /// rewrote — a redaction bypass. Dropping the extra (text and non-text)
 /// blocks guarantees the bytes we emit are exactly what APL vetted.
 ///
-/// `result.structuredContent` is mirrored to the same value, but only
-/// when the original response already had it (we don't invent fields).
+/// `result.structuredContent` is mirrored to the same value, but
+/// only when the original response already had it (we don't invent
+/// fields).
 pub(super) fn reserialize_json_rpc_response_body(original: &Bytes, method: &str, message: &Message) -> Option<Bytes> {
-    if method != "tools/call" {
+    if method != "service/invoke" {
         return None;
     }
     let mut envelope: serde_json::Value = serde_json::from_slice(original).ok()?;

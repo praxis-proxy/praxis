@@ -768,6 +768,53 @@ use_standard_header: true
         );
     }
 
+    #[tokio::test]
+    async fn untrusted_client_xff_overwritten() {
+        let f = make_filter(&[]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert(
+            http::header::HeaderName::from_static("x-forwarded-for"),
+            "10.0.0.1, 172.16.0.5".parse().unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("198.51.100.7".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let xff = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "X-Forwarded-For")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            xff,
+            Some("198.51.100.7"),
+            "untrusted client should overwrite spoofed XFF chain with actual client IP"
+        );
+    }
+
+    #[tokio::test]
+    async fn x_forwarded_proto_set_for_non_tls() {
+        let f = make_filter(&[]);
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("203.0.113.50".parse().unwrap());
+        ctx.downstream_tls = false;
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let proto = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "X-Forwarded-Proto")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            proto,
+            Some("http"),
+            "non-TLS connection should set X-Forwarded-Proto to http"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------

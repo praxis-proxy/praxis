@@ -11,12 +11,12 @@
 ///
 /// Body-derived values that are promoted to metadata or filter results use
 /// the same rule as headers so every promotion sink has one safety policy.
-pub(crate) fn is_safe_promoted_value(s: &str) -> bool {
+pub fn is_safe_promoted_value(s: &str) -> bool {
     http::HeaderValue::from_str(s).is_ok()
 }
 
 /// Returns `true` if `s` is unsafe to promote to headers or metadata.
-pub(crate) fn contains_control_chars(s: &str) -> bool {
+pub fn contains_control_chars(s: &str) -> bool {
     !is_safe_promoted_value(s)
 }
 
@@ -27,7 +27,7 @@ mod tests {
     #[test]
     fn promoted_value_allows_visible_ascii() {
         assert!(
-            is_safe_promoted_value("gpt-4.1-mini"),
+            is_safe_promoted_value("model-gamma-2"),
             "visible ASCII should be safe for promotion"
         );
     }

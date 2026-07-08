@@ -3,19 +3,20 @@
 
 //! Reserved internal header helpers for proxy-owned routing metadata.
 
-/// Built-in reserved header prefixes for Praxis agentic protocol routing.
+/// Built-in reserved header prefixes for Praxis routing metadata.
 ///
 /// Headers with these prefixes are proxy-internal metadata used for
 /// body-derived routing decisions. Clients must not be able to inject
 /// them directly, and they should not be forwarded to upstream backends.
 ///
-/// Standard MCP protocol headers (`mcp-session-id`, `mcp-method`,
-/// `mcp-name`, `mcp-protocol-version`, `mcp-param-*`) do NOT match these
-/// prefixes because they lack the `x-` prefix.
+/// The `x-ext-protocol-*` and `x-ext-agent-*` prefixes are reserved for the AI
+/// extension package (`praxis-ai`). They are stripped here to
+/// prevent clients from spoofing internal AI routing headers even
+/// when the AI filters are not loaded.
 // TODO(#186) Spike: consider additive operator-managed reserved prefixes
 // once the broader config model defines global vs listener/filter-chain
 // scope and additive vs override semantics.
-const RESERVED_HEADER_PREFIXES: &[&str] = &["x-praxis-", "x-mcp-", "x-a2a-"];
+const RESERVED_HEADER_PREFIXES: &[&str] = &["x-praxis-", "x-ext-protocol-", "x-ext-agent-"];
 
 /// Return whether a header name belongs to Praxis reserved internal metadata.
 pub(in crate::http::pingora::handler) fn is_reserved_internal_header(name: &http::HeaderName) -> bool {
@@ -40,15 +41,21 @@ mod tests {
     }
 
     #[test]
-    fn x_mcp_prefix_is_reserved() {
-        let name = http::HeaderName::from_static("x-mcp-session");
-        assert!(is_reserved_internal_header(&name), "x-mcp-session should be reserved");
+    fn x_ext_protocol_prefix_is_reserved() {
+        let name = http::HeaderName::from_static("x-ext-protocol-session");
+        assert!(
+            is_reserved_internal_header(&name),
+            "x-ext-protocol-session should be reserved"
+        );
     }
 
     #[test]
-    fn x_a2a_prefix_is_reserved() {
-        let name = http::HeaderName::from_static("x-a2a-task");
-        assert!(is_reserved_internal_header(&name), "x-a2a-task should be reserved");
+    fn x_ext_agent_prefix_is_reserved() {
+        let name = http::HeaderName::from_static("x-ext-agent-task");
+        assert!(
+            is_reserved_internal_header(&name),
+            "x-ext-agent-task should be reserved"
+        );
     }
 
     #[test]
@@ -70,11 +77,11 @@ mod tests {
     }
 
     #[test]
-    fn mcp_session_id_without_x_prefix_is_not_reserved() {
-        let name = http::HeaderName::from_static("mcp-session-id");
+    fn ext_session_id_without_x_prefix_is_not_reserved() {
+        let name = http::HeaderName::from_static("ext-session-id");
         assert!(
             !is_reserved_internal_header(&name),
-            "mcp-session-id (no x- prefix) should not be reserved"
+            "ext-session-id (no x- prefix) should not be reserved"
         );
     }
 

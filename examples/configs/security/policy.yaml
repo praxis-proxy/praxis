@@ -8,9 +8,9 @@
 # Experimental: requires the `cpex-policy-engine` cargo feature, which
 # is off by default.
 #
-# The policy filter consumes `mcp.method` / `mcp.name` metadata stashed
-# by praxis's built-in `mcp` filter, which MUST be ordered before it
-# in the chain.
+# The policy filter consumes `protocol.method` / `protocol.name` metadata from
+# an upstream protocol classifier filter (available in the `praxis-ai` package), which
+# MUST be ordered before it in the chain.
 #
 # `config_path` points at the CPEX policy YAML (plugins + routes) that
 # the filter loads once at construction. It is operator-supplied, not
@@ -20,13 +20,14 @@
 # `tests/integration/fixtures/cpex-policy.yaml` for the minimal
 # single-HS256-identity-plugin policy the integration test loads.
 #
-# `require_mcp_metadata: true` (the default) fail-closes when the
-# `mcp` filter is missing or ordered after `policy` — this guards
+# `require_protocol_metadata: true` (the default) fail-closes when the
+# protocol classifier filter is missing or ordered after `policy` — this guards
 # against a misconfigured chain silently bypassing policy.
 #
 # This example builds only when the `cpex-policy-engine` cargo feature
-# is enabled:
+# is enabled.
 #
+# Usage:
 #   cargo run --features cpex-policy-engine -p praxis-proxy -- \
 #     -c examples/configs/security/policy.yaml
 #
@@ -34,16 +35,16 @@
 #
 #   # Missing Authorization → 401 with WWW-Authenticate and
 #   # X-Policy-Violation header:
-#   curl -i -X POST http://localhost:8080/mcp \
+#   curl -i -X POST http://localhost:8080/rpc \
 #     -H "Content-Type: application/json" \
-#     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+#     -d '{"jsonrpc":"2.0","id":1,"method":"service/invoke",
 #          "params":{"name":"echo","arguments":{}}}'
 #
 #   # Token rejected by HS256 signature mismatch → 401:
-#   curl -i -X POST http://localhost:8080/mcp \
+#   curl -i -X POST http://localhost:8080/rpc \
 #     -H "Authorization: Bearer bogus.token.bytes" \
 #     -H "Content-Type: application/json" \
-#     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
+#     -d '{"jsonrpc":"2.0","id":1,"method":"service/invoke",
 #          "params":{"name":"echo","arguments":{}}}'
 #
 # Supply your own policy document at `config_path` before running this
@@ -59,16 +60,16 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: mcp
-        # Default mode parses MCP JSON-RPC bodies and stashes
-        # mcp.method / mcp.name in filter_metadata. Must precede policy.
+      # An protocol classifier filter (from praxis-ai) must precede `policy` in the
+      # chain to stash protocol.method / protocol.name in filter_metadata.
+      # See the praxis-ai documentation for setup instructions.
 
       - filter: policy
         config_path: /etc/praxis/cpex-policy.yaml
-        # Fail-closed when mcp.method is missing. Set to `false` only
-        # when intentionally fronting non-MCP traffic through the policy
-        # filter for identity-only enforcement.
-        require_mcp_metadata: true
+        # Fail-closed when protocol.method metadata is missing. Set to
+        # `false` only when intentionally fronting non-classified traffic
+        # through the policy filter for identity-only enforcement.
+        require_protocol_metadata: true
 
       - filter: router
         routes:

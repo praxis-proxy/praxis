@@ -5,9 +5,8 @@
 
 use serde::Deserialize;
 
-use crate::{
-    FilterError, body::DEFAULT_JSON_BODY_MAX_BYTES, builtins::http::ai::config_validation::validate_max_body_bytes,
-};
+use super::super::config_validation::validate_max_body_bytes;
+use crate::{FilterError, body::DEFAULT_JSON_BODY_MAX_BYTES};
 
 // -----------------------------------------------------------------------------
 // JsonBodyFieldMapping

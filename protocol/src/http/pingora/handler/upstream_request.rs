@@ -116,9 +116,9 @@ pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &mut PingoraReq
 /// Strip reserved internal headers before forwarding to upstream.
 ///
 /// Removes proxy-internal routing metadata that should not leak to
-/// backends. Standard MCP protocol headers (`mcp-session-id`,
-/// `mcp-method`, `mcp-name`) are preserved because they do not
-/// match the `x-` prefixed reserved set.
+/// backends. Standard protocol headers without the `x-` prefix
+/// (e.g. `ext-session-id`) are preserved because they do not match
+/// the `x-` prefixed reserved set.
 pub(crate) fn strip_reserved_internal(req: &mut RequestHeader) {
     let to_remove: Vec<http::HeaderName> = req
         .headers

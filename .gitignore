@@ -8,6 +8,10 @@ target
 # Rustfmt backup files
 **/*.rs.bk
 
+# Python
+__pycache__/
+*.pyc
+
 # MSVC debugging symbols
 *.pdb
 

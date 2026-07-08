@@ -8,6 +8,9 @@
 #
 # Use case: blocking requests with suspicious headers
 # before they reach the backend.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/branching/conditional-terminal.yaml
 
 listeners:
   - name: web

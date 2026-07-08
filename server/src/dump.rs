@@ -529,7 +529,7 @@ filter_chains:
     }
 
     #[test]
-    fn response_store_database_url_redacted_in_dump() {
+    fn database_url_redacted_in_dump() {
         let config = Config::from_yaml(
             r#"
 listeners:
@@ -539,11 +539,9 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      - filter: openai_response_store
+      - filter: some_db_filter
         backend: postgres
         database_url: "postgres://user:super-secret-db-pass@localhost:5432/praxis"
-        responses_table: openai_responses
-        conversations_table: openai_conversations
 "#,
         )
         .unwrap();
@@ -561,7 +559,7 @@ filter_chains:
 
     #[test]
     #[expect(clippy::too_many_lines, reason = "test YAML is intentionally explicit")]
-    fn branch_chain_response_store_database_url_redacted_in_dump() {
+    fn branch_chain_database_url_redacted_in_dump() {
         let config = Config::from_yaml(
             r#"
 listeners:
@@ -578,11 +576,9 @@ filter_chains:
             chains:
               - name: inline_store
                 filters:
-                  - filter: openai_response_store
+                  - filter: some_db_filter
                     backend: postgres
                     database_url: "postgres://user:super-secret-db-pass@localhost:5432/praxis"
-                    responses_table: openai_responses
-                    conversations_table: openai_conversations
             rejoin: next
 "#,
         )

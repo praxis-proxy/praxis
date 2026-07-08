@@ -106,7 +106,17 @@ pub fn ipv6_available() -> bool {
 /// Panics if binding to `[::1]:0` fails (caller must check
 /// [`ipv6_available`] first).
 pub fn free_port_v6() -> u16 {
-    TcpListener::bind("[::1]:0").unwrap().local_addr().unwrap().port()
+    for _ in 0..256 {
+        let port = TcpListener::bind("[::1]:0").unwrap().local_addr().unwrap().port();
+        if ALLOCATED_PORTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(port)
+        {
+            return port;
+        }
+    }
+    panic!("failed to bind a unique IPv6 port after 256 attempts");
 }
 
 // ---------------------------------------------------------------------------

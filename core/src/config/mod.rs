@@ -582,6 +582,51 @@ filter_chains:
     }
 
     #[test]
+    fn config_serialize_roundtrip() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let original = Config::from_yaml(yaml).unwrap();
+        let serialized = serde_yaml::to_string(&original).expect("serialization should succeed");
+        let roundtripped: Config = serde_yaml::from_str(&serialized).expect("deserialization should succeed");
+
+        assert_eq!(
+            roundtripped.listeners.len(),
+            original.listeners.len(),
+            "listener count should survive roundtrip"
+        );
+        assert_eq!(
+            roundtripped.listeners[0].name, original.listeners[0].name,
+            "listener name should survive roundtrip"
+        );
+        assert_eq!(
+            roundtripped.listeners[0].address, original.listeners[0].address,
+            "listener address should survive roundtrip"
+        );
+        assert_eq!(
+            roundtripped.filter_chains.len(),
+            original.filter_chains.len(),
+            "filter chain count should survive roundtrip"
+        );
+        assert_eq!(
+            roundtripped.filter_chains[0].name, original.filter_chains[0].name,
+            "filter chain name should survive roundtrip"
+        );
+        assert_eq!(
+            roundtripped.shutdown_timeout_secs, original.shutdown_timeout_secs,
+            "shutdown_timeout_secs should survive roundtrip"
+        );
+    }
+
+    #[test]
     fn reject_unknown_insecure_options_field() {
         let yaml = r#"
 listeners:

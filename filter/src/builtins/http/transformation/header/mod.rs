@@ -25,7 +25,8 @@ use serde::Deserialize;
 use tracing::trace;
 
 use self::ops::{
-    append_headers, parse_header_names, parse_header_pairs, remove_headers, set_headers, validate_raw_header_pairs,
+    append_headers, parse_header_name_with_raw_value, parse_header_names, parse_header_pairs, remove_headers,
+    set_headers,
 };
 use crate::{
     FilterAction, FilterError,
@@ -123,8 +124,8 @@ pub(crate) struct HeaderPair {
 /// assert_eq!(filter.name(), "headers");
 /// ```
 pub struct HeaderFilter {
-    /// Headers to append to the upstream request (raw strings for `Cow` output).
-    pub(crate) request_add: Vec<(String, String)>,
+    /// Headers to append to the upstream request.
+    pub(crate) request_add: Vec<(http::header::HeaderName, String)>,
 
     /// Pre-parsed header names to strip from the upstream request.
     pub(crate) request_remove: Vec<http::header::HeaderName>,
@@ -153,7 +154,7 @@ impl HeaderFilter {
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: HeaderFilterConfig = parse_filter_config("headers", config)?;
 
-        let request_add = validate_raw_header_pairs(cfg.request_add, "request_add")?;
+        let request_add = parse_header_name_with_raw_value(cfg.request_add, "request_add")?;
         let request_remove = parse_header_names(cfg.request_remove, "request_remove")?;
         let request_set = parse_header_pairs(cfg.request_set, "request_set")?;
         let response_add = parse_header_pairs(cfg.response_add, "response_add")?;
@@ -190,19 +191,18 @@ impl HttpFilter for HeaderFilter {
 
         for (name, value) in &self.request_add {
             trace!(header = %name, "adding request header");
-            if let Some(existing) = ctx.request.headers.get(name.as_str())
+            if let Some(existing) = ctx.request.headers.get(name)
                 && let Ok(existing_str) = existing.to_str()
-                && let Ok(hdr_name) = http::header::HeaderName::from_bytes(name.as_bytes())
             {
                 let combined = format!("{existing_str},{value}");
                 if let Ok(combined_val) = http::header::HeaderValue::from_str(&combined) {
-                    ctx.request_headers_to_set.push((hdr_name, combined_val));
+                    ctx.request_headers_to_set.push((name.clone(), combined_val));
                     continue;
                 }
             }
 
             ctx.extra_request_headers
-                .push((Cow::Owned(name.clone()), value.clone()));
+                .push((Cow::Owned(name.to_string()), value.clone()));
         }
         Ok(FilterAction::Continue)
     }

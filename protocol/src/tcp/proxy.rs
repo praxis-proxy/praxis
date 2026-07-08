@@ -211,11 +211,7 @@ impl PingoraTcpProxy {
 
 #[async_trait]
 impl ServerApp for PingoraTcpProxy {
-    #[expect(
-        clippy::large_stack_frames,
-        clippy::too_many_lines,
-        reason = "linear connection lifecycle"
-    )]
+    #[expect(clippy::too_many_lines, reason = "linear connection lifecycle")]
     async fn process_new(self: &Arc<Self>, mut session: Stream, shutdown: &ShutdownWatch) -> Option<Stream> {
         let connect_time = std::time::Instant::now();
         let (remote_addr, local_addr) = extract_addrs(&session);

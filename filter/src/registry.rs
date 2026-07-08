@@ -109,13 +109,12 @@ impl FilterRegistry {
 #[expect(clippy::too_many_lines, reason = "one line per filter, will grow")]
 fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     use crate::builtins::{
-        A2aFilter, AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter,
-        CsrfFilter, ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter,
-        JsonRpcFilter, McpFilter, PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter,
-        StaticResponseFilter, TimeoutFilter, TokenUsageHeadersFilter, UrlRewriteFilter,
+        AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter, CsrfFilter,
+        ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter,
+        PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter, StaticResponseFilter, TimeoutFilter,
+        UrlRewriteFilter,
     };
 
-    register_http(factories, "a2a", A2aFilter::from_config);
     register_http(factories, "access_log", AccessLogFilter::from_config);
     register_http(factories, "circuit_breaker", CircuitBreakerFilter::from_config);
     register_http(factories, "compression", CompressionFilter::from_config);
@@ -141,95 +140,9 @@ fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
     register_http(factories, "router", crate::RouterFilter::from_config);
     register_http(factories, "static_response", StaticResponseFilter::from_config);
     register_http(factories, "timeout", TimeoutFilter::from_config);
-    register_http(factories, "token_usage_headers", TokenUsageHeadersFilter::from_config);
     register_http(factories, "url_rewrite", UrlRewriteFilter::from_config);
     register_http(factories, "json_body_field", JsonBodyFieldFilter::from_config);
     register_http(factories, "json_rpc", JsonRpcFilter::from_config);
-    register_http(factories, "mcp", McpFilter::from_config);
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "ai_guardrails",
-        crate::builtins::AiGuardrailsFilter::from_config,
-    );
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "anthropic_messages_format",
-        crate::builtins::AnthropicMessagesFormatFilter::from_config,
-    );
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "anthropic_messages_protocol",
-        crate::builtins::AnthropicMessagesProtocolFilter::from_config,
-    );
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "anthropic_stream_events",
-        crate::builtins::AnthropicStreamEventsFilter::from_config,
-    );
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "anthropic_to_openai",
-        crate::builtins::AnthropicToOpenaiFilter::from_config,
-    );
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "anthropic_validate",
-        crate::builtins::AnthropicValidateFilter::from_config,
-    );
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "model_to_header",
-        crate::builtins::ModelToHeaderFilter::from_config,
-    );
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "prompt_enrich",
-        crate::builtins::PromptEnrichFilter::from_config,
-    );
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "openai_responses_format",
-        crate::builtins::ResponsesFormatFilter::from_config,
-    );
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "openai_responses_model_rewrite",
-        crate::builtins::ModelRewriteFilter::from_config,
-    );
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "openai_responses_validate",
-        crate::builtins::OpenaiResponsesValidateFilter::from_config,
-    );
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "openai_response_store",
-        crate::builtins::ResponseStoreFilter::from_config,
-    );
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "openai_responses_rehydrate",
-        crate::builtins::RehydrateFilter::from_config,
-    );
-    #[cfg(feature = "ai-inference")]
-    register_http(
-        factories,
-        "responses_proxy",
-        crate::builtins::ResponsesProxyFilter::from_config,
-    );
 }
 
 /// Register a single HTTP filter factory by name.
@@ -294,7 +207,6 @@ mod tests {
         let mut names = registry.available_filters();
         names.sort();
 
-        assert!(names.contains(&"a2a"), "a2a should be registered");
         assert!(names.contains(&"access_log"), "access_log should be registered");
         assert!(
             names.contains(&"circuit_breaker"),
@@ -332,81 +244,12 @@ mod tests {
             "tcp_load_balancer should be registered"
         );
         assert!(names.contains(&"timeout"), "timeout should be registered");
-        assert!(
-            names.contains(&"token_usage_headers"),
-            "token_usage_headers should be registered"
-        );
         assert!(names.contains(&"url_rewrite"), "url_rewrite should be registered");
         assert!(
             names.contains(&"json_body_field"),
             "json_body_field should be registered"
         );
         assert!(names.contains(&"json_rpc"), "json_rpc should be registered");
-        assert!(names.contains(&"mcp"), "mcp should be registered");
-        #[cfg(feature = "ai-inference")]
-        assert!(names.contains(&"ai_guardrails"), "ai_guardrails should be registered");
-        #[cfg(feature = "ai-inference")]
-        assert!(
-            names.contains(&"model_to_header"),
-            "model_to_header should be registered"
-        );
-        #[cfg(feature = "ai-inference")]
-        assert!(names.contains(&"prompt_enrich"), "prompt_enrich should be registered");
-        #[cfg(feature = "ai-inference")]
-        assert!(
-            names.contains(&"anthropic_messages_format"),
-            "anthropic_messages_format should be registered"
-        );
-        #[cfg(feature = "ai-inference")]
-        assert!(
-            names.contains(&"anthropic_messages_protocol"),
-            "anthropic_messages_protocol should be registered"
-        );
-        #[cfg(feature = "ai-inference")]
-        assert!(
-            names.contains(&"anthropic_stream_events"),
-            "anthropic_stream_events should be registered"
-        );
-        #[cfg(feature = "ai-inference")]
-        assert!(
-            names.contains(&"anthropic_to_openai"),
-            "anthropic_to_openai should be registered"
-        );
-        #[cfg(feature = "ai-inference")]
-        assert!(
-            names.contains(&"anthropic_validate"),
-            "anthropic_validate should be registered"
-        );
-        #[cfg(feature = "ai-inference")]
-        assert!(
-            names.contains(&"openai_responses_format"),
-            "openai_responses_format should be registered"
-        );
-        #[cfg(feature = "ai-inference")]
-        assert!(
-            names.contains(&"openai_responses_model_rewrite"),
-            "openai_responses_model_rewrite should be registered"
-        );
-        #[cfg(feature = "ai-inference")]
-        assert!(
-            names.contains(&"openai_responses_validate"),
-            "validate should be registered"
-        );
-        #[cfg(feature = "ai-inference")]
-        assert!(
-            names.contains(&"openai_response_store"),
-            "response_store should be registered"
-        );
-        #[cfg(feature = "ai-inference")]
-        assert!(
-            names.contains(&"openai_responses_rehydrate"),
-            "openai_responses_rehydrate should be registered"
-        );
-        #[cfg(feature = "ai-inference")]
-        assert!(
-            names.contains(&"responses_proxy"),
-            "responses_proxy should be registered"
-        );
         #[cfg(feature = "cpex-policy-engine")]
         assert!(names.contains(&"policy"), "policy should be registered");
     }

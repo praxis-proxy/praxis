@@ -29,8 +29,8 @@ Two delivery modes:
   remaining chunks flow through in stream mode. No size
   limit by default; an optional `max_bytes` returns 413
   when exceeded. Enables streaming inspection with deferred
-  forwarding for AI inference, Agentic networks, and
-  Security systems use cases including content scanning,
+  forwarding for protocol parsing, body-based routing, and
+  security use cases including content scanning,
   payload inspection, and body-based routing.
 
 When StreamBuffer mode is active, the protocol layer

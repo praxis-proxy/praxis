@@ -24,13 +24,13 @@ fn extracts_json_rpc_method_to_header() {
 
     let raw = http_send(
         proxy.addr(),
-        &json_post("/api", r#"{"jsonrpc":"2.0","method":"tools/call","id":1}"#),
+        &json_post("/api", r#"{"jsonrpc":"2.0","method":"service/invoke","id":1}"#),
     );
 
     assert_eq!(parse_status(&raw), 200, "JSON-RPC request should return 200");
     let body = parse_body(&raw);
     assert!(
-        body.to_lowercase().contains("x-json-rpc-method: tools/call"),
+        body.to_lowercase().contains("x-json-rpc-method: service/invoke"),
         "expected X-Json-Rpc-Method header echoed by backend, got:\n{body}"
     );
     assert!(
@@ -56,7 +56,7 @@ fn extracts_notification_without_id() {
         proxy.addr(),
         &json_post(
             "/api",
-            r#"{"jsonrpc":"2.0","method":"notifications/tools/list_changed"}"#,
+            r#"{"jsonrpc":"2.0","method":"notifications/service/list_changed"}"#,
         ),
     );
 
@@ -64,7 +64,7 @@ fn extracts_notification_without_id() {
     let body = parse_body(&raw);
     assert!(
         body.to_lowercase()
-            .contains("x-json-rpc-method: notifications/tools/list_changed"),
+            .contains("x-json-rpc-method: notifications/service/list_changed"),
         "expected method header for notification, got:\n{body}"
     );
     assert!(
@@ -79,10 +79,10 @@ fn extracts_notification_without_id() {
 
 #[test]
 fn method_based_routing_different_clusters() {
-    let backend1_guard = start_backend_with_shutdown("mcp-tools-backend");
+    let backend1_guard = start_backend_with_shutdown("tools-backend");
     let backend1_port = backend1_guard.port();
 
-    let backend2_guard = start_backend_with_shutdown("a2a-send-backend");
+    let backend2_guard = start_backend_with_shutdown("messaging-backend");
     let backend2_port = backend2_guard.port();
 
     let proxy_port = free_port();
@@ -93,29 +93,29 @@ fn method_based_routing_different_clusters() {
     let raw1 = http_send(
         proxy.addr(),
         &json_post(
-            "/mcp/",
-            r#"{"jsonrpc":"2.0","id":"req-1","method":"tools/call","params":{"name":"calculator"}}"#,
+            "/rpc-tools/",
+            r#"{"jsonrpc":"2.0","id":"req-1","method":"service/invoke","params":{"name":"calculator"}}"#,
         ),
     );
-    assert_eq!(parse_status(&raw1), 200, "MCP tools/call request should return 200");
+    assert_eq!(parse_status(&raw1), 200, "service/invoke request should return 200");
     assert_eq!(
         parse_body(&raw1),
-        "mcp-tools-backend",
-        "tools/call should route to MCP backend"
+        "tools-backend",
+        "service/invoke should route to tools backend"
     );
 
     let raw2 = http_send(
         proxy.addr(),
         &json_post(
-            "/a2a/",
-            r#"{"jsonrpc":"2.0","id":"msg-123","method":"SendMessage","params":{"recipient":"agent-42"}}"#,
+            "/rpc-msg/",
+            r#"{"jsonrpc":"2.0","id":"msg-123","method":"ProcessRequest","params":{"recipient":"agent-42"}}"#,
         ),
     );
-    assert_eq!(parse_status(&raw2), 200, "A2A SendMessage request should return 200");
+    assert_eq!(parse_status(&raw2), 200, "ProcessRequest request should return 200");
     assert_eq!(
         parse_body(&raw2),
-        "a2a-send-backend",
-        "SendMessage should route to A2A backend"
+        "messaging-backend",
+        "ProcessRequest should route to messaging backend"
     );
 }
 
@@ -243,30 +243,30 @@ filter_chains:
           kind: X-Json-Rpc-Kind
       - filter: router
         routes:
-          - path_prefix: "/mcp/"
+          - path_prefix: "/rpc-tools/"
             headers:
-              x-json-rpc-method: "tools/call"
-            cluster: "mcp-tools"
-          - path_prefix: "/mcp/"
+              x-json-rpc-method: "service/invoke"
+            cluster: "tools"
+          - path_prefix: "/rpc-tools/"
             headers:
-              x-json-rpc-method: "tools/list"
-            cluster: "mcp-tools"
-          - path_prefix: "/a2a/"
+              x-json-rpc-method: "service/list"
+            cluster: "tools"
+          - path_prefix: "/rpc-msg/"
             headers:
-              x-json-rpc-method: "SendMessage"
-            cluster: "a2a-send"
-          - path_prefix: "/a2a/"
+              x-json-rpc-method: "ProcessRequest"
+            cluster: "messaging"
+          - path_prefix: "/rpc-msg/"
             headers:
-              x-json-rpc-method: "SendStreamingMessage"
-            cluster: "a2a-send"
+              x-json-rpc-method: "StreamRequest"
+            cluster: "messaging"
           - path_prefix: "/"
             cluster: "default"
       - filter: load_balancer
         clusters:
-          - name: "mcp-tools"
+          - name: "tools"
             endpoints:
               - "127.0.0.1:{backend1_port}"
-          - name: "a2a-send"
+          - name: "messaging"
             endpoints:
               - "127.0.0.1:{backend2_port}"
           - name: "default"

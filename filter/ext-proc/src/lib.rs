@@ -60,6 +60,7 @@ mod callout;
 #[expect(dead_code, reason = "wired into ExtProcFilter in follow-up PR")]
 pub(crate) mod duplex;
 mod mutations;
+pub(crate) mod proto;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -371,9 +372,9 @@ impl BodySendMode {
 
     /// Convert to the protobuf [`BodySendMode`] enum integer value.
     ///
-    /// [`BodySendMode`]: praxis_proto::envoy::service::ext_proc::v3::BodySendMode
+    /// [`BodySendMode`]: crate::proto::envoy::service::ext_proc::v3::BodySendMode
     pub(crate) fn to_proto_i32(self) -> i32 {
-        use praxis_proto::envoy::service::ext_proc::v3::BodySendMode as ProtoMode;
+        use crate::proto::envoy::service::ext_proc::v3::BodySendMode as ProtoMode;
         match self {
             Self::None => ProtoMode::None as i32,
             Self::Streamed => ProtoMode::Streamed as i32,

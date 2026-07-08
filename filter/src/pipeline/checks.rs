@@ -304,21 +304,21 @@ mod tests {
     }
 
     #[test]
-    fn lb_with_only_mcp_static_catalog_errors() {
-        let names = vec!["mcp", "load_balancer"];
+    fn lb_with_only_non_cluster_filter_errors() {
+        let names = vec!["custom_filter", "load_balancer"];
         let mut errors = Vec::new();
         check_lb_without_cluster_selector(&names, &mut errors);
         assert_eq!(errors.len(), 1);
         assert!(
             errors[0].contains("load_balancer without a preceding router"),
-            "MCP static catalog does not select a cluster in this PR: {}",
+            "non-cluster-selecting filter should not satisfy router requirement: {}",
             errors[0]
         );
     }
 
     #[test]
-    fn mcp_static_catalog_with_router_no_conflict_check() {
-        let names = vec!["mcp", "router", "load_balancer"];
+    fn non_cluster_filter_with_router_no_error() {
+        let names = vec!["custom_filter", "router", "load_balancer"];
         let mut errors = Vec::new();
         check_lb_without_cluster_selector(&names, &mut errors);
         assert!(errors.is_empty());

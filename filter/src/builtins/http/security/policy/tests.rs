@@ -153,7 +153,7 @@ routes:
     (dir, path_str)
 }
 
-/// Run a `tools/call` for the `echo` tool as `subject`, returning the
+/// Run a `service/invoke` for the `echo` tool as `subject`, returning the
 /// filter's body-phase action. Shared by the CEL allow/deny cases.
 async fn dispatch_echo_as(filter: &PolicyFilter, subject: &str) -> FilterAction {
     let token = mint_jwt(&standard_claims(subject));
@@ -163,10 +163,10 @@ async fn dispatch_echo_as(filter: &PolicyFilter, subject: &str) -> FilterAction 
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.set_metadata("protocol.method", "service/invoke");
+    ctx.set_metadata("protocol.name", "echo");
     let body = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
+        br#"{"jsonrpc":"2.0","id":1,"method":"service/invoke","params":{"name":"echo","arguments":{}}}"#,
     );
     filter
         .on_request_body(&mut ctx, &mut Some(body), true)
@@ -224,7 +224,7 @@ routes:
     (dir, path_str)
 }
 
-/// Dispatch a `tools/call` for `tool` as `subject` with the given
+/// Dispatch a `service/invoke` for `tool` as `subject` with the given
 /// `X-Session-Id`. Returns the filter's body-phase action. Threads the
 /// session header so cpex's session-scoped taint store can persist /
 /// hydrate labels across calls.
@@ -240,10 +240,10 @@ async fn dispatch_tool_session(filter: &PolicyFilter, subject: &str, tool: &str,
         HeaderValue::from_str(session_id).expect("session header"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", tool);
+    ctx.set_metadata("protocol.method", "service/invoke");
+    ctx.set_metadata("protocol.name", tool);
     let body = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{}}}"#,
+        br#"{"jsonrpc":"2.0","id":1,"method":"service/invoke","params":{"name":"t","arguments":{}}}"#,
     );
     filter
         .on_request_body(&mut ctx, &mut Some(body), true)
@@ -360,14 +360,14 @@ routes:
 }
 
 /// Build a `PolicyFilter` from a YAML config path. Defaults
-/// `require_mcp_metadata` to true so the test surface matches the
+/// `require_protocol_metadata` to true so the test surface matches the
 /// production default; individual tests that want to test the
 /// fail-open knob construct their own config.
 fn build_filter(config_path: String) -> PolicyFilter {
     let cfg = PolicyFilterConfig {
         config_path,
         body_access: super::config::BodyAccessMode::ReadOnly,
-        require_mcp_metadata: true,
+        require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
     };
@@ -379,7 +379,7 @@ fn build_filter(config_path: String) -> PolicyFilter {
 // -----------------------------------------------------------------------------
 
 /// The minimal valid config carries only `config_path:`; all other
-/// fields (`body_access`, `require_mcp_metadata`, `init_timeout_secs`,
+/// fields (`body_access`, `require_protocol_metadata`, `init_timeout_secs`,
 /// `max_buffer_bytes`) take their documented defaults.
 #[test]
 fn config_parses_minimal_yaml() {
@@ -497,9 +497,9 @@ async fn tampered_jwt_signature_rejects_401() {
     );
 }
 
-/// Auth rejections must carry the MCP-spec-required
-/// `WWW-Authenticate: Bearer` header so MCP clients know to retry
-/// with credentials, plus our `X-Policy-Violation` diagnostic header.
+/// Auth rejections must carry the `WWW-Authenticate: Bearer` header
+/// so clients know to retry with credentials, plus our
+/// `X-Policy-Violation` diagnostic header.
 #[tokio::test(flavor = "multi_thread")]
 async fn auth_rejection_carries_diagnostic_headers() {
     let (_dir, path) = write_single_plugin_config();
@@ -604,14 +604,14 @@ body_acces: read_write
     );
 }
 
-/// `require_mcp_metadata` defaults to `true` — the safer fail-closed
+/// `require_protocol_metadata` defaults to `true` — the safer fail-closed
 /// posture. Operators must explicitly opt in to identity-only
-/// pass-through for non-MCP traffic.
+/// pass-through for non-classified traffic.
 #[test]
-fn config_require_mcp_metadata_defaults_to_true() {
+fn config_require_protocol_metadata_defaults_to_true() {
     let yaml = "config_path: /etc/praxis/cpex.yaml";
     let cfg: PolicyFilterConfig = serde_yaml::from_str(yaml).expect("parse");
-    assert!(cfg.require_mcp_metadata, "default must be fail-closed");
+    assert!(cfg.require_protocol_metadata, "default must be fail-closed");
 }
 
 /// `init_timeout_secs` defaults to 30s when omitted. Operators don't
@@ -643,16 +643,16 @@ fn config_init_timeout_honors_override() {
 // exercised by `tokio::time::timeout` itself.
 
 // -----------------------------------------------------------------------------
-// Fail-closed policy gate (require_mcp_metadata)
+// Fail-closed policy gate (require_protocol_metadata)
 // -----------------------------------------------------------------------------
 
-/// When `require_mcp_metadata: true` (default) and `mcp.method` is
+/// When `require_protocol_metadata: true` (default) and `protocol.method` is
 /// absent from filter metadata, `on_request_body` rejects with
-/// HTTP 500 + `X-Policy-Violation: config.missing_mcp_metadata`. This
-/// catches a misconfigured chain (mcp filter missing or ordered after
-/// cpex) loudly at the first body-phase request.
+/// HTTP 500 + `X-Policy-Violation: config.missing_protocol_metadata`. This
+/// catches a misconfigured chain (protocol classifier filter missing or ordered
+/// after policy) loudly at the first body-phase request.
 #[tokio::test(flavor = "multi_thread")]
-async fn missing_mcp_metadata_rejects_when_required() {
+async fn missing_protocol_metadata_rejects_when_required() {
     let (_dir, path) = write_single_plugin_config();
     let filter = build_filter(path);
 
@@ -678,7 +678,7 @@ async fn missing_mcp_metadata_rejects_when_required() {
             assert!(violation.is_some(), "violation header expected");
             assert_eq!(
                 violation.unwrap().1,
-                "config.missing_mcp_metadata",
+                "config.missing_protocol_metadata",
                 "violation code should name the missing metadata",
             );
         },
@@ -686,16 +686,16 @@ async fn missing_mcp_metadata_rejects_when_required() {
     }
 }
 
-/// When `require_mcp_metadata: false` and `mcp.method` is absent,
+/// When `require_protocol_metadata: false` and `protocol.method` is absent,
 /// `on_request_body` passes the request through (identity-only mode
-/// for non-MCP traffic). Pins the opt-out behavior.
+/// for non-classified traffic). Pins the opt-out behavior.
 #[tokio::test(flavor = "multi_thread")]
-async fn missing_mcp_metadata_passes_when_not_required() {
+async fn missing_protocol_metadata_passes_when_not_required() {
     let (_dir, path) = write_single_plugin_config();
     let cfg = PolicyFilterConfig {
         config_path: path,
         body_access: super::config::BodyAccessMode::ReadOnly,
-        require_mcp_metadata: false,
+        require_protocol_metadata: false,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
     };
@@ -720,22 +720,22 @@ async fn missing_mcp_metadata_passes_when_not_required() {
 }
 
 // -----------------------------------------------------------------------------
-// Post-phase deny envelope (mcp_error_envelope_bytes)
+// Post-phase deny envelope (json_rpc_error_envelope_bytes)
 // -----------------------------------------------------------------------------
 
 /// The post-phase deny path replaces the response body with this
 /// envelope when an APL `result:` pipeline denies. The envelope shape
-/// must match the MCP Tools-spec JSON-RPC error format so clients can
-/// parse it the same way they parse upstream errors.
+/// must match the JSON-RPC error format so clients can parse it the
+/// same way they parse upstream errors.
 #[test]
-fn mcp_error_envelope_has_expected_shape() {
+fn json_rpc_error_envelope_has_expected_shape() {
     use cpex::cpex_core::error::PluginViolation;
 
-    use super::error::mcp_error_envelope_bytes;
+    use super::error::json_rpc_error_envelope_bytes;
 
     let violation = PluginViolation::new("test.deny", "policy says no");
     let id = serde_json::json!(42);
-    let bytes = mcp_error_envelope_bytes(Some(&violation), &id);
+    let bytes = json_rpc_error_envelope_bytes(Some(&violation), &id);
 
     let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("envelope must be valid JSON");
 
@@ -750,10 +750,10 @@ fn mcp_error_envelope_has_expected_shape() {
 /// sent — string id stays a string, numeric stays numeric, etc.
 /// Pins compliance with the JSON-RPC 2.0 spec.
 #[test]
-fn mcp_error_envelope_preserves_string_request_id() {
-    use super::error::mcp_error_envelope_bytes;
+fn json_rpc_error_envelope_preserves_string_request_id() {
+    use super::error::json_rpc_error_envelope_bytes;
     let id = serde_json::json!("req-abc-123");
-    let bytes = mcp_error_envelope_bytes(None, &id);
+    let bytes = json_rpc_error_envelope_bytes(None, &id);
     let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
     assert_eq!(parsed["id"], "req-abc-123");
 }
@@ -761,10 +761,10 @@ fn mcp_error_envelope_preserves_string_request_id() {
 /// When no violation is provided (defensive null path), the envelope
 /// still parses and carries the sentinel `gateway.unknown` code.
 #[test]
-fn mcp_error_envelope_handles_missing_violation() {
-    use super::error::mcp_error_envelope_bytes;
+fn json_rpc_error_envelope_handles_missing_violation() {
+    use super::error::json_rpc_error_envelope_bytes;
     let id = serde_json::json!(null);
-    let bytes = mcp_error_envelope_bytes(None, &id);
+    let bytes = json_rpc_error_envelope_bytes(None, &id);
     let parsed: serde_json::Value = serde_json::from_slice(&bytes).expect("valid JSON");
     assert_eq!(parsed["error"]["data"]["violation"], "gateway.unknown");
     assert_eq!(parsed["error"]["message"], "denied by gateway");
@@ -834,7 +834,7 @@ fn auth_rejection_falls_back_to_sentinel_when_no_violation() {
 fn fit_to_original_length_pads_on_shrink() {
     use super::filter::fit_to_original_length;
     let new = bytes::Bytes::from_static(b"abc");
-    let out = fit_to_original_length(new, 8, "tools/call", "test");
+    let out = fit_to_original_length(new, 8, "service/invoke", "test");
     assert_eq!(out.len(), 8, "padded length must match original");
     assert_eq!(&out[..3], b"abc");
     assert!(
@@ -851,7 +851,7 @@ fn fit_to_original_length_pads_on_shrink() {
 fn fit_to_original_length_passes_through_on_equal() {
     use super::filter::fit_to_original_length;
     let new = bytes::Bytes::from_static(b"redacted");
-    let out = fit_to_original_length(new.clone(), 8, "tools/call", "test");
+    let out = fit_to_original_length(new.clone(), 8, "service/invoke", "test");
     assert_eq!(out, new);
 }
 
@@ -865,38 +865,37 @@ fn fit_to_original_length_passes_through_on_equal() {
 fn fit_to_original_length_truncates_on_grow() {
     use super::filter::fit_to_original_length;
     let new = bytes::Bytes::from_static(b"a much longer rewritten payload");
-    let out = fit_to_original_length(new.clone(), 4, "tools/call", "test");
+    let out = fit_to_original_length(new.clone(), 4, "service/invoke", "test");
     assert_eq!(out.len(), 4, "grow path must truncate to the original length");
     assert_eq!(&*out, &new[..4], "truncation keeps the leading bytes");
 }
 
 // -----------------------------------------------------------------------------
-// cmf.rs — MCP method → entity coords
+// cmf.rs — JSON-RPC method → entity coords
 // -----------------------------------------------------------------------------
 
-/// Pre-phase mapping returns `(entity_type, pre_hook_name)` for the
-/// MCP methods that carry an entity, `None` for the no-entity methods.
-/// The set is closed; any new MCP method needs an explicit decision.
+/// Pre-phase mapping returns `(entity_type, pre_hook_name)` for
+/// methods that carry an entity, `None` for the no-entity methods.
 #[test]
-fn entity_for_mcp_method_covers_known_methods() {
-    use super::common_message_format::entity_for_mcp_method;
-    assert!(entity_for_mcp_method("tools/call").is_some());
-    assert!(entity_for_mcp_method("prompts/get").is_some());
-    assert!(entity_for_mcp_method("resources/read").is_some());
-    assert!(entity_for_mcp_method("tools/list").is_none());
-    assert!(entity_for_mcp_method("initialize").is_none());
-    assert!(entity_for_mcp_method("unknown/method").is_none());
+fn entity_for_protocol_method_covers_known_methods() {
+    use super::common_message_format::entity_for_protocol_method;
+    assert!(entity_for_protocol_method("service/invoke").is_some());
+    assert!(entity_for_protocol_method("template/get").is_some());
+    assert!(entity_for_protocol_method("resource/read").is_some());
+    assert!(entity_for_protocol_method("service/list").is_none());
+    assert!(entity_for_protocol_method("initialize").is_none());
+    assert!(entity_for_protocol_method("unknown/method").is_none());
 }
 
 /// Post-phase mirror — same set of methods, different hooks.
 #[test]
-fn entity_for_mcp_method_post_covers_known_methods() {
-    use super::common_message_format::entity_for_mcp_method_post;
-    assert!(entity_for_mcp_method_post("tools/call").is_some());
-    assert!(entity_for_mcp_method_post("prompts/get").is_some());
-    assert!(entity_for_mcp_method_post("resources/read").is_some());
-    assert!(entity_for_mcp_method_post("tools/list").is_none());
-    assert!(entity_for_mcp_method_post("initialize").is_none());
+fn entity_for_protocol_method_post_covers_known_methods() {
+    use super::common_message_format::entity_for_protocol_method_post;
+    assert!(entity_for_protocol_method_post("service/invoke").is_some());
+    assert!(entity_for_protocol_method_post("template/get").is_some());
+    assert!(entity_for_protocol_method_post("resource/read").is_some());
+    assert!(entity_for_protocol_method_post("service/list").is_none());
+    assert!(entity_for_protocol_method_post("initialize").is_none());
 }
 
 // -----------------------------------------------------------------------------
@@ -933,7 +932,7 @@ fn json_rpc_id_value_preserves_json_type() {
     assert_eq!(json_rpc_id_value(&bad), serde_json::Value::Null);
 }
 
-/// `tools/call` parses `params.arguments` into a `ToolCall` content
+/// `service/invoke` parses `params.arguments` into a `ToolCall` content
 /// part so APL `args.<field>` predicates have something to read.
 #[test]
 fn build_content_for_method_tools_call() {
@@ -942,10 +941,10 @@ fn build_content_for_method_tools_call() {
     use super::json_rpc::build_content_for_method;
 
     let body = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
+        br#"{"jsonrpc":"2.0","id":1,"method":"service/invoke",
              "params":{"name":"echo","arguments":{"text":"hi","n":7}}}"#,
     );
-    let parts = build_content_for_method("tools/call", "echo", "corr-1", &body);
+    let parts = build_content_for_method("service/invoke", "echo", "corr-1", &body);
     assert_eq!(parts.len(), 1);
     match &parts[0] {
         ContentPart::ToolCall { content } => {
@@ -958,7 +957,7 @@ fn build_content_for_method_tools_call() {
     }
 }
 
-/// `resources/read` produces a `ResourceRef` keyed off `params.uri`
+/// `resource/read` produces a `ResourceRef` keyed off `params.uri`
 /// so route resolution and APL `resource.*` predicates work.
 #[test]
 fn build_content_for_method_resources_read() {
@@ -967,10 +966,10 @@ fn build_content_for_method_resources_read() {
     use super::json_rpc::build_content_for_method;
 
     let body = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"method":"resources/read",
+        br#"{"jsonrpc":"2.0","id":1,"method":"resource/read",
              "params":{"uri":"file:///etc/example"}}"#,
     );
-    let parts = build_content_for_method("resources/read", "file:///etc/example", "corr-1", &body);
+    let parts = build_content_for_method("resource/read", "file:///etc/example", "corr-1", &body);
     assert_eq!(parts.len(), 1);
     match &parts[0] {
         ContentPart::ResourceRef { content } => {
@@ -981,19 +980,19 @@ fn build_content_for_method_resources_read() {
     }
 }
 
-/// Unknown / no-entity MCP methods produce an empty content list —
-/// CMF dispatch still routes by entity coords but predicates over
+/// Unknown / no-entity methods produce an empty content list — CMF
+/// dispatch still routes by entity coords but predicates over
 /// `args.*` see nothing, which is the correct behavior.
 #[test]
 fn build_content_for_method_unknown_method_yields_empty() {
     use super::json_rpc::build_content_for_method;
-    let body = bytes::Bytes::from_static(br#"{"method":"tools/list"}"#);
-    let parts = build_content_for_method("tools/list", "n/a", "corr-1", &body);
+    let body = bytes::Bytes::from_static(br#"{"method":"service/list"}"#);
+    let parts = build_content_for_method("service/list", "n/a", "corr-1", &body);
     assert!(parts.is_empty());
 }
 
 /// `reserialize_json_rpc_body` mutates only `params.arguments` (for
-/// `tools/call`), leaving `jsonrpc`, `id`, `method`, `params.name`
+/// `service/invoke`), leaving `jsonrpc`, `id`, `method`, `params.name`
 /// untouched. Operators who hash the envelope only see deltas when
 /// APL actually mutated.
 #[test]
@@ -1003,7 +1002,7 @@ fn reserialize_tools_call_round_trips_with_mutated_args() {
     use super::json_rpc::reserialize_json_rpc_body;
 
     let original = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
+        br#"{"jsonrpc":"2.0","id":1,"method":"service/invoke",
              "params":{"name":"echo","arguments":{"a":1}}}"#,
     );
     let mut new_args: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
@@ -1019,11 +1018,11 @@ fn reserialize_tools_call_round_trips_with_mutated_args() {
             },
         }],
     );
-    let new_bytes = reserialize_json_rpc_body(&original, "tools/call", &message).expect("rewrite Some");
+    let new_bytes = reserialize_json_rpc_body(&original, "service/invoke", &message).expect("rewrite Some");
     let parsed: serde_json::Value = serde_json::from_slice(&new_bytes).expect("valid JSON");
     assert_eq!(parsed["jsonrpc"], "2.0");
     assert_eq!(parsed["id"], 1);
-    assert_eq!(parsed["method"], "tools/call");
+    assert_eq!(parsed["method"], "service/invoke");
     assert_eq!(parsed["params"]["name"], "echo");
     assert_eq!(parsed["params"]["arguments"]["a"], "[REDACTED]");
 }
@@ -1043,7 +1042,7 @@ fn build_response_content_for_method_text_fallback() {
              "content":[{"type":"text","text":"{\"k\":\"v\"}"}],
              "isError":false}}"#,
     );
-    let parts = build_response_content_for_method("tools/call", "echo", "corr-1", &body);
+    let parts = build_response_content_for_method("service/invoke", "echo", "corr-1", &body);
     assert_eq!(parts.len(), 1);
     match &parts[0] {
         ContentPart::ToolResult { content } => {
@@ -1055,7 +1054,7 @@ fn build_response_content_for_method_text_fallback() {
 }
 
 /// `structuredContent` takes precedence over the text-block fallback
-/// when present (newer MCP shape).
+/// when present.
 #[test]
 fn build_response_content_for_method_prefers_structured_content() {
     use cpex::cpex_core::cmf::ContentPart;
@@ -1068,7 +1067,7 @@ fn build_response_content_for_method_prefers_structured_content() {
              "structuredContent":{"hi":"there"},
              "isError":true}}"#,
     );
-    let parts = build_response_content_for_method("tools/call", "echo", "corr-1", &body);
+    let parts = build_response_content_for_method("service/invoke", "echo", "corr-1", &body);
     assert_eq!(parts.len(), 1);
     match &parts[0] {
         ContentPart::ToolResult { content } => {
@@ -1098,7 +1097,7 @@ fn build_response_content_for_method_folds_all_text_blocks() {
              ],
              "isError":false}}"#,
     );
-    let parts = build_response_content_for_method("tools/call", "echo", "corr-1", &body);
+    let parts = build_response_content_for_method("service/invoke", "echo", "corr-1", &body);
     assert_eq!(parts.len(), 1);
     match &parts[0] {
         ContentPart::ToolResult { content } => {
@@ -1138,7 +1137,7 @@ fn reserialize_response_collapses_to_single_vetted_block() {
             },
         }],
     );
-    let out = reserialize_json_rpc_response_body(&original, "tools/call", &message).expect("Some");
+    let out = reserialize_json_rpc_response_body(&original, "service/invoke", &message).expect("Some");
     let parsed: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
     let content = parsed["result"]["content"].as_array().expect("content array");
     assert_eq!(content.len(), 1, "extra blocks must be dropped; got {content:?}");
@@ -1160,12 +1159,12 @@ fn reserialize_response_collapses_to_single_vetted_block() {
 fn deny_envelope_fits_committed_length() {
     use cpex::cpex_core::error::PluginViolation;
 
-    use super::{error::mcp_error_envelope_bytes, filter::fit_to_original_length};
+    use super::{error::json_rpc_error_envelope_bytes, filter::fit_to_original_length};
 
     let violation = PluginViolation::new("gateway.response_rewrite_overflow", "too large to fit");
-    let envelope = mcp_error_envelope_bytes(Some(&violation), &serde_json::json!(1));
+    let envelope = json_rpc_error_envelope_bytes(Some(&violation), &serde_json::json!(1));
     let original_len = envelope.len() + 64;
-    let fitted = fit_to_original_length(envelope, original_len, "tools/call", "overflow");
+    let fitted = fit_to_original_length(envelope, original_len, "service/invoke", "overflow");
     assert_eq!(
         fitted.len(),
         original_len,
@@ -1177,8 +1176,8 @@ fn deny_envelope_fits_committed_length() {
 // on_request_body — CMF dispatch path (identity-only policy, no routes)
 // -----------------------------------------------------------------------------
 
-/// `on_request_body` happy path: valid JWT, `mcp.method=tools/call`,
-/// `mcp.name` set. The identity-only policy has no APL routes, so the
+/// `on_request_body` happy path: valid JWT, `protocol.method=service/invoke`,
+/// `protocol.name` set. The identity-only policy has no APL routes, so the
 /// CMF dispatch finds no matching handler and the request continues.
 /// Pins the "CMF dispatch runs without crashing and returns
 /// `BodyDone`" branch the reviewer flagged as untested.
@@ -1194,11 +1193,11 @@ async fn on_request_body_dispatches_cmf_when_metadata_present() {
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.set_metadata("protocol.method", "service/invoke");
+    ctx.set_metadata("protocol.name", "echo");
 
     let body = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
+        br#"{"jsonrpc":"2.0","id":1,"method":"service/invoke",
              "params":{"name":"echo","arguments":{}}}"#,
     );
 
@@ -1288,7 +1287,7 @@ async fn session_taint_is_isolated_across_principals() {
 }
 
 /// Non-EOS chunks must pass through untouched — CMF dispatch waits
-/// for the full body so praxis's `mcp` filter has finished parsing
+/// for the full body so the upstream protocol classifier filter has finished parsing
 /// and writing metadata. Pins the streaming-chunk fast path.
 #[tokio::test(flavor = "multi_thread")]
 async fn on_request_body_continues_on_partial_chunks() {
@@ -1369,7 +1368,7 @@ async fn response_phase_without_request_identity_fails_closed() {
     let cfg = PolicyFilterConfig {
         config_path: path,
         body_access: super::config::BodyAccessMode::ReadWrite,
-        require_mcp_metadata: true,
+        require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
     };
@@ -1377,8 +1376,8 @@ async fn response_phase_without_request_identity_fails_closed() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("mcp.method", "tools/call");
-    ctx.set_metadata("mcp.name", "echo");
+    ctx.set_metadata("protocol.method", "service/invoke");
+    ctx.set_metadata("protocol.name", "echo");
 
     // No `on_request_body` ran on this ctx, so no `ResolvedIdentity` is
     // stashed. The response body is comfortably larger than the deny

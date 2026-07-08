@@ -51,7 +51,7 @@ pub fn start_hop_by_hop_response_backend() -> u16 {
 }
 
 /// Start a backend that includes reserved internal headers
-/// (`x-praxis-*`, `x-mcp-*`, `x-a2a-*`) in its responses.
+/// (`x-praxis-*`, `x-ext-protocol-*`, `x-ext-agent-*`) in its responses.
 /// Used to verify the proxy strips them before forwarding to
 /// the client.
 ///
@@ -67,9 +67,9 @@ pub fn start_reserved_header_response_backend() -> u16 {
         let response = format!(
             "HTTP/1.1 200 OK\r\n\
              Content-Length: {}\r\n\
-             X-Praxis-Mcp-Method: tools/call\r\n\
-             X-Mcp-Servername: backend-1\r\n\
-             X-A2a-Method: task/send\r\n\
+             X-Praxis-Filter-Action: routed\r\n\
+             X-Ext-Servername: backend-1\r\n\
+             X-Ext-Agent-Method: task/send\r\n\
              X-Request-Id: abc-123\r\n\
              Server: test-backend\r\n\
              \r\n\

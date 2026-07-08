@@ -166,6 +166,8 @@ pub(super) async fn pre_read_body(
         ctx.filter_metadata = filter_ctx.filter_metadata;
         ctx.filter_state = filter_ctx.filter_state;
         ctx.filter_results = filter_ctx.filter_results;
+        ctx.cached_executed_filter_indices = filter_ctx.executed_filter_indices;
+        ctx.cached_body_done_indices = filter_ctx.body_done_indices;
         all_extra_headers.extend(filter_ctx.extra_request_headers);
 
         match action {

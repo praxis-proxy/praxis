@@ -7,6 +7,8 @@ use std::borrow::Cow;
 
 use tracing::{trace, warn};
 
+use super::super::MAX_DYNAMIC_VALUE_LEN;
+
 // -----------------------------------------------------------------------------
 // Field Extraction
 // -----------------------------------------------------------------------------
@@ -25,12 +27,7 @@ pub(super) fn extract_fields(
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            if contains_control_chars(&text) {
-                warn!(
-                    field = %field,
-                    header = %header,
-                    "skipping header injection: value is not safe for header promotion"
-                );
+            if !is_safe_header_value(&text, field, header) {
                 continue;
             }
             trace!(
@@ -44,6 +41,26 @@ pub(super) fn extract_fields(
         }
     }
     found_any
+}
+
+/// Reject values that are too long or contain control characters.
+fn is_safe_header_value(text: &str, field: &str, header: &str) -> bool {
+    if text.len() > MAX_DYNAMIC_VALUE_LEN {
+        warn!(
+            field = %field, header = %header,
+            len = text.len(), max = MAX_DYNAMIC_VALUE_LEN,
+            "skipping header promotion: value exceeds maximum length"
+        );
+        return false;
+    }
+    if contains_control_chars(text) {
+        warn!(
+            field = %field, header = %header,
+            "skipping header promotion: value contains control characters"
+        );
+        return false;
+    }
+    true
 }
 
 // -----------------------------------------------------------------------------

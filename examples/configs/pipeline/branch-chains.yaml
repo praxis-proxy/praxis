@@ -30,6 +30,9 @@
 #      a branch in preprocessing can rejoin at a named
 #      filter in main using just the filter name. No
 #      colon syntax needed.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/pipeline/branch-chains.yaml
 
 listeners:
   - name: web

@@ -6,7 +6,8 @@
 # request header, which the router then matches on to select
 # the correct backend cluster.
 #
-# Example request:
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/payload-processing/stream-buffer.yaml
 #
 #   curl -X POST http://localhost:8080/tasks \
 #     -H "Content-Type: application/json" \

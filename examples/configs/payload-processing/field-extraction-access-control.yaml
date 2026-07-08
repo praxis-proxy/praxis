@@ -10,7 +10,8 @@
 # cluster (which could be a rejection endpoint in
 # production).
 #
-# Example request:
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/payload-processing/field-extraction-access-control.yaml
 #
 #   curl -X POST http://localhost:8080/api/data \
 #     -H "Content-Type: application/json" \

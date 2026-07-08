@@ -211,15 +211,15 @@ fn route_matches_by_header() {
             path_prefix: "/".to_owned(),
         },
         host: None,
-        headers: Some(HashMap::from([("x-model".to_owned(), "claude-sonnet-4-5".to_owned())])),
-        cluster: "claude_sonnet".into(),
+        headers: Some(HashMap::from([("x-model".to_owned(), "model-alpha-1".to_owned())])),
+        cluster: "alpha_cluster".into(),
     }]);
 
     let mut hdrs = HeaderMap::new();
-    hdrs.insert("x-model", HeaderValue::from_static("claude-sonnet-4-5"));
+    hdrs.insert("x-model", HeaderValue::from_static("model-alpha-1"));
     let route = router.match_route("/chat", None, &hdrs).unwrap();
     assert_eq!(
-        &*route.cluster, "claude_sonnet",
+        &*route.cluster, "alpha_cluster",
         "matching header should select header-constrained route"
     );
 }
@@ -231,12 +231,12 @@ fn route_skips_mismatched_header() {
             path_prefix: "/".to_owned(),
         },
         host: None,
-        headers: Some(HashMap::from([("x-model".to_owned(), "claude-sonnet-4-5".to_owned())])),
-        cluster: "claude_sonnet".into(),
+        headers: Some(HashMap::from([("x-model".to_owned(), "model-alpha-1".to_owned())])),
+        cluster: "alpha_cluster".into(),
     }]);
 
     let mut hdrs = HeaderMap::new();
-    hdrs.insert("x-model", HeaderValue::from_static("mistral-small-latest"));
+    hdrs.insert("x-model", HeaderValue::from_static("model-beta-2"));
     assert!(
         router.match_route("/chat", None, &hdrs).is_none(),
         "mismatched header value should return no match"
@@ -251,17 +251,17 @@ fn route_with_headers_wins_over_plain() {
                 path_prefix: "/".to_owned(),
             },
             host: None,
-            headers: Some(HashMap::from([("x-model".to_owned(), "claude-sonnet-4-5".to_owned())])),
-            cluster: "claude_sonnet".into(),
+            headers: Some(HashMap::from([("x-model".to_owned(), "model-alpha-1".to_owned())])),
+            cluster: "alpha_cluster".into(),
         },
         prefix_route("/", "default"),
     ]);
 
     let mut hdrs = HeaderMap::new();
-    hdrs.insert("x-model", HeaderValue::from_static("claude-sonnet-4-5"));
+    hdrs.insert("x-model", HeaderValue::from_static("model-alpha-1"));
     let route = router.match_route("/chat", None, &hdrs).unwrap();
     assert_eq!(
-        &*route.cluster, "claude_sonnet",
+        &*route.cluster, "alpha_cluster",
         "header-constrained route should win over plain"
     );
 }
@@ -274,14 +274,14 @@ fn route_without_headers_used_as_fallback() {
                 path_prefix: "/".to_owned(),
             },
             host: None,
-            headers: Some(HashMap::from([("x-model".to_owned(), "claude-sonnet-4-5".to_owned())])),
-            cluster: "claude_sonnet".into(),
+            headers: Some(HashMap::from([("x-model".to_owned(), "model-alpha-1".to_owned())])),
+            cluster: "alpha_cluster".into(),
         },
         prefix_route("/", "default"),
     ]);
 
     let mut hdrs = HeaderMap::new();
-    hdrs.insert("x-model", HeaderValue::from_static("mistral-small-latest"));
+    hdrs.insert("x-model", HeaderValue::from_static("model-beta-2"));
     let route = router.match_route("/chat", None, &hdrs).unwrap();
     assert_eq!(
         &*route.cluster, "default",
@@ -324,16 +324,16 @@ fn multi_value_header_matches_any() {
             path_prefix: "/".to_owned(),
         },
         host: None,
-        headers: Some(HashMap::from([("x-model".to_owned(), "claude-sonnet-4-5".to_owned())])),
-        cluster: "claude_sonnet".into(),
+        headers: Some(HashMap::from([("x-model".to_owned(), "model-alpha-1".to_owned())])),
+        cluster: "alpha_cluster".into(),
     }]);
 
     let mut hdrs = HeaderMap::new();
-    hdrs.append("x-model", HeaderValue::from_static("claude-3"));
-    hdrs.append("x-model", HeaderValue::from_static("claude-sonnet-4-5"));
+    hdrs.append("x-model", HeaderValue::from_static("model-alpha-2"));
+    hdrs.append("x-model", HeaderValue::from_static("model-alpha-1"));
     let route = router.match_route("/chat", None, &hdrs).unwrap();
     assert_eq!(
-        &*route.cluster, "claude_sonnet",
+        &*route.cluster, "alpha_cluster",
         "any matching value in multi-value header should match"
     );
 }
@@ -1440,27 +1440,27 @@ fn json_alias_config_preserves_route_count() {
 }
 
 #[test]
-fn json_alias_config_preserves_anthropic_alias() {
+fn json_alias_config_preserves_provider_b_alias() {
     let filter = make_alias_config_filter();
-    let anthropic = find_resolved_route(&filter, "anthropic");
-    let aliases = anthropic.json_aliases.as_ref().unwrap();
+    let provider_b = find_resolved_route(&filter, "provider-b");
+    let aliases = provider_b.json_aliases.as_ref().unwrap();
 
-    assert_eq!(aliases.len(), 1, "anthropic should have 1 alias");
-    assert_eq!(aliases[0].field, "model", "anthropic alias field");
-    assert_eq!(aliases[0].pattern, "claude-*", "wildcard alias pattern");
+    assert_eq!(aliases.len(), 1, "provider-b should have 1 alias");
+    assert_eq!(aliases[0].field, "model", "provider-b alias field");
+    assert_eq!(aliases[0].pattern, "model-a-*", "wildcard alias pattern");
     assert!(aliases[0].target.is_none(), "wildcard alias should have no target");
 }
 
 #[test]
-fn json_alias_config_preserves_openai_aliases() {
+fn json_alias_config_preserves_provider_a_aliases() {
     let filter = make_alias_config_filter();
-    let openai = find_resolved_route(&filter, "openai");
-    let aliases = openai.json_aliases.as_ref().unwrap();
+    let provider_a = find_resolved_route(&filter, "provider-a");
+    let aliases = provider_a.json_aliases.as_ref().unwrap();
 
-    assert_eq!(aliases.len(), 2, "openai should have 2 aliases");
+    assert_eq!(aliases.len(), 2, "provider-a should have 2 aliases");
     assert_eq!(aliases[0].field, "model", "first alias field");
     assert_eq!(aliases[0].pattern, "fast", "first alias pattern");
-    assert_eq!(aliases[0].target.as_deref(), Some("gpt-4o-mini"), "first alias target");
+    assert_eq!(aliases[0].target.as_deref(), Some("model-fast"), "first alias target");
     assert_eq!(aliases[1].field, "tenant_id", "second alias field");
     assert_eq!(aliases[1].pattern, "cheap", "second alias pattern");
 }
@@ -1487,12 +1487,12 @@ fn json_alias_from_config_parses_first_route_alias() {
     let cfg = parse_json_alias_config();
     let first = &cfg.routes[0];
 
-    assert_eq!(&*first.route.cluster, "openai", "first route cluster");
+    assert_eq!(&*first.route.cluster, "provider-a", "first route cluster");
     let aliases = first.json_aliases.as_ref().unwrap();
     assert_eq!(aliases.len(), 1, "first route should have one alias");
     assert_eq!(aliases[0].field, "model", "first alias field");
     assert_eq!(aliases[0].pattern, "fast", "first alias pattern");
-    assert_eq!(aliases[0].target.as_deref(), Some("gpt-4o-mini"), "first alias target");
+    assert_eq!(aliases[0].target.as_deref(), Some("model-fast"), "first alias target");
 }
 
 #[test]
@@ -1535,7 +1535,7 @@ routes:
     json_aliases:
       - field: model
         match: fast
-        target: gpt-4o-mini
+        target: model-fast
 "#,
     )
     .unwrap();
@@ -1558,7 +1558,7 @@ fn json_alias_validate_invalid_header_name_rejected() {
         vec![json_alias_route(
             "/",
             "test",
-            vec![("model", "fast", Some("gpt-4o-mini"))],
+            vec![("model", "fast", Some("model-fast"))],
         )],
         "bad header",
         super::config::DEFAULT_JSON_ALIAS_MAX_BODY_BYTES,
@@ -1576,7 +1576,7 @@ fn json_alias_validate_zero_max_bytes_rejected() {
         vec![json_alias_route(
             "/",
             "test",
-            vec![("model", "fast", Some("gpt-4o-mini"))],
+            vec![("model", "fast", Some("model-fast"))],
         )],
         super::config::DEFAULT_JSON_ALIAS_HEADER,
         0,
@@ -1594,7 +1594,7 @@ fn json_alias_validate_max_bytes_above_upper_bound_rejected() {
         vec![json_alias_route(
             "/",
             "test",
-            vec![("model", "fast", Some("gpt-4o-mini"))],
+            vec![("model", "fast", Some("model-fast"))],
         )],
         super::config::DEFAULT_JSON_ALIAS_HEADER,
         super::config::MAX_JSON_ALIAS_BODY_BYTES + 1,
@@ -1612,7 +1612,7 @@ fn json_alias_validate_max_bytes_at_upper_bound_accepted() {
         vec![json_alias_route(
             "/",
             "test",
-            vec![("model", "fast", Some("gpt-4o-mini"))],
+            vec![("model", "fast", Some("model-fast"))],
         )],
         super::config::DEFAULT_JSON_ALIAS_HEADER,
         super::config::MAX_JSON_ALIAS_BODY_BYTES,
@@ -1634,11 +1634,11 @@ json_alias_header: X-AI-Model
 json_alias_max_body_bytes: 4096
 routes:
   - path_prefix: "/v1/chat/"
-    cluster: "openai"
+    cluster: "provider-a"
     json_aliases:
       - field: model
         match: fast
-        target: gpt-4o-mini
+        target: model-fast
   - path_prefix: "/tenant/"
     cluster: "tenant"
     json_aliases:
@@ -1704,13 +1704,13 @@ fn make_alias_config_filter() -> RouterFilter {
         vec![
             json_alias_route(
                 "/v1/chat/",
-                "openai",
+                "provider-a",
                 vec![
-                    ("model", "fast", Some("gpt-4o-mini")),
+                    ("model", "fast", Some("model-fast")),
                     ("tenant_id", "cheap", Some("tenant-cheap")),
                 ],
             ),
-            json_alias_route("/v1/messages/", "anthropic", vec![("model", "claude-*", None)]),
+            json_alias_route("/v1/messages/", "provider-b", vec![("model", "model-a-*", None)]),
             router_route("/", "fallback", None),
         ],
         "X-AI-Model",

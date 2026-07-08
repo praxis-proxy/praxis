@@ -8,12 +8,18 @@ use std::{collections::HashMap, fmt, path::PathBuf, sync::Arc, thread::JoinHandl
 use arc_swap::ArcSwap;
 use pingora_core::server::{RunArgs, ShutdownSignal, ShutdownSignalWatch};
 use praxis_core::{
-    config::{Config, Listener},
+    config::{Config, Listener, ProtocolKind},
+    health::{HealthRegistry, build_health_registry},
     server::RuntimeOptions,
 };
 use praxis_filter::{FilterFactory, FilterPipeline, FilterRegistry, HttpFilter};
-use praxis_protocol::http::load_http_handler;
+use praxis_protocol::{
+    Protocol as _,
+    http::{PingoraHttp, load_http_handler},
+    tcp::PingoraTcp,
+};
 use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 
 // -----------------------------------------------------------------------------
 // Pipeline Building
@@ -227,11 +233,105 @@ pub fn start_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> 
     guard
 }
 
-/// Start a full proxy server (HTTP + TCP protocols) in a background thread.
-pub fn start_full_proxy(config: Config) {
+/// Build a [`PingoraServerRuntime`] with HTTP and TCP protocols
+/// and spawn background health check probes.
+///
+/// [`PingoraServerRuntime`]: praxis_core::PingoraServerRuntime
+fn build_full_server(config: &Config) -> praxis_core::PingoraServerRuntime {
+    let registry = praxis::build_full_registry();
+    let health_registry = build_health_registry(&config.clusters);
+    let kv_stores = praxis_core::kv::KvStoreRegistry::new();
+    let pipelines = praxis::resolve_pipelines(config, &registry, &health_registry, &kv_stores)
+        .expect("pipeline resolution should succeed in test");
+
+    let mut runtime = praxis_core::PingoraServerRuntime::new(config);
+
+    if config.listeners.iter().any(|l| l.protocol == ProtocolKind::Http) {
+        let _ = Box::new(PingoraHttp)
+            .register(&mut runtime, config, &pipelines)
+            .expect("HTTP protocol registration should succeed in test");
+    }
+
+    if config.listeners.iter().any(|l| l.protocol == ProtocolKind::Tcp) {
+        let _ = Box::new(PingoraTcp)
+            .register(&mut runtime, config, &pipelines)
+            .expect("TCP protocol registration should succeed in test");
+    }
+
+    if let Some(admin_addr) = &config.admin.address {
+        praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server(
+            runtime.server_mut(),
+            admin_addr,
+            Some(Arc::clone(&health_registry)),
+            Some(kv_stores),
+            config.admin.verbose,
+        );
+    }
+
+    spawn_test_health_checks(config, &health_registry);
+
+    runtime
+}
+
+/// Spawn background health check tasks for tests.
+fn spawn_test_health_checks(config: &Config, registry: &HealthRegistry) {
+    if registry.is_empty() {
+        return;
+    }
+    let clusters = config.clusters.clone();
+    let registry = Arc::clone(registry);
+    let shutdown = CancellationToken::new();
     std::thread::spawn(move || {
-        praxis::run_server(config, None);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("health check runtime");
+        rt.block_on(async {
+            praxis_protocol::http::pingora::health::runner::spawn_health_checks(&clusters, &registry, &shutdown);
+            shutdown.cancelled().await;
+        });
     });
+}
+
+/// Start a full proxy server (HTTP + TCP protocols) in a
+/// background thread.
+///
+/// Returns a [`ProxyGuard`] that shuts down the server when
+/// dropped. The caller is responsible for its own readiness
+/// check (e.g. [`wait_for_tcp`], [`wait_for_tls`]) because the
+/// appropriate check depends on the listener protocol.
+///
+/// # Panics
+///
+/// Panics if `config.listeners` is empty or pipeline resolution
+/// fails.
+///
+/// [`wait_for_tcp`]: crate::net::wait::wait_for_tcp
+/// [`wait_for_tls`]: crate::net::tls::wait_for_tls
+pub fn start_full_proxy(config: &Config) -> ProxyGuard {
+    let addr = config
+        .listeners
+        .first()
+        .expect("config must have at least one listener")
+        .address
+        .clone();
+
+    let runtime = build_full_server(config);
+
+    let notify = Arc::new(Notify::new());
+    let watch_notify = Arc::clone(&notify);
+
+    let handle = std::thread::spawn(move || {
+        runtime.run_with_args(RunArgs {
+            shutdown_signal: Box::new(NotifyShutdownWatch { notify: watch_notify }),
+        });
+    });
+
+    ProxyGuard {
+        addr,
+        handle: Some(handle),
+        notify,
+    }
 }
 
 // -----------------------------------------------------------------------------

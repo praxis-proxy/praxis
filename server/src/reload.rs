@@ -34,7 +34,6 @@ use crate::pipelines::resolve_pipelines;
 #[expect(
     clippy::too_many_arguments,
     clippy::too_many_lines,
-    clippy::cognitive_complexity,
     reason = "orchestration function"
 )]
 pub(crate) fn reload_pipelines(
@@ -145,7 +144,6 @@ fn log_restart_required_changes(old: &Config, new: &Config) {
 }
 
 /// Detect listener additions, removals, and address rebinds.
-#[expect(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
 fn detect_listener_topology_changes(old: &Config, new: &Config) {
     let old_names: std::collections::HashSet<&str> = old.listeners.iter().map(|l| l.name.as_str()).collect();
     let new_names: std::collections::HashSet<&str> = new.listeners.iter().map(|l| l.name.as_str()).collect();
@@ -260,18 +258,35 @@ fn detect_tls_toggles(old: &Config, new: &Config) {
 /// Log a warning when the new config contains stateful filters
 /// whose state will reset on reload (e.g. rate limiters).
 fn warn_stateful_filter_reset(config: &Config) {
-    let has_rate_limiter = config.filter_chains.iter().any(|c| {
-        c.filters
-            .iter()
-            .any(|f| f.filter_type == "rate_limit" || f.filter_type == "circuit_breaker")
-    });
+    let has_stateful = config
+        .filter_chains
+        .iter()
+        .any(|c| c.filters.iter().any(is_stateful_recursive));
 
-    if has_rate_limiter {
+    if has_stateful {
         warn!(
             "stateful filters (rate_limit, circuit_breaker) have been \
              reset; in-flight requests retain old state via Arc guard"
         );
     }
+}
+
+/// Check a filter entry and its inline branch chain filters.
+fn is_stateful_recursive(f: &praxis_core::config::FilterEntry) -> bool {
+    if f.filter_type == "rate_limit" || f.filter_type == "circuit_breaker" {
+        return true;
+    }
+    f.branch_chains.as_ref().is_some_and(|branches| {
+        branches.iter().any(|b| {
+            b.chains.iter().any(|chain_ref| {
+                if let praxis_core::config::ChainRef::Inline { filters, .. } = chain_ref {
+                    filters.iter().any(is_stateful_recursive)
+                } else {
+                    false
+                }
+            })
+        })
+    })
 }
 
 // -----------------------------------------------------------------------------
@@ -589,6 +604,143 @@ filter_chains:
         let old = valid_config();
         let new = valid_config();
         log_restart_required_changes(&old, &new);
+    }
+
+    #[test]
+    fn is_stateful_detects_rate_limit() {
+        let entry: praxis_core::config::FilterEntry = serde_yaml::from_str("filter: rate_limit").unwrap();
+        assert!(is_stateful_recursive(&entry), "rate_limit should be stateful");
+    }
+
+    #[test]
+    fn is_stateful_detects_circuit_breaker() {
+        let entry: praxis_core::config::FilterEntry = serde_yaml::from_str("filter: circuit_breaker").unwrap();
+        assert!(is_stateful_recursive(&entry), "circuit_breaker should be stateful");
+    }
+
+    #[test]
+    fn is_stateful_ignores_non_stateful_filter() {
+        let entry: praxis_core::config::FilterEntry = serde_yaml::from_str("filter: static_response").unwrap();
+        assert!(!is_stateful_recursive(&entry), "static_response should not be stateful");
+    }
+
+    #[test]
+    fn is_stateful_detects_nested_in_branch_chains() {
+        let entry: praxis_core::config::FilterEntry = serde_yaml::from_str(
+            "\
+filter: router
+branch_chains:
+  - name: branch1
+    chains:
+      - name: inline1
+        filters:
+          - filter: rate_limit
+",
+        )
+        .unwrap();
+        assert!(
+            is_stateful_recursive(&entry),
+            "rate_limit nested in a branch chain should be detected"
+        );
+    }
+
+    #[test]
+    fn is_stateful_ignores_non_stateful_in_branch_chains() {
+        let entry: praxis_core::config::FilterEntry = serde_yaml::from_str(
+            "\
+filter: router
+branch_chains:
+  - name: branch1
+    chains:
+      - name: inline1
+        filters:
+          - filter: static_response
+",
+        )
+        .unwrap();
+        assert!(
+            !is_stateful_recursive(&entry),
+            "non-stateful filters in branch chains should not trigger"
+        );
+    }
+
+    #[test]
+    fn find_chains_with_compression_identifies_compressed_chains() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [compressed, plain]
+filter_chains:
+  - name: compressed
+    filters:
+      - filter: compression
+      - filter: static_response
+        status: 200
+  - name: plain
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap();
+
+        let result = find_chains_with_compression(&config);
+        assert!(
+            result.contains("compressed"),
+            "chain with compression filter should be found"
+        );
+        assert!(
+            !result.contains("plain"),
+            "chain without compression filter should not be found"
+        );
+    }
+
+    #[test]
+    fn find_chains_with_compression_empty_when_no_compression() {
+        let config = valid_config();
+        let result = find_chains_with_compression(&config);
+        assert!(result.is_empty(), "no chains should have compression in base config");
+    }
+
+    #[test]
+    fn compression_addition_detected() {
+        let old = valid_config();
+        let new = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: compression
+"#,
+        )
+        .unwrap();
+
+        detect_compression_additions(&old, &new);
+    }
+
+    #[test]
+    fn compression_not_flagged_when_already_present() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: compression
+"#,
+        )
+        .unwrap();
+
+        detect_compression_additions(&config, &config);
     }
 
     // -------------------------------------------------------------------------

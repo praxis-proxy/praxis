@@ -22,12 +22,12 @@ fn extracts_string_field_to_header() {
     let proxy = start_proxy(&config);
     let raw = http_send(
         proxy.addr(),
-        &json_post("/v1/chat", r#"{"model":"claude-sonnet-4-5","prompt":"hi"}"#),
+        &json_post("/v1/chat", r#"{"model":"model-alpha-1","prompt":"hi"}"#),
     );
     assert_eq!(parse_status(&raw), 200, "string field extraction should return 200");
     let body = parse_body(&raw);
     assert!(
-        body.to_lowercase().contains("x-model: claude-sonnet-4-5"),
+        body.to_lowercase().contains("x-model: model-alpha-1"),
         "expected X-Model header echoed by backend, got:\n{body}"
     );
 }
@@ -40,11 +40,11 @@ fn custom_field_and_header_names() {
     let yaml = proxy_yaml(proxy_port, backend_port, "provider", "X-Provider");
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
-    let raw = http_send(proxy.addr(), &json_post("/api", r#"{"provider":"anthropic"}"#));
+    let raw = http_send(proxy.addr(), &json_post("/api", r#"{"provider":"provider-b"}"#));
     assert_eq!(parse_status(&raw), 200, "custom field extraction should return 200");
     let body = parse_body(&raw);
     assert!(
-        body.to_lowercase().contains("x-provider: anthropic"),
+        body.to_lowercase().contains("x-provider: provider-b"),
         "expected X-Provider header, got:\n{body}"
     );
 }
@@ -147,7 +147,7 @@ fn nested_object_value_promoted_as_json_string() {
     let proxy = start_proxy(&config);
     let raw = http_send(
         proxy.addr(),
-        &json_post("/api", r#"{"model":{"name":"claude-sonnet-4-5"}}"#),
+        &json_post("/api", r#"{"model":{"name":"model-alpha-1"}}"#),
     );
     assert_eq!(parse_status(&raw), 200, "nested object field should return 200");
     let body = parse_body(&raw);
@@ -156,7 +156,7 @@ fn nested_object_value_promoted_as_json_string() {
         "X-Model header should be present even for object values, got:\n{body}"
     );
     assert!(
-        body.contains("claude-sonnet-4-5"),
+        body.contains("model-alpha-1"),
         "stringified object value should contain inner content, got:\n{body}"
     );
 }
@@ -194,7 +194,7 @@ filter_chains:
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    let raw = http_send(proxy.addr(), &json_post("/v1/chat", r#"{"model":"claude-3"}"#));
+    let raw = http_send(proxy.addr(), &json_post("/v1/chat", r#"{"model":"model-alpha-2"}"#));
     assert_eq!(
         parse_status(&raw),
         200,
@@ -202,7 +202,7 @@ filter_chains:
     );
     let body = parse_body(&raw);
     assert!(
-        body.to_lowercase().contains("x-model: claude-3"),
+        body.to_lowercase().contains("x-model: model-alpha-2"),
         "expected promoted header after routing, got:\n{body}"
     );
 }

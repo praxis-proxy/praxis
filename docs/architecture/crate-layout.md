@@ -23,15 +23,12 @@ upstream library callbacks (Pingora) into filter pipeline
 invocations. `Protocol` trait, `ListenerPipelines`, HTTP and
 TCP implementations.
 
-**`praxis-proto`** : Vendored Envoy ext_proc protocol buffer
-definitions compiled into Rust types with tonic/prost gRPC
-stubs. Used by `praxis-ext-proc`.
-
 **`praxis-ext-proc`** : Envoy-compatible external processing
 filter (anti-pattern — see [filter docs](../filters/README.md#external-processing-anti-pattern)).
-Optional dependency of `praxis` behind the `ext-proc`
-cargo feature. Enabled by default for Envoy migration
-compatibility.
+Self-contained crate with vendored Envoy protobuf
+definitions, gRPC stubs, and the filter implementation.
+Not included in the default feature set; registered
+explicitly by callers.
 
 **`praxis-tls`** : TLS configuration types and runtime
 setup. Defines `ListenerTls` (certificate list, client CA,
@@ -136,20 +133,14 @@ praxis-filter                   Filter pipeline engine
 │   └── tests                   Pipeline unit tests
 └── builtins/                   Built-in filter implementations
     ├── http/                   HTTP protocol filters
-    │   ├── ai/                 AI filters for HTTP workloads
-    │   │   ├── agentic/        Agentic protocol classifiers
-    │   │   │   ├── json_rpc    JSON-RPC 2.0 envelope parsing and metadata extraction
-    │   │   │   └── mcp         MCP protocol classifier and metadata extraction
-    │   │   ├── inference/      Model routing and prompt enrichment
-    │   │   │   └── model_to_header  Extract model field, promote to header
-    │   │   └── prompt_enrich   Inject messages into chat completion bodies
     │   ├── net                 Shared IP utilities (IPv4-mapped normalization)
     │   ├── observability/
     │   │   ├── access_log      Structured JSON request/response logging
     │   │   └── request_id      Correlation ID generation/propagation
     │   ├── payload_processing/
     │   │   ├── compression     Gzip/brotli/zstd response compression
-    │   │   └── json_body_field Extract JSON field, promote to header
+    │   │   ├── json_body_field Extract JSON field, promote to header
+    │   │   └── json_rpc        JSON-RPC 2.0 envelope parsing and metadata extraction
     │   ├── security/
     │   │   ├── cors            CORS preflight handling, origin validation
     │   │   ├── credential_injection  Per-cluster API key injection
@@ -178,10 +169,6 @@ praxis-filter                   Filter pipeline engine
         └── traffic_management/
             ├── sni_router      SNI-based upstream routing
             └── tcp_load_balancer  Cluster-backed TCP endpoint selection
-
-praxis-proto                    Envoy ext_proc protobuf definitions (opt-in via ext-proc feature)
-├── envoy/service/common/v3     Common Envoy service types
-└── envoy/service/ext_proc/v3   External processor gRPC service
 
 praxis-protocol                 Protocol adapters
 ├── pipelines                   Maps listener names to resolved pipelines
@@ -252,7 +239,6 @@ graph LR
     praxis-protocol --> praxis-core
     praxis-protocol --> praxis-tls
     praxis-filter --> praxis-core
-    praxis-filter -.->|ext-proc| praxis-proto
     praxis-core --> praxis-tls
 ```
 
@@ -266,7 +252,7 @@ sequenceDiagram
     participant LP as ListenerPipelines
     participant S as PingoraServerRuntime
 
-    M->>C: Config::load(path, fallback_yaml)
+    M->>C: load_config(explicit_path)
     C->>C: serde_yaml → Config{listeners, filter_chains, clusters}
     C->>C: validate() (listeners, chains, clusters)
     M->>M: init_tracing(&config)

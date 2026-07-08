@@ -31,7 +31,7 @@ Location: `benchmarks/microbenchmarks/`
 | `filter_pipeline` | Pipeline build time (1/5/20 filters) and request execution |
 | `condition_eval` | Condition matching: empty, path prefix, header, method |
 | `config_parsing` | YAML config deserialization at varying complexity |
-| `load_balancer` | Round-robin, least-connections, random with varying upstreams |
+| `load_balancer` | Round-robin, least-connections, consistent-hash with varying upstreams |
 | `headers` | Request/response header injection (1/5/20 headers) |
 
 Run all microbenchmarks:

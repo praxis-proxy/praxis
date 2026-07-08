@@ -16,9 +16,9 @@ use serde::Deserialize;
 /// ```yaml
 /// filter: credential_injection
 /// clusters:
-///   - name: openai
+///   - name: provider-a
 ///     header: Authorization
-///     env_var: OPENAI_API_KEY
+///     env_var: PROVIDER_A_API_KEY
 ///     header_prefix: "Bearer "
 ///     strip_client_credential: true
 /// ```
@@ -96,7 +96,7 @@ mod tests {
         let cfg: CredentialInjectionConfig = serde_yaml::from_str(
             "
 clusters:
-  - name: openai
+  - name: provider-a
     header: Authorization
     value: super-secret-inline-value
     header_prefix: 'Bearer '
@@ -109,7 +109,7 @@ clusters:
             debug.contains("REDACTED"),
             "Debug output should include redaction marker"
         );
-        assert!(debug.contains("openai"), "Debug output should retain cluster name");
+        assert!(debug.contains("provider-a"), "Debug output should retain cluster name");
         assert!(
             !debug.contains("super-secret-inline-value"),
             "Debug output must not contain inline credential value"
@@ -121,16 +121,16 @@ clusters:
         let cfg: CredentialInjectionConfig = serde_yaml::from_str(
             "
 clusters:
-  - name: openai
+  - name: provider-a
     header: Authorization
-    env_var: OPENAI_API_KEY
+    env_var: PROVIDER_A_API_KEY
 ",
         )
         .expect("credential injection config should parse");
 
         let debug = format!("{cfg:?}");
         assert!(
-            debug.contains("OPENAI_API_KEY"),
+            debug.contains("PROVIDER_A_API_KEY"),
             "Debug output should retain env var name"
         );
         assert!(

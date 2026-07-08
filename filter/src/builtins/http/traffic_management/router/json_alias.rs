@@ -110,69 +110,69 @@ mod tests {
     #[test]
     fn pattern_matches_exact() {
         assert!(pattern_matches("fast", "fast"));
-        assert!(pattern_matches("claude-3", "claude-3"));
+        assert!(pattern_matches("model-a-2", "model-a-2"));
         assert!(!pattern_matches("fast", "slow"));
-        assert!(!pattern_matches("claude-3", "claude-2"));
+        assert!(!pattern_matches("model-a-2", "model-a-1"));
     }
 
     #[test]
     fn pattern_matches_wildcard_prefix() {
-        assert!(pattern_matches("claude-*", "claude-3"));
-        assert!(pattern_matches("claude-*", "claude-3-sonnet"));
-        assert!(pattern_matches("gpt-*", "gpt-4"));
-        assert!(!pattern_matches("claude-*", "gpt-4"));
-        assert!(!pattern_matches("claude-*", "claude"));
+        assert!(pattern_matches("model-a-*", "model-a-2"));
+        assert!(pattern_matches("model-a-*", "model-a-2-std"));
+        assert!(pattern_matches("model-g-*", "model-g-1"));
+        assert!(!pattern_matches("model-a-*", "model-g-1"));
+        assert!(!pattern_matches("model-a-*", "model-a"));
     }
 
     #[test]
     fn pattern_matches_wildcard_suffix() {
-        assert!(pattern_matches("*-turbo", "gpt-4-turbo"));
-        assert!(pattern_matches("*-turbo", "claude-3-turbo"));
-        assert!(!pattern_matches("*-turbo", "gpt-4"));
+        assert!(pattern_matches("*-turbo", "model-g-1-turbo"));
+        assert!(pattern_matches("*-turbo", "model-a-2-turbo"));
+        assert!(!pattern_matches("*-turbo", "model-g-1"));
         assert!(!pattern_matches("*-turbo", "turbo"));
     }
 
     #[test]
     fn pattern_matches_wildcard_middle() {
-        assert!(pattern_matches("gpt-*-turbo", "gpt-4-turbo"));
-        assert!(pattern_matches("gpt-*-turbo", "gpt-3.5-turbo"));
-        assert!(!pattern_matches("gpt-*-turbo", "gpt-4"));
-        assert!(!pattern_matches("gpt-*-turbo", "claude-3-turbo"));
+        assert!(pattern_matches("model-g-*-turbo", "model-g-1-turbo"));
+        assert!(pattern_matches("model-g-*-turbo", "model-g-0-turbo"));
+        assert!(!pattern_matches("model-g-*-turbo", "model-g-1"));
+        assert!(!pattern_matches("model-g-*-turbo", "model-a-2-turbo"));
     }
 
     #[test]
     fn pattern_specificity_exact_beats_wildcard() {
         assert!(pattern_specificity("exact") > pattern_specificity("wild-*"));
-        assert!(pattern_specificity("claude-3") > pattern_specificity("claude-*"));
+        assert!(pattern_specificity("model-a-2") > pattern_specificity("model-a-*"));
     }
 
     #[test]
     fn pattern_specificity_more_literals_beat_fewer() {
-        assert!(pattern_specificity("claude-3-*") > pattern_specificity("claude-*"));
-        assert!(pattern_specificity("gpt-*-turbo") > pattern_specificity("gpt-*"));
+        assert!(pattern_specificity("model-a-2-*") > pattern_specificity("model-a-*"));
+        assert!(pattern_specificity("model-g-*-turbo") > pattern_specificity("model-g-*"));
         assert!(pattern_specificity("*-turbo") > pattern_specificity("*"));
     }
 
     #[test]
     fn resolve_json_alias_exact_match() {
-        let routes = [test_route_with_alias("fast", Some("gpt-4o-mini"))];
+        let routes = [test_route_with_alias("fast", Some("model-fast"))];
         let matched = resolve_json_alias("model", "fast", routes.iter()).unwrap();
         assert_eq!(matched.alias.pattern, "fast");
-        assert_eq!(matched.alias.target.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(matched.alias.target.as_deref(), Some("model-fast"));
     }
 
     #[test]
     fn resolve_json_alias_wildcard_match() {
-        let routes = [test_route_with_alias("claude-*", None)];
-        let matched = resolve_json_alias("model", "claude-3", routes.iter()).unwrap();
-        assert_eq!(matched.alias.pattern, "claude-*");
+        let routes = [test_route_with_alias("model-a-*", None)];
+        let matched = resolve_json_alias("model", "model-a-2", routes.iter()).unwrap();
+        assert_eq!(matched.alias.pattern, "model-a-*");
         assert!(matched.alias.target.is_none());
     }
 
     #[test]
     fn resolve_json_alias_no_match() {
-        let routes = [test_route_with_alias("claude-*", None)];
-        let matched = resolve_json_alias("model", "gpt-4", routes.iter());
+        let routes = [test_route_with_alias("model-a-*", None)];
+        let matched = resolve_json_alias("model", "model-g-1", routes.iter());
         assert!(matched.is_none());
     }
 
@@ -189,28 +189,28 @@ mod tests {
     #[test]
     fn resolve_json_alias_exact_beats_wildcard_same_route() {
         let routes = [test_route_with_aliases(vec![
-            ("claude-*", Some("claude-generic")),
-            ("claude-3", Some("claude-3-exact")),
+            ("model-a-*", Some("model-a-generic")),
+            ("model-a-2", Some("model-a-2-exact")),
         ])];
 
-        let matched = resolve_json_alias("model", "claude-3", routes.iter()).unwrap();
+        let matched = resolve_json_alias("model", "model-a-2", routes.iter()).unwrap();
         assert_eq!(
-            matched.alias.pattern, "claude-3",
+            matched.alias.pattern, "model-a-2",
             "exact should beat wildcard within route"
         );
-        assert_eq!(matched.alias.target.as_deref(), Some("claude-3-exact"));
+        assert_eq!(matched.alias.target.as_deref(), Some("model-a-2-exact"));
     }
 
     #[test]
     fn resolve_json_alias_more_literals_beat_fewer_same_route() {
         let routes = [test_route_with_aliases(vec![
-            ("claude-*", Some("generic")),
-            ("claude-3-*", Some("specific")),
+            ("model-a-*", Some("generic")),
+            ("model-a-2-*", Some("specific")),
         ])];
 
-        let matched = resolve_json_alias("model", "claude-3-sonnet", routes.iter()).unwrap();
+        let matched = resolve_json_alias("model", "model-a-2-std", routes.iter()).unwrap();
         assert_eq!(
-            matched.alias.pattern, "claude-3-*",
+            matched.alias.pattern, "model-a-2-*",
             "more literal chars should beat fewer within route"
         );
         assert_eq!(matched.alias.target.as_deref(), Some("specific"));
@@ -219,11 +219,11 @@ mod tests {
     #[test]
     fn resolve_json_alias_route_order_wins_over_alias_specificity() {
         let routes = [
-            test_route_with_alias("claude-*", Some("first-route")),
-            test_route_with_alias("claude-3", Some("second-route")),
+            test_route_with_alias("model-a-*", Some("first-route")),
+            test_route_with_alias("model-a-2", Some("second-route")),
         ];
 
-        let matched = resolve_json_alias("model", "claude-3", routes.iter()).unwrap();
+        let matched = resolve_json_alias("model", "model-a-2", routes.iter()).unwrap();
         assert_eq!(
             matched.alias.target.as_deref(),
             Some("first-route"),
@@ -234,11 +234,11 @@ mod tests {
     #[test]
     fn resolve_json_alias_skips_non_matching_route() {
         let routes = [
-            test_route_with_alias("gpt-*", Some("first-route")),
-            test_route_with_alias("claude-*", Some("second-route")),
+            test_route_with_alias("model-g-*", Some("first-route")),
+            test_route_with_alias("model-a-*", Some("second-route")),
         ];
 
-        let matched = resolve_json_alias("model", "claude-3", routes.iter()).unwrap();
+        let matched = resolve_json_alias("model", "model-a-2", routes.iter()).unwrap();
         assert_eq!(
             matched.alias.target.as_deref(),
             Some("second-route"),

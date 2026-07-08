@@ -1,4 +1,7 @@
 # TCP consistent-hash load balancing (client IP affinity).
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/tcp-consistent-hash.yaml
 listeners:
   - name: cache
     address: "127.0.0.1:6379"

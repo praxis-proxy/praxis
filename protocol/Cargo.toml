@@ -14,8 +14,7 @@ publish = true
 name = "praxis_protocol"
 
 [features]
-default = ["response-store"]
-response-store = ["praxis-filter/ai-inference"]
+default = []
 
 [lints]
 workspace = true

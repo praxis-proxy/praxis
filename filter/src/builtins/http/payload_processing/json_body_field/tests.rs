@@ -114,7 +114,7 @@ async fn extracts_field_from_complete_json() {
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
-    let json = br#"{"model":"claude-sonnet-4-5","prompt":"hi"}"#;
+    let json = br#"{"model":"model-alpha-1","prompt":"hi"}"#;
     let mut body = Some(Bytes::from_static(json));
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
@@ -131,7 +131,7 @@ async fn extracts_multiple_fields_in_single_parse() {
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
-    let json = br#"{"model":"claude-sonnet-4-5","user_id":"u-42","prompt":"hi"}"#;
+    let json = br#"{"model":"model-alpha-1","user_id":"u-42","prompt":"hi"}"#;
     let mut body = Some(Bytes::from_static(json));
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
@@ -143,7 +143,7 @@ async fn extracts_multiple_fields_in_single_parse() {
     assert_eq!(ctx.extra_request_headers.len(), 2, "should add two headers");
     let (n0, v0) = &ctx.extra_request_headers[0];
     assert_eq!(n0, "X-Model", "first mapping should extract model name");
-    assert_eq!(v0, "claude-sonnet-4-5", "first mapping should extract model value");
+    assert_eq!(v0, "model-alpha-1", "first mapping should extract model value");
     let (n1, v1) = &ctx.extra_request_headers[1];
     assert_eq!(n1, "X-User-Id", "second mapping should extract user_id name");
     assert_eq!(v1, "u-42", "second mapping should extract user_id value");
@@ -155,7 +155,7 @@ async fn partial_multi_field_match_still_releases() {
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
-    let json = br#"{"model":"claude-sonnet-4-5","prompt":"hi"}"#;
+    let json = br#"{"model":"model-alpha-1","prompt":"hi"}"#;
     let mut body = Some(Bytes::from_static(json));
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
@@ -167,7 +167,7 @@ async fn partial_multi_field_match_still_releases() {
     assert_eq!(ctx.extra_request_headers.len(), 1, "should add only matched header");
     let (name, value) = &ctx.extra_request_headers[0];
     assert_eq!(name, "X-Model", "only model name should be extracted");
-    assert_eq!(value, "claude-sonnet-4-5", "only model value should be extracted");
+    assert_eq!(value, "model-alpha-1", "only model value should be extracted");
 }
 
 #[tokio::test]
@@ -197,7 +197,7 @@ async fn returns_continue_on_incomplete_json() {
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
-    let partial = br#"{"model":"claude-sonnet-4-5","pro"#;
+    let partial = br#"{"model":"model-alpha-1","pro"#;
     let mut body = Some(Bytes::from_static(partial));
 
     let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
@@ -645,7 +645,7 @@ async fn field_name_with_dot() {
     let req = crate::test_utils::make_request(http::Method::POST, "/api");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
-    let json = br#"{"my.model":"gpt-4o"}"#;
+    let json = br#"{"my.model":"model-gamma-3"}"#;
     let mut body = Some(Bytes::from_static(json));
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
@@ -657,7 +657,7 @@ async fn field_name_with_dot() {
     assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
     let (name, value) = &ctx.extra_request_headers[0];
     assert_eq!(name, "X-Model", "header name should match");
-    assert_eq!(value, "gpt-4o", "dotted field value should match");
+    assert_eq!(value, "model-gamma-3", "dotted field value should match");
 }
 
 #[tokio::test]
@@ -666,7 +666,7 @@ async fn field_name_with_unicode() {
     let req = crate::test_utils::make_request(http::Method::POST, "/api");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
-    let json = "{\"mod\u{00e9}le\":\"claude\"}";
+    let json = "{\"mod\u{00e9}le\":\"model-a\"}";
     let mut body = Some(Bytes::from(json));
 
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
@@ -678,7 +678,7 @@ async fn field_name_with_unicode() {
     assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
     let (name, value) = &ctx.extra_request_headers[0];
     assert_eq!(name, "X-Model", "header name should match");
-    assert_eq!(value, "claude", "unicode field value should match");
+    assert_eq!(value, "model-a", "unicode field value should match");
 }
 
 #[tokio::test]

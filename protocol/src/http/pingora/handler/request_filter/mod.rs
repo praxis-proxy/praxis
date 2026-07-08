@@ -50,11 +50,7 @@ struct PipelineResult {
 ///
 /// Host header validation runs first (before the pipeline) to reject
 /// ambiguous requests early.
-#[expect(
-    clippy::too_many_lines,
-    clippy::cognitive_complexity,
-    reason = "orchestration function"
-)]
+#[expect(clippy::too_many_lines, reason = "orchestration function")]
 #[expect(
     clippy::large_stack_frames,
     reason = "primary request handler with multiple filter stages"
@@ -192,6 +188,8 @@ async fn run_pipeline(
         extensions,
         filter_metadata,
         filter_state,
+        executed_indices,
+        body_done,
     ) = {
         let mut filter_ctx = ctx.build_filter_context(pipeline, &request, None);
 
@@ -209,6 +207,8 @@ async fn run_pipeline(
             filter_ctx.extensions,
             filter_ctx.filter_metadata,
             filter_ctx.filter_state,
+            filter_ctx.executed_filter_indices,
+            filter_ctx.body_done_indices,
         )
     };
 
@@ -216,6 +216,8 @@ async fn run_pipeline(
     ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;
     ctx.filter_state = filter_state;
+    ctx.cached_executed_filter_indices = executed_indices;
+    ctx.cached_body_done_indices = body_done;
     ctx.metrics_cluster_shared = cluster.as_ref().map(|c| ::metrics::SharedString::from(Arc::clone(c)));
     ctx.metrics_cluster.clone_from(&cluster);
 

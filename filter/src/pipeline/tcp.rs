@@ -452,8 +452,7 @@ mod tests {
             health_registry: None,
             id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
             kv_stores: None,
-            #[cfg(feature = "ai-inference")]
-            response_stores: None,
+            pipeline_extensions: Vec::new(),
             time_source: Arc::new(praxis_core::time::SystemTimeSource),
         }
     }

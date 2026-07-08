@@ -8,8 +8,6 @@ readme = "../../README.md"
 publish = false
 
 [features]
-default = ["ai-inference"]
-ai-inference = ["praxis-filter/ai-inference", "praxis-test-utils/ai-inference"]
 cpex-policy-engine = ["praxis-filter/cpex-policy-engine"]
 no-mac-cert-rotation-tests = [] # We use this to disable testing cert rotation on macOS
 
@@ -24,7 +22,7 @@ bytes = { workspace = true }
 http = { workspace = true }
 # Used only by the cpex example test to mint HS256 JWTs for the
 # happy-path case (matches the filter crate's signing dependency).
-jsonwebtoken = "9"
+jsonwebtoken = "10.4.0"
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-protocol = { workspace = true }
@@ -34,7 +32,6 @@ rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
-sqlx = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-util"] }
 tokio-rustls = { workspace = true }

@@ -130,41 +130,38 @@ fn buffer_pipeline_rejects_forbidden_content() {
 
 #[test]
 fn stream_buffer_pipeline_extracts_and_routes() {
-    let claude_port_guard = start_backend_with_shutdown("claude-response");
-    let claude_port = claude_port_guard.port();
+    let alpha_port_guard = start_backend_with_shutdown("alpha-response");
+    let alpha_port = alpha_port_guard.port();
     let default_port_guard = start_backend_with_shutdown("default-response");
     let default_port = default_port_guard.port();
     let proxy_port = free_port();
-    let config = Config::from_yaml(&stream_buffer_routing_yaml(proxy_port, claude_port, default_port)).unwrap();
+    let config = Config::from_yaml(&stream_buffer_routing_yaml(proxy_port, alpha_port, default_port)).unwrap();
     let proxy = praxis_test_utils::start_proxy(&config);
 
     let raw = http_send(
         proxy.addr(),
-        &json_post(
-            "/v1/chat",
-            r#"{"model":"claude-sonnet-4-5","user_id":"u-1","prompt":"hi"}"#,
-        ),
+        &json_post("/v1/chat", r#"{"model":"model-alpha-1","user_id":"u-1","prompt":"hi"}"#),
     );
     assert_eq!(
         parse_status(&raw),
         200,
-        "stream-buffer claude-sonnet-4-5 routing should return 200"
+        "stream-buffer model-alpha-1 routing should return 200"
     );
     assert_eq!(
         parse_body(&raw),
-        "claude-response",
-        "model=claude-sonnet-4-5 should route to claude_sonnet cluster"
+        "alpha-response",
+        "model=model-alpha-1 should route to alpha_cluster cluster"
     );
 }
 
 #[test]
 fn stream_buffer_pipeline_fallback_routing() {
-    let claude_port_guard = start_backend_with_shutdown("claude-response");
-    let claude_port = claude_port_guard.port();
+    let alpha_port_guard = start_backend_with_shutdown("alpha-response");
+    let alpha_port = alpha_port_guard.port();
     let default_port_guard = start_backend_with_shutdown("default-response");
     let default_port = default_port_guard.port();
     let proxy_port = free_port();
-    let config = Config::from_yaml(&stream_buffer_routing_yaml(proxy_port, claude_port, default_port)).unwrap();
+    let config = Config::from_yaml(&stream_buffer_routing_yaml(proxy_port, alpha_port, default_port)).unwrap();
     let proxy = praxis_test_utils::start_proxy(&config);
 
     let raw = http_send(
@@ -241,8 +238,8 @@ filter_chains:
 fn multi_listener_per_listener_filter_chains() {
     let echo_port_guard = start_echo_backend();
     let echo_port = echo_port_guard.port();
-    let claude_port_guard = start_backend_with_shutdown("claude-routed");
-    let claude_port = claude_port_guard.port();
+    let alpha_port_guard = start_backend_with_shutdown("alpha-routed");
+    let alpha_port = alpha_port_guard.port();
     let default_port_guard = start_backend_with_shutdown("default-routed");
     let default_port = default_port_guard.port();
     let extraction_guard = free_port_guard();
@@ -272,15 +269,15 @@ filter_chains:
         routes:
           - path_prefix: "/"
             headers:
-              x-model: "claude-sonnet-4-5"
-            cluster: claude_sonnet
+              x-model: "model-alpha-1"
+            cluster: alpha_cluster
           - path_prefix: "/"
             cluster: default
       - filter: load_balancer
         clusters:
-          - name: claude_sonnet
+          - name: alpha_cluster
             endpoints:
-              - "127.0.0.1:{claude_port}"
+              - "127.0.0.1:{alpha_port}"
           - name: default
             endpoints:
               - "127.0.0.1:{default_port}"
@@ -306,17 +303,17 @@ filter_chains:
 
     let raw = http_send(
         &format!("127.0.0.1:{extraction_port}"),
-        &json_post("/v1/chat", r#"{"model":"claude-sonnet-4-5","user_id":"u-99"}"#),
+        &json_post("/v1/chat", r#"{"model":"model-alpha-1","user_id":"u-99"}"#),
     );
     assert_eq!(
         parse_status(&raw),
         200,
-        "extraction listener claude-sonnet-4-5 should return 200"
+        "extraction listener model-alpha-1 should return 200"
     );
     assert_eq!(
         parse_body(&raw),
-        "claude-routed",
-        "extraction listener should route claude-sonnet-4-5 to claude_sonnet cluster"
+        "alpha-routed",
+        "extraction listener should route model-alpha-1 to alpha_cluster cluster"
     );
 
     let raw = http_send(
@@ -334,7 +331,7 @@ filter_chains:
         "extraction listener should route unknown model to default"
     );
 
-    let payload = r#"{"model":"claude-sonnet-4-5","prompt":"hi"}"#;
+    let payload = r#"{"model":"model-alpha-1","prompt":"hi"}"#;
     let (status, body) = http_post(&format!("127.0.0.1:{passthrough_port}"), "/echo", payload);
     assert_eq!(status, 200, "passthrough listener should return 200");
     assert_eq!(body, payload, "passthrough listener should forward body unmodified");
@@ -459,7 +456,7 @@ filter_chains:
 }
 
 /// YAML for stream-buffer mode with multi-field extraction and routing.
-fn stream_buffer_routing_yaml(proxy_port: u16, claude_port: u16, default_port: u16) -> String {
+fn stream_buffer_routing_yaml(proxy_port: u16, alpha_port: u16, default_port: u16) -> String {
     format!(
         r#"
 listeners:
@@ -479,15 +476,15 @@ filter_chains:
         routes:
           - path_prefix: "/"
             headers:
-              x-model: "claude-sonnet-4-5"
-            cluster: claude_sonnet
+              x-model: "model-alpha-1"
+            cluster: alpha_cluster
           - path_prefix: "/"
             cluster: default
       - filter: load_balancer
         clusters:
-          - name: claude_sonnet
+          - name: alpha_cluster
             endpoints:
-              - "127.0.0.1:{claude_port}"
+              - "127.0.0.1:{alpha_port}"
           - name: default
             endpoints:
               - "127.0.0.1:{default_port}"

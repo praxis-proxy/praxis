@@ -22,9 +22,9 @@ use cpex::cpex_core::{
 };
 
 use super::{
-    common_message_format::{entity_for_mcp_method, entity_for_mcp_method_post},
+    common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post},
     config::{BodyAccessMode, PolicyFilterConfig},
-    error::{VIOLATION_HEADER, auth_rejection, mcp_error_envelope_bytes, mcp_error_rejection},
+    error::{VIOLATION_HEADER, auth_rejection, json_rpc_error_envelope_bytes, json_rpc_error_rejection},
     json_rpc::{
         build_content_for_method, build_response_content_for_method, json_rpc_id, json_rpc_id_value,
         reserialize_json_rpc_body, reserialize_json_rpc_response_body,
@@ -65,8 +65,9 @@ const RUNTIME_REJECTED: u8 = 2;
 /// own configured header and contributes to a typed `Extensions`
 /// context.
 ///
-/// On the body phase, the filter consumes praxis's `mcp` filter
-/// metadata to dispatch the matching CMF hook chain. APL routes
+/// On the body phase, the filter consumes protocol classifier filter metadata
+/// (from the `praxis-ai` package) to dispatch the matching CMF
+/// hook chain. APL routes
 /// (declared in the CPEX YAML) gate the tool/prompt/resource call by
 /// role, attribute, or Cedar PDP decision. `delegate(...)` steps mint
 /// audience-scoped tokens (RFC 8693) that the allow path attaches as
@@ -86,7 +87,7 @@ const RUNTIME_REJECTED: u8 = 2;
 /// filter: policy
 /// config_path: /etc/praxis/cpex-policy.yaml
 /// body_access: read_write       # optional; default read_only
-/// require_mcp_metadata: true    # optional; default true
+/// require_protocol_metadata: true    # optional; default true
 /// init_timeout_secs: 30         # optional; default 30
 /// max_buffer_bytes: 10485760    # optional; default 10 MiB (read_write only)
 /// ```
@@ -222,23 +223,26 @@ impl PolicyFilter {
             .collect()
     }
 
-    /// Build a fresh `IdentityPayload` from request headers. `raw_token`
-    /// is left empty: each registered identity plugin reads its own
-    /// configured header from `headers` instead.
-    fn identity_payload(ctx: &HttpFilterContext<'_>) -> IdentityPayload {
-        IdentityPayload::new(String::new(), TokenSource::Bearer).with_headers(Self::snapshot_headers(ctx))
+    /// Build a fresh `IdentityPayload` from pre-snapshotted headers.
+    /// `raw_token` is left empty: each registered identity plugin
+    /// reads its own configured header from `headers` instead.
+    fn identity_payload(headers: std::collections::HashMap<String, String>) -> IdentityPayload {
+        IdentityPayload::new(String::new(), TokenSource::Bearer).with_headers(headers)
     }
 
     /// Resolve identity by invoking the identity hook chain. Returns the
     /// resolved [`IdentityPayload`] (subject / client / workload / raw
     /// credentials / delegation) or a rejection when no identity
     /// continues. Cheap — the JWT verifier hits its in-process key cache.
-    async fn resolve_identity(&self, ctx: &HttpFilterContext<'_>) -> Result<IdentityPayload, Rejection> {
+    async fn resolve_identity(
+        &self,
+        headers: std::collections::HashMap<String, String>,
+    ) -> Result<IdentityPayload, Rejection> {
         let (id_result, _bg) = self
             .mgr
             .invoke_named::<IdentityHook>(
                 HOOK_IDENTITY_RESOLVE,
-                Self::identity_payload(ctx),
+                Self::identity_payload(headers),
                 Extensions::default(),
                 None,
             )
@@ -263,7 +267,7 @@ impl PolicyFilter {
     /// identity hook: a token that expires between the request and the
     /// (already-served) response must not turn into a false deny.
     fn extensions_from_identity(
-        ctx: &HttpFilterContext<'_>,
+        headers: &std::collections::HashMap<String, String>,
         identity: &IdentityPayload,
         entity_type: &str,
         entity_name: &str,
@@ -275,17 +279,7 @@ impl PolicyFilter {
         meta.entity_name = Some(entity_name.to_owned());
         ext.meta = Some(Arc::new(meta));
 
-        // Thread a per-conversation session id from the `X-Session-Id`
-        // request header into `agent.session_id`. cpex's session resolver
-        // subject-scopes it (`H(subject:session_id)`), so session-scoped
-        // taint labels (`taint(label, session)`) persist across requests
-        // in the same conversation and stay isolated between principals.
-        // Absent header → cpex falls back to its identity-derived session.
-        if let Some(session_id) = Self::snapshot_headers(ctx)
-            .get("x-session-id")
-            .filter(|value| !value.is_empty())
-            .cloned()
-        {
+        if let Some(session_id) = headers.get("x-session-id").filter(|value| !value.is_empty()).cloned() {
             let mut agent = ext.agent.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
             agent.session_id = Some(session_id);
             ext.agent = Some(Arc::new(agent));
@@ -311,7 +305,7 @@ impl HttpFilter for PolicyFilter {
     fn request_body_access(&self) -> BodyAccess {
         // `ReadOnly` is the minimum that gets us into `on_request_body`
         // (we need the body phase to fire so we can dispatch CMF after
-        // the `mcp` filter populates its metadata). Operators opt into
+        // the protocol classifier filter populates its metadata). Operators opt into
         // `ReadWrite` via `body_access: read_write` when they want APL
         // field mutators (`redact()` / `assign()` on `args.<field>`) to
         // rewrite the upstream body. Chain-level scoping keeps non-CPEX
@@ -382,7 +376,7 @@ impl HttpFilter for PolicyFilter {
             .mgr
             .invoke_named::<IdentityHook>(
                 HOOK_IDENTITY_RESOLVE,
-                Self::identity_payload(ctx),
+                Self::identity_payload(Self::snapshot_headers(ctx)),
                 Extensions::default(),
                 None,
             )
@@ -409,60 +403,64 @@ impl HttpFilter for PolicyFilter {
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         // CMF dispatch only fires once the full body has been seen
-        // (so praxis's `mcp` filter has finished parsing and writing
-        // its metadata). For streaming chunks we just pass.
+        // (so the protocol classifier filter has finished parsing and writing its
+        // metadata). For streaming chunks we just pass.
         if !end_of_stream {
             return Ok(FilterAction::Continue);
         }
 
-        // Pull MCP-derived entity coords from durable filter_metadata.
-        // Missing `mcp.method` means praxis's built-in `mcp` filter
+        // Pull Protocol-derived entity coords from durable filter_metadata.
+        // Missing `protocol.method` means the protocol classifier filter (from praxis-ai)
         // didn't run before us — almost always a misconfigured chain
         // (missing or ordered after `policy`). Default to fail-closed
         // so the misconfig is loud at first request. Operators
-        // fronting non-MCP traffic can opt out via
-        // `require_mcp_metadata: false`.
-        let Some(method) = ctx.get_metadata("mcp.method").map(str::to_owned) else {
-            if self.cfg.require_mcp_metadata {
+        // fronting non-classified traffic can opt out via
+        // `require_protocol_metadata: false`.
+        let Some(method) = ctx.get_metadata("protocol.method").map(str::to_owned) else {
+            if self.cfg.require_protocol_metadata {
                 tracing::warn!(
                     target: "policy.filter",
-                    "no mcp.method in metadata — likely the `mcp` filter is missing \
-                     or ordered after `policy` in the chain; rejecting (set \
-                     `require_mcp_metadata: false` to disable this guard)",
+                    "no protocol.method in metadata — likely the protocol classifier filter (praxis-ai) \
+                     is missing or ordered after `policy` in the chain; rejecting \
+                     (set `require_protocol_metadata: false` to disable this guard)",
                 );
-                return Ok(FilterAction::Reject(missing_mcp_metadata_rejection()));
+                return Ok(FilterAction::Reject(missing_protocol_metadata_rejection()));
             }
-            tracing::trace!(target: "policy.filter", "no mcp.method in metadata; no CMF dispatch");
+            tracing::trace!(target: "policy.filter", "no protocol.method in metadata; no CMF dispatch");
             return Ok(FilterAction::BodyDone);
         };
-        let Some((entity_type, hook_name)) = entity_for_mcp_method(&method) else {
+        let Some((entity_type, hook_name)) = entity_for_protocol_method(&method) else {
             tracing::trace!(
                 target: "policy.filter",
-                mcp_method = %method,
-                "MCP method has no entity binding; no CMF dispatch",
+                protocol_method = %method,
+                "JSON-RPC method has no entity binding; no CMF dispatch",
             );
             return Ok(FilterAction::BodyDone);
         };
-        let Some(entity_name) = ctx.get_metadata("mcp.name").map(str::to_owned) else {
+        let Some(entity_name) = ctx.get_metadata("protocol.name").map(str::to_owned) else {
             tracing::debug!(
                 target: "policy.filter",
-                mcp_method = %method,
-                "MCP method missing mcp.name metadata; skipping CMF dispatch",
+                protocol_method = %method,
+                "JSON-RPC method missing protocol.name metadata; skipping CMF dispatch",
             );
             return Ok(FilterAction::BodyDone);
         };
+
+        // Snapshot headers once for both identity resolution and
+        // extensions building (avoids iterating the header map twice).
+        let headers = Self::snapshot_headers(ctx);
 
         // Resolve identity once here, then stash it so the response phase
         // can rebuild `Extensions` without re-validating the token.
-        let identity = match self.resolve_identity(ctx).await {
+        let identity = match self.resolve_identity(headers.clone()).await {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
-        let extensions = Self::extensions_from_identity(ctx, &identity, entity_type, &entity_name);
+        let extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &entity_name);
         ctx.extensions.insert(ResolvedIdentity(identity));
 
         // Parse the JSON-RPC body to build the typed CMF content part.
-        // praxis's `mcp` filter already parsed once but only stashed
+        // The protocol classifier filter already parsed once but only stashed
         // method/name in `filter_metadata`, not the `params.arguments`
         // that APL `args.*` predicates need. We re-parse here. The
         // body is already in memory; the duplicate parse is
@@ -490,7 +488,7 @@ impl HttpFilter for PolicyFilter {
                 entity = %entity_name,
                 "CMF deny",
             );
-            return Ok(FilterAction::Reject(mcp_error_rejection(
+            return Ok(FilterAction::Reject(json_rpc_error_rejection(
                 cmf_result.violation.as_ref(),
                 &request_id,
             )));
@@ -551,7 +549,6 @@ impl HttpFilter for PolicyFilter {
 
     #[expect(
         clippy::too_many_lines,
-        clippy::cognitive_complexity,
         reason = "linear response-phase flow (rebuild identity, dispatch, deny/rewrite); splitting obscures it"
     )]
     fn on_response_body(
@@ -569,17 +566,17 @@ impl HttpFilter for PolicyFilter {
             return Ok(FilterAction::Continue);
         }
 
-        // praxis's `mcp` filter stashes method/name during the request
+        // The protocol classifier filter stashes method/name during the request
         // phase and praxis preserves `filter_metadata` across phases,
         // so we can route the post-phase hook without re-parsing the
         // body.
-        let Some(method) = ctx.get_metadata("mcp.method").map(str::to_owned) else {
+        let Some(method) = ctx.get_metadata("protocol.method").map(str::to_owned) else {
             return Ok(FilterAction::Continue);
         };
-        let Some((entity_type, hook_name)) = entity_for_mcp_method_post(&method) else {
+        let Some((entity_type, hook_name)) = entity_for_protocol_method_post(&method) else {
             return Ok(FilterAction::Continue);
         };
-        let Some(entity_name) = ctx.get_metadata("mcp.name").map(str::to_owned) else {
+        let Some(entity_name) = ctx.get_metadata("protocol.name").map(str::to_owned) else {
             return Ok(FilterAction::Continue);
         };
 
@@ -611,7 +608,7 @@ impl HttpFilter for PolicyFilter {
                 "identity.post_phase_unavailable",
                 "no request-phase identity available for response processing",
             );
-            let envelope = mcp_error_envelope_bytes(Some(&violation), &request_id);
+            let envelope = json_rpc_error_envelope_bytes(Some(&violation), &request_id);
             *body = Some(fit_to_original_length(
                 envelope,
                 body_bytes.len(),
@@ -620,7 +617,8 @@ impl HttpFilter for PolicyFilter {
             ));
             return Ok(FilterAction::Continue);
         };
-        let extensions = Self::extensions_from_identity(ctx, identity, entity_type, &entity_name);
+        let headers = Self::snapshot_headers(ctx);
+        let extensions = Self::extensions_from_identity(&headers, identity, entity_type, &entity_name);
 
         let content = build_response_content_for_method(&method, &entity_name, &id_str, &body_bytes);
         if content.is_empty() {
@@ -658,7 +656,7 @@ impl HttpFilter for PolicyFilter {
             // Reuse `body_bytes` (the original response body cloned above);
             // it has not been reassigned on this path.
             let request_id = json_rpc_id_value(&body_bytes);
-            let envelope = mcp_error_envelope_bytes(cmf_result.violation.as_ref(), &request_id);
+            let envelope = json_rpc_error_envelope_bytes(cmf_result.violation.as_ref(), &request_id);
             *body = Some(fit_to_original_length(
                 envelope,
                 body_bytes.len(),
@@ -695,7 +693,7 @@ impl HttpFilter for PolicyFilter {
                         "gateway.response_rewrite_overflow",
                         "response rewrite exceeded the committed response length",
                     );
-                    let envelope = mcp_error_envelope_bytes(Some(&violation), &request_id);
+                    let envelope = json_rpc_error_envelope_bytes(Some(&violation), &request_id);
                     fit_to_original_length(envelope, body_bytes.len(), method.as_str(), "response rewrite overflow")
                 } else {
                     fit_to_original_length(new_bytes, body_bytes.len(), method.as_str(), "response-side rewrite")
@@ -774,18 +772,19 @@ pub(super) fn fit_to_original_length(new_bytes: Bytes, original_len: usize, meth
     }
 }
 
-/// Rejection emitted when `require_mcp_metadata` is on (default) and
-/// no `mcp.method` metadata was set by an upstream filter. HTTP 500
+/// Rejection emitted when `require_protocol_metadata` is on (default) and
+/// no `protocol.method` metadata was set by an upstream filter. HTTP 500
 /// because the misconfiguration is server-side, not client-side.
-fn missing_mcp_metadata_rejection() -> Rejection {
+fn missing_protocol_metadata_rejection() -> Rejection {
     Rejection::status(500)
         .with_header("Content-Type", "text/plain")
-        .with_header(VIOLATION_HEADER, "config.missing_mcp_metadata")
+        .with_header(VIOLATION_HEADER, "config.missing_protocol_metadata")
         .with_body(Bytes::from_static(
-            b"policy: no mcp.method in filter metadata. The `mcp` filter must \
-              be present in the chain and ordered before `policy`. Set the \
-              filter's `require_mcp_metadata: false` to disable this guard \
-              for non-MCP traffic.",
+            b"policy: no protocol.method in filter metadata. An protocol classifier filter \
+              (from the praxis-ai package) must be present in the chain \
+              and ordered before `policy`. Set the filter's \
+              `require_protocol_metadata: false` to disable this guard \
+              for non-classified traffic.",
         ))
 }
 
@@ -810,7 +809,6 @@ fn missing_mcp_metadata_rejection() -> Rejection {
 /// the operator can fix the overlapping delegators.
 #[expect(
     clippy::too_many_lines,
-    clippy::cognitive_complexity,
     reason = "single linear pass attaching delegated tokens with first-writer-wins dedupe"
 )]
 pub(super) fn attach_delegated_tokens(ctx: &mut HttpFilterContext<'_>, extensions: Option<&Extensions>) -> usize {

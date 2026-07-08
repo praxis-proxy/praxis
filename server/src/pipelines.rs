@@ -59,8 +59,8 @@ pub fn resolve_pipelines(
     Ok(ListenerPipelines::new(pipelines))
 }
 
-/// Apply body limits, health registry, KV stores, and insecure options to a
-/// pipeline.
+/// Apply body limits, health registry, KV stores, pipeline extensions,
+/// and insecure options to a pipeline.
 fn configure_pipeline(
     pipeline: &mut FilterPipeline,
     config: &Config,
@@ -88,7 +88,6 @@ fn configure_pipeline(
 
 /// Run pipeline ordering validation; either fail or warn depending
 /// on the `skip` flag.
-#[expect(clippy::cognitive_complexity, reason = "pre-existing complexity above threshold")]
 fn validate_pipeline(
     pipeline: &FilterPipeline,
     entries: &[praxis_core::config::FilterEntry],

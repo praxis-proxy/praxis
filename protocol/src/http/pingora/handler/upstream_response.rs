@@ -438,7 +438,7 @@ mod tests {
     #[test]
     fn strips_x_praxis_reserved_headers_from_response() {
         let mut resp = make_response(&[
-            ("x-praxis-mcp-method", "tools/call"),
+            ("x-praxis-filter-action", "routed"),
             ("x-praxis-route", "internal"),
             ("content-type", "application/json"),
         ]);
@@ -446,8 +446,8 @@ mod tests {
         strip_reserved_internal_response(&mut resp);
 
         assert!(
-            resp.headers.get("x-praxis-mcp-method").is_none(),
-            "x-praxis-mcp-method should be stripped from response"
+            resp.headers.get("x-praxis-filter-action").is_none(),
+            "x-praxis-filter-action should be stripped from response"
         );
         assert!(
             resp.headers.get("x-praxis-route").is_none(),
@@ -461,22 +461,22 @@ mod tests {
     }
 
     #[test]
-    fn strips_x_mcp_reserved_headers_from_response() {
+    fn strips_x_ext_protocol_reserved_headers_from_response() {
         let mut resp = make_response(&[
-            ("x-mcp-servername", "backend-1"),
-            ("x-mcp-toolname", "get_weather"),
+            ("x-ext-protocol-servername", "backend-1"),
+            ("x-ext-protocol-toolname", "get_weather"),
             ("server", "test"),
         ]);
 
         strip_reserved_internal_response(&mut resp);
 
         assert!(
-            resp.headers.get("x-mcp-servername").is_none(),
-            "x-mcp-servername should be stripped from response"
+            resp.headers.get("x-ext-protocol-servername").is_none(),
+            "x-ext-protocol-servername should be stripped from response"
         );
         assert!(
-            resp.headers.get("x-mcp-toolname").is_none(),
-            "x-mcp-toolname should be stripped from response"
+            resp.headers.get("x-ext-protocol-toolname").is_none(),
+            "x-ext-protocol-toolname should be stripped from response"
         );
         assert_eq!(
             resp.headers.get("server").unwrap(),
@@ -486,22 +486,22 @@ mod tests {
     }
 
     #[test]
-    fn strips_x_a2a_reserved_headers_from_response() {
+    fn strips_x_ext_agent_reserved_headers_from_response() {
         let mut resp = make_response(&[
-            ("x-a2a-method", "task/send"),
-            ("x-a2a-family", "internal"),
+            ("x-ext-agent-method", "task/send"),
+            ("x-ext-agent-family", "internal"),
             ("cache-control", "no-cache"),
         ]);
 
         strip_reserved_internal_response(&mut resp);
 
         assert!(
-            resp.headers.get("x-a2a-method").is_none(),
-            "x-a2a-method should be stripped from response"
+            resp.headers.get("x-ext-agent-method").is_none(),
+            "x-ext-agent-method should be stripped from response"
         );
         assert!(
-            resp.headers.get("x-a2a-family").is_none(),
-            "x-a2a-family should be stripped from response"
+            resp.headers.get("x-ext-agent-family").is_none(),
+            "x-ext-agent-family should be stripped from response"
         );
         assert_eq!(
             resp.headers.get("cache-control").unwrap(),
@@ -513,9 +513,9 @@ mod tests {
     #[test]
     fn strips_multiple_reserved_prefixes_from_response() {
         let mut resp = make_response(&[
-            ("x-praxis-mcp-method", "tools/call"),
-            ("x-mcp-servername", "backend-1"),
-            ("x-a2a-method", "task/send"),
+            ("x-praxis-filter-action", "routed"),
+            ("x-ext-protocol-servername", "backend-1"),
+            ("x-ext-agent-method", "task/send"),
             ("x-request-id", "abc-123"),
             ("content-type", "text/plain"),
         ]);
@@ -523,14 +523,17 @@ mod tests {
         strip_reserved_internal_response(&mut resp);
 
         assert!(
-            resp.headers.get("x-praxis-mcp-method").is_none(),
+            resp.headers.get("x-praxis-filter-action").is_none(),
             "x-praxis-* should be stripped"
         );
         assert!(
-            resp.headers.get("x-mcp-servername").is_none(),
-            "x-mcp-* should be stripped"
+            resp.headers.get("x-ext-protocol-servername").is_none(),
+            "x-ext-protocol-* should be stripped"
         );
-        assert!(resp.headers.get("x-a2a-method").is_none(), "x-a2a-* should be stripped");
+        assert!(
+            resp.headers.get("x-ext-agent-method").is_none(),
+            "x-ext-agent-* should be stripped"
+        );
         assert_eq!(
             resp.headers.get("x-request-id").unwrap(),
             "abc-123",
@@ -544,35 +547,35 @@ mod tests {
     }
 
     #[test]
-    fn preserves_standard_mcp_protocol_headers_in_response() {
+    fn preserves_standard_protocol_headers_in_response() {
         let mut resp = make_response(&[
-            ("mcp-session-id", "session-123"),
-            ("mcp-method", "tools/call"),
-            ("mcp-name", "get_weather"),
-            ("mcp-protocol-version", "2025-03-26"),
+            ("ext-session-id", "session-123"),
+            ("ext-method", "process"),
+            ("ext-name", "get_weather"),
+            ("ext-protocol-version", "2025-03-26"),
         ]);
 
         strip_reserved_internal_response(&mut resp);
 
         assert_eq!(
-            resp.headers.get("mcp-session-id").unwrap(),
+            resp.headers.get("ext-session-id").unwrap(),
             "session-123",
-            "standard mcp-session-id should be preserved (no x- prefix)"
+            "standard ext-session-id should be preserved (no x- prefix)"
         );
         assert_eq!(
-            resp.headers.get("mcp-method").unwrap(),
-            "tools/call",
-            "standard mcp-method should be preserved"
+            resp.headers.get("ext-method").unwrap(),
+            "process",
+            "standard ext-method should be preserved"
         );
         assert_eq!(
-            resp.headers.get("mcp-name").unwrap(),
+            resp.headers.get("ext-name").unwrap(),
             "get_weather",
-            "standard mcp-name should be preserved"
+            "standard ext-name should be preserved"
         );
         assert_eq!(
-            resp.headers.get("mcp-protocol-version").unwrap(),
+            resp.headers.get("ext-protocol-version").unwrap(),
             "2025-03-26",
-            "standard mcp-protocol-version should be preserved"
+            "standard ext-protocol-version should be preserved"
         );
     }
 

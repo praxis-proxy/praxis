@@ -37,11 +37,7 @@
     reason = "test code"
 )]
 
-mod a2a;
 mod adversarial;
-mod agentic_mocks;
-#[cfg(feature = "ai-inference")]
-mod anthropic_messages;
 mod body;
 mod body_pipeline;
 mod compression;
@@ -59,20 +55,10 @@ mod hot_reload;
 mod ip_acl;
 mod json_body_field;
 mod json_rpc;
-mod mcp;
-mod mcp_broker;
-#[cfg(feature = "ai-inference")]
-mod openai_responses_format;
-#[cfg(feature = "ai-inference")]
-mod openai_responses_model_rewrite;
 mod path_rewrite;
 mod payload_processing;
 mod per_listener_pipeline;
-#[cfg(feature = "ai-inference")]
-mod prompt_enrich;
 mod rate_limit;
-#[cfg(feature = "ai-inference")]
-mod responses_routing;
 mod retry;
 mod routing;
 mod security;

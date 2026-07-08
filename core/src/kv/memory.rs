@@ -302,12 +302,12 @@ mod tests {
     #[test]
     fn lookup_regex() {
         let store = InMemoryKvBackend::new();
-        store.set("model-gpt4", Arc::from("openai"));
-        store.set("model-claude", Arc::from("anthropic"));
+        store.set("model-gamma1", Arc::from("provider-a"));
+        store.set("model-alpha", Arc::from("provider-b"));
 
-        let result = store.lookup("model-gpt\\d", MatchType::Regex).unwrap();
+        let result = store.lookup("model-gamma\\d", MatchType::Regex).unwrap();
         assert!(result.is_some(), "regex lookup should find matching key");
-        assert_eq!(result.unwrap().1.as_ref(), "openai");
+        assert_eq!(result.unwrap().1.as_ref(), "provider-a");
     }
 
     #[test]
@@ -408,7 +408,7 @@ mod tests {
     #[test]
     fn lookup_regex_anchored() {
         let store = InMemoryKvBackend::new();
-        store.set("model-gpt4", Arc::from("openai"));
+        store.set("model-gamma1", Arc::from("provider-a"));
         let result = store.lookup("^model-", MatchType::Regex).unwrap();
         assert!(result.is_some(), "anchored regex should match");
     }
@@ -468,6 +468,36 @@ mod tests {
         let deleted: u32 = handles.into_iter().map(|h| u32::from(h.join().unwrap())).sum();
         assert_eq!(deleted, 50, "all 50 deletes should succeed");
         assert!(store.is_empty(), "store should be empty after all deletes");
+    }
+
+    #[test]
+    fn regex_cache_continues_working_at_capacity() {
+        let store = InMemoryKvBackend::new();
+        store.set("key-42", Arc::from("val"));
+
+        for i in 0..MAX_REGEX_CACHE_SIZE {
+            let pattern = format!("^pattern-{i}$");
+            let result = store.lookup(&pattern, MatchType::Regex).unwrap();
+            assert!(result.is_none(), "pattern-{i} should not match any key");
+        }
+        assert_eq!(
+            store.regex_cache.len(),
+            MAX_REGEX_CACHE_SIZE,
+            "cache should be at capacity"
+        );
+
+        let result = store.lookup("^key-\\d+$", MatchType::Regex).unwrap();
+        assert!(
+            result.is_some(),
+            "regex lookup should still succeed after cache is full"
+        );
+        assert_eq!(result.unwrap().1.as_ref(), "val", "matched value should be correct");
+
+        assert_eq!(
+            store.regex_cache.len(),
+            MAX_REGEX_CACHE_SIZE,
+            "cache size should not grow beyond capacity"
+        );
     }
 
     #[test]

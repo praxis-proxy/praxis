@@ -27,18 +27,19 @@
 //!
 //! # Where it sits in the chain
 //!
-//! The filter consumes metadata Praxis's built-in `mcp` filter produces,
-//! so `mcp` must run before it:
+//! The filter consumes metadata produced by a protocol classifier filter (available in
+//! the `praxis-ai` package), so that filter must run before it:
 //!
 //! ```text
-//! mcp  ->  policy  ->  router  ->  load_balancer
+//! classifier  ->  policy  ->  router  ->  load_balancer
 //! ```
 //!
-//! `mcp` parses the JSON-RPC body and writes `mcp.method` / `mcp.name`
-//! into filter metadata; `policy` reads that to pick the matching policy
-//! route. With `require_mcp_metadata: true` (the default), a request that
-//! reaches `policy` without `mcp.method` is rejected — catching a chain
-//! that is missing `mcp` or has it ordered after `policy`.
+//! The protocol classifier filter parses the JSON-RPC body and writes `protocol.method` /
+//! `protocol.name` into filter metadata; `policy` reads that to pick the
+//! matching policy route. With `require_protocol_metadata: true` (the
+//! default), a request that reaches `policy` without `protocol.method` is
+//! rejected — catching a chain that is missing the protocol classifier filter or has
+//! it ordered after `policy`.
 //!
 //! # The policy document
 //!
@@ -95,8 +96,8 @@
 //! | Outcome | Wire shape |
 //! |---|---|
 //! | Identity / transport failure | HTTP 401, `WWW-Authenticate: Bearer`, `X-Policy-Violation: <code>`. |
-//! | Policy deny (PDP, predicate, PII, taint, delegation) | HTTP 200 with a JSON-RPC error envelope (`code -32001`) and `X-Policy-Violation: <code>` — per the MCP Tools spec, gateway denials are JSON-RPC errors, not HTTP 4xx. |
-//! | Missing `mcp.method` metadata | HTTP 500 (server-side misconfiguration). |
+//! | Policy deny (PDP, predicate, PII, taint, delegation) | HTTP 200 with a JSON-RPC error envelope (`code -32001`) and `X-Policy-Violation: <code>` — per the JSON-RPC spec, gateway denials are JSON-RPC errors, not HTTP 4xx. |
+//! | Missing `protocol.method` metadata | HTTP 500 (server-side misconfiguration; protocol classifier filter from `praxis-ai` missing or misordered). |
 //!
 //! # Runtime requirement
 //!

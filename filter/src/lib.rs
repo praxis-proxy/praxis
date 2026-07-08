@@ -7,9 +7,8 @@
 
 mod actions;
 mod any_filter;
-mod body;
-#[expect(unreachable_pub, reason = "internal pub items re-exported selectively")]
-mod builtins;
+pub mod body;
+pub mod builtins;
 mod condition;
 mod context;
 mod extensions;
@@ -33,23 +32,11 @@ pub use builtins::{
     has_dot_dot_traversal, http::payload_processing::compression_config::CompressionConfig, normalize_rewritten_path,
 };
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
-
-/// AI inference filter types, gated behind the `ai-inference` feature.
-#[cfg(feature = "ai-inference")]
-pub mod ai {
-    pub use crate::builtins::{
-        AiGuardrailsFilter, AnthropicMessagesFormatFilter, AnthropicMessagesProtocolFilter,
-        AnthropicStreamEventsFilter, AnthropicToOpenaiFilter, AnthropicValidateFilter, ModelRewriteFilter,
-        ModelToHeaderFilter, OpenaiResponsesValidateFilter, PromptEnrichFilter, RehydrateFilter, ResponseStoreFilter,
-        ResponseStoreRegistry, ResponsesFormatFilter, ResponsesProxyFilter, TokenUsage, TokenUsageProvider,
-        extract_token_usage, set_token_usage,
-    };
-}
 pub use context::{HttpFilterContext, Request, Response};
 pub use extensions::RequestExtensions;
 pub use factory::{FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config, tcp_builtin};
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
-pub use pipeline::FilterPipeline;
+pub use pipeline::{FilterPipeline, PipelineExtension};
 pub use praxis_core::config::{FailureMode, FilterEntry};
 pub use registry::FilterRegistry;
 pub use results::FilterResultSet;

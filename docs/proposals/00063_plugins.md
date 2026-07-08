@@ -24,7 +24,7 @@ observe or enforce policy at well-defined lifecycle
 protocol-semantic (MCP tool invocation) points. The
 runtime is [CPEX], embedded in-process.
 
-[CPEX]: https://github.com/contextforge-org/contextforge-plugins-framework
+[CPEX]: https://github.com/contextforge-org/cpex
 
 ### Goals
 
@@ -247,8 +247,8 @@ TLS (L1, L2, L4), body chunks (H6, H13),
 and additional HTTP lifecycle points (H5, H8,
 H10, H12). Reserved protocol-semantic hooks
 include MCP prompt/resource and A2A task hooks.
-A full catalog with payload sketches is in the
-design document (`docs/plugins.md`).
+A full catalog with payload sketches will be added
+when the hook system graduates to experimental.
 
 ### Plugin Runtime Model
 

@@ -24,12 +24,7 @@ const BODY_FALLBACK_LIMIT: usize = 67_108_864; // 64 MiB
 // -----------------------------------------------------------------------------
 
 /// Run body filters on a request body chunk, enforcing size limits.
-#[expect(
-    clippy::large_stack_frames,
-    clippy::too_many_lines,
-    clippy::cognitive_complexity,
-    reason = "body filter dispatch"
-)]
+#[expect(clippy::large_stack_frames, clippy::too_many_lines, reason = "body filter dispatch")]
 pub(super) async fn execute(
     pipeline: &FilterPipeline,
     session: &mut Session,
@@ -107,7 +102,7 @@ pub(super) async fn execute(
         _ => tracing::warn!("unhandled BodyMode variant in request body filter"),
     }
 
-    let (result, body_bytes, cluster, upstream, extensions, filter_metadata, filter_state) = {
+    let (result, body_bytes, cluster, upstream, extensions, filter_metadata, filter_state, executed_indices, body_done) = {
         let mut fctx = ctx.filter_context_for(pipeline, None).ok_or_else(|| {
             pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
@@ -123,6 +118,8 @@ pub(super) async fn execute(
             fctx.extensions,
             fctx.filter_metadata,
             fctx.filter_state,
+            fctx.executed_filter_indices,
+            fctx.body_done_indices,
         )
     };
     ctx.request_body_bytes = body_bytes;
@@ -131,6 +128,8 @@ pub(super) async fn execute(
     ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;
     ctx.filter_state = filter_state;
+    ctx.cached_executed_filter_indices = executed_indices;
+    ctx.cached_body_done_indices = body_done;
 
     match result {
         Ok(FilterAction::Continue | FilterAction::BodyDone) => {

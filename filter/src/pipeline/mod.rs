@@ -10,6 +10,7 @@ mod build_branch;
 mod checks;
 mod clusters;
 pub(crate) mod evaluate;
+mod extension;
 pub(crate) mod filter;
 mod http;
 mod http_utils;
@@ -34,6 +35,7 @@ mod tests;
 
 use std::sync::Arc;
 
+pub use extension::PipelineExtension;
 use praxis_core::{
     config::{ABSOLUTE_MAX_BODY_BYTES, FailureMode, InsecureOptions},
     health::HealthRegistry,
@@ -44,8 +46,6 @@ use praxis_core::{
 use tracing::warn;
 
 use self::filter::PipelineFilter;
-#[cfg(feature = "ai-inference")]
-use crate::builtins::http::ai::store::ResponseStoreRegistry;
 use crate::{
     FilterError,
     body::{BodyCapabilities, BodyMode},
@@ -85,9 +85,8 @@ pub struct FilterPipeline {
     /// Named key-value stores for runtime mappings.
     kv_stores: Option<KvStoreRegistry>,
 
-    /// Named response store backends for AI API persistence.
-    #[cfg(feature = "ai-inference")]
-    response_stores: Option<ResponseStoreRegistry>,
+    /// External pipeline extensions injected after construction.
+    pipeline_extensions: Vec<Box<dyn PipelineExtension>>,
 
     /// Wall-clock time source for filters that need timestamps.
     time_source: Arc<dyn TimeSource>,
@@ -206,23 +205,27 @@ impl FilterPipeline {
         self.kv_stores = Some(stores);
     }
 
-    /// The shared response store registry, if set.
-    #[cfg(feature = "ai-inference")]
-    pub fn response_stores(&self) -> Option<&ResponseStoreRegistry> {
-        self.response_stores.as_ref()
+    /// Register an external pipeline extension.
+    ///
+    /// Extensions are called once per request via
+    /// [`prepare_extensions`] to inject pipeline-scoped resources
+    /// into the per-request [`RequestExtensions`] container.
+    ///
+    /// [`prepare_extensions`]: FilterPipeline::prepare_extensions
+    /// [`RequestExtensions`]: crate::RequestExtensions
+    pub fn add_pipeline_extension(&mut self, ext: Box<dyn PipelineExtension>) {
+        self.pipeline_extensions.push(ext);
     }
 
     /// Inject pipeline-level resources into per-request extensions.
     ///
     /// Called by the protocol adapter when building each request's
-    /// filter context. Keeps AI-specific types encapsulated within
-    /// the filter crate so callers never name AI types directly.
+    /// filter context. Delegates to each registered
+    /// [`PipelineExtension`].
     pub fn prepare_extensions(&self, extensions: &mut RequestExtensions) {
-        #[cfg(feature = "ai-inference")]
-        if let Some(stores) = self.response_stores.as_ref() {
-            extensions.insert(stores.clone());
+        for ext in &self.pipeline_extensions {
+            ext.prepare(extensions);
         }
-        let _ = extensions;
     }
 
     /// The wall-clock time source.

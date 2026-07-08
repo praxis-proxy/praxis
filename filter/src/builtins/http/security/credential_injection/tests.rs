@@ -17,7 +17,7 @@ async fn injects_credential_for_matching_cluster() {
     let f = from_yaml(
         r#"
 clusters:
-  - name: openai
+  - name: provider-a
     header: Authorization
     value: "sk-test-key"
     header_prefix: "Bearer "
@@ -25,7 +25,7 @@ clusters:
     );
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.cluster = Some(Arc::from("openai"));
+    ctx.cluster = Some(Arc::from("provider-a"));
 
     let action = f.on_request(&mut ctx).await.unwrap();
     assert!(
@@ -46,7 +46,7 @@ async fn skips_when_no_cluster_selected() {
     let f = from_yaml(
         r#"
 clusters:
-  - name: openai
+  - name: provider-a
     header: Authorization
     value: "sk-test-key"
 "#,
@@ -70,7 +70,7 @@ async fn skips_when_cluster_has_no_credentials() {
     let f = from_yaml(
         r#"
 clusters:
-  - name: openai
+  - name: provider-a
     header: Authorization
     value: "sk-test-key"
 "#,
@@ -185,29 +185,33 @@ async fn multiple_clusters() {
     let f = from_yaml(
         r#"
 clusters:
-  - name: openai
+  - name: provider-a
     header: Authorization
-    value: "sk-openai"
+    value: "sk-provider-a"
     header_prefix: "Bearer "
-  - name: anthropic
+  - name: provider-b
     header: x-api-key
-    value: "sk-anthropic"
+    value: "sk-provider-b"
 "#,
     );
 
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    ctx.cluster = Some(Arc::from("openai"));
+    ctx.cluster = Some(Arc::from("provider-a"));
     let _action = f.on_request(&mut ctx).await.unwrap();
     let auth = find_header(&ctx.extra_request_headers, "Authorization");
-    assert_eq!(auth, Some("Bearer sk-openai"), "openai cluster should get Bearer token");
+    assert_eq!(
+        auth,
+        Some("Bearer sk-provider-a"),
+        "provider-a cluster should get Bearer token"
+    );
 
     let req2 = crate::test_utils::make_request(http::Method::POST, "/v1/messages");
     let mut ctx2 = crate::test_utils::make_filter_context(&req2);
-    ctx2.cluster = Some(Arc::from("anthropic"));
+    ctx2.cluster = Some(Arc::from("provider-b"));
     let _action = f.on_request(&mut ctx2).await.unwrap();
     let key = find_header(&ctx2.extra_request_headers, "x-api-key");
-    assert_eq!(key, Some("sk-anthropic"), "anthropic cluster should get x-api-key");
+    assert_eq!(key, Some("sk-provider-b"), "provider-b cluster should get x-api-key");
 }
 
 #[test]
@@ -284,7 +288,7 @@ fn from_config_parses_valid_yaml() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 clusters:
-  - name: openai
+  - name: provider-a
     header: Authorization
     value: "sk-test"
     header_prefix: "Bearer "

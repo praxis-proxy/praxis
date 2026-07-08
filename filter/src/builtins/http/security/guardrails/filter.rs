@@ -165,7 +165,7 @@ impl GuardrailsFilter {
                 .iter()
                 .filter_map(|val| val.to_str().ok())
                 .find_map(|s| {
-                    let ev = rule.eval(s);
+                    let ev = rule.eval(s, None);
                     ev.matched.then_some(ev)
                 });
 
@@ -189,13 +189,23 @@ impl GuardrailsFilter {
     }
 
     /// Check all body-targeted rules against the request body.
+    ///
+    /// Lowercases the body once for all `Contains` rules to avoid
+    /// re-allocating per rule. Only allocates when at least one
+    /// body-targeted `Contains` rule exists.
     fn check_body(&self, body: &str) -> bool {
+        use super::rule::RuleMatcher;
+        let has_body_contains = self
+            .rules
+            .iter()
+            .any(|r| matches!(r.target, RuleTarget::Body) && matches!(r.matcher, RuleMatcher::Contains(_)));
+        let body_lower = has_body_contains.then(|| body.to_lowercase());
         for rule in &self.rules {
             if !matches!(rule.target, RuleTarget::Body) {
                 continue;
             }
 
-            let is_rule_match = rule.eval(body);
+            let is_rule_match = rule.eval(body, body_lower.as_deref());
             let rule_matches = if rule.negate {
                 !is_rule_match.matched
             } else {

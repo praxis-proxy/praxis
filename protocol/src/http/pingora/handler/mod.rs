@@ -268,9 +268,13 @@ async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx)
         let extensions = filter_ctx.extensions;
         let metadata = filter_ctx.filter_metadata;
         let state = filter_ctx.filter_state;
+        let exec_idx = filter_ctx.executed_filter_indices;
+        let body_idx = filter_ctx.body_done_indices;
         ctx.extensions = extensions;
         ctx.filter_metadata = metadata;
         ctx.filter_state = state;
+        ctx.cached_executed_filter_indices = exec_idx;
+        ctx.cached_body_done_indices = body_idx;
     }
 }
 
@@ -535,16 +539,16 @@ mod tests {
         let mut ctx = PingoraRequestCtx::default();
         ctx.response_phase_done = false;
         ctx.filter_metadata
-            .insert("mcp.method".to_owned(), "tools/call".to_owned());
+            .insert("json_rpc.method".to_owned(), "service/invoke".to_owned());
         ctx.request_snapshot = Some(praxis_filter::Request {
             method: http::Method::POST,
-            uri: "/mcp".parse().unwrap(),
+            uri: "/api".parse().unwrap(),
             headers: http::HeaderMap::new(),
         });
         logging_cleanup(&pipeline, &mut ctx).await;
         assert_eq!(
-            ctx.filter_metadata.get("mcp.method").map(String::as_str),
-            Some("tools/call"),
+            ctx.filter_metadata.get("json_rpc.method").map(String::as_str),
+            Some("service/invoke"),
             "filter_metadata should survive logging_cleanup"
         );
     }

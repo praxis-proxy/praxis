@@ -913,24 +913,71 @@ certificates:
     }
 
     #[test]
-    fn cipher_suite_id_is_tls12() {
-        assert!(CipherSuiteId::Tls12EcdheRsaWithAes128GcmSha256.is_tls12());
-        assert!(CipherSuiteId::Tls12EcdheEcdsaWithAes256GcmSha384.is_tls12());
-        assert!(
-            !CipherSuiteId::Tls13Aes256GcmSha384.is_tls12(),
-            "TLS 1.3 suite should not be TLS 1.2"
-        );
+    fn cipher_suite_id_is_tls12_all_variants() {
+        let tls12_suites = [
+            CipherSuiteId::Tls12EcdheEcdsaWithAes128GcmSha256,
+            CipherSuiteId::Tls12EcdheEcdsaWithAes256GcmSha384,
+            CipherSuiteId::Tls12EcdheEcdsaWithChacha20Poly1305Sha256,
+            CipherSuiteId::Tls12EcdheRsaWithAes128GcmSha256,
+            CipherSuiteId::Tls12EcdheRsaWithAes256GcmSha384,
+            CipherSuiteId::Tls12EcdheRsaWithChacha20Poly1305Sha256,
+        ];
+        for suite in tls12_suites {
+            assert!(suite.is_tls12(), "{suite:?} should be TLS 1.2");
+        }
+
+        let tls13_suites = [
+            CipherSuiteId::Tls13Aes128GcmSha256,
+            CipherSuiteId::Tls13Aes256GcmSha384,
+            CipherSuiteId::Tls13Chacha20Poly1305Sha256,
+        ];
+        for suite in tls13_suites {
+            assert!(!suite.is_tls12(), "{suite:?} should NOT be TLS 1.2");
+        }
     }
 
     #[test]
-    fn cipher_suite_id_to_rustls_round_trip() {
-        let suite = CipherSuiteId::Tls13Aes256GcmSha384;
-        let rustls_suite = suite.to_rustls();
-        assert_eq!(
-            format!("{:?}", rustls_suite.suite()),
-            "TLS13_AES_256_GCM_SHA384",
-            "should map to the correct rustls suite"
-        );
+    fn cipher_suite_id_to_rustls_all_variants() {
+        let expected = [
+            (CipherSuiteId::Tls13Aes128GcmSha256, "TLS13_AES_128_GCM_SHA256"),
+            (CipherSuiteId::Tls13Aes256GcmSha384, "TLS13_AES_256_GCM_SHA384"),
+            (
+                CipherSuiteId::Tls13Chacha20Poly1305Sha256,
+                "TLS13_CHACHA20_POLY1305_SHA256",
+            ),
+            (
+                CipherSuiteId::Tls12EcdheEcdsaWithAes128GcmSha256,
+                "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256",
+            ),
+            (
+                CipherSuiteId::Tls12EcdheEcdsaWithAes256GcmSha384,
+                "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384",
+            ),
+            (
+                CipherSuiteId::Tls12EcdheEcdsaWithChacha20Poly1305Sha256,
+                "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256",
+            ),
+            (
+                CipherSuiteId::Tls12EcdheRsaWithAes128GcmSha256,
+                "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256",
+            ),
+            (
+                CipherSuiteId::Tls12EcdheRsaWithAes256GcmSha384,
+                "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384",
+            ),
+            (
+                CipherSuiteId::Tls12EcdheRsaWithChacha20Poly1305Sha256,
+                "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256",
+            ),
+        ];
+        for (suite, expected_name) in expected {
+            let rustls_suite = suite.to_rustls();
+            assert_eq!(
+                format!("{:?}", rustls_suite.suite()),
+                expected_name,
+                "{suite:?} should map to {expected_name}"
+            );
+        }
     }
 
     #[test]

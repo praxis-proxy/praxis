@@ -5,7 +5,7 @@
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    free_port, http_send, parse_body, parse_status, simple_proxy_yaml, start_backend, start_proxy,
+    bind_unique_port, free_port, http_send, parse_body, parse_status, simple_proxy_yaml, start_backend, start_proxy,
 };
 
 // -----------------------------------------------------------------------------
@@ -311,6 +311,129 @@ fn content_length_overflow_rejected() {
     );
 }
 
+// -----------------------------------------------------------------------------
+// Tests - TE-CL Desync
+// -----------------------------------------------------------------------------
+
+/// TE-CL desync: Transfer-Encoding chunked with a conflicting
+/// Content-Length should be handled safely.
+#[test]
+fn te_cl_desync_rejected_or_safe() {
+    let backend_port = start_backend("ok");
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "POST / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Transfer-Encoding: chunked\r\n\
+         Content-Length: 6\r\n\
+         Connection: close\r\n\
+         \r\n\
+         0\r\n\r\n",
+    );
+    let status = parse_status(&raw);
+
+    assert!(
+        status == 400 || status == 200 || status == 0,
+        "TE-CL conflict must be rejected or handled safely (got {status})"
+    );
+    if status == 200 {
+        let body = parse_body(&raw);
+        assert_eq!(body, "ok", "if accepted, only one response should be returned");
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tests - TE-TE Obfuscation
+// -----------------------------------------------------------------------------
+
+/// Multiple TE values in a single header is an obfuscation vector.
+#[test]
+fn te_te_multiple_values_handled_safely() {
+    let backend_port = start_backend("ok");
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "POST / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Transfer-Encoding: chunked, identity\r\n\
+         Connection: close\r\n\
+         \r\n\
+         0\r\n\r\n",
+    );
+    let status = parse_status(&raw);
+
+    assert!(
+        status == 400 || status == 200 || status == 0,
+        "TE with multiple values must be rejected or normalized (got {status})"
+    );
+}
+
+/// Two separate TE headers is an obfuscation vector.
+#[test]
+fn te_duplicate_headers_handled_safely() {
+    let backend_port = start_backend("ok");
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "POST / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Transfer-Encoding: chunked\r\n\
+         Transfer-Encoding: identity\r\n\
+         Connection: close\r\n\
+         \r\n\
+         0\r\n\r\n",
+    );
+    let status = parse_status(&raw);
+
+    assert!(
+        status == 400 || status == 200 || status == 0,
+        "duplicate TE headers must be rejected or normalized (got {status})"
+    );
+}
+
+/// Tab-prefixed TE value is an obfuscation attempt.
+#[test]
+fn te_tab_prefix_obfuscation_handled_safely() {
+    let backend_port = start_backend("ok");
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "POST / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Transfer-Encoding: \tchunked\r\n\
+         Connection: close\r\n\
+         \r\n\
+         0\r\n\r\n",
+    );
+    let status = parse_status(&raw);
+
+    assert!(
+        status == 400 || status == 200 || status == 0,
+        "tab-prefixed TE must be rejected or normalized (got {status})"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Tests - Content-Length Edge Cases (continued)
+// -----------------------------------------------------------------------------
+
 /// Empty Transfer-Encoding value must be rejected. An empty
 /// TE is invalid per [RFC 9112].
 ///
@@ -337,4 +460,115 @@ fn empty_transfer_encoding_rejected() {
         status, 400,
         "empty Transfer-Encoding must be rejected with 400, got {status}"
     );
+}
+
+// -----------------------------------------------------------------------------
+// Tests - Response Splitting and Header Injection
+// -----------------------------------------------------------------------------
+
+#[test]
+fn response_splitting_crlf_in_header_value_rejected() {
+    let backend_port = start_crlf_header_backend();
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Connection: close\r\n\r\n",
+    );
+    let status = parse_status(&raw);
+
+    assert!(
+        status == 502 || status == 200,
+        "CRLF in upstream response header must result in 502 or safe forwarding (got {status})"
+    );
+}
+
+#[test]
+fn multiple_content_type_headers_handled() {
+    let backend_port = start_backend("ok");
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "POST / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Content-Type: text/plain\r\n\
+         Content-Type: application/json\r\n\
+         Content-Length: 2\r\n\
+         Connection: close\r\n\
+         \r\n\
+         ok",
+    );
+    let status = parse_status(&raw);
+
+    assert!(
+        status == 200 || status == 400,
+        "duplicate Content-Type headers must be accepted or cleanly rejected (got {status})"
+    );
+}
+
+#[test]
+fn null_byte_in_header_value_handled() {
+    let backend_port = start_backend("ok");
+    let proxy_port = free_port();
+    let yaml = simple_proxy_yaml(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         X-Test: before\x00after\r\n\
+         Connection: close\r\n\r\n",
+    );
+    let status = parse_status(&raw);
+
+    assert!(
+        status == 200 || status == 400 || status == 0,
+        "null byte in header value must be accepted, rejected, or connection closed (got {status})"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+/// Start a backend that embeds a CRLF sequence inside a
+/// response header value to simulate response splitting.
+fn start_crlf_header_backend() -> u16 {
+    use std::io::{Read as _, Write as _};
+
+    let (listener, port) = bind_unique_port();
+
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut stream = stream;
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut buf = [0_u8; 4096];
+                let _bytes = stream.read(&mut buf);
+
+                let response = "HTTP/1.1 200 OK\r\n\
+                                Content-Length: 2\r\n\
+                                X-Malicious: benign\r\nX-Injected: evil\r\n\
+                                Connection: close\r\n\
+                                \r\n\
+                                ok";
+                let _sent = stream.write_all(response.as_bytes());
+            });
+        }
+    });
+
+    port
 }

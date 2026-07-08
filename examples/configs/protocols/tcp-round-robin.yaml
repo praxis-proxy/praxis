@@ -1,4 +1,7 @@
 # TCP round-robin load balancing across database replicas.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/tcp-round-robin.yaml
 listeners:
   - name: postgres
     address: "127.0.0.1:5432"

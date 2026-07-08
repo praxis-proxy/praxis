@@ -22,6 +22,26 @@ use tempfile::TempDir;
 // TestCertificates
 // -----------------------------------------------------------------------------
 
+// -----------------------------------------------------------------------------
+// CryptoProvider
+// -----------------------------------------------------------------------------
+
+/// Install the rustls [`CryptoProvider`] for test environments.
+///
+/// Both `ring` and `aws-lc-rs` features are enabled transitively
+/// via Pingora, so rustls cannot auto-select. This function
+/// installs `ring` as the process-wide default. Safe to call
+/// multiple times — subsequent calls are no-ops.
+///
+/// [`CryptoProvider`]: rustls::crypto::CryptoProvider
+pub fn ensure_crypto_provider() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+}
+
+// -----------------------------------------------------------------------------
+// TestCertificates
+// -----------------------------------------------------------------------------
+
 /// Self-signed test CA and server certificate files.
 pub struct TestCertificates {
     /// Path to the PEM-encoded server certificate file.
@@ -146,6 +166,7 @@ impl TestCertificates {
     ///
     /// [`rustls::ClientConfig`]: rustls::ClientConfig
     pub fn client_config(&self) -> Arc<ClientConfig> {
+        ensure_crypto_provider();
         let ca = rustls::pki_types::CertificateDer::from(self.ca_cert_der.clone());
         let mut root_store = rustls::RootCertStore::empty();
         root_store.add(ca).expect("add CA to root store");
@@ -166,6 +187,7 @@ impl TestCertificates {
     ///
     /// [`rustls::ClientConfig`]: rustls::ClientConfig
     pub fn raw_tls_client_config(&self) -> Arc<ClientConfig> {
+        ensure_crypto_provider();
         let ca = rustls::pki_types::CertificateDer::from(self.ca_cert_der.clone());
         let mut root_store = rustls::RootCertStore::empty();
         root_store.add(ca).expect("add CA to root store");
@@ -215,6 +237,7 @@ impl TestCertificates {
     /// [`rustls::ClientConfig`]: rustls::ClientConfig
     /// [`raw_tls_client_config_with_cert`]: Self::raw_tls_client_config_with_cert
     pub fn client_config_with_cert(&self, client_cert: &ClientCert) -> Arc<ClientConfig> {
+        ensure_crypto_provider();
         let ca = rustls::pki_types::CertificateDer::from(self.ca_cert_der.clone());
         let mut root_store = rustls::RootCertStore::empty();
         root_store.add(ca).expect("add CA to root store");
@@ -248,6 +271,7 @@ impl TestCertificates {
     ///
     /// [`rustls::ClientConfig`]: rustls::ClientConfig
     pub fn raw_tls_client_config_with_cert(&self, client_cert: &ClientCert) -> Arc<ClientConfig> {
+        ensure_crypto_provider();
         let ca = rustls::pki_types::CertificateDer::from(self.ca_cert_der.clone());
         let mut root_store = rustls::RootCertStore::empty();
         root_store.add(ca).expect("add CA to root store");
@@ -561,6 +585,7 @@ pub fn start_tls_backend(certs: &TestCertificates, body: &str) -> u16 {
 ///
 /// [`TlsAcceptor`]: tokio_rustls::TlsAcceptor
 fn build_tls_acceptor(certs: &TestCertificates) -> tokio_rustls::TlsAcceptor {
+    ensure_crypto_provider();
     let certs_pem = std::fs::read(&certs.cert_path).expect("read cert PEM");
     let key_pem = std::fs::read(&certs.key_path).expect("read key PEM");
 
@@ -606,6 +631,7 @@ pub fn start_mtls_backend(certs: &TestCertificates, body: &str) -> u16 {
 ///
 /// [`TlsAcceptor`]: tokio_rustls::TlsAcceptor
 fn build_mtls_acceptor(certs: &TestCertificates) -> tokio_rustls::TlsAcceptor {
+    ensure_crypto_provider();
     let certs_pem = std::fs::read(&certs.cert_path).expect("read cert PEM");
     let key_pem = std::fs::read(&certs.key_path).expect("read key PEM");
 

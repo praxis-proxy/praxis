@@ -18,7 +18,7 @@ use clap::Parser;
 /// Title overrides for category directories whose display name cannot be
 /// derived by simple title-casing. All other directories are converted
 /// automatically (e.g. `"traffic-management"` → `"Traffic Management"`).
-const TITLE_OVERRIDES: &[(&str, &str)] = &[("ai", "AI / Inference")];
+const TITLE_OVERRIDES: &[(&str, &str)] = &[];
 
 /// Comment-line prefixes that begin a non-description block. Paragraphs
 /// whose first line starts with any of these are skipped during description
@@ -104,7 +104,7 @@ struct ExampleEntry {
     description: String,
     /// Filename only (e.g. `full-flow.yaml`).
     filename: String,
-    /// Relative link path from `examples/` (e.g. `configs/ai/full-flow.yaml`).
+    /// Relative link path from `examples/` (e.g. `configs/security/cors.yaml`).
     link_path: String,
 }
 
@@ -401,8 +401,8 @@ listeners:
         let input = "\
 # Title
 #
-# Requires the ai-inference feature:
-#   cargo build --features ai-inference
+# Requires the ext-proc feature:
+#   cargo build --features ext-proc
 #
 # Real description here.
 ";
@@ -415,7 +415,7 @@ listeners:
         let input = "\
 # Static Catalog
 #
-# Pipeline: mcp -> load_balancer.
+# Pipeline: json_rpc -> load_balancer.
 #
 # Backend endpoints are placeholders for a future flow.
 ";
@@ -518,11 +518,6 @@ listeners:
     }
 
     #[test]
-    fn title_override_applied() {
-        assert_eq!(category_title("ai"), "AI / Inference");
-    }
-
-    #[test]
     fn split_at_marker_found() {
         let content = "# Header\n\n## Configs\nsome tables\n";
         let (header, tables) = split_at_marker(content);
@@ -543,13 +538,9 @@ listeners:
         let root = workspace_root();
         let categories = discover_categories(&root.join("examples/configs"));
         assert!(
-            categories.len() > 5,
-            "expected 5+ categories, found {}",
+            categories.len() > 4,
+            "expected 4+ categories, found {}",
             categories.len()
-        );
-        assert!(
-            categories.iter().any(|(d, _)| d == "ai"),
-            "ai category should be discovered"
         );
     }
 

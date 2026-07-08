@@ -13,6 +13,17 @@ use praxis_core::{
 use crate::{body::BodyMode, extensions::RequestExtensions, pipeline::body::merge_body_mode, results::FilterResultSet};
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// Maximum entries allowed in the general `filter_metadata` map.
+///
+/// Individual keys and values are already size-bounded (64 / 256
+/// bytes), but without an entry count cap a filter chain could
+/// insert thousands of unique keys per request.
+const MAX_METADATA_ENTRIES: usize = 128;
+
+// -----------------------------------------------------------------------------
 // HttpFilterContext
 // -----------------------------------------------------------------------------
 
@@ -89,7 +100,7 @@ pub struct HttpFilterContext<'a> {
     /// for the entire request lifetime.
     ///
     /// Keys use dot-prefix namespacing by convention
-    /// (e.g. `mcp.method`, `a2a.task_id`, `json_rpc.kind`).
+    /// (e.g. `json_rpc.kind`, `classifier.label`).
     ///
     /// [`filter_results`]: Self::filter_results
     pub filter_metadata: HashMap<String, String>,
@@ -212,7 +223,7 @@ impl HttpFilterContext<'_> {
     /// Write a durable metadata value that persists across all phases.
     ///
     /// Keys should use dot-prefix namespacing
-    /// (e.g. `mcp.method`, `a2a.task_id`). Keys are limited to
+    /// (e.g. `json_rpc.kind`, `classifier.label`). Keys are limited to
     /// 64 bytes and values to 256 bytes to bound per-request
     /// memory growth.
     pub fn set_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) {
@@ -224,6 +235,14 @@ impl HttpFilterContext<'_> {
         }
         if value.len() > 256 {
             tracing::warn!(key = %key, value_len = value.len(), "metadata value rejected (max 256 bytes)");
+            return;
+        }
+        if !self.filter_metadata.contains_key(&key) && self.filter_metadata.len() >= MAX_METADATA_ENTRIES {
+            tracing::warn!(
+                key = %key,
+                entries = self.filter_metadata.len(),
+                "metadata entry rejected (max {MAX_METADATA_ENTRIES} entries)"
+            );
             return;
         }
         self.filter_metadata.insert(key, value);
@@ -527,7 +546,7 @@ mod tests {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let ctx = crate::test_utils::make_filter_context(&req);
         assert!(
-            ctx.get_metadata("mcp.method").is_none(),
+            ctx.get_metadata("json_rpc.method").is_none(),
             "get_metadata should return None for absent key"
         );
     }
@@ -536,10 +555,10 @@ mod tests {
     fn set_metadata_then_get_returns_value() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.set_metadata("mcp.method", "tools/call");
+        ctx.set_metadata("json_rpc.method", "service/invoke");
         assert_eq!(
-            ctx.get_metadata("mcp.method"),
-            Some("tools/call"),
+            ctx.get_metadata("json_rpc.method"),
+            Some("service/invoke"),
             "get_metadata should return the set value"
         );
     }
@@ -548,10 +567,10 @@ mod tests {
     fn set_metadata_overwrites_existing() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.set_metadata("a2a.method", "SendMessage");
-        ctx.set_metadata("a2a.method", "GetTask");
+        ctx.set_metadata("classifier.label", "ProcessRequest");
+        ctx.set_metadata("classifier.label", "GetTask");
         assert_eq!(
-            ctx.get_metadata("a2a.method"),
+            ctx.get_metadata("classifier.label"),
             Some("GetTask"),
             "set_metadata should overwrite previous value"
         );
@@ -561,10 +580,10 @@ mod tests {
     fn metadata_independent_of_filter_results() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.set_metadata("mcp.session_id", "gw-123");
+        ctx.set_metadata("request.session_id", "gw-123");
         ctx.filter_results.clear();
         assert_eq!(
-            ctx.get_metadata("mcp.session_id"),
+            ctx.get_metadata("request.session_id"),
             Some("gw-123"),
             "clearing filter_results should not affect metadata"
         );
@@ -574,11 +593,11 @@ mod tests {
     fn set_metadata_accepts_owned_strings() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        let key = "a2a.task_id".to_owned();
+        let key = "request.task_id".to_owned();
         let value = "task-456".to_owned();
         ctx.set_metadata(key, value);
         assert_eq!(
-            ctx.get_metadata("a2a.task_id"),
+            ctx.get_metadata("request.task_id"),
             Some("task-456"),
             "set_metadata should accept owned Strings"
         );
@@ -595,7 +614,7 @@ mod tests {
     fn kv_stores_returns_registry_when_set() {
         let registry = KvStoreRegistry::new();
         let store = registry.get_or_create("routing");
-        store.set("model", Arc::from("gpt-4"));
+        store.set("model", Arc::from("model-gamma-1"));
 
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -604,7 +623,7 @@ mod tests {
         let store = ctx.kv_stores.unwrap().get("routing").unwrap();
         assert_eq!(
             store.get("model").as_deref(),
-            Some("gpt-4"),
+            Some("model-gamma-1"),
             "filter should read KV store via context"
         );
     }
@@ -684,6 +703,47 @@ mod tests {
         let long_value = "v".repeat(257);
         ctx.set_metadata("key", long_value.as_str());
         assert!(ctx.get_metadata("key").is_none(), "257-byte value should be rejected");
+    }
+
+    #[test]
+    fn set_metadata_rejects_when_entry_limit_reached() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        for i in 0..MAX_METADATA_ENTRIES {
+            ctx.set_metadata(format!("key.{i}"), "value");
+        }
+        assert_eq!(
+            ctx.filter_metadata.len(),
+            MAX_METADATA_ENTRIES,
+            "should accept exactly {MAX_METADATA_ENTRIES} entries"
+        );
+
+        ctx.set_metadata("overflow", "value");
+        assert!(
+            ctx.get_metadata("overflow").is_none(),
+            "entry beyond limit should be rejected"
+        );
+    }
+
+    #[test]
+    fn set_metadata_allows_overwrite_at_limit() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        for i in 0..MAX_METADATA_ENTRIES {
+            ctx.set_metadata(format!("key.{i}"), "old");
+        }
+
+        ctx.set_metadata("key.0", "new");
+        assert_eq!(
+            ctx.get_metadata("key.0"),
+            Some("new"),
+            "overwriting existing key at limit should succeed"
+        );
+        assert_eq!(
+            ctx.filter_metadata.len(),
+            MAX_METADATA_ENTRIES,
+            "overwrite should not increase entry count"
+        );
     }
 
     #[test]

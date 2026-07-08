@@ -3,7 +3,7 @@
 
 //! Pingora-specific server factory and lifecycle management.
 
-use pingora_core::server::{Server, configuration::ServerConf};
+use pingora_core::server::{RunArgs, Server, configuration::ServerConf};
 use tracing::info;
 
 use super::RuntimeOptions;
@@ -44,6 +44,18 @@ impl PingoraServerRuntime {
     /// Start all registered services. Blocks forever.
     pub fn run(self) -> ! {
         self.server.run_forever()
+    }
+
+    /// Start all registered services with a shutdown signal.
+    ///
+    /// Unlike [`run`], this method returns when the [`RunArgs`]
+    /// shutdown signal fires, allowing test harnesses to stop
+    /// the server cleanly.
+    ///
+    /// [`run`]: Self::run
+    /// [`RunArgs`]: pingora_core::server::RunArgs
+    pub fn run_with_args(self, args: RunArgs) {
+        self.server.run(args);
     }
 }
 

@@ -1,4 +1,7 @@
 # TCP least-connections load balancing.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/protocols/tcp-least-connections.yaml
 listeners:
   - name: postgres
     address: "127.0.0.1:5432"

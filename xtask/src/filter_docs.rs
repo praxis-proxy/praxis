@@ -203,8 +203,9 @@ struct ModuleItems {
     module_docs: Vec<String>,
     /// Local config structs found (with `Deserialize` + `deny_unknown_fields`).
     configs: Vec<ConfigStruct>,
-    /// Doc comments on public structs and filter implementation structs.
-    struct_docs: Vec<String>,
+    /// Doc comments on public structs and filter implementation structs,
+    /// paired with the struct name for priority selection.
+    struct_docs: Vec<(String, String)>,
     /// Struct definitions available for nested field rendering.
     structs: BTreeMap<String, ConfigStruct>,
     /// Enum definitions with `Deserialize` for variant rendering.
@@ -398,7 +399,7 @@ fn extract_filters(category_dir: &Path, shared_items: &ModuleItems) -> Vec<Filte
 }
 
 /// Parse non-anchor `.rs` files directly in the category root for shared
-/// enum/struct types (e.g. `on_invalid.rs` in the AI category).  Only
+/// enum/struct types (e.g. `on_invalid.rs` in payload processing).  Only
 /// struct field info and enums survive `clone_for_filter`, so module docs
 /// and config structs from these files do not leak into individual filter
 /// docs.
@@ -434,7 +435,7 @@ fn parse_category_shared_types(category_dir: &Path, anchors: &[FilterAnchor], ou
 ///
 /// An anchor is a `.rs` file containing both `fn name()` and
 /// `fn from_config()`. Duplicate names are preserved so variant
-/// configs, such as MCP broker mode, can be merged into one doc.
+/// configs can be merged into one doc.
 fn discover_filter_anchors(dir: &Path) -> Vec<FilterAnchor> {
     let rs_files = collect_rs_files(dir);
     let mut anchors: Vec<FilterAnchor> = rs_files.iter().filter_map(|path| parse_anchor_file(path)).collect();
@@ -766,7 +767,7 @@ fn parse_struct(s: &syn::ItemStruct, out: &mut ModuleItems) {
         }
     }
     if !docs.is_empty() && is_filter_doc_candidate(s) {
-        out.struct_docs.push(docs);
+        out.struct_docs.push((s.ident.to_string(), docs));
     }
 }
 
@@ -780,9 +781,10 @@ fn build_filter(items: &ModuleItems, name: &str, config_type: Option<&str>) -> F
     let description_doc = items
         .struct_docs
         .iter()
-        .find(|doc| !doc.is_empty())
-        .or_else(|| items.module_docs.iter().find(|doc| !doc.is_empty()))
-        .cloned()
+        .find(|(name, doc)| !doc.is_empty() && name.ends_with("Filter"))
+        .or_else(|| items.struct_docs.iter().find(|(_, doc)| !doc.is_empty()))
+        .map(|(_, doc)| doc.clone())
+        .or_else(|| items.module_docs.iter().find(|doc| !doc.is_empty()).cloned())
         .unwrap_or_default();
 
     let description = first_paragraph(&description_doc);
@@ -807,7 +809,11 @@ fn build_filter(items: &ModuleItems, name: &str, config_type: Option<&str>) -> F
 /// Collect all unique YAML examples from module and filter struct docs.
 fn collect_yaml_examples(items: &ModuleItems) -> Vec<String> {
     let mut examples = Vec::new();
-    for doc in items.module_docs.iter().chain(items.struct_docs.iter()) {
+    for doc in items
+        .module_docs
+        .iter()
+        .chain(items.struct_docs.iter().map(|(_, doc)| doc))
+    {
         append_unique(&mut examples, extract_yaml_examples(doc));
     }
     examples
@@ -2130,10 +2136,10 @@ mod tests {
     #[test]
     fn render_filter_doc_marks_required_feature() {
         let mut entry = sample_filter_entry();
-        entry.required_feature = Some("ai-inference".to_owned());
+        entry.required_feature = Some("ext-proc".to_owned());
         let result = render_filter_doc(&entry);
         assert!(
-            result.contains("Requires Cargo feature: `ai-inference`."),
+            result.contains("Requires Cargo feature: `ext-proc`."),
             "feature-gated filter pages should state the required feature"
         );
     }
@@ -2381,10 +2387,10 @@ mod tests {
     #[test]
     fn render_reference_index_marks_required_feature() {
         let mut entry = sample_filter_entry();
-        entry.required_feature = Some("ai-inference".to_owned());
+        entry.required_feature = Some("ext-proc".to_owned());
         let result = render_reference_index(&[entry]);
         assert!(
-            result.contains("| [`timeout`](http/traffic_management/timeout.md) | `ai-inference` |"),
+            result.contains("| [`timeout`](http/traffic_management/timeout.md) | `ext-proc` |"),
             "reference index should expose feature-gated filters"
         );
     }
@@ -2396,7 +2402,7 @@ mod tests {
             "HTTP / Traffic Management",
             "should format protocol/category"
         );
-        assert_eq!(format_title("http/ai"), "HTTP / AI", "should handle abbreviations");
+        assert_eq!(format_title("http/ip"), "HTTP / IP", "should handle abbreviations");
         assert_eq!(
             format_title("tcp/traffic_management"),
             "TCP / Traffic Management",
@@ -2429,13 +2435,8 @@ mod tests {
             return;
         }
         let features = discover_feature_requirements(&root);
-        assert_eq!(
-            features.get("model_to_header").map(String::as_str),
-            Some("ai-inference"),
-            "cfg-gated registry entries should carry their feature"
-        );
         assert!(
-            !features.contains_key("a2a"),
+            !features.contains_key("router"),
             "unconditional registry entries should not be marked feature-gated"
         );
     }
@@ -2506,67 +2507,16 @@ mod tests {
     #[test]
     fn discover_anchors_finds_nested_filters() {
         let root = workspace_root();
-        let ai_dir = root.join("filter/src/builtins/http/ai");
-        if !ai_dir.is_dir() {
+        let pp_dir = root.join("filter/src/builtins/http/payload_processing");
+        if !pp_dir.is_dir() {
             return;
         }
-        let anchors = discover_filter_anchors(&ai_dir);
+        let anchors = discover_filter_anchors(&pp_dir);
         let names: Vec<&str> = anchors.iter().map(|a| a.name.as_str()).collect();
 
-        assert!(names.contains(&"a2a"), "should find a2a in agentic/a2a/");
-        assert!(names.contains(&"json_rpc"), "should find json_rpc in agentic/json_rpc/");
-        assert!(names.contains(&"mcp"), "should find mcp in agentic/mcp/");
         assert!(
-            names.iter().filter(|name| **name == "mcp").count() >= 2,
-            "should preserve same-name MCP variants"
-        );
-    }
-
-    #[test]
-    fn mcp_docs_include_broker_fields() {
-        let root = workspace_root();
-        let ai_dir = root.join("filter/src/builtins/http/ai");
-        if !ai_dir.is_dir() {
-            return;
-        }
-        let filters = extract_filters(&ai_dir, &ModuleItems::new());
-        let mcp = filters.iter().find(|f| f.name == "mcp").expect("mcp filter");
-        let field_names: Vec<&str> = mcp.fields.iter().map(|f| f.name.as_str()).collect();
-        assert!(
-            field_names.contains(&"servers"),
-            "mcp docs should include broker-mode servers field"
-        );
-        let protocol_profile = mcp
-            .fields
-            .iter()
-            .find(|f| f.name == "protocol_profile")
-            .expect("protocol_profile field");
-        assert_eq!(
-            protocol_profile.type_str, "`current`",
-            "mcp broker enum imported from parent protocol module should render YAML variants"
-        );
-    }
-
-    #[test]
-    fn mcp_docs_include_broker_description_and_example() {
-        let root = workspace_root();
-        let ai_dir = root.join("filter/src/builtins/http/ai");
-        if !ai_dir.is_dir() {
-            return;
-        }
-        let filters = extract_filters(&ai_dir, &ModuleItems::new());
-        let mcp = filters.iter().find(|f| f.name == "mcp").expect("mcp filter");
-        assert!(
-            mcp.extra_descriptions
-                .iter()
-                .any(|description| description.contains("MCP static catalog filter")),
-            "mcp docs should include broker-mode description from crate-visible filter struct"
-        );
-        assert!(
-            mcp.yaml_examples
-                .iter()
-                .any(|example| example.contains("servers:") && example.contains("weather-mcp")),
-            "mcp docs should include broker-mode YAML example from crate-visible filter struct"
+            names.contains(&"json_rpc"),
+            "should find json_rpc in payload_processing/json_rpc/"
         );
     }
 
@@ -2636,25 +2586,6 @@ mod tests {
         assert!(
             field_names.contains(&"status"),
             "should have status field, not name/value from HeaderEntry"
-        );
-    }
-
-    #[test]
-    fn no_config_nested_filter_does_not_inherit_sibling_config() {
-        let root = workspace_root();
-        let ai_dir = root.join("filter/src/builtins/http/ai");
-        if !ai_dir.is_dir() {
-            return;
-        }
-        let filters = extract_filters(&ai_dir, &ModuleItems::new());
-        let validate = filters
-            .iter()
-            .find(|f| f.name == "openai_responses_validate")
-            .expect("openai_responses_validate filter");
-
-        assert!(
-            validate.fields.is_empty(),
-            "config-less nested filters should not inherit config fields from sibling modules"
         );
     }
 

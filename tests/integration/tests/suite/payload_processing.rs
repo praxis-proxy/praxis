@@ -111,13 +111,13 @@ fn multi_field_extracts_both_fields() {
 
     let raw = http_send(
         proxy.addr(),
-        &json_post("/v1/chat", r#"{"model":"claude-sonnet-4-5","user_id":"u-42"}"#),
+        &json_post("/v1/chat", r#"{"model":"model-alpha-1","user_id":"u-42"}"#),
     );
     assert_eq!(parse_status(&raw), 200, "multi-field extraction should return 200");
     let body = parse_body(&raw);
     let body_lower = body.to_lowercase();
     assert!(
-        body_lower.contains("x-model: claude-sonnet-4-5"),
+        body_lower.contains("x-model: model-alpha-1"),
         "expected X-Model header echoed by backend, got:\n{body}"
     );
     assert!(
@@ -136,12 +136,12 @@ fn multi_field_missing_one_still_extracts_other() {
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    let raw = http_send(proxy.addr(), &json_post("/v1/chat", r#"{"model":"claude-sonnet-4-5"}"#));
+    let raw = http_send(proxy.addr(), &json_post("/v1/chat", r#"{"model":"model-alpha-1"}"#));
     assert_eq!(parse_status(&raw), 200, "single-field present should return 200");
     let body = parse_body(&raw);
     let body_lower = body.to_lowercase();
     assert!(
-        body_lower.contains("x-model: claude-sonnet-4-5"),
+        body_lower.contains("x-model: model-alpha-1"),
         "expected X-Model header when only model is present, got:\n{body}"
     );
     assert!(
@@ -152,29 +152,25 @@ fn multi_field_missing_one_still_extracts_other() {
 
 #[test]
 fn multi_field_routes_by_extracted_model() {
-    let claude_port_guard = start_backend_with_shutdown("claude-backend");
-    let claude_port = claude_port_guard.port();
+    let alpha_port_guard = start_backend_with_shutdown("alpha-backend");
+    let alpha_port = alpha_port_guard.port();
     let default_port_guard = start_backend_with_shutdown("default-backend");
     let default_port = default_port_guard.port();
     let proxy_port = free_port();
 
-    let yaml = multi_field_routing_yaml(proxy_port, claude_port, default_port);
+    let yaml = multi_field_routing_yaml(proxy_port, alpha_port, default_port);
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
     let raw = http_send(
         proxy.addr(),
-        &json_post("/v1/chat", r#"{"model":"claude-sonnet-4-5","user_id":"u-42"}"#),
+        &json_post("/v1/chat", r#"{"model":"model-alpha-1","user_id":"u-42"}"#),
     );
-    assert_eq!(
-        parse_status(&raw),
-        200,
-        "claude-sonnet-4-5 model routing should return 200"
-    );
+    assert_eq!(parse_status(&raw), 200, "model-alpha-1 model routing should return 200");
     assert_eq!(
         parse_body(&raw),
-        "claude-backend",
-        "model=claude-sonnet-4-5 should route to claude_sonnet cluster"
+        "alpha-backend",
+        "model=model-alpha-1 should route to alpha_cluster cluster"
     );
 
     let raw = http_send(
@@ -201,12 +197,12 @@ fn conditional_extraction_fires_on_matching_path() {
 
     let raw = http_send(
         proxy.addr(),
-        &json_post("/v1/chat/completions", r#"{"model":"claude-sonnet-4-5","prompt":"hi"}"#),
+        &json_post("/v1/chat/completions", r#"{"model":"model-alpha-1","prompt":"hi"}"#),
     );
     assert_eq!(parse_status(&raw), 200, "matching path extraction should return 200");
     let body = parse_body(&raw);
     assert!(
-        body.to_lowercase().contains("x-model: claude-sonnet-4-5"),
+        body.to_lowercase().contains("x-model: model-alpha-1"),
         "X-Model should be extracted on /v1/ path, got:\n{body}"
     );
 }
@@ -223,7 +219,7 @@ fn conditional_extraction_skips_on_non_matching_path() {
 
     let raw = http_send(
         proxy.addr(),
-        &json_post("/other/endpoint", r#"{"model":"claude-sonnet-4-5","prompt":"hi"}"#),
+        &json_post("/other/endpoint", r#"{"model":"model-alpha-1","prompt":"hi"}"#),
     );
     assert_eq!(parse_status(&raw), 200, "non-matching path should return 200");
     let body = parse_body(&raw);
@@ -245,12 +241,12 @@ fn body_limit_allows_small_body_with_extraction() {
 
     let raw = http_send(
         proxy.addr(),
-        &json_post("/v1/chat", r#"{"model":"claude-sonnet-4-5","prompt":"hello"}"#),
+        &json_post("/v1/chat", r#"{"model":"model-alpha-1","prompt":"hello"}"#),
     );
     assert_eq!(parse_status(&raw), 200, "small body under limit should return 200");
     let body = parse_body(&raw);
     assert!(
-        body.to_lowercase().contains("x-model: claude-sonnet-4-5"),
+        body.to_lowercase().contains("x-model: model-alpha-1"),
         "field should be extracted from small body, got:\n{body}"
     );
 }
@@ -265,7 +261,7 @@ fn body_limit_rejects_oversized_body() {
     let config = Config::from_yaml(&yaml).unwrap();
     let proxy = start_proxy(&config);
 
-    let large_body = format!(r#"{{"model":"claude-sonnet-4-5","prompt":"{}"}}"#, "x".repeat(100));
+    let large_body = format!(r#"{{"model":"model-alpha-1","prompt":"{}"}}"#, "x".repeat(100));
     let raw = http_send(proxy.addr(), &json_post("/v1/chat", &large_body));
     assert_eq!(parse_status(&raw), 413, "oversized body should be rejected with 413");
 }
@@ -276,7 +272,7 @@ fn body_limit_exact_boundary_succeeds() {
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
 
-    let small_json = r#"{"model":"claude-sonnet-4-5"}"#;
+    let small_json = r#"{"model":"model-alpha-1"}"#;
     let limit = small_json.len();
     let yaml = body_limit_extraction_yaml(proxy_port, backend_port, limit);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -290,7 +286,7 @@ fn body_limit_exact_boundary_succeeds() {
     );
     let body = parse_body(&raw);
     assert!(
-        body.to_lowercase().contains("x-model: claude-sonnet-4-5"),
+        body.to_lowercase().contains("x-model: model-alpha-1"),
         "field should be extracted at exact boundary, got:\n{body}"
     );
 }
@@ -461,7 +457,7 @@ filter_chains:
 }
 
 /// YAML config for multi-field extraction with model-based routing.
-fn multi_field_routing_yaml(proxy_port: u16, claude_port: u16, default_port: u16) -> String {
+fn multi_field_routing_yaml(proxy_port: u16, alpha_port: u16, default_port: u16) -> String {
     format!(
         r#"
 listeners:
@@ -481,15 +477,15 @@ filter_chains:
         routes:
           - path_prefix: "/"
             headers:
-              x-model: "claude-sonnet-4-5"
-            cluster: claude_sonnet
+              x-model: "model-alpha-1"
+            cluster: alpha_cluster
           - path_prefix: "/"
             cluster: default
       - filter: load_balancer
         clusters:
-          - name: claude_sonnet
+          - name: alpha_cluster
             endpoints:
-              - "127.0.0.1:{claude_port}"
+              - "127.0.0.1:{alpha_port}"
           - name: default
             endpoints:
               - "127.0.0.1:{default_port}"

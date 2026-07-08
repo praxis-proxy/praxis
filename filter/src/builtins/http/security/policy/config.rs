@@ -23,7 +23,7 @@ use serde::Deserialize;
 ///   - filter: policy
 ///     config_path: /etc/praxis/cpex-policy.yaml
 ///     body_access: read_write   # optional; default read_only
-///     require_mcp_metadata: true
+///     require_protocol_metadata: true
 /// ```
 ///
 /// The referenced YAML is the CPEX policy document — plugins, routes,
@@ -69,27 +69,27 @@ pub struct PolicyFilterConfig {
 
     /// Fail-closed policy gate for misconfigured chains. When `true`
     /// (default), `on_request_body` rejects any request that reaches
-    /// it without `mcp.method` filter-metadata. The metadata is set
-    /// by praxis's built-in `mcp` filter, so its absence means either
-    /// (a) the `mcp` filter is missing from the chain, or (b) it is
-    /// ordered AFTER `policy` instead of before. Either is a
-    /// misconfiguration that would silently bypass CMF/APL policy.
+    /// it without `protocol.method` filter-metadata. The metadata is set
+    /// by the protocol classifier filter (available in the `praxis-ai` package), so
+    /// its absence means either (a) the protocol classifier filter is missing from
+    /// the chain, or (b) it is ordered AFTER `policy` instead of
+    /// before. Either is a misconfiguration that would silently
+    /// bypass CMF/APL policy.
     ///
-    /// Set to `false` only when intentionally fronting non-MCP
+    /// Set to `false` only when intentionally fronting non-classified
     /// traffic through the `policy` filter for identity-only
     /// enforcement (legacy behavior).
     ///
-    /// Note: MCP methods that legitimately carry no entity (e.g.
-    /// `tools/list`, `initialize`, `prompts/list`) still pass —
-    /// `require_mcp_metadata` only rejects when the metadata is
+    /// Note: JSON-RPC methods that legitimately carry no entity (e.g.
+    /// `service/list`, `initialize`, `template/list`) still pass —
+    /// `require_protocol_metadata` only rejects when the metadata is
     /// missing entirely.
     #[serde(default = "default_true")]
-    pub require_mcp_metadata: bool,
+    pub require_protocol_metadata: bool,
 }
 
 /// `#[serde(default = ...)]` requires a free function for primitives
-/// without a `Default` impl that returns the desired value. `true` is
-/// the safer default for `require_mcp_metadata`.
+/// without a `Default` impl that returns the desired value.
 fn default_true() -> bool {
     true
 }

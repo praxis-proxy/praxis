@@ -15,78 +15,6 @@ use praxis_test_utils::{
 // Tests
 // -----------------------------------------------------------------------------
 
-#[test]
-fn ai_inference_body_based_routing_matches_model() {
-    let mistral_port_guard = start_backend_with_shutdown("mistral-response");
-    let mistral_port = mistral_port_guard.port();
-    let granite_port_guard = start_backend_with_shutdown("granite-response");
-    let granite_port = granite_port_guard.port();
-    let default_port_guard = start_backend_with_shutdown("default-response");
-    let default_port = default_port_guard.port();
-    let proxy_port = free_port();
-
-    let config = load_example_config(
-        "ai/ai-inference-body-based-routing.yaml",
-        proxy_port,
-        HashMap::from([
-            ("10.0.1.1:8080", mistral_port),
-            ("10.0.1.2:8080", mistral_port),
-            ("10.0.2.1:8080", granite_port),
-            ("10.0.2.2:8080", granite_port),
-            ("10.0.3.1:8080", default_port),
-        ]),
-    );
-    let proxy = start_proxy(&config);
-
-    let raw = http_send(
-        proxy.addr(),
-        &json_post(
-            "/v1/chat/completions",
-            r#"{"model":"mistral-7b-instruct","messages":[]}"#,
-        ),
-    );
-    assert_eq!(parse_status(&raw), 200, "mistral model should return 200");
-    assert_eq!(
-        parse_body(&raw),
-        "mistral-response",
-        "model=mistral-7b-instruct should route to mistral cluster"
-    );
-}
-
-#[test]
-fn ai_inference_body_based_routing_falls_through_to_default() {
-    let mistral_port_guard = start_backend_with_shutdown("mistral-response");
-    let mistral_port = mistral_port_guard.port();
-    let granite_port_guard = start_backend_with_shutdown("granite-response");
-    let granite_port = granite_port_guard.port();
-    let default_port_guard = start_backend_with_shutdown("default-response");
-    let default_port = default_port_guard.port();
-    let proxy_port = free_port();
-
-    let config = load_example_config(
-        "ai/ai-inference-body-based-routing.yaml",
-        proxy_port,
-        HashMap::from([
-            ("10.0.1.1:8080", mistral_port),
-            ("10.0.1.2:8080", mistral_port),
-            ("10.0.2.1:8080", granite_port),
-            ("10.0.2.2:8080", granite_port),
-            ("10.0.3.1:8080", default_port),
-        ]),
-    );
-    let proxy = start_proxy(&config);
-
-    let raw = http_send(
-        proxy.addr(),
-        &json_post("/v1/chat/completions", r#"{"model":"unknown-model","messages":[]}"#),
-    );
-    assert_eq!(parse_status(&raw), 200, "unknown model should return 200");
-    assert_eq!(
-        parse_body(&raw),
-        "default-response",
-        "unknown model should fall through to default cluster"
-    );
-}
 
 #[test]
 fn multi_field_extraction_extracts_both_fields() {
@@ -108,16 +36,13 @@ fn multi_field_extraction_extracts_both_fields() {
 
     let raw = http_send(
         proxy.addr(),
-        &json_post(
-            "/v1/chat/completions",
-            r#"{"model":"claude-sonnet-4-5","user_id":"u-42"}"#,
-        ),
+        &json_post("/v1/chat/completions", r#"{"model":"model-alpha-1","user_id":"u-42"}"#),
     );
     assert_eq!(parse_status(&raw), 200, "multi-field extraction should return 200");
     let body = parse_body(&raw);
     let lower = body.to_lowercase();
     assert!(
-        lower.contains("x-model: claude-sonnet-4-5"),
+        lower.contains("x-model: model-alpha-1"),
         "expected X-Model header echoed by backend, got:\n{body}"
     );
     assert!(
@@ -128,8 +53,8 @@ fn multi_field_extraction_extracts_both_fields() {
 
 #[test]
 fn multi_field_extraction_routes_by_model() {
-    let claude_port_guard = start_backend_with_shutdown("claude-backend");
-    let claude_port = claude_port_guard.port();
+    let alpha_port_guard = start_backend_with_shutdown("alpha-backend");
+    let alpha_port = alpha_port_guard.port();
     let default_port_guard = start_backend_with_shutdown("default-backend");
     let default_port = default_port_guard.port();
     let proxy_port = free_port();
@@ -138,8 +63,8 @@ fn multi_field_extraction_routes_by_model() {
         "payload-processing/multi-field-extraction.yaml",
         proxy_port,
         HashMap::from([
-            ("10.0.1.1:8080", claude_port),
-            ("10.0.1.2:8080", claude_port),
+            ("10.0.1.1:8080", alpha_port),
+            ("10.0.1.2:8080", alpha_port),
             ("10.0.2.1:8080", default_port),
             ("10.0.3.1:8080", default_port),
         ]),
@@ -148,16 +73,13 @@ fn multi_field_extraction_routes_by_model() {
 
     let raw = http_send(
         proxy.addr(),
-        &json_post(
-            "/v1/chat/completions",
-            r#"{"model":"claude-sonnet-4-5","user_id":"u-42"}"#,
-        ),
+        &json_post("/v1/chat/completions", r#"{"model":"model-alpha-1","user_id":"u-42"}"#),
     );
-    assert_eq!(parse_status(&raw), 200, "claude model routing should return 200");
+    assert_eq!(parse_status(&raw), 200, "model-alpha-1 routing should return 200");
     assert_eq!(
         parse_body(&raw),
-        "claude-backend",
-        "model=claude-sonnet-4-5 should route to claude_sonnet cluster"
+        "alpha-backend",
+        "model=model-alpha-1 should route to alpha_cluster cluster"
     );
 }
 
@@ -180,15 +102,12 @@ fn conditional_field_extraction_fires_on_v1_path() {
 
     let raw = http_send(
         proxy.addr(),
-        &json_post(
-            "/v1/chat/completions",
-            r#"{"model":"mistral-large-latest","messages":[]}"#,
-        ),
+        &json_post("/v1/chat/completions", r#"{"model":"model-beta-1","messages":[]}"#),
     );
     assert_eq!(parse_status(&raw), 200, "v1 path extraction should return 200");
     let body = parse_body(&raw);
     assert!(
-        body.to_lowercase().contains("x-model: mistral-large-latest"),
+        body.to_lowercase().contains("x-model: model-beta-1"),
         "X-Model should be extracted on /v1/ path, got:\n{body}"
     );
 }
@@ -212,7 +131,7 @@ fn conditional_field_extraction_skips_on_non_v1_path() {
 
     let raw = http_send(
         proxy.addr(),
-        &json_post("/healthz", r#"{"model":"mistral-large-latest","messages":[]}"#),
+        &json_post("/healthz", r#"{"model":"model-beta-1","messages":[]}"#),
     );
     assert_eq!(parse_status(&raw), 200, "non-v1 path should return 200");
     let body = parse_body(&raw);
@@ -339,7 +258,7 @@ fn body_size_limit_allows_small_body() {
 
     let raw = http_send(
         proxy.addr(),
-        &json_post("/v1/chat", r#"{"model":"claude-sonnet-4-5","prompt":"hello"}"#),
+        &json_post("/v1/chat", r#"{"model":"model-alpha-1","prompt":"hello"}"#),
     );
     assert_eq!(parse_status(&raw), 200, "small body under 1024 limit should return 200");
 }
@@ -357,7 +276,7 @@ fn body_size_limit_rejects_oversized_body() {
     );
     let proxy = start_proxy(&config);
 
-    let large_body = format!(r#"{{"model":"claude-sonnet-4-5","prompt":"{}"}}"#, "x".repeat(2000));
+    let large_body = format!(r#"{{"model":"model-alpha-1","prompt":"{}"}}"#, "x".repeat(2000));
     let raw = http_send(proxy.addr(), &json_post("/v1/chat", &large_body));
     assert_eq!(parse_status(&raw), 413, "oversized body should be rejected with 413");
 }
@@ -366,8 +285,8 @@ fn body_size_limit_rejects_oversized_body() {
 fn multi_listener_body_pipeline_passthrough() {
     let default_port_guard = start_backend_with_shutdown("passthrough-ok");
     let default_port = default_port_guard.port();
-    let claude_port_guard = start_backend_with_shutdown("claude-response");
-    let claude_port = claude_port_guard.port();
+    let alpha_port_guard = start_backend_with_shutdown("alpha-response");
+    let alpha_port = alpha_port_guard.port();
     let proxy_passthrough = free_port();
     let proxy_streambuf = free_port();
     let proxy_buffered = free_port();
@@ -379,7 +298,7 @@ fn multi_listener_body_pipeline_passthrough() {
         .replace("0.0.0.0:8081", &format!("127.0.0.1:{proxy_buffered}"))
         .replace("0.0.0.0:8082", &format!("127.0.0.1:{proxy_passthrough}"))
         .replace("127.0.0.1:3000", &format!("127.0.0.1:{default_port}"))
-        .replace("127.0.0.1:3001", &format!("127.0.0.1:{claude_port}"));
+        .replace("127.0.0.1:3001", &format!("127.0.0.1:{alpha_port}"));
     let config = Config::from_yaml(&patched).unwrap();
 
     let _proxy = start_proxy(&config);
@@ -398,8 +317,8 @@ fn multi_listener_body_pipeline_passthrough() {
 fn multi_listener_body_pipeline_stream_buffer_routes() {
     let default_port_guard = start_backend_with_shutdown("default-response");
     let default_port = default_port_guard.port();
-    let claude_port_guard = start_backend_with_shutdown("claude-response");
-    let claude_port = claude_port_guard.port();
+    let alpha_port_guard = start_backend_with_shutdown("alpha-response");
+    let alpha_port = alpha_port_guard.port();
     let proxy_streambuf = free_port();
     let proxy_buffered = free_port();
     let proxy_passthrough = free_port();
@@ -411,19 +330,19 @@ fn multi_listener_body_pipeline_stream_buffer_routes() {
         .replace("0.0.0.0:8081", &format!("127.0.0.1:{proxy_buffered}"))
         .replace("0.0.0.0:8082", &format!("127.0.0.1:{proxy_passthrough}"))
         .replace("127.0.0.1:3000", &format!("127.0.0.1:{default_port}"))
-        .replace("127.0.0.1:3001", &format!("127.0.0.1:{claude_port}"));
+        .replace("127.0.0.1:3001", &format!("127.0.0.1:{alpha_port}"));
     let config = Config::from_yaml(&patched).unwrap();
 
     let proxy = start_proxy(&config);
 
     let raw = http_send(
         proxy.addr(),
-        &json_post("/v1/chat", r#"{"model":"claude-sonnet-4-5","user_id":"u-1"}"#),
+        &json_post("/v1/chat", r#"{"model":"model-alpha-1","user_id":"u-1"}"#),
     );
     assert_eq!(parse_status(&raw), 200, "stream-buffer listener should return 200");
     assert_eq!(
         parse_body(&raw),
-        "claude-response",
-        "model=claude-sonnet-4-5 should route to claude_sonnet cluster on stream-buffer listener"
+        "alpha-response",
+        "model=model-alpha-1 should route to alpha_cluster cluster on stream-buffer listener"
     );
 }

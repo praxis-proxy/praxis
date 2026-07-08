@@ -71,11 +71,9 @@ server -> protocol -> filter -> core -> tls
   admin endpoints
 - **tls** (`praxis-tls`): TLS config types, SNI
   resolution (including wildcards), cert loading
-- **proto** (`praxis-proto`): vendored Envoy ext_proc
-  protobuf definitions
 - **ext-proc** (`praxis-ext-proc`): Envoy ext_proc
-  filter (anti-pattern; opt-in `ext-proc` feature,
-  default-on for migration compatibility)
+  filter with vendored protobuf definitions
+  (anti-pattern; standalone crate, not a default dep)
 
 **Test crates** (under `tests/`):
 
@@ -155,11 +153,6 @@ See `docs/filters/extensions.md` for the full guide.
    `tests/integration/tests/suite/examples/`
 7. Run `cargo xtask sync-example-readme --fix`
 
-For AI inference filters, follow
-`docs/developing/adding-filters.md#ai-inference-validation`:
-validate only fields needed for local proxy behavior and
-leave backend-owned API semantics to the inference backend.
-
 ## Adding a Protocol
 
 1. Implement `Protocol` trait under `protocol/src/`
@@ -206,16 +199,14 @@ These two concepts are distinct, take care to not conflate them.
 ## Key Patterns
 
 - **Classify → route → branch**: classifier filters
-  promote facts to internal headers
-  (`x-praxis-ai-*`) and the router matches those
-  headers to select clusters (routing). Branch
-  chains split pipelines (pipelining). See
-  `examples/configs/ai/openai/responses/format-routing.yaml`.
+  promote facts to internal headers (`x-praxis-*`)
+  and the router matches those headers to select
+  clusters (routing). Branch chains split pipelines
+  (pipelining).
 - **Branch on filter results**: branch chains split
   or rejoin request-phase pipelines based on filter
   results (`on_result`). See
-  `examples/configs/pipeline/branch-chains.yaml`
-  and `tests/integration/tests/suite/responses_format.rs`.
+  `examples/configs/pipeline/branch-chains.yaml`.
   Branch sub-chains only run `on_request`;
   `on_request_body` and `on_response_body` are not
   executed for filters inside branch chains.
@@ -247,10 +238,10 @@ See `docs/filters/README.md` for the filter system
 documentation and `docs/filters/reference.md`
 for built-in filter configurations.
 
-Categories: `ai`, `observability`,
-`payload_processing`, `security`,
-`traffic_management`, `transformation` (HTTP);
-`observability`, `traffic_management` (TCP).
+Categories: `observability`, `payload_processing`,
+`security`, `traffic_management`,
+`transformation` (HTTP); `observability`,
+`traffic_management` (TCP).
 
 Example configs: `examples/configs/<category>/`.
 

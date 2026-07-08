@@ -5,11 +5,11 @@
 //!
 //! Directory structure mirrors `examples/configs/`.
 
+mod additional_configs;
 mod api_key_filter;
 mod max_body_guard;
 mod parse_configs;
 
-mod ai;
 mod branching;
 mod observability;
 mod operations;

@@ -194,7 +194,7 @@ filter_chains:
   code mapping.
 - **Envoy ext_proc** — bidirectional gRPC stream for
   external processing. Praxis vendors the proto definitions
-  in `praxis-proto`.
+  in `praxis-ext-proc`.
 - **NGINX auth_request** — sub-request to an authorization
   endpoint; response status controls access.
 - **Lakera Guard** — HTTP content-safety API

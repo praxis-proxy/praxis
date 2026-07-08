@@ -4,13 +4,13 @@
 //! Functional integration test for the policy example config.
 //!
 //! Exercises the `examples/configs/security/policy.yaml` filter chain
-//! end-to-end: praxis is configured with the `mcp` → `policy` → `router`
-//! → `load_balancer` chain. Two cases:
+//! end-to-end: praxis is configured with the `policy` → `router` →
+//! `load_balancer` chain. Two cases:
 //!
 //! * **Deny** — a request with no `Authorization` header is rejected with HTTP 401 (the policy identity gate's
 //!   `auth_rejection` path).
 //! * **Allow** — a request carrying a valid HS256 JWT (signed with the fixture's shared secret) resolves identity,
-//!   finds no APL route to gate it, and passes through to the backend with HTTP 200.
+//!   finds no APL route to gate it, and passes through to the backend (HTTP 200).
 //!
 //! Together these prove the example config loads, the filter
 //! constructs from the policy YAML, and the chain both blocks
@@ -91,14 +91,14 @@ fn policy_example_missing_authorization_rejects_401() {
     let config = load_policy_example(proxy_port, HashMap::from([("127.0.0.1:3000", backend_guard.port())]));
     let proxy = start_proxy(&config);
 
-    // POST with a well-formed MCP body but no Authorization header.
-    // The identity hook chain denies, the policy filter returns auth_rejection (401
-    // with WWW-Authenticate + X-Policy-Violation headers).
-    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#;
+    // POST with a well-formed JSON-RPC body but no Authorization header.
+    // The identity hook chain denies, the policy filter returns
+    // auth_rejection (401 with WWW-Authenticate + X-Policy-Violation).
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"service/invoke","params":{"name":"echo","arguments":{}}}"#;
     let raw = http_send(
         proxy.addr(),
         &format!(
-            "POST /mcp HTTP/1.1\r\n\
+            "POST /rpc HTTP/1.1\r\n\
              Host: localhost\r\n\
              Content-Type: application/json\r\n\
              Content-Length: {}\r\n\
@@ -116,7 +116,7 @@ fn policy_example_missing_authorization_rejects_401() {
     );
     assert!(
         raw.to_lowercase().contains("www-authenticate: bearer"),
-        "401 must carry WWW-Authenticate per MCP auth spec; raw response:\n{raw}",
+        "401 must carry WWW-Authenticate; raw response:\n{raw}",
     );
     assert!(
         raw.to_lowercase().contains("x-policy-violation:"),
@@ -131,16 +131,16 @@ fn policy_example_valid_jwt_passes_through() {
     let config = load_policy_example(proxy_port, HashMap::from([("127.0.0.1:3000", backend_guard.port())]));
     let proxy = start_proxy(&config);
 
-    // Same well-formed MCP body as the deny case, but now carrying a
-    // valid HS256 JWT. The policy identity gate resolves it, the fixture
-    // declares no APL routes so policy dispatch is a no-op, and the
-    // request reaches the backend (HTTP 200, body "ok").
+    // Same well-formed JSON-RPC body as the deny case, but now carrying
+    // a valid HS256 JWT. The policy identity gate resolves it, the
+    // fixture declares no APL routes so policy dispatch is a no-op, and
+    // the request reaches the backend (HTTP 200, body "ok").
     let token = mint_fixture_jwt("alice");
-    let body = r#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#;
+    let body = r#"{"jsonrpc":"2.0","id":1,"method":"service/invoke","params":{"name":"echo","arguments":{}}}"#;
     let raw = http_send(
         proxy.addr(),
         &format!(
-            "POST /mcp HTTP/1.1\r\n\
+            "POST /rpc HTTP/1.1\r\n\
              Host: localhost\r\n\
              Authorization: Bearer {token}\r\n\
              Content-Type: application/json\r\n\

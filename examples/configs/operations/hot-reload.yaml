@@ -4,16 +4,12 @@
 # config file changes. In-flight requests complete on the old
 # pipeline; new requests pick up the updated config.
 #
-# Try it:
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/operations/hot-reload.yaml
+#   curl http://localhost:8080/api/hello
 #
-#   1. Start the proxy:
-#      cargo run -p praxis-proxy -- -c examples/configs/operations/hot-reload.yaml
-#
-#   2. Send a request:
-#      curl http://localhost:8080/api/hello
-#
-#   3. Edit this file (e.g. change the static_response body)
-#      and save. The next request reflects the change.
+#   Edit this file (e.g. change the static_response body)
+#   and save. The next request reflects the change.
 #
 # What reloads dynamically:
 #   - Filter pipeline configuration
@@ -58,4 +54,5 @@ filter_chains:
         status: 200
         body: '{"message": "hello from praxis"}'
         headers:
-          content-type: "application/json"
+          - name: content-type
+            value: "application/json"

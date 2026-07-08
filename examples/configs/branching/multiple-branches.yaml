@@ -8,6 +8,9 @@
 # Use case: guardrails categorizes requests as blocked
 # or passed. Blocked requests terminate; passed requests
 # get tagged and continue.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/branching/multiple-branches.yaml
 
 listeners:
   - name: web

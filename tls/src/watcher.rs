@@ -87,11 +87,7 @@ impl CertWatcher {
 
 /// Core watch loop: sets up the notify watcher, debounces events,
 /// and reloads certificates.
-#[expect(
-    clippy::cognitive_complexity,
-    clippy::too_many_lines,
-    reason = "event loop with tokio::select"
-)]
+#[expect(clippy::too_many_lines, reason = "event loop with tokio::select")]
 async fn watch_loop(
     current: Arc<ArcSwap<CertifiedKey>>,
     pair: CertKeyPair,

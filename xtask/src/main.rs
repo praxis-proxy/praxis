@@ -18,7 +18,6 @@ mod benchmark;
 mod debug;
 mod echo;
 mod filter_docs;
-mod lint_ai_isolation;
 mod lint_deps;
 mod lint_example_tests;
 mod port;
@@ -53,11 +52,6 @@ enum Command {
     /// Run proxy benchmarks and generate reports.
     Benchmark(Box<benchmark::Args>),
 
-    /// Check that AI-specific code stays inside
-    /// `filter/src/builtins/` and does not leak into
-    /// infrastructure layers.
-    LintAiIsolation(lint_ai_isolation::Args),
-
     /// Check that workspace dependency versions use
     /// three-component semver.
     LintDeps(lint_deps::Args),
@@ -88,7 +82,6 @@ fn main() {
         Command::Echo(args) => echo::run(args),
         Command::Debug(args) => debug::run(&args),
         Command::Benchmark(args) => benchmark::run(*args),
-        Command::LintAiIsolation(args) => lint_ai_isolation::run(args),
         Command::LintDeps(args) => lint_deps::run(args),
         Command::LintExampleTests(args) => lint_example_tests::run(args),
         Command::SyncExampleReadme(args) => sync_example_readme::run(&args),

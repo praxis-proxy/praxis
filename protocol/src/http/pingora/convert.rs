@@ -81,7 +81,6 @@ pub(crate) fn response_header_from_pingora(upstream: &mut pingora_http::Response
 /// ```
 ///
 /// [`Rejection`]: praxis_filter::Rejection
-#[expect(clippy::cognitive_complexity, reason = "error handling branches")]
 pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) {
     debug!(status = rejection.status, "sending rejection response");
     session.set_keepalive(None);

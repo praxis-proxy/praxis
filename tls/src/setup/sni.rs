@@ -87,9 +87,17 @@ impl SniCertResolver {
     }
 }
 
-impl ResolvesServerCert for SniCertResolver {
-    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
-        let Some(sni) = client_hello.server_name() else {
+impl SniCertResolver {
+    /// Look up a certificate by SNI hostname.
+    ///
+    /// This is the core resolution logic used by the
+    /// [`ResolvesServerCert`] impl. Extracted so tests can call
+    /// it without constructing a [`ClientHello`].
+    ///
+    /// [`ResolvesServerCert`]: rustls::server::ResolvesServerCert
+    /// [`ClientHello`]: rustls::server::ClientHello
+    fn lookup(&self, sni: Option<&str>) -> Option<Arc<CertifiedKey>> {
+        let Some(sni) = sni else {
             return self.default.as_ref().map(Arc::clone);
         };
         let lower = sni.to_ascii_lowercase();
@@ -110,6 +118,12 @@ impl ResolvesServerCert for SniCertResolver {
         }
 
         self.default.as_ref().map(Arc::clone)
+    }
+}
+
+impl ResolvesServerCert for SniCertResolver {
+    fn resolve(&self, client_hello: ClientHello<'_>) -> Option<Arc<CertifiedKey>> {
+        self.lookup(client_hello.server_name())
     }
 }
 
@@ -397,6 +411,134 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // resolve() / lookup() Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn resolve_exact_hostname_returns_cert() {
+        let certs = gen_test_certs();
+        let resolver = build_resolver_with_exact(&certs, "api.example.com", false);
+        assert!(
+            resolver.lookup(Some("api.example.com")).is_some(),
+            "exact hostname should resolve"
+        );
+    }
+
+    #[test]
+    fn resolve_unknown_without_default_returns_none() {
+        let certs = gen_test_certs();
+        let resolver = build_resolver_with_exact(&certs, "api.example.com", false);
+        assert!(
+            resolver.lookup(Some("unknown.example.com")).is_none(),
+            "unknown hostname without default should return None"
+        );
+    }
+
+    #[test]
+    fn resolve_unknown_falls_back_to_default() {
+        let certs1 = gen_test_certs();
+        let certs2 = gen_test_certs();
+        let certificates = vec![
+            CertKeyPair {
+                cert_path: certs1.cert_path.to_str().expect("path").to_owned(),
+                default: false,
+                key_path: certs1.key_path.to_str().expect("path").to_owned(),
+                server_names: vec!["known.example.com".to_owned()],
+            },
+            CertKeyPair {
+                cert_path: certs2.cert_path.to_str().expect("path").to_owned(),
+                default: true,
+                key_path: certs2.key_path.to_str().expect("path").to_owned(),
+                server_names: Vec::new(),
+            },
+        ];
+        let resolver = build_sni_resolver(&certificates).unwrap();
+        assert!(
+            resolver.lookup(Some("unknown.example.com")).is_some(),
+            "unknown hostname should fall back to default"
+        );
+    }
+
+    #[test]
+    fn resolve_no_sni_returns_default() {
+        let certs = gen_test_certs();
+        let resolver = build_resolver_with_exact(&certs, "example.com", true);
+        assert!(resolver.lookup(None).is_some(), "absent SNI should return default cert");
+    }
+
+    #[test]
+    fn resolve_no_sni_no_default_returns_none() {
+        let certs = gen_test_certs();
+        let resolver = build_resolver_with_exact(&certs, "example.com", false);
+        assert!(
+            resolver.lookup(None).is_none(),
+            "absent SNI without default should return None"
+        );
+    }
+
+    #[test]
+    fn resolve_case_insensitive_match() {
+        let certs = gen_test_certs();
+        let resolver = build_resolver_with_exact(&certs, "api.example.com", false);
+        assert!(
+            resolver.lookup(Some("API.Example.COM")).is_some(),
+            "case-insensitive SNI should match"
+        );
+    }
+
+    #[test]
+    fn resolve_wildcard_single_level() {
+        let certs = gen_test_certs_with_sans(vec!["*.example.com".to_owned()]);
+        let certificates = vec![CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("path").to_owned(),
+            server_names: vec!["*.example.com".to_owned()],
+        }];
+        let resolver = build_sni_resolver(&certificates).unwrap();
+        assert!(
+            resolver.lookup(Some("app.example.com")).is_some(),
+            "single-level subdomain should match *.example.com"
+        );
+    }
+
+    #[test]
+    fn resolve_wildcard_rejects_multi_level() {
+        let certs = gen_test_certs_with_sans(vec!["*.example.com".to_owned()]);
+        let certificates = vec![CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("path").to_owned(),
+            server_names: vec!["*.example.com".to_owned()],
+        }];
+        let resolver = build_sni_resolver(&certificates).unwrap();
+        assert!(
+            resolver.lookup(Some("a.b.example.com")).is_none(),
+            "multi-level subdomain must NOT match *.example.com"
+        );
+    }
+
+    #[test]
+    fn resolve_wildcard_rejects_bare_domain() {
+        let certs = gen_test_certs_with_sans(vec!["*.example.com".to_owned()]);
+        let certificates = vec![CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("path").to_owned(),
+            server_names: vec!["*.example.com".to_owned()],
+        }];
+        let resolver = build_sni_resolver(&certificates).unwrap();
+        assert!(
+            resolver.lookup(Some("example.com")).is_none(),
+            "bare domain must NOT match *.example.com"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Construction Tests
+    // -----------------------------------------------------------------------
+
     #[test]
     fn sni_resolver_no_default_has_no_fallback() {
         let certs1 = gen_test_certs();
@@ -422,5 +564,24 @@ mod tests {
             !resolver.has_default(),
             "no default should be set when no entry has default: true"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------
+
+    /// Build a resolver with a single exact hostname mapping.
+    fn build_resolver_with_exact(
+        certs: &crate::test_utils::TestCerts,
+        hostname: &str,
+        default: bool,
+    ) -> SniCertResolver {
+        let certificates = vec![CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("path").to_owned(),
+            default,
+            key_path: certs.key_path.to_str().expect("path").to_owned(),
+            server_names: vec![hostname.to_owned()],
+        }];
+        build_sni_resolver(&certificates).unwrap()
     }
 }

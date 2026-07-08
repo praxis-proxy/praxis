@@ -15,21 +15,9 @@ first.
    `examples/configs/`.
 6. Add a functional integration test in
    `tests/integration/tests/suite/examples/`.
-7. Update `examples/README.md` to list any new or renamed
-   example configs.
+7. Run `cargo xtask sync-example-readme --fix` to
+   regenerate `examples/README.md`.
 
 All testing requirements from [conventions.md](conventions.md#testing)
 apply. A feature without tests and an example is not
 complete.
-
-## AI Inference Validation
-
-AI inference filters should validate only fields they
-need for local proxy behavior, such as routing,
-transformation, persistence, metering, or security
-policy decisions. Do not validate backend-owned API
-semantics such as required inference fields, parameter
-types or ranges, nested message/tool structures, or
-unknown extension fields unless the filter must act on
-that value itself. Preserve the original request and
-let the inference backend perform protocol validation.

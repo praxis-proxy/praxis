@@ -206,7 +206,7 @@ cluster: "backend"
 path_prefix: "/"
 cluster: "backend"
 headers:
-  x-model: "claude-sonnet-4-5"
+  x-model: "model-alpha-1"
   x-version: "v1"
 "#;
         let route: Route = serde_yaml::from_str(yaml).unwrap();
@@ -214,7 +214,7 @@ headers:
         assert_eq!(headers.len(), 2, "should have 2 header constraints");
         assert_eq!(
             headers.get("x-model").unwrap(),
-            "claude-sonnet-4-5",
+            "model-alpha-1",
             "x-model header mismatch"
         );
         assert_eq!(headers.get("x-version").unwrap(), "v1", "x-version header mismatch");

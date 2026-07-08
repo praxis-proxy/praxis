@@ -54,10 +54,13 @@ impl ConsistentHash {
     /// Skips unhealthy endpoints by probing adjacent ring slots, falling
     /// back to the original selection if all are unhealthy.
     #[expect(clippy::indexing_slicing, reason = "within bounds")]
-    pub(crate) fn select(&self, hash_key: Option<&str>, health: Option<&ClusterHealthState>) -> Arc<str> {
+    pub(crate) fn select(&self, hash_key: Option<&str>, health: Option<&ClusterHealthState>) -> Option<Arc<str>> {
         let key = hash_key.unwrap_or("");
 
         let len = self.ring.len();
+        if len == 0 {
+            return None;
+        }
         #[expect(clippy::cast_possible_truncation, reason = "modulo fits usize")]
         let start = (fnv1a(key) as usize) % len;
 
@@ -66,12 +69,12 @@ impl ConsistentHash {
                 let ring_idx = (start + offset) % len;
                 let ep = &self.endpoints[self.ring[ring_idx]];
                 if ep.index < state.endpoints().len() && state.endpoints()[ep.index].is_healthy() {
-                    return Arc::clone(&ep.address);
+                    return Some(Arc::clone(&ep.address));
                 }
             }
         }
 
-        Arc::clone(&self.endpoints[self.ring[start]].address)
+        Some(Arc::clone(&self.endpoints[self.ring[start]].address))
     }
 }
 
@@ -133,8 +136,8 @@ mod tests {
             None,
         );
 
-        let first = ch.select(Some("/stable-path"), None);
-        let second = ch.select(Some("/stable-path"), None);
+        let first = ch.select(Some("/stable-path"), None).unwrap();
+        let second = ch.select(Some("/stable-path"), None).unwrap();
         assert_eq!(first, second, "same key should always select same endpoint");
     }
 
@@ -156,8 +159,8 @@ mod tests {
             None,
         );
 
-        let ep_a = ch.select(Some("/path-a"), None);
-        let ep_b = ch.select(Some("/path-b"), None);
+        let ep_a = ch.select(Some("/path-a"), None).unwrap();
+        let ep_b = ch.select(Some("/path-b"), None).unwrap();
         assert_ne!(
             ep_a, ep_b,
             "FNV-1a of /path-a and /path-b should not collide with only 2 endpoints"
@@ -200,7 +203,7 @@ mod tests {
 
         let paths = ["/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h"];
         for path in &paths {
-            let selected = ch.select(Some(path), Some(&state));
+            let selected = ch.select(Some(path), Some(&state)).unwrap();
             assert_ne!(
                 &*selected, "10.0.0.2:80",
                 "unhealthy endpoint should never be selected for path {path}"
@@ -234,7 +237,7 @@ mod tests {
         state.endpoints()[0].mark_unhealthy();
         state.endpoints()[1].mark_unhealthy();
 
-        let selected = ch.select(Some("/panic"), Some(&state));
+        let selected = ch.select(Some("/panic"), Some(&state)).unwrap();
         assert!(
             &*selected == "10.0.0.1:80" || &*selected == "10.0.0.2:80",
             "panic mode should still return an endpoint, got: {selected}"
@@ -264,9 +267,9 @@ mod tests {
             None,
         );
 
-        let first = ch.select(None, None);
+        let first = ch.select(None, None).unwrap();
         for _ in 0..10 {
-            let again = ch.select(None, None);
+            let again = ch.select(None, None).unwrap();
             assert_eq!(
                 first, again,
                 "None hash key should consistently select the same endpoint"
@@ -294,8 +297,8 @@ mod tests {
         let mut ep1_count = 0_usize;
 
         for key in &keys {
-            let selected = ch.select(Some(key), None);
-            let again = ch.select(Some(key), None);
+            let selected = ch.select(Some(key), None).unwrap();
+            let again = ch.select(Some(key), None).unwrap();
             assert_eq!(selected, again, "weighted hashing must be deterministic for key {key}");
             if &*selected == "10.0.0.1:80" {
                 ep1_count += 1;

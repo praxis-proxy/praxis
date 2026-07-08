@@ -51,6 +51,19 @@ pub struct PingoraRequestCtx {
     /// Name of the cluster selected by a cluster-selecting filter.
     pub cluster: Option<Arc<str>>,
 
+    /// Cached per-filter body-done indices. Swapped into each
+    /// [`HttpFilterContext`] and written back after execution so
+    /// that the heap allocation is reused across pipeline phases.
+    ///
+    /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+    pub cached_body_done_indices: Vec<bool>,
+
+    /// Cached per-filter execution indices. Same lifecycle as
+    /// [`cached_body_done_indices`].
+    ///
+    /// [`cached_body_done_indices`]: Self::cached_body_done_indices
+    pub cached_executed_filter_indices: Vec<bool>,
+
     /// Whether the downstream connection uses TLS.
     ///
     /// Derived from the Pingora session's SSL digest during
@@ -233,14 +246,14 @@ macro_rules! filter_context {
     ($ctx:expr, $pipeline:expr, $request:expr, $response_header:expr) => {{
         $pipeline.prepare_extensions(&mut $ctx.extensions);
         praxis_filter::HttpFilterContext {
-            body_done_indices: Vec::new(),
+            body_done_indices: std::mem::take(&mut $ctx.cached_body_done_indices),
             branch_iterations: std::collections::HashMap::new(),
             client_addr: $ctx.client_addr,
             cluster: $ctx.cluster.take(),
             current_filter_id: None,
             downstream_tls: $ctx.downstream_tls,
             extensions: std::mem::take(&mut $ctx.extensions),
-            executed_filter_indices: Vec::new(),
+            executed_filter_indices: std::mem::take(&mut $ctx.cached_executed_filter_indices),
             extra_request_headers: Vec::new(),
             request_headers_to_remove: Vec::new(),
             request_headers_to_set: Vec::new(),
@@ -399,6 +412,8 @@ impl Default for PingoraRequestCtx {
         Self {
             _connection_permit: None,
             _global_connection_permit: None,
+            cached_body_done_indices: Vec::new(),
+            cached_executed_filter_indices: Vec::new(),
             client_addr: None,
             client_http_version: None,
             cluster: None,

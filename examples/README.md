@@ -18,32 +18,6 @@ page.
 
 ## Configs
 
-### AI / Inference
-
-| File | Description |
-| ------ | ------------- |
-| [a2a-classifier-routing.yaml](configs/ai/a2a-classifier-routing.yaml) | Routes A2A requests by body-derived method, family, task ID, and streaming detection |
-| [a2a-task-routing.yaml](configs/ai/a2a-task-routing.yaml) | Captures task ownership from SendMessage JSON responses and SendStreamingMessage / SubscribeToTask SSE responses, then routes follow-up task operations back to the backend cluster that created the task |
-| [ai-inference-body-based-routing.yaml](configs/ai/ai-inference-body-based-routing.yaml) | Routes LLM API requests to different backends based on the `model` field in the JSON request body |
-| [messages-protocol.yaml](configs/ai/anthropic/messages-protocol.yaml) | Routes Anthropic Messages API requests to a native `/v1/messages` backend |
-| [messages-to-openai.yaml](configs/ai/anthropic/messages-to-openai.yaml) | Transforms Anthropic Messages API requests and responses for Chat Completions-compatible inference backends |
-| [request-validate.yaml](configs/ai/anthropic/request-validate.yaml) | Rejects empty, malformed, or non-object JSON request bodies |
-| [unified-gateway.yaml](configs/ai/anthropic/unified-gateway.yaml) | Routes traffic by classifier-promoted headers so a single listener handles Anthropic Messages, OpenAI Chat Completions, and OpenAI Responses requests |
-| [credential-injection.yaml](configs/ai/credential-injection.yaml) | Injects per-cluster API credentials into upstream requests and strips client-provided credentials to prevent forwarding |
-| [json-rpc-routing.yaml](configs/ai/json-rpc-routing.yaml) | Routes JSON-RPC 2.0 requests to different backends based on the "method" field in the JSON request body |
-| [mcp-classifier-routing.yaml](configs/ai/mcp-classifier-routing.yaml) | Routes MCP requests by body-derived method and tool name |
-| [model-to-header-routing.yaml](configs/ai/model-to-header-routing.yaml) | Routes LLM API requests to different backends based on the "model" field in the JSON request body |
-| [format-routing.yaml](configs/ai/openai/responses/format-routing.yaml) | Routes AI API traffic by detected body format |
-| [full-flow.yaml](configs/ai/openai/responses/full-flow.yaml) | Combines format classification, request validation, and backend routing into a single pipeline |
-| [model-rewrite.yaml](configs/ai/openai/responses/model-rewrite.yaml) | Rewrites or injects the top-level `model` field in Responses API request bodies before forwarding to the inference backend |
-| [rehydrate.yaml](configs/ai/openai/responses/rehydrate.yaml) | Validates `previous_response_id` by fetching the stored response, confirming its status is completed, and promoting the ID to filter metadata |
-| [request-validate.yaml](configs/ai/openai/responses/request-validate.yaml) | Validates Responses API requests and rejects invalid parameter combinations |
-| [response-store.yaml](configs/ai/openai/responses/response-store.yaml) | Persists non-streaming Responses API responses to a database and serves stored data via GET endpoints and handles DELETE /v1/responses/{id} locally |
-| [responses-proxy.yaml](configs/ai/openai/responses/responses-proxy.yaml) | Proxies OpenAI Responses API requests to a native /v1/responses backend |
-| [responses-routing.yaml](configs/ai/openai/responses/responses-routing.yaml) | Routes Responses API traffic by detected mode |
-| [prompt-enrichment.yaml](configs/ai/prompt-enrichment.yaml) | Injects system messages into OpenAI-compatible chat completion requests before forwarding to the upstream provider |
-| [token-usage-headers.yaml](configs/ai/token-usage-headers.yaml) | Inject Praxis-Token-Input, Praxis-Token-Output, and Praxis-Token-Total headers into downstream responses when token counts are available in filter metadata |
-
 ### Branching
 
 | File | Description |
@@ -85,7 +59,6 @@ page.
 | [compression.yaml](configs/payload-processing/compression.yaml) | Enables transparent response compression using Pingora's built-in compression module |
 | [conditional-field-extraction.yaml](configs/payload-processing/conditional-field-extraction.yaml) | Uses the condition system to apply json_body_field only on specific request paths |
 | [field-extraction-access-control.yaml](configs/payload-processing/field-extraction-access-control.yaml) | Extracts the "tenant_id" field from the JSON request body and promotes it to an X-Tenant-Id header |
-| [mcp-static-catalog.yaml](configs/payload-processing/mcp-static-catalog.yaml) | Provides a static MCP catalog and broker for initialize, tools/list, ping, and notifications/initialized requests |
 | [multi-field-extraction.yaml](configs/payload-processing/multi-field-extraction.yaml) | A single json_body_field filter extracts multiple top-level JSON fields into separate request headers in one pass |
 | [multi-listener-body-pipeline.yaml](configs/payload-processing/multi-listener-body-pipeline.yaml) | Three listeners, each with a different body processing strategy |
 | [stream-buffer.yaml](configs/payload-processing/stream-buffer.yaml) | json_body_field inspects request body chunks as they arrive and defers upstream forwarding until the field is extracted (or end-of-stream) |

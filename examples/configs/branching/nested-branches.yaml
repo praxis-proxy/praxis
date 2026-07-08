@@ -8,6 +8,9 @@
 #
 # Use case: an outer branch always runs security checks,
 # and an inner branch reacts to the check result.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/branching/nested-branches.yaml
 
 listeners:
   - name: web

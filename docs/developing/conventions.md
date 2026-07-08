@@ -61,8 +61,8 @@ write comments that restate what names already convey.
 3. An example config in `examples/configs/`
 4. A functional integration test for the example config
    in `tests/integration/tests/suite/examples/`
-5. Update `examples/README.md` to list any new or
-   renamed example configs
+5. Run `cargo xtask sync-example-readme --fix` to
+   regenerate `examples/README.md`
 6. Significant changes need to be [benchmarked].
 
 This is not optional. A feature without tests and an

@@ -26,11 +26,11 @@ ambiguous configuration:
 - Root execution (UID 0) rejected by default.
 - Supply chain audited via `cargo audit` and
   `cargo deny`.
-- Reserved internal headers (`x-praxis-*`,
-  `x-mcp-*`, `x-a2a-*`) are rejected from client
-  requests, stripped before forwarding to backends,
-  and stripped from backend responses before reaching
-  clients.
+- Reserved internal headers (`x-praxis-*` and AI
+  extension prefixes `x-ext-protocol-*`, `x-ext-agent-*`) are
+  rejected from client requests, stripped before
+  forwarding to backends, and stripped from backend
+  responses before reaching clients.
 - `--dump` redacts credential injection literal
   values as `[REDACTED]` to prevent accidental secret
   exposure in config dumps.
@@ -139,6 +139,7 @@ in development:
 - **Wildcard CORS origins (`"*"`)**: Allows any
   origin. Use explicit origin lists in production.
 - **Empty IP ACL allowlists**: An empty allowlist
-  permits all traffic. When possible, use principle
-  of least privilege and only allow access from the
+  permits all traffic. When possible, use the
+  principle of least privilege and only allow access
+  from the
   networks that require it.

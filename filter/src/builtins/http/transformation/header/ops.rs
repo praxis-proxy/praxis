@@ -45,28 +45,30 @@ pub(super) fn set_headers(
 // Config-Time Validation
 // -----------------------------------------------------------------------------
 
-/// Validate header pairs and return raw strings (for request headers
-/// that are pushed as `Cow` values).
+/// Parse header names at config time but keep raw string values.
+///
+/// Used for `request_add` where the value is combined with existing
+/// header values at request time via string formatting.
 ///
 /// # Errors
 ///
 /// Returns [`FilterError`] if any header name or value is invalid.
-pub(super) fn validate_raw_header_pairs(
+pub(super) fn parse_header_name_with_raw_value(
     pairs: Vec<super::HeaderPair>,
     section: &str,
-) -> Result<Vec<(String, String)>, FilterError> {
+) -> Result<Vec<(http::header::HeaderName, String)>, FilterError> {
     let mut out = Vec::with_capacity(pairs.len());
     for p in pairs {
-        let name = &p.name;
-        http::header::HeaderName::from_bytes(p.name.as_bytes()).map_err(|_e| {
-            let msg: FilterError = format!("headers filter: invalid header name '{name}' in {section}").into();
+        let pname = &p.name;
+        let name = http::header::HeaderName::from_bytes(p.name.as_bytes()).map_err(|_e| {
+            let msg: FilterError = format!("headers filter: invalid header name '{pname}' in {section}").into();
             msg
         })?;
         http::header::HeaderValue::from_str(&p.value).map_err(|_e| {
-            let msg: FilterError = format!("headers filter: invalid header value for '{name}' in {section}").into();
+            let msg: FilterError = format!("headers filter: invalid header value for '{pname}' in {section}").into();
             msg
         })?;
-        out.push((p.name, p.value));
+        out.push((name, p.value));
     }
     Ok(out)
 }

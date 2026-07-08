@@ -9,6 +9,9 @@
 # Use case: reusable filter chains shared across branches
 # (e.g. a guardrails or validation chain used by both API
 # and inference paths).
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/branching/named-chain-ref.yaml
 
 listeners:
   - name: web

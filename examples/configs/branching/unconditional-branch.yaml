@@ -4,6 +4,9 @@
 # pipeline. Useful for injecting audit headers, logging
 # metadata, or applying transformations that must run on
 # every request regardless of filter results.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/branching/unconditional-branch.yaml
 
 listeners:
   - name: web

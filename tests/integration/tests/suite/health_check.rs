@@ -452,7 +452,7 @@ filter_chains:
     );
 
     let config = Config::from_yaml(&yaml).unwrap();
-    start_full_proxy(config);
+    let _proxy = start_full_proxy(&config);
 
     let addr = format!("127.0.0.1:{proxy_port}");
     wait_for_http(&addr);

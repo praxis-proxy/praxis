@@ -8,8 +8,6 @@ readme = "../../README.md"
 publish = false
 
 [features]
-default = ["ai-inference"]
-ai-inference = ["praxis-filter/ai-inference"]
 
 [lints]
 workspace = true

@@ -49,9 +49,9 @@ struct ClusterCredential {
 /// ```yaml
 /// filter: credential_injection
 /// clusters:
-///   - name: openai
+///   - name: provider-a
 ///     header: Authorization
-///     env_var: OPENAI_API_KEY
+///     env_var: PROVIDER_A_API_KEY
 ///     header_prefix: "Bearer "
 ///     strip_client_credential: true
 ///   - name: internal

@@ -4,7 +4,8 @@
 # upstream endpoints. The proxy resolves hostnames to IP addresses
 # at connection time, preferring IPv4 when multiple records exist.
 #
-# Example:
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/hostname-upstream.yaml
 #
 #   curl http://localhost:8080/
 #

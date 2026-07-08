@@ -95,7 +95,6 @@ impl Runner {
     ///
     /// Returns [`BenchmarkError`] if the backend, proxy, or load
     /// generator fails to start, or if result parsing fails.
-    #[expect(clippy::cognitive_complexity, reason = "orchestration function")]
     #[expect(
         clippy::large_stack_frames,
         reason = "benchmark orchestration allocates tooling structs"

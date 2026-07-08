@@ -12,6 +12,7 @@ use std::{
 };
 
 use praxis_core::health::ClusterHealthState;
+use smallvec::SmallVec;
 
 use super::endpoint::WeightedEndpoint;
 
@@ -71,14 +72,17 @@ impl PowerOfTwoChoices {
     /// Falls back to all endpoints when every endpoint is unhealthy.
     /// With a single endpoint, returns it directly.
     #[expect(clippy::indexing_slicing, reason = "keyed by endpoints built in new()")]
-    pub(crate) fn select(&self, health: Option<&ClusterHealthState>) -> Arc<str> {
+    pub(crate) fn select(&self, health: Option<&ClusterHealthState>) -> Option<Arc<str>> {
+        if self.endpoints.is_empty() {
+            return None;
+        }
         let candidates = self.healthy_candidates(health);
         let total_w: usize = candidates.iter().map(|ep| ep.weight as usize).sum();
 
         if candidates.len() <= 1 || total_w <= 1 {
             let fallback = &self.endpoints[0];
             let ep = candidates.first().copied().unwrap_or(fallback);
-            return Arc::clone(&ep.address);
+            return Some(Arc::clone(&ep.address));
         }
 
         let (a, b) = self.pick_two(total_w);
@@ -87,7 +91,7 @@ impl PowerOfTwoChoices {
         let chosen = self.less_loaded(ep_a, ep_b);
 
         self.counters[&*chosen.address].fetch_add(1, Ordering::AcqRel);
-        Arc::clone(&chosen.address)
+        Some(Arc::clone(&chosen.address))
     }
 
     /// Decrement the in-flight counter for `addr` after a response.
@@ -144,9 +148,9 @@ impl PowerOfTwoChoices {
 
     /// Filter to healthy endpoints, falling back to all on panic mode.
     #[expect(clippy::indexing_slicing, reason = "bounds checked by ep.index < len()")]
-    fn healthy_candidates(&self, health: Option<&ClusterHealthState>) -> Vec<&WeightedEndpoint> {
+    fn healthy_candidates(&self, health: Option<&ClusterHealthState>) -> SmallVec<[&WeightedEndpoint; 8]> {
         if let Some(state) = health {
-            let healthy: Vec<_> = self
+            let healthy: SmallVec<[_; 8]> = self
                 .endpoints
                 .iter()
                 .filter(|ep| ep.index < state.endpoints().len() && state.endpoints()[ep.index].is_healthy())
@@ -203,7 +207,7 @@ mod tests {
         let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1, 0)]);
         for _ in 0..10 {
             assert_eq!(
-                &*p2c.select(None),
+                &*p2c.select(None).unwrap(),
                 "10.0.0.1:80",
                 "single endpoint must always be returned"
             );
@@ -219,7 +223,7 @@ mod tests {
         ]);
 
         for _ in 0..30 {
-            let addr = p2c.select(None);
+            let addr = p2c.select(None).unwrap();
             p2c.release(&addr);
         }
 
@@ -236,7 +240,7 @@ mod tests {
 
         let mut picked_2 = 0_u32;
         for _ in 0..20 {
-            let addr = p2c.select(None);
+            let addr = p2c.select(None).unwrap();
             if &*addr == "10.0.0.2:80" {
                 picked_2 += 1;
             }
@@ -254,7 +258,7 @@ mod tests {
 
         let mut counts = HashMap::new();
         for _ in 0..100 {
-            let addr = p2c.select(None);
+            let addr = p2c.select(None).unwrap();
             *counts.entry(Arc::clone(&addr)).or_insert(0_u32) += 1;
             p2c.release(&addr);
         }
@@ -271,7 +275,7 @@ mod tests {
 
         for _ in 0..10 {
             assert_eq!(
-                &*p2c.select(Some(&state)),
+                &*p2c.select(Some(&state)).unwrap(),
                 "10.0.0.2:80",
                 "should skip unhealthy endpoint"
             );
@@ -286,7 +290,7 @@ mod tests {
         state.endpoints()[0].mark_unhealthy();
         state.endpoints()[1].mark_unhealthy();
 
-        let addr = p2c.select(Some(&state));
+        let addr = p2c.select(Some(&state)).unwrap();
         assert!(
             &*addr == "10.0.0.1:80" || &*addr == "10.0.0.2:80",
             "panic mode should still return an endpoint"
@@ -321,7 +325,7 @@ mod tests {
             .map(|_| {
                 let p = Arc::clone(&p2c);
                 std::thread::spawn(move || {
-                    let addr = p.select(None);
+                    let addr = p.select(None).unwrap();
                     p.release(&addr);
                 })
             })

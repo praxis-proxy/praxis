@@ -14,8 +14,6 @@ use clap::Parser;
 /// requirement. Each entry must have a justification. Shrink this list over
 /// time by adding tests.
 const SKIP: &[&str] = &[
-    // --- AI: tested via model_to_header module without load_example_config ---
-    "ai/model-to-header-routing.yaml",
     // --- Observability: TCP access log not yet integration-tested ---
     "observability/tcp-access-log.yaml",
     // --- Operations: runtime/container configs that don't exercise filters ---

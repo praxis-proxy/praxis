@@ -47,9 +47,19 @@ influence downstream processing:
 - `ctx.cluster`: select which upstream cluster to route to.
 - `ctx.upstream`: select a specific endpoint.
 - `ctx.rewritten_path`: rewrite the upstream request path.
-- `ctx.extra_request_headers`: inject headers into the upstream request.
-- `ctx.response_header`: mutate response headers directly in `on_response`.
-- `ctx.response_headers_modified`: flag that response headers were changed
+- `ctx.extra_request_headers`: inject headers into the
+  upstream request.
+- `ctx.request_headers_to_set`: overwrite headers on the
+  upstream request.
+- `ctx.request_headers_to_remove`: remove headers from the
+  upstream request.
+- `ctx.filter_metadata`: write durable per-request metadata.
+- `ctx.filter_results`: write results for branch chain
+  evaluation.
+- `ctx.response_header`: mutate response headers directly
+  in `on_response`.
+- `ctx.response_headers_modified`: flag that response
+  headers were changed.
 
 ### Lifecycle Hooks
 
@@ -133,15 +143,14 @@ category:
 ```text
 builtins/
   http/                       HTTP protocol filters
-    ai/                       AI workloads (inference)
     observability/            Access logs, request IDs
-    payload_processing/       Compression, body field extraction
-    security/                 CORS, CSRF, forwarded headers, guardrails, IP ACL
-    traffic_management/       Router, load balancer, timeout, rate limit, redirect, static response
+    payload_processing/       Compression, body field extraction, JSON-RPC
+    security/                 CORS, credential injection, CSRF, forwarded headers, guardrails, IP ACL, policy
+    traffic_management/       Circuit breaker, gRPC detection, router, load balancer, timeout, rate limit, redirect, static response
     transformation/           Header, path rewrite, URL rewrite
   tcp/                        TCP protocol filters
     observability/            Connection logging
-    traffic_management/       SNI-based routing
+    traffic_management/       SNI router, TCP load balancer
 ```
 
 At runtime, pipeline execution dispatches to the correct
@@ -199,7 +208,7 @@ solution is viable.
 - **Header transforms**: `headers`, `forwarded_headers`,
   classifier filters
 - **Routing decisions**: `router` + `load_balancer`,
-  branch chains, `model_to_header`
+  branch chains
 - **Custom logic**: write a native `HttpFilter` — it
   runs in-process with full pipeline context
 
@@ -323,19 +332,25 @@ pub struct TcpFilterContext<'a> {
     pub remote_addr: &'a str,
     pub local_addr: &'a str,
     pub sni: Option<&'a str>,
-    pub upstream_addr: Cow<'a, str>,
+    pub upstream_addr: Option<Cow<'a, str>>,
+    pub cluster: Option<Arc<str>>,
     pub connect_time: Instant,
     pub bytes_in: u64,
     pub bytes_out: u64,
+    pub health_registry: Option<&'a HealthRegistry>,
+    pub kv_stores: Option<&'a KvStoreRegistry>,
 }
 ```
 
 The `sni` field is populated by the TCP proxy when it peeks
 at the first bytes of a TLS connection and extracts the SNI
 hostname from the ClientHello. Filters like `sni_router` use
-this to select an upstream. The `upstream_addr` field is a
-`Cow` so filters can replace it with an owned value without
-requiring the listener config to provide a static upstream.
+this to select an upstream. The `upstream_addr` field is an
+`Option<Cow>` — `None` until a static upstream or filter
+provides one; filters can replace it with an owned value.
+The `cluster` field names the selected cluster, and
+`health_registry` / `kv_stores` provide access to shared
+runtime state.
 
 ## AnyFilter
 
@@ -413,9 +428,8 @@ exceeding `n` bytes receive 413.
 
 This mode is useful for:
 
-- **AI inference proxies**: inspect prompt content for
-  routing, token counting, or content policy before
-  forwarding
+- **API gateways**: inspect request bodies for routing,
+  content policy, or field extraction before forwarding
 - **Security gateways**: scan payloads for malware
   signatures, PII, or injection attacks with early
   rejection

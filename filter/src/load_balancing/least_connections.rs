@@ -49,16 +49,16 @@ impl LeastConnections {
     /// optimistic CAS loop: scans for the minimum, then atomically
     /// increments. On CAS failure, rescans and retries.
     #[expect(clippy::indexing_slicing, reason = "keyed by endpoints")]
-    pub(crate) fn select(&self, health: Option<&ClusterHealthState>) -> Arc<str> {
+    pub(crate) fn select(&self, health: Option<&ClusterHealthState>) -> Option<Arc<str>> {
         loop {
-            let (addr, load) = self.find_best(health);
+            let (addr, load) = self.find_best(health)?;
             let counter = &self.counters[&*addr];
 
             if counter
                 .compare_exchange_weak(load, load + 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                return addr;
+                return Some(addr);
             }
         }
     }
@@ -73,8 +73,8 @@ impl LeastConnections {
     /// Scan endpoints and return the best candidate address with its
     /// current load. Prefers healthy endpoints when health state is
     /// available; falls back to all endpoints.
-    #[expect(clippy::indexing_slicing, clippy::expect_used, reason = "bounds checked; non-empty")]
-    fn find_best(&self, health: Option<&ClusterHealthState>) -> (Arc<str>, usize) {
+    #[expect(clippy::indexing_slicing, reason = "bounds checked")]
+    fn find_best(&self, health: Option<&ClusterHealthState>) -> Option<(Arc<str>, usize)> {
         if let Some(state) = health
             && let Some((addr, load)) = self
                 .endpoints
@@ -87,20 +87,17 @@ impl LeastConnections {
                 .min_by(|(a, a_load), (b, b_load)| a_load.cmp(b_load).then(b.weight.cmp(&a.weight)))
                 .map(|(ep, load)| (Arc::clone(&ep.address), load))
         {
-            return (addr, load);
+            return Some((addr, load));
         }
 
-        let (ep, load) = self
-            .endpoints
+        self.endpoints
             .iter()
             .map(|ep| {
                 let load = self.counters[&*ep.address].load(Ordering::Acquire);
                 (ep, load)
             })
             .min_by(|(a, a_load), (b, b_load)| a_load.cmp(b_load).then(b.weight.cmp(&a.weight)))
-            .expect("endpoints must be non-empty");
-
-        (Arc::clone(&ep.address), load)
+            .map(|(ep, load)| (Arc::clone(&ep.address), load))
     }
 }
 
@@ -149,18 +146,18 @@ mod tests {
         ]);
 
         assert_eq!(
-            &*lc.select(None),
+            &*lc.select(None).unwrap(),
             "10.0.0.1:80",
             "first selection should go to first endpoint"
         );
         assert_eq!(
-            &*lc.select(None),
+            &*lc.select(None).unwrap(),
             "10.0.0.2:80",
             "second selection should pick least-loaded"
         );
         lc.release("10.0.0.1:80");
         assert_eq!(
-            &*lc.select(None),
+            &*lc.select(None).unwrap(),
             "10.0.0.1:80",
             "released endpoint should be selected again"
         );
@@ -216,7 +213,7 @@ mod tests {
         state.endpoints()[0].mark_unhealthy();
 
         assert_eq!(
-            &*lc.select(Some(&state)),
+            &*lc.select(Some(&state)).unwrap(),
             "10.0.0.2:80",
             "should skip unhealthy endpoint"
         );
@@ -245,7 +242,7 @@ mod tests {
         state.endpoints()[0].mark_unhealthy();
         state.endpoints()[1].mark_unhealthy();
 
-        let selected = lc.select(Some(&state));
+        let selected = lc.select(Some(&state)).unwrap();
         assert!(
             &*selected == "10.0.0.1:80" || &*selected == "10.0.0.2:80",
             "panic mode should still return an endpoint"
@@ -268,7 +265,7 @@ mod tests {
         ]);
 
         assert_eq!(
-            &*lc.select(None),
+            &*lc.select(None).unwrap(),
             "10.0.0.2:80",
             "higher-weight endpoint should win tie at 0 connections"
         );
@@ -325,7 +322,7 @@ mod tests {
             .map(|_| {
                 let lc = Arc::clone(&lc);
                 thread::spawn(move || {
-                    let addr = lc.select(None);
+                    let addr = lc.select(None).unwrap();
                     lc.release(&addr);
                 })
             })

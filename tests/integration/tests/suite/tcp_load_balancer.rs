@@ -11,7 +11,7 @@ use std::{
 };
 
 use praxis_core::config::Config;
-use praxis_test_utils::{free_port, start_full_proxy, start_tcp_tagged_backend, wait_for_tcp};
+use praxis_test_utils::{ProxyGuard, free_port, start_full_proxy, start_tcp_tagged_backend, wait_for_tcp};
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -57,7 +57,7 @@ filter_chains:
     );
 
     let config = Config::from_yaml(&yaml).unwrap();
-    start_tcp_proxy(config, proxy_port);
+    let _proxy = start_tcp_proxy(&config, proxy_port);
 
     let total = 30_u32;
     let mut counts: HashMap<String, u32> = HashMap::new();
@@ -122,7 +122,7 @@ filter_chains:
     );
 
     let config = Config::from_yaml(&yaml).unwrap();
-    start_tcp_proxy(config, proxy_port);
+    let _proxy = start_tcp_proxy(&config, proxy_port);
 
     let total = 200_u32;
     let mut counts: HashMap<String, u32> = HashMap::new();
@@ -201,7 +201,7 @@ filter_chains:
     );
 
     let config = Config::from_yaml(&yaml).unwrap();
-    start_tcp_proxy(config, proxy_port);
+    let _proxy = start_tcp_proxy(&config, proxy_port);
 
     let mut first_backend = String::new();
     for i in 0..5 {
@@ -233,7 +233,7 @@ listeners:
     );
 
     let config = Config::from_yaml(&yaml).unwrap();
-    start_tcp_proxy(config, proxy_port);
+    let _proxy = start_tcp_proxy(&config, proxy_port);
 
     let resp = tcp_send_recv(&format!("127.0.0.1:{proxy_port}"), b"hello");
     assert!(
@@ -290,7 +290,7 @@ filter_chains:
     );
 
     let config = Config::from_yaml(&yaml).unwrap();
-    start_tcp_proxy(config, proxy_port);
+    let _proxy = start_tcp_proxy(&config, proxy_port);
 
     for _ in 0..5 {
         let resp = tcp_send_recv(&format!("127.0.0.1:{proxy_port}"), b"data");
@@ -310,9 +310,10 @@ filter_chains:
 // ---------------------------------------------------------------------------
 
 /// Start a full Praxis TCP proxy in a background thread and wait for readiness.
-fn start_tcp_proxy(config: Config, proxy_port: u16) {
-    start_full_proxy(config);
+fn start_tcp_proxy(config: &Config, proxy_port: u16) -> ProxyGuard {
+    let guard = start_full_proxy(config);
     wait_for_tcp(&format!("127.0.0.1:{proxy_port}"));
+    guard
 }
 
 /// Send data over TCP and return the response as a string.
