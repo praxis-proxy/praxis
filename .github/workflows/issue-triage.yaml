@@ -29,7 +29,7 @@ jobs:
           private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
 
       - name: Add triage/needs-triage on new issue
-        if: github.event.action == 'opened'
+        if: github.event.action == 'opened' && !github.event.issue.milestone
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           GH_REPO: ${{ github.repository }}
