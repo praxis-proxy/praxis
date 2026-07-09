@@ -36,7 +36,9 @@ pub use builtins::{
     normalize_rewritten_path,
 };
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
-pub use context::{ErrorResponseFormat, HttpFilterContext, PendingHeaderResult, Request, Response, TrustedHeaderMutation};
+pub use context::{
+    ErrorResponseFormat, HttpFilterContext, PendingHeaderResult, Request, Response, TrustedHeaderMutation,
+};
 pub use extensions::RequestExtensions;
 pub use factory::{
     EmptyFilterConfig, FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config,
