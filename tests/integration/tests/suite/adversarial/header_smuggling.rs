@@ -173,7 +173,7 @@ fn proxy_authorization_stripped_from_upstream() {
 
     let request = "GET / HTTP/1.1\r\n\
          Host: localhost\r\n\
-         Proxy-Authorization: Basic dGVzdDp0ZXN0\r\n\
+         Proxy-Authorization: Basic badmonkey123\r\n\
          Authorization: Bearer real-token\r\n\
          \r\n";
     let raw = http_send(proxy.addr(), request);
