@@ -103,6 +103,9 @@ pub struct FilterPipeline {
     /// Ordered list of filters with their conditions and branches.
     pub(crate) filters: Vec<PipelineFilter>,
 
+    /// Whether per-filter duration metrics are recorded.
+    record_filter_duration_metrics: bool,
+
     /// Shared health registry for endpoint health lookups.
     health_registry: Option<HealthRegistry>,
 
@@ -205,6 +208,16 @@ impl FilterPipeline {
     /// Set the shared [`HealthRegistry`] for this pipeline.
     pub fn set_health_registry(&mut self, registry: HealthRegistry) {
         self.health_registry = Some(registry);
+    }
+
+    /// Enable or disable recording of per-filter duration metrics.
+    pub fn set_record_filter_duration_metrics(&mut self, enabled: bool) {
+        self.record_filter_duration_metrics = enabled;
+    }
+
+    /// Whether per-filter duration metrics are recorded.
+    pub fn records_filter_duration_metrics(&self) -> bool {
+        self.record_filter_duration_metrics
     }
 
     /// The shared health registry, if set.

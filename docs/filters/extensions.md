@@ -37,9 +37,9 @@ version = "0.1.0"
 
 [dependencies]
 async-trait = "0.1"
-praxis-proxy-filter = "0.3"
+praxis-proxy-filter = "0.4"
 serde = { version = "1", features = ["derive"] }
-serde_yaml = { package = "yaml_serde", version = "0.10" }
+serde_yaml = "0.9.34"
 ```
 
 In the external crate's `src/lib.rs`:

@@ -29,8 +29,8 @@ struct ForwardedHeadersConfig {
     #[serde(default)]
     trusted_proxies: Vec<String>,
 
-    /// When `true`, inject the standard [RFC 7239] `Forwarded`
-    /// header instead of (or in addition to) X-Forwarded-* headers.
+    /// When `true`, also inject the standard [RFC 7239]
+    /// `Forwarded` header in addition to X-Forwarded-* headers.
     ///
     /// [RFC 7239]: https://datatracker.ietf.org/doc/html/rfc7239
     #[serde(default)]

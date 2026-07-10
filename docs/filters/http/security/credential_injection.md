@@ -7,7 +7,7 @@ Injects per-cluster API credentials into upstream requests.
 
 ## Configuration Notes
 
-For each configured cluster, injects a header (e.g. `Authorization: Bearer sk-...`) and optionally strips client-provided values for that header to prevent credential forwarding.
+For each configured cluster, injects a header (e.g. `Authorization: Bearer sk-...`), replacing any client-provided value for that header to prevent credential forwarding.
 
 Credentials are resolved at construction time (inline values or environment variables). The filter matches on the cluster name selected by the router filter earlier in the pipeline.
 

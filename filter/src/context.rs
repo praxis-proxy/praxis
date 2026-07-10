@@ -172,10 +172,8 @@ pub struct HttpFilterContext<'a> {
     pub filter_metadata: HashMap<String, String>,
 
     /// Ordered log of trusted header mutations from pre-read body
-    /// processing. Replayed by [`apply_pre_read_mutations`] after
-    /// the request-phase pipeline runs.
-    ///
-    /// [`apply_pre_read_mutations`]: Self
+    /// processing. Replayed by the protocol layer after the
+    /// request-phase pipeline runs.
     pub pre_read_mutations: Vec<TrustedHeaderMutation>,
 
     /// Structured per-request metadata keyed by namespace.

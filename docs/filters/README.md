@@ -221,10 +221,10 @@ solution is viable.
 - **Custom logic**: write a native `HttpFilter` — it
   runs in-process with full pipeline context
 
-The `ext-proc` feature is enabled by default so that
-Envoy migrations work out of the box. Production
-deployments should plan to replace `ext_proc` usage
-with native filters.
+The `ext_proc` filter lives in a separate crate
+(`praxis-ext-proc`) and must be registered explicitly.
+Production deployments should plan to replace
+`ext_proc` usage with native filters.
 
 ## What Stays Outside Filters
 
@@ -310,11 +310,15 @@ pub struct HttpFilterContext<'a> {
     pub client_addr: Option<IpAddr>,
     pub cluster: Option<Arc<str>>,
     pub downstream_tls: bool,
+    pub extensions: RequestExtensions,
     pub extra_request_headers: Vec<(Cow<'static, str>, String)>,
     pub filter_metadata: HashMap<String, String>,
     pub filter_results: HashMap<&'static str, FilterResultSet>,
+    pub filter_state: HashMap<usize, Box<dyn Any + Send + Sync>>,
     pub health_registry: Option<&'a HealthRegistry>,
+    pub id_generator: &'a IdGenerator,
     pub kv_stores: Option<&'a KvStoreRegistry>,
+    pub pre_read_mutations: Vec<TrustedHeaderMutation>,
     pub request: &'a Request,
     pub request_body_bytes: u64,
     pub request_body_mode: BodyMode,
@@ -327,6 +331,8 @@ pub struct HttpFilterContext<'a> {
     pub response_headers_modified: bool,
     pub rewritten_path: Option<String>,
     pub selected_endpoint_index: Option<usize>,
+    pub structured_metadata: HashMap<String, serde_json::Value>,
+    pub time_source: &'a dyn TimeSource,
     pub upstream: Option<Upstream>,
     // Internal pipeline tracking fields omitted.
 }

@@ -16,7 +16,7 @@ When `use_standard_header` is `true`, also injects the [RFC 7239] `Forwarded` he
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
 | `trusted_proxies` | string[] | no | CIDR ranges of trusted proxies whose existing X-Forwarded-For values are preserved (appended to). Untrusted sources have the header overwritten. |
-| `use_standard_header` | bool | no | When `true`, inject the standard [RFC 7239] `Forwarded` header instead of (or in addition to) X-Forwarded-* headers. |
+| `use_standard_header` | bool | no | When `true`, also inject the standard [RFC 7239] `Forwarded` header in addition to X-Forwarded-* headers. |
 
 ## Example
 

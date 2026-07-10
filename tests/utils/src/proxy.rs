@@ -56,6 +56,7 @@ fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &Fi
             config.insecure_options.allow_unbounded_body,
         )
         .unwrap();
+    pipeline.set_record_filter_duration_metrics(config.metrics.filter_duration);
     Arc::new(pipeline)
 }
 

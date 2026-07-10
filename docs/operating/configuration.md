@@ -15,6 +15,7 @@ filter_chains:         # Named, reusable filter chains.
 clusters:              # Optional. Standalone cluster defs (health checks).
 admin:                 # Optional. Admin health endpoint.
 body_limits:           # Optional. Global body size ceilings.
+metrics:               # Optional. Prometheus metric collection toggles.
 runtime:               # Optional. Thread pool and logging tuning.
 shutdown_timeout_secs: # Optional. Graceful drain time (default: 30).
 insecure_options:      # Optional. Dev/test overrides. See developing/getting-started.md.
@@ -71,6 +72,7 @@ continues serving with the old config.
 **Dynamically reloadable:**
 
 - Filter pipeline configuration
+- Metrics collection settings (`metrics.filter_duration`)
 - Router routes and path mappings
 - Load balancer endpoints and weights
 - Rate limit and circuit breaker settings
@@ -106,7 +108,11 @@ See [hot-reload.yaml] for an example.
   checks, `/ready` returns `{"status":"ok"}`.
 - `/metrics` returns Prometheus text exposition format
   with HTTP request metrics (`praxis_http_requests_total`,
-  `praxis_http_request_duration_seconds`).
+  `praxis_http_request_duration_seconds`). When
+  `metrics.filter_duration` is enabled, also exposes
+  per-filter hook duration histograms
+  (`praxis_filter_duration_seconds`, labels: `filter`,
+  `phase`, `stream`).
 
 Any other path returns `404 NOT FOUND`. Useful for orchestrator
 health checks and monitoring without exposing them on
@@ -205,8 +211,10 @@ access. The default configuration binds to
 
 ### TCP Listeners
 
-TCP listeners set `protocol: tcp` and require an `upstream`
-address. Filter chains are optional for TCP listeners.
+TCP listeners set `protocol: tcp` and require either a
+static `upstream` address or a `cluster` name for load-
+balanced routing. Filter chains are optional. The two
+fields are mutually exclusive.
 
 ```yaml
 listeners:
@@ -391,6 +399,28 @@ but requires `insecure_options.allow_unbounded_body:
 true`; without that flag, startup fails with a
 validation error.
 
+## Metrics
+
+Optional Prometheus metric collection toggles. HTTP
+request metrics on `/metrics` are always recorded when
+the admin endpoint is enabled. Per-filter hook duration
+histograms are opt-in.
+
+```yaml
+metrics:
+  filter_duration: true
+```
+
+`filter_duration` defaults to `false`. When enabled,
+records wall-clock duration for each HTTP filter hook
+(request/response headers and body). Histogram labels:
+`filter` (filter name), `phase` (`request` or
+`response`), `stream` (`headers` or `body`).
+
+Requires `admin.address` to scrape via `/metrics`.
+Enabling `filter_duration` without admin logs a startup
+warning; metrics are recorded but not exposed.
+
 ## Header and Request Limits
 
 Praxis inherits header and request limits from Pingora's
@@ -435,6 +465,11 @@ runtime:
   upstream connections kept per thread. `Option<usize>`,
   defaults to `Some(64)`. Set to `null` to disable
   keepalive pooling.
+- `max_connections`: process-wide maximum concurrent
+  connections across all listeners. When set, new
+  connections beyond this limit are rejected.
+  `Option<u32>`, defaults to `None` (disabled).
+  Distinct from per-listener `max_connections`.
 - `max_memory_bytes`: process-wide RSS memory limit for
   load shedding. When set, the proxy monitors resident
   memory and rejects new requests with `503 Service
@@ -447,6 +482,7 @@ runtime:
   work_stealing: true
   global_queue_interval: 61
   upstream_keepalive_pool_size: 64
+  max_connections: 10000         # process-wide limit
   max_memory_bytes: 1073741824   # 1 GiB
 ```
 

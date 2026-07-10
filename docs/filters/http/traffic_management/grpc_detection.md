@@ -9,7 +9,7 @@ Detects gRPC requests from the `content-type` header and promotes the variant to
 
 Detection values: `grpc` (bare `application/grpc`), `grpc+proto`, `grpc+json`, `grpc+other` (unrecognized sub-protocol), `none` (non-gRPC request).
 
-Writes `grpc_detection.kind` to both filter metadata and filter results for branch chain conditions.
+Writes `grpc.kind` to filter metadata and `kind` to the `grpc_detection` filter results for branch chain conditions.
 
 ## Example
 
