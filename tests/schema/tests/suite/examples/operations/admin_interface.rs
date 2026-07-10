@@ -22,5 +22,9 @@ fn admin_interface_parses() {
         "admin address should be 127.0.0.1:9901"
     );
     assert!(config.admin.verbose, "admin verbose should be true");
+    assert!(
+        config.metrics.filter_duration,
+        "filter_duration should be enabled in example"
+    );
     assert_eq!(config.filter_chains.len(), 1, "expected one filter chain");
 }

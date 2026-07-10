@@ -6,7 +6,7 @@
 use clap::Parser;
 use praxis_core::config::{
     AdminConfig, BodyLimitsConfig, Config, FailureMode, FilterChainConfig, FilterEntry, InsecureOptions, Listener,
-    ProtocolKind, RuntimeConfig,
+    MetricsConfig, ProtocolKind, RuntimeConfig,
 };
 
 // -----------------------------------------------------------------------------
@@ -70,6 +70,7 @@ fn build_config(args: &Args) -> Config {
         }],
         insecure_options: InsecureOptions::default(),
         listeners: vec![echo_listener(&args.address)],
+        metrics: MetricsConfig::default(),
         runtime: RuntimeConfig::default(),
         shutdown_timeout_secs: 30,
     }

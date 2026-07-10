@@ -13,6 +13,9 @@
 - **Conditional filters** - `when`/`unless` gates on both
   request and response phases (path prefix, methods,
   headers, status codes)
+- **Branch chains** - conditional branching in filter
+  pipelines based on filter results, with skip-forward,
+  terminal short-circuit, and re-entrance loops
 
 ## Traffic Management
 
@@ -42,6 +45,11 @@
   supports `${path}` and `${query}` template placeholders
 - **Timeout enforcement** - 504 rejection when upstream
   response exceeds a configured latency SLA
+- **gRPC detection** - content-type detection for gRPC,
+  gRPC-Web, and sub-protocols; writes results for
+  branch chain conditions
+- **Endpoint selector** - header-based upstream endpoint
+  selection from trusted mutation sources
 - **Connection tuning** - per-cluster connection, read,
   write, idle, and total connection (TLS handshake)
   timeouts
@@ -73,6 +81,9 @@
   bodies and promotes values to request headers, enabling
   content-based cluster selection and request
   classification.
+- **JSON-RPC envelope parsing**: extract method, id, kind,
+  and batch length from JSON-RPC 2.0 payloads; promotes
+  to headers and filter results for branch chain routing
 - **Response compression**: gzip, brotli, and zstd
   response compression with per-algorithm levels,
   content type filtering, and minimum size thresholds.
@@ -123,6 +134,9 @@ deployment guidance.
   support, wildcard subdomains, and log-only mode
 - **Forwarded headers**: X-Forwarded-For/Proto/Host
   injection with trusted proxy CIDR support
+- **Credential injection**: per-cluster API key injection
+  into upstream request headers with environment variable
+  or inline values
 
 ## Observability
 
@@ -132,7 +146,8 @@ deployment guidance.
   via `tracing`
 - **Prometheus metrics** - `/metrics` on the admin
   listener exposes request counts and duration
-  histograms in Prometheus text exposition format
+  histograms. Optional per-filter hook duration
+  histograms (`metrics.filter_duration`, default off).
 - **Admin health endpoints** - `/ready` and `/healthy`
   on a dedicated admin listener. `/ready` returns
   per-cluster health status with healthy/unhealthy/total
@@ -159,6 +174,9 @@ deployment guidance.
   Changes that require a restart (listener topology,
   TLS toggle, protocol type) are detected and logged
   as warnings.
+- **Configuration validation** - `--validate` checks
+  config without starting; `--dump` outputs the
+  effective config with defaults applied
 - **Graceful shutdown** - configurable drain timeout
 - **Max connections** - per-listener connection limit
   via semaphore; HTTP returns 503 with `Retry-After`,
@@ -184,6 +202,12 @@ deployment guidance.
     upstream.
   - **Re-encryption**: TLS to upstream with configurable
     SNI.
+  - **Certificate hot-reload**: automatic pickup of
+    certificate changes on disk (500ms debounce).
+  - **Cipher suite configuration**: per-listener
+    cipher suite restriction.
+  - **CRL checking**: client certificate revocation
+    list verification for mTLS.
   - See [TLS documentation][tls-docs].
 - **TCP/L4**: bidirectional forwarding with optional TLS
   and idle timeout. See
@@ -201,4 +225,7 @@ deployment guidance.
 
 - **Rust extensions**: compile-time custom filters with
   zero overhead via the `HttpFilter`/`TcpFilter` traits
-  and `register_filters!` macro.
+  and `register_filters!` macro
+- **External processing** (`ext_proc`): Envoy-compatible
+  gRPC external processing filter (opt-in, separate
+  crate)

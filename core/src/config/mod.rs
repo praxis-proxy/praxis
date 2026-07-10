@@ -17,6 +17,7 @@ mod condition;
 mod filters;
 mod insecure_options;
 mod listener;
+mod metrics;
 mod parse;
 mod route;
 mod runtime;
@@ -35,6 +36,7 @@ pub use condition::{Condition, ConditionMatch, ResponseCondition, ResponseCondit
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
 pub use insecure_options::InsecureOptions;
 pub use listener::{Listener, ListenerTls, ProtocolKind};
+pub use metrics::MetricsConfig;
 use parse::check_yaml_safety;
 pub use praxis_tls::{CachedClusterTls, ClusterTls};
 pub use route::{PathMatch, Route};
@@ -91,6 +93,10 @@ pub struct Config {
 
     /// Proxy listeners to bind.
     pub listeners: Vec<Listener>,
+
+    /// Optional Prometheus metric collection settings.
+    #[serde(default)]
+    pub metrics: MetricsConfig,
 
     /// Runtime configuration knobs.
     #[serde(default)]
@@ -254,6 +260,15 @@ mod tests {
             config.body_limits.max_response_bytes,
             Some(DEFAULT_MAX_BODY_BYTES),
             "max_response_bytes should default to 10 MiB"
+        );
+    }
+
+    #[test]
+    fn metrics_defaults_filter_duration_off() {
+        let config = Config::from_yaml(VALID_YAML).unwrap();
+        assert!(
+            !config.metrics.filter_duration,
+            "filter_duration should default to false"
         );
     }
 

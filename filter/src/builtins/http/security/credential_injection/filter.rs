@@ -35,8 +35,8 @@ struct ClusterCredential {
 /// Injects per-cluster API credentials into upstream requests.
 ///
 /// For each configured cluster, injects a header (e.g.
-/// `Authorization: Bearer sk-...`) and optionally strips
-/// client-provided values for that header to prevent
+/// `Authorization: Bearer sk-...`), replacing any
+/// client-provided value for that header to prevent
 /// credential forwarding.
 ///
 /// Credentials are resolved at construction time (inline

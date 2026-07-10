@@ -57,7 +57,7 @@ pub fn is_exceeded() -> bool {
 
 /// RSS-based memory pressure detector with cached sampling.
 ///
-/// Reads `/proc/self/statm` at most every `CHECK_INTERVAL_MS`
+/// Reads `/proc/self/status` at most every `CHECK_INTERVAL_MS`
 /// and compares RSS against a fixed threshold. All fields are
 /// atomic for lock-free concurrent access from multiple worker
 /// threads.

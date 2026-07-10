@@ -14,7 +14,7 @@ use std::borrow::Cow;
 /// Applies four transformations:
 /// 1. Strip `/./` segments (and leading `./`)
 /// 2. Strip `/../` segments (and leading `../`)
-/// 3. Strip percent-encoded traversal (`%2e%2e`, `.%2e`, `%2e.`)
+/// 3. Resolve percent-encoded traversal (`%2e%2e`, `.%2e`, `%2e.`) as `..`
 /// 4. Collapse `//` to `/`
 ///
 /// Ensures the result starts with `/`. Returns [`Cow::Borrowed`] when

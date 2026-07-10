@@ -399,7 +399,7 @@ filter_chains:
     /// This bypasses `Config::from_yaml` validation which rejects TCP
     /// listeners without an upstream.
     fn config_with_tcp_no_upstream() -> Config {
-        use praxis_core::config::{Listener, ProtocolKind};
+        use praxis_core::config::{Listener, MetricsConfig, ProtocolKind};
         Config {
             admin: AdminConfig::default(),
             body_limits: BodyLimitsConfig::default(),
@@ -419,6 +419,7 @@ filter_chains:
                 tls: None,
                 upstream: None,
             }],
+            metrics: MetricsConfig::default(),
             runtime: RuntimeConfig::default(),
             shutdown_timeout_secs: 10,
         }

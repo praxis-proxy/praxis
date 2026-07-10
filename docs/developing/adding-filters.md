@@ -15,7 +15,10 @@ first.
    `examples/configs/`.
 6. Add a functional integration test in
    `tests/integration/tests/suite/examples/`.
-7. Run `cargo xtask sync-example-readme --fix` to
+7. Run `cargo xtask generate-filter-docs` to regenerate
+   the per-filter markdown under `docs/filters/` and
+   the reference table at `docs/filters/reference.md`.
+8. Run `cargo xtask sync-example-readme --fix` to
    regenerate `examples/README.md`.
 
 All testing requirements from [conventions.md](conventions.md#testing)

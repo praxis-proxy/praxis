@@ -35,7 +35,9 @@ struct AlgorithmConfig {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CompressionFilterConfig {
-    /// Default compression level for all algorithms (1..=12).
+    /// Default compression level for all algorithms.
+    /// Clamped to each algorithm's maximum (gzip: 9,
+    /// brotli: 11, zstd: 22).
     #[serde(default = "default_level")]
     level: u32,
 
@@ -129,7 +131,9 @@ impl CompressionFilter {
     ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if all algorithms are disabled or content types are empty.
+    /// Returns [`FilterError`] if all algorithms are disabled, content
+    /// types are empty, or any compression level exceeds the algorithm's
+    /// maximum.
     ///
     /// [`FilterError`]: crate::FilterError
     ///

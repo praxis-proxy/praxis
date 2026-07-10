@@ -39,72 +39,65 @@ Used by `praxis-core` and `praxis-protocol`.
 ## Module Tree
 
 ```text
-benchmarks                      Benchmark tool and library
-├── error                       Benchmark error types
-├── net                         Network utilities
-├── proxy/                      ProxyConfig trait and implementations
-│   ├── envoy                   Envoy proxy adapter
-│   ├── haproxy                 HAProxy adapter
-│   ├── nginx                   NGINX adapter
-│   └── praxis                  Praxis proxy adapter
-├── report                      Comparison report generation
-├── result                      Structured benchmark results
-├── runner                      Test orchestration
-├── scenario/                   Benchmark scenario definitions
-│   ├── settings                Scenario settings
-│   └── workload                Workload definitions
-└── tools/                      External load generator integrations
-    ├── fortio                  Fortio adapter
-    └── vegeta                  Vegeta adapter
-
 praxis                          Binary entry point
-├── pipelines                   Pipeline resolution from config
-├── reload                      Config reload orchestration (validate, swap, health lifecycle)
-├── server                      Protocol registration, startup
-└── watcher                     File watcher with debounce for config hot-reload
+├── commands                    CLI helpers (--validate, --dump modes)
+├── dump                        Serializable effective config output
+├── pipelines                   Config-to-runtime filter pipeline builder
+├── reload                      Hot config reload and atomic pipeline swap
+├── server                      Server bootstrap and protocol registration
+└── watcher                     File watcher for hot config reload
 
 praxis-core                     Configuration, errors, and server factory
+├── callout/                    HTTP callout client with circuit breaking
+│   └── circuit                 Circuit breaker state machine
 ├── config/                     YAML parsing, defaults, and validation
+│   ├── admin                   Admin endpoint address and options
+│   ├── body_limits             Global max request/response byte limits
 │   ├── bootstrap               Config loading with fallback resolution
+│   ├── branch_chain            Conditional branching in filter pipelines
+│   ├── chain_ref               Named or inline chain references
 │   ├── cluster/                Upstream cluster definitions
 │   │   ├── endpoint            Endpoint address and weight
 │   │   ├── health_check        Per-cluster active health check settings
-│   │   └── load_balancer_strategy  Strategy enum (round-robin, least-conn, etc.)
+│   │   └── load_balancer_strategy  Strategy enum (round-robin, etc.)
 │   ├── condition/              Condition predicates for gating filters
 │   │   ├── request             Path, method, header predicates
 │   │   └── response            Status code, header predicates
-│   ├── validate/               Post-deserialization validation rules
-│   │   ├── cluster/            Cluster config validation
-│   │   │   ├── endpoints       Endpoint address and weight validation
-│   │   │   ├── health_check    Health check config validation
-│   │   │   ├── timeouts        Cluster timeout validation
-│   │   │   └── tls             Cluster TLS config validation
-│   │   ├── listener/           Listener config validation
-│   │   │   ├── address         Bind address validation
-│   │   │   ├── rules           Listener-level validation rules
-│   │   │   └── timeouts        Listener timeout validation
-│   │   ├── filter_chain        Filter chain reference validation
-│   │   └── rules               Top-level validation orchestration
-│   ├── admin                   Admin endpoint address and options
-│   ├── body_limits             Global max request/response byte limits
 │   ├── filters                 FilterChainConfig and FilterEntry structs
 │   ├── insecure_options        Security override flags for development
 │   ├── listener                Bind address, protocol, TLS, chain refs
+│   ├── metrics                 Prometheus metric collection toggles
 │   ├── parse                   YAML safety checks (size, alias expansion)
 │   ├── route                   Route definitions for router filter
-│   └── runtime                 Worker threads, work-stealing, log overrides
+│   ├── runtime                 Worker threads, work-stealing, log overrides
+│   └── validate/               Post-deserialization validation rules
+│       ├── branch_chain        Branch chain cycle and depth validation
+│       ├── cluster/            Cluster config validation
+│       │   ├── endpoints       Endpoint address and weight validation
+│       │   ├── health_check    Health check config validation
+│       │   ├── timeouts        Cluster timeout validation
+│       │   └── tls             Cluster TLS config validation
+│       ├── filter_chain        Filter chain reference validation
+│       ├── listener/           Listener config validation
+│       │   ├── address         Bind address validation
+│       │   ├── rules           Listener-level validation rules
+│       │   └── timeouts        Listener timeout validation
+│       └── rules               Top-level validation orchestration
 ├── connectivity/               Upstream connection types
 │   ├── connection_options      Timeouts, pool sizes, TLS settings
 │   ├── network                 CIDR range matching and IP normalization
 │   └── upstream                Upstream address representation
 ├── errors                      ProxyError (shared workspace error type)
-├── health                      Shared health state types for active health checking
+├── health                      Shared health state for active checking
+├── id                          Per-instance request ID generation
 ├── kv/                         Key-value store trait and registry
 │   └── memory                  In-memory backend (DashMap)
 ├── logging                     Tracing subscriber setup
-└── server/                     Server factory and lifecycle
-    ├── pingora                 Pingora server configuration
-    └── runtime                 PingoraServerRuntime wrapper and options
+├── memory                      Process-wide memory pressure monitoring
+├── server/                     Server factory and lifecycle
+│   ├── pingora                 Pingora server configuration
+│   └── runtime                 PingoraServerRuntime wrapper and options
+└── time                        Wall-clock time abstraction for filters
 
 praxis-filter                   Filter pipeline engine
 ├── actions                     FilterAction: continue or reject
@@ -113,124 +106,146 @@ praxis-filter                   Filter pipeline engine
 │   ├── access                  BodyAccess enum
 │   ├── buffer                  BodyBuffer and overflow handling
 │   ├── builder                 Pre-computed BodyCapabilities
+│   ├── limits                  Shared body-size defaults
 │   └── mode                    BodyMode enum (Stream, StreamBuffer, SizeLimit)
 ├── condition/                  Condition evaluation for filter gating
 │   ├── request                 Request condition evaluation
 │   └── response                Response condition evaluation
-├── context                     Transport-agnostic Request/Response types
+├── context                     HttpFilterContext and per-request types
+├── extensions                  Type-safe request-scoped extension container
 ├── factory                     FilterFactory enum (Http/Tcp) and utilities
-├── filter                      HttpFilter trait and HttpFilterContext
-├── tcp_filter                  TcpFilter trait and TcpFilterContext
-├── registry                    FilterRegistry: name -> factory map
+├── filter                      HttpFilter trait definition
+├── load_balancing/             Protocol-agnostic load-balancing strategies
+│   ├── consistent_hash         Consistent-hash ring selection
+│   ├── endpoint                Weighted endpoint type from cluster config
+│   ├── least_connections       Least-connections with in-flight tracking
+│   ├── p2c                     Power-of-two-choices endpoint selection
+│   ├── round_robin             Weighted round-robin via cumulative thresholds
+│   └── strategy                Strategy selection and dispatch
+├── metrics                     Per-filter hook duration histogram recording
+├── path_match                  Segment-boundary path prefix matching
 ├── pipeline/                   Pipeline execution engine
-│   ├── body                    Body chunk processing and buffer management
+│   ├── body                    Body capabilities computation
 │   ├── branch                  Runtime branch types (ResolvedBranch, BranchOutcome)
-│   ├── build                   Pipeline construction and body capability computation
-│   ├── build_branch            Recursive branch chain resolution (config to runtime)
-│   ├── checks                  Pipeline validation (protocol compatibility)
-│   ├── clusters                Cluster reference collection from filters
-│   ├── evaluate                Branch condition checking and dispatch
-│   ├── extension               PipelineExtension trait for per-request injection
-│   ├── filter                  PipelineFilter: per-filter wrapper with conditions/branches
-│   ├── http                    HTTP request/response/body pipeline
-│   ├── http_utils              Shared HTTP pipeline utilities
-│   ├── tcp                     TCP connect/disconnect pipeline
-│   └── tests                   Pipeline unit tests
+│   ├── build                   Pipeline construction from config entries
+│   ├── build_branch            Recursive branch chain resolution
+│   ├── checks                  Ordering validation (router before LB)
+│   ├── clusters                Cluster name extraction from entries
+│   ├── evaluate                Branch condition evaluation and dispatch
+│   ├── extension               PipelineExtension trait for injecting resources
+│   ├── filter                  PipelineFilter per-filter wrapper
+│   ├── http                    HTTP request/response/body execution loops
+│   ├── http_utils              HTTP pipeline utility functions
+│   └── tcp                     TCP connect/disconnect execution
+├── registry                    FilterRegistry: name -> factory map
+├── results                     FilterResultSet for branch chain evaluation
+├── tcp_filter                  TcpFilter trait and TcpFilterContext
 └── builtins/                   Built-in filter implementations
-    ├── http/                   HTTP protocol filters
-    │   ├── net                 Shared IP utilities (IPv4-mapped normalization)
+    ├── http/                   HTTP protocol filters by category
     │   ├── observability/
-    │   │   ├── access_log      Structured JSON request/response logging
-    │   │   └── request_id      Correlation ID generation/propagation
+    │   │   ├── access_log      Structured JSON access log with sampling
+    │   │   └── request_id      Request correlation ID injection
     │   ├── payload_processing/
-    │   │   ├── compression     Gzip/brotli/zstd response compression
-    │   │   ├── json_body_field Extract JSON field, promote to header
-    │   │   └── json_rpc        JSON-RPC 2.0 envelope parsing and metadata extraction
+    │   │   ├── compression     Response compression (gzip/brotli/zstd)
+    │   │   ├── json_body_field JSON body field extraction to headers
+    │   │   └── json_rpc        JSON-RPC envelope parsing filter
     │   ├── security/
-    │   │   ├── cors            CORS preflight handling, origin validation
-    │   │   ├── credential_injection  Per-cluster API key injection
-    │   │   ├── csrf            CSRF protection via origin validation
-    │   │   ├── forwarded_headers  X-Forwarded-For/Proto/Host injection
-    │   │   ├── guardrails      Reject requests matching string/regex rules
-    │   │   └── ip_acl          Allow/deny by source IP/CIDR
+    │   │   ├── cors            Cross-origin resource sharing filter
+    │   │   ├── credential_injection  Secret injection into upstream headers
+    │   │   ├── csrf            Cross-site request forgery protection
+    │   │   ├── forwarded_headers  X-Forwarded-* header injection
+    │   │   ├── guardrails      PII scanning and content rules
+    │   │   ├── ip_acl          IP-based access control (allow/deny)
+    │   │   └── policy/         CPEX in-process policy engine (feature-gated)
     │   ├── traffic_management/
-    │   │   ├── circuit_breaker Per-cluster circuit breaking (closed/open/half-open)
-    │   │   ├── rate_limit      Token bucket rate limiting (per-IP, global)
-    │   │   ├── router          Path-prefix + host routing to clusters
-    │   │   ├── redirect         3xx redirect without upstream
-    │   │   ├── static_response Fixed status/headers/body (no upstream)
-    │   │   ├── timeout         504 if response exceeds configured ms
-    │   │   └── load_balancer/  Weighted endpoint selection
-    │   │       ├── round_robin Round-robin strategy
-    │   │       ├── least_connections  Least-connections strategy
-    │   │       └── consistent_hash  Consistent-hash strategy
+    │   │   ├── circuit_breaker Per-cluster circuit breaking
+    │   │   ├── endpoint_selector  Header-based upstream endpoint selection
+    │   │   ├── grpc_detection  gRPC content-type detection filter
+    │   │   ├── load_balancer   Weighted upstream load balancing
+    │   │   ├── rate_limit      Token-bucket rate limiting filter
+    │   │   ├── redirect        HTTP 3xx redirect without upstream
+    │   │   ├── router          Path/method-based request routing
+    │   │   ├── static_response Fixed response without upstream contact
+    │   │   └── timeout         Request timeout enforcement (504)
     │   └── transformation/
-    │       ├── header          Add/set/remove request/response headers
-    │       ├── path_rewrite    Strip/add prefix or regex replace on paths
-    │       └── url_rewrite     Regex path transform + query manipulation
-    └── tcp/                    TCP protocol filters
+    │       ├── header          Header add/set/remove operations
+    │       ├── path_rewrite    Path prefix rewriting filter
+    │       └── url_rewrite     Regex-based URL and query rewriting
+    └── tcp/                    TCP protocol filters by category
         ├── observability/
-        │   └── tcp_access_log  Structured JSON connection logging
+        │   └── tcp_access_log  TCP connection access logging
         └── traffic_management/
-            ├── sni_router      SNI-based upstream routing
-            └── tcp_load_balancer  Cluster-backed TCP endpoint selection
+            ├── sni_router      SNI-based TLS connection routing
+            └── tcp_load_balancer  TCP upstream load balancing
 
 praxis-protocol                 Protocol adapters
-├── pipelines                   Maps listener names to resolved pipelines
+├── connections                 Process-wide connection limit
+├── pipelines                   Hot-swappable pipeline storage (ArcSwap)
+├── tls_setup                   Shared TLS settings builder for listeners
 ├── http/                       HTTP (Pingora)
 │   └── pingora/                Pingora ProxyHttp integration
 │       ├── context             Per-request state through lifecycle hooks
 │       ├── convert             Pingora <-> Praxis type conversions
 │       ├── health/             Active health checking
-│       │   ├── probe           HTTP and TCP health check probe functions
+│       │   ├── probe           HTTP and TCP health check probes
 │       │   ├── runner          Background health check runner
 │       │   └── service         Admin health-check service (/ready, /healthy)
 │       ├── json                JSON HTTP response builder
 │       ├── kv                  KV store admin CRUD endpoints
 │       ├── listener            TCP/TLS listener setup
+│       ├── metrics             Prometheus metrics and scrape endpoint
 │       └── handler/            Request/response lifecycle hooks
-│           ├── hop_by_hop           Shared hop-by-hop header stripping logic
-│           ├── no_body              ProxyHttp impl without body filter hooks
-│           ├── with_body            ProxyHttp impl with body filter hooks
+│           ├── hop_by_hop           Hop-by-hop header stripping (RFC 9110)
+│           ├── no_body              Handler without body filter hooks
+│           ├── normalize            Request header normalization
+│           ├── reserved_headers     Reserved internal header helpers
+│           ├── with_body            Handler with body filter hooks
 │           ├── request_filter/      Pipeline execution on request
 │           │   ├── stream_buffer    Pre-read logic for StreamBuffer mode
-│           │   └── validation       Host header validation, Max-Forwards
+│           │   └── validation       Host header and Max-Forwards validation
 │           ├── request_body_filter  Body chunk processing (request)
 │           ├── response_filter      Pipeline execution on response
 │           ├── response_body_filter Body chunk processing (response)
 │           ├── upstream_peer        Build HttpPeer from filter context
-│           ├── upstream_request     Request-path hop-by-hop stripping
+│           ├── upstream_request     Request-path rewriting
 │           ├── upstream_response    Response-path hop-by-hop stripping
-│           └── via                  Via header injection
-├── tcp/                        L4 bidirectional forwarding
-│   ├── proxy                   Bidirectional TCP proxy application
-│   └── tls_setup               TLS configuration and listener grouping
+│           └── via                  Via header injection (RFC 9110)
+└── tcp/                        L4 bidirectional forwarding
+    ├── proxy                   Bidirectional TCP proxy application
+    └── tls_setup               TCP TLS configuration and listener grouping
 
 praxis-tls                      TLS configuration types and setup
-├── client_auth                 Client certificate authentication mode
+├── cached                      Pre-parsed TLS certificate data caching
+├── client_auth                 Client certificate verifier for mTLS
 ├── config/                     TLS configuration structs
 │   ├── certs                   CaConfig and CertKeyPair types
 │   ├── cluster                 ClusterTls upstream TLS settings
 │   └── listener                ListenerTls: cert list, client CA, cert mode
 ├── error                       TlsError type
+├── reload                      Hot-reloadable certificate resolver
 ├── setup/                      TLS runtime setup
 │   ├── loader                  Certificate and key loading from disk
-│   └── sni                     SNI-based certificate selection
-└── sni                         ClientHello SNI parser for TCP routing
+│   └── sni                     SNI-based multi-cert resolver
+├── sni                         Zero-copy ClientHello SNI parser
+└── watcher                     Filesystem watcher for cert hot-reload
 
 xtask                           Developer task runner (cargo xtask)
 ├── benchmark/                  Benchmark orchestration
-│   ├── cli                     CLI argument parsing
-│   ├── compare                 Comparison logic
-│   ├── flamegraph              Flamegraph generation
-│   ├── orchestrate             Test orchestration
-│   ├── proxy                   Proxy configuration
-│   ├── report                  Report generation
-│   ├── resolve                 Resolution logic
-│   └── visualize               Result visualization
-├── debug                       Debug utilities
-├── echo                        Echo server for testing
-└── port                        Free port allocation
+│   ├── cli                     CLI argument types and subcommands
+│   ├── compare                 Report comparison and regression detection
+│   ├── flamegraph              CPU profiling with flamegraphs
+│   ├── orchestrate             Benchmark orchestration and report assembly
+│   ├── proxy                   Proxy config builders and Docker management
+│   ├── report                  Benchmark report serialization
+│   ├── resolve                 Workload and proxy name resolution
+│   └── visualize               SVG chart generator for results
+├── debug                       Run praxis with dev settings
+├── echo                        Quick HTTP test echo server
+├── filter_docs                 Generate and lint per-filter documentation
+├── lint_deps                   Enforce three-component semver in deps
+├── lint_example_tests          Enforce example config test coverage
+├── port                        Port availability utilities
+└── sync_example_readme         Generate examples/README.md table
 ```
 
 ## Dependency Graph
@@ -271,7 +286,7 @@ sequenceDiagram
     loop each Listener
         M->>M: look up listener.filter_chains, flatten → Vec<FilterEntry>
         M->>R: registry.create(type, yaml) per entry → AnyFilter
-        M->>M: FilterPipeline{Vec<ConditionalFilter>, BodyCapabilities}
+        M->>M: FilterPipeline{Vec<PipelineFilter>, BodyCapabilities}
         M->>M: apply_body_limits(max_req, max_resp)
         M->>M: pipeline.set_kv_stores(kv_registry)
         M->>LP: insert(listener.name, Arc<FilterPipeline>)

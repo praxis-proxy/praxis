@@ -29,6 +29,7 @@ bytes = { workspace = true }
 cpex = { workspace = true, optional = true }
 dashmap = { workspace = true }
 http = { workspace = true }
+metrics = { workspace = true }
 percent-encoding = { workspace = true }
 praxis-core = { workspace = true }
 rand = { workspace = true }
@@ -47,5 +48,6 @@ zeroize = { workspace = true }
 [dev-dependencies]
 chrono = { workspace = true }
 jsonwebtoken = "10.4.0"
+metrics-exporter-prometheus = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

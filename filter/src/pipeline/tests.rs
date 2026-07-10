@@ -692,6 +692,7 @@ fn apply_body_limits_no_limits_leaves_stream_mode() {
         body_capabilities: caps,
         compression: None,
         filters: vec![],
+        record_filter_duration_metrics: false,
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
@@ -727,6 +728,7 @@ fn apply_body_limits_converts_default_stream_to_size_limit() {
         body_capabilities: caps,
         compression: None,
         filters: vec![],
+        record_filter_duration_metrics: false,
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
@@ -771,6 +773,7 @@ fn apply_body_limits_preserves_filter_declared_stream() {
         body_capabilities: caps,
         compression: None,
         filters: vec![],
+        record_filter_duration_metrics: false,
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
@@ -1346,6 +1349,7 @@ fn apply_body_limits_default_stream_becomes_size_limit() {
         body_capabilities: caps,
         compression: None,
         filters: vec![],
+        record_filter_duration_metrics: false,
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
@@ -1374,6 +1378,7 @@ fn apply_body_limits_filter_stricter_than_config() {
         body_capabilities: caps,
         compression: None,
         filters: vec![],
+        record_filter_duration_metrics: false,
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
@@ -1399,6 +1404,7 @@ fn apply_body_limits_config_stricter_than_filter() {
         body_capabilities: caps,
         compression: None,
         filters: vec![],
+        record_filter_duration_metrics: false,
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
@@ -1424,6 +1430,7 @@ fn apply_body_limits_rejects_unbounded_stream_buffer() {
         body_capabilities: caps,
         compression: None,
         filters: vec![],
+        record_filter_duration_metrics: false,
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
@@ -1448,6 +1455,7 @@ fn apply_body_limits_clamps_unbounded_stream_buffer_with_override() {
         body_capabilities: caps,
         compression: None,
         filters: vec![],
+        record_filter_duration_metrics: false,
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
@@ -1668,6 +1676,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         body_capabilities: BodyCapabilities::default(),
         compression: None,
         filters: vec![filter_a, filter_b, filter_c],
+        record_filter_duration_metrics: false,
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
@@ -1716,6 +1725,7 @@ async fn all_executed_filters_run_on_response() {
                 vec![],
             ),
         ],
+        record_filter_duration_metrics: false,
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
@@ -1771,6 +1781,7 @@ async fn skipped_filter_skips_its_branches() {
         body_capabilities: BodyCapabilities::default(),
         compression: None,
         filters: vec![parent],
+        record_filter_duration_metrics: false,
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
@@ -2823,6 +2834,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         body_capabilities,
         compression: None,
         filters,
+        record_filter_duration_metrics: false,
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
@@ -2846,6 +2858,7 @@ fn make_pipeline_with_conditions(
         body_capabilities,
         compression: None,
         filters,
+        record_filter_duration_metrics: false,
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
@@ -2869,6 +2882,7 @@ fn make_pipeline_with_response_conditions(
         body_capabilities,
         compression: None,
         filters,
+        record_filter_duration_metrics: false,
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
@@ -3350,4 +3364,229 @@ fn multiple_pipeline_extensions_are_all_injected() {
 
     assert_eq!(ext.get::<ExtA>().unwrap().0, 1, "ExtA should be injected");
     assert_eq!(ext.get::<ExtB>().unwrap().0, "hello", "ExtB should be injected");
+}
+
+// -----------------------------------------------------------------------------
+// Filter Metrics Tests
+// -----------------------------------------------------------------------------
+
+mod filter_duration_metrics_tests {
+    use std::sync::OnceLock;
+
+    use bytes::Bytes;
+    use metrics_exporter_prometheus::PrometheusBuilder;
+
+    use super::*;
+
+    static RECORDER: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+
+    fn install_test_recorder() -> &'static metrics_exporter_prometheus::PrometheusHandle {
+        RECORDER.get_or_init(|| {
+            PrometheusBuilder::new()
+                .install_recorder()
+                .expect("failed to install test Prometheus recorder")
+        })
+    }
+
+    fn render_metrics() -> String {
+        install_test_recorder().render()
+    }
+
+    fn assert_filter_metric(metrics: &str, filter: &str, phase: &str, stream: &str) {
+        let filter_label = format!("filter=\"{filter}\"");
+        let phase_label = format!("phase=\"{phase}\"");
+        let stream_label = format!("stream=\"{stream}\"");
+        assert!(
+            metrics.lines().any(|line| {
+                line.contains(&filter_label) && line.contains(&phase_label) && line.contains(&stream_label)
+            }),
+            "expected filter={filter} phase={phase} stream={stream} on one metric line: {metrics}"
+        );
+    }
+
+    fn make_filter_duration_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
+        let mut pipeline = make_pipeline(filters);
+        pipeline.set_record_filter_duration_metrics(true);
+        pipeline
+    }
+
+    fn make_filter_duration_pipeline_with_conditions(
+        filters: Vec<(Box<dyn HttpFilter>, Vec<praxis_core::config::Condition>)>,
+    ) -> FilterPipeline {
+        let mut pipeline = make_pipeline_with_conditions(filters);
+        pipeline.set_record_filter_duration_metrics(true);
+        pipeline
+    }
+
+    struct GatedFilter;
+
+    #[async_trait]
+    impl HttpFilter for GatedFilter {
+        fn name(&self) -> &'static str {
+            "gated_filter"
+        }
+
+        async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    /// Exercises all four HTTP filter hooks for metrics coverage.
+    struct AllStreamsFilter;
+
+    #[async_trait]
+    impl HttpFilter for AllStreamsFilter {
+        fn name(&self) -> &'static str {
+            "all_streams"
+        }
+
+        async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        async fn on_response(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn request_body_access(&self) -> BodyAccess {
+            BodyAccess::ReadOnly
+        }
+
+        fn response_body_access(&self) -> BodyAccess {
+            BodyAccess::ReadOnly
+        }
+
+        async fn on_request_body(
+            &self,
+            _ctx: &mut crate::HttpFilterContext<'_>,
+            _body: &mut Option<Bytes>,
+            _end_of_stream: bool,
+        ) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        fn on_response_body(
+            &self,
+            _ctx: &mut crate::HttpFilterContext<'_>,
+            _body: &mut Option<Bytes>,
+            _end_of_stream: bool,
+        ) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    struct DisabledOnlyFilter;
+
+    #[async_trait]
+    impl HttpFilter for DisabledOnlyFilter {
+        fn name(&self) -> &'static str {
+            "disabled_only"
+        }
+
+        async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    #[tokio::test]
+    async fn filter_duration_metric_emitted_on_request_headers() {
+        install_test_recorder();
+
+        let pipeline = make_filter_duration_pipeline(vec![Box::new(AllStreamsFilter)]);
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+        assert_filter_metric(&render_metrics(), "all_streams", "request", "headers");
+    }
+
+    #[tokio::test]
+    async fn filter_duration_metric_emitted_on_request_body() {
+        install_test_recorder();
+
+        let pipeline = make_filter_duration_pipeline(vec![Box::new(AllStreamsFilter)]);
+        let req = crate::test_utils::make_request(Method::POST, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+        let mut body = Some(Bytes::from_static(b"data"));
+        drop(
+            pipeline
+                .execute_http_request_body(&mut ctx, &mut body, true)
+                .await
+                .unwrap(),
+        );
+
+        assert_filter_metric(&render_metrics(), "all_streams", "request", "body");
+    }
+
+    #[tokio::test]
+    async fn filter_duration_metric_emitted_on_response_headers() {
+        install_test_recorder();
+
+        let pipeline = make_filter_duration_pipeline(vec![Box::new(AllStreamsFilter)]);
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+        let mut resp = crate::test_utils::make_response();
+        ctx.response_header = Some(&mut resp);
+        drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
+
+        assert_filter_metric(&render_metrics(), "all_streams", "response", "headers");
+    }
+
+    #[tokio::test]
+    async fn filter_duration_metric_emitted_on_response_body() {
+        install_test_recorder();
+
+        let pipeline = make_filter_duration_pipeline(vec![Box::new(AllStreamsFilter)]);
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+        let mut resp = crate::test_utils::make_response();
+        ctx.response_header = Some(&mut resp);
+
+        let mut body = Some(Bytes::from_static(b"resp"));
+        drop(pipeline.execute_http_response_body(&mut ctx, &mut body, true).unwrap());
+
+        assert_filter_metric(&render_metrics(), "all_streams", "response", "body");
+    }
+
+    #[tokio::test]
+    async fn filter_duration_metric_skipped_when_condition_not_met() {
+        install_test_recorder();
+
+        let pipeline =
+            make_filter_duration_pipeline_with_conditions(vec![(Box::new(GatedFilter), vec![when_path("/api")])]);
+        let req = crate::test_utils::make_request(Method::GET, "/health");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+        let metrics = render_metrics();
+        assert!(
+            !metrics.contains("filter=\"gated_filter\""),
+            "condition-gated skip should not emit filter metric: {metrics}"
+        );
+    }
+
+    #[tokio::test]
+    async fn filter_duration_not_recorded_when_disabled() {
+        install_test_recorder();
+
+        let pipeline = make_pipeline(vec![Box::new(DisabledOnlyFilter)]);
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+        let metrics = render_metrics();
+        assert!(
+            !metrics.contains("filter=\"disabled_only\""),
+            "disabled filter metrics should not record this filter: {metrics}"
+        );
+    }
 }

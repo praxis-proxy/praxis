@@ -9,7 +9,7 @@ Enables Pingora's built-in response compression when present in a filter chain.
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `level` | integer | no | Default compression level for all algorithms (1..=12). |
+| `level` | integer | no | Default compression level for all algorithms. Clamped to each algorithm's maximum (gzip: 9, brotli: 11, zstd: 22). |
 | `gzip` | AlgorithmConfig | no | Gzip algorithm settings. |
 | `gzip.enabled` | bool | no | Whether this algorithm is enabled. |
 | `gzip.level` | integer | no | Compression level for this algorithm. |

@@ -16,10 +16,15 @@
 #   curl http://localhost:9901/healthy    # liveness
 #   curl http://localhost:9901/ready      # readiness (verbose)
 #   curl http://localhost:9901/metrics    # prometheus scrape
+#
+# Per-filter duration metrics require metrics.filter_duration: true.
 
 admin:
   address: "127.0.0.1:9901"
   verbose: true
+
+metrics:
+  filter_duration: true
 
 listeners:
   - name: default

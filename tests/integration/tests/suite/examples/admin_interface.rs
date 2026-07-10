@@ -24,6 +24,10 @@ fn admin_interface_config_parses() {
     assert_eq!(config.listeners.len(), 1, "expected one listener");
     assert!(config.admin.address.is_some(), "admin address should be set");
     assert!(config.admin.verbose, "admin verbose should be true");
+    assert!(
+        config.metrics.filter_duration,
+        "filter_duration should be enabled in example"
+    );
 }
 
 #[test]
@@ -71,5 +75,25 @@ fn admin_interface_serves_health_and_metrics() {
     assert!(
         metrics_body.contains("status_class=\"2xx\""),
         "/metrics should contain status_class=2xx label: {metrics_body}"
+    );
+    assert!(
+        metrics_body.contains("praxis_filter_duration_seconds"),
+        "/metrics should contain praxis_filter_duration_seconds: {metrics_body}"
+    );
+    assert!(
+        metrics_body.contains("filter=\"router\""),
+        "/metrics should contain router filter duration: {metrics_body}"
+    );
+    assert!(
+        metrics_body.contains("filter=\"load_balancer\""),
+        "/metrics should contain load_balancer filter duration: {metrics_body}"
+    );
+    assert!(
+        metrics_body.contains("phase=\"request\""),
+        "/metrics should contain request phase label: {metrics_body}"
+    );
+    assert!(
+        metrics_body.contains("stream=\"headers\""),
+        "/metrics should contain headers stream label: {metrics_body}"
     );
 }

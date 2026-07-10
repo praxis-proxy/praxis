@@ -7,7 +7,7 @@ IP-based access control filter.
 
 ## Configuration Notes
 
-When `allow` is configured, only matching clients are permitted. When `deny` is configured, matching clients are rejected. When both are set, `allow` takes precedence: a client matching an allow entry is never denied.
+When `allow` is configured, only matching clients are permitted. When `deny` is configured, matching clients are rejected. Both cannot be set together; [`from_config`] rejects configurations with both lists.
 
 Denied requests receive a 403 Forbidden response.
 

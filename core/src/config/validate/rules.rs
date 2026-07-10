@@ -50,6 +50,7 @@ impl Config {
         validate_filter_chains(&self.filter_chains, &self.listeners)?;
         validate_branch_chains(&self.filter_chains)?;
         validate_admin_address(self.admin.address.as_deref(), self.insecure_options.allow_public_admin)?;
+        warn_filter_duration_without_admin(self.metrics.filter_duration, self.admin.address.is_some());
 
         for listener in &self.listeners {
             if listener.protocol != ProtocolKind::Tcp && listener.filter_chains.is_empty() {
@@ -182,6 +183,16 @@ fn validate_admin_address(addr: Option<&str>, allow_public: bool) -> Result<(), 
         "admin endpoint '{addr}' must bind to a loopback address (127.0.0.1 or [::1]); \
          set insecure_options.allow_public_admin: true to allow non-loopback binding"
     )))
+}
+
+/// Warn when filter duration metrics are enabled but the admin endpoint is disabled.
+pub(super) fn warn_filter_duration_without_admin(filter_duration: bool, admin_enabled: bool) {
+    if filter_duration && !admin_enabled {
+        warn!(
+            "metrics.filter_duration is enabled but admin is disabled; \
+             filter duration metrics will be recorded but not scrapeable via /metrics"
+        );
+    }
 }
 
 // -----------------------------------------------------------------------------
