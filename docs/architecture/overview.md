@@ -22,12 +22,37 @@ compose a bespoke proxy server from the same primitives.
 [`HttpFilter`]:../filters/README.md
 [`TcpFilter`]:../filters/README.md
 
+## Deployment placements
+
+Praxis exposes listeners, runs a composable filter pipeline,
+and selects a **configured** upstream cluster through routing
+and load balancing. Destinations come from cluster config,
+not from client-supplied arbitrary URLs. That same pipeline
+supports multiple placements:
+
+- **Ingress**: clients and partners call Praxis; Praxis
+  reaches your services (API gateway / edge proxy).
+- **Egress gateway**: workloads call Praxis as their API
+  endpoint; Praxis reaches configured upstreams (for example
+  external APIs with `credential_injection`).
+- **Sidecar / colocated**: run next to a workload for local
+  ingress or egress-gateway patterns. Praxis does not ship a
+  mesh control plane; colocated use is the same filter
+  pipeline next to the app.
+
+Routing, load balancing, security, and body-aware filters
+are available in every placement.
+
 ## Primary Use-Cases
 
-- **Ingress**: Reverse proxy, API gateway, edge proxy
-- **Egress**: Outbound proxy, service-to-service
-- **East/West**: Sidecar or converged proxy for service mesh
-- **Security Gateway**: Guardrails, Network Policy
+- **Ingress**: API gateway, edge proxy, traffic ingestion
+- **Egress gateway**: Workloads to configured upstreams via Praxis
+- **Sidecar / colocated**: Local proxy next to a workload
+- **Security gateway**: Guardrails, network policy
+- **AI inference and agents**: [AI Gateway][ai-overview] on
+  `praxis-ai` (not the core `praxis` binary)
+
+[ai-overview]: https://github.com/praxis-proxy/ai/blob/main/docs/overview.md
 
 ## System Architecture
 

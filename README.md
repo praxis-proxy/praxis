@@ -6,7 +6,13 @@
 [![MSRV: 1.96](https://img.shields.io/badge/MSRV-1.96-brightgreen.svg)](https://blog.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Praxis is a high-performance and security-first proxy server and framework for AI and cloud-native workloads.
+Praxis is a high-performance, security-first **proxy framework**
+built on a composable filter pipeline. Deploy it for ingress
+(API gateway / edge proxy) or as an egress gateway that
+workloads call so Praxis can reach configured upstreams.
+AI Gateway capabilities ship in
+[praxis-ai](https://github.com/praxis-proxy/ai); see
+[AI Gateway overview](https://github.com/praxis-proxy/ai/blob/main/docs/overview.md).
 
 ## Getting Started
 
