@@ -247,11 +247,7 @@ deployment guidance.
 
 An **AI Gateway** (AI API Gateway) routes, manages, enriches,
 and parses inference and agentic traffic between workloads and
-model or agent backends. Using the same filter pipeline as
-core Praxis, it can be placed as an ingress API gateway, an
-in-cluster service, or an egress gateway (workloads call
-`praxis-ai`; it reaches configured model upstreams). Full
-definitions:
+model or agent backends. Full definitions:
 [praxis-ai overview](https://github.com/praxis-proxy/ai/blob/main/docs/overview.md).
 
 LLM provider filters, MCP/A2A, response storage, and token

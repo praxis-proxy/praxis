@@ -1,10 +1,8 @@
 # Praxis Documentation
 
 Praxis is a high-performance, security-first **proxy framework**
-with a composable filter pipeline for ingress (API gateway /
-edge proxy) and egress-gateway placements (workloads call
-Praxis; Praxis reaches configured upstreams), including
-routing and load balancing. AI Gateway docs live in
+with a composable filter pipeline for routing, load balancing,
+and security. AI Gateway docs live in
 [praxis-ai overview](https://github.com/praxis-proxy/ai/blob/main/docs/overview.md).
 
 ## Getting started
