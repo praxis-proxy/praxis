@@ -38,7 +38,7 @@ mod payload_processing;
 mod pipeline;
 #[cfg(feature = "cpex-policy-engine")]
 mod policy;
-#[cfg(feature = "experimental-http-authz")]
+#[cfg(feature = "cpex-policy-engine")]
 mod policy_http;
 mod protocol_examples;
 mod protocols;

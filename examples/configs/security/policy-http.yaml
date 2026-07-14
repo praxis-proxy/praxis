@@ -6,11 +6,11 @@
 # the HTTP request line, headers, and identity claims. Denials become plain
 # HTTP responses (with a custom `denyWith` status/body/headers).
 #
-# Requires building with the `experimental-http-authz` feature, which is off
+# Requires building with the `cpex-policy-engine` feature, which is off
 # by default:
 #
 # Usage:
-#   cargo run -p praxis-proxy --features experimental-http-authz -- -c examples/configs/security/policy-http.yaml
+#   cargo run -p praxis-proxy --features cpex-policy-engine -- -c examples/configs/security/policy-http.yaml
 
 listeners:
   - name: default

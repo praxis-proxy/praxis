@@ -127,16 +127,6 @@ impl PolicyFilter {
         reason = "linear construction + init steps; splitting obscures the startup flow"
     )]
     pub fn new(cfg: PolicyFilterConfig) -> Result<Self, FilterError> {
-        // `enforcement: http` is experimental and only functions when the
-        // `experimental-http-authz` feature is compiled in. Fail fast at
-        // construction rather than silently running the request through the
-        // MCP path (which would fail-close on non-MCP traffic).
-        if cfg.enforcement == super::config::EnforcementMode::Http && !cfg!(feature = "experimental-http-authz") {
-            return Err("policy: `enforcement: http` requires building with the \
-                        `experimental-http-authz` feature"
-                .into());
-        }
-
         let yaml = std::fs::read_to_string(&cfg.config_path).map_err(|e| -> FilterError {
             format!("policy: failed to read config_path {}: {e}", cfg.config_path).into()
         })?;
@@ -349,7 +339,6 @@ impl PolicyFilter {
     /// plain HTTP response ([`super::error::http_authz_rejection`]); an
     /// identity failure is the usual 401. Authorization runs here (not the
     /// body phase) because it needs no request body.
-    #[cfg(feature = "experimental-http-authz")]
     #[expect(clippy::large_stack_frames, reason = "async handler over large CMF types")]
     async fn on_request_http_authz(&self, ctx: &HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         use cpex::cpex_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_HTTP_REQUEST};
@@ -385,7 +374,6 @@ impl PolicyFilter {
     /// `http.request_headers.*` evaluate. `host` is sourced from the parsed
     /// request authority (Praxis validates Host upstream — see the Pingora
     /// boundary docs), never a raw unvalidated header.
-    #[cfg(feature = "experimental-http-authz")]
     fn attach_http_attributes(ctx: &HttpFilterContext<'_>, ext: &mut Extensions) {
         use cpex::cpex_core::extensions::HttpExtension;
 
@@ -473,10 +461,7 @@ impl HttpFilter for PolicyFilter {
 
         // Experimental generic-HTTP authorization for non-MCP traffic —
         // evaluate the CPEX `global` policy here (authorization is an
-        // admission check; no body needed). Gated by the
-        // `experimental-http-authz` feature; `new` rejects `enforcement:
-        // http` when the feature is not compiled in.
-        #[cfg(feature = "experimental-http-authz")]
+        // admission check; no body needed).
         if self.cfg.enforcement == super::config::EnforcementMode::Http {
             // Box the (large CMF-typed) future so it lives on the heap
             // rather than inflating this method's stack frame.
@@ -503,7 +488,6 @@ impl HttpFilter for PolicyFilter {
         // In `http` mode authorization already ran (and allowed) in
         // `on_request` over the CPEX `global` policy — the body phase is
         // MCP-only, so skip it entirely rather than trip the mcp.method gate.
-        #[cfg(feature = "experimental-http-authz")]
         if self.cfg.enforcement == super::config::EnforcementMode::Http {
             return Ok(FilterAction::BodyDone);
         }

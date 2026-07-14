@@ -91,13 +91,12 @@ pub struct PolicyFilterConfig {
     /// MCP/JSON-RPC behavior: identity in `on_request`, and CMF/APL
     /// authorization dispatched per MCP entity in `on_request_body`.
     ///
-    /// `Http` is **experimental** (requires building with the
-    /// `experimental-http-authz` feature): it enables generic-HTTP
-    /// authorization for non-MCP traffic. The filter populates the HTTP
-    /// request line + headers into the CPEX bag and evaluates the CPEX
-    /// `global` policy via the `cmf.http_request` hook, mapping denials
-    /// to plain HTTP responses. See the security-hardening docs for the
-    /// experimental status and retain/revert criteria.
+    /// `Http` is **experimental**: it enables generic-HTTP authorization
+    /// for non-MCP traffic. The filter populates the HTTP request line +
+    /// headers into the CPEX bag and evaluates the CPEX `global` policy via
+    /// the `cmf.http_request` hook, mapping denials to plain HTTP responses.
+    /// See the security-hardening docs for the experimental status and
+    /// retain/revert criteria.
     #[serde(default)]
     pub enforcement: EnforcementMode,
 }
@@ -154,7 +153,7 @@ pub enum EnforcementMode {
 
     /// Generic-HTTP enforcement (experimental). Authorization runs over
     /// the CPEX `global` policy for non-MCP requests; denials are plain
-    /// HTTP responses. Requires the `experimental-http-authz` feature.
+    /// HTTP responses.
     Http,
 }
 

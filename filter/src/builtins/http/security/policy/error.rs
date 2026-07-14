@@ -154,7 +154,6 @@ const FALLBACK_DENY_ENVELOPE: &[u8] =
 /// `"<code>: <reason>"`), and `http.headers`. Header names/values
 /// containing control characters are dropped as defense-in-depth against
 /// response splitting (plan R21). Always stamps [`VIOLATION_HEADER`].
-#[cfg(feature = "experimental-http-authz")]
 #[expect(
     clippy::too_many_lines,
     reason = "linear denyWith mapping with per-header validation"
@@ -204,7 +203,6 @@ pub(super) fn http_authz_rejection(violation: Option<&PluginViolation>) -> Rejec
 }
 
 /// True if a header name/value carries no control characters.
-#[cfg(feature = "experimental-http-authz")]
 fn header_is_safe(s: &str) -> bool {
     !s.chars().any(char::is_control)
 }
