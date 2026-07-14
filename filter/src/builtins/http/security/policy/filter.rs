@@ -354,11 +354,12 @@ impl PolicyFilter {
     async fn on_request_http_authz(&self, ctx: &HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         use cpex::cpex_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_HTTP_REQUEST};
 
-        let identity = match self.resolve_identity(Self::snapshot_headers(ctx)).await {
+        let headers = Self::snapshot_headers(ctx);
+        let identity = match self.resolve_identity(headers.clone()).await {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
-        let mut extensions = Self::extensions_from_identity(ctx, &identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL);
+        let mut extensions = Self::extensions_from_identity(&headers, &identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL);
         Self::attach_http_attributes(ctx, &mut extensions);
 
         let payload = MessagePayload {

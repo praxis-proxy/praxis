@@ -22,7 +22,7 @@ cpex-policy-engine = [
 # Experimental generic-HTTP authorization for the policy filter
 # (`enforcement: http`). Off by default; opting in enables the non-MCP
 # authz path that consumes the CPEX http.* attributes / cmf.http_request
-# hook / denyWith details. See the AuthPolicy support docs.
+# hook / denyWith details. See the security-hardening docs.
 experimental-http-authz = ["cpex-policy-engine"]
 
 [lints]

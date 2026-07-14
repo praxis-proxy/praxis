@@ -10,8 +10,6 @@ pub use test_utils::load_example_config;
 mod access_logging;
 mod admin_interface;
 mod api_key_filter;
-#[cfg(feature = "experimental-http-authz")]
-mod authpolicy_http;
 mod basic_reverse_proxy;
 mod branching;
 mod canary_routing;
@@ -40,6 +38,8 @@ mod payload_processing;
 mod pipeline;
 #[cfg(feature = "cpex-policy-engine")]
 mod policy;
+#[cfg(feature = "experimental-http-authz")]
+mod policy_http;
 mod protocol_examples;
 mod protocols;
 mod redirect;

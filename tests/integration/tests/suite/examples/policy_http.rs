@@ -1,22 +1,22 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Functional integration test for the experimental AuthPolicy HTTP
-//! authorization example (`examples/configs/security/authpolicy-http.yaml`).
+//! Functional integration test for the experimental generic-HTTP policy
+//! authorization example (`examples/configs/security/policy-http.yaml`).
 //!
 //! Exercises the `policy` filter in `enforcement: http` mode end-to-end
 //! against the CPEX `global` policy (admit only GET). Three cases prove the
-//! full Phase B chain:
+//! full chain:
 //!
 //! * **Allow** — GET with a valid HS256 JWT resolves identity, the global policy admits GET, and the request reaches
 //!   the backend (HTTP 200).
-//! * **Deny (authz)** — POST with a valid JWT is denied by the global policy; the transpiled `denyWith` produces a
-//!   plain HTTP 403 with the custom body + header (not a JSON-RPC envelope).
+//! * **Deny (authz)** — POST with a valid JWT is denied by the global policy; the `denyWith` produces a plain HTTP 403
+//!   with the custom body + header (not a JSON-RPC envelope).
 //! * **Deny (identity)** — a request with no `Authorization` header is rejected at the identity gate (HTTP 401).
 //!
-//! Together these exercise the request-line attributes (U1), the structured
-//! denyWith carrier (U2), the CPEX non-entity authz path (U3), and the
-//! Praxis `http` enforcement mode + deny mapping (U6/U7).
+//! Together these exercise the request-line attributes, the structured
+//! denyWith carrier, the CPEX non-entity authz path, and the Praxis `http`
+//! enforcement mode + deny mapping.
 
 use std::{
     collections::HashMap,
@@ -30,7 +30,7 @@ use praxis_test_utils::{
 };
 
 // Identity parameters mirrored from
-// `tests/integration/fixtures/authpolicy-http-cpex-policy.yaml`.
+// `tests/integration/fixtures/policy-http-cpex-policy.yaml`.
 const FIXTURE_ISSUER: &str = "https://idp.example.com";
 const FIXTURE_AUDIENCE: &str = "praxis-cpex-example";
 const FIXTURE_SECRET: &str = "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT";
@@ -56,20 +56,17 @@ fn mint_fixture_jwt(subject: &str) -> String {
     .expect("sign fixture JWT")
 }
 
-/// Load the authpolicy-http example, rewrite the operator `config_path` to
+/// Load the policy-http example, rewrite the operator `config_path` to
 /// the in-repo fixture, and patch ports.
 #[expect(clippy::needless_pass_by_value, reason = "callers construct the map inline")]
 fn load_example(proxy_port: u16, port_map: HashMap<&str, u16>) -> Config {
-    let praxis_yaml_path = example_config_path("security/authpolicy-http.yaml");
-    let policy_yaml_path = format!(
-        "{}/fixtures/authpolicy-http-cpex-policy.yaml",
-        env!("CARGO_MANIFEST_DIR")
-    );
+    let praxis_yaml_path = example_config_path("security/policy-http.yaml");
+    let policy_yaml_path = format!("{}/fixtures/policy-http-cpex-policy.yaml", env!("CARGO_MANIFEST_DIR"));
 
     let raw = std::fs::read_to_string(&praxis_yaml_path).unwrap_or_else(|e| panic!("read {praxis_yaml_path}: {e}"));
-    let with_policy = raw.replace("/etc/praxis/authpolicy-http-cpex-policy.yaml", &policy_yaml_path);
+    let with_policy = raw.replace("/etc/praxis/policy-http-cpex-policy.yaml", &policy_yaml_path);
     let patched = patch_yaml(&with_policy, proxy_port, &port_map);
-    Config::from_yaml(&patched).unwrap_or_else(|e| panic!("parse security/authpolicy-http.yaml: {e}"))
+    Config::from_yaml(&patched).unwrap_or_else(|e| panic!("parse security/policy-http.yaml: {e}"))
 }
 
 fn backend_map(port: u16) -> HashMap<&'static str, u16> {
@@ -77,7 +74,7 @@ fn backend_map(port: u16) -> HashMap<&'static str, u16> {
 }
 
 #[test]
-fn authpolicy_http_get_with_valid_jwt_passes_through() {
+fn policy_http_get_with_valid_jwt_passes_through() {
     let backend = start_backend_with_shutdown("ok");
     let proxy_port = free_port();
     let config = load_example(proxy_port, backend_map(backend.port()));
@@ -107,7 +104,7 @@ fn authpolicy_http_get_with_valid_jwt_passes_through() {
 }
 
 #[test]
-fn authpolicy_http_post_denied_with_custom_response() {
+fn policy_http_post_denied_with_custom_response() {
     let backend = start_backend_with_shutdown("ok");
     let proxy_port = free_port();
     let config = load_example(proxy_port, backend_map(backend.port()));
@@ -152,7 +149,7 @@ fn authpolicy_http_post_denied_with_custom_response() {
 }
 
 #[test]
-fn authpolicy_http_missing_authorization_rejects_401() {
+fn policy_http_missing_authorization_rejects_401() {
     let backend = start_backend_with_shutdown("ok");
     let proxy_port = free_port();
     let config = load_example(proxy_port, backend_map(backend.port()));

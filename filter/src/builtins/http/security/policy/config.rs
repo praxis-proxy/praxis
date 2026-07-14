@@ -96,8 +96,7 @@ pub struct PolicyFilterConfig {
     /// authorization for non-MCP traffic. The filter populates the HTTP
     /// request line + headers into the CPEX bag and evaluates the CPEX
     /// `global` policy via the `cmf.http_request` hook, mapping denials
-    /// to plain HTTP responses. This is the mode the `AuthPolicy`
-    /// transpiler targets. See the `AuthPolicy` support docs for the
+    /// to plain HTTP responses. See the security-hardening docs for the
     /// experimental status and retain/revert criteria.
     #[serde(default)]
     pub enforcement: EnforcementMode,

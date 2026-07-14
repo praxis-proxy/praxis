@@ -141,7 +141,7 @@ global:
 routes:
   - tool: echo
     apl:
-      policy:
+      pre_invocation:
         - cel:
             expr: |
               subject.id == "alice"
@@ -210,11 +210,11 @@ fn write_taint_config() -> (TempDir, String) {
 routes:
   - tool: read-secret
     apl:
-      policy:
+      pre_invocation:
         - "taint(secret, session)"
   - tool: send-out
     apl:
-      policy:
+      pre_invocation:
         - "security.labels contains \"secret\": deny('session accessed secret data', 'session_tainted_secret')"
 "#
     );
@@ -349,7 +349,7 @@ global:
 routes:
   - tool: read-secret
     apl:
-      policy:
+      pre_invocation:
         - "taint(secret, session)"
 "#
     );
