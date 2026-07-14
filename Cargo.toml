@@ -38,10 +38,7 @@ async-trait = "0.1.89"
 benchmarks = { path = "benchmarks" }
 bytes = "1.12.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-# TEMPORARY: path dep on the local CPEX checkout for demo/e2e validation of
-# the generic-HTTP authorization runtime (http.* / cmf.http_request /
-# denyWith). Swap back to the published crates.io release once it is cut.
-cpex = { version = "0.2.0", path = "../cpex/crates/cpex", features = ["jwt", "oauth", "pii", "audit", "cedar", "cel", "valkey"] }
+cpex = { version = "0.2.1", features = ["jwt", "oauth", "pii", "audit", "cedar", "cel", "valkey"] }
 clap = { version = "4.6.1", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.2.1"

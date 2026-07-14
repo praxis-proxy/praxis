@@ -157,7 +157,9 @@ checksum = "2a4385e2e34eb35d6b3efe798b9eb88096925d87726c0798709bf56d9ed84af3"
 
 [[package]]
 name = "apl-cmf"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3caf776592011d33f4d9d85834daf615de7c038549edbde4ad001c96e83d645d"
 dependencies = [
  "apl-core",
  "cpex-core",
@@ -166,7 +168,9 @@ dependencies = [
 
 [[package]]
 name = "apl-core"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ae106c4bf2497c610b74ec7091f8facb8d82cd041a53ef6b4a7bbd3524c8ce50"
 dependencies = [
  "async-trait",
  "cpex-orchestration",
@@ -180,7 +184,9 @@ dependencies = [
 
 [[package]]
 name = "apl-cpex"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e40e33d304dcf1d6d57ea91fd58bc6d4bfc4d473ad2c48b503b13696f2782bf"
 dependencies = [
  "apl-cmf",
  "apl-core",
@@ -900,7 +906,9 @@ checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
 
 [[package]]
 name = "cpex"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f3b05e323dc449d9e61e7ec9e72e6b35634a8c4f650c52d37b9bddd8827840d"
 dependencies = [
  "apl-cmf",
  "apl-core",
@@ -911,7 +919,9 @@ dependencies = [
 
 [[package]]
 name = "cpex-builtins"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5b58c609e23d080ee5d2a05630f40c860d02522f22db88450109eab572722b75"
 dependencies = [
  "apl-core",
  "apl-cpex",
@@ -927,7 +937,9 @@ dependencies = [
 
 [[package]]
 name = "cpex-core"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "de077ac4aacd2b33d89a8d430f24459f974e277688877a1e1f39eaf13d7f6cb6"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -948,7 +960,9 @@ dependencies = [
 
 [[package]]
 name = "cpex-orchestration"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9808b666ceab61a32281ba8801063e3729bc8f9b28959974cbbfc147382cc8ae"
 dependencies = [
  "futures",
  "tokio",
@@ -956,7 +970,9 @@ dependencies = [
 
 [[package]]
 name = "cpex-pdp-cedar-direct"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53f086f6fc33a85f1470c26a792be2c8777b8a6682302a2931385197664117a6"
 dependencies = [
  "apl-core",
  "async-trait",
@@ -969,7 +985,9 @@ dependencies = [
 
 [[package]]
 name = "cpex-pdp-cel"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "044bc55e99fe2c6410457372803cb06e4980510493334806781a27ff2ae89c8d"
 dependencies = [
  "apl-core",
  "async-trait",
@@ -981,7 +999,9 @@ dependencies = [
 
 [[package]]
 name = "cpex-plugin-audit-logger"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75967287c9d4c17fa1646fa5605b7fa03e84fdc62a8377ba2765a596a018b349"
 dependencies = [
  "async-trait",
  "chrono",
@@ -993,7 +1013,9 @@ dependencies = [
 
 [[package]]
 name = "cpex-plugin-delegator-oauth"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "64dfdabc4babdbd69ae401e633734c4c28040c21ca44038bee0a30db2eb751e6"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1007,7 +1029,9 @@ dependencies = [
 
 [[package]]
 name = "cpex-plugin-identity-jwt"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e3fd073546e1971aef7a38f8f07816cd3ce2f64a9dfc8bd0026b53ff48e3e201"
 dependencies = [
  "async-trait",
  "base64",
@@ -1024,7 +1048,9 @@ dependencies = [
 
 [[package]]
 name = "cpex-plugin-pii-scanner"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aba03f5513f8e60d12bec245e6cbbef504f16940dcaad263c5f1819bdb03ffce"
 dependencies = [
  "async-trait",
  "cpex-core",
@@ -1035,7 +1061,9 @@ dependencies = [
 
 [[package]]
 name = "cpex-session-valkey"
-version = "0.2.0"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7d7ae8301d61ae6c558d28211faab4743a078f8da9b6fcee325aeea01aeb34c"
 dependencies = [
  "apl-cpex",
  "async-trait",
