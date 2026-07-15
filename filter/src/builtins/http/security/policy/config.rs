@@ -86,19 +86,6 @@ pub struct PolicyFilterConfig {
     /// missing entirely.
     #[serde(default = "default_true")]
     pub require_protocol_metadata: bool,
-
-    /// Enforcement mode. `Mcp` (default) preserves the existing
-    /// MCP/JSON-RPC behavior: identity in `on_request`, and CMF/APL
-    /// authorization dispatched per MCP entity in `on_request_body`.
-    ///
-    /// `Http` is **experimental**: it enables generic-HTTP authorization
-    /// for non-MCP traffic. The filter populates the HTTP request line +
-    /// headers into the CPEX bag and evaluates the CPEX `global` policy via
-    /// the `cmf.http_request` hook, mapping denials to plain HTTP responses.
-    /// See the security-hardening docs for the experimental status and
-    /// retain/revert criteria.
-    #[serde(default)]
-    pub enforcement: EnforcementMode,
 }
 
 /// `#[serde(default = ...)]` requires a free function for primitives
@@ -140,48 +127,4 @@ pub enum BodyAccessMode {
     /// the downstream client see them. Costs one JSON parse +
     /// serialize per mutated request or response.
     ReadWrite,
-}
-
-/// How the filter enforces policy. See [`PolicyFilterConfig::enforcement`].
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EnforcementMode {
-    /// MCP/JSON-RPC enforcement (default, stable). Authorization is
-    /// dispatched per MCP entity; denials are JSON-RPC error envelopes.
-    #[default]
-    Mcp,
-
-    /// Generic-HTTP enforcement (experimental). Authorization runs over
-    /// the CPEX `global` policy for non-MCP requests; denials are plain
-    /// HTTP responses.
-    Http,
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::expect_used, reason = "expect is idiomatic in test assertions")]
-    use super::*;
-
-    fn parse(yaml: &str) -> PolicyFilterConfig {
-        serde_yaml::from_str(yaml).expect("parse")
-    }
-
-    #[test]
-    fn enforcement_defaults_to_mcp() {
-        let cfg = parse("config_path: /etc/praxis/p.yaml\n");
-        assert_eq!(cfg.enforcement, EnforcementMode::Mcp);
-    }
-
-    #[test]
-    fn enforcement_http_parses() {
-        let cfg = parse("config_path: /etc/praxis/p.yaml\nenforcement: http\n");
-        assert_eq!(cfg.enforcement, EnforcementMode::Http);
-    }
-
-    #[test]
-    fn unknown_enforcement_value_is_rejected() {
-        let err =
-            serde_yaml::from_str::<PolicyFilterConfig>("config_path: /etc/praxis/p.yaml\nenforcement: sideways\n");
-        assert!(err.is_err(), "unknown enforcement value must be rejected");
-    }
 }

@@ -144,8 +144,8 @@ const FALLBACK_DENY_ENVELOPE: &[u8] =
 // http_authz_rejection (generic-HTTP deny — plain HTTP response)
 // -----------------------------------------------------------------------------
 
-/// Build a plain-HTTP rejection for a generic-HTTP (`enforcement: http`)
-/// authorization denial. Unlike [`mcp_error_rejection`] (which wraps the
+/// Build a plain-HTTP rejection for a generic-HTTP (L7) authorization
+/// denial. Unlike [`mcp_error_rejection`] (which wraps the
 /// deny in an HTTP-200 JSON-RPC envelope), a non-MCP client expects a real
 /// HTTP status.
 ///

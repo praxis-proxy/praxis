@@ -101,6 +101,132 @@ fn write_single_plugin_config() -> (TempDir, String) {
     (dir, path_str)
 }
 
+/// Write a CPEX YAML with a single entity route (`echo` tool) gated by a
+/// native `require(authenticated)` and no global HTTP policy. The filter
+/// derives `entity_routes = true`, so it authorizes at the body phase and
+/// requires classifier metadata.
+fn write_tool_route_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+routes:
+  - tool: echo
+    apl:
+      pre_invocation:
+        - "require(authenticated)"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Write a CPEX YAML whose `echo` tool route rule references BOTH `http.*`
+/// and identity attributes in one CEL step. Proves the body-phase entity
+/// evaluation sees the HTTP request line alongside entity/identity
+/// attributes (the enrichment). `entity_routes = true`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_http_entity_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  apl:
+    pdp:
+      - kind: cel
+routes:
+  - tool: echo
+    apl:
+      pre_invocation:
+        - cel:
+            expr: |
+              http.method == "POST" && subject.id == "alice"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Write a CPEX YAML with only a `global` HTTP policy and no entity routes —
+/// the pure L7 shape. The filter derives `http_global = true`,
+/// `entity_routes = false`, and authorizes at `on_request` with no
+/// classifier.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_l7_global_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"
+      - cel: {{ expr: "http.method == 'GET'" }}
+  pdp:
+    - kind: cel
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
 /// Write a CPEX YAML that gates the `echo` tool through a CEL PDP step.
 /// Single HS256 identity plugin (so `subject.id` resolves from the JWT
 /// `sub`), a `kind: cel` PDP declared globally, and a route whose `cel:`
@@ -156,8 +282,14 @@ routes:
 /// Run a `service/invoke` for the `echo` tool as `subject`, returning the
 /// filter's body-phase action. Shared by the CEL allow/deny cases.
 async fn dispatch_echo_as(filter: &PolicyFilter, subject: &str) -> FilterAction {
+    dispatch_echo_method(filter, subject, Method::POST).await
+}
+
+/// Like [`dispatch_echo_as`] but with a caller-chosen HTTP method, so a test
+/// can vary `http.method` and observe an entity route's `http.*` predicate.
+async fn dispatch_echo_method(filter: &PolicyFilter, subject: &str, method: Method) -> FilterAction {
     let token = mint_jwt(&standard_claims(subject));
-    let mut req = make_request(Method::POST, "/");
+    let mut req = make_request(method, "/");
     req.headers.insert(
         "Authorization",
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
@@ -370,7 +502,6 @@ fn build_filter(config_path: String) -> PolicyFilter {
         require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
-        enforcement: super::config::EnforcementMode::Mcp,
     };
     PolicyFilter::new(cfg).expect("filter should construct")
 }
@@ -647,14 +778,15 @@ fn config_init_timeout_honors_override() {
 // Fail-closed policy gate (require_protocol_metadata)
 // -----------------------------------------------------------------------------
 
-/// When `require_protocol_metadata: true` (default) and `protocol.method` is
-/// absent from filter metadata, `on_request_body` rejects with
+/// For an entity-aware policy (declares tool/prompt/resource routes) with
+/// `require_protocol_metadata: true` (default), a request that reaches the
+/// body phase without `protocol.method` is rejected with
 /// HTTP 500 + `X-Policy-Violation: config.missing_protocol_metadata`. This
 /// catches a misconfigured chain (protocol classifier filter missing or ordered
 /// after policy) loudly at the first body-phase request.
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_protocol_metadata_rejects_when_required() {
-    let (_dir, path) = write_single_plugin_config();
+    let (_dir, path) = write_tool_route_config();
     let filter = build_filter(path);
 
     let token = mint_jwt(&standard_claims("alice"));
@@ -687,19 +819,18 @@ async fn missing_protocol_metadata_rejects_when_required() {
     }
 }
 
-/// When `require_protocol_metadata: false` and `protocol.method` is absent,
-/// `on_request_body` passes the request through (identity-only mode
-/// for non-classified traffic). Pins the opt-out behavior.
+/// For an entity-aware policy with `require_protocol_metadata: false`, a
+/// request with no `protocol.method` passes through (identity-only mode for
+/// non-classified traffic). Pins the opt-out behavior.
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_protocol_metadata_passes_when_not_required() {
-    let (_dir, path) = write_single_plugin_config();
+    let (_dir, path) = write_tool_route_config();
     let cfg = PolicyFilterConfig {
         config_path: path,
         body_access: super::config::BodyAccessMode::ReadOnly,
         require_protocol_metadata: false,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
-        enforcement: super::config::EnforcementMode::Mcp,
     };
     let filter = PolicyFilter::new(cfg).expect("filter should construct");
 
@@ -1178,11 +1309,10 @@ fn deny_envelope_fits_committed_length() {
 // on_request_body — CMF dispatch path (identity-only policy, no routes)
 // -----------------------------------------------------------------------------
 
-/// `on_request_body` happy path: valid JWT, `protocol.method=service/invoke`,
-/// `protocol.name` set. The identity-only policy has no APL routes, so the
-/// CMF dispatch finds no matching handler and the request continues.
-/// Pins the "CMF dispatch runs without crashing and returns
-/// `BodyDone`" branch the reviewer flagged as untested.
+/// `on_request_body` for an identity-only policy (no entity routes): even
+/// with `protocol.method` / `protocol.name` present, there are no entity
+/// routes to authorize, so the body phase short-circuits to `BodyDone`.
+/// (Actual per-entity CMF dispatch is covered by the routed-policy tests.)
 #[tokio::test(flavor = "multi_thread")]
 async fn on_request_body_dispatches_cmf_when_metadata_present() {
     let (_dir, path) = write_single_plugin_config();
@@ -1234,6 +1364,54 @@ async fn cel_route_allows_matching_subject_and_denies_others() {
         matches!(deny, FilterAction::Reject(_)),
         "eve fails the CEL predicate; expected Reject, got {deny:?}",
     );
+}
+
+/// A single entity-route rule can combine `http.*` with entity/identity
+/// attributes: the `echo` tool is gated by `http.method == "POST" &&
+/// subject.id == "alice"`. Proves the body-phase evaluation is enriched with
+/// the HTTP request line (via CPEX's `read_headers` grant to entity routes),
+/// so the same policy sees both dimensions. `alice` over POST passes; the
+/// same caller over GET is denied by the `http.method` half of the predicate.
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_route_rule_sees_http_attributes() {
+    let (_dir, path) = write_http_entity_config();
+    let filter = build_filter(path);
+
+    let allow = dispatch_echo_method(&filter, "alice", Method::POST).await;
+    assert!(
+        matches!(allow, FilterAction::BodyDone),
+        "POST + alice satisfies the combined http+identity predicate; got {allow:?}",
+    );
+
+    let deny = dispatch_echo_method(&filter, "alice", Method::GET).await;
+    assert!(
+        matches!(deny, FilterAction::Reject(_)),
+        "GET must be denied by the http.method half of the rule (proves http.* is present \
+         at the body phase); got {deny:?}",
+    );
+}
+
+/// A policy with only a `global` HTTP policy (no entity routes) derives the
+/// pure L7 shape: `http_global = true`, `entity_routes = false`.
+#[test]
+fn derives_l7_shape_for_global_only_policy() {
+    let (_dir, path) = write_l7_global_config();
+    let filter = build_filter(path);
+    assert_eq!(
+        filter.derived_shape(),
+        (true, false),
+        "global-only policy should derive (http_global, !entity_routes)",
+    );
+}
+
+/// A policy that declares entity routes derives `entity_routes = true`, so
+/// authorization runs at the body phase.
+#[test]
+fn derives_entity_shape_for_routed_policy() {
+    let (_dir, path) = write_cel_policy_config();
+    let filter = build_filter(path);
+    let (_http_global, entity_routes) = filter.derived_shape();
+    assert!(entity_routes, "a policy with tool routes must derive entity_routes");
 }
 
 /// Session tainting end-to-end through the filter: reading the secret
@@ -1366,14 +1544,13 @@ fn on_response_body_continues_on_partial_chunks() {
     reason = "linear setup + assertions for the fail-closed response path"
 )]
 async fn response_phase_without_request_identity_fails_closed() {
-    let (_dir, path) = write_single_plugin_config();
+    let (_dir, path) = write_tool_route_config();
     let cfg = PolicyFilterConfig {
         config_path: path,
         body_access: super::config::BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
         max_buffer_bytes: 10_485_760,
-        enforcement: super::config::EnforcementMode::Mcp,
     };
     let filter = PolicyFilter::new(cfg).expect("filter should construct");
 

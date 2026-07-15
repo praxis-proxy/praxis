@@ -1,10 +1,11 @@
 # Generic-HTTP authorization (experimental)
 #
 # Generic-HTTP authorization for non-MCP traffic using the CPEX policy
-# engine: the `policy` filter runs in the experimental `enforcement: http`
-# mode, resolving JWT identity and evaluating the CPEX `global` policy over
-# the HTTP request line, headers, and identity claims. Denials become plain
-# HTTP responses (with a custom `denyWith` status/body/headers).
+# engine. The `policy` filter loads a policy that declares only a `global`
+# HTTP policy (no entity routes), so it authorizes at the HTTP layer: it
+# resolves JWT identity and evaluates the CPEX `global` policy over the HTTP
+# request line, headers, and identity claims. Denials become plain HTTP
+# responses (with a custom `denyWith` status/body/headers).
 #
 # Requires building with the `cpex-policy-engine` feature, which is off
 # by default:
@@ -22,11 +23,11 @@ filter_chains:
   - name: main
     filters:
       # Generic-HTTP authorization. `config_path` points at the CPEX policy
-      # document. No `mcp` filter is needed in `http` mode — authorization
-      # runs over the HTTP request directly.
+      # document. The policy declares only a `global` HTTP policy (no entity
+      # routes), so the filter authorizes at the HTTP layer directly — no
+      # protocol classifier needed.
       - filter: policy
         config_path: /etc/praxis/policy-http-cpex-policy.yaml
-        enforcement: http
 
       - filter: router
         routes:
