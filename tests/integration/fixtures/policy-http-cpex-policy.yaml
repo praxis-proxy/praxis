@@ -7,7 +7,7 @@
 # authorization policy that admits only GET requests. Non-GET requests are
 # denied with a custom response (403 + JSON body + header) carried via the
 # `denyWith` (CPEX `response:` block). This is the entity-less generic-HTTP
-# authz path the `enforcement: http` mode targets.
+# authz path the pure-L7 (`http_global`) shape targets.
 #
 # Canonical CPEX form: the `authentication:` + `authorization:` block form, a
 # native `require(authenticated)` presence gate, and each CEL predicate as a

@@ -227,6 +227,57 @@ global:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
+/// Write a CPEX YAML that declares BOTH a `global` HTTP policy (canonical
+/// `authentication:`/`authorization:` form, admitting only GET) AND an entity
+/// route (the `echo` tool). Derives the combined shape
+/// `(http_global = true, entity_routes = true)`.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_combined_global_and_routes_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"
+      - cel: {{ expr: "http.method == 'GET'" }}
+  pdp:
+    - kind: cel
+routes:
+  - tool: echo
+    apl:
+      pre_invocation:
+        - cel:
+            expr: |
+              subject.id == "alice"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
 /// Write a CPEX YAML that gates the `echo` tool through a CEL PDP step.
 /// Single HS256 identity plugin (so `subject.id` resolves from the JWT
 /// `sub`), a `kind: cel` PDP declared globally, and a route whose `cel:`
@@ -695,8 +746,18 @@ async fn multi_source_both_identities_continue() {
 /// `work_stealing: false`.
 #[tokio::test]
 async fn current_thread_runtime_is_rejected() {
-    let (_dir, path) = write_single_plugin_config();
-    let filter = build_filter(path);
+    // Only the entity-route ReadWrite shape reaches `block_in_place`, so that
+    // is the shape refused on a current-thread runtime. Other shapes run fine
+    // (see `current_thread_runtime_allows_pure_l7`).
+    let (_dir, path) = write_cel_policy_config();
+    let cfg = PolicyFilterConfig {
+        config_path: path,
+        body_access: super::config::BodyAccessMode::ReadWrite,
+        require_protocol_metadata: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+    };
+    let filter = PolicyFilter::new(cfg).expect("filter should construct");
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
@@ -704,11 +765,32 @@ async fn current_thread_runtime_is_rejected() {
     let err = filter
         .on_request(&mut ctx)
         .await
-        .expect_err("current-thread runtime must be rejected");
+        .expect_err("current-thread runtime must be rejected for the ReadWrite entity shape");
     let msg = format!("{err}");
     assert!(
         msg.contains("multi-threaded tokio runtime"),
         "error message should point at the work_stealing config; got: {msg}",
+    );
+}
+
+/// A pure-L7 (`global`-only) policy never calls `block_in_place`, so it must
+/// run on a current-thread runtime rather than being refused up front. Pins
+/// the relaxed guard so a future change can't re-introduce the blanket
+/// rejection for shapes that don't need a multi-threaded runtime.
+#[tokio::test]
+async fn current_thread_runtime_allows_pure_l7() {
+    let (_dir, path) = write_l7_global_config();
+    let filter = build_filter(path); // ReadOnly, http_global && !entity_routes
+
+    let req = make_request(Method::GET, "/");
+    let mut ctx = make_filter_context(&req);
+
+    // No runtime rejection: `on_request` returns an Ok authorization verdict,
+    // not the "multi-threaded tokio runtime" FilterError.
+    let action = filter.on_request(&mut ctx).await;
+    assert!(
+        action.is_ok(),
+        "pure-L7 must not be refused on a current-thread runtime; got {action:?}",
     );
 }
 
@@ -953,6 +1035,130 @@ fn auth_rejection_falls_back_to_sentinel_when_no_violation() {
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("X-Policy-Violation"));
     assert_eq!(viol.expect("X-Policy-Violation header").1, "auth.unknown");
+}
+
+// -----------------------------------------------------------------------------
+// http_authz_rejection (generic-HTTP / L7 deny mapping)
+// -----------------------------------------------------------------------------
+
+/// With no `denyWith` details, the L7 deny defaults to HTTP 403 and a
+/// `"<code>: <reason>"` body, always stamping `X-Policy-Violation`.
+#[test]
+fn http_authz_rejection_defaults_without_details() {
+    use cpex::cpex_core::error::PluginViolation;
+
+    use super::error::http_authz_rejection;
+
+    let violation = PluginViolation::new("policy.method_denied", "only GET is permitted");
+    let rej = http_authz_rejection(Some(&violation));
+    assert_eq!(rej.status, 403, "default L7 deny status is 403");
+
+    let viol = rej
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("X-Policy-Violation"));
+    assert_eq!(viol.expect("X-Policy-Violation header").1, "policy.method_denied");
+
+    let body = std::str::from_utf8(rej.body.as_ref().expect("body present")).expect("utf8 body");
+    assert!(
+        body.contains("policy.method_denied") && body.contains("only GET is permitted"),
+        "default body carries code and reason; got {body:?}",
+    );
+}
+
+/// A `denyWith` (CPEX `response:`) block sets a custom status, body, and
+/// safe headers on the L7 deny.
+#[test]
+fn http_authz_rejection_applies_custom_denywith() {
+    use std::collections::HashMap;
+
+    use cpex::cpex_core::error::PluginViolation;
+
+    use super::error::http_authz_rejection;
+
+    let mut details = HashMap::new();
+    details.insert("http.status".to_owned(), serde_json::json!(401));
+    details.insert("http.body".to_owned(), serde_json::json!("{\"error\":\"nope\"}"));
+    details.insert(
+        "http.headers".to_owned(),
+        serde_json::json!({ "X-Authz-Denied": "method-not-allowed" }),
+    );
+    let violation = PluginViolation::new("policy.deny", "denied").with_details(details);
+
+    let rej = http_authz_rejection(Some(&violation));
+    assert_eq!(rej.status, 401, "custom denyWith status wins");
+    let body = std::str::from_utf8(rej.body.as_ref().expect("body present")).expect("utf8 body");
+    assert_eq!(body, "{\"error\":\"nope\"}", "custom denyWith body wins");
+    let custom = rej
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("X-Authz-Denied"));
+    assert_eq!(custom.expect("custom denyWith header").1, "method-not-allowed");
+}
+
+/// An out-of-range `http.status` falls back to 403 rather than reaching
+/// `Rejection::status` with an invalid code.
+#[test]
+fn http_authz_rejection_clamps_out_of_range_status() {
+    use std::collections::HashMap;
+
+    use cpex::cpex_core::error::PluginViolation;
+
+    use super::error::http_authz_rejection;
+
+    let mut details = HashMap::new();
+    details.insert("http.status".to_owned(), serde_json::json!(700));
+    let violation = PluginViolation::new("policy.deny", "denied").with_details(details);
+    let rej = http_authz_rejection(Some(&violation));
+    assert_eq!(rej.status, 403, "an out-of-range denyWith status falls back to 403");
+}
+
+/// Header names/values carrying CR/LF/NUL are dropped (response-splitting
+/// defense) while sibling safe headers still attach.
+#[test]
+fn http_authz_rejection_drops_control_char_headers() {
+    use std::collections::HashMap;
+
+    use cpex::cpex_core::error::PluginViolation;
+
+    use super::error::http_authz_rejection;
+
+    let mut details = HashMap::new();
+    details.insert(
+        "http.headers".to_owned(),
+        serde_json::json!({
+            "X-Safe": "ok",
+            "X-Bad": "value\r\nInjected: evil",
+        }),
+    );
+    let violation = PluginViolation::new("policy.deny", "denied").with_details(details);
+    let rej = http_authz_rejection(Some(&violation));
+
+    assert!(
+        rej.headers
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("X-Safe") && v == "ok"),
+        "a safe denyWith header must attach",
+    );
+    assert!(
+        !rej.headers.iter().any(|(_, v)| v.contains("Injected")),
+        "a header value with CR/LF must be dropped, not injected",
+    );
+}
+
+/// A missing violation still yields a structured 403 with the sentinel
+/// `policy.deny` code.
+#[test]
+fn http_authz_rejection_falls_back_to_sentinel_when_no_violation() {
+    use super::error::http_authz_rejection;
+
+    let rej = http_authz_rejection(None);
+    assert_eq!(rej.status, 403);
+    let viol = rej
+        .headers
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case("X-Policy-Violation"));
+    assert_eq!(viol.expect("X-Policy-Violation header").1, "policy.deny");
 }
 
 // -----------------------------------------------------------------------------
@@ -1410,8 +1616,42 @@ fn derives_l7_shape_for_global_only_policy() {
 fn derives_entity_shape_for_routed_policy() {
     let (_dir, path) = write_cel_policy_config();
     let filter = build_filter(path);
-    let (_http_global, entity_routes) = filter.derived_shape();
-    assert!(entity_routes, "a policy with tool routes must derive entity_routes");
+    assert_eq!(
+        filter.derived_shape(),
+        (false, true),
+        "a routes-only policy derives (!http_global, entity_routes)",
+    );
+}
+
+/// A policy declaring BOTH a `global` HTTP policy and entity routes derives
+/// the combined shape `(true, true)`. In that shape `on_request` must take the
+/// identity gate (deferring authorization to the entity/body phase), NOT the
+/// pure-L7 http-authz path — otherwise the GET-only global policy would 403 a
+/// POST here instead of letting the entity route decide.
+#[tokio::test]
+async fn combined_shape_on_request_uses_identity_gate_not_http_authz() {
+    let (_dir, path) = write_combined_global_and_routes_config();
+    let filter = build_filter(path);
+    assert_eq!(
+        filter.derived_shape(),
+        (true, true),
+        "a global + routes policy derives the combined shape",
+    );
+
+    let token = mint_jwt(&standard_claims("alice"));
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.expect("on_request ran");
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "combined shape must pass on_request via the identity gate (not L7 http-authz, \
+         which would 403 this POST under the GET-only global policy); got {action:?}",
+    );
 }
 
 /// Session tainting end-to-end through the filter: reading the secret

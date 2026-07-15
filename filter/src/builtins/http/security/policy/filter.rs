@@ -391,9 +391,13 @@ impl PolicyFilter {
     /// plain HTTP response ([`super::error::http_authz_rejection`]); an
     /// identity failure is the usual 401. Authorization runs here (not the
     /// body phase) because it needs no request body.
-    #[expect(clippy::large_stack_frames, reason = "async handler over large CMF types")]
-    async fn on_request_http_authz(&self, ctx: &HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        use cpex::cpex_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_HTTP_REQUEST};
+    #[expect(
+        clippy::large_stack_frames,
+        clippy::too_many_lines,
+        reason = "async handler over large CMF types; linear resolve/authz/delegate flow"
+    )]
+    async fn on_request_http_authz(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        use cpex::cpex_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL};
 
         let headers = Self::snapshot_headers(ctx);
         let identity = match self.resolve_identity(headers.clone()).await {
@@ -401,7 +405,7 @@ impl PolicyFilter {
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
         let mut extensions = Self::extensions_from_identity(&headers, &identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL);
-        Self::attach_http_attributes(ctx, &mut extensions);
+        Self::attach_http_attributes(ctx, &mut extensions, headers);
 
         let payload = MessagePayload {
             message: Message::text(Role::User, ""),
@@ -417,6 +421,17 @@ impl PolicyFilter {
                 result.violation.as_ref(),
             )));
         }
+        // Allow path. If the `global` policy ran `delegate(...)` steps, attach
+        // the minted tokens to the upstream request (mirrors the entity path in
+        // `on_request_body`); a no-op when the policy declares no delegation.
+        let attached = attach_delegated_tokens(ctx, result.modified_extensions.as_ref());
+        if attached > 0 {
+            tracing::debug!(
+                target: "policy.filter",
+                count = attached,
+                "attached delegated tokens to upstream request (L7 authz)",
+            );
+        }
         tracing::trace!(target: "policy.filter", "http authz allow (on_request)");
         Ok(FilterAction::Continue)
     }
@@ -426,7 +441,11 @@ impl PolicyFilter {
     /// `http.request_headers.*` evaluate. `host` is sourced from the parsed
     /// request authority (Praxis validates Host upstream — see the Pingora
     /// boundary docs), never a raw unvalidated header.
-    fn attach_http_attributes(ctx: &HttpFilterContext<'_>, ext: &mut Extensions) {
+    fn attach_http_attributes(
+        ctx: &HttpFilterContext<'_>,
+        ext: &mut Extensions,
+        request_headers: std::collections::HashMap<String, String>,
+    ) {
         use cpex::cpex_core::extensions::HttpExtension;
 
         let req = ctx.request;
@@ -441,7 +460,7 @@ impl PolicyFilter {
             path: Some(req.uri.path().to_owned()),
             host,
             scheme: req.uri.scheme_str().map(str::to_owned),
-            request_headers: Self::snapshot_headers(ctx),
+            request_headers,
             ..Default::default()
         };
         ext.http = Some(Arc::new(http));
@@ -509,7 +528,14 @@ impl HttpFilter for PolicyFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        self.ensure_multithread_runtime()?;
+        // Only the entity-route ReadWrite response path reaches `block_in_place`
+        // (see `on_response_body`); the pure-L7, identity-only, and ReadOnly
+        // shapes never do, so don't refuse them on a current-thread runtime.
+        // Kept here (not in `on_response_body`) so a ReadWrite filter still
+        // fails fast before any upstream side effects.
+        if self.entity_routes && matches!(self.cfg.body_access, BodyAccessMode::ReadWrite) {
+            self.ensure_multithread_runtime()?;
+        }
 
         // Pure L7 policy (a `global` HTTP policy, no entity routes): authorize
         // here over `http.*` + identity. Authorization is an admission check
@@ -608,7 +634,7 @@ impl HttpFilter for PolicyFilter {
         // entity/`args.*` checks with `http.*` predicates in one evaluation.
         // CPEX grants entity route handlers the `read_headers` capability, so
         // these `http.*` attributes reach the CEL/APL bag at the entity phase.
-        Self::attach_http_attributes(ctx, &mut extensions);
+        Self::attach_http_attributes(ctx, &mut extensions, headers);
         ctx.extensions.insert(ResolvedIdentity(identity));
 
         // Parse the JSON-RPC body to build the typed CMF content part.
