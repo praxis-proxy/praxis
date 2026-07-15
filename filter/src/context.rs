@@ -9,6 +9,7 @@ use http::{HeaderMap, Method, StatusCode, Uri, header::HeaderName};
 use praxis_core::{
     connectivity::Upstream, health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, time::TimeSource,
 };
+use praxis_tls::TlsPeerIdentity;
 
 use crate::{body::BodyMode, extensions::RequestExtensions, pipeline::body::merge_body_mode, results::FilterResultSet};
 
@@ -18,10 +19,6 @@ use crate::{body::BodyMode, extensions::RequestExtensions, pipeline::body::merge
 /// send unique keys across many response messages. Existing keys
 /// can still be overwritten past this limit.
 const MAX_STRUCTURED_METADATA_KEYS: usize = 64;
-
-// -----------------------------------------------------------------------------
-// TrustedHeaderMutation
-// -----------------------------------------------------------------------------
 
 /// Trusted header mutation recorded during pre-read body processing.
 ///
@@ -132,6 +129,16 @@ pub struct HttpFilterContext<'a> {
     /// rather than the request URI scheme (which is absent
     /// in HTTP/1.1).
     pub downstream_tls: bool,
+
+    /// Verified downstream TLS peer identity, if the connection
+    /// is mTLS and the peer presented a valid client certificate.
+    ///
+    /// `None` for plain-TLS or non-TLS connections, or when the
+    /// client did not send a certificate (e.g. `client_cert_mode:
+    /// request` with no cert).  Populated once from the SSL digest
+    /// before the first filter runs and preserved across all
+    /// subsequent `build_filter_context()` calls for the request.
+    pub peer_identity: Option<TlsPeerIdentity>,
 
     /// Type-safe request-scoped extension container.
     ///

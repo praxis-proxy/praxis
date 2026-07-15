@@ -87,7 +87,18 @@ pub(in crate::http) async fn execute(
         .and_then(|a| a.as_inet())
         .map(std::net::SocketAddr::ip)
         .map(normalize_mapped_ipv4);
-    ctx.downstream_tls = session.digest().is_some_and(|d| d.ssl_digest.is_some());
+    let ssl_digest = session.digest().and_then(|d| d.ssl_digest.as_ref());
+    ctx.downstream_tls = ssl_digest.is_some();
+    ctx.peer_identity = ssl_digest.and_then(|d| {
+        if d.cert_digest.is_empty() {
+            return None;
+        }
+        Some(praxis_tls::TlsPeerIdentity {
+            cert_digest: d.cert_digest.clone(),
+            organization: d.organization.clone(),
+            serial_number: d.serial_number.clone(),
+        })
+    });
     ctx.request_is_idempotent = matches!(
         session.req_header().method,
         http::Method::GET | http::Method::HEAD | http::Method::OPTIONS

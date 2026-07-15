@@ -15,7 +15,8 @@
   headers, status codes)
 - **Branch chains** - conditional branching in filter
   pipelines based on filter results, with skip-forward,
-  terminal short-circuit, and re-entrance loops
+  terminal short-circuit, and re-entrance loops.
+  See [Branch Chains](filters/branch-chains.md).
 
 ## Traffic Management
 
@@ -91,6 +92,10 @@
   request and response payload size.
 
 [payload-processing]:./architecture/payload-processing.md
+[pipeline-concepts]:./architecture/pipeline-concepts.md
+
+Filter results and branch conditions are covered in
+[Pipeline Concepts][pipeline-concepts].
 
 ## Security
 
@@ -136,7 +141,10 @@ deployment guidance.
   injection with trusted proxy CIDR support
 - **Credential injection**: per-cluster API key injection
   into upstream request headers with environment variable
-  or inline values
+  or inline values; client credential stripping
+- **Policy engine** (`policy`, experimental, feature
+  `cpex-policy-engine`): JWT identity, route policy, PII
+  scanning, audit
 
 ## Observability
 
@@ -229,3 +237,21 @@ deployment guidance.
 - **External processing** (`ext_proc`): Envoy-compatible
   gRPC external processing filter (opt-in, separate
   crate)
+- **Endpoint selector**: pin upstream endpoints from
+  trusted mutation sources (e.g. `ext_proc`).
+- **Failure mode**: per-filter `failure_mode: open` for
+  non-security filters when runtime errors should not
+  block traffic.
+
+## AI gateway
+
+An **AI Gateway** (AI API Gateway) routes, manages, enriches,
+and parses inference and agentic traffic between workloads and
+model or agent backends. Full definitions:
+[praxis-ai overview](https://github.com/praxis-proxy/ai/blob/main/docs/overview.md).
+
+LLM provider filters, MCP/A2A, response storage, and token
+metadata ship in [praxis-ai](https://github.com/praxis-proxy/ai),
+not the core `praxis` binary. Core filters such as
+`json_rpc`, `credential_injection`, and `router` compose
+with AI filters in `praxis-ai` pipelines.

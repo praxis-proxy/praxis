@@ -72,6 +72,15 @@ pub struct PingoraRequestCtx {
     /// connections where the URI lacks a scheme.
     pub downstream_tls: bool,
 
+    /// Verified downstream TLS peer identity.
+    ///
+    /// Set once from the SSL digest in `request_filter` before
+    /// the first filter runs.  Cloned (not moved) into each
+    /// `HttpFilterContext` so it is available in both pre-read
+    /// body phases and the main filter pipeline.  `None` for
+    /// non-mTLS or no-client-cert connections.
+    pub peer_identity: Option<praxis_tls::TlsPeerIdentity>,
+
     /// Whether the connection was upgraded via 101 Switching Protocols.
     ///
     /// Set during `response_filter` when the upstream returns 101.
@@ -277,6 +286,7 @@ macro_rules! filter_context {
             filter_results: std::mem::take(&mut $ctx.filter_results),
             filter_state: std::mem::take(&mut $ctx.filter_state),
             health_registry: $pipeline.health_registry(),
+            peer_identity: $ctx.peer_identity.clone(),
             id_generator: $pipeline.id_generator(),
             kv_stores: $pipeline.kv_stores(),
             request: $request,
@@ -435,6 +445,7 @@ impl Default for PingoraRequestCtx {
             cluster: None,
             connection_upgraded: false,
             downstream_tls: false,
+            peer_identity: None,
             extensions: praxis_filter::RequestExtensions::new(),
             filter_metadata: std::collections::HashMap::new(),
             pre_read_mutations: Vec::new(),

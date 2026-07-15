@@ -9,6 +9,7 @@ mod cached;
 mod client_auth;
 mod config;
 mod error;
+mod identity;
 #[cfg(feature = "hot-reload")]
 pub mod reload;
 pub mod setup;
@@ -23,3 +24,4 @@ pub mod watcher;
 pub use cached::{CachedCaCerts, CachedClientCert, CachedClusterTls};
 pub use config::{CaConfig, CertKeyPair, CipherSuiteId, ClientCertMode, ClusterTls, ListenerTls, TlsVersion};
 pub use error::TlsError;
+pub use identity::TlsPeerIdentity;

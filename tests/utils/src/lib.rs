@@ -25,5 +25,5 @@ pub use net::*;
 pub use proxy::{
     ProxyGuard, ReloadableProxyGuard, build_pipeline, custom_filter_yaml, registry_with, simple_proxy_yaml,
     start_full_proxy, start_proxy, start_proxy_with_registry, start_reloadable_proxy, start_tls_proxy,
-    start_tls_proxy_no_wait,
+    start_tls_proxy_no_wait, start_tls_proxy_no_wait_with_registry,
 };

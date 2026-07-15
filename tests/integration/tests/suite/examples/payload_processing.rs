@@ -15,7 +15,6 @@ use praxis_test_utils::{
 // Tests
 // -----------------------------------------------------------------------------
 
-
 #[test]
 fn multi_field_extraction_extracts_both_fields() {
     let backend_guard = start_header_echo_backend();

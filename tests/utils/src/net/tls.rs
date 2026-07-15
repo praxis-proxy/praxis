@@ -199,6 +199,32 @@ impl TestCertificates {
         )
     }
 
+    /// Generate a client certificate with a specific `OrganizationName` (O= field).
+    ///
+    /// The cert is signed by this test CA so the TLS handshake succeeds.
+    /// Setting a custom org is useful for testing org-based access decisions.
+    ///
+    /// # Panics
+    ///
+    /// Panics if certificate generation or file I/O fails.
+    pub fn generate_client_cert_with_org(&self, org: &str) -> ClientCert {
+        let issuer = Issuer::from_params(&self.ca_params, &self.ca_key);
+        let client_key = KeyPair::generate().expect("client key generation");
+        let mut client_params = CertificateParams::new(vec!["localhost".to_owned()]).expect("client cert params");
+        client_params.distinguished_name.push(DnType::CommonName, "Test Client");
+        client_params.distinguished_name.push(DnType::OrganizationName, org);
+        let client_cert = client_params.signed_by(&client_key, &issuer).expect("client cert sign");
+
+        let n = self.client_cert_counter.fetch_add(1, Ordering::Relaxed);
+        let cert_path = self.temp_dir.path().join(format!("client-org-{n}.pem"));
+        let key_path = self.temp_dir.path().join(format!("client-org-{n}-key.pem"));
+
+        std::fs::write(&cert_path, client_cert.pem()).expect("write client cert PEM");
+        std::fs::write(&key_path, client_key.serialize_pem()).expect("write client key PEM");
+
+        ClientCert { cert_path, key_path }
+    }
+
     /// Generate a client certificate signed by this test CA.
     ///
     /// Returns a [`ClientCert`] with paths written into the same temp directory.

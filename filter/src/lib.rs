@@ -40,6 +40,7 @@ pub use factory::{FilterFactory, HttpFilterFactory, TcpFilterFactory, http_built
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
 pub use pipeline::{FilterPipeline, PipelineExtension};
 pub use praxis_core::config::{FailureMode, FilterEntry};
+pub use praxis_tls::TlsPeerIdentity;
 pub use registry::FilterRegistry;
 pub use results::FilterResultSet;
 pub use tcp_filter::{TcpFilter, TcpFilterContext};
@@ -413,6 +414,7 @@ pub(crate) mod test_utils {
             health_registry: None,
             id_generator: &TEST_ID_GENERATOR,
             kv_stores: None,
+            peer_identity: None,
             request: req,
             request_body_bytes: 0,
             request_body_mode: crate::body::BodyMode::Stream,

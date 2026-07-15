@@ -456,6 +456,17 @@ pub fn start_tls_proxy_no_wait(config: &Config) -> ProxyGuard {
     spawn_proxy_server(config, &FilterRegistry::with_builtins())
 }
 
+/// Start a TLS-enabled proxy with a custom filter registry and return
+/// immediately without waiting for readiness.  The caller is responsible
+/// for calling [`wait_for_https`](crate::net::wait_for_https) or similar.
+///
+/// # Panics
+///
+/// Panics if `config.listeners` is empty.
+pub fn start_tls_proxy_no_wait_with_registry(config: &Config, registry: &FilterRegistry) -> ProxyGuard {
+    spawn_proxy_server(config, registry)
+}
+
 // -----------------------------------------------------------------------------
 // YAML Config Test Utilities
 // -----------------------------------------------------------------------------

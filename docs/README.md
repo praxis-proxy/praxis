@@ -1,6 +1,11 @@
 # Praxis Documentation
 
-## Getting Started
+Praxis is a high-performance, security-first **proxy framework**
+with a composable filter pipeline for routing, load balancing,
+and security. AI Gateway docs live in
+[praxis-ai overview](https://github.com/praxis-proxy/ai/blob/main/docs/overview.md).
+
+## Getting started
 
 - [Quickstart](quickstart.md)
 - [Features](features.md)

@@ -560,3 +560,12 @@ filter with `FilterFactory::Http(Arc::new(factory))`,
 build a minimal YAML config, and assert on status codes
 and response bodies. See `tests/integration/` for
 examples.
+
+Built-in filter reference pages are generated from source.
+After changing a filter config struct, run:
+
+```console
+cargo xtask generate-filter-docs
+```
+
+CI runs `cargo xtask lint-filter-docs` as part of `make lint`.

@@ -3137,6 +3137,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "percent-encoding",
  "praxis-proxy-core",
+ "praxis-proxy-tls",
  "rand 0.10.2",
  "regex",
  "serde",

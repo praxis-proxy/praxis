@@ -8,9 +8,10 @@ use std::sync::Arc;
 
 use praxis_core::config::Config;
 use praxis_test_utils::{
-    TestCertificates, free_port, http_get, https_get, start_backend_with_shutdown, start_full_proxy,
+    TestCertificates, free_port, http_get, https_get, registry_with, start_backend_with_shutdown, start_full_proxy,
     start_mtls_backend, start_proxy, start_tcp_echo_backend, start_tls_backend, start_tls_proxy,
-    start_tls_proxy_no_wait, tls_connection_rejected, tls_send_recv, wait_for_https, wait_for_tls,
+    start_tls_proxy_no_wait, start_tls_proxy_no_wait_with_registry, tls_connection_rejected, tls_send_recv,
+    wait_for_https, wait_for_tls,
 };
 
 // -----------------------------------------------------------------------------
@@ -2037,6 +2038,396 @@ filter_chains:
         result.is_err(),
         "TLS 1.2-only client should be rejected when only TLS 1.3 suites are configured"
     );
+}
+
+// -----------------------------------------------------------------------------
+// Downstream TLS peer identity tests
+//
+// These tests prove that `HttpFilterContext.peer_identity` is correctly
+// populated when the downstream connection uses mTLS and the peer
+// presents a valid client certificate.
+//
+// The tests use small inline test-only filters that observe peer_identity
+// and reject with a 403 when expectations are not met.  This is the
+// minimal approach to verify peer identity from outside the proxy without
+// depending on any production access-control filter.
+//
+// All fields extracted from the client certificate — cert_digest,
+// organization, and serial_number — are covered end-to-end below.
+//
+// Regression covered: peer_identity must survive StreamBuffer body
+// pre-read.  Root cause was `.take()` in filter_context! macro consuming
+// the value during pre_read_body; fixed by switching to `.clone()`.
+// -----------------------------------------------------------------------------
+
+struct PeerIdentityRejectIfNone;
+
+#[async_trait::async_trait]
+impl praxis_filter::HttpFilter for PeerIdentityRejectIfNone {
+    fn name(&self) -> &'static str {
+        "test_peer_identity_reject_if_none"
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut praxis_filter::HttpFilterContext<'_>,
+    ) -> Result<praxis_filter::FilterAction, praxis_filter::FilterError> {
+        if ctx.peer_identity.is_some() {
+            Ok(praxis_filter::FilterAction::Continue)
+        } else {
+            Ok(praxis_filter::FilterAction::Reject(praxis_filter::Rejection::status(
+                403,
+            )))
+        }
+    }
+}
+
+struct PeerIdentityRequireOrg(&'static str);
+
+#[async_trait::async_trait]
+impl praxis_filter::HttpFilter for PeerIdentityRequireOrg {
+    fn name(&self) -> &'static str {
+        "test_peer_identity_require_org"
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut praxis_filter::HttpFilterContext<'_>,
+    ) -> Result<praxis_filter::FilterAction, praxis_filter::FilterError> {
+        let matches = ctx
+            .peer_identity
+            .as_ref()
+            .and_then(|id| id.organization.as_deref())
+            .is_some_and(|org| org == self.0);
+        if matches {
+            Ok(praxis_filter::FilterAction::Continue)
+        } else {
+            Ok(praxis_filter::FilterAction::Reject(praxis_filter::Rejection::status(
+                403,
+            )))
+        }
+    }
+}
+
+#[test]
+fn peer_identity_set_for_mtls_connection() {
+    let certs = TestCertificates::generate();
+    let client_cert = certs.generate_client_cert();
+    let client_config = certs.client_config_with_cert(&client_cert);
+
+    let backend_port_guard = start_backend_with_shutdown("peer-identity-ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: secure
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: "{cert}"
+          key_path: "{key}"
+      client_ca:
+        ca_path: "{ca}"
+      client_cert_mode: require
+filter_chains:
+  - name: main
+    filters:
+      - filter: test_peer_identity_reject_if_none
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#,
+        cert = certs.cert_path.display(),
+        key = certs.key_path.display(),
+        ca = certs.ca_cert_path.display(),
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let registry = registry_with("test_peer_identity_reject_if_none", || {
+        Box::new(PeerIdentityRejectIfNone)
+    });
+    let proxy = start_tls_proxy_no_wait_with_registry(&config, &registry);
+    wait_for_https(proxy.addr(), &client_config);
+
+    let (status, body) = https_get(proxy.addr(), "/", &client_config);
+    assert_eq!(
+        status, 200,
+        "peer_identity must be populated for valid mTLS client cert (got {status}, body: {body})"
+    );
+    assert_eq!(body, "peer-identity-ok", "request should reach backend");
+}
+
+#[test]
+fn peer_identity_is_none_without_client_cert() {
+    let certs = TestCertificates::generate();
+    let no_cert_config = certs.client_config();
+
+    let backend_port_guard = start_backend_with_shutdown("peer-identity-no-cert");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: secure
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: "{cert}"
+          key_path: "{key}"
+      client_ca:
+        ca_path: "{ca}"
+      client_cert_mode: request
+filter_chains:
+  - name: main
+    filters:
+      - filter: test_peer_identity_reject_if_none
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#,
+        cert = certs.cert_path.display(),
+        key = certs.key_path.display(),
+        ca = certs.ca_cert_path.display(),
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let registry = registry_with("test_peer_identity_reject_if_none", || {
+        Box::new(PeerIdentityRejectIfNone)
+    });
+    let proxy = start_tls_proxy_no_wait_with_registry(&config, &registry);
+    wait_for_https(proxy.addr(), &no_cert_config);
+
+    let (status, _body) = https_get(proxy.addr(), "/", &no_cert_config);
+    assert_eq!(
+        status, 403,
+        "peer_identity must be None when no client cert is presented (got {status})"
+    );
+}
+
+#[test]
+fn peer_identity_has_organization_when_cert_has_org() {
+    let certs = TestCertificates::generate();
+    let client_cert = certs.generate_client_cert_with_org("my-org");
+    let client_config = certs.client_config_with_cert(&client_cert);
+
+    let backend_port_guard = start_backend_with_shutdown("peer-identity-org-ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: secure
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: "{cert}"
+          key_path: "{key}"
+      client_ca:
+        ca_path: "{ca}"
+      client_cert_mode: require
+filter_chains:
+  - name: main
+    filters:
+      - filter: test_peer_identity_require_org
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#,
+        cert = certs.cert_path.display(),
+        key = certs.key_path.display(),
+        ca = certs.ca_cert_path.display(),
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let registry = registry_with("test_peer_identity_require_org", || {
+        Box::new(PeerIdentityRequireOrg("my-org"))
+    });
+    let proxy = start_tls_proxy_no_wait_with_registry(&config, &registry);
+    wait_for_https(proxy.addr(), &client_config);
+
+    let (status, body) = https_get(proxy.addr(), "/", &client_config);
+    assert_eq!(
+        status, 200,
+        "peer_identity.organization must match cert O= field (got {status}, body: {body})"
+    );
+    assert_eq!(body, "peer-identity-org-ok", "request should reach backend");
+}
+
+struct PeerIdentityRequireSerialNumber;
+
+#[async_trait::async_trait]
+impl praxis_filter::HttpFilter for PeerIdentityRequireSerialNumber {
+    fn name(&self) -> &'static str {
+        "test_peer_identity_require_serial_number"
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut praxis_filter::HttpFilterContext<'_>,
+    ) -> Result<praxis_filter::FilterAction, praxis_filter::FilterError> {
+        let has_serial = ctx
+            .peer_identity
+            .as_ref()
+            .and_then(|id| id.serial_number.as_deref())
+            .is_some();
+        if has_serial {
+            Ok(praxis_filter::FilterAction::Continue)
+        } else {
+            Ok(praxis_filter::FilterAction::Reject(praxis_filter::Rejection::status(
+                403,
+            )))
+        }
+    }
+}
+
+#[test]
+fn peer_identity_has_serial_number_for_mtls_connection() {
+    let certs = TestCertificates::generate();
+    let client_cert = certs.generate_client_cert();
+    let client_config = certs.client_config_with_cert(&client_cert);
+
+    let backend_port_guard = start_backend_with_shutdown("peer-identity-serial-ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: secure
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: "{cert}"
+          key_path: "{key}"
+      client_ca:
+        ca_path: "{ca}"
+      client_cert_mode: require
+filter_chains:
+  - name: main
+    filters:
+      - filter: test_peer_identity_require_serial_number
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#,
+        cert = certs.cert_path.display(),
+        key = certs.key_path.display(),
+        ca = certs.ca_cert_path.display(),
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let registry = registry_with("test_peer_identity_require_serial_number", || {
+        Box::new(PeerIdentityRequireSerialNumber)
+    });
+    let proxy = start_tls_proxy_no_wait_with_registry(&config, &registry);
+    wait_for_https(proxy.addr(), &client_config);
+
+    let (status, body) = https_get(proxy.addr(), "/", &client_config);
+    assert_eq!(
+        status, 200,
+        "peer_identity.serial_number must be populated for valid mTLS client cert (got {status}, body: {body})"
+    );
+    assert_eq!(body, "peer-identity-serial-ok", "request should reach backend");
+}
+
+#[test]
+fn peer_identity_survives_stream_buffer_pre_read_regression() {
+    let certs = TestCertificates::generate();
+    let client_cert = certs.generate_client_cert_with_org("test-org");
+    let client_config = certs.client_config_with_cert(&client_cert);
+
+    let backend_port_guard = start_backend_with_shutdown("peer-identity-streambuf-ok");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+
+    // json_body_field declares StreamBuffer body mode, so pre_read_body runs
+    // before the main pipeline. peer_identity must survive this.
+    let yaml = format!(
+        r#"
+listeners:
+  - name: secure
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: "{cert}"
+          key_path: "{key}"
+      client_ca:
+        ca_path: "{ca}"
+      client_cert_mode: require
+filter_chains:
+  - name: main
+    filters:
+      - filter: test_peer_identity_reject_if_none
+      - filter: json_body_field
+        field: model
+        header: X-Model
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#,
+        cert = certs.cert_path.display(),
+        key = certs.key_path.display(),
+        ca = certs.ca_cert_path.display(),
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let registry = registry_with("test_peer_identity_reject_if_none", || {
+        Box::new(PeerIdentityRejectIfNone)
+    });
+    let proxy = start_tls_proxy_no_wait_with_registry(&config, &registry);
+    wait_for_https(proxy.addr(), &client_config);
+
+    // `json_body_field` always declares StreamBuffer, triggering pre_read_body.
+    let (status, body) = https_get(proxy.addr(), "/", &client_config);
+    assert_eq!(
+        status, 200,
+        "peer_identity must survive StreamBuffer pre-read (got {status}, body: {body})"
+    );
+    assert_eq!(body, "peer-identity-streambuf-ok", "request should reach backend");
 }
 
 // -----------------------------------------------------------------------------

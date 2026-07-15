@@ -607,14 +607,35 @@ by category:
 
 | Directory | Contents |
 | ----------- | ---------- |
-| `traffic-management` | Router, load balancer, timeouts, static responses, redirects, rate limiting, health checks |
-| `payload-processing` | Body processing: compression, field extraction, stream buffering, size limits |
-| `security` | Forwarded headers, IP ACL, guardrails, CORS, downstream read timeout |
-| `observability` | Access logs, request IDs |
-| `transformation` | Header manipulation, path rewriting, URL rewriting |
+| `branching` | Branch chains: conditional skip, terminal, reentrance, cross-chain |
+| `traffic-management` | Router, load balancing, timeouts, redirects, rate limiting, static responses, P2C, canary, circuit breaker, health checks, gRPC detection |
+| `payload-processing` | Compression, JSON field extraction, stream buffering, size limits |
+| `security` | CORS, CSRF, IP ACL, guardrails, policy (feature-gated), forwarded headers, downstream read timeout |
+| `observability` | Access logs, request IDs, TCP access logs |
+| `transformation` | Headers, path rewrite, URL rewrite |
 | `protocols` | TCP, TLS, mixed protocol configs |
-| `pipeline` | Filter chain composition and conditions |
-| `operations` | Production gateway, multi-listener, admin |
+| `pipeline` | Chain composition, conditions, failure mode, branch chains |
+| `operations` | Hot reload, admin, multi-listener, max connections, production gateway |
+
+## Branch Chains
+
+Conditional sub-pipelines based on filter results:
+short-circuit responses, skip filters, retry loops, and
+cross-chain routing. See [Branch Chains](../filters/branch-chains.md)
+and [Pipeline Concepts](../architecture/pipeline-concepts.md).
+
+## Health Checks
+
+Per-cluster active HTTP/TCP probes and passive inline
+failure tracking remove unhealthy endpoints from rotation.
+See [health-checks.yaml](../../examples/configs/traffic-management/health-checks.yaml).
+
+## Failure Mode
+
+Filters declare `failure_mode: open` (continue on error)
+or `closed` (reject the request). Security-critical
+filters reject open mode by default. See
+[failure-mode.yaml](../../examples/configs/pipeline/failure-mode.yaml).
 
 ## Validation and Security
 

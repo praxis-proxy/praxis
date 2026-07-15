@@ -24,10 +24,15 @@ compose a bespoke proxy server from the same primitives.
 
 ## Primary Use-Cases
 
-- **Ingress**: Reverse proxy, API gateway, edge proxy
-- **Egress**: Outbound proxy, service-to-service
-- **East/West**: Sidecar or converged proxy for service mesh
-- **Security Gateway**: Guardrails, Network Policy
+- **Ingress**: API gateway, edge proxy, traffic ingestion
+- **Egress**: Workloads call Praxis; Praxis reaches configured
+  upstreams
+- **East/West**: Sidecar or colocated proxy next to a workload
+- **Security gateway**: Guardrails, network policy
+- **AI inference and agents**: [AI Gateway][ai-overview] on
+  `praxis-ai` (not the core `praxis` binary)
+
+[ai-overview]: https://github.com/praxis-proxy/ai/blob/main/docs/overview.md
 
 ## System Architecture
 

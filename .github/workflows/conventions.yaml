@@ -426,6 +426,9 @@ jobs:
 
             discussion=$(echo "$frontmatter" | grep -E '^discussion:' | sed 's/^discussion:[[:space:]]*//')
             if [ -z "$discussion" ]; then
+              discussion=$(echo "$frontmatter" | awk '/^discussion:/{f=1;next} f && /^  - /{print;exit} f && /^[^ ]/{exit}')
+            fi
+            if [ -z "$discussion" ]; then
               errors="${errors}\n- \`${file}\`: missing \`discussion\` field in frontmatter"
             fi
 

@@ -30,8 +30,11 @@ Two delivery modes:
   limit by default; an optional `max_bytes` returns 413
   when exceeded. Enables streaming inspection with deferred
   forwarding for protocol parsing, body-based routing, and
-  security use cases including content scanning,
-  payload inspection, and body-based routing.
+  security use cases including content scanning and payload
+  inspection. [praxis-ai][ai-overview] builds on the same
+  StreamBuffer model for AI request classification.
+
+[ai-overview]: https://github.com/praxis-proxy/ai/blob/main/docs/overview.md
 
 When StreamBuffer mode is active, the protocol layer
 pre-reads the body during the request phase (before
