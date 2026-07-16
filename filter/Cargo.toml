@@ -35,6 +35,7 @@ praxis-core = { workspace = true }
 praxis-tls = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
+secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 smallvec = { workspace = true }

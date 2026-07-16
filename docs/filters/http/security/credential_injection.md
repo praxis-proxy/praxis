@@ -21,7 +21,7 @@ Credentials are resolved at construction time (inline values or environment vari
 | `clusters[].header` | string | yes | Header name to inject (e.g. `"Authorization"`, `"x-api-key"`). |
 | `clusters[].header_prefix` | string | no | Optional prefix prepended to the credential value before injection (e.g. `"Bearer "`). |
 | `clusters[].strip_client_credential` | bool | no | Deprecated: injection always replaces any client-provided value for the header. Retained for config compatibility. |
-| `clusters[].value` | string | no | Literal credential value. Mutually exclusive with `env_var`. |
+| `clusters[].value` | string (secret) | no | Literal credential value. Mutually exclusive with `env_var`. Wrapped in [`SecretString`] to prevent accidental logging. |
 
 ## Example
 

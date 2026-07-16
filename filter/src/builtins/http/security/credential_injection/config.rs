@@ -5,6 +5,7 @@
 
 use std::fmt;
 
+use secrecy::SecretString;
 use serde::Deserialize;
 
 // -----------------------------------------------------------------------------
@@ -63,7 +64,8 @@ pub(super) struct ClusterCredentialConfig {
     pub strip_client_credential: bool,
 
     /// Literal credential value. Mutually exclusive with `env_var`.
-    pub value: Option<String>,
+    /// Wrapped in [`SecretString`] to prevent accidental logging.
+    pub value: Option<SecretString>,
 }
 
 impl fmt::Debug for ClusterCredentialConfig {
@@ -89,7 +91,32 @@ fn default_strip() -> bool {
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests use expect for parse setup")]
 mod tests {
+    use secrecy::{ExposeSecret as _, SecretString};
+
     use super::*;
+
+    #[test]
+    fn inline_credential_value_is_secret_string() {
+        let cfg: CredentialInjectionConfig = serde_yaml::from_str(
+            "
+clusters:
+  - name: provider-a
+    header: Authorization
+    value: super-secret-inline-value
+",
+        )
+        .expect("credential injection config should parse");
+
+        let value = cfg
+            .clusters
+            .first()
+            .expect("credential config should include one cluster")
+            .value
+            .as_ref()
+            .expect("inline credential value should be present");
+        let _: &SecretString = value;
+        assert_eq!(value.expose_secret(), "super-secret-inline-value");
+    }
 
     #[test]
     fn debug_redacts_inline_credential_value() {

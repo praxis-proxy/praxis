@@ -6,6 +6,7 @@
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use secrecy::ExposeSecret as _;
 use zeroize::Zeroizing;
 
 use super::config::{ClusterCredentialConfig, CredentialInjectionConfig};
@@ -183,7 +184,7 @@ fn resolve_credential(cfg: &ClusterCredentialConfig) -> Result<ClusterCredential
 
     let header_value = match &cfg.header_prefix {
         Some(prefix) => format!("{prefix}{raw_value}"),
-        None => raw_value,
+        None => raw_value.into_owned(),
     };
 
     http::HeaderValue::from_str(&header_value).map_err(|e| -> FilterError {
@@ -201,10 +202,10 @@ fn resolve_credential(cfg: &ClusterCredentialConfig) -> Result<ClusterCredential
 }
 
 /// Extract the raw credential string from config (inline or env var).
-fn resolve_raw_value(cfg: &ClusterCredentialConfig) -> Result<String, FilterError> {
+fn resolve_raw_value(cfg: &ClusterCredentialConfig) -> Result<Cow<'_, str>, FilterError> {
     match (&cfg.value, &cfg.env_var) {
-        (Some(val), None) => Ok(val.clone()),
-        (None, Some(var)) => std::env::var(var).map_err(|e| -> FilterError {
+        (Some(val), None) => Ok(Cow::Borrowed(val.expose_secret())),
+        (None, Some(var)) => std::env::var(var).map(Cow::Owned).map_err(|e| -> FilterError {
             format!(
                 "credential_injection: environment variable '{var}' not set for cluster '{}': {e}",
                 cfg.name
