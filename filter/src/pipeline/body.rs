@@ -445,6 +445,10 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------
+
     /// Noop HTTP filter for body capability branch testing.
     struct NoopHttpFilter;
 

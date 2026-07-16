@@ -72,7 +72,7 @@ use praxis_core::{
     kv::KvStoreRegistry,
     time::TimeSource,
 };
-use tracing::warn;
+use tracing::{error, warn};
 
 use self::filter::PipelineFilter;
 use crate::{
@@ -382,7 +382,7 @@ pub(crate) fn check_failure_mode(
             Ok(())
         },
         FailureMode::Closed => {
-            warn!(
+            error!(
                 filter = filter_name,
                 error = %error,
                 "filter error during {phase}, aborting"

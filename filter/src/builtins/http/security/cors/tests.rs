@@ -89,6 +89,99 @@ allow_credentials: true
 }
 
 #[test]
+fn from_config_rejects_credentials_with_null_origin() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+allow_origins: ["https://example.com"]
+allow_null_origin: true
+allow_credentials: true
+"#,
+    )
+    .unwrap();
+    let err = CorsFilter::from_config(&yaml).err().unwrap();
+    assert!(
+        err.to_string().contains("incompatible with allow_null_origin"),
+        "credentials + null origin should fail: {err}"
+    );
+}
+
+#[test]
+fn from_config_allows_null_origin_without_credentials() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+allow_origins: ["https://example.com"]
+allow_null_origin: true
+"#,
+    )
+    .unwrap();
+    assert!(
+        CorsFilter::from_config(&yaml).is_ok(),
+        "null origin without credentials should be accepted"
+    );
+}
+
+#[test]
+fn from_config_rejects_null_literal_in_origins() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+allow_origins: ["null"]
+"#,
+    )
+    .unwrap();
+    let err = CorsFilter::from_config(&yaml).err().unwrap();
+    assert!(
+        err.to_string().contains("literal \"null\" in allow_origins"),
+        "null literal in origins should fail: {err}"
+    );
+}
+
+#[test]
+fn from_config_rejects_null_literal_in_origins_case_insensitive() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+allow_origins: ["NULL"]
+"#,
+    )
+    .unwrap();
+    let err = CorsFilter::from_config(&yaml).err().unwrap();
+    assert!(
+        err.to_string().contains("literal \"null\" in allow_origins"),
+        "uppercase NULL in origins should fail: {err}"
+    );
+}
+
+#[test]
+fn from_config_rejects_null_literal_in_origins_with_credentials() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+allow_origins: ["null"]
+allow_credentials: true
+"#,
+    )
+    .unwrap();
+    let err = CorsFilter::from_config(&yaml).err().unwrap();
+    assert!(
+        err.to_string().contains("literal \"null\" in allow_origins"),
+        "null literal with credentials should fail: {err}"
+    );
+}
+
+#[test]
+fn from_config_rejects_null_literal_mixed_with_valid_origins() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+allow_origins: ["https://example.com", "null"]
+"#,
+    )
+    .unwrap();
+    let err = CorsFilter::from_config(&yaml).err().unwrap();
+    assert!(
+        err.to_string().contains("literal \"null\" in allow_origins"),
+        "null mixed with valid origins should fail: {err}"
+    );
+}
+
+#[test]
 fn from_config_rejects_wildcard_mixed_with_other_origins() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"

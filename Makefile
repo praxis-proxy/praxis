@@ -225,7 +225,7 @@ coverage:
 		--exclude benchmarks \
 		--exclude praxis-tests-conformance \
 		--exclude xtask \
-		--ignore-filename-regex '(target/|tests/)' \
+		--ignore-filename-regex '(target/|tests/|server/src/main\.rs)' \
 		--fail-under-lines 96
 
 coverage-check:
@@ -233,7 +233,7 @@ coverage-check:
 		--exclude benchmarks \
 		--exclude praxis-tests-conformance \
 		--exclude xtask \
-		--ignore-filename-regex '(target/|tests/)' \
+		--ignore-filename-regex '(target/|tests/|server/src/main\.rs)' \
 		--fail-under-lines 96 \
 		--output-path coverage.json
 

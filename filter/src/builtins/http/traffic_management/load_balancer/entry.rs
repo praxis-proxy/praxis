@@ -9,7 +9,7 @@ use praxis_core::{
     config::{CachedClusterTls, Cluster},
     connectivity::{ConnectionOptions, Upstream},
 };
-use tracing::{debug, warn};
+use tracing::{debug, error};
 
 use super::strategy::{Strategy, build_strategy};
 use crate::{filter::HttpFilterContext, load_balancing::endpoint::build_weighted_endpoints};
@@ -43,7 +43,11 @@ impl ClusterEntry {
     pub(super) fn build_upstream(&self, addr: Arc<str>, ctx: &HttpFilterContext<'_>) -> Upstream {
         let tls = self.tls.clone().map(|mut t| {
             if t.sni().is_none()
-                && let Some(host) = ctx.request.headers.get("host").and_then(|v| v.to_str().ok())
+                && let Some(host) = ctx
+                    .request
+                    .headers
+                    .get(http::header::HOST)
+                    .and_then(|v| v.to_str().ok())
             {
                 t.set_sni(strip_host_port(host).to_owned());
             }
@@ -86,7 +90,7 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> ClusterEntry {
         .and_then(|t| match CachedClusterTls::try_from_config(t) {
             Ok(cached) => Some(cached),
             Err(e) => {
-                warn!(
+                error!(
                     cluster = %cluster.name,
                     error = %e,
                     "failed to cache TLS certificates; TLS disabled for this cluster"

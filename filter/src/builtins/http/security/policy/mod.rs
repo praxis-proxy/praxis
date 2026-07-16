@@ -99,12 +99,11 @@
 //! | Policy deny (PDP, predicate, PII, taint, delegation) | HTTP 200 with a JSON-RPC error envelope (`code -32001`) and `X-Policy-Violation: <code>` — per the JSON-RPC spec, gateway denials are JSON-RPC errors, not HTTP 4xx. |
 //! | Missing `protocol.method` metadata | HTTP 500 (server-side misconfiguration; protocol classifier filter from `praxis-ai` missing or misordered). |
 //!
-//! # Runtime requirement
+//! # Runtime compatibility
 //!
-//! The response phase drives async work with `block_in_place`, which
-//! requires a multi-threaded tokio runtime — run the proxy with
-//! `work_stealing: true`. On a current-thread runtime the filter rejects
-//! every request with a clear error rather than panicking mid-response.
+//! The response phase uses `spawn_blocking` to dispatch async CMF hooks
+//! from the sync `on_response_body` trait method. This works on both
+//! multi-threaded and current-thread tokio runtimes.
 //!
 //! # See also
 //!

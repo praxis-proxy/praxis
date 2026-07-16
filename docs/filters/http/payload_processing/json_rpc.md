@@ -15,11 +15,12 @@ Writes `json_rpc.*` entries to the filter result set for branch chain conditions
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `batch_policy` | `reject` \| `first` | no | Batch handling policy. |
+| `batch_policy` | `reject` \| `first` | no | Batch handling policy (default: [`reject`]). Controls whether JSON-RPC batch arrays are allowed. See [`BatchPolicy`] for security implications. |
 | `headers` | JsonRpcHeaders | no | Header names for metadata promotion. |
 | `headers.id` | string | no | Header name for JSON-RPC id (e.g., `X-Json-Rpc-Id`). |
 | `headers.kind` | string | no | Header name for JSON-RPC kind (e.g., `X-Json-Rpc-Kind`). |
 | `headers.method` | string | no | Header name for JSON-RPC method (e.g., `X-Json-Rpc-Method`). |
+| `max_batch_size` | integer | no | Maximum number of items allowed in a JSON-RPC batch array. Only enforced when [`batch_policy`] is [`First`]. Requests exceeding this limit are rejected with HTTP 400. This prevents a single HTTP request from multiplexing an excessive number of JSON-RPC calls, which could bypass per-request rate limits. Default: [`DEFAULT_MAX_BATCH_SIZE`] (100). |
 | `max_body_bytes` | integer | no | Maximum body size in bytes for `StreamBuffer`. |
 | `on_invalid` | `continue` \| `reject` \| `error` | no | Invalid input handling behavior. |
 
@@ -36,7 +37,8 @@ filter: json_rpc
 ```yaml
 filter: json_rpc
 max_body_bytes: 1048576
-batch_policy: reject
+batch_policy: first
+max_batch_size: 50
 on_invalid: continue
 headers:
   method: X-Json-Rpc-Method

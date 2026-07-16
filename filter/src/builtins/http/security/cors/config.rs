@@ -93,14 +93,35 @@ pub(super) fn validate_config(cfg: &CorsConfig) -> Result<(), crate::FilterError
     if cfg.max_age == 0 {
         return Err("cors: max_age must be greater than 0".into());
     }
+    validate_null_literal_origins(cfg)?;
     validate_credentials(cfg)?;
     validate_wildcard_origins(cfg)
 }
 
-/// Reject credentials + wildcard combinations per Fetch spec.
+/// Reject the literal string `"null"` in `allow_origins`.
+///
+/// The `null` origin (sent by sandboxed iframes, `data:` URIs, and
+/// cross-origin redirects) is controlled by the dedicated
+/// `allow_null_origin` flag. Placing `"null"` in `allow_origins` has
+/// no effect at runtime and usually indicates a misconfiguration.
+fn validate_null_literal_origins(cfg: &CorsConfig) -> Result<(), crate::FilterError> {
+    if cfg.allow_origins.iter().any(|o| o.eq_ignore_ascii_case("null")) {
+        return Err("cors: literal \"null\" in allow_origins is not supported; \
+             use allow_null_origin: true to explicitly allow null origins"
+            .into());
+    }
+    Ok(())
+}
+
+/// Reject credentials with wildcards or null origin per Fetch spec.
 fn validate_credentials(cfg: &CorsConfig) -> Result<(), crate::FilterError> {
     if !cfg.allow_credentials {
         return Ok(());
+    }
+    if cfg.allow_null_origin {
+        return Err("cors: allow_credentials is incompatible with allow_null_origin \
+             (null origin enables credential theft from sandboxed contexts)"
+            .into());
     }
     if cfg.allow_origins.iter().any(|o| o == "*") {
         return Err("cors: allow_credentials is incompatible with wildcard allow_origins".into());

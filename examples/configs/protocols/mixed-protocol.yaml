@@ -6,6 +6,9 @@
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/protocols/mixed-protocol.yaml
 
+insecure_options:
+  allow_private_upstreams: true
+
 listeners:
   - name: web
     address: "127.0.0.1:8080"

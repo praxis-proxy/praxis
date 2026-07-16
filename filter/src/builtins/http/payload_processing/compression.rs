@@ -15,6 +15,19 @@ use crate::{
     filter::{HttpFilter, HttpFilterContext},
 };
 
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum compression levels per algorithm.
+const MAX_GZIP_LEVEL: u32 = 9;
+
+/// Maximum brotli compression level.
+const MAX_BROTLI_LEVEL: u32 = 11;
+
+/// Maximum zstd compression level.
+const MAX_ZSTD_LEVEL: u32 = 22;
+
 // -----------------------------------------------------------------------------
 // YAML Config
 // -----------------------------------------------------------------------------
@@ -204,13 +217,6 @@ impl HttpFilter for CompressionFilter {
 // -----------------------------------------------------------------------------
 // Validation
 // -----------------------------------------------------------------------------
-
-/// Maximum compression levels per algorithm.
-const MAX_GZIP_LEVEL: u32 = 9;
-/// Maximum brotli compression level.
-const MAX_BROTLI_LEVEL: u32 = 11;
-/// Maximum zstd compression level.
-const MAX_ZSTD_LEVEL: u32 = 22;
 
 /// Validate compression levels are within algorithm-defined bounds.
 fn validate_levels(cfg: &CompressionFilterConfig) -> Result<(), FilterError> {

@@ -29,6 +29,7 @@ use tokio::sync::watch;
 /// [`build_server_config`]: praxis_tls::setup::build_server_config
 /// [`ReloadableCertResolver`]: praxis_tls::reload::ReloadableCertResolver
 /// [`CertWatcher`]: praxis_tls::watcher::CertWatcher
+#[expect(clippy::too_many_lines, reason = "hot-reload vs static TLS branching")]
 pub(crate) fn build_tls_settings(
     tls: &ListenerTls,
     address: &str,
@@ -43,17 +44,29 @@ pub(crate) fn build_tls_settings(
 
     if tls.is_hot_reload() {
         tracing::debug!(address, context_label, "building TLS ServerConfig with hot-reload");
-        let (server_config, swap_handle) = praxis_tls::setup::build_reloadable_server_config(tls)
+        let result = praxis_tls::setup::build_reloadable_server_config(tls)
             .map_err(|e| ProxyError::Config(format!("TLS hot-reload for {address}: {e}")))?;
 
         let pair =
             tls.certificates.first().cloned().ok_or_else(|| {
                 ProxyError::Config(format!("TLS hot-reload for {address}: no certificate configured"))
             })?;
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
-        praxis_tls::watcher::CertWatcher::spawn(swap_handle, pair, shutdown_rx);
 
-        let settings = TlsSettings::with_server_config(server_config).map_err(|e| tls_err!(e))?;
+        let verifier_reload = result.verifier_handle.and_then(|handle| {
+            tls.client_ca
+                .as_ref()
+                .map(|ca_cfg| praxis_tls::watcher::ClientVerifierReload {
+                    ca_path: ca_cfg.ca_path.clone(),
+                    crl_paths: ca_cfg.crl_paths.clone(),
+                    mode: tls.client_cert_mode,
+                    swap_handle: handle,
+                })
+        });
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        praxis_tls::watcher::CertWatcher::spawn(result.cert_handle, pair, verifier_reload, shutdown_rx);
+
+        let settings = TlsSettings::with_server_config(result.config).map_err(|e| tls_err!(e))?;
         return Ok((settings, Some(shutdown_tx)));
     }
 

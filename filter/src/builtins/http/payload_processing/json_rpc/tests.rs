@@ -8,7 +8,7 @@ use bytes::Bytes;
 use super::{
     super::OnInvalidBehavior,
     JsonRpcFilter,
-    config::{BatchPolicy, JsonRpcHeaders},
+    config::{BatchPolicy, DEFAULT_MAX_BATCH_SIZE, JsonRpcHeaders},
     envelope::{JsonRpcIdKind, JsonRpcKind, parse_json_rpc_envelope},
 };
 use crate::{FilterAction, HttpFilter as _};
@@ -95,6 +95,33 @@ fn reject_invalid_header_names() {
     assert!(
         err.to_string().contains("not a valid HTTP header name"),
         "error should mention invalid header name"
+    );
+}
+
+#[test]
+fn parse_config_with_max_batch_size() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+        batch_policy: first
+        max_batch_size: 50
+        "#,
+    )
+    .unwrap();
+    let filter = JsonRpcFilter::from_config(&yaml).unwrap();
+    assert_eq!(
+        filter.name(),
+        "json_rpc",
+        "config with explicit max_batch_size should parse"
+    );
+}
+
+#[test]
+fn reject_zero_max_batch_size() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("max_batch_size: 0").unwrap();
+    let err = JsonRpcFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("must be greater than 0"),
+        "error should mention max_batch_size constraint"
     );
 }
 
@@ -402,6 +429,57 @@ fn non_object_json_continues_when_configured() {
     assert!(result.is_none(), "non-object JSON should return None when continuing");
 }
 
+#[test]
+fn batch_within_max_size_allowed() {
+    let config = make_config_with_batch_limit(5);
+    let json = br#"[
+        {"jsonrpc":"2.0","method":"a","id":1},
+        {"jsonrpc":"2.0","method":"b","id":2}
+    ]"#;
+    let envelope = parse_json_rpc_envelope(json, &config).unwrap().unwrap();
+    assert_eq!(envelope.kind, JsonRpcKind::Batch, "kind should be batch");
+    assert_eq!(envelope.batch_len, Some(2), "batch_len should be 2");
+}
+
+#[test]
+fn batch_at_exact_max_size_allowed() {
+    let config = make_config_with_batch_limit(2);
+    let json = br#"[
+        {"jsonrpc":"2.0","method":"a","id":1},
+        {"jsonrpc":"2.0","method":"b","id":2}
+    ]"#;
+    let envelope = parse_json_rpc_envelope(json, &config).unwrap().unwrap();
+    assert_eq!(envelope.batch_len, Some(2), "batch at exact limit should pass");
+}
+
+#[test]
+fn batch_exceeding_max_size_rejected() {
+    let config = make_config_with_batch_limit(1);
+    let json = br#"[
+        {"jsonrpc":"2.0","method":"a","id":1},
+        {"jsonrpc":"2.0","method":"b","id":2}
+    ]"#;
+    let err = parse_json_rpc_envelope(json, &config).expect_err("should fail");
+    assert!(
+        err.to_string().contains("exceeds maximum"),
+        "error should mention exceeds maximum: got '{err}'"
+    );
+}
+
+#[test]
+fn batch_too_large_error_includes_counts() {
+    let config = make_config_with_batch_limit(1);
+    let json = br#"[
+        {"jsonrpc":"2.0","method":"a","id":1},
+        {"jsonrpc":"2.0","method":"b","id":2},
+        {"jsonrpc":"2.0","method":"c","id":3}
+    ]"#;
+    let err = parse_json_rpc_envelope(json, &config).expect_err("should fail");
+    let msg = err.to_string();
+    assert!(msg.contains("3"), "error should include actual batch size: got '{msg}'");
+    assert!(msg.contains("1"), "error should include max batch size: got '{msg}'");
+}
+
 // -----------------------------------------------------------------------------
 // Filter Behavior Tests
 // -----------------------------------------------------------------------------
@@ -614,6 +692,46 @@ async fn allows_tab_character() {
     );
 }
 
+#[tokio::test]
+async fn rejects_batch_exceeding_max_size_through_filter() {
+    let filter = JsonRpcFilter {
+        config: make_config_with_batch_limit(1),
+        max_body_bytes: 1_048_576,
+    };
+    let req = crate::test_utils::make_request(http::Method::POST, "/rpc");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let json = br#"[{"jsonrpc":"2.0","method":"a","id":1},{"jsonrpc":"2.0","method":"b","id":2}]"#;
+    let mut body = Some(Bytes::from_static(json));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 400),
+        "batch exceeding max_batch_size should be rejected with 400"
+    );
+}
+
+#[tokio::test]
+async fn batch_too_large_rejects_regardless_of_on_invalid() {
+    let filter = JsonRpcFilter {
+        config: super::config::JsonRpcConfig {
+            batch_policy: BatchPolicy::First,
+            headers: JsonRpcHeaders::default(),
+            max_batch_size: 1,
+            max_body_bytes: 1_048_576,
+            on_invalid: OnInvalidBehavior::Continue,
+        },
+        max_body_bytes: 1_048_576,
+    };
+    let req = crate::test_utils::make_request(http::Method::POST, "/rpc");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let json = br#"[{"jsonrpc":"2.0","method":"a","id":1},{"jsonrpc":"2.0","method":"b","id":2}]"#;
+    let mut body = Some(Bytes::from_static(json));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 400),
+        "batch_too_large must reject with 400 even when on_invalid is continue"
+    );
+}
+
 #[test]
 fn body_access_is_read_only() {
     let filter = make_filter();
@@ -646,8 +764,19 @@ fn make_config(batch_policy: BatchPolicy, on_invalid: OnInvalidBehavior) -> supe
     super::config::JsonRpcConfig {
         batch_policy,
         headers: JsonRpcHeaders::default(),
+        max_batch_size: DEFAULT_MAX_BATCH_SIZE,
         max_body_bytes: 1_048_576,
         on_invalid,
+    }
+}
+
+fn make_config_with_batch_limit(max_batch_size: usize) -> super::config::JsonRpcConfig {
+    super::config::JsonRpcConfig {
+        batch_policy: BatchPolicy::First,
+        headers: JsonRpcHeaders::default(),
+        max_batch_size,
+        max_body_bytes: 1_048_576,
+        on_invalid: OnInvalidBehavior::Continue,
     }
 }
 

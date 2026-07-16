@@ -9,6 +9,9 @@
 # Exercise:
 #   nc localhost 5432   # observe connect/disconnect log lines
 
+insecure_options:
+  allow_private_upstreams: true
+
 listeners:
   - name: db
     address: "127.0.0.1:5432"

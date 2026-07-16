@@ -3,11 +3,12 @@
 
 //! Pingora-backed bidirectional TCP proxy application.
 
-use std::{borrow::Cow, future::Future, io, sync::Arc, time::Duration};
+use std::{borrow::Cow, future::Future, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use pingora_core::{apps::ServerApp, protocols::Stream, server::ShutdownWatch};
+use praxis_core::connectivity::is_private_ip;
 use praxis_filter::{FilterAction, FilterPipeline, TcpFilterContext};
 use praxis_tls::sni;
 use tokio::{
@@ -15,7 +16,7 @@ use tokio::{
     net::TcpStream,
     sync::{Semaphore, watch},
 };
-use tracing::{debug, trace, warn};
+use tracing::{debug, error, trace, warn};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -59,6 +60,9 @@ const SNI_PEEK_TIMEOUT: Duration = Duration::from_secs(5);
 /// [`TcpFilterContext::upstream_addr`]: praxis_filter::TcpFilterContext::upstream_addr
 /// [`ArcSwap`]: arc_swap::ArcSwap
 pub(crate) struct PingoraTcpProxy {
+    /// Allow upstream connections to private/reserved IP addresses.
+    allow_private_upstreams: bool,
+
     /// Cluster name for load-balanced TCP connections.
     cluster: Option<Arc<str>>,
 
@@ -88,8 +92,10 @@ impl PingoraTcpProxy {
         session_timeout: Option<Duration>,
         max_duration: Option<Duration>,
         connection_semaphore: Option<Arc<Semaphore>>,
+        allow_private_upstreams: bool,
     ) -> Self {
         Self {
+            allow_private_upstreams,
             cluster,
             connection_semaphore,
             session_timeout,
@@ -252,12 +258,12 @@ impl ServerApp for PingoraTcpProxy {
             .run_connect_filters(&remote_addr, &local_addr, sni_hostname.as_deref(), connect_time)
             .await?;
 
-        let mut upstream = connect_upstream(&upstream_addr).await?;
+        let mut upstream = connect_upstream(&upstream_addr, self.allow_private_upstreams).await?;
 
         if !peeked_bytes.is_empty()
             && let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut upstream, &peeked_bytes).await
         {
-            warn!(upstream = %upstream_addr, error = %e, "failed to write peeked bytes to upstream");
+            error!(upstream = %upstream_addr, error = %e, "failed to write peeked bytes to upstream");
             self.run_disconnect_filters(
                 &remote_addr,
                 &local_addr,
@@ -307,7 +313,7 @@ async fn resolve_connect_result(
             if let Some(addr) = &ctx.upstream_addr {
                 Some(addr.clone().into_owned())
             } else {
-                warn!(remote = %remote_addr, "no upstream address resolved for TCP connection");
+                error!(remote = %remote_addr, "no upstream address resolved for TCP connection");
                 None
             }
         },
@@ -316,7 +322,7 @@ async fn resolve_connect_result(
             None
         },
         Err(e) => {
-            warn!(remote = %remote_addr, error = %e, "TCP connect filter error");
+            error!(remote = %remote_addr, error = %e, "TCP connect filter error");
             None
         },
     }
@@ -470,22 +476,68 @@ async fn forward_no_timeout(
 }
 
 /// Connect to the upstream TCP address with a timeout.
-async fn connect_upstream(upstream_addr: &str) -> Option<TcpStream> {
-    match tokio::time::timeout(UPSTREAM_CONNECT_TIMEOUT, TcpStream::connect(upstream_addr)).await {
-        Ok(Ok(s)) => Some(s),
-        Ok(Err(e)) => {
-            warn!(upstream = %upstream_addr, error = %e, "failed to connect to TCP upstream");
-            None
+///
+/// Resolves DNS before connecting so that the resolved IPs can be
+/// checked against private/reserved ranges (loopback, RFC 1918,
+/// link-local, CGNAT, IPv6 unique-local). This prevents DNS
+/// rebinding attacks where a hostname resolves to a public IP at
+/// config time but a private IP at connection time. The check is
+/// skipped when `allow_private` is `true`
+/// (`insecure_options.allow_private_upstreams`).
+async fn connect_upstream(upstream_addr: &str, allow_private: bool) -> Option<TcpStream> {
+    if let Ok(result) = tokio::time::timeout(
+        UPSTREAM_CONNECT_TIMEOUT,
+        resolve_and_connect(upstream_addr, allow_private),
+    )
+    .await
+    {
+        return result;
+    }
+    error!(
+        upstream = %upstream_addr,
+        timeout_secs = UPSTREAM_CONNECT_TIMEOUT.as_secs(),
+        "TCP upstream connect timed out"
+    );
+    None
+}
+
+/// Resolve, SSRF-check, and connect to an upstream address.
+async fn resolve_and_connect(upstream_addr: &str, allow_private: bool) -> Option<TcpStream> {
+    let addrs: Vec<SocketAddr> = match tokio::net::lookup_host(upstream_addr).await {
+        Ok(iter) => iter.collect(),
+        Err(e) => {
+            warn!(upstream = %upstream_addr, error = %e, "failed to resolve TCP upstream");
+            return None;
         },
-        Err(_) => {
-            warn!(
-                upstream = %upstream_addr,
-                timeout_secs = UPSTREAM_CONNECT_TIMEOUT.as_secs(),
-                "TCP upstream connect timed out"
-            );
+    };
+
+    if !allow_private && let Some(bad_ip) = find_private_addr(&addrs) {
+        warn!(
+            upstream = %upstream_addr,
+            resolved_ip = %bad_ip,
+            "TCP upstream resolved to private/reserved IP address; \
+             set insecure_options.allow_private_upstreams to allow"
+        );
+        return None;
+    }
+
+    match TcpStream::connect(addrs.as_slice()).await {
+        Ok(s) => Some(s),
+        Err(e) => {
+            error!(upstream = %upstream_addr, error = %e, "failed to connect to TCP upstream");
             None
         },
     }
+}
+
+/// Return the first private/reserved IP among resolved socket addresses.
+///
+/// Uses [`is_private_ip`] which handles IPv4-mapped IPv6 normalization
+/// internally, so `::ffff:10.0.0.1` is correctly identified.
+///
+/// [`is_private_ip`]: praxis_core::connectivity::is_private_ip
+fn find_private_addr(addrs: &[SocketAddr]) -> Option<std::net::IpAddr> {
+    addrs.iter().map(SocketAddr::ip).find(is_private_ip)
 }
 
 // -----------------------------------------------------------------------------
@@ -648,6 +700,93 @@ mod tests {
             "NotTls should return Done(None)"
         );
         assert_eq!(buf.len(), filled, "buf should be truncated to filled length");
+    }
+
+    #[test]
+    fn find_private_addr_flags_loopback_v4() {
+        let addrs = vec![SocketAddr::from(([127, 0, 0, 1], 80))];
+        let result = find_private_addr(&addrs);
+        assert!(result.is_some(), "127.0.0.1 should be flagged as private");
+    }
+
+    #[test]
+    fn find_private_addr_flags_loopback_v6() {
+        let addrs = vec![SocketAddr::from((std::net::Ipv6Addr::LOCALHOST, 80))];
+        let result = find_private_addr(&addrs);
+        assert!(result.is_some(), "::1 should be flagged as private");
+    }
+
+    #[test]
+    fn find_private_addr_flags_link_local_v4() {
+        let addrs = vec![SocketAddr::from(([169, 254, 169, 254], 80))];
+        let result = find_private_addr(&addrs);
+        assert!(
+            result.is_some(),
+            "169.254.169.254 (link-local) should be flagged as private"
+        );
+    }
+
+    #[test]
+    fn find_private_addr_flags_ipv4_mapped_loopback() {
+        let v6 = "::ffff:127.0.0.1".parse::<std::net::Ipv6Addr>().unwrap();
+        let addrs = vec![SocketAddr::from((v6, 80))];
+        let result = find_private_addr(&addrs);
+        assert!(
+            result.is_some(),
+            "::ffff:127.0.0.1 should be flagged after normalization"
+        );
+    }
+
+    #[test]
+    fn find_private_addr_allows_public_ip() {
+        let addrs = vec![SocketAddr::from(([8, 8, 8, 8], 443))];
+        let result = find_private_addr(&addrs);
+        assert!(result.is_none(), "8.8.8.8 should not be flagged");
+    }
+
+    #[test]
+    fn find_private_addr_flags_rfc1918() {
+        let addrs = vec![SocketAddr::from(([10, 0, 0, 1], 80))];
+        let result = find_private_addr(&addrs);
+        assert!(result.is_some(), "RFC 1918 10.0.0.1 should be flagged as private");
+    }
+
+    #[test]
+    fn find_private_addr_flags_rfc1918_172() {
+        let addrs = vec![SocketAddr::from(([172, 16, 5, 1], 80))];
+        let result = find_private_addr(&addrs);
+        assert!(result.is_some(), "RFC 1918 172.16.5.1 should be flagged as private");
+    }
+
+    #[test]
+    fn find_private_addr_flags_rfc1918_192() {
+        let addrs = vec![SocketAddr::from(([192, 168, 1, 1], 80))];
+        let result = find_private_addr(&addrs);
+        assert!(result.is_some(), "RFC 1918 192.168.1.1 should be flagged as private");
+    }
+
+    #[test]
+    fn find_private_addr_flags_cgnat() {
+        let addrs = vec![SocketAddr::from(([100, 64, 0, 1], 80))];
+        let result = find_private_addr(&addrs);
+        assert!(result.is_some(), "CGNAT 100.64.0.1 should be flagged as private");
+    }
+
+    #[test]
+    fn find_private_addr_flags_any_private_in_list() {
+        let addrs = vec![
+            SocketAddr::from(([8, 8, 8, 8], 80)),
+            SocketAddr::from(([127, 0, 0, 1], 80)),
+        ];
+        let result = find_private_addr(&addrs);
+        assert!(result.is_some(), "should flag when any address in the list is private");
+    }
+
+    #[test]
+    fn find_private_addr_returns_none_for_empty() {
+        let addrs: Vec<SocketAddr> = vec![];
+        let result = find_private_addr(&addrs);
+        assert!(result.is_none(), "empty list should return None");
     }
 
     // -------------------------------------------------------------------------

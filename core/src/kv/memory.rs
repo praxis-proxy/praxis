@@ -17,6 +17,16 @@ use regex::Regex;
 use super::{KvBackend, MatchType};
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum number of compiled regex patterns to cache.
+const MAX_REGEX_CACHE_SIZE: usize = 10_000;
+
+/// Maximum number of entries per store.
+const MAX_ENTRIES: usize = 100_000;
+
+// ---------------------------------------------------------------------------
 // InMemoryKvBackend
 // ---------------------------------------------------------------------------
 
@@ -102,12 +112,6 @@ impl InMemoryKvBackend {
         Ok(compiled)
     }
 }
-
-/// Maximum number of compiled regex patterns to cache.
-const MAX_REGEX_CACHE_SIZE: usize = 10_000;
-
-/// Maximum number of entries per store.
-const MAX_ENTRIES: usize = 100_000;
 
 impl Default for InMemoryKvBackend {
     fn default() -> Self {

@@ -381,7 +381,7 @@ impl HttpFilter for RouterFilter {
         let host = ctx
             .request
             .headers
-            .get("host")
+            .get(http::header::HOST)
             .and_then(|v| v.to_str().ok())
             .or_else(|| ctx.request.uri.authority().map(http::uri::Authority::as_str));
 

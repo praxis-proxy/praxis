@@ -6,7 +6,7 @@
 use praxis_core::config::{FailureMode, FilterEntry};
 use tracing::warn;
 
-use super::filter::PipelineFilter;
+use super::{branch::RejoinTarget, filter::PipelineFilter};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -243,6 +243,36 @@ pub(super) fn check_duplicate_rewrite_filters(names: &[&str], entries: &[FilterE
     }
 }
 
+/// `SkipTo` branches that bypass security-critical filters.
+///
+/// When a branch's rejoin target jumps forward past a security filter,
+/// that filter will not execute for requests taking the branch path.
+pub(super) fn check_skip_to_bypasses_security(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for (i, pf) in filters.iter().enumerate() {
+        for branch in &pf.branches {
+            let RejoinTarget::SkipTo(target) = branch.rejoin else {
+                continue;
+            };
+            for (skip_idx, skipped) in filters
+                .iter()
+                .enumerate()
+                .skip(i + 1)
+                .take(target.saturating_sub(i + 1))
+            {
+                let name = skipped.filter.name();
+                if SECURITY_FILTERS.contains(&name) {
+                    errors.push(format!(
+                        "branch '{branch}' on filter at position {i} \
+                         uses SkipTo rejoin that bypasses security \
+                         filter '{name}' at position {skip_idx}",
+                        branch = branch.name,
+                    ));
+                }
+            }
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Warning Checks
 // -----------------------------------------------------------------------------
@@ -315,10 +345,15 @@ fn has_allow_rewrite_override(entries: &[FilterEntry], idx: usize) -> bool {
     reason = "tests"
 )]
 mod tests {
+    use std::sync::Arc;
+
     use praxis_core::config::{Condition, ConditionMatch, FailureMode, FilterEntry};
 
     use super::*;
-    use crate::pipeline::test_filters::{lb_filter, noop_filter_with_conditions, selector_filter};
+    use crate::pipeline::{
+        branch::{RejoinTarget, ResolvedBranch},
+        test_filters::{lb_filter, noop_filter_with_conditions, selector_filter},
+    };
 
     #[test]
     fn lb_without_router_errors() {
@@ -790,6 +825,77 @@ mod tests {
         assert!(errors.is_empty(), "single rewrite filter should produce no errors");
     }
 
+    #[test]
+    fn skip_to_bypassing_security_filter_errors() {
+        let mut f0 = named_noop_filter("headers", vec![]);
+        f0.branches = vec![make_skip_branch("skip", 2)];
+        let f1 = named_noop_filter("ip_acl", vec![]);
+        let f2 = named_noop_filter("load_balancer", vec![]);
+        let filters = vec![f0, f1, f2];
+        let mut errors = Vec::new();
+        check_skip_to_bypasses_security(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "should detect skipped security filter");
+        assert!(
+            errors[0].contains("ip_acl"),
+            "error should mention the bypassed security filter: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn skip_to_bypassing_multiple_security_filters_reports_each() {
+        let mut f0 = named_noop_filter("headers", vec![]);
+        f0.branches = vec![make_skip_branch("big_skip", 3)];
+        let f1 = named_noop_filter("ip_acl", vec![]);
+        let f2 = named_noop_filter("cors", vec![]);
+        let f3 = named_noop_filter("load_balancer", vec![]);
+        let filters = vec![f0, f1, f2, f3];
+        let mut errors = Vec::new();
+        check_skip_to_bypasses_security(&filters, &mut errors);
+        assert_eq!(errors.len(), 2, "should report each skipped security filter");
+    }
+
+    #[test]
+    fn skip_to_over_non_security_no_error() {
+        let mut f0 = named_noop_filter("headers", vec![]);
+        f0.branches = vec![make_skip_branch("skip", 2)];
+        let f1 = named_noop_filter("request_id", vec![]);
+        let f2 = named_noop_filter("load_balancer", vec![]);
+        let filters = vec![f0, f1, f2];
+        let mut errors = Vec::new();
+        check_skip_to_bypasses_security(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "skipping non-security filters should produce no error"
+        );
+    }
+
+    #[test]
+    fn skip_to_landing_on_security_filter_no_error() {
+        let mut f0 = named_noop_filter("headers", vec![]);
+        f0.branches = vec![make_skip_branch("skip", 2)];
+        let f1 = named_noop_filter("request_id", vec![]);
+        let f2 = named_noop_filter("ip_acl", vec![]);
+        let filters = vec![f0, f1, f2];
+        let mut errors = Vec::new();
+        check_skip_to_bypasses_security(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "SkipTo landing ON a security filter should not error"
+        );
+    }
+
+    #[test]
+    fn no_branches_no_skip_to_error() {
+        let filters = vec![
+            named_noop_filter("headers", vec![]),
+            named_noop_filter("ip_acl", vec![]),
+        ];
+        let mut errors = Vec::new();
+        check_skip_to_bypasses_security(&filters, &mut errors);
+        assert!(errors.is_empty(), "filters without branches should produce no error");
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -823,6 +929,19 @@ mod tests {
             config: serde_yaml::from_str(yaml).expect("valid test YAML"),
             name: None,
             response_conditions: vec![],
+        }
+    }
+
+    /// Build a [`ResolvedBranch`] with a [`SkipTo`] rejoin target.
+    ///
+    /// [`SkipTo`]: RejoinTarget::SkipTo
+    fn make_skip_branch(name: &str, target: usize) -> ResolvedBranch {
+        ResolvedBranch {
+            condition: None,
+            filters: vec![],
+            max_iterations: None,
+            name: Arc::from(name),
+            rejoin: RejoinTarget::SkipTo(target),
         }
     }
 }

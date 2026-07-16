@@ -11,6 +11,31 @@ use tokio::{
 };
 use tracing::trace;
 
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// HTTP/2 connection preface ([RFC 9113 Section 3.4]).
+///
+/// [RFC 9113 Section 3.4]: https://datatracker.ietf.org/doc/html/rfc9113#section-3.4
+const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
+
+/// Empty SETTINGS frame: length=0, type=0x04, flags=0, stream=0.
+const H2_SETTINGS: &[u8] = &[0, 0, 0, 4, 0, 0, 0, 0, 0];
+
+/// SETTINGS ACK frame: length=0, type=0x04, flags=0x01 (ACK), stream=0.
+const H2_SETTINGS_ACK: &[u8] = &[0, 0, 0, 4, 1, 0, 0, 0, 0];
+
+/// GOAWAY frame: `length=8`, `type=0x07`, `flags=0`, `stream=0`,
+/// `last_stream_id=0`, `error_code=0` (`NO_ERROR`).
+const H2_GOAWAY: &[u8] = &[0, 0, 8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+/// H2 frame type for SETTINGS frames.
+const H2_FRAME_TYPE_SETTINGS: u8 = 0x04;
+
+/// Minimum H2 frame header size (9 bytes).
+const H2_FRAME_HEADER_LEN: usize = 9;
+
 // -----------------------------------------------------------------------------
 // HTTP Probe
 // -----------------------------------------------------------------------------
@@ -109,31 +134,6 @@ pub(crate) fn parse_status_code(response: &str) -> Option<u16> {
     }
     parts[1].parse().ok()
 }
-
-// -----------------------------------------------------------------------------
-// HTTP/2 Constants
-// -----------------------------------------------------------------------------
-
-/// HTTP/2 connection preface ([RFC 9113 Section 3.4]).
-///
-/// [RFC 9113 Section 3.4]: https://datatracker.ietf.org/doc/html/rfc9113#section-3.4
-const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-
-/// Empty SETTINGS frame: length=0, type=0x04, flags=0, stream=0.
-const H2_SETTINGS: &[u8] = &[0, 0, 0, 4, 0, 0, 0, 0, 0];
-
-/// SETTINGS ACK frame: length=0, type=0x04, flags=0x01 (ACK), stream=0.
-const H2_SETTINGS_ACK: &[u8] = &[0, 0, 0, 4, 1, 0, 0, 0, 0];
-
-/// GOAWAY frame: `length=8`, `type=0x07`, `flags=0`, `stream=0`,
-/// `last_stream_id=0`, `error_code=0` (`NO_ERROR`).
-const H2_GOAWAY: &[u8] = &[0, 0, 8, 7, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
-
-/// H2 frame type for SETTINGS frames.
-const H2_FRAME_TYPE_SETTINGS: u8 = 0x04;
-
-/// Minimum H2 frame header size (9 bytes).
-const H2_FRAME_HEADER_LEN: usize = 9;
 
 // -----------------------------------------------------------------------------
 // HTTP/2 Probe

@@ -49,6 +49,7 @@ pub(super) struct CircuitBreakerConfig {
 ///     name: Arc<str>,
 ///     consecutive_failures: u32,
 ///     recovery_window_secs: u64,
+///     half_open_timeout_secs: Option<u64>,
 /// }
 /// let yaml = r#"
 /// name: backend
@@ -57,6 +58,7 @@ pub(super) struct CircuitBreakerConfig {
 /// "#;
 /// let e: Entry = serde_yaml::from_str(yaml).unwrap();
 /// assert_eq!(&*e.name, "backend");
+/// assert!(e.half_open_timeout_secs.is_none());
 /// ```
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -68,7 +70,23 @@ pub(super) struct ClusterCircuitBreakerConfig {
     /// circuit trips to Open.
     pub consecutive_failures: u32,
 
+    /// Seconds a Half-Open probe may remain in-flight before
+    /// the circuit resets to Open and starts a new recovery
+    /// cycle. Prevents indefinite stall when a probe request
+    /// is dropped without a response. Defaults to 30 seconds.
+    #[serde(default = "default_half_open_timeout_secs")]
+    pub half_open_timeout_secs: u64,
+
     /// Seconds the circuit stays Open before transitioning
     /// to Half-Open.
     pub recovery_window_secs: u64,
+}
+
+// ---------------------------------------------------------------------------
+// Defaults
+// ---------------------------------------------------------------------------
+
+/// Default half-open timeout (30 seconds).
+const fn default_half_open_timeout_secs() -> u64 {
+    30
 }

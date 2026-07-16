@@ -729,35 +729,6 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // Test Utilities
-    // -------------------------------------------------------------------------
-
-    /// Create a minimal [`FilterEntry`] for testing.
-    fn make_entry(filter_type: &str, name: Option<&str>) -> FilterEntry {
-        FilterEntry {
-            branch_chains: None,
-            conditions: vec![],
-            config: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
-            failure_mode: FailureMode::default(),
-            filter_type: filter_type.to_owned(),
-            name: name.map(|n| n.to_owned()),
-            response_conditions: vec![],
-        }
-    }
-
-    /// Collect all `filter_id` values from a filter list, recursing into branches.
-    fn collect_ids(filters: &[PipelineFilter]) -> Vec<usize> {
-        let mut ids = Vec::new();
-        for pf in filters {
-            ids.push(pf.filter_id);
-            for branch in &pf.branches {
-                ids.extend(collect_ids(&branch.filters));
-            }
-        }
-        ids
-    }
-
-    // -------------------------------------------------------------------------
     // Nested Branch ID Uniqueness
     // -------------------------------------------------------------------------
 
@@ -893,5 +864,34 @@ mod tests {
             unique.len(),
             "IDs should be unique even across recursive resolution: {ids:?}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------
+
+    /// Create a minimal [`FilterEntry`] for testing.
+    fn make_entry(filter_type: &str, name: Option<&str>) -> FilterEntry {
+        FilterEntry {
+            branch_chains: None,
+            conditions: vec![],
+            config: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            failure_mode: FailureMode::default(),
+            filter_type: filter_type.to_owned(),
+            name: name.map(|n| n.to_owned()),
+            response_conditions: vec![],
+        }
+    }
+
+    /// Collect all `filter_id` values from a filter list, recursing into branches.
+    fn collect_ids(filters: &[PipelineFilter]) -> Vec<usize> {
+        let mut ids = Vec::new();
+        for pf in filters {
+            ids.push(pf.filter_id);
+            for branch in &pf.branches {
+                ids.extend(collect_ids(&branch.filters));
+            }
+        }
+        ids
     }
 }

@@ -8,6 +8,26 @@ use tracing::trace;
 use crate::FilterError;
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// [RFC 9110] hop-by-hop headers that must not be injected into responses.
+///
+/// Re-injecting these into downstream responses can cause HTTP desync
+/// or smuggling through downstream proxies.
+///
+/// [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
+const RESPONSE_HOP_BY_HOP: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
+// -----------------------------------------------------------------------------
 // Header Manipulation
 // -----------------------------------------------------------------------------
 
@@ -96,6 +116,33 @@ pub(super) fn parse_header_pairs(
         out.push((name, value));
     }
     Ok(out)
+}
+
+/// Reject response header pairs that name a hop-by-hop header.
+///
+/// Called at config time on `response_add` and `response_set` to
+/// prevent re-injection of hop-by-hop headers into downstream
+/// responses.
+///
+/// # Errors
+///
+/// Returns [`FilterError`] if any header name matches the
+/// [`RESPONSE_HOP_BY_HOP`] blocklist.
+///
+/// [`FilterError`]: crate::FilterError
+pub(super) fn reject_response_hop_by_hop(
+    pairs: &[(http::header::HeaderName, http::header::HeaderValue)],
+    section: &str,
+) -> Result<(), FilterError> {
+    for (name, _) in pairs {
+        if RESPONSE_HOP_BY_HOP
+            .iter()
+            .any(|&h| name.as_str().eq_ignore_ascii_case(h))
+        {
+            return Err(format!("headers filter: hop-by-hop header '{name}' cannot be added in {section}").into());
+        }
+    }
+    Ok(())
 }
 
 /// Parse a list of header name strings into validated [`HeaderName`] values.

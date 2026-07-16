@@ -5,7 +5,7 @@
 
 use pingora_core::Result;
 use praxis_filter::{FilterAction, FilterPipeline};
-use tracing::{debug, warn};
+use tracing::{debug, error, warn};
 
 use super::super::{context::PingoraRequestCtx, convert::response_header_from_pingora};
 
@@ -22,11 +22,19 @@ use super::super::{context::PingoraRequestCtx, convert::response_header_from_pin
 /// client.
 ///
 /// [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
+#[expect(clippy::too_many_lines, reason = "linear response orchestration")]
 pub(super) async fn execute(
     pipeline: &FilterPipeline,
     upstream_response: &mut pingora_http::ResponseHeader,
     ctx: &mut PingoraRequestCtx,
 ) -> Result<()> {
+    if upstream_response.status == 101 && !request_has_upgrade(ctx) {
+        error!("upstream sent unsolicited 101 without matching request Upgrade header");
+        return Err(pingora_core::Error::explain(
+            pingora_core::ErrorType::HTTPStatus(502),
+            "unsolicited 101 response from upstream",
+        ));
+    }
     let is_upgrade_response = upstream_response.status == 101 && is_websocket_101(&upstream_response.headers);
     if upstream_response.status == 101 && !is_upgrade_response {
         debug!("101 response missing valid WebSocket Upgrade header; not marking as upgraded");
@@ -131,7 +139,7 @@ fn handle_response_result(
             ))
         },
         Err(e) => {
-            warn!(error = %e, "filter pipeline error during response");
+            error!(error = %e, "filter pipeline error during response");
             Err(pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
                 format!("response filter error: {e}"),
@@ -162,6 +170,16 @@ fn write_headers_to_pingora(src: &http::HeaderMap, status: http::StatusCode, dst
 // -----------------------------------------------------------------------------
 // Private Utilities
 // -----------------------------------------------------------------------------
+
+/// Whether the original client request included an `Upgrade` header.
+///
+/// Returns `false` when the request snapshot is missing (should not
+/// happen in normal flow since `request_filter` always sets it).
+fn request_has_upgrade(ctx: &PingoraRequestCtx) -> bool {
+    ctx.request_snapshot
+        .as_ref()
+        .is_some_and(|req| req.headers.contains_key(http::header::UPGRADE))
+}
 
 /// Whether a 101 response carries a valid `WebSocket` `Upgrade` header.
 ///
@@ -241,7 +259,7 @@ mod tests {
         drop(resp.insert_header("upgrade", "websocket"));
         drop(resp.insert_header("connection", "Upgrade"));
         drop(resp.insert_header("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
-        let mut ctx = make_ctx();
+        let mut ctx = make_upgrade_ctx();
 
         execute(&pipeline, &mut resp, &mut ctx).await.unwrap();
 
@@ -255,7 +273,7 @@ mod tests {
     async fn bare_101_without_upgrade_header_does_not_set_flag() {
         let pipeline = make_pipeline();
         let mut resp = pingora_http::ResponseHeader::build(101, None).unwrap();
-        let mut ctx = make_ctx();
+        let mut ctx = make_upgrade_ctx();
 
         execute(&pipeline, &mut resp, &mut ctx).await.unwrap();
 
@@ -271,7 +289,7 @@ mod tests {
         let mut resp = pingora_http::ResponseHeader::build(101, None).unwrap();
         drop(resp.insert_header("upgrade", "h2c"));
         drop(resp.insert_header("connection", "Upgrade"));
-        let mut ctx = make_ctx();
+        let mut ctx = make_upgrade_ctx();
 
         execute(&pipeline, &mut resp, &mut ctx).await.unwrap();
 
@@ -293,6 +311,60 @@ mod tests {
         assert!(
             !ctx.connection_upgraded,
             "200 with Upgrade header should not set connection_upgraded"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsolicited_101_websocket_rejected() {
+        let pipeline = make_pipeline();
+        let mut resp = pingora_http::ResponseHeader::build(101, None).unwrap();
+        drop(resp.insert_header("upgrade", "websocket"));
+        drop(resp.insert_header("connection", "Upgrade"));
+        drop(resp.insert_header("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="));
+        let mut ctx = make_ctx();
+
+        let result = execute(&pipeline, &mut resp, &mut ctx).await;
+
+        assert!(result.is_err(), "unsolicited WebSocket 101 should be rejected");
+        assert!(
+            !ctx.connection_upgraded,
+            "unsolicited 101 must not set connection_upgraded"
+        );
+    }
+
+    #[tokio::test]
+    async fn unsolicited_101_bare_rejected() {
+        let pipeline = make_pipeline();
+        let mut resp = pingora_http::ResponseHeader::build(101, None).unwrap();
+        let mut ctx = make_ctx();
+
+        let result = execute(&pipeline, &mut resp, &mut ctx).await;
+
+        assert!(result.is_err(), "unsolicited bare 101 should be rejected");
+        assert!(
+            !ctx.connection_upgraded,
+            "unsolicited 101 must not set connection_upgraded"
+        );
+    }
+
+    #[test]
+    fn request_has_upgrade_true_when_present() {
+        let ctx = make_upgrade_ctx();
+        assert!(request_has_upgrade(&ctx), "should detect Upgrade header in request");
+    }
+
+    #[test]
+    fn request_has_upgrade_false_when_absent() {
+        let ctx = make_ctx();
+        assert!(!request_has_upgrade(&ctx), "should return false when no Upgrade header");
+    }
+
+    #[test]
+    fn request_has_upgrade_false_when_no_snapshot() {
+        let ctx = PingoraRequestCtx::default();
+        assert!(
+            !request_has_upgrade(&ctx),
+            "should return false when request_snapshot is None"
         );
     }
 
@@ -379,6 +451,20 @@ mod tests {
             method: http::Method::GET,
             uri: http::Uri::from_static("/"),
             headers: http::HeaderMap::new(),
+        });
+        ctx
+    }
+
+    /// Create a request context with `Upgrade: websocket` for tests.
+    fn make_upgrade_ctx() -> PingoraRequestCtx {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::UPGRADE, "websocket".parse().unwrap());
+        headers.insert(http::header::CONNECTION, "Upgrade".parse().unwrap());
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.request_snapshot = Some(Request {
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/"),
+            headers,
         });
         ctx
     }

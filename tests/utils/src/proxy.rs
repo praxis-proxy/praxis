@@ -21,6 +21,20 @@ use praxis_protocol::{
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum time to wait for the proxy server thread to join on
+/// [`ProxyGuard`] shutdown before giving up.
+///
+/// [`ProxyGuard`]: ProxyGuard
+const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Time to wait after writing a config file for the watcher
+/// to debounce (500ms) and apply the reload.
+const RELOAD_SETTLE: Duration = Duration::from_millis(1500);
+
 // -----------------------------------------------------------------------------
 // Pipeline Building
 // -----------------------------------------------------------------------------
@@ -97,12 +111,6 @@ impl ShutdownSignalWatch for NotifyShutdownWatch {
         ShutdownSignal::FastShutdown
     }
 }
-
-/// Maximum time to wait for the proxy server thread to join on
-/// [`ProxyGuard`] shutdown before giving up.
-///
-/// [`ProxyGuard`]: ProxyGuard
-const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// RAII guard that shuts down a Pingora proxy server when
 /// dropped. Returned by [`start_proxy_with_registry`] and
@@ -381,10 +389,6 @@ impl ReloadableProxyGuard {
         std::thread::sleep(RELOAD_SETTLE);
     }
 }
-
-/// Time to wait after writing a config file for the watcher
-/// to debounce (500ms) and apply the reload.
-const RELOAD_SETTLE: Duration = Duration::from_millis(1500);
 
 /// Start a proxy with hot reload enabled by writing config
 /// to a temp file and passing the path to the server.

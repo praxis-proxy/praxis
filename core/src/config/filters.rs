@@ -10,6 +10,20 @@ use tracing::warn;
 
 use super::{Condition, ResponseCondition};
 
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Fields handled by `FilterEntry`'s serde derives.
+const KNOWN_FILTER_FIELDS: &[&str] = &[
+    "filter",
+    "branch_chains",
+    "conditions",
+    "failure_mode",
+    "name",
+    "response_conditions",
+];
+
 // -----------------------------------------------------------------------------
 // FailureMode
 // -----------------------------------------------------------------------------
@@ -129,16 +143,6 @@ pub struct FilterEntry {
 // ---------------------------------------------------------------------------
 // FilterEntry Typo Detection
 // ---------------------------------------------------------------------------
-
-/// Fields handled by `FilterEntry`'s serde derives.
-const KNOWN_FILTER_FIELDS: &[&str] = &[
-    "filter",
-    "branch_chains",
-    "conditions",
-    "failure_mode",
-    "name",
-    "response_conditions",
-];
 
 impl FilterEntry {
     /// Warn if `config` contains keys that look like typos of known fields.

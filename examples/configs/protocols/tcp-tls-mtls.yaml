@@ -13,6 +13,9 @@
 #     sslkey=client-key.pem sslrootcert=ca.pem \
 #     host=localhost port=5432 dbname=mydb"
 
+insecure_options:
+  allow_private_upstreams: true
+
 listeners:
   - name: secure-db
     address: "127.0.0.1:5432"

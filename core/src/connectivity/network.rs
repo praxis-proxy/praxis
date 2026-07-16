@@ -38,6 +38,68 @@ pub fn normalize_mapped_ipv4(ip: IpAddr) -> IpAddr {
 }
 
 // -----------------------------------------------------------------------------
+// Private/Reserved IP Detection
+// -----------------------------------------------------------------------------
+
+/// Returns `true` if the IP address is in a private or reserved range.
+///
+/// Detects addresses that should not be reachable as public upstream
+/// targets, protecting against DNS rebinding and SSRF attacks where
+/// a DNS name resolves to an internal IP at runtime.
+///
+/// Covered ranges:
+/// - IPv4 loopback (`127.0.0.0/8`)
+/// - IPv4 private / RFC 1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`)
+/// - IPv4 link-local (`169.254.0.0/16`)
+/// - IPv4 current network (`0.0.0.0/8`)
+/// - IPv4 CGNAT / shared address space (`100.64.0.0/10`)
+/// - IPv6 loopback (`::1`)
+/// - IPv6 link-local (`fe80::/10`)
+/// - IPv6 unique local (`fc00::/7`)
+/// - IPv4-mapped IPv6 variants of all above
+///
+/// ```
+/// use std::net::IpAddr;
+///
+/// use praxis_core::connectivity::is_private_ip;
+///
+/// assert!(is_private_ip(&"127.0.0.1".parse().unwrap()));
+/// assert!(is_private_ip(&"10.0.0.1".parse().unwrap()));
+/// assert!(is_private_ip(&"172.16.5.1".parse().unwrap()));
+/// assert!(is_private_ip(&"192.168.1.1".parse().unwrap()));
+/// assert!(is_private_ip(&"169.254.1.1".parse().unwrap()));
+/// assert!(is_private_ip(&"0.0.0.0".parse().unwrap()));
+/// assert!(is_private_ip(&"100.64.0.1".parse().unwrap()));
+/// assert!(is_private_ip(&"::1".parse().unwrap()));
+/// assert!(is_private_ip(&"fe80::1".parse().unwrap()));
+/// assert!(is_private_ip(&"fc00::1".parse().unwrap()));
+/// assert!(is_private_ip(&"::ffff:10.0.0.1".parse().unwrap()));
+///
+/// assert!(!is_private_ip(&"8.8.8.8".parse().unwrap()));
+/// assert!(!is_private_ip(&"2001:db8::1".parse().unwrap()));
+/// ```
+pub fn is_private_ip(ip: &IpAddr) -> bool {
+    let normalized = normalize_mapped_ipv4(*ip);
+    match normalized {
+        IpAddr::V4(v4) => {
+            v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.octets()[0] == 0 || is_cgnat(v4)
+        },
+        IpAddr::V6(v6) => {
+            let seg0 = v6.segments()[0];
+            v6.is_loopback() || (seg0 & 0xFFC0) == 0xFE80 || (seg0 & 0xFE00) == 0xFC00
+        },
+    }
+}
+
+/// Returns `true` if the IPv4 address is in the CGNAT/shared address
+/// space (`100.64.0.0/10`, [RFC 6598]).
+///
+/// [RFC 6598]: https://datatracker.ietf.org/doc/html/rfc6598
+fn is_cgnat(v4: std::net::Ipv4Addr) -> bool {
+    u32::from(v4) & 0xFFC0_0000 == 0x6440_0000 // 100.64.0.0/10
+}
+
+// -----------------------------------------------------------------------------
 // CIDR Range
 // -----------------------------------------------------------------------------
 
@@ -335,5 +397,128 @@ mod tests {
     fn contains_v6_no_match() {
         let r = CidrRange::parse("fd00::/16").unwrap();
         assert!(!r.contains(&"fe80::1".parse().unwrap()), "fe80::1 is outside fd00::/16");
+    }
+
+    #[test]
+    fn is_private_ip_loopback_v4() {
+        assert!(is_private_ip(&"127.0.0.1".parse().unwrap()), "127.0.0.1 is loopback");
+        assert!(
+            is_private_ip(&"127.255.255.255".parse().unwrap()),
+            "127.255.255.255 is loopback"
+        );
+    }
+
+    #[test]
+    fn is_private_ip_rfc1918_10() {
+        assert!(is_private_ip(&"10.0.0.1".parse().unwrap()), "10.0.0.1 is RFC 1918");
+        assert!(
+            is_private_ip(&"10.255.255.255".parse().unwrap()),
+            "10.255.255.255 is RFC 1918"
+        );
+    }
+
+    #[test]
+    fn is_private_ip_rfc1918_172() {
+        assert!(is_private_ip(&"172.16.0.1".parse().unwrap()), "172.16.0.1 is RFC 1918");
+        assert!(
+            is_private_ip(&"172.31.255.255".parse().unwrap()),
+            "172.31.255.255 is RFC 1918"
+        );
+        assert!(
+            !is_private_ip(&"172.32.0.1".parse().unwrap()),
+            "172.32.0.1 is outside 172.16/12"
+        );
+    }
+
+    #[test]
+    fn is_private_ip_rfc1918_192() {
+        assert!(
+            is_private_ip(&"192.168.0.1".parse().unwrap()),
+            "192.168.0.1 is RFC 1918"
+        );
+        assert!(
+            is_private_ip(&"192.168.255.255".parse().unwrap()),
+            "192.168.255.255 is RFC 1918"
+        );
+    }
+
+    #[test]
+    fn is_private_ip_link_local_v4() {
+        assert!(
+            is_private_ip(&"169.254.1.1".parse().unwrap()),
+            "169.254.1.1 is link-local"
+        );
+        assert!(
+            is_private_ip(&"169.254.169.254".parse().unwrap()),
+            "169.254.169.254 is link-local"
+        );
+    }
+
+    #[test]
+    fn is_private_ip_current_network() {
+        assert!(is_private_ip(&"0.0.0.0".parse().unwrap()), "0.0.0.0 is current network");
+        assert!(
+            is_private_ip(&"0.255.255.255".parse().unwrap()),
+            "0.255.255.255 is current network"
+        );
+    }
+
+    #[test]
+    fn is_private_ip_cgnat() {
+        assert!(is_private_ip(&"100.64.0.1".parse().unwrap()), "100.64.0.1 is CGNAT");
+        assert!(
+            is_private_ip(&"100.127.255.255".parse().unwrap()),
+            "100.127.255.255 is CGNAT"
+        );
+        assert!(
+            !is_private_ip(&"100.128.0.1".parse().unwrap()),
+            "100.128.0.1 is outside CGNAT"
+        );
+    }
+
+    #[test]
+    fn is_private_ip_loopback_v6() {
+        assert!(is_private_ip(&"::1".parse().unwrap()), "::1 is IPv6 loopback");
+    }
+
+    #[test]
+    fn is_private_ip_link_local_v6() {
+        assert!(is_private_ip(&"fe80::1".parse().unwrap()), "fe80::1 is IPv6 link-local");
+    }
+
+    #[test]
+    fn is_private_ip_unique_local_v6() {
+        assert!(
+            is_private_ip(&"fc00::1".parse().unwrap()),
+            "fc00::1 is IPv6 unique local"
+        );
+        assert!(
+            is_private_ip(&"fd00::1".parse().unwrap()),
+            "fd00::1 is IPv6 unique local"
+        );
+    }
+
+    #[test]
+    fn is_private_ip_mapped_v4() {
+        assert!(
+            is_private_ip(&"::ffff:10.0.0.1".parse().unwrap()),
+            "mapped 10.0.0.1 is private"
+        );
+        assert!(
+            is_private_ip(&"::ffff:127.0.0.1".parse().unwrap()),
+            "mapped 127.0.0.1 is private"
+        );
+        assert!(
+            !is_private_ip(&"::ffff:8.8.8.8".parse().unwrap()),
+            "mapped 8.8.8.8 is public"
+        );
+    }
+
+    #[test]
+    fn is_private_ip_public_addresses() {
+        assert!(!is_private_ip(&"8.8.8.8".parse().unwrap()), "8.8.8.8 is public");
+        assert!(!is_private_ip(&"1.1.1.1".parse().unwrap()), "1.1.1.1 is public");
+        assert!(!is_private_ip(&"2001:db8::1".parse().unwrap()), "2001:db8::1 is public");
+        assert!(!is_private_ip(&"203.0.113.1".parse().unwrap()), "203.0.113.1 is public");
     }
 }

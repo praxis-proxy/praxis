@@ -34,14 +34,14 @@ pub use cluster::{
 };
 pub use condition::{Condition, ConditionMatch, ResponseCondition, ResponseConditionMatch};
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
-pub use insecure_options::InsecureOptions;
+pub use insecure_options::{InsecureOptions, SkipPipelineChecks};
 pub use listener::{Listener, ListenerTls, ProtocolKind};
 pub use metrics::MetricsConfig;
 use parse::check_yaml_safety;
 pub use praxis_tls::{CachedClusterTls, ClusterTls};
 pub use route::{PathMatch, Route};
 pub use runtime::RuntimeConfig;
-pub use validate::{MAX_BRANCH_DEPTH, MAX_ITERATIONS_CEILING};
+pub use validate::{MAX_BRANCH_DEPTH, MAX_ITERATIONS_CEILING, is_ssrf_sensitive};
 
 // -----------------------------------------------------------------------------
 // Config
@@ -169,6 +169,7 @@ impl Config {
     ///
     /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
     pub fn from_file(path: &Path) -> Result<Self, crate::errors::ProxyError> {
+        parse::check_file_size(path)?;
         let content = std::fs::read_to_string(path).map_err(|e| {
             let display = path.display();
             crate::errors::ProxyError::Config(format!("failed to read {display}: {e}"))

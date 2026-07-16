@@ -110,7 +110,11 @@ impl CircuitBreakerFilter {
             }
             breakers.insert(
                 Arc::clone(&cluster.name),
-                CircuitBreaker::new(cluster.consecutive_failures, cluster.recovery_window_secs),
+                CircuitBreaker::new(
+                    cluster.consecutive_failures,
+                    cluster.recovery_window_secs,
+                    cluster.half_open_timeout_secs,
+                ),
             );
         }
 

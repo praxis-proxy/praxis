@@ -25,8 +25,8 @@ use serde::Deserialize;
 use tracing::trace;
 
 use self::ops::{
-    append_headers, parse_header_name_with_raw_value, parse_header_names, parse_header_pairs, remove_headers,
-    set_headers,
+    append_headers, parse_header_name_with_raw_value, parse_header_names, parse_header_pairs,
+    reject_response_hop_by_hop, remove_headers, set_headers,
 };
 use crate::{
     FilterAction, FilterError,
@@ -158,8 +158,10 @@ impl HeaderFilter {
         let request_remove = parse_header_names(cfg.request_remove, "request_remove")?;
         let request_set = parse_header_pairs(cfg.request_set, "request_set")?;
         let response_add = parse_header_pairs(cfg.response_add, "response_add")?;
+        reject_response_hop_by_hop(&response_add, "response_add")?;
         let response_remove = parse_header_names(cfg.response_remove, "response_remove")?;
         let response_set = parse_header_pairs(cfg.response_set, "response_set")?;
+        reject_response_hop_by_hop(&response_set, "response_set")?;
 
         Ok(Box::new(Self {
             request_add,
@@ -191,10 +193,12 @@ impl HttpFilter for HeaderFilter {
 
         for (name, value) in &self.request_add {
             trace!(header = %name, "adding request header");
-            if let Some(existing) = ctx.request.headers.get(name)
-                && let Ok(existing_str) = existing.to_str()
+            let existing: Result<Vec<&str>, _> = ctx.request.headers.get_all(name).iter().map(|v| v.to_str()).collect();
+
+            if let Ok(parts) = existing
+                && !parts.is_empty()
             {
-                let combined = format!("{existing_str},{value}");
+                let combined = format!("{},{value}", parts.join(","));
                 if let Ok(combined_val) = http::header::HeaderValue::from_str(&combined) {
                     ctx.request_headers_to_set.push((name.clone(), combined_val));
                     continue;

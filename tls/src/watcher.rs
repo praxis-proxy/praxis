@@ -1,15 +1,16 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! Filesystem watcher for TLS certificate hot-reload.
+//! Filesystem watcher for TLS certificate and client verifier
+//! hot-reload.
 //!
-//! [`CertWatcher`] monitors cert and key files using the [`notify`]
-//! crate, debounces events, and calls [`ReloadableCertResolver::reload`]
-//! on detected changes.
+//! [`CertWatcher`] monitors cert/key files (and optionally CRL/CA
+//! files) using the [`notify`] crate, debounces events, and
+//! atomically reloads certificates and the client verifier on
+//! detected changes.
 //!
 //! [`CertWatcher`]: crate::watcher::CertWatcher
 //! [`notify`]: notify
-//! [`ReloadableCertResolver::reload`]: crate::reload::ReloadableCertResolver::reload
 
 use std::{
     path::{Path, PathBuf},
@@ -22,7 +23,7 @@ use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher as _};
 use rustls::sign::CertifiedKey;
 use tokio::sync::mpsc;
 
-use crate::{CertKeyPair, setup::loader};
+use crate::{CertKeyPair, ClientCertMode, setup::loader};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -38,23 +39,61 @@ const MIN_SUCCESS_COOLDOWN_MS: u64 = 5_000; // 5 seconds
 const MAX_BACKOFF_MS: u64 = 60_000; // 60 seconds
 
 // -----------------------------------------------------------------------------
+// ClientVerifierReload
+// -----------------------------------------------------------------------------
+
+/// Configuration for hot-reloading the client certificate verifier
+/// (CRL and CA files).
+///
+/// When provided to [`CertWatcher::spawn`], the watcher monitors
+/// the CA and CRL file directories alongside the cert/key
+/// directories. On any relevant filesystem change, the verifier
+/// is atomically rebuilt from the current files on disk.
+///
+/// [`CertWatcher::spawn`]: CertWatcher::spawn
+pub struct ClientVerifierReload {
+    /// Path to the CA certificate PEM file.
+    pub ca_path: String,
+
+    /// Paths to CRL PEM files.
+    pub crl_paths: Vec<String>,
+
+    /// Client certificate verification mode.
+    pub mode: ClientCertMode,
+
+    /// Handle to atomically swap the inner verifier state.
+    pub swap_handle: Arc<ArcSwap<crate::reload::VerifierState>>,
+}
+
+// -----------------------------------------------------------------------------
 // CertWatcher
 // -----------------------------------------------------------------------------
 
-/// Watches cert and key files for changes, reloading on modification.
+/// Watches cert/key files (and optionally CRL/CA files) for changes,
+/// reloading on modification.
 ///
 /// Spawns as a tokio background task. Debounces events by
 /// `DEBOUNCE_MS` to handle atomic rename patterns (Kubernetes
 /// secret updates, certbot, etc.).
 ///
+/// When a [`ClientVerifierReload`] is provided, also monitors
+/// CRL and CA files and hot-reloads the client certificate
+/// verifier on changes.
+///
 /// ```ignore
-/// let handle = CertWatcher::spawn(resolver_arc, pair, shutdown_rx);
+/// let handle = CertWatcher::spawn(
+///     resolver_arc, pair, None, shutdown_rx,
+/// );
 /// ```
 pub struct CertWatcher;
 
 impl CertWatcher {
     /// Spawn a background thread that watches cert/key paths and
     /// reloads the resolver on changes.
+    ///
+    /// When `verifier_reload` is `Some`, also watches CRL and CA
+    /// file directories and rebuilds the client verifier on
+    /// filesystem changes.
     ///
     /// Creates its own single-threaded tokio runtime so it works
     /// regardless of whether a tokio runtime is currently active
@@ -73,6 +112,7 @@ impl CertWatcher {
     pub fn spawn(
         current: Arc<ArcSwap<CertifiedKey>>,
         pair: CertKeyPair,
+        verifier_reload: Option<ClientVerifierReload>,
         shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
@@ -80,17 +120,18 @@ impl CertWatcher {
                 .enable_all()
                 .build()
                 .expect("cert watcher tokio runtime");
-            rt.block_on(watch_loop(current, pair, shutdown));
+            rt.block_on(watch_loop(current, pair, verifier_reload, shutdown));
         })
     }
 }
 
 /// Core watch loop: sets up the notify watcher, debounces events,
-/// and reloads certificates.
+/// and reloads certificates (and optionally the client verifier).
 #[expect(clippy::too_many_lines, reason = "event loop with tokio::select")]
 async fn watch_loop(
     current: Arc<ArcSwap<CertifiedKey>>,
     pair: CertKeyPair,
+    verifier_reload: Option<ClientVerifierReload>,
     mut shutdown: tokio::sync::watch::Receiver<bool>,
 ) {
     let (tx, mut rx) = mpsc::channel::<()>(16);
@@ -98,7 +139,8 @@ async fn watch_loop(
     let cert_dir = parent_dir(&pair.cert_path);
     let key_dir = parent_dir(&pair.key_path);
 
-    let _watcher = match setup_watcher(tx, &cert_dir, &key_dir) {
+    let extra_dirs = verifier_extra_dirs(&verifier_reload);
+    let _watcher = match setup_watcher(tx, &cert_dir, &key_dir, &extra_dirs) {
         Ok(w) => w,
         Err(e) => {
             tracing::warn!(error = %e, "failed to start certificate file watcher");
@@ -106,11 +148,19 @@ async fn watch_loop(
         },
     };
 
-    tracing::info!(
-        cert_path = %pair.cert_path,
-        key_path = %pair.key_path,
-        "certificate file watcher started"
-    );
+    if verifier_reload.is_some() {
+        tracing::info!(
+            cert_path = %pair.cert_path,
+            key_path = %pair.key_path,
+            "certificate and client verifier file watcher started"
+        );
+    } else {
+        tracing::info!(
+            cert_path = %pair.cert_path,
+            key_path = %pair.key_path,
+            "certificate file watcher started"
+        );
+    }
 
     let mut backoff_ms = DEBOUNCE_MS;
 
@@ -123,7 +173,10 @@ async fn watch_loop(
                     return;
                 }
 
-                if reload_cert(&current, &pair) {
+                let cert_ok = reload_cert(&current, &pair);
+                let verifier_ok = reload_client_verifier(&verifier_reload);
+
+                if cert_ok && verifier_ok {
                     backoff_ms = MIN_SUCCESS_COOLDOWN_MS;
                 } else {
                     backoff_ms = (backoff_ms * 2).min(MAX_BACKOFF_MS);
@@ -146,13 +199,25 @@ async fn watch_loop(
 /// Set up a [`RecommendedWatcher`] that sends to the given channel
 /// on relevant filesystem events.
 ///
+/// Watches `cert_dir` and `key_dir` (plus any `extra_dirs` for
+/// CRL/CA files), deduplicating directories that overlap.
+///
 /// [`RecommendedWatcher`]: notify::RecommendedWatcher
-fn setup_watcher(tx: mpsc::Sender<()>, cert_dir: &Path, key_dir: &Path) -> Result<RecommendedWatcher, notify::Error> {
+fn setup_watcher(
+    tx: mpsc::Sender<()>,
+    cert_dir: &Path,
+    key_dir: &Path,
+    extra_dirs: &[PathBuf],
+) -> Result<RecommendedWatcher, notify::Error> {
     let mut watcher = notify::recommended_watcher(move |res| handle_watch_event(res, &tx))?;
 
-    watcher.watch(cert_dir, RecursiveMode::NonRecursive)?;
-    if cert_dir != key_dir {
-        watcher.watch(key_dir, RecursiveMode::NonRecursive)?;
+    let mut dirs = vec![cert_dir.to_path_buf(), key_dir.to_path_buf()];
+    dirs.extend_from_slice(extra_dirs);
+    dirs.sort();
+    dirs.dedup();
+
+    for dir in &dirs {
+        watcher.watch(dir, RecursiveMode::NonRecursive)?;
     }
 
     Ok(watcher)
@@ -221,6 +286,55 @@ fn reload_cert(current: &Arc<ArcSwap<CertifiedKey>>, pair: &CertKeyPair) -> bool
             false
         },
     }
+}
+
+// -----------------------------------------------------------------------------
+// Client Verifier Reload
+// -----------------------------------------------------------------------------
+
+/// Attempt to reload the client certificate verifier, logging
+/// success or failure.
+///
+/// Returns `true` on success (or when no verifier reload is
+/// configured), `false` on failure.
+fn reload_client_verifier(reload: &Option<ClientVerifierReload>) -> bool {
+    let Some(cfg) = reload else {
+        return true;
+    };
+
+    match crate::client_auth::build_client_verifier(&cfg.ca_path, cfg.mode, &cfg.crl_paths) {
+        Ok(verifier) => {
+            cfg.swap_handle
+                .store(Arc::new(crate::reload::VerifierState { verifier }));
+            tracing::info!(
+                ca_path = %cfg.ca_path,
+                crl_count = cfg.crl_paths.len(),
+                "client verifier hot-reloaded successfully"
+            );
+            true
+        },
+        Err(e) => {
+            tracing::warn!(
+                ca_path = %cfg.ca_path,
+                error = %e,
+                "client verifier reload failed, keeping previous verifier"
+            );
+            false
+        },
+    }
+}
+
+/// Collect the extra directories to watch for CRL/CA file changes.
+fn verifier_extra_dirs(reload: &Option<ClientVerifierReload>) -> Vec<PathBuf> {
+    let Some(cfg) = reload else {
+        return Vec::new();
+    };
+
+    let mut dirs = vec![parent_dir(&cfg.ca_path)];
+    for crl_path in &cfg.crl_paths {
+        dirs.push(parent_dir(crl_path));
+    }
+    dirs
 }
 
 // -----------------------------------------------------------------------------
@@ -325,7 +439,7 @@ mod tests {
         let current = Arc::new(ArcSwap::from_pointee(certified));
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let handle = CertWatcher::spawn(current, pair, shutdown_rx);
+        let handle = CertWatcher::spawn(current, pair, None, shutdown_rx);
 
         std::thread::sleep(Duration::from_millis(50));
         let _sent = shutdown_tx.send(true);
@@ -440,7 +554,7 @@ mod tests {
         let current = Arc::new(ArcSwap::from_pointee(certified));
 
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
-        let _handle = CertWatcher::spawn(Arc::clone(&current), pair.clone(), shutdown_rx);
+        let _handle = CertWatcher::spawn(Arc::clone(&current), pair.clone(), None, shutdown_rx);
 
         std::thread::sleep(Duration::from_millis(100));
 
@@ -457,5 +571,44 @@ mod tests {
             before_der, after_der,
             "certificate should change after file modification"
         );
+    }
+
+    #[test]
+    fn reload_client_verifier_returns_true_when_none() {
+        assert!(
+            reload_client_verifier(&None),
+            "no verifier reload config should return true"
+        );
+    }
+
+    #[test]
+    fn verifier_extra_dirs_empty_when_none() {
+        let dirs = verifier_extra_dirs(&None);
+        assert!(dirs.is_empty(), "no verifier config should yield empty dirs");
+    }
+
+    #[test]
+    fn verifier_extra_dirs_includes_ca_and_crl() {
+        use crate::test_utils::{ensure_crypto_provider, gen_ca_file};
+
+        ensure_crypto_provider();
+        let ca = gen_ca_file();
+        let ca_path = ca.ca_path.to_str().expect("ca path").to_owned();
+        let ca_dir = parent_dir(&ca_path);
+
+        let verifier = crate::reload::ReloadableClientVerifier::new(&ca_path, ClientCertMode::Require, &[])
+            .expect("verifier creation");
+
+        let reload = Some(ClientVerifierReload {
+            ca_path: ca_path.clone(),
+            crl_paths: vec!["/etc/ssl/crl.pem".to_owned()],
+            mode: ClientCertMode::Require,
+            swap_handle: verifier.arc(),
+        });
+
+        let dirs = verifier_extra_dirs(&reload);
+        assert_eq!(dirs.len(), 2, "should include CA dir and CRL dir");
+        assert_eq!(dirs[0], ca_dir, "first dir should be CA parent");
+        assert_eq!(dirs[1], PathBuf::from("/etc/ssl"), "second dir should be CRL parent");
     }
 }

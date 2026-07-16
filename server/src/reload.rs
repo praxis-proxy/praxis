@@ -12,9 +12,20 @@ use praxis_core::{
 use praxis_filter::FilterRegistry;
 use praxis_protocol::ListenerPipelines;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 
-use crate::pipelines::resolve_pipelines;
+#[cfg(test)]
+use crate::reload_diagnostics::{
+    collect_escalated_flags, detect_compression_additions, diff_named_items, find_chains_with_compression,
+    is_stateful_recursive,
+};
+use crate::{
+    pipelines::resolve_pipelines,
+    reload_diagnostics::{
+        log_config_change_audit, log_restart_required_changes, warn_insecure_option_escalations,
+        warn_stateful_filter_reset,
+    },
+};
 
 // -----------------------------------------------------------------------------
 // Reload
@@ -62,7 +73,9 @@ pub(crate) fn reload_pipelines(
     };
 
     log_restart_required_changes(old_config, new_config);
+    warn_insecure_option_escalations(old_config, new_config);
     warn_stateful_filter_reset(new_config);
+    log_config_change_audit(old_config, new_config);
 
     let mut swapped = Vec::new();
     let mut skipped = Vec::new();
@@ -131,165 +144,6 @@ fn respawn_health_checks(
 }
 
 // -----------------------------------------------------------------------------
-// Restart-Required Detection
-// -----------------------------------------------------------------------------
-
-/// Compare old and new configs, logging warnings for changes that
-/// require a process restart to take effect.
-fn log_restart_required_changes(old: &Config, new: &Config) {
-    detect_listener_topology_changes(old, new);
-    detect_protocol_changes(old, new);
-    detect_compression_additions(old, new);
-    detect_tls_toggles(old, new);
-}
-
-/// Detect listener additions, removals, and address rebinds.
-fn detect_listener_topology_changes(old: &Config, new: &Config) {
-    let old_names: std::collections::HashSet<&str> = old.listeners.iter().map(|l| l.name.as_str()).collect();
-    let new_names: std::collections::HashSet<&str> = new.listeners.iter().map(|l| l.name.as_str()).collect();
-
-    for name in new_names.difference(&old_names) {
-        warn!(
-            listener = %name,
-            "listener added in config; requires restart to bind"
-        );
-    }
-    for name in old_names.difference(&new_names) {
-        warn!(
-            listener = %name,
-            "listener removed in config; requires restart to unbind"
-        );
-    }
-
-    for new_l in &new.listeners {
-        if let Some(old_l) = old.listeners.iter().find(|l| l.name == new_l.name)
-            && old_l.address != new_l.address
-        {
-            warn!(
-                listener = %new_l.name,
-                old_address = %old_l.address,
-                new_address = %new_l.address,
-                "listener address changed; requires restart to rebind"
-            );
-        }
-    }
-}
-
-/// Detect protocol changes (e.g. HTTP to TCP).
-fn detect_protocol_changes(old: &Config, new: &Config) {
-    for new_l in &new.listeners {
-        if let Some(old_l) = old.listeners.iter().find(|l| l.name == new_l.name)
-            && old_l.protocol != new_l.protocol
-        {
-            warn!(
-                listener = %new_l.name,
-                old_protocol = ?old_l.protocol,
-                new_protocol = ?new_l.protocol,
-                "protocol changed; requires restart"
-            );
-        }
-    }
-}
-
-/// Detect compression being added to a previously uncompressed listener.
-fn detect_compression_additions(old: &Config, new: &Config) {
-    let old_chains_with_compression = find_chains_with_compression(old);
-    let new_chains_with_compression = find_chains_with_compression(new);
-
-    for new_l in &new.listeners {
-        if let Some(old_l) = old.listeners.iter().find(|l| l.name == new_l.name) {
-            let old_had_compression = old_l
-                .filter_chains
-                .iter()
-                .any(|c| old_chains_with_compression.contains(c.as_str()));
-
-            let new_has_compression = new_l
-                .filter_chains
-                .iter()
-                .any(|c| new_chains_with_compression.contains(c.as_str()));
-
-            if !old_had_compression && new_has_compression {
-                warn!(
-                    listener = %new_l.name,
-                    "compression added; requires restart (module registration is one-shot)"
-                );
-            }
-        }
-    }
-}
-
-/// Collect chain names that contain a compression filter.
-fn find_chains_with_compression(config: &Config) -> std::collections::HashSet<&str> {
-    config
-        .filter_chains
-        .iter()
-        .filter(|c| c.filters.iter().any(|f| f.filter_type == "compression"))
-        .map(|c| c.name.as_str())
-        .collect()
-}
-
-/// Detect TLS enable/disable toggles.
-fn detect_tls_toggles(old: &Config, new: &Config) {
-    for new_l in &new.listeners {
-        if let Some(old_l) = old.listeners.iter().find(|l| l.name == new_l.name) {
-            match (&old_l.tls, &new_l.tls) {
-                (None, Some(_)) => {
-                    warn!(
-                        listener = %new_l.name,
-                        "TLS enabled; requires restart"
-                    );
-                },
-                (Some(_), None) => {
-                    warn!(
-                        listener = %new_l.name,
-                        "TLS disabled; requires restart"
-                    );
-                },
-                _ => {},
-            }
-        }
-    }
-}
-
-// -----------------------------------------------------------------------------
-// Stateful Filter Warnings
-// -----------------------------------------------------------------------------
-
-/// Log a warning when the new config contains stateful filters
-/// whose state will reset on reload (e.g. rate limiters).
-fn warn_stateful_filter_reset(config: &Config) {
-    let has_stateful = config
-        .filter_chains
-        .iter()
-        .any(|c| c.filters.iter().any(is_stateful_recursive));
-
-    if has_stateful {
-        warn!(
-            "stateful filters (rate_limit, circuit_breaker) have been \
-             reset; in-flight requests retain old state via Arc guard"
-        );
-    }
-}
-
-/// Check a filter entry and its inline branch chain filters.
-fn is_stateful_recursive(f: &praxis_core::config::FilterEntry) -> bool {
-    if f.filter_type == "rate_limit" || f.filter_type == "circuit_breaker" {
-        return true;
-    }
-    f.branch_chains.as_ref().is_some_and(|branches| {
-        branches.iter().any(|b| {
-            b.chains.iter().any(|chain_ref| {
-                if let praxis_core::config::ChainRef::Inline { filters, .. } = chain_ref {
-                    filters.iter().any(is_stateful_recursive)
-                } else {
-                    false
-                }
-            })
-        })
-    })
-}
-
-// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
@@ -308,7 +162,10 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use praxis_core::{config::Config, health::HealthRegistry};
+    use praxis_core::{
+        config::{Config, InsecureOptions, SkipPipelineChecks},
+        health::HealthRegistry,
+    };
     use praxis_filter::FilterRegistry;
     use tokio_util::sync::CancellationToken;
 
@@ -741,6 +598,297 @@ filter_chains:
         .unwrap();
 
         detect_compression_additions(&config, &config);
+    }
+
+    #[test]
+    fn escalation_single_flag_detected() {
+        let old = InsecureOptions::default();
+        let new = InsecureOptions {
+            allow_root: true,
+            ..Default::default()
+        };
+
+        let escalated = collect_escalated_flags(&old, &new);
+        assert_eq!(
+            escalated,
+            vec!["allow_root"],
+            "single escalated flag should be reported"
+        );
+    }
+
+    #[test]
+    fn escalation_multiple_flags_detected() {
+        let old = InsecureOptions::default();
+        let new = InsecureOptions {
+            allow_public_admin: true,
+            allow_root: true,
+            skip_pipeline_validation: true,
+            ..Default::default()
+        };
+
+        let escalated = collect_escalated_flags(&old, &new);
+        assert_eq!(
+            escalated,
+            vec!["allow_public_admin", "allow_root", "skip_pipeline_validation"],
+            "all escalated flags should be reported in declaration order"
+        );
+    }
+
+    #[test]
+    fn no_escalation_when_identical() {
+        let opts = InsecureOptions::default();
+        let escalated = collect_escalated_flags(&opts, &opts);
+        assert!(escalated.is_empty(), "identical options should produce no escalations");
+    }
+
+    #[test]
+    fn deescalation_not_flagged() {
+        let old = InsecureOptions {
+            allow_root: true,
+            skip_pipeline_validation: true,
+            ..Default::default()
+        };
+        let new = InsecureOptions::default();
+
+        let escalated = collect_escalated_flags(&old, &new);
+        assert!(escalated.is_empty(), "true-to-false transitions should not be flagged");
+    }
+
+    #[test]
+    fn escalation_only_newly_enabled_reported() {
+        let old = InsecureOptions {
+            allow_root: true,
+            ..Default::default()
+        };
+        let new = InsecureOptions {
+            allow_root: true,
+            skip_pipeline_validation: true,
+            ..Default::default()
+        };
+
+        let escalated = collect_escalated_flags(&old, &new);
+        assert_eq!(
+            escalated,
+            vec!["skip_pipeline_validation"],
+            "only newly enabled flags should be reported"
+        );
+    }
+
+    #[test]
+    fn escalation_detects_granular_pipeline_check() {
+        let old = InsecureOptions::default();
+        let new = InsecureOptions {
+            skip_pipeline_checks: SkipPipelineChecks {
+                duplicate_routers: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let escalated = collect_escalated_flags(&old, &new);
+        assert_eq!(
+            escalated,
+            vec!["skip_pipeline_checks.duplicate_routers"],
+            "granular pipeline check escalation should be detected"
+        );
+    }
+
+    #[test]
+    fn audit_identical_configs_all_zeros() {
+        let config = valid_config();
+        let (a, r, m) = diff_named_items(&config.listeners, &config.listeners, |l| &l.name);
+        assert_eq!((a, r, m), (0, 0, 0), "identical listeners should show no changes");
+
+        let (a, r, m) = diff_named_items(&config.clusters, &config.clusters, |c| &c.name);
+        assert_eq!((a, r, m), (0, 0, 0), "identical clusters should show no changes");
+
+        let (a, r, m) = diff_named_items(&config.filter_chains, &config.filter_chains, |c| &c.name);
+        assert_eq!((a, r, m), (0, 0, 0), "identical chains should show no changes");
+    }
+
+    #[test]
+    fn audit_cluster_added() {
+        let old = valid_config();
+        let new = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80"]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap();
+
+        let (a, r, m) = diff_named_items(&old.clusters, &new.clusters, |c| &c.name);
+        assert_eq!(a, 1, "one cluster should be added");
+        assert_eq!(r, 0, "no clusters should be removed");
+        assert_eq!(m, 0, "no clusters should be modified");
+    }
+
+    #[test]
+    fn audit_cluster_removed() {
+        let old = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80"]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap();
+        let new = valid_config();
+
+        let (a, r, m) = diff_named_items(&old.clusters, &new.clusters, |c| &c.name);
+        assert_eq!(a, 0, "no clusters should be added");
+        assert_eq!(r, 1, "one cluster should be removed");
+        assert_eq!(m, 0, "no clusters should be modified");
+    }
+
+    #[test]
+    fn audit_filter_chain_modified() {
+        let old = valid_config();
+        let new = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 404
+"#,
+        )
+        .unwrap();
+
+        let (a, r, m) = diff_named_items(&old.filter_chains, &new.filter_chains, |c| &c.name);
+        assert_eq!(a, 0, "no chains should be added");
+        assert_eq!(r, 0, "no chains should be removed");
+        assert_eq!(m, 1, "one chain should be modified");
+    }
+
+    #[test]
+    fn audit_insecure_options_change_detected() {
+        let old = valid_config();
+        let mut new = valid_config();
+        new.insecure_options.allow_root = true;
+
+        let changed =
+            serde_yaml::to_string(&old.insecure_options).ok() != serde_yaml::to_string(&new.insecure_options).ok();
+        assert!(changed, "insecure_options change should be detected");
+    }
+
+    #[test]
+    fn audit_insecure_options_identical() {
+        let config = valid_config();
+        let changed = serde_yaml::to_string(&config.insecure_options).ok()
+            != serde_yaml::to_string(&config.insecure_options).ok();
+        assert!(!changed, "identical insecure_options should not flag change");
+    }
+
+    #[test]
+    fn audit_mixed_changes() {
+        let old = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+  - name: api
+    address: "127.0.0.1:9090"
+    filter_chains: [main]
+clusters:
+  - name: old_cluster
+    endpoints: ["10.0.0.1:80"]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap();
+
+        let new = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+  - name: grpc
+    address: "127.0.0.1:7070"
+    filter_chains: [main]
+clusters:
+  - name: new_cluster
+    endpoints: ["10.0.0.2:80"]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 404
+"#,
+        )
+        .unwrap();
+
+        let (la, lr, lm) = diff_named_items(&old.listeners, &new.listeners, |l| &l.name);
+        assert_eq!(la, 1, "one listener added (grpc)");
+        assert_eq!(lr, 1, "one listener removed (api)");
+        assert_eq!(lm, 0, "web listener unchanged");
+
+        let (ca, cr, cm) = diff_named_items(&old.clusters, &new.clusters, |c| &c.name);
+        assert_eq!(ca, 1, "one cluster added (new_cluster)");
+        assert_eq!(cr, 1, "one cluster removed (old_cluster)");
+        assert_eq!(cm, 0, "no clusters modified");
+
+        let (fa, fr, fm) = diff_named_items(&old.filter_chains, &new.filter_chains, |c| &c.name);
+        assert_eq!(fa, 0, "no chains added");
+        assert_eq!(fr, 0, "no chains removed");
+        assert_eq!(fm, 1, "main chain modified (status 200->404)");
+    }
+
+    #[test]
+    fn audit_log_does_not_panic() {
+        let old = valid_config();
+        let new = valid_config();
+        log_config_change_audit(&old, &new);
+    }
+
+    #[test]
+    fn no_escalation_when_all_already_true() {
+        let opts = InsecureOptions {
+            allow_open_security_filters: true,
+            allow_private_endpoints: true,
+            allow_private_health_checks: true,
+            allow_private_upstreams: true,
+            allow_public_admin: true,
+            allow_root: true,
+            allow_tls_no_verify: true,
+            allow_tls_without_sni: true,
+            allow_unbounded_body: true,
+            csrf_log_only: true,
+            skip_pipeline_checks: SkipPipelineChecks::all(),
+            skip_pipeline_validation: true,
+        };
+
+        let escalated = collect_escalated_flags(&opts, &opts);
+        assert!(escalated.is_empty(), "already-true flags should not be reported");
     }
 
     // -------------------------------------------------------------------------

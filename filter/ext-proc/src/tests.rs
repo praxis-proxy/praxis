@@ -26,6 +26,7 @@ use praxis_filter::parse_filter_config;
 
 use super::*;
 use crate::{
+    config::{DEFAULT_DEFERRED_CLOSE_TIMEOUT_MS, DEFAULT_MESSAGE_TIMEOUT_MS, DEFAULT_STATUS_ON_ERROR},
     duplex::{ExchangeConfig, ExchangeError, ExchangeEvent, ExtProcExchange},
     mutations,
     proto::envoy::service::{
@@ -368,21 +369,18 @@ mutation_rules:
 }
 
 #[tokio::test]
-async fn rejects_forward_rules() {
+async fn accepts_forward_rules() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
 target: "http://127.0.0.1:50051"
 forward_rules:
   allowed_headers: ["content-type"]
+  disallowed_headers: ["authorization"]
 "#,
     )
     .unwrap();
 
-    let err = ExtProcFilter::from_config(&yaml).err().expect("should error");
-    assert!(
-        err.to_string().contains("forward_rules"),
-        "error should mention forward_rules: {err}"
-    );
+    ExtProcFilter::from_config(&yaml).expect("forward_rules should be accepted");
 }
 
 #[tokio::test]
@@ -779,7 +777,7 @@ fn request_to_proto_headers_includes_method_and_path() {
     let req = make_request(Method::POST, "/api/v1/users");
     let ctx = make_ctx(&req);
 
-    let proto = mutations::request_to_proto_headers(&ctx);
+    let proto = mutations::request_to_proto_headers(&ctx, &mutations::ForwardRules::default());
     let headers = proto.headers.unwrap().headers;
 
     let method = headers
@@ -800,7 +798,7 @@ fn request_to_proto_headers_preserves_query_string() {
     let req = make_request(Method::GET, "/search?q=secret&page=1");
     let ctx = make_ctx(&req);
 
-    let proto = mutations::request_to_proto_headers(&ctx);
+    let proto = mutations::request_to_proto_headers(&ctx, &mutations::ForwardRules::default());
     let headers = proto.headers.unwrap().headers;
 
     let path = headers.iter().find(|h| h.key == ":path").expect("should include :path");
@@ -815,7 +813,7 @@ fn request_to_proto_headers_includes_scheme() {
     let req = make_request(Method::GET, "/");
     let ctx = make_ctx(&req);
 
-    let proto = mutations::request_to_proto_headers(&ctx);
+    let proto = mutations::request_to_proto_headers(&ctx, &mutations::ForwardRules::default());
     let headers = proto.headers.unwrap().headers;
 
     let scheme = headers
@@ -831,7 +829,7 @@ fn request_to_proto_headers_includes_https_scheme() {
     let mut ctx = make_ctx(&req);
     ctx.downstream_tls = true;
 
-    let proto = mutations::request_to_proto_headers(&ctx);
+    let proto = mutations::request_to_proto_headers(&ctx, &mutations::ForwardRules::default());
     let headers = proto.headers.unwrap().headers;
 
     let scheme = headers
@@ -847,7 +845,7 @@ fn request_to_proto_headers_includes_authority() {
     req.headers.insert("host", "example.com".parse().unwrap());
     let ctx = make_ctx(&req);
 
-    let proto = mutations::request_to_proto_headers(&ctx);
+    let proto = mutations::request_to_proto_headers(&ctx, &mutations::ForwardRules::default());
     let headers = proto.headers.unwrap().headers;
 
     let authority = headers
@@ -862,7 +860,7 @@ fn request_to_proto_headers_omits_authority_when_no_host() {
     let req = make_request(Method::GET, "/");
     let ctx = make_ctx(&req);
 
-    let proto = mutations::request_to_proto_headers(&ctx);
+    let proto = mutations::request_to_proto_headers(&ctx, &mutations::ForwardRules::default());
     let headers = proto.headers.unwrap().headers;
 
     assert!(
@@ -878,7 +876,7 @@ fn request_to_proto_headers_includes_request_headers() {
     req.headers.insert("x-request-id", "abc-123".parse().unwrap());
     let ctx = make_ctx(&req);
 
-    let proto = mutations::request_to_proto_headers(&ctx);
+    let proto = mutations::request_to_proto_headers(&ctx, &mutations::ForwardRules::default());
     let headers = proto.headers.unwrap().headers;
 
     let ct = headers
@@ -906,7 +904,7 @@ fn response_to_proto_headers_includes_status() {
     let mut ctx = make_ctx(&req);
     ctx.response_header = Some(&mut resp);
 
-    let proto = mutations::response_to_proto_headers(&ctx);
+    let proto = mutations::response_to_proto_headers(&ctx, &mutations::ForwardRules::default());
     let headers = proto.headers.unwrap().headers;
 
     let status = headers
@@ -924,7 +922,7 @@ fn response_to_proto_headers_includes_response_headers() {
     let mut ctx = make_ctx(&req);
     ctx.response_header = Some(&mut resp);
 
-    let proto = mutations::response_to_proto_headers(&ctx);
+    let proto = mutations::response_to_proto_headers(&ctx, &mutations::ForwardRules::default());
     let headers = proto.headers.unwrap().headers;
 
     let hdr = headers
@@ -939,11 +937,102 @@ fn response_to_proto_headers_empty_when_no_response() {
     let req = make_request(Method::GET, "/");
     let ctx = make_ctx(&req);
 
-    let proto = mutations::response_to_proto_headers(&ctx);
+    let proto = mutations::response_to_proto_headers(&ctx, &mutations::ForwardRules::default());
     let headers = proto.headers.unwrap().headers;
     assert!(
         headers.is_empty(),
         "headers should be empty when response_header is None"
+    );
+}
+
+// -----------------------------------------------------------------------------
+// Proto Conversion: forward_rules filtering
+// -----------------------------------------------------------------------------
+
+#[test]
+fn request_to_proto_headers_denylist_filters_sensitive() {
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert("authorization", "Bearer secret".parse().unwrap());
+    req.headers.insert("content-type", "application/json".parse().unwrap());
+    req.headers.insert("cookie", "session=abc".parse().unwrap());
+    let ctx = make_ctx(&req);
+
+    let rules = mutations::ForwardRules::new(Vec::new(), vec!["authorization".to_owned(), "cookie".to_owned()]);
+    let proto = mutations::request_to_proto_headers(&ctx, &rules);
+    let headers = proto.headers.unwrap().headers;
+
+    assert!(
+        headers.iter().any(|h| h.key == ":method"),
+        "pseudo-headers should always be included"
+    );
+    assert!(
+        headers.iter().any(|h| h.key == "content-type"),
+        "non-denied header should be forwarded"
+    );
+    assert!(
+        headers.iter().all(|h| h.key != "authorization"),
+        "denied authorization header should be filtered"
+    );
+    assert!(
+        headers.iter().all(|h| h.key != "cookie"),
+        "denied cookie header should be filtered"
+    );
+}
+
+#[test]
+fn request_to_proto_headers_allowlist_filters() {
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert("content-type", "application/json".parse().unwrap());
+    req.headers.insert("authorization", "Bearer secret".parse().unwrap());
+    req.headers.insert("x-request-id", "abc".parse().unwrap());
+    let ctx = make_ctx(&req);
+
+    let rules = mutations::ForwardRules::new(vec!["content-type".to_owned(), "x-request-id".to_owned()], Vec::new());
+    let proto = mutations::request_to_proto_headers(&ctx, &rules);
+    let headers = proto.headers.unwrap().headers;
+
+    assert!(
+        headers.iter().any(|h| h.key == ":method"),
+        "pseudo-headers should always be included"
+    );
+    assert!(
+        headers.iter().any(|h| h.key == "content-type"),
+        "allowed header should be forwarded"
+    );
+    assert!(
+        headers.iter().any(|h| h.key == "x-request-id"),
+        "allowed header should be forwarded"
+    );
+    assert!(
+        headers.iter().all(|h| h.key != "authorization"),
+        "unlisted header should be filtered with allowlist"
+    );
+}
+
+#[test]
+fn response_to_proto_headers_denylist_filters_sensitive() {
+    let req = make_request(Method::GET, "/");
+    let mut resp = make_response();
+    resp.headers.insert("set-cookie", "session=xyz".parse().unwrap());
+    resp.headers.insert("content-type", "text/html".parse().unwrap());
+    let mut ctx = make_ctx(&req);
+    ctx.response_header = Some(&mut resp);
+
+    let rules = mutations::ForwardRules::new(Vec::new(), vec!["set-cookie".to_owned()]);
+    let proto = mutations::response_to_proto_headers(&ctx, &rules);
+    let headers = proto.headers.unwrap().headers;
+
+    assert!(
+        headers.iter().any(|h| h.key == ":status"),
+        "pseudo-headers should always be included"
+    );
+    assert!(
+        headers.iter().any(|h| h.key == "content-type"),
+        "non-denied header should be forwarded"
+    );
+    assert!(
+        headers.iter().all(|h| h.key != "set-cookie"),
+        "denied set-cookie header should be filtered"
     );
 }
 

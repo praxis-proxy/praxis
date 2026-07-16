@@ -12,6 +12,16 @@ mod filter_chain;
 mod listener;
 mod rules;
 
+pub use cluster::is_ssrf_sensitive;
+
+/// Maximum allowed `max_connections` value across listeners, clusters,
+/// and the global runtime setting (1 million).
+///
+/// Modern Linux systems top out at roughly 1M concurrent connections
+/// due to file descriptor limits. Values beyond this are almost
+/// certainly operator error.
+pub(crate) const MAX_CONNECTIONS: u32 = 1_000_000;
+
 // ---------------------------------------------------------------------------
 // Shared Name Validation
 // ---------------------------------------------------------------------------

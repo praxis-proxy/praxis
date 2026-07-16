@@ -70,9 +70,7 @@ pub fn resolve_pipelines(
         let mut pipeline = FilterPipeline::build_with_chains(&mut entries, registry, &chains)?;
         configure_pipeline(&mut pipeline, config, health_registry, kv_stores)?;
 
-        let skip = config.insecure_options.skip_pipeline_validation;
-        let allow_open_security = config.insecure_options.allow_open_security_filters;
-        validate_pipeline(&pipeline, &entries, &listener.name, skip, allow_open_security)?;
+        validate_pipeline(&pipeline, &entries, &listener.name, &config.insecure_options)?;
 
         pipelines.insert(listener.name.clone(), Arc::new(pipeline));
     }
@@ -109,17 +107,16 @@ fn configure_pipeline(
 // -----------------------------------------------------------------------------
 
 /// Run pipeline ordering validation; either fail or warn depending
-/// on the `skip` flag.
+/// on insecure option flags.
 fn validate_pipeline(
     pipeline: &FilterPipeline,
     entries: &[praxis_core::config::FilterEntry],
     listener_name: &str,
-    skip: bool,
-    allow_open_security: bool,
+    opts: &praxis_core::config::InsecureOptions,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let errors = pipeline.ordering_errors(entries, allow_open_security);
+    let errors = pipeline.ordering_errors(entries, opts.allow_open_security_filters, &opts.skip_pipeline_checks);
 
-    if skip {
+    if opts.skip_pipeline_validation {
         for msg in &errors {
             tracing::warn!(listener = %listener_name, "{msg}");
         }
@@ -492,6 +489,72 @@ filter_chains:
         assert!(
             pipeline.kv_stores().is_none(),
             "empty kv_stores should not be set on pipeline"
+        );
+    }
+
+    #[test]
+    fn resolve_pipelines_granular_skip_suppresses_targeted_check() {
+        let config = Config::from_yaml(
+            r#"
+insecure_options:
+  skip_pipeline_checks:
+    misaligned_clusters: true
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: missing
+      - filter: load_balancer
+        clusters:
+          - name: other
+            endpoints: ["10.0.0.1:80"]
+"#,
+        )
+        .unwrap();
+        let registry = FilterRegistry::with_builtins();
+        let result = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores());
+        assert!(
+            result.is_ok(),
+            "skip_pipeline_checks.misaligned_clusters should suppress cluster mismatch error"
+        );
+    }
+
+    #[test]
+    fn resolve_pipelines_granular_skip_does_not_suppress_other_checks() {
+        let config = Config::from_yaml(
+            r#"
+insecure_options:
+  skip_pipeline_checks:
+    duplicate_routers: true
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: missing
+      - filter: load_balancer
+        clusters:
+          - name: other
+            endpoints: ["10.0.0.1:80"]
+"#,
+        )
+        .unwrap();
+        let registry = FilterRegistry::with_builtins();
+        let result = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores());
+        assert!(
+            result.is_err(),
+            "skipping duplicate_routers should not suppress misaligned cluster error"
         );
     }
 

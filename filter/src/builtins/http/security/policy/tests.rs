@@ -21,358 +21,9 @@ use crate::{
     test_utils::{make_filter_context, make_request},
 };
 
-// -----------------------------------------------------------------------------
-// Fixtures
-// -----------------------------------------------------------------------------
-
 const TEST_SECRET: &str = "praxis-cpex-test-secret-not-for-production-use";
 const TEST_ISSUER: &str = "https://idp.test.local";
 const TEST_AUDIENCE: &str = "test-api";
-
-fn now_unix() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .expect("clock should not be before unix epoch")
-        .as_secs()
-}
-
-/// Mint an HS256 JWT signed with [`TEST_SECRET`].
-fn mint_jwt(claims: &serde_json::Value) -> String {
-    let header = Header::new(Algorithm::HS256);
-    let key = EncodingKey::from_secret(TEST_SECRET.as_bytes());
-    encode(&header, claims, &key).expect("sign JWT")
-}
-
-/// Standard token claims: test issuer + audience, fresh `exp`.
-fn standard_claims(subject: &str) -> serde_json::Value {
-    json!({
-        "iss": TEST_ISSUER,
-        "aud": TEST_AUDIENCE,
-        "sub": subject,
-        "exp": now_unix() + 300,
-        "iat": now_unix(),
-    })
-}
-
-/// Claims for a workload / agent token. Includes `azp` (authorized
-/// party) so the `client`-role claim mapper can populate the
-/// caller-workload identity slot.
-fn agent_claims(client_id: &str) -> serde_json::Value {
-    json!({
-        "iss": TEST_ISSUER,
-        "aud": TEST_AUDIENCE,
-        "sub": client_id,
-        "azp": client_id,
-        "exp": now_unix() + 300,
-        "iat": now_unix(),
-    })
-}
-
-/// Write a single-plugin CPEX YAML referencing the HS256 test secret.
-fn write_single_plugin_config() -> (TempDir, String) {
-    let dir = TempDir::new().expect("create tempdir");
-    let cfg_path = dir.path().join("cpex.yaml");
-
-    let yaml = format!(
-        r#"plugins:
-  - name: jwt-user
-    kind: identity/jwt
-    hooks:
-      - identity.resolve
-    mode: sequential
-    priority: 10
-    on_error: fail
-    config:
-      header: Authorization
-      trusted_issuers:
-        - issuer: "{TEST_ISSUER}"
-          audiences: ["{TEST_AUDIENCE}"]
-          algorithms: ["HS256"]
-          decoding_key:
-            kind: secret
-            secret: "{TEST_SECRET}"
-          leeway_seconds: 60
-      claim_mapper: standard
-"#
-    );
-
-    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
-    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
-    (dir, path_str)
-}
-
-/// Write a CPEX YAML that gates the `echo` tool through a CEL PDP step.
-/// Single HS256 identity plugin (so `subject.id` resolves from the JWT
-/// `sub`), a `kind: cel` PDP declared globally, and a route whose `cel:`
-/// expression allows only `alice`. Exercises the `apl-pdp-cel` backend
-/// end-to-end through the filter's CMF dispatch.
-#[expect(
-    clippy::too_many_lines,
-    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
-)]
-fn write_cel_policy_config() -> (TempDir, String) {
-    let dir = TempDir::new().expect("create tempdir");
-    let cfg_path = dir.path().join("cpex.yaml");
-
-    let yaml = format!(
-        r#"plugins:
-  - name: jwt-user
-    kind: identity/jwt
-    hooks:
-      - identity.resolve
-    mode: sequential
-    priority: 10
-    on_error: fail
-    config:
-      header: Authorization
-      trusted_issuers:
-        - issuer: "{TEST_ISSUER}"
-          audiences: ["{TEST_AUDIENCE}"]
-          algorithms: ["HS256"]
-          decoding_key:
-            kind: secret
-            secret: "{TEST_SECRET}"
-          leeway_seconds: 60
-      claim_mapper: standard
-global:
-  apl:
-    pdp:
-      - kind: cel
-routes:
-  - tool: echo
-    apl:
-      policy:
-        - cel:
-            expr: |
-              subject.id == "alice"
-"#
-    );
-
-    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
-    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
-    (dir, path_str)
-}
-
-/// Run a `service/invoke` for the `echo` tool as `subject`, returning the
-/// filter's body-phase action. Shared by the CEL allow/deny cases.
-async fn dispatch_echo_as(filter: &PolicyFilter, subject: &str) -> FilterAction {
-    let token = mint_jwt(&standard_claims(subject));
-    let mut req = make_request(Method::POST, "/");
-    req.headers.insert(
-        "Authorization",
-        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
-    );
-    let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("protocol.method", "service/invoke");
-    ctx.set_metadata("protocol.name", "echo");
-    let body = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"method":"service/invoke","params":{"name":"echo","arguments":{}}}"#,
-    );
-    filter
-        .on_request_body(&mut ctx, &mut Some(body), true)
-        .await
-        .expect("filter ran")
-}
-
-/// Write a CPEX YAML demonstrating session tainting: a `read-secret`
-/// tool taints the session, and a `send-out` tool denies when the
-/// session carries that taint. Identity is the HS256 jwt plugin so
-/// `subject.id` resolves; the taint persists in the in-process session
-/// store keyed by the resolved session id.
-#[expect(
-    clippy::too_many_lines,
-    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
-)]
-fn write_taint_config() -> (TempDir, String) {
-    let dir = TempDir::new().expect("create tempdir");
-    let cfg_path = dir.path().join("cpex.yaml");
-
-    let yaml = format!(
-        r#"plugins:
-  - name: jwt-user
-    kind: identity/jwt
-    hooks:
-      - identity.resolve
-    mode: sequential
-    priority: 10
-    on_error: fail
-    config:
-      header: Authorization
-      trusted_issuers:
-        - issuer: "{TEST_ISSUER}"
-          audiences: ["{TEST_AUDIENCE}"]
-          algorithms: ["HS256"]
-          decoding_key:
-            kind: secret
-            secret: "{TEST_SECRET}"
-          leeway_seconds: 60
-      claim_mapper: standard
-routes:
-  - tool: read-secret
-    apl:
-      policy:
-        - "taint(secret, session)"
-  - tool: send-out
-    apl:
-      policy:
-        - "security.labels contains \"secret\": deny('session accessed secret data', 'session_tainted_secret')"
-"#
-    );
-
-    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
-    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
-    (dir, path_str)
-}
-
-/// Dispatch a `service/invoke` for `tool` as `subject` with the given
-/// `X-Session-Id`. Returns the filter's body-phase action. Threads the
-/// session header so cpex's session-scoped taint store can persist /
-/// hydrate labels across calls.
-async fn dispatch_tool_session(filter: &PolicyFilter, subject: &str, tool: &str, session_id: &str) -> FilterAction {
-    let token = mint_jwt(&standard_claims(subject));
-    let mut req = make_request(Method::POST, "/");
-    req.headers.insert(
-        "Authorization",
-        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
-    );
-    req.headers.insert(
-        "X-Session-Id",
-        HeaderValue::from_str(session_id).expect("session header"),
-    );
-    let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("protocol.method", "service/invoke");
-    ctx.set_metadata("protocol.name", tool);
-    let body = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"method":"service/invoke","params":{"name":"t","arguments":{}}}"#,
-    );
-    filter
-        .on_request_body(&mut ctx, &mut Some(body), true)
-        .await
-        .expect("filter ran")
-}
-
-/// Write a CPEX YAML with two identity plugins, each reading its own
-/// header. Demonstrates the multi-source agentic identity story PR1
-/// targets — one request can carry user + agent JWTs simultaneously,
-/// both validated, both contributing to a typed `Extensions` context.
-#[expect(
-    clippy::too_many_lines,
-    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
-)]
-fn write_multi_source_config() -> (TempDir, String) {
-    let dir = TempDir::new().expect("create tempdir");
-    let cfg_path = dir.path().join("cpex.yaml");
-
-    let yaml = format!(
-        r#"plugins:
-  - name: jwt-user
-    kind: identity/jwt
-    hooks:
-      - identity.resolve
-    mode: sequential
-    priority: 10
-    on_error: fail
-    config:
-      header: Authorization
-      role: user
-      trusted_issuers:
-        - issuer: "{TEST_ISSUER}"
-          audiences: ["{TEST_AUDIENCE}"]
-          algorithms: ["HS256"]
-          decoding_key:
-            kind: secret
-            secret: "{TEST_SECRET}"
-      claim_mapper: standard
-  - name: jwt-agent
-    kind: identity/jwt
-    hooks:
-      - identity.resolve
-    mode: sequential
-    priority: 20
-    on_error: fail
-    config:
-      header: X-Agent-Token
-      role: client
-      trusted_issuers:
-        - issuer: "{TEST_ISSUER}"
-          audiences: ["{TEST_AUDIENCE}"]
-          algorithms: ["HS256"]
-          decoding_key:
-            kind: secret
-            secret: "{TEST_SECRET}"
-      claim_mapper: standard
-"#
-    );
-
-    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
-    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
-    (dir, path_str)
-}
-
-/// Write a CPEX YAML selecting the Valkey-backed session store via a
-/// flat `global.session_store` block. The `valkey` factory connects
-/// lazily (the pool dials on first request), so this config loads
-/// without a running Valkey — it pins that the factory is registered
-/// and the flat `session_store` block parses and resolves.
-#[expect(
-    clippy::too_many_lines,
-    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
-)]
-fn write_valkey_session_store_config() -> (TempDir, String) {
-    let dir = TempDir::new().expect("create tempdir");
-    let cfg_path = dir.path().join("cpex.yaml");
-
-    let yaml = format!(
-        r#"plugins:
-  - name: jwt-user
-    kind: identity/jwt
-    hooks:
-      - identity.resolve
-    mode: sequential
-    priority: 10
-    on_error: fail
-    config:
-      header: Authorization
-      trusted_issuers:
-        - issuer: "{TEST_ISSUER}"
-          audiences: ["{TEST_AUDIENCE}"]
-          algorithms: ["HS256"]
-          decoding_key:
-            kind: secret
-            secret: "{TEST_SECRET}"
-          leeway_seconds: 60
-      claim_mapper: standard
-global:
-  session_store:
-    kind: valkey
-    endpoint: localhost:6379
-routes:
-  - tool: read-secret
-    apl:
-      policy:
-        - "taint(secret, session)"
-"#
-    );
-
-    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
-    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
-    (dir, path_str)
-}
-
-/// Build a `PolicyFilter` from a YAML config path. Defaults
-/// `require_protocol_metadata` to true so the test surface matches the
-/// production default; individual tests that want to test the
-/// fail-open knob construct their own config.
-fn build_filter(config_path: String) -> PolicyFilter {
-    let cfg = PolicyFilterConfig {
-        config_path,
-        body_access: super::config::BodyAccessMode::ReadOnly,
-        require_protocol_metadata: true,
-        init_timeout_secs: 30,
-        max_buffer_bytes: 10_485_760,
-    };
-    PolicyFilter::new(cfg).expect("filter should construct")
-}
 
 // -----------------------------------------------------------------------------
 // Config parsing
@@ -555,28 +206,26 @@ async fn multi_source_both_identities_continue() {
     );
 }
 
-/// `block_in_place` (used by the response phase) panics on a
-/// current-thread runtime, so the filter refuses to run there. Pins
-/// the rejection so a future change can't silently re-introduce the
-/// panic path. The default `#[tokio::test]` flavor is current-thread,
-/// which is exactly the runtime praxis configures when
-/// `work_stealing: false`.
+/// The response phase uses `spawn_blocking` + `Handle::block_on` to
+/// drive async work from the sync `on_response_body` trait method.
+/// Unlike the previous `block_in_place` approach, `spawn_blocking`
+/// works on current-thread runtimes too. The default `#[tokio::test]`
+/// flavor is current-thread, which matches praxis `work_stealing: false`.
 #[tokio::test]
-async fn current_thread_runtime_is_rejected() {
+async fn current_thread_runtime_is_accepted() {
     let (_dir, path) = write_single_plugin_config();
     let filter = build_filter(path);
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
 
-    let err = filter
+    let action = filter
         .on_request(&mut ctx)
         .await
-        .expect_err("current-thread runtime must be rejected");
-    let msg = format!("{err}");
+        .expect("current-thread runtime must be accepted");
     assert!(
-        msg.contains("multi-threaded tokio runtime"),
-        "error message should point at the work_stealing config; got: {msg}",
+        matches!(action, FilterAction::Reject(_)),
+        "unauthenticated request should be rejected; got {action:?}",
     );
 }
 
@@ -1314,7 +963,7 @@ async fn on_request_body_continues_on_partial_chunks() {
 /// `Continue` without doing any work — the operator hasn't opted into
 /// response rewriting, and the post-phase deny envelope path is gated
 /// on `read_write`. Pins the early-return that keeps the sync hook
-/// from blocking on `block_in_place` for read-only chains.
+/// from dispatching `spawn_blocking` for read-only chains.
 #[test]
 fn on_response_body_in_read_only_is_a_no_op() {
     let (_dir, path) = write_single_plugin_config();
@@ -1358,7 +1007,7 @@ fn on_response_body_continues_on_partial_chunks() {
 /// token that expires between the request and the already-served
 /// response can never produce a false deny on a request that was
 /// authorized.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "linear setup + assertions for the fail-closed response path"
@@ -1512,4 +1161,384 @@ fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
 
     assert_eq!(count, 2, "two distinct headers must both attach");
     assert_eq!(ctx.request_headers_to_set.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// spawn_blocking offload
+// ---------------------------------------------------------------------------
+
+/// Concurrent CMF dispatches must not block the async runtime. With the
+/// evaluation offloaded to `spawn_blocking`, multiple requests can
+/// proceed in parallel without starving the worker threads. This test
+/// fires four concurrent policy evaluations on a two-thread runtime;
+/// all must complete without deadlocking or failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_cmf_dispatch_completes_without_blocking() {
+    use std::sync::Arc;
+
+    let (_dir, path) = write_cel_policy_config();
+    let filter = Arc::new(build_filter(path));
+
+    let mut handles = Vec::new();
+    for _ in 0..4 {
+        let f = Arc::clone(&filter);
+        handles.push(tokio::spawn(async move { dispatch_echo_as(&f, "alice").await }));
+    }
+
+    for h in handles {
+        let action = h.await.expect("task should not panic");
+        assert!(
+            matches!(action, FilterAction::BodyDone),
+            "alice satisfies the CEL predicate; expected BodyDone, got {action:?}",
+        );
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Test Utilities
+// -----------------------------------------------------------------------------
+
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock should not be before unix epoch")
+        .as_secs()
+}
+
+/// Mint an HS256 JWT signed with [`TEST_SECRET`].
+fn mint_jwt(claims: &serde_json::Value) -> String {
+    let header = Header::new(Algorithm::HS256);
+    let key = EncodingKey::from_secret(TEST_SECRET.as_bytes());
+    encode(&header, claims, &key).expect("sign JWT")
+}
+
+/// Standard token claims: test issuer + audience, fresh `exp`.
+fn standard_claims(subject: &str) -> serde_json::Value {
+    json!({
+        "iss": TEST_ISSUER,
+        "aud": TEST_AUDIENCE,
+        "sub": subject,
+        "exp": now_unix() + 300,
+        "iat": now_unix(),
+    })
+}
+
+/// Claims for a workload / agent token. Includes `azp` (authorized
+/// party) so the `client`-role claim mapper can populate the
+/// caller-workload identity slot.
+fn agent_claims(client_id: &str) -> serde_json::Value {
+    json!({
+        "iss": TEST_ISSUER,
+        "aud": TEST_AUDIENCE,
+        "sub": client_id,
+        "azp": client_id,
+        "exp": now_unix() + 300,
+        "iat": now_unix(),
+    })
+}
+
+/// Write a single-plugin CPEX YAML referencing the HS256 test secret.
+fn write_single_plugin_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    mode: sequential
+    priority: 10
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+"#
+    );
+
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
+    (dir, path_str)
+}
+
+/// Write a CPEX YAML that gates the `echo` tool through a CEL PDP step.
+/// Single HS256 identity plugin (so `subject.id` resolves from the JWT
+/// `sub`), a `kind: cel` PDP declared globally, and a route whose `cel:`
+/// expression allows only `alice`. Exercises the `apl-pdp-cel` backend
+/// end-to-end through the filter's CMF dispatch.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_cel_policy_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    mode: sequential
+    priority: 10
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  apl:
+    pdp:
+      - kind: cel
+routes:
+  - tool: echo
+    apl:
+      policy:
+        - cel:
+            expr: |
+              subject.id == "alice"
+"#
+    );
+
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
+    (dir, path_str)
+}
+
+/// Run a `service/invoke` for the `echo` tool as `subject`, returning the
+/// filter's body-phase action. Shared by the CEL allow/deny cases.
+async fn dispatch_echo_as(filter: &PolicyFilter, subject: &str) -> FilterAction {
+    let token = mint_jwt(&standard_claims(subject));
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("protocol.method", "service/invoke");
+    ctx.set_metadata("protocol.name", "echo");
+    let body = bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"service/invoke","params":{"name":"echo","arguments":{}}}"#,
+    );
+    filter
+        .on_request_body(&mut ctx, &mut Some(body), true)
+        .await
+        .expect("filter ran")
+}
+
+/// Write a CPEX YAML demonstrating session tainting: a `read-secret`
+/// tool taints the session, and a `send-out` tool denies when the
+/// session carries that taint. Identity is the HS256 jwt plugin so
+/// `subject.id` resolves; the taint persists in the in-process session
+/// store keyed by the resolved session id.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_taint_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    mode: sequential
+    priority: 10
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+routes:
+  - tool: read-secret
+    apl:
+      policy:
+        - "taint(secret, session)"
+  - tool: send-out
+    apl:
+      policy:
+        - "security.labels contains \"secret\": deny('session accessed secret data', 'session_tainted_secret')"
+"#
+    );
+
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
+    (dir, path_str)
+}
+
+/// Dispatch a `service/invoke` for `tool` as `subject` with the given
+/// `X-Session-Id`. Returns the filter's body-phase action. Threads the
+/// session header so cpex's session-scoped taint store can persist /
+/// hydrate labels across calls.
+async fn dispatch_tool_session(filter: &PolicyFilter, subject: &str, tool: &str, session_id: &str) -> FilterAction {
+    let token = mint_jwt(&standard_claims(subject));
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    req.headers.insert(
+        "X-Session-Id",
+        HeaderValue::from_str(session_id).expect("session header"),
+    );
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("protocol.method", "service/invoke");
+    ctx.set_metadata("protocol.name", tool);
+    let body = bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"service/invoke","params":{"name":"t","arguments":{}}}"#,
+    );
+    filter
+        .on_request_body(&mut ctx, &mut Some(body), true)
+        .await
+        .expect("filter ran")
+}
+
+/// Write a CPEX YAML with two identity plugins, each reading its own
+/// header. Demonstrates the multi-source agentic identity story PR1
+/// targets — one request can carry user + agent JWTs simultaneously,
+/// both validated, both contributing to a typed `Extensions` context.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_multi_source_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    mode: sequential
+    priority: 10
+    on_error: fail
+    config:
+      header: Authorization
+      role: user
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+      claim_mapper: standard
+  - name: jwt-agent
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    mode: sequential
+    priority: 20
+    on_error: fail
+    config:
+      header: X-Agent-Token
+      role: client
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+      claim_mapper: standard
+"#
+    );
+
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
+    (dir, path_str)
+}
+
+/// Write a CPEX YAML selecting the Valkey-backed session store via a
+/// flat `global.session_store` block. The `valkey` factory connects
+/// lazily (the pool dials on first request), so this config loads
+/// without a running Valkey — it pins that the factory is registered
+/// and the flat `session_store` block parses and resolves.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_valkey_session_store_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    mode: sequential
+    priority: 10
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  session_store:
+    kind: valkey
+    endpoint: localhost:6379
+routes:
+  - tool: read-secret
+    apl:
+      policy:
+        - "taint(secret, session)"
+"#
+    );
+
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
+    (dir, path_str)
+}
+
+/// Build a `PolicyFilter` from a YAML config path. Defaults
+/// `require_protocol_metadata` to true so the test surface matches the
+/// production default; individual tests that want to test the
+/// fail-open knob construct their own config.
+fn build_filter(config_path: String) -> PolicyFilter {
+    let cfg = PolicyFilterConfig {
+        config_path,
+        body_access: super::config::BodyAccessMode::ReadOnly,
+        require_protocol_metadata: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+    };
+    PolicyFilter::new(cfg).expect("filter should construct")
 }

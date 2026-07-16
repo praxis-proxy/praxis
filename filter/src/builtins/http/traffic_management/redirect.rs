@@ -79,6 +79,15 @@ impl TryFrom<u16> for RedirectStatus {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RedirectConfig {
+    /// Optional allowlist of permitted hostnames for `${host}` substitution.
+    ///
+    /// Supports exact matches and wildcard prefixes (`*.example.com`).
+    /// When set, host values not matching any entry leave `${host}` unexpanded
+    /// and log a warning. When absent or empty, any syntactically valid host
+    /// is accepted (character-level validation still applies).
+    #[serde(default)]
+    allowed_hosts: Vec<String>,
+
     /// Location URL template. Supports `${path}`, `${query}`, `${host}`, and `${scheme}` placeholders.
     ///
     /// `${query}` expands to `?key=val` (with leading `?`) when a query string
@@ -158,6 +167,8 @@ where
 /// assert!(result.is_err());
 /// ```
 pub struct RedirectFilter {
+    /// Permitted hostnames for `${host}` substitution (empty = unrestricted).
+    allowed_hosts: Vec<String>,
     /// Location URL template with `${path}`, `${query}`, `${host}`, and `${scheme}` placeholders.
     location: String,
     /// HTTP redirect status code.
@@ -176,7 +187,17 @@ impl RedirectFilter {
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: RedirectConfig = parse_filter_config("redirect", config)?;
 
+        validate_allowed_hosts(&cfg.allowed_hosts)?;
+
+        if cfg.location.contains("${host}") && cfg.allowed_hosts.is_empty() {
+            tracing::warn!(
+                "redirect: template uses ${{host}} without allowed_hosts; \
+                 consider restricting permitted hosts to prevent open redirects"
+            );
+        }
+
         Ok(Box::new(Self {
+            allowed_hosts: cfg.allowed_hosts,
             status: cfg.status,
             location: cfg.location,
         }))
@@ -191,12 +212,27 @@ impl HttpFilter for RedirectFilter {
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let uri = &ctx.request.uri;
-        let host = ctx
+        let raw_host = ctx
             .request
             .headers
-            .get("host")
+            .get(http::header::HOST)
             .and_then(|v| v.to_str().ok())
             .map(strip_port);
+
+        let host = if let Some(h) = raw_host {
+            if !self.allowed_hosts.is_empty() && !host_matches_allowlist(h, &self.allowed_hosts) {
+                tracing::warn!(
+                    host = h,
+                    "redirect: host not in allowed_hosts, leaving placeholder unexpanded"
+                );
+                None
+            } else {
+                Some(h)
+            }
+        } else {
+            None
+        };
+
         let scheme = infer_scheme(ctx);
         let location = expand_location(&self.location, uri.path(), uri.query(), host, scheme);
         let rejection = Rejection::status(self.status.as_u16()).with_header("Location", &location);
@@ -221,31 +257,85 @@ impl HttpFilter for RedirectFilter {
 ///
 /// # Security
 ///
-/// `${host}` is populated from the request `Host` header without
-/// validation. Templates using `${host}` should only be deployed
-/// behind host-constrained listeners to prevent open redirect.
+/// `${host}` is validated before substitution to prevent open
+/// redirects via crafted `Host` headers. Only hostname-safe
+/// characters are permitted; invalid values leave the `${host}`
+/// placeholder unexpanded.
 fn expand_location(template: &str, path: &str, query: Option<&str>, host: Option<&str>, scheme: &str) -> String {
     let safe_path = crate::builtins::http::transformation::path_sanitize::normalize_rewritten_path(path);
     let mut result = template.replace("${path}", &safe_path);
     let query_with_prefix = query.map_or(String::new(), |q| format!("?{q}"));
     result = result.replace("${query}", &query_with_prefix);
     if let Some(h) = host {
-        result = result.replace("${host}", h);
+        if is_valid_host_for_redirect(h) {
+            result = result.replace("${host}", h);
+        } else {
+            tracing::warn!(host = h, "redirect: rejected invalid host value");
+        }
     }
     result.replace("${scheme}", scheme)
 }
 
-/// Strip port from a `Host` header value, handling IPv4 and bracketed IPv6.
-fn strip_port(host: &str) -> &str {
-    if host.starts_with('[') {
-        match host.find(']') {
-            Some(i) => host.get(..=i).unwrap_or(host),
-            None => host,
+/// Validate entries in the `allowed_hosts` configuration list.
+///
+/// Rejects empty entries and malformed wildcard patterns. Valid wildcards
+/// must be `*.suffix` where `suffix` is a non-empty domain.
+///
+/// # Errors
+///
+/// Returns a boxed error if any entry is empty or has an invalid wildcard.
+fn validate_allowed_hosts(hosts: &[String]) -> Result<(), FilterError> {
+    for host in hosts {
+        if host.is_empty() {
+            return Err("redirect: allowed_hosts contains an empty entry".into());
         }
-    } else {
-        host.split(':').next().unwrap_or(host)
+        if let Some(suffix) = host.strip_prefix("*.")
+            && (suffix.is_empty() || suffix == ".")
+        {
+            return Err(format!("redirect: invalid wildcard pattern '{host}'").into());
+        }
     }
+    Ok(())
 }
+
+/// Check whether a host matches any entry in the allowed hosts list.
+///
+/// Supports exact (case-insensitive) matches and wildcard prefixes.
+/// A pattern `*.example.com` matches `sub.example.com` and
+/// `a.b.example.com`, as well as the bare domain `example.com`.
+fn host_matches_allowlist(host: &str, allowed: &[String]) -> bool {
+    let host_lower = host.to_ascii_lowercase();
+    allowed.iter().any(|pattern| {
+        let pattern_lower = pattern.to_ascii_lowercase();
+        if let Some(suffix) = pattern_lower.strip_prefix("*.") {
+            host_lower == suffix || host_lower.ends_with(&format!(".{suffix}"))
+        } else {
+            host_lower == pattern_lower
+        }
+    })
+}
+
+/// Check whether a host value is safe for redirect URL substitution.
+///
+/// Allows only hostname-safe ASCII characters: alphanumeric, `.`, `-`,
+/// `_`, `[`, `]`, `:` (IPv6), and `%` (IPv6 zone IDs). Rejects
+/// characters that could enable open redirects (`/`, `@`, `\`) or
+/// header injection (whitespace, control characters).
+fn is_valid_host_for_redirect(host: &str) -> bool {
+    !host.is_empty()
+        && host.bytes().all(|b| {
+            matches!(b,
+                b'a'..=b'z'
+                | b'A'..=b'Z'
+                | b'0'..=b'9'
+                | b'-' | b'.' | b'_'
+                | b'[' | b']' | b':'
+                | b'%'
+            )
+        })
+}
+
+use super::strip_port;
 
 /// Infer the request scheme from headers and connection state.
 ///
@@ -694,6 +784,355 @@ mod tests {
     fn expand_location_http_scheme() {
         let result = expand_location("${scheme}://example.com${path}", "/page", None, None, "http");
         assert_eq!(result, "http://example.com/page", "http scheme should be substituted");
+    }
+
+    #[test]
+    fn expand_location_rejects_host_with_slash() {
+        let result = expand_location("https://${host}/page", "/", None, Some("evil.com/redirect"), "https");
+        assert_eq!(
+            result, "https://${host}/page",
+            "host with slash should leave placeholder unexpanded"
+        );
+    }
+
+    #[test]
+    fn expand_location_rejects_host_with_at_sign() {
+        let result = expand_location("https://${host}/page", "/", None, Some("user@evil.com"), "https");
+        assert_eq!(
+            result, "https://${host}/page",
+            "host with @ should leave placeholder unexpanded"
+        );
+    }
+
+    #[test]
+    fn expand_location_rejects_host_with_backslash() {
+        let result = expand_location("https://${host}/page", "/", None, Some("evil.com\\foo"), "https");
+        assert_eq!(
+            result, "https://${host}/page",
+            "host with backslash should leave placeholder unexpanded"
+        );
+    }
+
+    #[test]
+    fn expand_location_rejects_host_with_whitespace() {
+        let result = expand_location("https://${host}/page", "/", None, Some("evil .com"), "https");
+        assert_eq!(
+            result, "https://${host}/page",
+            "host with space should leave placeholder unexpanded"
+        );
+    }
+
+    #[test]
+    fn expand_location_rejects_host_with_newline() {
+        let result = expand_location(
+            "https://${host}/page",
+            "/",
+            None,
+            Some("evil.com\r\nEvil: header"),
+            "https",
+        );
+        assert_eq!(
+            result, "https://${host}/page",
+            "host with CRLF should leave placeholder unexpanded"
+        );
+    }
+
+    #[test]
+    fn expand_location_rejects_host_with_hash() {
+        let result = expand_location("https://${host}/page", "/", None, Some("evil.com#frag"), "https");
+        assert_eq!(
+            result, "https://${host}/page",
+            "host with fragment should leave placeholder unexpanded"
+        );
+    }
+
+    #[test]
+    fn expand_location_rejects_empty_host() {
+        let result = expand_location("https://${host}/page", "/", None, Some(""), "https");
+        assert_eq!(
+            result, "https://${host}/page",
+            "empty host should leave placeholder unexpanded"
+        );
+    }
+
+    #[test]
+    fn expand_location_accepts_ipv4_host() {
+        let result = expand_location("https://${host}/page", "/", None, Some("10.0.0.1"), "https");
+        assert_eq!(result, "https://10.0.0.1/page", "IPv4 address should be accepted");
+    }
+
+    #[test]
+    fn expand_location_accepts_ipv6_host() {
+        let result = expand_location("https://${host}/page", "/", None, Some("[::1]"), "https");
+        assert_eq!(result, "https://[::1]/page", "IPv6 address should be accepted");
+    }
+
+    #[test]
+    fn expand_location_accepts_underscore_host() {
+        let result = expand_location("https://${host}/page", "/", None, Some("my_service.internal"), "https");
+        assert_eq!(
+            result, "https://my_service.internal/page",
+            "underscore in hostname should be accepted"
+        );
+    }
+
+    #[test]
+    fn host_matches_allowlist_exact_match() {
+        let allowed = vec!["example.com".to_owned()];
+        assert!(
+            host_matches_allowlist("example.com", &allowed),
+            "exact match should succeed"
+        );
+    }
+
+    #[test]
+    fn host_matches_allowlist_case_insensitive() {
+        let allowed = vec!["Example.COM".to_owned()];
+        assert!(
+            host_matches_allowlist("example.com", &allowed),
+            "case-insensitive match should succeed"
+        );
+    }
+
+    #[test]
+    fn host_matches_allowlist_wildcard_subdomain() {
+        let allowed = vec!["*.example.com".to_owned()];
+        assert!(
+            host_matches_allowlist("sub.example.com", &allowed),
+            "wildcard should match subdomain"
+        );
+    }
+
+    #[test]
+    fn host_matches_allowlist_wildcard_deep_subdomain() {
+        let allowed = vec!["*.example.com".to_owned()];
+        assert!(
+            host_matches_allowlist("a.b.example.com", &allowed),
+            "wildcard should match deep subdomain"
+        );
+    }
+
+    #[test]
+    fn host_matches_allowlist_wildcard_bare_domain() {
+        let allowed = vec!["*.example.com".to_owned()];
+        assert!(
+            host_matches_allowlist("example.com", &allowed),
+            "wildcard should match bare domain"
+        );
+    }
+
+    #[test]
+    fn host_matches_allowlist_no_match() {
+        let allowed = vec!["example.com".to_owned()];
+        assert!(
+            !host_matches_allowlist("evil.com", &allowed),
+            "non-matching host should be rejected"
+        );
+    }
+
+    #[test]
+    fn host_matches_allowlist_wildcard_no_match() {
+        let allowed = vec!["*.example.com".to_owned()];
+        assert!(
+            !host_matches_allowlist("evil.com", &allowed),
+            "wildcard should not match unrelated domain"
+        );
+    }
+
+    #[test]
+    fn host_matches_allowlist_multiple_entries() {
+        let allowed = vec!["a.com".to_owned(), "b.com".to_owned()];
+        assert!(host_matches_allowlist("b.com", &allowed), "should match second entry");
+        assert!(
+            !host_matches_allowlist("c.com", &allowed),
+            "should reject non-matching host"
+        );
+    }
+
+    #[test]
+    fn host_matches_allowlist_empty_list() {
+        let allowed: Vec<String> = vec![];
+        assert!(
+            !host_matches_allowlist("anything.com", &allowed),
+            "empty allowlist should match nothing"
+        );
+    }
+
+    #[test]
+    fn host_matches_allowlist_wildcard_suffix_attack() {
+        let allowed = vec!["*.example.com".to_owned()];
+        assert!(
+            !host_matches_allowlist("notexample.com", &allowed),
+            "wildcard must match at dot boundary"
+        );
+    }
+
+    #[test]
+    fn validate_allowed_hosts_rejects_empty_entry() {
+        let hosts = vec![String::new()];
+        assert!(
+            validate_allowed_hosts(&hosts).is_err(),
+            "empty entry should be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_allowed_hosts_rejects_bare_wildcard() {
+        let hosts = vec!["*.".to_owned()];
+        assert!(
+            validate_allowed_hosts(&hosts).is_err(),
+            "bare wildcard '*.' should be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_allowed_hosts_accepts_valid_entries() {
+        let hosts = vec!["example.com".to_owned(), "*.example.com".to_owned()];
+        assert!(
+            validate_allowed_hosts(&hosts).is_ok(),
+            "valid entries should be accepted"
+        );
+    }
+
+    #[test]
+    fn from_config_with_allowed_hosts() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            "location: \"https://${host}${path}\"\nallowed_hosts:\n  - example.com\n  - \"*.internal.net\"",
+        )
+        .unwrap();
+        let filter = RedirectFilter::from_config(&yaml).unwrap();
+        assert_eq!(filter.name(), "redirect", "config with allowed_hosts should parse");
+    }
+
+    #[test]
+    fn from_config_rejects_invalid_allowed_hosts() {
+        let yaml =
+            serde_yaml::from_str::<serde_yaml::Value>("location: \"https://${host}${path}\"\nallowed_hosts:\n  - \"\"")
+                .unwrap();
+        assert!(
+            RedirectFilter::from_config(&yaml).is_err(),
+            "empty allowed_hosts entry should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn on_request_allowed_hosts_rejects_unlisted_host() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            "location: \"https://${host}${path}\"\nallowed_hosts:\n  - example.com",
+        )
+        .unwrap();
+        let filter = RedirectFilter::from_config(&yaml).unwrap();
+
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/page");
+        req.headers.insert("host", "evil.com".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        match action {
+            FilterAction::Reject(r) => {
+                assert_eq!(
+                    r.headers[0].1, "https://${host}/page",
+                    "unlisted host should leave placeholder unexpanded"
+                );
+            },
+            _ => panic!("expected Reject"),
+        }
+    }
+
+    #[tokio::test]
+    async fn on_request_allowed_hosts_accepts_listed_host() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            "location: \"https://${host}${path}\"\nallowed_hosts:\n  - example.com",
+        )
+        .unwrap();
+        let filter = RedirectFilter::from_config(&yaml).unwrap();
+
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/page");
+        req.headers.insert("host", "example.com".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        match action {
+            FilterAction::Reject(r) => {
+                assert_eq!(
+                    r.headers[0].1, "https://example.com/page",
+                    "listed host should be substituted"
+                );
+            },
+            _ => panic!("expected Reject"),
+        }
+    }
+
+    #[tokio::test]
+    async fn on_request_allowed_hosts_wildcard_accepts_subdomain() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+            "location: \"https://${host}${path}\"\nallowed_hosts:\n  - \"*.example.com\"",
+        )
+        .unwrap();
+        let filter = RedirectFilter::from_config(&yaml).unwrap();
+
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/page");
+        req.headers.insert("host", "sub.example.com".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        match action {
+            FilterAction::Reject(r) => {
+                assert_eq!(
+                    r.headers[0].1, "https://sub.example.com/page",
+                    "wildcard-matched subdomain should be substituted"
+                );
+            },
+            _ => panic!("expected Reject"),
+        }
+    }
+
+    #[tokio::test]
+    async fn on_request_no_allowed_hosts_permits_any_valid_host() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>(r#"location: "https://${host}${path}""#).unwrap();
+        let filter = RedirectFilter::from_config(&yaml).unwrap();
+
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/page");
+        req.headers.insert("host", "any-host.com".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        match action {
+            FilterAction::Reject(r) => {
+                assert_eq!(
+                    r.headers[0].1, "https://any-host.com/page",
+                    "without allowed_hosts, any valid host should be substituted"
+                );
+            },
+            _ => panic!("expected Reject"),
+        }
+    }
+
+    #[test]
+    fn is_valid_host_rejects_dangerous_characters() {
+        assert!(!is_valid_host_for_redirect(""), "empty");
+        assert!(!is_valid_host_for_redirect("evil/path"), "slash");
+        assert!(!is_valid_host_for_redirect("user@host"), "at sign");
+        assert!(!is_valid_host_for_redirect("host\\path"), "backslash");
+        assert!(!is_valid_host_for_redirect("host name"), "space");
+        assert!(!is_valid_host_for_redirect("host\tname"), "tab");
+        assert!(!is_valid_host_for_redirect("host\nname"), "newline");
+        assert!(!is_valid_host_for_redirect("host\r\nfoo"), "CRLF");
+        assert!(!is_valid_host_for_redirect("host#frag"), "hash");
+        assert!(!is_valid_host_for_redirect("host?query"), "question mark");
+        assert!(!is_valid_host_for_redirect("host<script>"), "angle bracket");
+    }
+
+    #[test]
+    fn is_valid_host_accepts_safe_values() {
+        assert!(is_valid_host_for_redirect("example.com"), "basic domain");
+        assert!(is_valid_host_for_redirect("sub.example.com"), "subdomain");
+        assert!(is_valid_host_for_redirect("my-host.example.com"), "hyphen");
+        assert!(is_valid_host_for_redirect("my_host.internal"), "underscore");
+        assert!(is_valid_host_for_redirect("10.0.0.1"), "IPv4");
+        assert!(is_valid_host_for_redirect("[::1]"), "IPv6 loopback");
+        assert!(is_valid_host_for_redirect("[fe80::1%25eth0]"), "IPv6 zone ID");
+        assert!(is_valid_host_for_redirect("xn--bcher-kva.example"), "punycode IDN");
     }
 
     #[test]

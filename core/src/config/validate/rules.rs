@@ -17,10 +17,29 @@ use super::{
     listener::{validate_listener_names, validate_listeners},
 };
 use crate::{
-    config::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, Config, InsecureOptions, ProtocolKind},
+    config::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, Config, InsecureOptions, ProtocolKind, SkipPipelineChecks},
     connectivity::normalize_mapped_ipv4,
     errors::ProxyError,
 };
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum allowed worker threads per service.
+const MAX_THREADS: usize = 1_024;
+
+/// Maximum allowed `upstream_keepalive_pool_size` (10,000 per worker).
+const MAX_KEEPALIVE_POOL_SIZE: usize = 10_000;
+
+/// Minimum allowed `max_memory_bytes` (1 MiB).
+const MIN_MEMORY_BYTES: usize = 1_048_576; // 1 MiB
+
+/// Maximum allowed `max_memory_bytes` (1 `TiB`).
+const MAX_MEMORY_BYTES: usize = 1_099_511_627_776; // 1 TiB
+
+/// Maximum allowed `shutdown_timeout_secs` (1 hour).
+const MAX_SHUTDOWN_TIMEOUT_SECS: u64 = 3_600;
 
 // -----------------------------------------------------------------------------
 // Config Validation
@@ -66,6 +85,11 @@ impl Config {
         validate_clusters(&self.clusters, &self.insecure_options)?;
         validate_upstream_ca_file(self.runtime.upstream_ca_file.as_deref())?;
         validate_runtime_threads(self.runtime.threads)?;
+        validate_runtime_max_connections(self.runtime.max_connections)?;
+        validate_keepalive_pool_size(self.runtime.upstream_keepalive_pool_size)?;
+        validate_max_memory_bytes(self.runtime.max_memory_bytes)?;
+        validate_global_queue_interval(self.runtime.global_queue_interval)?;
+        validate_shutdown_timeout(self.shutdown_timeout_secs)?;
 
         Ok(())
     }
@@ -77,18 +101,46 @@ impl Config {
 
 /// Emit a warning for each active insecure option flag.
 fn warn_active_insecure_options(opts: &InsecureOptions) {
-    let flags = [
+    for (name, active) in [
         ("allow_open_security_filters", opts.allow_open_security_filters),
         ("allow_private_endpoints", opts.allow_private_endpoints),
         ("allow_private_health_checks", opts.allow_private_health_checks),
+        ("allow_private_upstreams", opts.allow_private_upstreams),
         ("allow_public_admin", opts.allow_public_admin),
         ("allow_root", opts.allow_root),
         ("allow_tls_without_sni", opts.allow_tls_without_sni),
         ("allow_unbounded_body", opts.allow_unbounded_body),
         ("csrf_log_only", opts.csrf_log_only),
         ("skip_pipeline_validation", opts.skip_pipeline_validation),
-    ];
-    for (name, active) in flags {
+    ] {
+        if active {
+            warn!(flag = name, "insecure_options flag is active");
+        }
+    }
+    warn_active_pipeline_checks(&opts.skip_pipeline_checks);
+}
+
+/// Emit a warning for each active granular pipeline check skip flag.
+fn warn_active_pipeline_checks(s: &SkipPipelineChecks) {
+    for (name, active) in [
+        ("skip_pipeline_checks.conditional_security", s.conditional_security),
+        (
+            "skip_pipeline_checks.conflicting_cluster_selectors",
+            s.conflicting_cluster_selectors,
+        ),
+        (
+            "skip_pipeline_checks.duplicate_load_balancers",
+            s.duplicate_load_balancers,
+        ),
+        (
+            "skip_pipeline_checks.duplicate_rewrite_filters",
+            s.duplicate_rewrite_filters,
+        ),
+        ("skip_pipeline_checks.duplicate_routers", s.duplicate_routers),
+        ("skip_pipeline_checks.lb_without_router", s.lb_without_router),
+        ("skip_pipeline_checks.misaligned_clusters", s.misaligned_clusters),
+        ("skip_pipeline_checks.unreachable_filters", s.unreachable_filters),
+    ] {
         if active {
             warn!(flag = name, "insecure_options flag is active");
         }
@@ -235,14 +287,81 @@ fn warn_if_symlink(path: &str) {
 // Runtime Validation
 // -----------------------------------------------------------------------------
 
-/// Maximum allowed worker threads per service.
-const MAX_THREADS: usize = 1_024;
-
 /// Reject unreasonable thread counts.
 fn validate_runtime_threads(threads: usize) -> Result<(), ProxyError> {
     if threads > MAX_THREADS {
         return Err(ProxyError::Config(format!(
             "runtime.threads must be <= {MAX_THREADS}, got {threads}"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject `runtime.max_connections` values that are zero or above the ceiling.
+fn validate_runtime_max_connections(max_connections: Option<u32>) -> Result<(), ProxyError> {
+    let Some(v) = max_connections else {
+        return Ok(());
+    };
+    if v == 0 {
+        return Err(ProxyError::Config("runtime.max_connections must be >= 1".into()));
+    }
+    if v > super::MAX_CONNECTIONS {
+        return Err(ProxyError::Config(format!(
+            "runtime.max_connections ({v}) exceeds maximum ({})",
+            super::MAX_CONNECTIONS,
+        )));
+    }
+    Ok(())
+}
+
+/// Reject `upstream_keepalive_pool_size` above the ceiling.
+fn validate_keepalive_pool_size(pool_size: Option<usize>) -> Result<(), ProxyError> {
+    if let Some(v) = pool_size
+        && v > MAX_KEEPALIVE_POOL_SIZE
+    {
+        return Err(ProxyError::Config(format!(
+            "runtime.upstream_keepalive_pool_size ({v}) exceeds maximum ({MAX_KEEPALIVE_POOL_SIZE})"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject `runtime.max_memory_bytes` outside the allowed range.
+fn validate_max_memory_bytes(max_memory_bytes: Option<usize>) -> Result<(), ProxyError> {
+    let Some(v) = max_memory_bytes else {
+        return Ok(());
+    };
+    if v < MIN_MEMORY_BYTES {
+        return Err(ProxyError::Config(format!(
+            "runtime.max_memory_bytes ({v}) must be >= {MIN_MEMORY_BYTES} (1 MiB)"
+        )));
+    }
+    if v > MAX_MEMORY_BYTES {
+        return Err(ProxyError::Config(format!(
+            "runtime.max_memory_bytes ({v}) exceeds maximum ({MAX_MEMORY_BYTES} / 1 TiB)"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject `runtime.global_queue_interval` of zero.
+fn validate_global_queue_interval(interval: Option<u32>) -> Result<(), ProxyError> {
+    if let Some(0) = interval {
+        return Err(ProxyError::Config(
+            "runtime.global_queue_interval must be > 0".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+/// Reject `shutdown_timeout_secs` of zero or above the ceiling.
+fn validate_shutdown_timeout(secs: u64) -> Result<(), ProxyError> {
+    if secs == 0 {
+        return Err(ProxyError::Config("shutdown_timeout_secs must be > 0".to_owned()));
+    }
+    if secs > MAX_SHUTDOWN_TIMEOUT_SECS {
+        return Err(ProxyError::Config(format!(
+            "shutdown_timeout_secs ({secs}) exceeds maximum ({MAX_SHUTDOWN_TIMEOUT_SECS}s / 1 hour)"
         )));
     }
     Ok(())
@@ -862,5 +981,266 @@ clusters:
             "unique cluster names should be accepted: {:?}",
             config.err()
         );
+    }
+
+    #[test]
+    fn reject_runtime_zero_max_connections() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  max_connections: 0
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("max_connections must be >= 1"),
+            "should reject zero runtime max_connections: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_runtime_max_connections_exceeding_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  max_connections: 1000001
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "should reject runtime max_connections > 1M: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_runtime_max_connections_at_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  max_connections: 1000000
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn reject_keepalive_pool_size_exceeding_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  upstream_keepalive_pool_size: 10001
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "should reject keepalive pool > 10K: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_keepalive_pool_size_at_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  upstream_keepalive_pool_size: 10000
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn reject_max_memory_bytes_below_minimum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  max_memory_bytes: 1000
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("must be >= 1048576"),
+            "should reject max_memory_bytes below 1 MiB: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_max_memory_bytes_at_minimum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  max_memory_bytes: 1048576
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn accept_max_memory_bytes_unset() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let config = Config::from_yaml(yaml).unwrap();
+        assert!(
+            config.runtime.max_memory_bytes.is_none(),
+            "max_memory_bytes should default to None"
+        );
+    }
+
+    #[test]
+    fn reject_global_queue_interval_zero() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  global_queue_interval: 0
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("global_queue_interval must be > 0"),
+            "should reject zero global_queue_interval: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_global_queue_interval_positive() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  global_queue_interval: 1
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn reject_shutdown_timeout_zero() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+shutdown_timeout_secs: 0
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("shutdown_timeout_secs must be > 0"),
+            "should reject zero shutdown timeout: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_shutdown_timeout_exceeding_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+shutdown_timeout_secs: 7200
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "should reject shutdown timeout > 1 hour: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_shutdown_timeout_at_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+shutdown_timeout_secs: 3600
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
     }
 }

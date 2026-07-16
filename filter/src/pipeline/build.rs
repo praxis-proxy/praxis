@@ -5,7 +5,11 @@
 
 use std::{collections::HashMap, mem, sync::Arc};
 
-use praxis_core::{config::FilterEntry, id::IdGenerator, time::SystemTimeSource};
+use praxis_core::{
+    config::{FilterEntry, SkipPipelineChecks},
+    id::IdGenerator,
+    time::SystemTimeSource,
+};
 use tracing::{debug, warn};
 
 use super::{FilterPipeline, body::compute_body_capabilities, filter::PipelineFilter};
@@ -24,7 +28,6 @@ impl FilterPipeline {
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails to instantiate.
-    #[expect(clippy::too_many_lines, reason = "pipeline construction is inherently sequential")]
     pub fn build(entries: &mut [FilterEntry], registry: &FilterRegistry) -> Result<Self, FilterError> {
         let mut filters = Vec::with_capacity(entries.len());
         for (filter_id, entry) in entries.iter_mut().enumerate() {
@@ -46,20 +49,7 @@ impl FilterPipeline {
             pf.name = entry.name.as_ref().map(|n| Arc::from(n.as_str()));
             filters.push(pf);
         }
-        let body_capabilities = compute_body_capabilities(&filters);
-        let compression = extract_compression_config(&filters);
-
-        Ok(Self {
-            body_capabilities,
-            compression,
-            filters,
-            record_filter_duration_metrics: false,
-            health_registry: None,
-            id_generator: Arc::new(IdGenerator::new()),
-            kv_stores: None,
-            pipeline_extensions: Vec::new(),
-            time_source: Arc::new(SystemTimeSource),
-        })
+        Ok(Self::from_filters(filters))
     }
 
     /// Build a pipeline with branch chain resolution.
@@ -86,26 +76,35 @@ impl FilterPipeline {
         chains: &HashMap<&str, &[FilterEntry]>,
     ) -> Result<Self, FilterError> {
         let filters = super::build_branch::resolve_chain_filters(entries, registry, chains, 0)?;
+        Ok(Self::from_filters(filters))
+    }
+
+    /// Create a pipeline from an already-resolved filter list.
+    fn from_filters(filters: Vec<PipelineFilter>) -> Self {
         let body_capabilities = compute_body_capabilities(&filters);
         let compression = extract_compression_config(&filters);
-        Ok(Self {
+        Self {
             body_capabilities,
             compression,
             filters,
-            record_filter_duration_metrics: false,
             health_registry: None,
             id_generator: Arc::new(IdGenerator::new()),
             kv_stores: None,
             pipeline_extensions: Vec::new(),
+            record_filter_duration_metrics: false,
             time_source: Arc::new(SystemTimeSource),
-        })
+        }
     }
 
     /// Validate the pipeline for structural misconfigurations that
     /// would cause runtime failures (502s, unreachable filters,
     /// cluster mismatches).
     ///
+    /// Individual checks can be skipped via [`SkipPipelineChecks`]
+    /// flags. Use [`SkipPipelineChecks::default()`] to run all checks.
+    ///
     /// ```
+    /// use praxis_core::config::SkipPipelineChecks;
     /// use praxis_filter::{FailureMode, FilterEntry, FilterPipeline, FilterRegistry};
     ///
     /// let registry = FilterRegistry::with_builtins();
@@ -119,7 +118,8 @@ impl FilterPipeline {
     ///     failure_mode: FailureMode::default(),
     /// }];
     /// let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
-    /// let errors = pipeline.ordering_errors(&entries, false);
+    /// let no_skip = SkipPipelineChecks::default();
+    /// let errors = pipeline.ordering_errors(&entries, false, &no_skip);
     /// assert!(
     ///     errors
     ///         .iter()
@@ -128,20 +128,43 @@ impl FilterPipeline {
     /// ```
     ///
     /// [`build`]: FilterPipeline::build
-    pub fn ordering_errors(&self, entries: &[FilterEntry], allow_open_security: bool) -> Vec<String> {
+    /// [`SkipPipelineChecks`]: praxis_core::config::SkipPipelineChecks
+    pub fn ordering_errors(
+        &self,
+        entries: &[FilterEntry],
+        allow_open_security: bool,
+        skip: &SkipPipelineChecks,
+    ) -> Vec<String> {
         let names: Vec<&str> = self.filters.iter().map(|pf| pf.filter.name()).collect();
 
         let mut errors = Vec::new();
 
-        super::checks::check_lb_without_cluster_selector(&self.filters, &mut errors);
-        super::checks::check_unconditional_static_response(&names, &self.filters, &mut errors);
-        super::checks::check_conditional_security(&names, &self.filters, &mut errors);
+        if !skip.lb_without_router {
+            super::checks::check_lb_without_cluster_selector(&self.filters, &mut errors);
+        }
+        if !skip.unreachable_filters {
+            super::checks::check_unconditional_static_response(&names, &self.filters, &mut errors);
+        }
+        if !skip.conditional_security {
+            super::checks::check_conditional_security(&names, &self.filters, &mut errors);
+        }
         super::checks::check_open_security_filters(&names, &self.filters, allow_open_security, &mut errors);
-        super::checks::check_duplicate_routers(&names, &mut errors);
-        super::checks::check_duplicate_load_balancers(&names, &mut errors);
-        super::checks::check_conflicting_cluster_selectors(&self.filters, &mut errors);
-        super::checks::check_misaligned_clusters(&self.filters, &mut errors);
-        super::checks::check_duplicate_rewrite_filters(&names, entries, &mut errors);
+        if !skip.duplicate_routers {
+            super::checks::check_duplicate_routers(&names, &mut errors);
+        }
+        if !skip.duplicate_load_balancers {
+            super::checks::check_duplicate_load_balancers(&names, &mut errors);
+        }
+        if !skip.conflicting_cluster_selectors {
+            super::checks::check_conflicting_cluster_selectors(&self.filters, &mut errors);
+        }
+        if !skip.misaligned_clusters {
+            super::checks::check_misaligned_clusters(&self.filters, &mut errors);
+        }
+        if !skip.duplicate_rewrite_filters {
+            super::checks::check_duplicate_rewrite_filters(&names, entries, &mut errors);
+        }
+        super::checks::check_skip_to_bypasses_security(&self.filters, &mut errors);
 
         errors
     }

@@ -306,4 +306,61 @@ clusters:
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("weight 0"), "got: {err}");
     }
+
+    #[test]
+    fn reject_decimal_loopback_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec!["2130706433:80".into()])];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("sensitive address"),
+            "decimal 2130706433 (127.0.0.1) should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_hex_loopback_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec!["0x7f000001:80".into()])];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("sensitive address"),
+            "hex 0x7f000001 (127.0.0.1) should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_octal_dotted_loopback_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec!["0177.0.0.1:80".into()])];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("sensitive address"),
+            "octal 0177.0.0.1 (127.0.0.1) should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_hex_dotted_loopback_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec!["0x7f.0.0.1:80".into()])];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("sensitive address"),
+            "hex dotted 0x7f.0.0.1 (127.0.0.1) should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_decimal_link_local_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec!["2852039166:80".into()])];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("sensitive address"),
+            "decimal 2852039166 (169.254.169.254) should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_decimal_public_ip_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec!["134744072:80".into()])];
+        validate_clusters(&clusters, &InsecureOptions::default())
+            .expect("decimal 134744072 (8.8.8.8) should not be flagged");
+    }
 }

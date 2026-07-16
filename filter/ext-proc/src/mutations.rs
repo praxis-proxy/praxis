@@ -12,18 +12,77 @@
 //! [`HeaderMutation`]: crate::proto::envoy::service::ext_proc::v3::HeaderMutation
 //! [`ImmediateResponse`]: crate::proto::envoy::service::ext_proc::v3::ImmediateResponse
 
-use std::borrow::Cow;
+use std::{borrow::Cow, collections::HashSet};
 
 use bytes::Bytes;
+use praxis_core::reserved_headers;
 use praxis_filter::{FilterAction, HttpFilterContext, Rejection, TrustedHeaderMutation};
 
 use crate::{
-    Phase,
+    config::Phase,
     proto::envoy::service::{
         common::v3::{HeaderValue, HeaderValueOption, header_value_option::HeaderAppendAction},
         ext_proc::v3::{HeaderMap, HeaderMutation, HeadersResponse, HttpHeaders, ImmediateResponse},
     },
 };
+
+// -----------------------------------------------------------------------------
+// ForwardRules
+// -----------------------------------------------------------------------------
+
+/// Compiled header-forwarding rules for the `ext_proc` filter.
+///
+/// Controls which request/response headers are sent to the external
+/// processor. An empty instance (the default) forwards all headers,
+/// preserving backwards compatibility.
+///
+/// When both `allowed` and `disallowed` are set, a header must be in
+/// the allowlist **and** not in the denylist to be forwarded. The
+/// denylist always takes precedence.
+///
+/// Header names are stored in lowercase for case-insensitive matching
+/// against the lowercase names produced by [`http::HeaderName`].
+///
+/// [`http::HeaderName`]: http::header::HeaderName
+#[derive(Debug, Default)]
+pub(crate) struct ForwardRules {
+    /// Only forward headers whose lowercase names are in this set.
+    /// Empty means no allowlist constraint (forward all).
+    allowed: HashSet<String>,
+
+    /// Never forward headers whose lowercase names are in this set.
+    disallowed: HashSet<String>,
+}
+
+impl ForwardRules {
+    /// Compile forward rules from config-provided header name lists.
+    ///
+    /// Lowercases all names at construction time so that runtime
+    /// lookups are simple equality checks.
+    pub(crate) fn new(allowed: Vec<String>, disallowed: Vec<String>) -> Self {
+        Self {
+            allowed: allowed.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
+            disallowed: disallowed.into_iter().map(|s| s.to_ascii_lowercase()).collect(),
+        }
+    }
+
+    /// Returns `true` if the header should be forwarded to the processor.
+    ///
+    /// Pseudo-headers (`:` prefix) are outside the scope of forward
+    /// rules and must be checked by the caller.
+    fn should_forward(&self, name: &str) -> bool {
+        if self.allowed.is_empty() && self.disallowed.is_empty() {
+            return true;
+        }
+        if self.disallowed.contains(name) {
+            return false;
+        }
+        if self.allowed.is_empty() {
+            return true;
+        }
+        self.allowed.contains(name)
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Request → Proto
@@ -32,10 +91,10 @@ use crate::{
 /// Build [`HttpHeaders`] from the current request context.
 ///
 /// Includes `:method`, `:path`, `:scheme`, and `:authority`
-/// pseudo-headers followed by all request headers, matching
-/// the Envoy `ext_proc` convention that external processors
-/// expect.
-pub(crate) fn request_to_proto_headers(ctx: &HttpFilterContext<'_>) -> HttpHeaders {
+/// pseudo-headers followed by request headers that pass the
+/// configured [`ForwardRules`]. Pseudo-headers are always
+/// included regardless of forward rules.
+pub(crate) fn request_to_proto_headers(ctx: &HttpFilterContext<'_>, rules: &ForwardRules) -> HttpHeaders {
     let path = ctx
         .request
         .uri
@@ -54,7 +113,9 @@ pub(crate) fn request_to_proto_headers(ctx: &HttpFilterContext<'_>) -> HttpHeade
     }
 
     for (name, value) in &ctx.request.headers {
-        headers.push(proto_header(name.as_str(), value.to_str().unwrap_or_default()));
+        if rules.should_forward(name.as_str()) {
+            headers.push(proto_header(name.as_str(), value.to_str().unwrap_or_default()));
+        }
     }
 
     HttpHeaders {
@@ -65,17 +126,20 @@ pub(crate) fn request_to_proto_headers(ctx: &HttpFilterContext<'_>) -> HttpHeade
 
 /// Build [`HttpHeaders`] from the upstream response context.
 ///
-/// Includes a `:status` pseudo-header followed by all response
-/// headers. Returns empty headers when `ctx.response_header` is
-/// `None` (should not happen during the response phase).
-pub(crate) fn response_to_proto_headers(ctx: &HttpFilterContext<'_>) -> HttpHeaders {
+/// Includes a `:status` pseudo-header followed by response
+/// headers that pass the configured [`ForwardRules`]. Returns
+/// empty headers when `ctx.response_header` is `None` (should
+/// not happen during the response phase).
+pub(crate) fn response_to_proto_headers(ctx: &HttpFilterContext<'_>, rules: &ForwardRules) -> HttpHeaders {
     let mut headers = Vec::new();
 
     if let Some(resp) = ctx.response_header.as_ref() {
         headers.push(proto_header(":status", &resp.status.as_u16().to_string()));
 
         for (name, value) in &resp.headers {
-            headers.push(proto_header(name.as_str(), value.to_str().unwrap_or_default()));
+            if rules.should_forward(name.as_str()) {
+                headers.push(proto_header(name.as_str(), value.to_str().unwrap_or_default()));
+            }
         }
     }
 
@@ -134,6 +198,10 @@ fn remove_request_headers(names: &[String], ctx: &mut HttpFilterContext<'_>) {
         if is_pseudo_header(name) || is_request_authority(name) {
             continue;
         }
+        if is_reserved_internal_header(name) {
+            tracing::warn!(header = %name, "ext_proc: blocked removal of reserved internal header");
+            continue;
+        }
         if let Ok(header_name) = http::HeaderName::try_from(name.as_str()) {
             ctx.request_headers_to_remove.push(header_name.clone());
             ctx.pre_read_mutations.push(TrustedHeaderMutation::Remove(header_name));
@@ -146,6 +214,10 @@ fn set_request_headers(headers: &[HeaderValueOption], ctx: &mut HttpFilterContex
     for hvo in headers {
         let Some(hv) = &hvo.header else { continue };
         if is_pseudo_header(&hv.key) || is_request_authority(&hv.key) {
+            continue;
+        }
+        if is_reserved_internal_header(&hv.key) {
+            tracing::warn!(header = %hv.key, "ext_proc: blocked set of reserved internal header");
             continue;
         }
         let Ok(name) = http::HeaderName::try_from(hv.key.as_str()) else {
@@ -222,6 +294,10 @@ fn set_response_headers(headers: &[HeaderValueOption], resp: &mut praxis_filter:
         if is_pseudo_header(&hv.key) {
             continue;
         }
+        if is_reserved_internal_header(&hv.key) {
+            tracing::warn!(header = %hv.key, "ext_proc: blocked set of reserved internal header");
+            continue;
+        }
         let Ok(name) = http::HeaderName::try_from(hv.key.as_str()) else {
             continue;
         };
@@ -279,6 +355,10 @@ fn remove_response_headers(names: &[String], resp: &mut praxis_filter::Response)
     let mut modified = false;
     for name in names {
         if is_pseudo_header(name) {
+            continue;
+        }
+        if is_reserved_internal_header(name) {
+            tracing::warn!(header = %name, "ext_proc: blocked removal of reserved internal header");
             continue;
         }
         if let Ok(header_name) = http::HeaderName::try_from(name.as_str())
@@ -349,6 +429,20 @@ pub(crate) fn is_pseudo_header(name: &str) -> bool {
 /// fields on the forwarded request, so request mutations never alter it.
 fn is_request_authority(name: &str) -> bool {
     name.eq_ignore_ascii_case("host")
+}
+
+/// Returns `true` if the header name is a reserved internal Praxis header.
+///
+/// Checks all reserved prefixes (`x-praxis-*`, `x-ext-protocol-*`,
+/// `x-ext-agent-*`) case-insensitively. Proto header keys arrive as
+/// arbitrary strings — `http::HeaderName` lowercases them later — so
+/// the check must be case-insensitive to prevent bypass via mixed-case
+/// keys like `X-Praxis-Route`.
+///
+/// [`RESERVED_HEADER_PREFIXES`]: praxis_core::reserved_headers::RESERVED_HEADER_PREFIXES
+fn is_reserved_internal_header(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    reserved_headers::is_reserved(&lower)
 }
 
 /// Build a [`HeaderValue`] proto with the given key and value.
@@ -558,6 +652,220 @@ mod tests {
             "negative status should fall back to 500"
         );
     }
+
+    // -----------------------------------------------------------------------
+    // is_reserved_internal_header
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn reserved_header_detected() {
+        assert!(
+            is_reserved_internal_header("x-praxis-route"),
+            "x-praxis-route should be reserved"
+        );
+        assert!(
+            is_reserved_internal_header("x-praxis-"),
+            "x-praxis- prefix alone should be reserved"
+        );
+    }
+
+    #[test]
+    fn non_reserved_header_not_blocked() {
+        assert!(
+            !is_reserved_internal_header("x-custom-header"),
+            "x-custom-header should not be reserved"
+        );
+        assert!(
+            !is_reserved_internal_header("authorization"),
+            "authorization should not be reserved"
+        );
+        assert!(
+            !is_reserved_internal_header("x-praxisnodash"),
+            "x-praxisnodash (no trailing dash) should not be reserved"
+        );
+    }
+
+    #[test]
+    fn reserved_header_case_insensitive() {
+        assert!(
+            is_reserved_internal_header("X-Praxis-Route"),
+            "mixed-case X-Praxis-Route should be reserved"
+        );
+        assert!(
+            is_reserved_internal_header("X-PRAXIS-FOO"),
+            "upper-case X-PRAXIS-FOO should be reserved"
+        );
+        assert!(
+            is_reserved_internal_header("x-PRAXIS-bar"),
+            "mixed-case x-PRAXIS-bar should be reserved"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Response mutation denylist
+    // -----------------------------------------------------------------------
+
+    #[test]
+    #[expect(clippy::too_many_lines, reason = "test")]
+    fn set_response_headers_blocks_reserved() {
+        let mut resp = praxis_filter::Response {
+            headers: http::HeaderMap::new(),
+            status: http::StatusCode::OK,
+        };
+        let headers = vec![
+            HeaderValueOption {
+                header: Some(HeaderValue {
+                    key: "x-praxis-route".to_owned(),
+                    value: "evil".to_owned(),
+                    raw_value: Vec::new(),
+                }),
+                append: None,
+                append_action: 0,
+            },
+            HeaderValueOption {
+                header: Some(HeaderValue {
+                    key: "x-safe-header".to_owned(),
+                    value: "ok".to_owned(),
+                    raw_value: Vec::new(),
+                }),
+                append: None,
+                append_action: 0,
+            },
+        ];
+
+        let modified = set_response_headers(&headers, &mut resp);
+
+        assert!(modified, "should report modified for the safe header");
+        assert!(
+            !resp.headers.contains_key("x-praxis-route"),
+            "reserved header should not be set on response"
+        );
+        assert_eq!(
+            resp.headers.get("x-safe-header").map(|v| v.to_str().unwrap()),
+            Some("ok"),
+            "non-reserved header should be set on response"
+        );
+    }
+
+    #[test]
+    fn remove_response_headers_blocks_reserved() {
+        let mut resp = praxis_filter::Response {
+            headers: http::HeaderMap::new(),
+            status: http::StatusCode::OK,
+        };
+        resp.headers.insert(
+            http::HeaderName::from_static("x-praxis-class"),
+            http::HeaderValue::from_static("internal"),
+        );
+        resp.headers.insert(
+            http::HeaderName::from_static("x-removable"),
+            http::HeaderValue::from_static("gone"),
+        );
+
+        let names = vec!["x-praxis-class".to_owned(), "x-removable".to_owned()];
+        let modified = remove_response_headers(&names, &mut resp);
+
+        assert!(modified, "should report modified for the removable header");
+        assert!(
+            resp.headers.contains_key("x-praxis-class"),
+            "reserved header should not be removed from response"
+        );
+        assert!(
+            !resp.headers.contains_key("x-removable"),
+            "non-reserved header should be removed from response"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // ForwardRules
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn forward_rules_empty_forwards_all() {
+        let rules = ForwardRules::default();
+        assert!(
+            rules.should_forward("authorization"),
+            "empty rules should forward all headers"
+        );
+        assert!(rules.should_forward("cookie"), "empty rules should forward cookie");
+        assert!(
+            rules.should_forward("x-custom"),
+            "empty rules should forward custom headers"
+        );
+    }
+
+    #[test]
+    fn forward_rules_allowlist_only() {
+        let rules = ForwardRules::new(vec!["content-type".to_owned(), "accept".to_owned()], Vec::new());
+        assert!(
+            rules.should_forward("content-type"),
+            "allowed header should be forwarded"
+        );
+        assert!(rules.should_forward("accept"), "allowed header should be forwarded");
+        assert!(
+            !rules.should_forward("authorization"),
+            "unlisted header should not be forwarded with allowlist"
+        );
+        assert!(
+            !rules.should_forward("cookie"),
+            "unlisted header should not be forwarded with allowlist"
+        );
+    }
+
+    #[test]
+    fn forward_rules_denylist_only() {
+        let rules = ForwardRules::new(Vec::new(), vec!["authorization".to_owned(), "cookie".to_owned()]);
+        assert!(
+            !rules.should_forward("authorization"),
+            "denied header should not be forwarded"
+        );
+        assert!(!rules.should_forward("cookie"), "denied header should not be forwarded");
+        assert!(
+            rules.should_forward("content-type"),
+            "non-denied header should be forwarded"
+        );
+        assert!(
+            rules.should_forward("x-custom"),
+            "non-denied header should be forwarded"
+        );
+    }
+
+    #[test]
+    fn forward_rules_denylist_overrides_allowlist() {
+        let rules = ForwardRules::new(
+            vec!["authorization".to_owned(), "content-type".to_owned()],
+            vec!["authorization".to_owned()],
+        );
+        assert!(
+            !rules.should_forward("authorization"),
+            "denylist should override allowlist"
+        );
+        assert!(
+            rules.should_forward("content-type"),
+            "allowed and not denied should be forwarded"
+        );
+        assert!(
+            !rules.should_forward("cookie"),
+            "not in allowlist should not be forwarded"
+        );
+    }
+
+    #[test]
+    fn forward_rules_case_insensitive_construction() {
+        let rules = ForwardRules::new(vec!["Content-Type".to_owned()], vec!["Authorization".to_owned()]);
+        assert!(
+            rules.should_forward("content-type"),
+            "lowercase lookup should match mixed-case config"
+        );
+        assert!(
+            !rules.should_forward("authorization"),
+            "lowercase lookup should match mixed-case deny config"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // immediate_to_rejection
+    // -----------------------------------------------------------------------
 
     #[test]
     fn immediate_to_rejection_with_body() {

@@ -101,12 +101,21 @@ fn validate_single_listener(listener: &mut Listener) -> Result<(), ProxyError> {
     Ok(())
 }
 
-/// Validate `max_connections` is at least 1 when set.
+/// Validate `max_connections` is at least 1 and within the allowed ceiling.
 fn validate_max_connections(listener: &Listener) -> Result<(), ProxyError> {
-    if listener.max_connections == Some(0) {
+    let Some(v) = listener.max_connections else {
+        return Ok(());
+    };
+    let name = &listener.name;
+    if v == 0 {
         return Err(ProxyError::Config(format!(
             "listener '{name}': max_connections must be >= 1",
-            name = listener.name,
+        )));
+    }
+    if v > crate::config::validate::MAX_CONNECTIONS {
+        return Err(ProxyError::Config(format!(
+            "listener '{name}': max_connections ({v}) exceeds maximum ({})",
+            crate::config::validate::MAX_CONNECTIONS,
         )));
     }
     Ok(())
@@ -412,5 +421,59 @@ filter_chains:
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("path traversal"), "got: {err}");
+    }
+
+    #[test]
+    fn accept_listener_without_tls() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn reject_listener_max_connections_exceeding_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    max_connections: 1000001
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "should reject max_connections > 1M: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_listener_max_connections_at_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    max_connections: 1000000
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
     }
 }

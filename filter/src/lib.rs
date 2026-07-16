@@ -41,7 +41,7 @@ pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
 pub use pipeline::{FilterPipeline, PipelineExtension};
 pub use praxis_core::config::{FailureMode, FilterEntry};
 pub use praxis_tls::TlsPeerIdentity;
-pub use registry::FilterRegistry;
+pub use registry::{FilterRegistry, SecurityClass};
 pub use results::FilterResultSet;
 pub use tcp_filter::{TcpFilter, TcpFilterContext};
 
@@ -169,11 +169,6 @@ mod macro_tests {
 
     use crate::{FilterAction, FilterError, HttpFilter, HttpFilterContext, TcpFilter};
 
-    register_filters! {
-        http "dummy_http" => DummyHttpFilter::from_config,
-        tcp  "dummy_tcp"  => DummyTcpFilter::from_config,
-    }
-
     #[test]
     fn macro_registers_http_filter() {
         let registry = custom_registry();
@@ -252,15 +247,6 @@ mod macro_tests {
     // export_filters! tests
     // -------------------------------------------------------------------------
 
-    mod export_test {
-        use super::*;
-
-        export_filters! {
-            http "exported_http" => DummyHttpFilter::from_config,
-            tcp  "exported_tcp"  => DummyTcpFilter::from_config,
-        }
-    }
-
     #[test]
     fn export_filters_registers_http() {
         let mut registry = crate::FilterRegistry::with_builtins();
@@ -321,9 +307,23 @@ mod macro_tests {
         collision::register_filters(&mut registry);
     }
 
-    // -----------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
     // Test Utilities
-    // -----------------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+
+    register_filters! {
+        http "dummy_http" => DummyHttpFilter::from_config,
+        tcp  "dummy_tcp"  => DummyTcpFilter::from_config,
+    }
+
+    mod export_test {
+        use super::*;
+
+        export_filters! {
+            http "exported_http" => DummyHttpFilter::from_config,
+            tcp  "exported_tcp"  => DummyTcpFilter::from_config,
+        }
+    }
 
     /// Dummy HTTP filter for macro testing.
     struct DummyHttpFilter;

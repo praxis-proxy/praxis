@@ -61,7 +61,7 @@ impl RateLimitFilter {
     /// Scans up to [`EVICTION_SCAN_LIMIT`] entries and removes any whose
     /// `last_refill` is older than `2 * burst / rate` seconds, meaning
     /// the bucket would be fully refilled and idle.
-    #[expect(clippy::too_many_lines, reason = "atomic CAS loop")]
+    #[expect(clippy::too_many_lines, reason = "atomic CAS loop with retain callback")]
     pub(super) fn maybe_evict(&self, map: &DashMap<IpAddr, TokenBucket>, now_nanos: u64) {
         if map.len() <= MAX_PER_IP_ENTRIES {
             return;

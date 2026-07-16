@@ -9,7 +9,7 @@ use pingora_core::Result;
 use pingora_proxy::Session;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 use praxis_filter::{BodyMode, FilterAction, FilterError, FilterPipeline, Rejection, Request, TrustedHeaderMutation};
-use tracing::warn;
+use tracing::{error, warn};
 
 use super::super::{
     context::PingoraRequestCtx,
@@ -120,7 +120,7 @@ pub(in crate::http) async fn execute(
                 return Ok(true);
             },
             Err(PreReadError::Filter(e)) => {
-                warn!(error = %e, "body filter error during pre-read");
+                error!(error = %e, "body filter error during pre-read");
                 send_rejection(session, Rejection::status(500)).await;
                 return Ok(true);
             },
@@ -155,7 +155,7 @@ pub(in crate::http) async fn execute(
             Ok(true)
         },
         Err(e) => {
-            warn!(error = %e, "filter pipeline error");
+            error!(error = %e, "filter pipeline error");
             send_rejection(session, Rejection::status(500)).await;
             Ok(true)
         },

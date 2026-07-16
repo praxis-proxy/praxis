@@ -6,10 +6,7 @@
 //! credentials, scan for PII, emit audit records, and optionally
 //! rewrite request/response bodies.
 
-use std::sync::{
-    Arc,
-    atomic::{AtomicU8, Ordering},
-};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -40,16 +37,6 @@ use crate::{
 // -----------------------------------------------------------------------------
 // PolicyFilter
 // -----------------------------------------------------------------------------
-
-// State of the one-shot tokio runtime-flavor check performed on the
-// first request. See `PolicyFilter::on_request` for the rationale.
-
-/// Initial state — no request has been served yet.
-const RUNTIME_UNCHECKED: u8 = 0;
-/// First request saw a multi-thread runtime; subsequent requests skip the check.
-const RUNTIME_OK: u8 = 1;
-/// First request saw a current-thread runtime; all requests reject.
-const RUNTIME_REJECTED: u8 = 2;
 
 /// Embeds the CPEX policy engine in-process to enforce multi-source JWT
 /// identity, APL route policy, RFC 8693 token exchange, PII
@@ -97,17 +84,10 @@ pub struct PolicyFilter {
     /// counterparts can branch on `body_access` per request.
     cfg: PolicyFilterConfig,
     /// CPEX plugin manager — owns the loaded plugin instances and
-    /// dispatches hook chains. Wrapped in `Arc` so the post-phase
-    /// `block_in_place` closure can hold its own handle without
+    /// dispatches hook chains. Wrapped in `Arc` so the response-phase
+    /// `spawn_blocking` closure can hold its own handle without
     /// borrowing `&self`.
     mgr: Arc<PluginManager>,
-    /// One-shot runtime-flavor check. `on_response_body` drives async
-    /// work via `block_in_place`, which panics on a current-thread
-    /// runtime (praxis `work_stealing: false`). We can't query the
-    /// flavor from `new()` (no runtime attached yet), so we check on
-    /// the first request and cache the result. A fuller fix would
-    /// require `on_response_body` to be async upstream in praxis.
-    runtime_check: AtomicU8,
 }
 
 impl PolicyFilter {
@@ -184,11 +164,7 @@ impl PolicyFilter {
         })?;
         init.map_err(|s: String| -> FilterError { s.into() })?;
 
-        Ok(Self {
-            cfg,
-            mgr,
-            runtime_check: AtomicU8::new(RUNTIME_UNCHECKED),
-        })
+        Ok(Self { cfg, mgr })
     }
 
     /// Praxis-side factory hook, wired via `register_http` in
@@ -352,25 +328,6 @@ impl HttpFilter for PolicyFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        // One-shot runtime-flavor check. `on_response_body` uses
-        // `block_in_place` to drive async work from a sync trait
-        // method, and that primitive panics on a current-thread
-        // tokio runtime (praxis `work_stealing: false`). Rather than
-        // crash mid-response, refuse to operate up front. After the
-        // first request this collapses to a single atomic load.
-        match self.runtime_check.load(Ordering::Acquire) {
-            RUNTIME_UNCHECKED => {
-                let flavor = tokio::runtime::Handle::current().runtime_flavor();
-                if matches!(flavor, tokio::runtime::RuntimeFlavor::CurrentThread) {
-                    self.runtime_check.store(RUNTIME_REJECTED, Ordering::Release);
-                    return Err(current_thread_runtime_error());
-                }
-                self.runtime_check.store(RUNTIME_OK, Ordering::Release);
-            },
-            RUNTIME_REJECTED => return Err(current_thread_runtime_error()),
-            _ => {}, // RUNTIME_OK — fall through.
-        }
-
         // Early identity gate. Saves the per-request body-buffer cost
         // on un-auth'd traffic — if there's no valid token, we never
         // reach `on_request_body` and the body never gets buffered.
@@ -420,7 +377,7 @@ impl HttpFilter for PolicyFilter {
         // `require_protocol_metadata: false`.
         let Some(method) = ctx.get_metadata("protocol.method").map(str::to_owned) else {
             if self.cfg.require_protocol_metadata {
-                tracing::warn!(
+                tracing::error!(
                     target: "policy.filter",
                     "no protocol.method in metadata — likely the protocol classifier filter (praxis-ai) \
                      is missing or ordered after `policy` in the chain; rejecting \
@@ -474,13 +431,24 @@ impl HttpFilter for PolicyFilter {
         // Dispatch the CMF hook. The route annotation (installed by
         // the APL visitor at config-load time) drives policy
         // evaluation; if no APL route matches, the hook is a no-op.
+        //
+        // Policy evaluation (APL predicates, Cedar/CEL PDP queries, PII
+        // scanning) can be CPU-intensive for complex rule sets or large
+        // input data. Offload to the blocking thread pool so the async
+        // runtime stays responsive to other concurrent requests.
         let payload = MessagePayload {
             message: Message::with_content(Role::User, content),
         };
-        let (cmf_result, _bg) = self
-            .mgr
-            .invoke_named::<CmfHook>(hook_name, payload, extensions, None)
-            .await;
+        let mgr = Arc::clone(&self.mgr);
+        let handle = tokio::runtime::Handle::current();
+        let cmf_result = tokio::task::spawn_blocking(move || {
+            handle.block_on(async {
+                let (r, _bg) = mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None).await;
+                r
+            })
+        })
+        .await
+        .map_err(|e| -> FilterError { format!("policy: CMF request-phase hook task failed: {e}").into() })?;
 
         if !cmf_result.continue_processing {
             let request_id = json_rpc_id_value(&body_bytes);
@@ -588,9 +556,9 @@ impl HttpFilter for PolicyFilter {
         // Rebuild `Extensions` from the identity resolved in the request
         // phase (stashed in `ctx.extensions`), rather than re-running the
         // identity hook here. This is a pure, synchronous field-mapping —
-        // no `block_in_place`, no token re-validation — so a token that
-        // expired between the request and this (already-served) response
-        // can't produce a false deny on a request that was authorized.
+        // no token re-validation — so a token that expired between the
+        // request and this (already-served) response can't produce a
+        // false deny on a request that was authorized.
         let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() else {
             // Fail closed: a response we can no longer attribute to a
             // request-phase identity must be denied rather than passed
@@ -598,7 +566,7 @@ impl HttpFilter for PolicyFilter {
             // redaction and leak the upstream payload. We can't change
             // the already-sent status/headers, but we can replace the
             // body with a deny envelope fitted to the committed length.
-            tracing::warn!(
+            tracing::error!(
                 target: "policy.filter",
                 method = %method,
                 entity = %entity_name,
@@ -630,12 +598,18 @@ impl HttpFilter for PolicyFilter {
             message: Message::with_content(Role::Assistant, content),
         };
         let mgr = Arc::clone(&self.mgr);
-        let cmf_result = tokio::task::block_in_place(|| {
-            tokio::runtime::Handle::current().block_on(async {
+        let handle = tokio::runtime::Handle::current();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tokio::task::spawn_blocking(move || {
+            let result = handle.block_on(async move {
                 let (r, _bg) = mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None).await;
                 r
-            })
+            });
+            drop(tx.send(result));
         });
+        let cmf_result = rx.recv().map_err(|_recv| -> FilterError {
+            "policy: response-phase CMF dispatch failed (spawn_blocking channel closed)".into()
+        })?;
 
         // Post-phase deny — the upstream's response carries something
         // the operator wants suppressed (output PII, late policy
@@ -712,21 +686,6 @@ impl HttpFilter for PolicyFilter {
         }
         Ok(FilterAction::Continue)
     }
-}
-
-// -----------------------------------------------------------------------------
-// runtime-flavor error
-// -----------------------------------------------------------------------------
-
-/// Error returned from `on_request` when the filter has been mounted
-/// into a current-thread tokio runtime. Hoisted into a helper so the
-/// first-request and cached-rejection branches return identical text.
-fn current_thread_runtime_error() -> FilterError {
-    "policy filter requires a multi-threaded tokio runtime \
-     (server config `work_stealing: true`); current-thread runtime \
-     is unsupported because response-phase body transformation \
-     requires `block_in_place`"
-        .into()
 }
 
 /// Fit a freshly-built body to the original `Content-Length`, always

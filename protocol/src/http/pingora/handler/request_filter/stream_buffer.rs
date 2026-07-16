@@ -14,6 +14,10 @@ use tracing::{debug, warn};
 
 use crate::http::pingora::context::PingoraRequestCtx;
 
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
 /// Headers allowed in TRACE echo responses.
 ///
 /// Only headers known to be non-sensitive are echoed. All others
