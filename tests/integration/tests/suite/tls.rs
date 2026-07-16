@@ -142,6 +142,9 @@ fn tcp_listener_tls_end_to_end() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_private_upstreams: true
+
 listeners:
   - name: secure-tcp
     address: "127.0.0.1:{proxy_port}"
@@ -228,6 +231,8 @@ fn upstream_tls_origination_end_to_end() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: plain
     address: "127.0.0.1:{proxy_port}"
@@ -271,6 +276,8 @@ fn both_side_tls_end_to_end() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: secure
     address: "127.0.0.1:{proxy_port}"
@@ -492,6 +499,8 @@ fn upstream_mtls_proxy_presents_client_cert() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: plain
     address: "127.0.0.1:{proxy_port}"
@@ -538,6 +547,8 @@ fn upstream_tls_verify_disabled_with_self_signed() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: plain
     address: "127.0.0.1:{proxy_port}"
@@ -624,6 +635,8 @@ fn sni_derived_from_hostname_address() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: plain
     address: "127.0.0.1:{proxy_port}"
@@ -666,6 +679,8 @@ fn sni_ip_address_leaves_sni_empty() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: plain
     address: "127.0.0.1:{proxy_port}"
@@ -710,6 +725,9 @@ fn tcp_listener_mtls_require_valid_client_cert_succeeds() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_private_upstreams: true
+
 listeners:
   - name: secure-tcp
     address: "127.0.0.1:{proxy_port}"
@@ -1025,6 +1043,8 @@ fn upstream_mtls_missing_client_cert_returns_502() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: plain
     address: "127.0.0.1:{proxy_port}"
@@ -1329,6 +1349,8 @@ fn full_mtls_listener_and_upstream_end_to_end() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_tls_no_verify: true
 listeners:
   - name: secure
     address: "127.0.0.1:{proxy_port}"
@@ -2650,4 +2672,177 @@ impl rustls::client::danger::ServerCertVerifier for NoHostnameVerifier {
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         self.0.supported_verify_schemes()
     }
+}
+// peer_identity_trust integration tests
+// -----------------------------------------------------------------------------
+
+/// Verify that a client cert with a matching org is allowed through.
+#[test]
+fn peer_identity_trust_allows_matching_org() {
+    let certs = TestCertificates::generate();
+    let client_cert = certs.generate_client_cert_with_org("trusted-org");
+    let client_config = certs.client_config_with_cert(&client_cert);
+
+    let backend_port_guard = start_backend_with_shutdown("trust-allowed");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: secure
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: "{cert}"
+          key_path: "{key}"
+      client_ca:
+        ca_path: "{ca}"
+      client_cert_mode: require
+filter_chains:
+  - name: main
+    filters:
+      - filter: peer_identity_trust
+        trusted_peers:
+          - organization: trusted-org
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#,
+        cert = certs.cert_path.display(),
+        key = certs.key_path.display(),
+        ca = certs.ca_cert_path.display(),
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_tls_proxy_no_wait(&config);
+    wait_for_https(proxy.addr(), &client_config);
+
+    let (status, body) = https_get(proxy.addr(), "/", &client_config);
+    assert_eq!(
+        status, 200,
+        "peer_identity_trust must allow cert with matching org (got {status}, body: {body})"
+    );
+    assert_eq!(body, "trust-allowed", "backend should be reached");
+}
+
+/// Verify that a cert signed by the same CA but with a non-matching org is rejected.
+#[test]
+fn peer_identity_trust_rejects_wrong_org() {
+    let certs = TestCertificates::generate();
+    let wrong_cert = certs.generate_client_cert_with_org("untrusted-org");
+    let wrong_config = certs.client_config_with_cert(&wrong_cert);
+
+    let backend_port_guard = start_backend_with_shutdown("trust-wrong-org");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: secure
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: "{cert}"
+          key_path: "{key}"
+      client_ca:
+        ca_path: "{ca}"
+      client_cert_mode: require
+filter_chains:
+  - name: main
+    filters:
+      - filter: peer_identity_trust
+        trusted_peers:
+          - organization: trusted-org
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#,
+        cert = certs.cert_path.display(),
+        key = certs.key_path.display(),
+        ca = certs.ca_cert_path.display(),
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_tls_proxy_no_wait(&config);
+    wait_for_https(proxy.addr(), &wrong_config);
+
+    let (status, _body) = https_get(proxy.addr(), "/", &wrong_config);
+    assert_eq!(
+        status, 403,
+        "peer_identity_trust must reject cert with non-matching org (got {status})"
+    );
+}
+
+/// Verify that a connection without a client cert (request mode) is rejected by the filter.
+#[test]
+fn peer_identity_trust_rejects_no_peer_identity() {
+    let certs = TestCertificates::generate();
+    let no_cert_config = certs.client_config();
+
+    let backend_port_guard = start_backend_with_shutdown("trust-no-cert");
+    let backend_port = backend_port_guard.port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: secure
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+    tls:
+      certificates:
+        - cert_path: "{cert}"
+          key_path: "{key}"
+      client_ca:
+        ca_path: "{ca}"
+      client_cert_mode: request
+filter_chains:
+  - name: main
+    filters:
+      - filter: peer_identity_trust
+        trusted_peers:
+          - organization: trusted-org
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+"#,
+        cert = certs.cert_path.display(),
+        key = certs.key_path.display(),
+        ca = certs.ca_cert_path.display(),
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_tls_proxy_no_wait(&config);
+    wait_for_https(proxy.addr(), &no_cert_config);
+
+    let (status, _body) = https_get(proxy.addr(), "/", &no_cert_config);
+    assert_eq!(
+        status, 403,
+        "peer_identity_trust must reject connections with no peer identity (got {status})"
+    );
 }

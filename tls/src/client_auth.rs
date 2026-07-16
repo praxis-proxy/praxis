@@ -3,10 +3,12 @@
 
 //! Client certificate verifier construction for listener mTLS.
 //!
-//! **Limitation**: CRLs are loaded once at startup and are not
-//! automatically reloaded when the CRL file changes on disk.
-//! To pick up newly revoked certificates the proxy must be
-//! restarted or the configuration reloaded.
+//! When the `hot-reload` feature is enabled and a listener uses
+//! [`ReloadableClientVerifier`], CRL and CA files are monitored
+//! for changes and the verifier is atomically rebuilt on disk
+//! modifications.
+//!
+//! [`ReloadableClientVerifier`]: crate::reload::ReloadableClientVerifier
 
 use std::sync::Arc;
 
@@ -26,9 +28,6 @@ use crate::{ClientCertMode, TlsError};
 ///
 /// When `crl_paths` is non-empty, the verifier checks presented client
 /// certificates against the provided CRLs and rejects revoked certificates.
-///
-/// **Note**: CRLs are loaded once and baked into the verifier. There is
-/// no automatic reload when CRL files change on disk.
 ///
 /// # Errors
 ///

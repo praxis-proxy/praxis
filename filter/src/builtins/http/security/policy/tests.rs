@@ -21,10 +21,6 @@ use crate::{
     test_utils::{make_filter_context, make_request},
 };
 
-// -----------------------------------------------------------------------------
-// Fixtures
-// -----------------------------------------------------------------------------
-
 const TEST_SECRET: &str = "praxis-cpex-test-secret-not-for-production-use";
 const TEST_ISSUER: &str = "https://idp.test.local";
 const TEST_AUDIENCE: &str = "test-api";
@@ -738,45 +734,34 @@ async fn multi_source_both_identities_continue() {
     );
 }
 
-/// `block_in_place` (used by the response phase) panics on a
-/// current-thread runtime, so the filter refuses to run there. Pins
-/// the rejection so a future change can't silently re-introduce the
-/// panic path. The default `#[tokio::test]` flavor is current-thread,
-/// which is exactly the runtime praxis configures when
-/// `work_stealing: false`.
+/// The response phase uses `spawn_blocking` + `Handle::block_on` to
+/// drive async work from the sync `on_response_body` trait method.
+/// Unlike the previous `block_in_place` approach, `spawn_blocking`
+/// works on current-thread runtimes too. The default `#[tokio::test]`
+/// flavor is current-thread, which matches praxis `work_stealing: false`.
 #[tokio::test]
-async fn current_thread_runtime_is_rejected() {
-    // Only the entity-route ReadWrite shape reaches `block_in_place`, so that
-    // is the shape refused on a current-thread runtime. Other shapes run fine
-    // (see `current_thread_runtime_allows_pure_l7`).
-    let (_dir, path) = write_cel_policy_config();
-    let cfg = PolicyFilterConfig {
-        config_path: path,
-        body_access: super::config::BodyAccessMode::ReadWrite,
-        require_protocol_metadata: true,
-        init_timeout_secs: 30,
-        max_buffer_bytes: 10_485_760,
-    };
-    let filter = PolicyFilter::new(cfg).expect("filter should construct");
+async fn current_thread_runtime_is_accepted() {
+    let (_dir, path) = write_single_plugin_config();
+    let filter = build_filter(path);
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
 
-    let err = filter
+    let action = filter
         .on_request(&mut ctx)
         .await
-        .expect_err("current-thread runtime must be rejected for the ReadWrite entity shape");
-    let msg = format!("{err}");
+        .expect("current-thread runtime must be accepted");
     assert!(
-        msg.contains("multi-threaded tokio runtime"),
-        "error message should point at the work_stealing config; got: {msg}",
+        matches!(action, FilterAction::Reject(_)),
+        "unauthenticated request should be rejected; got {action:?}",
     );
 }
 
-/// A pure-L7 (`global`-only) policy never calls `block_in_place`, so it must
-/// run on a current-thread runtime rather than being refused up front. Pins
-/// the relaxed guard so a future change can't re-introduce the blanket
-/// rejection for shapes that don't need a multi-threaded runtime.
+/// A pure-L7 (`global`-only) policy authorizes at `on_request` over
+/// `http.*` + identity. Since CMF dispatch is offloaded via
+/// `spawn_blocking`, it runs on the default current-thread `#[tokio::test]`
+/// runtime (which matches praxis `work_stealing: false`) rather than
+/// requiring a multi-threaded runtime.
 #[tokio::test]
 async fn current_thread_runtime_allows_pure_l7() {
     let (_dir, path) = write_l7_global_config();
@@ -785,8 +770,8 @@ async fn current_thread_runtime_allows_pure_l7() {
     let req = make_request(Method::GET, "/");
     let mut ctx = make_filter_context(&req);
 
-    // No runtime rejection: `on_request` returns an Ok authorization verdict,
-    // not the "multi-threaded tokio runtime" FilterError.
+    // `on_request` returns an Ok authorization verdict on a current-thread
+    // runtime — no runtime-flavor rejection.
     let action = filter.on_request(&mut ctx).await;
     assert!(
         action.is_ok(),
@@ -1734,7 +1719,7 @@ async fn on_request_body_continues_on_partial_chunks() {
 /// `Continue` without doing any work — the operator hasn't opted into
 /// response rewriting, and the post-phase deny envelope path is gated
 /// on `read_write`. Pins the early-return that keeps the sync hook
-/// from blocking on `block_in_place` for read-only chains.
+/// from dispatching `spawn_blocking` for read-only chains.
 #[test]
 fn on_response_body_in_read_only_is_a_no_op() {
     let (_dir, path) = write_single_plugin_config();
@@ -1778,7 +1763,7 @@ fn on_response_body_continues_on_partial_chunks() {
 /// token that expires between the request and the already-served
 /// response can never produce a false deny on a request that was
 /// authorized.
-#[tokio::test(flavor = "multi_thread")]
+#[tokio::test]
 #[expect(
     clippy::too_many_lines,
     reason = "linear setup + assertions for the fail-closed response path"
@@ -1932,4 +1917,35 @@ fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
 
     assert_eq!(count, 2, "two distinct headers must both attach");
     assert_eq!(ctx.request_headers_to_set.len(), 2);
+}
+
+// ---------------------------------------------------------------------------
+// spawn_blocking offload
+// ---------------------------------------------------------------------------
+
+/// Concurrent CMF dispatches must not block the async runtime. With the
+/// evaluation offloaded to `spawn_blocking`, multiple requests can
+/// proceed in parallel without starving the worker threads. This test
+/// fires four concurrent policy evaluations on a two-thread runtime;
+/// all must complete without deadlocking or failing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn concurrent_cmf_dispatch_completes_without_blocking() {
+    use std::sync::Arc;
+
+    let (_dir, path) = write_cel_policy_config();
+    let filter = Arc::new(build_filter(path));
+
+    let mut handles = Vec::new();
+    for _ in 0..4 {
+        let f = Arc::clone(&filter);
+        handles.push(tokio::spawn(async move { dispatch_echo_as(&f, "alice").await }));
+    }
+
+    for h in handles {
+        let action = h.await.expect("task should not panic");
+        assert!(
+            matches!(action, FilterAction::BodyDone),
+            "alice satisfies the CEL predicate; expected BodyDone, got {action:?}",
+        );
+    }
 }

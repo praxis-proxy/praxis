@@ -15,6 +15,9 @@
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/protocols/tcp-timeouts.yaml
 
+insecure_options:
+  allow_private_upstreams: true
+
 listeners:
   - name: postgres
     address: "127.0.0.1:5432"

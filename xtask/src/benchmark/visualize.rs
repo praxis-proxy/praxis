@@ -25,6 +25,63 @@ const TOP_MARGIN: i32 = 35;
 /// Bottom margin per panel (for x-axis labels).
 const BOTTOM_MARGIN: i32 = 80;
 
+/// All charts to render.
+#[expect(clippy::cast_precision_loss, reason = "chart values")]
+const CHARTS: &[ChartDef] = &[
+    ChartDef {
+        suffix: "p99-latency",
+        title: "p99 Latency (ms)  \u{2193} lower is better",
+        y_label: "ms",
+        extract: |m| m.latency.p99 * 1000.0,
+    },
+    ChartDef {
+        suffix: "throughput",
+        title: "Throughput (req/s)  \u{2191} higher is better",
+        y_label: "req/s",
+        extract: |m| m.throughput.requests_per_sec,
+    },
+    ChartDef {
+        suffix: "min-latency",
+        title: "Min Latency (ms)  \u{2193} lower is better",
+        y_label: "ms",
+        extract: |m| m.latency.min * 1000.0,
+    },
+    ChartDef {
+        suffix: "mean-latency",
+        title: "Mean Latency (ms)  \u{2193} lower is better",
+        y_label: "ms",
+        extract: |m| m.latency.mean * 1000.0,
+    },
+    ChartDef {
+        suffix: "max-latency",
+        title: "Max Latency (ms)  \u{2193} lower is better",
+        y_label: "ms",
+        extract: |m| m.latency.max * 1000.0,
+    },
+    ChartDef {
+        suffix: "data-throughput",
+        title: "Data Throughput (MB/s)  \u{2191} higher is better",
+        y_label: "MB/s",
+        extract: |m| m.throughput.bytes_per_sec / 1_000_000.0,
+    },
+    ChartDef {
+        suffix: "cpu-avg",
+        title: "Average CPU Utilization (%)  \u{2193} lower is better",
+        y_label: "%",
+        extract: |m| m.resource.as_ref().map_or(0.0, |r| r.cpu_percent_avg),
+    },
+    ChartDef {
+        suffix: "memory-peak",
+        title: "Peak Memory RSS (MiB)  \u{2193} lower is better",
+        y_label: "MiB",
+        extract: |m| {
+            m.resource
+                .as_ref()
+                .map_or(0.0, |r| r.memory_rss_bytes_peak as f64 / 1_048_576.0)
+        },
+    },
+];
+
 // -----------------------------------------------------------------------------
 // CLI Arguments
 // -----------------------------------------------------------------------------
@@ -121,63 +178,6 @@ struct ChartDef {
     /// Metric extractor.
     extract: fn(&benchmarks::result::BenchmarkResult) -> f64,
 }
-
-/// All charts to render.
-#[expect(clippy::cast_precision_loss, reason = "chart values")]
-const CHARTS: &[ChartDef] = &[
-    ChartDef {
-        suffix: "p99-latency",
-        title: "p99 Latency (ms)  \u{2193} lower is better",
-        y_label: "ms",
-        extract: |m| m.latency.p99 * 1000.0,
-    },
-    ChartDef {
-        suffix: "throughput",
-        title: "Throughput (req/s)  \u{2191} higher is better",
-        y_label: "req/s",
-        extract: |m| m.throughput.requests_per_sec,
-    },
-    ChartDef {
-        suffix: "min-latency",
-        title: "Min Latency (ms)  \u{2193} lower is better",
-        y_label: "ms",
-        extract: |m| m.latency.min * 1000.0,
-    },
-    ChartDef {
-        suffix: "mean-latency",
-        title: "Mean Latency (ms)  \u{2193} lower is better",
-        y_label: "ms",
-        extract: |m| m.latency.mean * 1000.0,
-    },
-    ChartDef {
-        suffix: "max-latency",
-        title: "Max Latency (ms)  \u{2193} lower is better",
-        y_label: "ms",
-        extract: |m| m.latency.max * 1000.0,
-    },
-    ChartDef {
-        suffix: "data-throughput",
-        title: "Data Throughput (MB/s)  \u{2191} higher is better",
-        y_label: "MB/s",
-        extract: |m| m.throughput.bytes_per_sec / 1_000_000.0,
-    },
-    ChartDef {
-        suffix: "cpu-avg",
-        title: "Average CPU Utilization (%)  \u{2193} lower is better",
-        y_label: "%",
-        extract: |m| m.resource.as_ref().map_or(0.0, |r| r.cpu_percent_avg),
-    },
-    ChartDef {
-        suffix: "memory-peak",
-        title: "Peak Memory RSS (MiB)  \u{2193} lower is better",
-        y_label: "MiB",
-        extract: |m| {
-            m.resource
-                .as_ref()
-                .map_or(0.0, |r| r.memory_rss_bytes_peak as f64 / 1_048_576.0)
-        },
-    },
-];
 
 /// Map a proxy name to its chart bar color.
 fn proxy_color(name: &str) -> plotters::style::RGBColor {

@@ -5,7 +5,9 @@
 
 pub(crate) mod pipelines;
 pub(crate) mod reload;
+pub(crate) mod reload_diagnostics;
 mod server;
+pub(crate) mod startup_checks;
 pub(crate) mod watcher;
 pub use pipelines::resolve_pipelines;
 pub use praxis_core::{config::load_config, logging::init_tracing};

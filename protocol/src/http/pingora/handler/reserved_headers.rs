@@ -3,25 +3,14 @@
 
 //! Reserved internal header helpers for proxy-owned routing metadata.
 
-/// Built-in reserved header prefixes for Praxis routing metadata.
-///
-/// Headers with these prefixes are proxy-internal metadata used for
-/// body-derived routing decisions. Clients must not be able to inject
-/// them directly, and they should not be forwarded to upstream backends.
-///
-/// The `x-ext-protocol-*` and `x-ext-agent-*` prefixes are reserved for the AI
-/// extension package (`praxis-ai`). They are stripped here to
-/// prevent clients from spoofing internal AI routing headers even
-/// when the AI filters are not loaded.
-// TODO(#186) Spike: consider additive operator-managed reserved prefixes
-// once the broader config model defines global vs listener/filter-chain
-// scope and additive vs override semantics.
-const RESERVED_HEADER_PREFIXES: &[&str] = &["x-praxis-", "x-ext-protocol-", "x-ext-agent-"];
-
 /// Return whether a header name belongs to Praxis reserved internal metadata.
+///
+/// Delegates to [`praxis_core::reserved_headers::is_reserved`] with
+/// the lowercased name from [`http::HeaderName`].
+///
+/// [`praxis_core::reserved_headers::is_reserved`]: praxis_core::reserved_headers::is_reserved
 pub(in crate::http::pingora::handler) fn is_reserved_internal_header(name: &http::HeaderName) -> bool {
-    let name = name.as_str();
-    RESERVED_HEADER_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+    praxis_core::reserved_headers::is_reserved(name.as_str())
 }
 
 // ---------------------------------------------------------------------------

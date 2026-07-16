@@ -181,6 +181,8 @@ fn tcp_proxy_yaml(proxy_port: u16, backend_port: u16) -> String {
     address: "127.0.0.1:{proxy_port}"
     protocol: tcp
     upstream: "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_upstreams: true
 "#
     )
 }

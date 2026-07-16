@@ -2602,7 +2602,9 @@ mod tests {
         assert_eq!(render_type(&f64_ty, &enums), "number", "floats");
     }
 
+    // -----------------------------------------------------------------------
     // Test Utilities
+    // -----------------------------------------------------------------------
 
     /// Build a sample [`FilterEntry`] for rendering tests.
     fn sample_filter_entry() -> FilterEntry {

@@ -36,6 +36,10 @@ pub(super) enum CircuitState {
 /// negligible at proxy scale.
 #[derive(Debug)]
 pub(super) struct CircuitBreaker {
+    /// How long a Half-Open probe may remain in-flight
+    /// before the circuit resets to Open.
+    half_open_timeout: Duration,
+
     /// Mutex-protected mutable state.
     inner: Mutex<CircuitInner>,
 
@@ -52,6 +56,9 @@ struct CircuitInner {
     /// Consecutive failure count (only meaningful in Closed).
     consecutive_failures: u32,
 
+    /// When the circuit transitioned to Half-Open.
+    half_opened_at: Option<Instant>,
+
     /// When the circuit transitioned to Open.
     opened_at: Option<Instant>,
 
@@ -61,10 +68,12 @@ struct CircuitInner {
 
 impl CircuitBreaker {
     /// Create a new circuit breaker starting in Closed.
-    pub(super) fn new(threshold: u32, recovery_window_secs: u64) -> Self {
+    pub(super) fn new(threshold: u32, recovery_window_secs: u64, half_open_timeout_secs: u64) -> Self {
         Self {
+            half_open_timeout: Duration::from_secs(half_open_timeout_secs),
             inner: Mutex::new(CircuitInner {
                 consecutive_failures: 0,
+                half_opened_at: None,
                 opened_at: None,
                 state: CircuitState::Closed,
             }),
@@ -80,14 +89,11 @@ impl CircuitBreaker {
     /// `HalfOpen` (probe allowed); subsequent callers
     /// still see `Open` until the probe completes.
     ///
-    /// **Oscillation risk:** if the single probe request is
-    /// dropped (e.g. client disconnect) before reaching the
-    /// upstream, no `record_success` or `record_failure` is
-    /// called. The circuit remains in Half-Open, and
-    /// subsequent callers see `Open` until the recovery
-    /// window elapses again. A future enhancement could
-    /// allow a configurable number of concurrent half-open
-    /// probes to reduce sensitivity to dropped requests.
+    /// If the probe request is dropped (e.g. client
+    /// disconnect) before reaching the upstream, the
+    /// `half_open_timeout` ensures the circuit resets to
+    /// Open with a fresh recovery window rather than
+    /// stalling indefinitely.
     ///
     /// # Panics
     ///
@@ -102,12 +108,22 @@ impl CircuitBreaker {
                     && opened_at.elapsed() >= self.recovery_window
                 {
                     inner.state = CircuitState::HalfOpen;
+                    inner.half_opened_at = Some(Instant::now());
                     CircuitState::HalfOpen
                 } else {
                     CircuitState::Open
                 }
             },
-            CircuitState::HalfOpen => CircuitState::Open,
+            CircuitState::HalfOpen => {
+                if let Some(half_opened_at) = inner.half_opened_at
+                    && half_opened_at.elapsed() >= self.half_open_timeout
+                {
+                    inner.state = CircuitState::Open;
+                    inner.opened_at = Some(Instant::now());
+                    inner.half_opened_at = None;
+                }
+                CircuitState::Open
+            },
         }
     }
 
@@ -134,6 +150,7 @@ impl CircuitBreaker {
             CircuitState::HalfOpen => {
                 inner.state = CircuitState::Open;
                 inner.opened_at = Some(Instant::now());
+                inner.half_opened_at = None;
             },
             CircuitState::Open => {},
         }
@@ -158,6 +175,7 @@ impl CircuitBreaker {
             CircuitState::HalfOpen => {
                 inner.state = CircuitState::Closed;
                 inner.consecutive_failures = 0;
+                inner.half_opened_at = None;
                 inner.opened_at = None;
             },
             CircuitState::Open => {},

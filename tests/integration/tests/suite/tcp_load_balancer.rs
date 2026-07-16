@@ -35,6 +35,7 @@ listeners:
 
 insecure_options:
   allow_private_endpoints: true
+  allow_private_upstreams: true
 
 clusters:
   - name: pool
@@ -94,6 +95,7 @@ listeners:
 
 insecure_options:
   allow_private_endpoints: true
+  allow_private_upstreams: true
 
 clusters:
   - name: pool
@@ -175,6 +177,7 @@ listeners:
 
 insecure_options:
   allow_private_endpoints: true
+  allow_private_upstreams: true
 
 clusters:
   - name: pool
@@ -224,6 +227,9 @@ fn tcp_backward_compat_upstream_still_works() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_private_upstreams: true
+
 listeners:
   - name: tcp_legacy
     address: "127.0.0.1:{proxy_port}"
@@ -264,6 +270,7 @@ listeners:
 
 insecure_options:
   allow_private_endpoints: true
+  allow_private_upstreams: true
 
 clusters:
   - name: pool

@@ -23,3 +23,25 @@ pub use redirect::{RedirectFilter, RedirectStatus};
 pub use router::RouterFilter;
 pub use static_response::StaticResponseFilter;
 pub use timeout::TimeoutFilter;
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+/// Strip the port from a `Host` header value, handling bracketed IPv6.
+///
+/// ```ignore
+/// assert_eq!(strip_port("example.com:8080"), "example.com");
+/// assert_eq!(strip_port("[::1]:8080"), "[::1]");
+/// assert_eq!(strip_port("example.com"), "example.com");
+/// ```
+pub(crate) fn strip_port(host: &str) -> &str {
+    if host.starts_with('[') {
+        match host.find(']') {
+            Some(i) => host.get(..=i).unwrap_or(host),
+            None => host,
+        }
+    } else {
+        host.split(':').next().unwrap_or(host)
+    }
+}

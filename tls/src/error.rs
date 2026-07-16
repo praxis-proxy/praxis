@@ -37,6 +37,10 @@ pub enum TlsError {
         path: String,
     },
 
+    /// `build_client_verifier` was called with `ClientCertMode::None`.
+    #[error("build_client_verifier must not be called with client_cert_mode=None")]
+    ClientVerifierNotRequired,
+
     /// A `server_name` appears more than once across certificates.
     #[error("duplicate server_name '{name}' in certificate {path}")]
     DuplicateServerName {
@@ -46,14 +50,6 @@ pub enum TlsError {
         /// The certificate path that introduced the duplicate.
         path: String,
     },
-
-    /// Cannot enable hot-reload with multiple certificates (SNI).
-    #[error("hot_reload requires exactly one certificate; multi-cert SNI configs are not supported")]
-    HotReloadMultipleCerts,
-
-    /// `build_client_verifier` was called with `ClientCertMode::None`.
-    #[error("build_client_verifier must not be called with client_cert_mode=None")]
-    ClientVerifierNotRequired,
 
     /// `cipher_suites` was set to an empty list.
     #[error("cipher_suites must not be empty; omit the field to accept all suites")]
@@ -67,6 +63,17 @@ pub enum TlsError {
 
         /// Underlying error description.
         detail: String,
+    },
+
+    /// Cannot enable hot-reload with multiple certificates (SNI).
+    #[error("hot_reload requires exactly one certificate; multi-cert SNI configs are not supported")]
+    HotReloadMultipleCerts,
+
+    /// The cluster SNI value is not a valid DNS hostname.
+    #[error("sni must be a valid DNS hostname: {value}")]
+    InvalidSni {
+        /// The offending SNI value.
+        value: String,
     },
 
     /// `client_cert_mode` is `request` or `require` but `client_ca` is not set.
@@ -84,14 +91,6 @@ pub enum TlsError {
     #[error("at least one certificate is required in listener TLS config")]
     NoCertificates,
 
-    /// TLS server configuration construction failed (e.g. cert/key
-    /// mismatch, unsupported protocol version).
-    #[error("TLS server config error: {detail}")]
-    ServerConfigError {
-        /// Underlying error description.
-        detail: String,
-    },
-
     /// A TLS path contains `..` (directory traversal).
     #[error("TLS {field} must not contain path traversal (..): {path}")]
     PathTraversal {
@@ -100,6 +99,14 @@ pub enum TlsError {
 
         /// The offending path value.
         path: String,
+    },
+
+    /// TLS server configuration construction failed (e.g. cert/key
+    /// mismatch, unsupported protocol version).
+    #[error("TLS server config error: {detail}")]
+    ServerConfigError {
+        /// Underlying error description.
+        detail: String,
     },
 
     /// `cipher_suites` contains TLS 1.2 suites but `min_version` is `tls13`.
@@ -233,5 +240,21 @@ mod tests {
         let msg = e.to_string();
         assert!(msg.contains("TLS 1.2 suites"), "should mention TLS 1.2 suites: {msg}");
         assert!(msg.contains("tls13"), "should mention tls13: {msg}");
+    }
+
+    #[test]
+    fn error_display_invalid_sni() {
+        let e = TlsError::InvalidSni {
+            value: "not a valid hostname!".to_owned(),
+        };
+        let msg = e.to_string();
+        assert!(
+            msg.contains("sni must be a valid DNS hostname"),
+            "should mention SNI validation: {msg}"
+        );
+        assert!(
+            msg.contains("not a valid hostname!"),
+            "should contain the invalid value: {msg}"
+        );
     }
 }

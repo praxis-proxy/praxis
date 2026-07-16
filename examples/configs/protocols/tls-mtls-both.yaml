@@ -10,6 +10,9 @@
 #   cargo run -p praxis-proxy -- -c examples/configs/protocols/tls-mtls-both.yaml
 #   curl --cert client.pem --key client-key.pem --cacert ca.pem https://localhost:8443/
 
+insecure_options:
+  allow_tls_no_verify: true
+
 listeners:
   - name: secure
     address: "127.0.0.1:8443"

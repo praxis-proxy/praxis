@@ -582,6 +582,60 @@ async fn request_add_non_visible_ascii_existing_falls_back() {
 }
 
 #[tokio::test]
+async fn request_add_preserves_multi_value_headers() {
+    let filter = make_header_filter(
+        r#"request_add:
+  - name: cache-control
+    value: must-revalidate"#,
+    );
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers
+        .insert("cache-control", http::HeaderValue::from_static("no-cache"));
+    req.headers
+        .append("cache-control", http::HeaderValue::from_static("no-store"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "stacking should use request_headers_to_set"
+    );
+    assert_eq!(
+        ctx.request_headers_to_set.len(),
+        1,
+        "should produce exactly one set operation for the combined value"
+    );
+    assert_eq!(
+        ctx.request_headers_to_set[0].1.to_str().unwrap(),
+        "no-cache,no-store,must-revalidate",
+        "all existing values should be preserved and new value appended"
+    );
+}
+
+#[tokio::test]
+async fn request_add_multi_value_with_non_str_falls_back() {
+    let filter = make_header_filter(
+        r#"request_add:
+  - name: x-multi
+    value: appended"#,
+    );
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers.insert("x-multi", http::HeaderValue::from_static("valid"));
+    req.headers
+        .append("x-multi", http::HeaderValue::from_bytes(b"\x80binary").unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    assert!(
+        ctx.request_headers_to_set.is_empty(),
+        "non-str value in multi-value set should prevent stacking"
+    );
+    assert_eq!(
+        ctx.extra_request_headers.len(),
+        1,
+        "should fall back to extra_request_headers"
+    );
+}
+
+#[tokio::test]
 async fn request_add_set_order_preserved_with_stacking() {
     let filter = make_header_filter(
         r#"request_set:
@@ -609,6 +663,174 @@ request_add:
         ctx.request_headers_to_set[1].1.to_str().unwrap(),
         "first,second",
         "stacked add should come second with combined value"
+    );
+}
+
+#[test]
+fn from_config_rejects_hop_by_hop_in_response_add() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+response_add:
+  - name: transfer-encoding
+    value: chunked
+"#,
+    )
+    .unwrap();
+    let err = expect_config_err(&yaml);
+    assert!(
+        err.contains("hop-by-hop header 'transfer-encoding'"),
+        "should reject hop-by-hop header in response_add: {err}"
+    );
+}
+
+#[test]
+fn from_config_rejects_hop_by_hop_in_response_set() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+response_set:
+  - name: connection
+    value: keep-alive
+"#,
+    )
+    .unwrap();
+    let err = expect_config_err(&yaml);
+    assert!(
+        err.contains("hop-by-hop header 'connection'"),
+        "should reject hop-by-hop header in response_set: {err}"
+    );
+}
+
+#[test]
+fn from_config_rejects_all_response_hop_by_hop_headers() {
+    let blocked = [
+        "connection",
+        "keep-alive",
+        "proxy-authenticate",
+        "te",
+        "trailer",
+        "transfer-encoding",
+        "upgrade",
+    ];
+    for header in blocked {
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str(&format!("response_add:\n  - name: {header}\n    value: test\n")).unwrap();
+        assert!(
+            HeaderFilter::from_config(&yaml).is_err(),
+            "should reject hop-by-hop header '{header}' in response_add"
+        );
+    }
+}
+
+#[test]
+fn from_config_allows_hop_by_hop_in_response_remove() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+response_remove:
+  - transfer-encoding
+  - connection
+"#,
+    )
+    .unwrap();
+    assert!(
+        HeaderFilter::from_config(&yaml).is_ok(),
+        "removing hop-by-hop headers from responses should be allowed"
+    );
+}
+
+#[test]
+fn from_config_allows_hop_by_hop_in_request_set() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+request_set:
+  - name: connection
+    value: keep-alive
+"#,
+    )
+    .unwrap();
+    assert!(
+        HeaderFilter::from_config(&yaml).is_ok(),
+        "hop-by-hop headers in request operations should not be blocked"
+    );
+}
+
+#[test]
+fn set_headers_replaces_all_multi_values() {
+    let mut headers = http::HeaderMap::new();
+    headers.append("set-cookie", "a=1".parse().unwrap());
+    headers.append("set-cookie", "b=2".parse().unwrap());
+    headers.append("set-cookie", "c=3".parse().unwrap());
+    assert_eq!(
+        headers.get_all("set-cookie").iter().count(),
+        3,
+        "precondition: three values present"
+    );
+    set_headers(&mut headers, &[hdr_pair("set-cookie", "d=4")]);
+    let values: Vec<&str> = headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert_eq!(
+        values,
+        vec!["d=4"],
+        "set should replace all existing values with a single new value"
+    );
+}
+
+#[test]
+fn remove_headers_removes_all_multi_values() {
+    let mut headers = http::HeaderMap::new();
+    headers.append("set-cookie", "a=1".parse().unwrap());
+    headers.append("set-cookie", "b=2".parse().unwrap());
+    remove_headers(&mut headers, &[hdr_name("set-cookie")]);
+    assert!(
+        !headers.contains_key("set-cookie"),
+        "remove should delete all values for the header"
+    );
+}
+
+#[test]
+fn append_headers_preserves_all_multi_values() {
+    let mut headers = http::HeaderMap::new();
+    headers.append("set-cookie", "a=1".parse().unwrap());
+    headers.append("set-cookie", "b=2".parse().unwrap());
+    append_headers(&mut headers, &[hdr_pair("set-cookie", "c=3")]);
+    let values: Vec<&str> = headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert_eq!(
+        values,
+        vec!["a=1", "b=2", "c=3"],
+        "append should preserve all existing values and add the new one"
+    );
+}
+
+#[tokio::test]
+async fn response_set_replaces_multi_value_header() {
+    let filter = make_header_filter(
+        r#"response_set:
+  - name: set-cookie
+    value: session=new"#,
+    );
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut resp = crate::test_utils::make_response();
+    resp.headers.append("set-cookie", "a=1".parse().unwrap());
+    resp.headers.append("set-cookie", "b=2".parse().unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.response_header = Some(&mut resp);
+    drop(filter.on_response(&mut ctx).await.unwrap());
+    let values: Vec<&str> = resp
+        .headers
+        .get_all("set-cookie")
+        .iter()
+        .map(|v| v.to_str().unwrap())
+        .collect();
+    assert_eq!(
+        values,
+        vec!["session=new"],
+        "response_set should replace all multi-values with a single new value"
     );
 }
 

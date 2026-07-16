@@ -13,43 +13,9 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::Deserialize;
 
-// -----------------------------------------------------------------------------
-// PII Kind
-// -----------------------------------------------------------------------------
-
-/// Categories of personally identifiable information detectable via the
-/// `pii` matcher on a guardrail rule.
-///
-/// ```
-/// use praxis_filter::PiiKind;
-///
-/// let kinds: Vec<PiiKind> = serde_yaml::from_str("[ssn, credit_card, phone, email]").unwrap();
-/// assert_eq!(kinds.len(), 4);
-/// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PiiKind {
-    /// US Social Security Numbers (e.g. `123-45-6789`).
-    Ssn,
-
-    /// Credit / debit card numbers (major network prefixes, common delimiters).
-    CreditCard,
-
-    /// US phone numbers in formatted form (e.g. `(555) 867-5309`).
-    Phone,
-
-    /// Email addresses.
-    Email,
-}
-
-impl PiiKind {
-    /// All built-in PII categories.
-    pub const ALL: &[PiiKind] = &[PiiKind::Ssn, PiiKind::CreditCard, PiiKind::Phone, PiiKind::Email];
-}
-
-// -----------------------------------------------------------------------------
-// Compiled Patterns (lazy, compiled once)
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
 /// Matches US SSNs in the canonical `NNN-NN-NNNN` format.
 #[expect(
@@ -121,6 +87,40 @@ static PHONE_RE: LazyLock<Regex> = LazyLock::new(|| {
 )]
 static EMAIL_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\b[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b").expect("email regex"));
+
+// -----------------------------------------------------------------------------
+// PII Kind
+// -----------------------------------------------------------------------------
+
+/// Categories of personally identifiable information detectable via the
+/// `pii` matcher on a guardrail rule.
+///
+/// ```
+/// use praxis_filter::PiiKind;
+///
+/// let kinds: Vec<PiiKind> = serde_yaml::from_str("[ssn, credit_card, phone, email]").unwrap();
+/// assert_eq!(kinds.len(), 4);
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PiiKind {
+    /// US Social Security Numbers (e.g. `123-45-6789`).
+    Ssn,
+
+    /// Credit / debit card numbers (major network prefixes, common delimiters).
+    CreditCard,
+
+    /// US phone numbers in formatted form (e.g. `(555) 867-5309`).
+    Phone,
+
+    /// Email addresses.
+    Email,
+}
+
+impl PiiKind {
+    /// All built-in PII categories.
+    pub const ALL: &[PiiKind] = &[PiiKind::Ssn, PiiKind::CreditCard, PiiKind::Phone, PiiKind::Email];
+}
 
 // -----------------------------------------------------------------------------
 // Matching

@@ -241,7 +241,27 @@ filter_chains:
 }
 
 #[test]
-fn response_hop_by_hop_headers_stripped() {
+fn response_hop_by_hop_headers_rejected_at_config_time() {
+    let registry = praxis_filter::FilterRegistry::with_builtins();
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+response_add:
+  - name: Keep-Alive
+    value: "timeout=300"
+  - name: Proxy-Authenticate
+    value: "Basic"
+"#,
+    )
+    .unwrap();
+    let result = registry.create("headers", &config);
+    assert!(
+        result.is_err(),
+        "headers filter should reject hop-by-hop headers in response_add"
+    );
+}
+
+#[test]
+fn response_safe_headers_preserved() {
     let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
     let proxy_port = free_port();
@@ -258,10 +278,6 @@ filter_chains:
     filters:
       - filter: headers
         response_add:
-          - name: Keep-Alive
-            value: "timeout=300"
-          - name: Proxy-Authenticate
-            value: "Basic"
           - name: X-Safe-Response
             value: "visible"
       - filter: router

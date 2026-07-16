@@ -12,6 +12,44 @@ use crate::{
 };
 
 // -----------------------------------------------------------------------------
+// SecurityClass
+// -----------------------------------------------------------------------------
+
+/// Classifies whether a filter is security-critical.
+///
+/// Security-class filters enforce access control, authentication, rate
+/// limiting, or other protective policies. This metadata enables future
+/// validation (e.g. preventing `SkipTo` from bypassing security filters).
+///
+/// ```
+/// use praxis_filter::SecurityClass;
+///
+/// assert_eq!(SecurityClass::default(), SecurityClass::Standard);
+/// ```
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SecurityClass {
+    /// A security-critical filter (e.g. `cors`, `csrf`, `ip_acl`).
+    Security,
+
+    /// A non-security filter (default).
+    #[default]
+    Standard,
+}
+
+// -----------------------------------------------------------------------------
+// FilterRegistration
+// -----------------------------------------------------------------------------
+
+/// A filter factory paired with its [`SecurityClass`] metadata.
+struct FilterRegistration {
+    /// The factory function that creates filter instances.
+    factory: FilterFactory,
+
+    /// Whether this filter is security-critical.
+    security_class: SecurityClass,
+}
+
+// -----------------------------------------------------------------------------
 // FilterRegistry
 // -----------------------------------------------------------------------------
 
@@ -28,21 +66,21 @@ use crate::{
 /// assert!(names.contains(&"router"));
 /// ```
 pub struct FilterRegistry {
-    /// Maps filter names to their factory functions.
-    factories: HashMap<String, FilterFactory>,
+    /// Maps filter names to their registrations (factory + metadata).
+    filters: HashMap<String, FilterRegistration>,
 }
 
 impl FilterRegistry {
-    /// Create a registry with only the built-in filters.
+    /// Creates a registry with only the built-in filters.
     #[must_use]
     pub fn with_builtins() -> Self {
-        let mut factories = HashMap::new();
-        register_http_builtins(&mut factories);
-        register_tcp_builtins(&mut factories);
-        Self { factories }
+        let mut filters = HashMap::new();
+        register_http_builtins(&mut filters);
+        register_tcp_builtins(&mut filters);
+        Self { filters }
     }
 
-    /// Register a custom filter factory.
+    /// Registers a custom filter factory with [`SecurityClass::Standard`].
     ///
     /// Returns an error if a filter with the same name is already registered.
     ///
@@ -58,18 +96,50 @@ impl FilterRegistry {
     ///     .unwrap_err();
     /// assert!(err.to_string().contains("duplicate filter name"));
     /// ```
+    ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if the name is already registered.
     pub fn register(&mut self, name: &str, factory: FilterFactory) -> Result<(), FilterError> {
-        if self.factories.contains_key(name) {
+        self.register_with_class(name, factory, SecurityClass::Standard)
+    }
+
+    /// Registers a custom filter factory with an explicit [`SecurityClass`].
+    ///
+    /// ```
+    /// use praxis_filter::{FilterFactory, FilterRegistry, SecurityClass};
+    ///
+    /// let mut registry = FilterRegistry::with_builtins();
+    /// let factory = FilterFactory::Http(std::sync::Arc::new(|_| Err("unused".into())));
+    /// registry
+    ///     .register_with_class("my_auth", factory, SecurityClass::Security)
+    ///     .unwrap();
+    /// assert!(registry.is_security_filter("my_auth"));
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the name is already registered.
+    pub fn register_with_class(
+        &mut self,
+        name: &str,
+        factory: FilterFactory,
+        security_class: SecurityClass,
+    ) -> Result<(), FilterError> {
+        if self.filters.contains_key(name) {
             return Err(format!("duplicate filter name: '{name}'").into());
         }
-        self.factories.insert(name.to_owned(), factory);
+        self.filters.insert(
+            name.to_owned(),
+            FilterRegistration {
+                factory,
+                security_class,
+            },
+        );
         Ok(())
     }
 
-    /// Instantiate a filter by type name and config.
+    /// Instantiates a filter by type name and config.
     ///
     /// ```
     /// use praxis_filter::FilterRegistry;
@@ -84,20 +154,61 @@ impl FilterRegistry {
     ///     .expect("should fail for unknown type");
     /// assert!(err.to_string().contains("unknown filter type"));
     /// ```
+    ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if the filter type is unknown or instantiation fails.
     pub fn create(&self, name: &str, config: &serde_yaml::Value) -> Result<AnyFilter, FilterError> {
-        let factory = self
-            .factories
+        let registration = self
+            .filters
             .get(name)
             .ok_or_else(|| -> FilterError { format!("unknown filter type: '{name}'").into() })?;
-        factory.create(config)
+        registration.factory.create(config)
     }
 
     /// Returns the names of all registered filter types.
     pub fn available_filters(&self) -> Vec<&str> {
-        self.factories.keys().map(String::as_str).collect()
+        self.filters.keys().map(String::as_str).collect()
+    }
+
+    /// Returns `true` if the named filter has [`SecurityClass::Security`].
+    ///
+    /// Returns `false` for unknown filter names.
+    ///
+    /// ```
+    /// use praxis_filter::FilterRegistry;
+    ///
+    /// let registry = FilterRegistry::with_builtins();
+    /// assert!(registry.is_security_filter("cors"));
+    /// assert!(registry.is_security_filter("ip_acl"));
+    /// assert!(!registry.is_security_filter("router"));
+    /// assert!(!registry.is_security_filter("nonexistent"));
+    /// ```
+    pub fn is_security_filter(&self, name: &str) -> bool {
+        self.filters
+            .get(name)
+            .is_some_and(|r| r.security_class == SecurityClass::Security)
+    }
+
+    /// Returns the names of all filters with [`SecurityClass::Security`].
+    ///
+    /// ```
+    /// use praxis_filter::FilterRegistry;
+    ///
+    /// let registry = FilterRegistry::with_builtins();
+    /// let mut sec = registry.security_filters();
+    /// sec.sort();
+    /// assert!(sec.contains(&"cors"));
+    /// assert!(sec.contains(&"csrf"));
+    /// assert!(sec.contains(&"ip_acl"));
+    /// assert!(!sec.contains(&"router"));
+    /// ```
+    pub fn security_filters(&self) -> Vec<&str> {
+        self.filters
+            .iter()
+            .filter(|(_, r)| r.security_class == SecurityClass::Security)
+            .map(|(name, _)| name.as_str())
+            .collect()
     }
 }
 
@@ -105,86 +216,108 @@ impl FilterRegistry {
 // Filter Factory - Registration
 // -----------------------------------------------------------------------------
 
-/// Register all built-in HTTP filter factories.
+/// Registers all built-in HTTP filter factories.
 #[expect(clippy::too_many_lines, reason = "one line per filter, will grow")]
-fn register_http_builtins(factories: &mut HashMap<String, FilterFactory>) {
+fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     use crate::builtins::{
         AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter, CsrfFilter,
         ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter,
-        PathRewriteFilter, RateLimitFilter, RedirectFilter, RequestIdFilter, StaticResponseFilter, TimeoutFilter,
-        UrlRewriteFilter,
+        PathRewriteFilter, PeerIdentityTrustFilter, RateLimitFilter, RedirectFilter, RequestIdFilter,
+        StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
     };
 
-    register_http(factories, "access_log", AccessLogFilter::from_config);
-    register_http(factories, "circuit_breaker", CircuitBreakerFilter::from_config);
-    register_http(factories, "compression", CompressionFilter::from_config);
-    register_http(factories, "cors", CorsFilter::from_config);
+    register_http(filters, "access_log", AccessLogFilter::from_config);
+    register_http(filters, "circuit_breaker", CircuitBreakerFilter::from_config);
+    register_http(filters, "compression", CompressionFilter::from_config);
+    register_http_security(filters, "cors", CorsFilter::from_config);
     #[cfg(feature = "cpex-policy-engine")]
-    register_http(factories, "policy", crate::PolicyFilter::from_config);
-    register_http(factories, "csrf", CsrfFilter::from_config);
+    register_http_security(filters, "policy", crate::PolicyFilter::from_config);
+    register_http_security(filters, "csrf", CsrfFilter::from_config);
+    register_http_security(filters, "credential_injection", CredentialInjectionFilter::from_config);
     register_http(
-        factories,
-        "credential_injection",
-        CredentialInjectionFilter::from_config,
-    );
-    register_http(
-        factories,
+        filters,
         "endpoint_selector",
         crate::builtins::EndpointSelectorFilter::from_config,
     );
-    register_http(factories, "headers", HeaderFilter::from_config);
-    register_http(factories, "forwarded_headers", ForwardedHeadersFilter::from_config);
-    register_http(factories, "grpc_detection", GrpcDetectionFilter::from_config);
-    register_http(factories, "guardrails", crate::GuardrailsFilter::from_config);
-    register_http(factories, "ip_acl", IpAclFilter::from_config);
-    register_http(factories, "load_balancer", crate::LoadBalancerFilter::from_config);
-    register_http(factories, "path_rewrite", PathRewriteFilter::from_config);
-    register_http(factories, "rate_limit", RateLimitFilter::from_config);
-    register_http(factories, "redirect", RedirectFilter::from_config);
-    register_http(factories, "request_id", RequestIdFilter::from_config);
-    register_http(factories, "router", crate::RouterFilter::from_config);
-    register_http(factories, "static_response", StaticResponseFilter::from_config);
-    register_http(factories, "timeout", TimeoutFilter::from_config);
-    register_http(factories, "url_rewrite", UrlRewriteFilter::from_config);
-    register_http(factories, "json_body_field", JsonBodyFieldFilter::from_config);
-    register_http(factories, "json_rpc", JsonRpcFilter::from_config);
+    register_http(filters, "headers", HeaderFilter::from_config);
+    register_http_security(filters, "forwarded_headers", ForwardedHeadersFilter::from_config);
+    register_http(filters, "grpc_detection", GrpcDetectionFilter::from_config);
+    register_http_security(filters, "guardrails", crate::GuardrailsFilter::from_config);
+    register_http_security(filters, "ip_acl", IpAclFilter::from_config);
+    register_http(filters, "load_balancer", crate::LoadBalancerFilter::from_config);
+    register_http(filters, "path_rewrite", PathRewriteFilter::from_config);
+    register_http(filters, "rate_limit", RateLimitFilter::from_config);
+    register_http(filters, "redirect", RedirectFilter::from_config);
+    register_http(filters, "request_id", RequestIdFilter::from_config);
+    register_http(filters, "router", crate::RouterFilter::from_config);
+    register_http(filters, "static_response", StaticResponseFilter::from_config);
+    register_http(filters, "timeout", TimeoutFilter::from_config);
+    register_http(filters, "url_rewrite", UrlRewriteFilter::from_config);
+    register_http(filters, "json_body_field", JsonBodyFieldFilter::from_config);
+    register_http(filters, "json_rpc", JsonRpcFilter::from_config);
+    register_http(filters, "peer_identity_trust", PeerIdentityTrustFilter::from_config);
 }
 
-/// Register a single HTTP filter factory by name.
+/// Registers a single HTTP filter factory with [`SecurityClass::Standard`].
 #[expect(clippy::type_complexity, reason = "complex function pointer")]
 fn register_http(
-    factories: &mut HashMap<String, FilterFactory>,
+    filters: &mut HashMap<String, FilterRegistration>,
     name: &str,
     factory_fn: fn(&serde_yaml::Value) -> Result<Box<dyn crate::filter::HttpFilter>, FilterError>,
 ) {
-    let prev = factories.insert(name.to_owned(), http_builtin(factory_fn));
-    debug_assert!(prev.is_none(), "duplicate built-in HTTP filter name: '{name}'");
+    insert_registration(filters, name, http_builtin(factory_fn), SecurityClass::Standard);
 }
 
-/// Register all built-in TCP filter factories.
-fn register_tcp_builtins(factories: &mut HashMap<String, FilterFactory>) {
-    register_tcp(factories, "sni_router", crate::builtins::SniRouterFilter::from_config);
+/// Registers a single HTTP filter factory with [`SecurityClass::Security`].
+#[expect(clippy::type_complexity, reason = "complex function pointer")]
+fn register_http_security(
+    filters: &mut HashMap<String, FilterRegistration>,
+    name: &str,
+    factory_fn: fn(&serde_yaml::Value) -> Result<Box<dyn crate::filter::HttpFilter>, FilterError>,
+) {
+    insert_registration(filters, name, http_builtin(factory_fn), SecurityClass::Security);
+}
+
+/// Registers all built-in TCP filter factories.
+fn register_tcp_builtins(filters: &mut HashMap<String, FilterRegistration>) {
+    register_tcp(filters, "sni_router", crate::builtins::SniRouterFilter::from_config);
     register_tcp(
-        factories,
+        filters,
         "tcp_access_log",
         crate::builtins::TcpAccessLogFilter::from_config,
     );
     register_tcp(
-        factories,
+        filters,
         "tcp_load_balancer",
         crate::builtins::TcpLoadBalancerFilter::from_config,
     );
 }
 
-/// Register a single TCP filter factory by name.
+/// Registers a single TCP filter factory with [`SecurityClass::Standard`].
 #[expect(clippy::type_complexity, reason = "complex function pointer")]
 fn register_tcp(
-    factories: &mut HashMap<String, FilterFactory>,
+    filters: &mut HashMap<String, FilterRegistration>,
     name: &str,
     factory_fn: fn(&serde_yaml::Value) -> Result<Box<dyn crate::tcp_filter::TcpFilter>, FilterError>,
 ) {
-    let prev = factories.insert(name.to_owned(), tcp_builtin(factory_fn));
-    debug_assert!(prev.is_none(), "duplicate built-in TCP filter name: '{name}'");
+    insert_registration(filters, name, tcp_builtin(factory_fn), SecurityClass::Standard);
+}
+
+/// Inserts a [`FilterRegistration`] into the map, asserting no duplicates.
+fn insert_registration(
+    filters: &mut HashMap<String, FilterRegistration>,
+    name: &str,
+    factory: FilterFactory,
+    security_class: SecurityClass,
+) {
+    let prev = filters.insert(
+        name.to_owned(),
+        FilterRegistration {
+            factory,
+            security_class,
+        },
+    );
+    debug_assert!(prev.is_none(), "duplicate built-in filter name: '{name}'");
 }
 
 // -----------------------------------------------------------------------------
@@ -310,6 +443,140 @@ mod tests {
         assert!(
             err.to_string().contains("duplicate filter name: 'my_filter'"),
             "error should name the duplicate: {err}"
+        );
+    }
+
+    #[test]
+    fn security_class_default_is_standard() {
+        assert_eq!(
+            SecurityClass::default(),
+            SecurityClass::Standard,
+            "default SecurityClass should be Standard"
+        );
+    }
+
+    #[test]
+    fn builtin_security_filters_classified() {
+        let registry = FilterRegistry::with_builtins();
+        let expected_security = [
+            "cors",
+            "credential_injection",
+            "csrf",
+            "forwarded_headers",
+            "guardrails",
+            "ip_acl",
+        ];
+
+        for name in &expected_security {
+            assert!(
+                registry.is_security_filter(name),
+                "{name} should be classified as Security"
+            );
+        }
+    }
+
+    #[test]
+    fn builtin_standard_filters_not_classified_as_security() {
+        let registry = FilterRegistry::with_builtins();
+        let expected_standard = [
+            "access_log",
+            "circuit_breaker",
+            "compression",
+            "headers",
+            "load_balancer",
+            "router",
+            "timeout",
+        ];
+
+        for name in &expected_standard {
+            assert!(
+                !registry.is_security_filter(name),
+                "{name} should be classified as Standard"
+            );
+        }
+    }
+
+    #[test]
+    fn is_security_filter_returns_false_for_unknown() {
+        let registry = FilterRegistry::with_builtins();
+        assert!(
+            !registry.is_security_filter("nonexistent"),
+            "unknown filter should not be classified as Security"
+        );
+    }
+
+    #[test]
+    fn security_filters_returns_all_security_names() {
+        let registry = FilterRegistry::with_builtins();
+        let mut sec = registry.security_filters();
+        sec.sort();
+
+        assert!(sec.contains(&"cors"), "cors should be in security_filters");
+        assert!(
+            sec.contains(&"credential_injection"),
+            "credential_injection should be in security_filters"
+        );
+        assert!(sec.contains(&"csrf"), "csrf should be in security_filters");
+        assert!(
+            sec.contains(&"forwarded_headers"),
+            "forwarded_headers should be in security_filters"
+        );
+        assert!(sec.contains(&"guardrails"), "guardrails should be in security_filters");
+        assert!(sec.contains(&"ip_acl"), "ip_acl should be in security_filters");
+        assert!(!sec.contains(&"router"), "router should not be in security_filters");
+    }
+
+    #[test]
+    fn register_with_class_security() {
+        let mut registry = FilterRegistry::with_builtins();
+        let factory = FilterFactory::Http(std::sync::Arc::new(|_| Err("unused".into())));
+        registry
+            .register_with_class("my_auth", factory, SecurityClass::Security)
+            .unwrap();
+        assert!(
+            registry.is_security_filter("my_auth"),
+            "custom filter registered with Security class should be security"
+        );
+        assert!(
+            registry.security_filters().contains(&"my_auth"),
+            "custom Security filter should appear in security_filters()"
+        );
+    }
+
+    #[test]
+    fn register_with_class_standard() {
+        let mut registry = FilterRegistry::with_builtins();
+        let factory = FilterFactory::Http(std::sync::Arc::new(|_| Err("unused".into())));
+        registry
+            .register_with_class("my_logger", factory, SecurityClass::Standard)
+            .unwrap();
+        assert!(
+            !registry.is_security_filter("my_logger"),
+            "custom filter registered with Standard class should not be security"
+        );
+    }
+
+    #[test]
+    fn register_defaults_to_standard() {
+        let mut registry = FilterRegistry::with_builtins();
+        let factory = FilterFactory::Http(std::sync::Arc::new(|_| Err("unused".into())));
+        registry.register("my_custom", factory).unwrap();
+        assert!(
+            !registry.is_security_filter("my_custom"),
+            "register() should default to Standard security class"
+        );
+    }
+
+    #[test]
+    fn register_with_class_duplicate_errors() {
+        let mut registry = FilterRegistry::with_builtins();
+        let factory = FilterFactory::Http(std::sync::Arc::new(|_| Err("unused".into())));
+        let err = registry
+            .register_with_class("router", factory, SecurityClass::Security)
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("duplicate filter name: 'router'"),
+            "register_with_class should reject duplicates: {err}"
         );
     }
 }

@@ -261,6 +261,10 @@ mod tests {
         );
     }
 
+    // -----------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------
+
     fn test_route_with_alias(pattern: &str, target: Option<&str>) -> ResolvedRoute {
         test_route_with_aliases(vec![(pattern, target)])
     }

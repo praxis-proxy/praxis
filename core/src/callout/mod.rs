@@ -34,6 +34,9 @@ const DEFAULT_TIMEOUT_MS: u64 = 5_000;
 /// Default HTTP status returned on error when `failure_mode` is `Closed`.
 const DEFAULT_STATUS_ON_ERROR: u16 = 403;
 
+/// Default maximum response body size in bytes (1 MiB).
+const DEFAULT_MAX_RESPONSE_BYTES: usize = 1_048_576; // 1 MiB
+
 /// Default pool idle connections per host.
 const DEFAULT_POOL_MAX_IDLE_PER_HOST: usize = 4;
 
@@ -167,6 +170,9 @@ pub struct CalloutConfig {
     /// Maximum callout depth for loop prevention.
     pub max_depth: u32,
 
+    /// Maximum response body size in bytes.
+    pub max_response_bytes: usize,
+
     /// Maximum idle connections per host in the pool.
     pub pool_max_idle_per_host: usize,
 
@@ -183,6 +189,7 @@ impl Default for CalloutConfig {
             circuit_breaker: None,
             failure_mode: FailureMode::Closed,
             max_depth: DEFAULT_MAX_DEPTH,
+            max_response_bytes: DEFAULT_MAX_RESPONSE_BYTES,
             pool_max_idle_per_host: DEFAULT_POOL_MAX_IDLE_PER_HOST,
             status_on_error: DEFAULT_STATUS_ON_ERROR,
             timeout_ms: DEFAULT_TIMEOUT_MS,
@@ -226,6 +233,9 @@ pub struct CalloutClient {
     /// Maximum allowed callout depth.
     max_depth: u32,
 
+    /// Maximum response body size in bytes.
+    max_response_bytes: usize,
+
     /// HTTP status to return in rejections.
     status_on_error: u16,
 
@@ -258,6 +268,7 @@ impl CalloutClient {
             client,
             failure_mode: config.failure_mode,
             max_depth: config.max_depth,
+            max_response_bytes: config.max_response_bytes,
             status_on_error: config.status_on_error,
             timeout: Duration::from_millis(config.timeout_ms),
         })
@@ -348,10 +359,10 @@ impl CalloutClient {
         }
 
         let headers = extract_headers(&response);
-        let body = match response.bytes().await {
-            Ok(b) => b.to_vec(),
-            Err(err) => {
-                warn!(%err, "failed to read callout response body");
+        let body = match self.read_body(response).await {
+            Ok(b) => b,
+            Err(reason) => {
+                warn!(reason, "failed to read callout response body");
                 self.record_failure();
                 return self.on_failure();
             },
@@ -363,6 +374,30 @@ impl CalloutClient {
             headers,
             status: status.as_u16(),
         })
+    }
+
+    /// Read the response body, enforcing [`Self::max_response_bytes`].
+    async fn read_body(&self, mut response: reqwest::Response) -> Result<Vec<u8>, String> {
+        if let Some(len) = response.content_length()
+            && len > self.max_response_bytes as u64
+        {
+            return Err(format!(
+                "Content-Length {len} exceeds {limit} byte limit",
+                limit = self.max_response_bytes,
+            ));
+        }
+
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.map_err(|e| e.to_string())? {
+            if body.len() + chunk.len() > self.max_response_bytes {
+                return Err(format!(
+                    "response body exceeds {limit} byte limit",
+                    limit = self.max_response_bytes,
+                ));
+            }
+            body.extend_from_slice(&chunk);
+        }
+        Ok(body)
     }
 
     /// Map a failure to the configured failure mode.
@@ -398,6 +433,10 @@ impl CalloutClient {
 fn validate_config(config: &CalloutConfig) -> Result<(), CalloutError> {
     if config.timeout_ms == 0 {
         return Err(CalloutError::Config("timeout_ms must be greater than 0".into()));
+    }
+
+    if config.max_response_bytes == 0 {
+        return Err(CalloutError::Config("max_response_bytes must be greater than 0".into()));
     }
 
     if config.status_on_error < 100 || config.status_on_error > 599 {

@@ -10,6 +10,9 @@
 #   cargo run -p praxis-proxy -- -c examples/configs/protocols/tls-mtls-upstream.yaml
 #   curl http://localhost:8080/
 
+insecure_options:
+  allow_tls_no_verify: true
+
 listeners:
   - name: plain
     address: "127.0.0.1:8080"

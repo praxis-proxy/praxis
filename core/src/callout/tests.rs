@@ -922,7 +922,159 @@ mod unit {
     }
 
     // -------------------------------------------------------------------------
-    // Execute — no circuit breaker (45)
+    // Execute — response size limit (45–50)
+    // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn execute_body_within_limit_succeeds() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/small"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0_u8; 64]))
+            .mount(&server)
+            .await;
+
+        let client = CalloutClient::new(CalloutConfig {
+            max_response_bytes: 128,
+            ..CalloutConfig::default()
+        })
+        .unwrap();
+
+        let req = default_request(&format!("{}/small", server.uri()));
+        let result = client.execute(req).await;
+        match result {
+            CalloutResult::Success(resp) => {
+                assert_eq!(resp.body.len(), 64, "body should be 64 bytes");
+            },
+            _ => panic!("expected Success for body within limit"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_body_at_limit_succeeds() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/exact"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0_u8; 128]))
+            .mount(&server)
+            .await;
+
+        let client = CalloutClient::new(CalloutConfig {
+            max_response_bytes: 128,
+            ..CalloutConfig::default()
+        })
+        .unwrap();
+
+        let req = default_request(&format!("{}/exact", server.uri()));
+        let result = client.execute(req).await;
+        match result {
+            CalloutResult::Success(resp) => {
+                assert_eq!(resp.body.len(), 128, "body should be exactly at limit");
+            },
+            _ => panic!("expected Success for body at exact limit"),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_body_over_limit_closed_rejects() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/big"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0_u8; 256]))
+            .mount(&server)
+            .await;
+
+        let client = CalloutClient::new(CalloutConfig {
+            max_response_bytes: 128,
+            failure_mode: FailureMode::Closed,
+            ..CalloutConfig::default()
+        })
+        .unwrap();
+
+        let req = default_request(&format!("{}/big", server.uri()));
+        let result = client.execute(req).await;
+        assert!(
+            matches!(result, CalloutResult::Rejected(_)),
+            "body over limit with Closed should reject"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_body_over_limit_open_returns_failed() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/big"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0_u8; 256]))
+            .mount(&server)
+            .await;
+
+        let client = CalloutClient::new(CalloutConfig {
+            max_response_bytes: 128,
+            failure_mode: FailureMode::Open,
+            ..CalloutConfig::default()
+        })
+        .unwrap();
+
+        let req = default_request(&format!("{}/big", server.uri()));
+        let result = client.execute(req).await;
+        assert!(
+            matches!(result, CalloutResult::Failed),
+            "body over limit with Open should return Failed"
+        );
+    }
+
+    #[test]
+    fn new_rejects_zero_max_response_bytes() {
+        let config = CalloutConfig {
+            max_response_bytes: 0,
+            ..CalloutConfig::default()
+        };
+        let err = CalloutClient::new(config).unwrap_err();
+        assert!(
+            err.to_string().contains("max_response_bytes"),
+            "error should mention max_response_bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_body_over_limit_records_failure() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/big"))
+            .respond_with(ResponseTemplate::new(200).set_body_bytes(vec![0_u8; 256]))
+            .mount(&server)
+            .await;
+
+        let config = CalloutConfig {
+            max_response_bytes: 128,
+            circuit_breaker: Some(CircuitBreakerConfig {
+                consecutive_failures: 1,
+                recovery_window_ms: 60_000,
+            }),
+            ..CalloutConfig::default()
+        };
+        let client = CalloutClient::new(config).unwrap();
+
+        let req = default_request(&format!("{}/big", server.uri()));
+        drop(client.execute(req).await);
+
+        Mock::given(method("GET"))
+            .and(path("/ok"))
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let req2 = default_request(&format!("{}/ok", server.uri()));
+        let result = client.execute(req2).await;
+        assert!(
+            matches!(result, CalloutResult::Rejected(_)),
+            "body size violation should trip circuit breaker"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Execute — no circuit breaker (51)
     // -------------------------------------------------------------------------
 
     #[tokio::test]

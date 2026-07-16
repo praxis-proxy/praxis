@@ -11,6 +11,9 @@
 #   mkcert -install && mkcert localhost 127.0.0.1
 #   cargo run -p praxis-proxy -- -c examples/configs/protocols/tcp-tls-termination.yaml
 
+insecure_options:
+  allow_private_upstreams: true
+
 listeners:
   - name: secure-db
     address: "127.0.0.1:5432"

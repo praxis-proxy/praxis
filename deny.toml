@@ -31,6 +31,36 @@ wildcards = "deny"
 allow-wildcard-paths = true
 highlight = "all"
 
+# Suppress known-unfixable duplicate version warnings.
+# All are transitive: Praxis uses the latest version of
+# each direct dependency. Re-evaluate on each Pingora
+# fork sync.
+skip = [
+    # metrics-util + tungstenite pin rand 0.9
+    { crate = "rand@0.9", reason = "metrics + tungstenite transitive" },
+
+    # x509-parser ecosystem hasn't migrated to thiserror 2
+    { crate = "thiserror@1", reason = "x509-parser transitive" },
+    { crate = "thiserror-impl@1", reason = "follows thiserror 1" },
+
+    # tungstenite pulls sha1 -> cpufeatures 0.2
+    { crate = "cpufeatures@0.2", reason = "tungstenite/sha1 transitive" },
+
+    # prost-build -> petgraph pins hashbrown 0.15
+    { crate = "hashbrown@0.15", reason = "prost-build/petgraph transitive" },
+
+    # protox pulls both logos 0.15 and 0.16 internally
+    { crate = "logos@0.15", reason = "protox-parse transitive" },
+    { crate = "logos-codegen@0.15", reason = "follows logos 0.15" },
+    { crate = "logos-derive@0.15", reason = "follows logos 0.15" },
+]
+
+# Pingora fork pulls many older deps; suppress the
+# entire subtree rather than listing each one.
+skip-tree = [
+    { crate = "quixotic-plecostomus-core@0.8", reason = "pingora fork pins older dashmap, rand, syn, indexmap, hashbrown" },
+]
+
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"

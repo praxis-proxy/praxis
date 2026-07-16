@@ -246,7 +246,7 @@ impl HttpFilter for ForwardedHeadersFilter {
         let host_value = ctx
             .request
             .headers
-            .get("host")
+            .get(http::header::HOST)
             .and_then(|h| h.to_str().ok())
             .map(str::to_owned);
         if let Some(host) = &host_value {

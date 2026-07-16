@@ -7,6 +7,13 @@ use benchmarks::result::{ComparativeResults, ScenarioResults};
 
 use super::cli::CompareArgs;
 
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Maximum coefficient of variation allowed before skipping comparison.
+const STABILITY_CV: f64 = 0.15;
+
 // -----------------------------------------------------------------------------
 // Comparison Computation
 // -----------------------------------------------------------------------------
@@ -89,9 +96,6 @@ fn print_comparison_rows(
     }
     any_regressed
 }
-
-/// Maximum coefficient of variation allowed before skipping comparison.
-const STABILITY_CV: f64 = 0.15;
 
 /// Print a single comparison row and return whether it regressed.
 fn print_comparison_row(current: &ScenarioResults, baseline: &ScenarioResults, threshold: f64) -> bool {

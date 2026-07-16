@@ -17,6 +17,16 @@ use praxis_core::connectivity::Upstream;
 
 use super::super::{context::PingoraRequestCtx, convert::apply_connection_options};
 
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// TTL for cached DNS entries.
+const DNS_TTL_SECS: u64 = 60;
+
+/// Maximum cached DNS entries before oldest-entry eviction.
+const MAX_DNS_ENTRIES: usize = 1_024;
+
 // -----------------------------------------------------------------------------
 // Execution/Conversion
 // -----------------------------------------------------------------------------
@@ -146,12 +156,6 @@ fn derive_sni(address: &str) -> String {
 // DNS Cache
 // ---------------------------------------------------------------------------
 
-/// TTL for cached DNS entries.
-const DNS_TTL_SECS: u64 = 60;
-
-/// Maximum cached DNS entries before oldest-entry eviction.
-const MAX_DNS_ENTRIES: usize = 1_024;
-
 /// Cached DNS resolution result.
 struct DnsCacheEntry {
     /// Resolved socket addresses.
@@ -279,7 +283,7 @@ async fn resolve_blocking(address: &str) -> Result<Vec<SocketAddr>> {
         )
     })?
     .map_err(|e| {
-        tracing::warn!(address, error = %e, "failed to resolve upstream address");
+        tracing::error!(address, error = %e, "failed to resolve upstream address");
         pingora_core::Error::explain(
             pingora_core::ErrorType::InternalError,
             format!("upstream address resolution failed for '{address}': {e}"),
@@ -295,7 +299,7 @@ fn select_preferred_address(addrs: &[SocketAddr], address: &str) -> Result<Socke
         .or_else(|| addrs.first())
         .copied()
         .ok_or_else(|| {
-            tracing::warn!(address, "DNS resolved but returned no addresses");
+            tracing::error!(address, "DNS resolved but returned no addresses");
             pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
                 format!("upstream address '{address}' resolved to zero addresses"),

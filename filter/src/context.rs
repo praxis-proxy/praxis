@@ -13,12 +13,23 @@ use praxis_tls::TlsPeerIdentity;
 
 use crate::{body::BodyMode, extensions::RequestExtensions, pipeline::body::merge_body_mode, results::FilterResultSet};
 
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
 /// Maximum number of keys per namespace in structured metadata.
 ///
 /// Prevents unbounded accumulation from streaming processors that
 /// send unique keys across many response messages. Existing keys
 /// can still be overwritten past this limit.
 const MAX_STRUCTURED_METADATA_KEYS: usize = 64;
+
+/// Maximum entries allowed in the general `filter_metadata` map.
+///
+/// Individual keys and values are already size-bounded (64 / 256
+/// bytes), but without an entry count cap a filter chain could
+/// insert thousands of unique keys per request.
+const MAX_METADATA_ENTRIES: usize = 128;
 
 /// Trusted header mutation recorded during pre-read body processing.
 ///
@@ -74,17 +85,6 @@ pub enum PendingHeaderResult {
     /// The header has a resolved pending value.
     Value(String),
 }
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Maximum entries allowed in the general `filter_metadata` map.
-///
-/// Individual keys and values are already size-bounded (64 / 256
-/// bytes), but without an entry count cap a filter chain could
-/// insert thousands of unique keys per request.
-const MAX_METADATA_ENTRIES: usize = 128;
 
 // -----------------------------------------------------------------------------
 // HttpFilterContext

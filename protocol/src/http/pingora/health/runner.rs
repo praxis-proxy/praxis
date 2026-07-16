@@ -168,7 +168,7 @@ async fn spawn_probe(idx: usize, addr: String, params: &HealthCheckParams) -> (u
         HealthCheckType::Http => http_probe(&addr, &params.path, params.expected_status, params.timeout).await,
         HealthCheckType::Tcp => tcp_probe(&addr, params.timeout).await,
         HealthCheckType::Grpc => {
-            tracing::warn!("gRPC health checks not yet implemented");
+            tracing::error!("gRPC health checks not yet implemented");
             false
         },
     };

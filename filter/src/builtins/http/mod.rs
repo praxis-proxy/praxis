@@ -16,7 +16,7 @@ pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter, JsonRpcFilt
 pub use security::PolicyFilter;
 pub use security::{
     ContainsValue, CorsFilter, CredentialInjectionFilter, CsrfFilter, DisallowedOriginMode, ForwardedHeadersFilter,
-    GuardrailsAction, GuardrailsFilter, IpAclFilter, PiiKind, RuleTargetKind,
+    GuardrailsAction, GuardrailsFilter, IpAclFilter, PeerIdentityTrustFilter, PiiKind, RuleTargetKind,
 };
 pub use traffic_management::{
     CircuitBreakerFilter, EndpointSelectorFilter, GrpcDetectionFilter, LoadBalancerFilter, RateLimitFilter,

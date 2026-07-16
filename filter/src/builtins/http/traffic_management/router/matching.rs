@@ -130,18 +130,4 @@ fn headers_match(required: &Option<HashMap<String, String>>, actual: &HeaderMap)
     })
 }
 
-// -----------------------------------------------------------------------------
-// Host Utilities
-// -----------------------------------------------------------------------------
-
-/// Strip the port from a host string, handling both IPv4 and bracketed IPv6.
-fn strip_port(host: &str) -> &str {
-    if host.starts_with('[') {
-        match host.find(']') {
-            Some(i) => host.get(..=i).unwrap_or(host),
-            None => host,
-        }
-    } else {
-        host.split(':').next().unwrap_or(host)
-    }
-}
+use crate::builtins::http::traffic_management::strip_port;

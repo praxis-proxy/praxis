@@ -83,14 +83,18 @@ impl<'de> Deserialize<'de> for ClusterTls {
 }
 
 impl ClusterTls {
-    /// Validate path traversal and cert/key pairing.
+    /// Validate SNI hostname, path traversal, and cert/key pairing.
     ///
     /// # Errors
     ///
-    /// Returns [`TlsError`] if any path contains `..`.
+    /// Returns [`TlsError`] if the SNI value is not a valid DNS
+    /// hostname or any path contains `..`.
     ///
     /// [`TlsError`]: crate::TlsError
     pub fn validate(&self) -> Result<(), TlsError> {
+        if let Some(sni) = &self.sni {
+            super::validate_sni_hostname(sni)?;
+        }
         if let Some(ca) = &self.ca {
             ca.validate()?;
         }
@@ -165,6 +169,74 @@ mod tests {
         let yaml = format!("ca:\n  ca_path: {ca}\n", ca = tmp.ca);
         let tls: ClusterTls = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(tls.ca.unwrap().ca_path, tmp.ca, "cluster ca_path mismatch");
+    }
+
+    #[test]
+    fn cluster_tls_accepts_valid_sni() {
+        let tls: ClusterTls = serde_yaml::from_str("sni: api.example.com\n").unwrap();
+        assert_eq!(tls.sni.as_deref(), Some("api.example.com"), "valid SNI should parse");
+    }
+
+    #[test]
+    fn cluster_tls_accepts_single_label_sni() {
+        let tls: ClusterTls = serde_yaml::from_str("sni: localhost\n").unwrap();
+        assert_eq!(tls.sni.as_deref(), Some("localhost"), "single-label SNI should parse");
+    }
+
+    #[test]
+    fn cluster_tls_rejects_empty_sni() {
+        let result = serde_yaml::from_str::<ClusterTls>("sni: \"\"\n");
+        assert!(result.is_err(), "empty SNI should be rejected");
+    }
+
+    #[test]
+    fn cluster_tls_rejects_sni_with_control_chars() {
+        let result = serde_yaml::from_str::<ClusterTls>("sni: \"evil\\r\\nhost.com\"\n");
+        assert!(result.is_err(), "SNI with control characters should be rejected");
+    }
+
+    #[test]
+    fn cluster_tls_rejects_sni_with_slash() {
+        let result = serde_yaml::from_str::<ClusterTls>("sni: \"host/path\"\n");
+        assert!(result.is_err(), "SNI with path separator should be rejected");
+    }
+
+    #[test]
+    fn cluster_tls_rejects_sni_with_space() {
+        let result = serde_yaml::from_str::<ClusterTls>("sni: \"host name.com\"\n");
+        assert!(result.is_err(), "SNI with space should be rejected");
+    }
+
+    #[test]
+    fn cluster_tls_rejects_ip_literal_sni() {
+        let result = serde_yaml::from_str::<ClusterTls>("sni: \"192.168.1.1\"\n");
+        assert!(result.is_err(), "IPv4 literal SNI should be rejected");
+    }
+
+    #[test]
+    fn cluster_tls_rejects_ipv6_literal_sni() {
+        let result = serde_yaml::from_str::<ClusterTls>("sni: \"::1\"\n");
+        assert!(result.is_err(), "IPv6 literal SNI should be rejected");
+    }
+
+    #[test]
+    fn cluster_tls_rejects_sni_leading_hyphen() {
+        let result = serde_yaml::from_str::<ClusterTls>("sni: \"-example.com\"\n");
+        assert!(result.is_err(), "SNI with leading hyphen should be rejected");
+    }
+
+    #[test]
+    fn cluster_tls_rejects_sni_trailing_dot() {
+        let result = serde_yaml::from_str::<ClusterTls>("sni: \"example.com.\"\n");
+        assert!(result.is_err(), "SNI with trailing dot should be rejected");
+    }
+
+    #[test]
+    fn cluster_tls_rejects_overlength_sni_label() {
+        let long_label = "a".repeat(64);
+        let yaml = format!("sni: \"{long_label}.com\"\n");
+        let result = serde_yaml::from_str::<ClusterTls>(&yaml);
+        assert!(result.is_err(), "SNI label >63 chars should be rejected");
     }
 
     #[test]

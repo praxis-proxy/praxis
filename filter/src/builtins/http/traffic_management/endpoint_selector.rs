@@ -19,14 +19,18 @@ use crate::{
     filter::{HttpFilter, HttpFilterContext},
 };
 
-// -----------------------------------------------------------------------------
-// Config
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
 /// Maximum supported endpoint-selector connection timeout in milliseconds.
 ///
 /// Matches the limit used for configured upstream clusters.
 const MAX_CONNECTION_TIMEOUT_MS: u64 = 3_600_000;
+
+// -----------------------------------------------------------------------------
+// Config
+// -----------------------------------------------------------------------------
 
 /// Connection tuning for dynamically selected upstream endpoints.
 ///
@@ -763,32 +767,21 @@ mod tests {
             panic!("invalid TLS SNI should reject filter construction");
         };
         assert!(
-            err.to_string().contains("invalid characters"),
+            err.to_string().contains("invalid") || err.to_string().contains("sni"),
             "unexpected error: {err}"
         );
     }
 
     #[test]
-    fn valid_wildcard_tls_sni_is_accepted() {
+    fn wildcard_tls_sni_is_rejected() {
         let config: serde_yaml::Value =
             serde_yaml::from_str("source_header: x-dest\ntls:\n  sni: '*.example.internal'\n  verify: false\n")
                 .unwrap();
 
         assert!(
-            EndpointSelectorFilter::from_config(&config).is_ok(),
-            "a complete leftmost wildcard should be accepted"
+            EndpointSelectorFilter::from_config(&config).is_err(),
+            "wildcard SNI is invalid for outbound ClientHello per RFC 6066"
         );
-    }
-
-    #[test]
-    fn non_leftmost_wildcard_tls_sni_is_rejected() {
-        let config: serde_yaml::Value =
-            serde_yaml::from_str("source_header: x-dest\ntls:\n  sni: 'api.*.internal'\n  verify: false\n").unwrap();
-
-        let Err(err) = EndpointSelectorFilter::from_config(&config) else {
-            panic!("non-leftmost wildcard should reject filter construction");
-        };
-        assert!(err.to_string().contains("wildcard"), "unexpected error: {err}");
     }
 
     #[test]

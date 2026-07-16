@@ -8,9 +8,9 @@ use cpex::cpex_core::error::PluginViolation;
 
 use crate::Rejection;
 
-// -----------------------------------------------------------------------------
-// auth_rejection (transport-level deny — HTTP 401)
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
 
 /// JSON-RPC error code for gateway-side denials. Lives in the
 /// implementation-defined `-32000` to `-32099` range carved out by the
@@ -36,6 +36,17 @@ const GATEWAY_DENIED_CODE: i64 = -32001;
 /// disclosure — they name the rule that fired but never carry user
 /// data or claims; acceptable on the deny path.
 pub(super) const VIOLATION_HEADER: &str = "X-Policy-Violation";
+
+/// Static, always-valid JSON-RPC deny envelope used only if
+/// serializing the dynamic envelope in
+/// [`json_rpc_error_envelope_bytes`] ever fails.
+/// Keeps the deny path total without emitting an empty (fail-open) body.
+const FALLBACK_DENY_ENVELOPE: &[u8] =
+    br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"denied by gateway","data":{"violation":"gateway.unknown"}}}"#;
+
+// -----------------------------------------------------------------------------
+// auth_rejection (transport-level deny — HTTP 401)
+// -----------------------------------------------------------------------------
 
 /// Build an HTTP 401 rejection for transport-level authentication
 /// failures (missing / invalid / wrong-audience JWT). Identity
@@ -129,23 +140,16 @@ pub(super) fn json_rpc_error_envelope_bytes(
     // an empty body if that ever changes: every caller is a deny path
     // that replaces the response body, so an empty body would weaken
     // (never strengthen) enforcement, and panicking mid-response-phase
-    // (`block_in_place`) is worse still.
+    // is worse still.
     Bytes::from(serde_json::to_vec(&body).unwrap_or_else(|_| FALLBACK_DENY_ENVELOPE.to_vec()))
 }
-
-/// Static, always-valid JSON-RPC deny envelope used only if
-/// serializing the dynamic envelope in
-/// [`json_rpc_error_envelope_bytes`] ever fails.
-/// Keeps the deny path total without emitting an empty (fail-open) body.
-const FALLBACK_DENY_ENVELOPE: &[u8] =
-    br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32001,"message":"denied by gateway","data":{"violation":"gateway.unknown"}}}"#;
 
 // -----------------------------------------------------------------------------
 // http_authz_rejection (generic-HTTP deny — plain HTTP response)
 // -----------------------------------------------------------------------------
 
 /// Build a plain-HTTP rejection for a generic-HTTP (L7) authorization
-/// denial. Unlike [`mcp_error_rejection`] (which wraps the
+/// denial. Unlike [`json_rpc_error_rejection`] (which wraps the
 /// deny in an HTTP-200 JSON-RPC envelope), a non-MCP client expects a real
 /// HTTP status.
 ///

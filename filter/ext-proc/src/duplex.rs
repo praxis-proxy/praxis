@@ -48,7 +48,7 @@ use tokio_stream::wrappers::ReceiverStream;
 use tonic::transport::Channel;
 
 use crate::{
-    BodySendMode,
+    config::BodySendMode,
     proto::envoy::service::ext_proc::v3::{
         BodyResponse, HeadersResponse, ImmediateResponse, ProcessingRequest, ProcessingResponse, ProtocolConfiguration,
         TrailersResponse, body_mutation, external_processor_client::ExternalProcessorClient, processing_request,
@@ -478,7 +478,10 @@ impl ExtProcExchange {
     /// [`open`]: Self::open
     /// [`send`]: Self::send
     /// [`RequestHeaders`]: processing_request::Request::RequestHeaders
-    #[expect(clippy::too_many_lines, reason = "struct initialization + state commit")]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "exchange init + channel bootstrap in one atomic step"
+    )]
     pub(crate) fn open_with_request_headers(
         channel: Channel,
         config: &ExchangeConfig,
@@ -530,13 +533,7 @@ impl ExtProcExchange {
             })
             .transpose()?;
 
-        let msg = ProcessingRequest {
-            request: Some(headers),
-            protocol_config: Some(protocol_config),
-            metadata_context: None,
-            attributes: std::collections::HashMap::new(),
-            observability_mode: false,
-        };
+        let msg = build_processing_request(headers, Some(protocol_config));
         tx.try_send(msg)
             .map_err(|_send| ExchangeError::OrderingViolation("pre-load into empty channel failed".to_owned()))?;
 
@@ -731,58 +728,41 @@ impl ExtProcExchange {
     /// per-message timeout.
     #[expect(
         clippy::too_many_lines,
-        reason = "six direction x type variants with mode-aware active-state logic"
+        reason = "six direction × type match arms with mode-aware active-state logic"
     )]
     fn compute_send_transition(&self, request: &processing_request::Request) -> Result<SendTransition, ExchangeError> {
-        let transition = match request {
+        match request {
             processing_request::Request::RequestHeaders(_) => {
                 require_phase(
                     self.request_send.phase,
                     SendPhase::NotStarted,
                     "request headers already sent",
                 )?;
-                let creates_active = !self.request_body_mode.is_full_duplex();
-                if creates_active {
-                    self.require_no_active_processing("request headers")?;
-                }
-                SendTransition {
-                    direction: Direction::Request,
-                    new_phase: SendPhase::Headers,
-                    active_state: creates_active.then_some(ExpectedResponse::RequestHeaders),
-                }
+                self.build_transition(
+                    Direction::Request,
+                    SendPhase::Headers,
+                    ExpectedResponse::RequestHeaders,
+                    "request headers",
+                )
             },
             processing_request::Request::RequestBody(b) => {
                 self.require_body_mode_enabled(Direction::Request)?;
                 require_body_phase(self.request_send.phase, "request body")?;
-                let full_duplex = self.request_body_mode.is_full_duplex();
-                if !full_duplex {
-                    self.require_no_active_processing("request body")?;
-                }
-                SendTransition {
-                    direction: Direction::Request,
-                    new_phase: if b.end_of_stream {
-                        SendPhase::BodyEos
-                    } else {
-                        SendPhase::BodyOpen
-                    },
-                    active_state: if full_duplex {
-                        None
-                    } else {
-                        Some(ExpectedResponse::RequestBody)
-                    },
-                }
+                let phase = if b.end_of_stream {
+                    SendPhase::BodyEos
+                } else {
+                    SendPhase::BodyOpen
+                };
+                self.build_transition(Direction::Request, phase, ExpectedResponse::RequestBody, "request body")
             },
             processing_request::Request::RequestTrailers(_) => {
                 require_trailer_phase(self.request_send.phase, "request trailers")?;
-                let creates_active = !self.request_body_mode.is_full_duplex();
-                if creates_active {
-                    self.require_no_active_processing("request trailers")?;
-                }
-                SendTransition {
-                    direction: Direction::Request,
-                    new_phase: SendPhase::Trailers,
-                    active_state: creates_active.then_some(ExpectedResponse::RequestTrailers),
-                }
+                self.build_transition(
+                    Direction::Request,
+                    SendPhase::Trailers,
+                    ExpectedResponse::RequestTrailers,
+                    "request trailers",
+                )
             },
             processing_request::Request::ResponseHeaders(_) => {
                 require_phase(
@@ -790,52 +770,62 @@ impl ExtProcExchange {
                     SendPhase::NotStarted,
                     "response headers already sent",
                 )?;
-                let creates_active = !self.response_body_mode.is_full_duplex();
-                if creates_active {
-                    self.require_no_active_processing("response headers")?;
-                }
-                SendTransition {
-                    direction: Direction::Response,
-                    new_phase: SendPhase::Headers,
-                    active_state: creates_active.then_some(ExpectedResponse::ResponseHeaders),
-                }
+                self.build_transition(
+                    Direction::Response,
+                    SendPhase::Headers,
+                    ExpectedResponse::ResponseHeaders,
+                    "response headers",
+                )
             },
             processing_request::Request::ResponseBody(b) => {
                 self.require_body_mode_enabled(Direction::Response)?;
                 require_body_phase(self.response_send.phase, "response body")?;
-                let full_duplex = self.response_body_mode.is_full_duplex();
-                if !full_duplex {
-                    self.require_no_active_processing("response body")?;
-                }
-                SendTransition {
-                    direction: Direction::Response,
-                    new_phase: if b.end_of_stream {
-                        SendPhase::BodyEos
-                    } else {
-                        SendPhase::BodyOpen
-                    },
-                    active_state: if full_duplex {
-                        None
-                    } else {
-                        Some(ExpectedResponse::ResponseBody)
-                    },
-                }
+                let phase = if b.end_of_stream {
+                    SendPhase::BodyEos
+                } else {
+                    SendPhase::BodyOpen
+                };
+                self.build_transition(
+                    Direction::Response,
+                    phase,
+                    ExpectedResponse::ResponseBody,
+                    "response body",
+                )
             },
             processing_request::Request::ResponseTrailers(_) => {
                 require_trailer_phase(self.response_send.phase, "response trailers")?;
-                let creates_active = !self.response_body_mode.is_full_duplex();
-                if creates_active {
-                    self.require_no_active_processing("response trailers")?;
-                }
-                SendTransition {
-                    direction: Direction::Response,
-                    new_phase: SendPhase::Trailers,
-                    active_state: creates_active.then_some(ExpectedResponse::ResponseTrailers),
-                }
+                self.build_transition(
+                    Direction::Response,
+                    SendPhase::Trailers,
+                    ExpectedResponse::ResponseTrailers,
+                    "response trailers",
+                )
             },
-        };
+        }
+    }
 
-        Ok(transition)
+    /// Build a [`SendTransition`] with direction-aware active-state logic.
+    ///
+    /// Full-duplex directions never create active processing state.
+    fn build_transition(
+        &self,
+        direction: Direction,
+        new_phase: SendPhase,
+        expected: ExpectedResponse,
+        label: &str,
+    ) -> Result<SendTransition, ExchangeError> {
+        let full_duplex = match direction {
+            Direction::Request => self.request_body_mode.is_full_duplex(),
+            Direction::Response => self.response_body_mode.is_full_duplex(),
+        };
+        if !full_duplex {
+            self.require_no_active_processing(label)?;
+        }
+        Ok(SendTransition {
+            direction,
+            new_phase,
+            active_state: (!full_duplex).then_some(expected),
+        })
     }
 
     /// Reject sends when active processing state is outstanding.
@@ -1196,6 +1186,20 @@ impl ExtProcExchange {
 // -----------------------------------------------------------------------------
 // Helpers
 // -----------------------------------------------------------------------------
+
+/// Build a [`ProcessingRequest`] envelope with optional protocol config.
+fn build_processing_request(
+    request: processing_request::Request,
+    protocol_config: Option<ProtocolConfiguration>,
+) -> ProcessingRequest {
+    ProcessingRequest {
+        request: Some(request),
+        protocol_config,
+        metadata_context: None,
+        attributes: std::collections::HashMap::new(),
+        observability_mode: false,
+    }
+}
 
 /// Return a human-readable name for a `ProcessingRequest` variant.
 fn request_variant_name(req: &processing_request::Request) -> &'static str {

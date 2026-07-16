@@ -25,6 +25,9 @@ fn sni_router_routes_by_hostname() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_private_upstreams: true
+
 listeners:
   - name: gateway
     address: "127.0.0.1:{proxy_port}"
@@ -66,6 +69,9 @@ fn sni_router_default_upstream_fallback() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_private_upstreams: true
+
 listeners:
   - name: gateway
     address: "127.0.0.1:{proxy_port}"
@@ -104,6 +110,9 @@ fn sni_router_rejects_when_no_match_and_no_default() {
 
     let yaml = format!(
         r#"
+insecure_options:
+  allow_private_upstreams: true
+
 listeners:
   - name: gateway
     address: "127.0.0.1:{proxy_port}"

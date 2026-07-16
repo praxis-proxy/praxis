@@ -3,7 +3,7 @@
 
 //! Health check validation: constraints, thresholds, and SSRF prevention.
 
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 
 use tracing::warn;
 
@@ -217,7 +217,7 @@ pub(super) fn extract_host(addr: &str) -> &str {
 /// intentionally not flagged.
 ///
 /// [RFC 1918]: https://datatracker.ietf.org/doc/html/rfc1918
-pub(super) fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
+pub fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local(),
         IpAddr::V6(v6) => {
@@ -228,10 +228,58 @@ pub(super) fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
 }
 
 /// Returns `true` for hostnames that commonly resolve to
-/// SSRF-sensitive addresses (loopback, cloud metadata).
+/// SSRF-sensitive addresses (loopback, cloud metadata) or
+/// alternate IP representations (decimal, hex, octal).
 pub(super) fn is_ssrf_sensitive_hostname(host: &str) -> bool {
+    if let Some(ip) = try_parse_alternate_ip(host) {
+        return is_ssrf_sensitive(&normalize_mapped_ipv4(ip));
+    }
     let lower = host.to_ascii_lowercase();
     lower == "localhost" || lower.ends_with(".internal") || lower.ends_with(".local") || lower.starts_with("metadata.")
+}
+
+/// Attempt to parse a host as an IPv4 address in an alternate
+/// representation that [`IpAddr`] does not accept: pure decimal,
+/// hexadecimal, or dotted notation with octal/hex octets.
+///
+/// [`IpAddr`]: std::net::IpAddr
+fn try_parse_alternate_ip(host: &str) -> Option<IpAddr> {
+    if host.contains('.') {
+        let parts: Vec<&str> = host.split('.').collect();
+        return match parts.as_slice() {
+            [a, b, c, d] => {
+                let octets = [
+                    parse_flexible_octet(a)?,
+                    parse_flexible_octet(b)?,
+                    parse_flexible_octet(c)?,
+                    parse_flexible_octet(d)?,
+                ];
+                Some(IpAddr::V4(Ipv4Addr::from(octets)))
+            },
+            _ => None,
+        };
+    }
+    let n = if let Some(hex) = host.strip_prefix("0x").or_else(|| host.strip_prefix("0X")) {
+        u32::from_str_radix(hex, 16).ok()?
+    } else {
+        host.parse::<u32>().ok()?
+    };
+    Some(IpAddr::V4(Ipv4Addr::from(n)))
+}
+
+/// Parse a single octet that may use decimal, octal (leading `0`),
+/// or hexadecimal (`0x`) notation.
+fn parse_flexible_octet(s: &str) -> Option<u8> {
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        return u8::from_str_radix(hex, 16).ok();
+    }
+    if s.len() > 1 && s.starts_with('0') && s.bytes().all(|b| b.is_ascii_digit()) {
+        return u8::from_str_radix(s, 8).ok();
+    }
+    s.parse::<u8>().ok()
 }
 
 // -----------------------------------------------------------------------------
@@ -1094,5 +1142,119 @@ clusters:
       passive_healthy_threshold: 3
 "#;
         Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn try_parse_alternate_ip_decimal() {
+        let ip = super::try_parse_alternate_ip("2130706433").unwrap();
+        assert_eq!(
+            ip,
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+            "decimal 2130706433 should parse as 127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn try_parse_alternate_ip_hex() {
+        let ip = super::try_parse_alternate_ip("0x7f000001").unwrap();
+        assert_eq!(
+            ip,
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+            "hex 0x7f000001 should parse as 127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn try_parse_alternate_ip_hex_uppercase() {
+        let ip = super::try_parse_alternate_ip("0X7F000001").unwrap();
+        assert_eq!(
+            ip,
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+            "hex 0X7F000001 should parse as 127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn try_parse_alternate_ip_octal_dotted() {
+        let ip = super::try_parse_alternate_ip("0177.0.0.01").unwrap();
+        assert_eq!(
+            ip,
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+            "octal 0177.0.0.01 should parse as 127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn try_parse_alternate_ip_hex_dotted() {
+        let ip = super::try_parse_alternate_ip("0x7f.0.0.0x01").unwrap();
+        assert_eq!(
+            ip,
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+            "hex dotted 0x7f.0.0.0x01 should parse as 127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn try_parse_alternate_ip_none_for_hostname() {
+        assert!(
+            super::try_parse_alternate_ip("example.com").is_none(),
+            "hostnames should return None"
+        );
+    }
+
+    #[test]
+    fn try_parse_alternate_ip_none_for_empty() {
+        assert!(
+            super::try_parse_alternate_ip("").is_none(),
+            "empty string should return None"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_hostname_flags_decimal_loopback() {
+        assert!(
+            super::is_ssrf_sensitive_hostname("2130706433"),
+            "decimal 2130706433 (127.0.0.1) should be flagged"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_hostname_flags_hex_loopback() {
+        assert!(
+            super::is_ssrf_sensitive_hostname("0x7f000001"),
+            "hex 0x7f000001 (127.0.0.1) should be flagged"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_hostname_flags_octal_dotted_loopback() {
+        assert!(
+            super::is_ssrf_sensitive_hostname("0177.0.0.01"),
+            "octal 0177.0.0.01 (127.0.0.1) should be flagged"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_hostname_flags_hex_dotted_loopback() {
+        assert!(
+            super::is_ssrf_sensitive_hostname("0x7f.0.0.0x01"),
+            "hex dotted 0x7f.0.0.0x01 (127.0.0.1) should be flagged"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_hostname_flags_decimal_link_local() {
+        assert!(
+            super::is_ssrf_sensitive_hostname("2852039166"),
+            "decimal 2852039166 (169.254.169.254) should be flagged"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_hostname_allows_decimal_public() {
+        assert!(
+            !super::is_ssrf_sensitive_hostname("134744072"),
+            "decimal 134744072 (8.8.8.8) should NOT be flagged"
+        );
     }
 }

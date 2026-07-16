@@ -12,8 +12,8 @@ pub use http::{
     AccessLogFilter, CircuitBreakerFilter, CompressionFilter, ContainsValue, CorsFilter, CredentialInjectionFilter,
     CsrfFilter, DisallowedOriginMode, EndpointSelectorFilter, ForwardedHeadersFilter, GrpcDetectionFilter,
     GuardrailsAction, GuardrailsFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter,
-    LoadBalancerFilter, PathRewriteFilter, PiiKind, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus,
-    RequestIdFilter, RouterFilter, RuleTargetKind, StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
-    has_dot_dot_traversal, normalize_rewritten_path,
+    LoadBalancerFilter, PathRewriteFilter, PeerIdentityTrustFilter, PiiKind, RateLimitFilter, RateLimitMode,
+    RedirectFilter, RedirectStatus, RequestIdFilter, RouterFilter, RuleTargetKind, StaticResponseFilter, TimeoutFilter,
+    UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,
 };
 pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};

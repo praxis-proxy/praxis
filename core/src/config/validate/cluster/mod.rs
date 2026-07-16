@@ -8,6 +8,8 @@ mod health_check;
 mod timeouts;
 mod tls;
 
+pub use health_check::is_ssrf_sensitive;
+
 use crate::{config::InsecureOptions, errors::ProxyError};
 
 // -----------------------------------------------------------------------------
@@ -46,10 +48,35 @@ pub(in crate::config::validate) fn validate_clusters(
         endpoints::validate_endpoints(cluster, insecure_options)?;
         tls::validate_tls_settings(cluster, insecure_options)?;
         timeouts::validate_timeouts(cluster)?;
+        validate_cluster_max_connections(cluster)?;
         if let Some(hc) = &cluster.health_check {
             health_check::validate_health_check(hc, &cluster.name)?;
         }
         health_check::validate_health_check_ssrf(cluster, insecure_options)?;
+    }
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Max Connections Validation
+// -----------------------------------------------------------------------------
+
+/// Validate `max_connections` is at least 1 and within the allowed ceiling.
+fn validate_cluster_max_connections(cluster: &crate::config::Cluster) -> Result<(), ProxyError> {
+    let Some(v) = cluster.max_connections else {
+        return Ok(());
+    };
+    let name = &cluster.name;
+    if v == 0 {
+        return Err(ProxyError::Config(format!(
+            "cluster '{name}': max_connections must be >= 1"
+        )));
+    }
+    if v > super::MAX_CONNECTIONS {
+        return Err(ProxyError::Config(format!(
+            "cluster '{name}': max_connections ({v}) exceeds maximum ({})",
+            super::MAX_CONNECTIONS,
+        )));
     }
     Ok(())
 }
@@ -70,7 +97,7 @@ pub(in crate::config::validate) fn validate_clusters(
 )]
 mod tests {
     use super::validate_clusters;
-    use crate::config::{Cluster, InsecureOptions};
+    use crate::config::{Cluster, Config, InsecureOptions};
 
     #[test]
     fn reject_too_many_clusters() {
@@ -85,5 +112,73 @@ mod tests {
     fn no_tls_skips_tls_validation() {
         let clusters = vec![Cluster::with_defaults("web", vec!["10.0.0.1:80".into()])];
         validate_clusters(&clusters, &InsecureOptions::default()).expect("no TLS should skip TLS validation");
+    }
+
+    #[test]
+    fn reject_cluster_zero_max_connections() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80"]
+    max_connections: 0
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("max_connections must be >= 1"),
+            "should reject zero cluster max_connections: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_cluster_max_connections_exceeding_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80"]
+    max_connections: 1000001
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "should reject cluster max_connections > 1M: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_cluster_max_connections_at_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80"]
+    max_connections: 1000000
+"#;
+        Config::from_yaml(yaml).unwrap();
     }
 }

@@ -111,7 +111,7 @@ fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader
     let mut header = match pingora_http::ResponseHeader::build(rejection.status, header_count) {
         Ok(h) => h,
         Err(e) => {
-            tracing::warn!(status = rejection.status, error = %e, "invalid rejection status; using 500");
+            tracing::error!(status = rejection.status, error = %e, "invalid rejection status; using 500");
             #[expect(clippy::expect_used, reason = "500 is a valid status code")]
             pingora_http::ResponseHeader::build(500, header_count).expect("500 is a valid status code")
         },

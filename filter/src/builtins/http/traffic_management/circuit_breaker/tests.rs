@@ -17,13 +17,13 @@ use crate::{FilterAction, filter::HttpFilter as _};
 
 #[test]
 fn starts_in_closed_state() {
-    let cb = CircuitBreaker::new(3, 30);
+    let cb = CircuitBreaker::new(3, 30, 9999);
     assert_eq!(cb.state(), CircuitState::Closed, "new breaker should start closed");
 }
 
 #[test]
 fn stays_closed_below_threshold() {
-    let cb = CircuitBreaker::new(3, 30);
+    let cb = CircuitBreaker::new(3, 30, 9999);
     cb.record_failure();
     cb.record_failure();
     assert_eq!(cb.state(), CircuitState::Closed, "should stay closed below threshold");
@@ -31,7 +31,7 @@ fn stays_closed_below_threshold() {
 
 #[test]
 fn trips_to_open_at_threshold() {
-    let cb = CircuitBreaker::new(3, 30);
+    let cb = CircuitBreaker::new(3, 30, 9999);
     cb.record_failure();
     cb.record_failure();
     cb.record_failure();
@@ -40,7 +40,7 @@ fn trips_to_open_at_threshold() {
 
 #[test]
 fn success_resets_failure_count() {
-    let cb = CircuitBreaker::new(3, 30);
+    let cb = CircuitBreaker::new(3, 30, 9999);
     cb.record_failure();
     cb.record_failure();
     cb.record_success();
@@ -51,7 +51,7 @@ fn success_resets_failure_count() {
 
 #[test]
 fn open_rejects_via_check() {
-    let cb = CircuitBreaker::new(1, 9999);
+    let cb = CircuitBreaker::new(1, 9999, 9999);
     cb.record_failure();
     assert_eq!(
         cb.check(),
@@ -62,7 +62,7 @@ fn open_rejects_via_check() {
 
 #[test]
 fn half_open_after_recovery_window() {
-    let cb = CircuitBreaker::new(1, 0);
+    let cb = CircuitBreaker::new(1, 0, 9999);
     cb.record_failure();
     assert_eq!(cb.state(), CircuitState::Open, "should be open after failure");
     let state = cb.check();
@@ -75,7 +75,7 @@ fn half_open_after_recovery_window() {
 
 #[test]
 fn half_open_success_transitions_to_closed() {
-    let cb = CircuitBreaker::new(1, 0);
+    let cb = CircuitBreaker::new(1, 0, 9999);
     cb.record_failure();
     let _ = cb.check();
     assert_eq!(cb.state(), CircuitState::HalfOpen, "should be half-open");
@@ -85,7 +85,7 @@ fn half_open_success_transitions_to_closed() {
 
 #[test]
 fn half_open_failure_transitions_to_open() {
-    let cb = CircuitBreaker::new(1, 0);
+    let cb = CircuitBreaker::new(1, 0, 9999);
     cb.record_failure();
     let _ = cb.check();
     assert_eq!(cb.state(), CircuitState::HalfOpen, "should be half-open");
@@ -95,7 +95,7 @@ fn half_open_failure_transitions_to_open() {
 
 #[test]
 fn half_open_allows_only_one_probe() {
-    let cb = CircuitBreaker::new(1, 0);
+    let cb = CircuitBreaker::new(1, 0, 9999);
     cb.record_failure();
     assert_eq!(cb.state(), CircuitState::Open, "should be open after failure");
 
@@ -119,7 +119,7 @@ fn half_open_allows_only_one_probe() {
 
 #[test]
 fn half_open_resets_after_successful_probe() {
-    let cb = CircuitBreaker::new(1, 0);
+    let cb = CircuitBreaker::new(1, 0, 9999);
     cb.record_failure();
 
     let probe = cb.check();
@@ -135,7 +135,7 @@ fn half_open_resets_after_successful_probe() {
 
 #[test]
 fn multiple_successes_in_closed_keep_closed() {
-    let cb = CircuitBreaker::new(3, 30);
+    let cb = CircuitBreaker::new(3, 30, 9999);
     for _ in 0..10 {
         cb.record_success();
     }
@@ -148,7 +148,7 @@ fn multiple_successes_in_closed_keep_closed() {
 
 #[test]
 fn open_record_failure_is_noop() {
-    let cb = CircuitBreaker::new(1, 9999);
+    let cb = CircuitBreaker::new(1, 9999, 9999);
     cb.record_failure();
     assert_eq!(cb.state(), CircuitState::Open, "should be open");
     cb.record_failure();
@@ -157,7 +157,7 @@ fn open_record_failure_is_noop() {
 
 #[test]
 fn open_record_success_is_noop() {
-    let cb = CircuitBreaker::new(1, 9999);
+    let cb = CircuitBreaker::new(1, 9999, 9999);
     cb.record_failure();
     assert_eq!(cb.state(), CircuitState::Open, "should be open");
     cb.record_success();
@@ -165,6 +165,143 @@ fn open_record_success_is_noop() {
         cb.state(),
         CircuitState::Open,
         "success in open should be no-op (only check transitions to half-open)"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Half-Open Timeout Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn half_open_timeout_resets_to_open() {
+    let cb = CircuitBreaker::new(1, 0, 0);
+    cb.record_failure();
+    assert_eq!(cb.state(), CircuitState::Open, "should be open after failure");
+
+    let probe = cb.check();
+    assert_eq!(probe, CircuitState::HalfOpen, "first check should get HalfOpen");
+
+    let after_timeout = cb.check();
+    assert_eq!(
+        after_timeout,
+        CircuitState::Open,
+        "should return Open after half-open timeout expires"
+    );
+    assert_eq!(
+        cb.state(),
+        CircuitState::Open,
+        "internal state should be Open after timeout reset"
+    );
+}
+
+#[test]
+fn half_open_timeout_allows_new_probe_cycle() {
+    let cb = CircuitBreaker::new(1, 0, 0);
+    cb.record_failure();
+
+    let first_probe = cb.check();
+    assert_eq!(first_probe, CircuitState::HalfOpen, "first probe allowed");
+
+    let timeout_reset = cb.check();
+    assert_eq!(timeout_reset, CircuitState::Open, "timeout resets to Open");
+
+    let new_probe = cb.check();
+    assert_eq!(
+        new_probe,
+        CircuitState::HalfOpen,
+        "after timeout reset, a new probe should be allowed"
+    );
+}
+
+#[test]
+fn half_open_no_timeout_when_probe_succeeds() {
+    let cb = CircuitBreaker::new(1, 0, 0);
+    cb.record_failure();
+
+    let probe = cb.check();
+    assert_eq!(probe, CircuitState::HalfOpen, "probe allowed");
+
+    cb.record_success();
+    assert_eq!(
+        cb.state(),
+        CircuitState::Closed,
+        "success should close circuit before timeout triggers"
+    );
+}
+
+#[test]
+fn half_open_no_timeout_when_probe_fails() {
+    let cb = CircuitBreaker::new(1, 0, 0);
+    cb.record_failure();
+
+    let probe = cb.check();
+    assert_eq!(probe, CircuitState::HalfOpen, "probe allowed");
+
+    cb.record_failure();
+    assert_eq!(
+        cb.state(),
+        CircuitState::Open,
+        "failure should reopen circuit before timeout triggers"
+    );
+}
+
+#[test]
+fn half_open_timeout_does_not_fire_before_expiry() {
+    let cb = CircuitBreaker::new(1, 0, 9999);
+    cb.record_failure();
+
+    let probe = cb.check();
+    assert_eq!(probe, CircuitState::HalfOpen, "probe allowed");
+
+    let still_waiting = cb.check();
+    assert_eq!(
+        still_waiting,
+        CircuitState::Open,
+        "should return Open while probe in-flight"
+    );
+    assert_eq!(
+        cb.state(),
+        CircuitState::HalfOpen,
+        "internal state should remain HalfOpen when timeout has not elapsed"
+    );
+}
+
+#[test]
+fn from_config_half_open_timeout_defaults() {
+    let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+        "
+clusters:
+  - name: backend
+    consecutive_failures: 5
+    recovery_window_secs: 30
+",
+    )
+    .unwrap();
+    let filter = CircuitBreakerFilter::from_config(&yaml).unwrap();
+    assert_eq!(
+        filter.name(),
+        "circuit_breaker",
+        "filter should accept config without half_open_timeout_secs"
+    );
+}
+
+#[test]
+fn from_config_half_open_timeout_explicit() {
+    let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+        "
+clusters:
+  - name: backend
+    consecutive_failures: 5
+    recovery_window_secs: 30
+    half_open_timeout_secs: 60
+",
+    )
+    .unwrap();
+    let filter = CircuitBreakerFilter::from_config(&yaml).unwrap();
+    assert_eq!(
+        filter.name(),
+        "circuit_breaker",
+        "filter should accept config with explicit half_open_timeout_secs"
     );
 }
 
@@ -484,14 +621,23 @@ async fn clusters_are_isolated() {
 /// Build a [`CircuitBreakerFilter`] for testing with a single cluster named "backend".
 fn make_filter(threshold: u32, recovery_secs: u64) -> CircuitBreakerFilter {
     let mut breakers = std::collections::HashMap::new();
-    breakers.insert(Arc::from("backend"), CircuitBreaker::new(threshold, recovery_secs));
+    breakers.insert(
+        Arc::from("backend"),
+        CircuitBreaker::new(threshold, recovery_secs, 9999),
+    );
     CircuitBreakerFilter { breakers }
 }
 
 /// Build a [`CircuitBreakerFilter`] with two clusters for isolation testing.
 fn make_two_cluster_filter(threshold: u32, recovery_secs: u64) -> CircuitBreakerFilter {
     let mut breakers = std::collections::HashMap::new();
-    breakers.insert(Arc::from("cluster-a"), CircuitBreaker::new(threshold, recovery_secs));
-    breakers.insert(Arc::from("cluster-b"), CircuitBreaker::new(threshold, recovery_secs));
+    breakers.insert(
+        Arc::from("cluster-a"),
+        CircuitBreaker::new(threshold, recovery_secs, 9999),
+    );
+    breakers.insert(
+        Arc::from("cluster-b"),
+        CircuitBreaker::new(threshold, recovery_secs, 9999),
+    );
     CircuitBreakerFilter { breakers }
 }

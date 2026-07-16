@@ -24,6 +24,8 @@ pub mod kv;
 pub mod logging;
 /// Process-wide memory pressure monitoring.
 pub mod memory;
+/// Reserved internal header prefixes for proxy-internal metadata.
+pub mod reserved_headers;
 /// Server factory and runtime options.
 pub mod server;
 /// Wall-clock time abstraction for filters.

@@ -8,9 +8,9 @@ use serde_json::Value;
 use super::config::{BatchPolicy, JsonRpcConfig};
 use crate::builtins::http::payload_processing::OnInvalidBehavior;
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // JSON-RPC Types
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
 /// JSON-RPC message kind.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,51 +87,69 @@ pub struct JsonRpcEnvelope {
     pub method: Option<String>,
 }
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Parse Errors
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
 /// JSON-RPC parsing error.
 #[derive(Debug, Clone)]
 pub enum JsonRpcParseError {
-    /// Invalid JSON.
-    InvalidJson(String),
-    /// Missing required `jsonrpc` field.
-    MissingVersion,
-    /// Wrong `jsonrpc` version.
-    WrongVersion(String),
-    /// Missing `method` for request/notification.
-    MissingMethod,
-    /// `method` is not a string.
-    InvalidMethod,
-    /// Invalid `id` type (must be string, number, or null).
-    InvalidId,
-    /// Unsupported batch (based on policy).
-    UnsupportedBatch,
+    /// Batch array exceeds [`max_batch_size`].
+    ///
+    /// The first field is the actual batch length; the second is the
+    /// configured maximum.
+    ///
+    /// [`max_batch_size`]: super::config::JsonRpcConfig::max_batch_size
+    BatchTooLarge(usize, usize),
+
     /// Empty batch array.
     EmptyBatch,
+
+    /// Invalid `id` type (must be string, number, or null).
+    InvalidId,
+
+    /// Invalid JSON.
+    InvalidJson(String),
+
+    /// `method` is not a string.
+    InvalidMethod,
+
+    /// Missing `method` for request/notification.
+    MissingMethod,
+
+    /// Missing required `jsonrpc` field.
+    MissingVersion,
+
+    /// Unsupported batch (based on policy).
+    UnsupportedBatch,
+
+    /// Wrong `jsonrpc` version.
+    WrongVersion(String),
 }
 
 impl std::fmt::Display for JsonRpcParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::InvalidJson(e) => write!(f, "invalid JSON: {e}"),
-            Self::MissingVersion => write!(f, "missing 'jsonrpc' field"),
-            Self::WrongVersion(v) => write!(f, "wrong jsonrpc version: '{v}', expected '2.0'"),
-            Self::MissingMethod => write!(f, "missing 'method' field for request/notification"),
-            Self::InvalidMethod => write!(f, "'method' must be a string"),
-            Self::InvalidId => write!(f, "'id' must be string, number, or null"),
-            Self::UnsupportedBatch => write!(f, "batch requests not supported by current policy"),
+            Self::BatchTooLarge(actual, max) => {
+                write!(f, "batch size {actual} exceeds maximum of {max}")
+            },
             Self::EmptyBatch => write!(f, "batch array is empty"),
+            Self::InvalidId => write!(f, "'id' must be string, number, or null"),
+            Self::InvalidJson(e) => write!(f, "invalid JSON: {e}"),
+            Self::InvalidMethod => write!(f, "'method' must be a string"),
+            Self::MissingMethod => write!(f, "missing 'method' field for request/notification"),
+            Self::MissingVersion => write!(f, "missing 'jsonrpc' field"),
+            Self::UnsupportedBatch => write!(f, "batch requests not supported by current policy"),
+            Self::WrongVersion(v) => write!(f, "wrong jsonrpc version: '{v}', expected '2.0'"),
         }
     }
 }
 
 impl std::error::Error for JsonRpcParseError {}
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Parser
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
 /// Parse JSON-RPC 2.0 envelope from request body bytes.
 ///
@@ -170,9 +188,9 @@ pub fn parse_json_rpc_value(
     }
 }
 
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 // Helpers
-// -----------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
 
 /// Parse a batch array according to the configured policy.
 fn parse_batch(items: &[Value], config: &JsonRpcConfig) -> Result<Option<JsonRpcEnvelope>, JsonRpcParseError> {
@@ -187,7 +205,17 @@ fn parse_batch(items: &[Value], config: &JsonRpcConfig) -> Result<Option<JsonRpc
 }
 
 /// Extract metadata from the first valid JSON-RPC message in a batch.
+///
+/// Enforces [`max_batch_size`] before inspecting items. Returns
+/// [`BatchTooLarge`] if the array exceeds the configured limit.
+///
+/// [`max_batch_size`]: JsonRpcConfig::max_batch_size
+/// [`BatchTooLarge`]: JsonRpcParseError::BatchTooLarge
 fn parse_batch_first(items: &[Value], config: &JsonRpcConfig) -> Result<Option<JsonRpcEnvelope>, JsonRpcParseError> {
+    if items.len() > config.max_batch_size {
+        return Err(JsonRpcParseError::BatchTooLarge(items.len(), config.max_batch_size));
+    }
+
     for item in items {
         if let Ok(mut envelope) = parse_single_message(item) {
             envelope.kind = JsonRpcKind::Batch;

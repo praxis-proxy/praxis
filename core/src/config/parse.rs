@@ -3,6 +3,8 @@
 
 //! YAML input safety checks: size limits and alias expansion guards.
 
+use std::path::Path;
+
 use crate::errors::ProxyError;
 
 // -----------------------------------------------------------------------------
@@ -19,7 +21,34 @@ const MAX_EXPANDED_BYTES: usize = 16_777_216;
 // Safety Checks
 // -----------------------------------------------------------------------------
 
-/// Reject raw YAML input that exceeds [`MAX_YAML_BYTES`].
+/// Reject a config file whose on-disk size exceeds `MAX_YAML_BYTES`.
+///
+/// Checks file metadata before reading, preventing memory exhaustion
+/// from oversized files.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] when the file is too large or its
+/// metadata cannot be read.
+///
+/// [`ProxyError::Config`]: crate::errors::ProxyError::Config
+pub(crate) fn check_file_size(path: &Path) -> Result<(), ProxyError> {
+    let meta = std::fs::metadata(path).map_err(|e| {
+        let display = path.display();
+        ProxyError::Config(format!("failed to read metadata for {display}: {e}"))
+    })?;
+
+    let len = meta.len();
+    let max = MAX_YAML_BYTES as u64;
+    if len > max {
+        return Err(ProxyError::Config(format!(
+            "config file too large ({len} bytes, max {MAX_YAML_BYTES})"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject raw YAML input that exceeds `MAX_YAML_BYTES`.
 ///
 /// # Errors
 ///
@@ -42,7 +71,7 @@ pub(crate) fn check_yaml_safety(raw: &str) -> Result<(), ProxyError> {
 ///
 /// # Errors
 ///
-/// Returns [`ProxyError::Config`] when the input exceeds [`MAX_YAML_BYTES`].
+/// Returns [`ProxyError::Config`] when the input exceeds `MAX_YAML_BYTES`.
 ///
 /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
 fn check_yaml_size(raw: &str) -> Result<(), ProxyError> {

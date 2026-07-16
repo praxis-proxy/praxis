@@ -13,6 +13,7 @@ The `location` template supports `${path}`, `${query}`, `${host}`, and `${scheme
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
+| `allowed_hosts` | string[] | no | Optional allowlist of permitted hostnames for `${host}` substitution. Supports exact matches and wildcard prefixes (`*.example.com`). When set, host values not matching any entry leave `${host}` unexpanded and log a warning. When absent or empty, any syntactically valid host is accepted (character-level validation still applies). |
 | `location` | string | yes | Location URL template. Supports `${path}`, `${query}`, `${host}`, and `${scheme}` placeholders. `${query}` expands to `?key=val` (with leading `?`) when a query string is present, or to an empty string when absent. `${host}` expands to the request `Host` header value (port stripped). `${scheme}` expands to the inferred scheme (`http` or `https`). Templates should use `${path}${query}` without a literal `?` separator. |
 | `status` | 301 \| 302 \| 307 \| 308 | no | HTTP redirect status code (301, 302, 307, or 308). |
 

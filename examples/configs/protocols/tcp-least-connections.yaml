@@ -20,6 +20,7 @@ clusters:
 
 insecure_options:
   allow_private_endpoints: true
+  allow_private_upstreams: true
 
 filter_chains:
   - name: tcp_lb

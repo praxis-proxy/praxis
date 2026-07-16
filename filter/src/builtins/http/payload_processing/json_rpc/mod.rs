@@ -25,7 +25,7 @@ use bytes::Bytes;
 use tracing::{trace, warn};
 
 use self::{
-    config::{JsonRpcConfig, build_config},
+    config::{BatchPolicy, JsonRpcConfig, build_config},
     envelope::{JsonRpcEnvelope, parse_json_rpc_envelope},
 };
 use crate::{
@@ -47,6 +47,14 @@ use crate::{
 /// Writes `json_rpc.*` entries to the filter result set for branch
 /// chain conditions.
 ///
+/// # Batch Security
+///
+/// When [`batch_policy`] is set to [`first`], a single HTTP request
+/// can carry many JSON-RPC calls, which may bypass per-request rate
+/// limiting. Use [`max_batch_size`] to cap the number of items
+/// allowed per batch (default: 100). The default policy is
+/// [`reject`], which blocks all batch arrays.
+///
 /// # Basic YAML
 ///
 /// ```yaml
@@ -58,7 +66,8 @@ use crate::{
 /// ```yaml
 /// filter: json_rpc
 /// max_body_bytes: 1048576
-/// batch_policy: reject
+/// batch_policy: first
+/// max_batch_size: 50
 /// on_invalid: continue
 /// headers:
 ///   method: X-Json-Rpc-Method
@@ -81,6 +90,11 @@ use crate::{
 /// let filter = JsonRpcFilter::from_config(&yaml).unwrap();
 /// assert_eq!(filter.name(), "json_rpc");
 /// ```
+///
+/// [`batch_policy`]: config::JsonRpcConfig::batch_policy
+/// [`first`]: config::BatchPolicy::First
+/// [`max_batch_size`]: config::JsonRpcConfig::max_batch_size
+/// [`reject`]: config::BatchPolicy::Reject
 pub struct JsonRpcFilter {
     /// Parsed filter configuration.
     config: JsonRpcConfig,
@@ -99,6 +113,16 @@ impl JsonRpcFilter {
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: JsonRpcConfig = parse_filter_config("json_rpc", config)?;
         let (max_body_bytes, validated_config) = build_config(cfg)?;
+
+        if validated_config.batch_policy == BatchPolicy::First {
+            warn!(
+                max_batch_size = validated_config.max_batch_size,
+                "json_rpc batch_policy is 'first': only the first item \
+                 in a batch is used for routing; remaining items bypass \
+                 per-request policy checks"
+            );
+        }
+
         Ok(Box::new(Self {
             config: validated_config,
             max_body_bytes,
@@ -169,7 +193,7 @@ fn handle_parse_error(e: envelope::JsonRpcParseError, config: &JsonRpcConfig) ->
     use crate::builtins::http::payload_processing::OnInvalidBehavior;
 
     match e {
-        JsonRpcParseError::UnsupportedBatch | JsonRpcParseError::EmptyBatch => {
+        JsonRpcParseError::BatchTooLarge(..) | JsonRpcParseError::EmptyBatch | JsonRpcParseError::UnsupportedBatch => {
             Ok(FilterAction::Reject(Rejection::status(400)))
         },
         _ => match config.on_invalid {
