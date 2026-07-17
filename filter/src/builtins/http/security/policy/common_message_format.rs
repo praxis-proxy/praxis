@@ -52,9 +52,9 @@ use cpex::cpex_core::cmf::constants::{
 /// — in those cases identity still runs but CMF dispatch is skipped.
 pub(super) fn entity_for_protocol_method(method: &str) -> Option<(&'static str, &'static str)> {
     match method {
-        "service/invoke" => Some((ENTITY_TOOL, HOOK_CMF_TOOL_PRE_INVOKE)),
-        "template/get" => Some((ENTITY_PROMPT, HOOK_CMF_PROMPT_PRE_INVOKE)),
-        "resource/read" => Some((ENTITY_RESOURCE, HOOK_CMF_RESOURCE_PRE_FETCH)),
+        "tools/call" => Some((ENTITY_TOOL, HOOK_CMF_TOOL_PRE_INVOKE)),
+        "prompts/get" => Some((ENTITY_PROMPT, HOOK_CMF_PROMPT_PRE_INVOKE)),
+        "resources/read" => Some((ENTITY_RESOURCE, HOOK_CMF_RESOURCE_PRE_FETCH)),
         _ => None,
     }
 }
@@ -73,9 +73,9 @@ pub(super) fn entity_for_protocol_method(method: &str) -> Option<(&'static str, 
 /// lifecycle in the same context object.
 pub(super) fn entity_for_protocol_method_post(method: &str) -> Option<(&'static str, &'static str)> {
     match method {
-        "service/invoke" => Some((ENTITY_TOOL, HOOK_CMF_TOOL_POST_INVOKE)),
-        "template/get" => Some((ENTITY_PROMPT, HOOK_CMF_PROMPT_POST_INVOKE)),
-        "resource/read" => Some((ENTITY_RESOURCE, HOOK_CMF_RESOURCE_POST_FETCH)),
+        "tools/call" => Some((ENTITY_TOOL, HOOK_CMF_TOOL_POST_INVOKE)),
+        "prompts/get" => Some((ENTITY_PROMPT, HOOK_CMF_PROMPT_POST_INVOKE)),
+        "resources/read" => Some((ENTITY_RESOURCE, HOOK_CMF_RESOURCE_POST_FETCH)),
         _ => None,
     }
 }

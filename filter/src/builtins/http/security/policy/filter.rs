@@ -325,6 +325,19 @@ impl PolicyFilter {
     /// paid. For entity-aware policies, authorization runs later, in
     /// `on_request_body`, once the request is classified.
     async fn identity_gate(&self, ctx: &HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        // When a downstream body-buffering filter (e.g. the protocol
+        // classifier) forces a pre-read, praxis runs `on_request_body` BEFORE
+        // this header phase. That body phase already resolved and enforced
+        // identity (stashing `ResolvedIdentity`) and may have stripped the
+        // inbound identity headers (`X-User-Token`, `Authorization`) for the
+        // upstream. Re-resolving here would fail on the now-stripped headers
+        // and spuriously reject an already-authorized request. The body phase
+        // is authoritative — skip the early gate when it already ran.
+        if ctx.extensions.get::<ResolvedIdentity>().is_some() {
+            tracing::trace!(target: "policy.filter", "identity already resolved in body phase; skipping early gate");
+            return Ok(FilterAction::Continue);
+        }
+
         let (result, _bg) = self
             .mgr
             .invoke_named::<IdentityHook>(
@@ -549,7 +562,7 @@ impl HttpFilter for PolicyFilter {
         // loud at the first request. Operators intentionally running this
         // policy for identity-only enforcement can opt out via
         // `require_protocol_metadata: false`.
-        let Some(method) = ctx.get_metadata("protocol.method").map(str::to_owned) else {
+        let Some(method) = ctx.get_metadata("mcp.method").map(str::to_owned) else {
             if self.cfg.require_protocol_metadata {
                 tracing::error!(
                     target: "policy.filter",
@@ -571,7 +584,7 @@ impl HttpFilter for PolicyFilter {
             );
             return Ok(FilterAction::BodyDone);
         };
-        let Some(entity_name) = ctx.get_metadata("protocol.name").map(str::to_owned) else {
+        let Some(entity_name) = ctx.get_metadata("mcp.name").map(str::to_owned) else {
             tracing::debug!(
                 target: "policy.filter",
                 protocol_method = %method,
@@ -725,13 +738,13 @@ impl HttpFilter for PolicyFilter {
         // phase and praxis preserves `filter_metadata` across phases,
         // so we can route the post-phase hook without re-parsing the
         // body.
-        let Some(method) = ctx.get_metadata("protocol.method").map(str::to_owned) else {
+        let Some(method) = ctx.get_metadata("mcp.method").map(str::to_owned) else {
             return Ok(FilterAction::Continue);
         };
         let Some((entity_type, hook_name)) = entity_for_protocol_method_post(&method) else {
             return Ok(FilterAction::Continue);
         };
-        let Some(entity_name) = ctx.get_metadata("protocol.name").map(str::to_owned) else {
+        let Some(entity_name) = ctx.get_metadata("mcp.name").map(str::to_owned) else {
             return Ok(FilterAction::Continue);
         };
 

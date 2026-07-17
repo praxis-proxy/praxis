@@ -125,13 +125,28 @@ pub(super) fn json_rpc_error_envelope_bytes(
         Some(v) => (v.code.clone(), v.reason.clone()),
         None => ("gateway.unknown".to_owned(), "denied by gateway".to_owned()),
     };
+    // Most denials share the single `GATEWAY_DENIED_CODE` (the specific rule
+    // is in `data.violation`). But a violation MAY carry a `proto_error_code`
+    // for the host to surface on the wire — e.g. a suspended human-in-the-loop
+    // elicitation uses `-32120` ("not complete — retry with this id") so the
+    // client can distinguish "pending approval" from a flat deny. Honor it
+    // when present, and pass the violation's structured `details` (the
+    // elicitation bundle: id / approver / expires_at / …) through `data`.
+    let code = violation.and_then(|v| v.proto_error_code).unwrap_or(GATEWAY_DENIED_CODE);
+    let mut data = serde_json::Map::new();
+    data.insert("violation".to_owned(), serde_json::Value::String(violation_code));
+    if let Some(v) = violation {
+        for (key, val) in &v.details {
+            data.insert(key.clone(), val.clone());
+        }
+    }
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": request_id,
         "error": {
-            "code": GATEWAY_DENIED_CODE,
+            "code": code,
             "message": reason,
-            "data": { "violation": violation_code },
+            "data": serde_json::Value::Object(data),
         }
     });
     // The envelope above is built entirely from owned `String`s and a
@@ -209,4 +224,40 @@ pub(super) fn http_authz_rejection(violation: Option<&PluginViolation>) -> Rejec
 /// True if a header name/value carries no control characters.
 fn header_is_safe(s: &str) -> bool {
     !s.chars().any(char::is_control)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    fn envelope(v: &PluginViolation) -> serde_json::Value {
+        let bytes = json_rpc_error_envelope_bytes(Some(v), &serde_json::json!(1));
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn plain_violation_uses_default_deny_code() {
+        let v = PluginViolation::new("apl.policy", "denied");
+        let env = envelope(&v);
+        assert_eq!(env["error"]["code"], GATEWAY_DENIED_CODE);
+        assert_eq!(env["error"]["data"]["violation"], "apl.policy");
+    }
+
+    #[test]
+    fn pending_violation_surfaces_proto_code_and_details() {
+        let mut details = HashMap::new();
+        details.insert("elicitation_id".to_owned(), serde_json::json!("elic-7"));
+        details.insert("approver".to_owned(), serde_json::json!("alice"));
+        let v = PluginViolation::new("elicitation.pending", "awaiting approval")
+            .with_proto_error_code(-32120)
+            .with_details(details);
+        let env = envelope(&v);
+        // The pending code reaches the wire (not collapsed to -32001) …
+        assert_eq!(env["error"]["code"], -32120);
+        // … and the elicitation bundle rides in `data`.
+        assert_eq!(env["error"]["data"]["elicitation_id"], "elic-7");
+        assert_eq!(env["error"]["data"]["approver"], "alice");
+        assert_eq!(env["error"]["data"]["violation"], "elicitation.pending");
+    }
 }

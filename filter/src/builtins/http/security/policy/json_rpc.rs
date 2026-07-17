@@ -76,7 +76,7 @@ pub(super) fn build_content_for_method(
         .unwrap_or(serde_json::Value::Null);
 
     match method {
-        "service/invoke" => {
+        "tools/call" => {
             let arguments = params
                 .get("arguments")
                 .and_then(|v| v.as_object())
@@ -91,7 +91,7 @@ pub(super) fn build_content_for_method(
                 },
             }]
         },
-        "template/get" => {
+        "prompts/get" => {
             let arguments = params
                 .get("arguments")
                 .and_then(|v| v.as_object())
@@ -106,7 +106,7 @@ pub(super) fn build_content_for_method(
                 },
             }]
         },
-        "resource/read" => {
+        "resources/read" => {
             // For `resource/read`, `params.uri` is the resource
             // identifier; `protocol.name` is set to the same URI by the
             // protocol classifier filter (it treats `uri` as the "selector"). Carry
@@ -161,11 +161,11 @@ pub(super) fn reserialize_json_rpc_body(original: &Bytes, method: &str, message:
     let params_obj = params.as_object_mut()?;
 
     match method {
-        "service/invoke" | "template/get" => {
+        "tools/call" | "prompts/get" => {
             for part in &message.content {
                 let new_args = match part {
-                    ContentPart::ToolCall { content } if method == "service/invoke" => Some(&content.arguments),
-                    ContentPart::PromptRequest { content } if method == "template/get" => Some(&content.arguments),
+                    ContentPart::ToolCall { content } if method == "tools/call" => Some(&content.arguments),
+                    ContentPart::PromptRequest { content } if method == "prompts/get" => Some(&content.arguments),
                     _ => None,
                 };
                 if let Some(args) = new_args {
@@ -180,7 +180,7 @@ pub(super) fn reserialize_json_rpc_body(original: &Bytes, method: &str, message:
             }
             None
         },
-        "resource/read" => {
+        "resources/read" => {
             for part in &message.content {
                 if let ContentPart::ResourceRef { content } = part {
                     params_obj.insert("uri".to_owned(), serde_json::Value::String(content.uri.clone()));
@@ -227,7 +227,7 @@ pub(super) fn build_response_content_for_method(
     correlation_id: &str,
     body: &Bytes,
 ) -> Vec<ContentPart> {
-    if method != "service/invoke" {
+    if method != "tools/call" {
         return Vec::new();
     }
     let envelope: serde_json::Value = match serde_json::from_slice::<serde_json::Value>(body) {
@@ -299,7 +299,7 @@ pub(super) fn build_response_content_for_method(
 /// only when the original response already had it (we don't invent
 /// fields).
 pub(super) fn reserialize_json_rpc_response_body(original: &Bytes, method: &str, message: &Message) -> Option<Bytes> {
-    if method != "service/invoke" {
+    if method != "tools/call" {
         return None;
     }
     let mut envelope: serde_json::Value = serde_json::from_slice(original).ok()?;
