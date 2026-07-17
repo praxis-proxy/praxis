@@ -17,6 +17,15 @@ that do not follow these conventions will be rejected.
 
 [conventions.md]:./conventions.md
 
+## Lint
+
+```console
+make fmt
+make lint
+```
+
+It is recommended you run `make setup-hooks` to setup pre-commit hooks that ensure linting is always done before commiting code.
+
 ## Build
 
 ```console
@@ -29,9 +38,6 @@ make check
 
 ```console
 make test
-```
-
-```console
 make test-integration
 ```
 
