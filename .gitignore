@@ -48,3 +48,6 @@ docs/**/
 !docs/filters/tcp/*/
 !docs/operating/
 !docs/proposals/
+
+# Praxis config files
+praxis.yaml
