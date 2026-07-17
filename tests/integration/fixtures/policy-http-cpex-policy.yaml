@@ -1,0 +1,59 @@
+# CPEX policy fixture for the `security/policy-http.yaml` example
+# integration test. The example points `config_path` at an operator-supplied
+# deployment path; the test rewrites that to this file so the policy filter
+# constructs without shipping a policy under examples/.
+#
+# Shape: one HS256 JWT identity plugin (fail-closed) + a `global` HTTP
+# authorization policy that admits only GET requests. Non-GET requests are
+# denied with a custom response (403 + JSON body + header) carried via the
+# `denyWith` (CPEX `response:` block). This is the entity-less generic-HTTP
+# authz path the pure-L7 (`http_global`) shape targets.
+#
+# Canonical CPEX form: the `authentication:` + `authorization:` block form, a
+# native `require(authenticated)` presence gate, and each CEL predicate as a
+# `cel: { expr }` PDP step (dispatched to CPEX's bundled `cel` resolver).
+#
+# Production deployments swap HS256 for RS256 + JWKS and author richer CEL
+# authorization.
+
+plugin_settings:
+  routing_enabled: true
+
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "https://idp.example.com"
+          audiences: ["praxis-cpex-example"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT"
+      claim_mapper: standard
+
+global:
+  # Canonical block form: `authentication:` + `authorization:` under
+  # `global:` (no `apl:` wrapper). Legacy `apl.policy`/`identity` are rejected.
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      # Native presence gate, then the Kuadrant predicate as a CEL PDP step:
+      # admit only GET (the CEL evaluates false for other methods → deny).
+      - "require(authenticated)"
+      - cel: { expr: "http.method == 'GET'" }
+  # Declares the bundled `cel` resolver into this policy's PDP router. A
+  # `cel:` step needs this entry — without it the router has no `cel`
+  # resolver and every `cel:` step fails closed (deny). The expression
+  # itself lives in the step, so the entry just names the kind.
+  pdp:
+    - kind: cel
+  response:
+    status: 403
+    body: "{\"error\":\"only GET is permitted\"}"
+    headers:
+      X-Authz-Denied: "method-not-allowed"

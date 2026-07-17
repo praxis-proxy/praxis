@@ -110,6 +110,7 @@ page.
 | [forwarded-headers.yaml](configs/security/forwarded-headers.yaml) | Injects X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host into upstream requests |
 | [guardrails.yaml](configs/security/guardrails.yaml) | Reject requests that match header or body inspection rules |
 | [ip-acl.yaml](configs/security/ip-acl.yaml) | Allow or deny requests by source IP/CIDR |
+| [policy-http.yaml](configs/security/policy-http.yaml) | Generic-HTTP authorization for non-MCP traffic using the CPEX policy engine |
 | [policy.yaml](configs/security/policy.yaml) | Embeds the CPEX policy engine in-process to enforce multi-source JWT identity, APL route policy, RFC 8693 OAuth 2.0 token exchange, PII scanning, audit emission, and (under `body_access: read_write`) request / response body rewriting |
 
 ### Traffic Management

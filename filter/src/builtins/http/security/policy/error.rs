@@ -143,3 +143,70 @@ pub(super) fn json_rpc_error_envelope_bytes(
     // is worse still.
     Bytes::from(serde_json::to_vec(&body).unwrap_or_else(|_| FALLBACK_DENY_ENVELOPE.to_vec()))
 }
+
+// -----------------------------------------------------------------------------
+// http_authz_rejection (generic-HTTP deny — plain HTTP response)
+// -----------------------------------------------------------------------------
+
+/// Build a plain-HTTP rejection for a generic-HTTP (L7) authorization
+/// denial. Unlike [`json_rpc_error_rejection`] (which wraps the
+/// deny in an HTTP-200 JSON-RPC envelope), a non-MCP client expects a real
+/// HTTP status.
+///
+/// Consumes the transpiled `denyWith` carried on the violation's `details`
+/// map (CPEX U2): `http.status` (default 403), `http.body` (default
+/// `"<code>: <reason>"`), and `http.headers`. Header names/values
+/// containing control characters are dropped as defense-in-depth against
+/// response splitting (plan R21). Always stamps [`VIOLATION_HEADER`].
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear denyWith mapping with per-header validation"
+)]
+pub(super) fn http_authz_rejection(violation: Option<&PluginViolation>) -> Rejection {
+    let (code, reason) = match violation {
+        Some(v) => (v.code.clone(), v.reason.clone()),
+        None => ("policy.deny".to_owned(), "access denied".to_owned()),
+    };
+    let details = violation.map(|v| &v.details);
+
+    let status = details
+        .and_then(|d| d.get("http.status"))
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|n| u16::try_from(n).ok())
+        .filter(|s| (100..=599).contains(s))
+        .unwrap_or(403);
+
+    let body = details
+        .and_then(|d| d.get("http.body"))
+        .and_then(serde_json::Value::as_str)
+        .map_or_else(|| format!("{code}: {reason}"), str::to_owned);
+
+    let mut rejection = Rejection::status(status)
+        .with_header(VIOLATION_HEADER, code)
+        .with_body(Bytes::from(body.into_bytes()));
+
+    if let Some(headers) = details
+        .and_then(|d| d.get("http.headers"))
+        .and_then(serde_json::Value::as_object)
+    {
+        for (name, value) in headers {
+            let Some(value) = value.as_str() else { continue };
+            // Reject control chars (CR/LF/NUL) to prevent response splitting.
+            if header_is_safe(name) && header_is_safe(value) {
+                rejection = rejection.with_header(name.clone(), value.to_owned());
+            } else {
+                tracing::warn!(
+                    target: "policy.filter",
+                    header = %name,
+                    "dropping denyWith header with control characters",
+                );
+            }
+        }
+    }
+    rejection
+}
+
+/// True if a header name/value carries no control characters.
+fn header_is_safe(s: &str) -> bool {
+    !s.chars().any(char::is_control)
+}
