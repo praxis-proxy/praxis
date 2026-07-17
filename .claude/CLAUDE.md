@@ -4,6 +4,10 @@ This file provides guidance to Claude Code
 (claude.ai/code) when working with code in this
 repository.
 
+Humans are responsible for verifying the changes in every pull request. AI
+coding tools may assist with the work, including generating commits, but the
+human contributor owns the final verification.
+
 ## Requirements
 
 - Rust stable 1.96+
