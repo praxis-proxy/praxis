@@ -153,4 +153,17 @@ mod tests {
         let result = Cli::try_parse_from(["praxis", "-T", "-t"]);
         assert!(result.is_err(), "-T and -t should conflict");
     }
+
+    // -------------------------------------------------------------------------
+    // --version CLI parsing
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn cli_version_flag() {
+        let result = Cli::try_parse_from(["praxis", "--version"]);
+        assert!(
+            matches!(&result, Err(e) if e.kind() == clap::error::ErrorKind::DisplayVersion),
+            "--version should be recognized"
+        );
+    }
 }
