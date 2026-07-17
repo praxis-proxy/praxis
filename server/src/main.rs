@@ -27,7 +27,7 @@ use tracing::info;
 
 /// Cloud and AI-native proxy server.
 #[derive(Parser)]
-#[command(name = "praxis")]
+#[command(name = "praxis", version)]
 struct Cli {
     /// Path to the YAML configuration file.
     #[arg(short = 'c', long = "config")]
