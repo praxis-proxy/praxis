@@ -4,7 +4,7 @@
 //! JSON-RPC method → CMF (Common Message Format) entity-coords mapping.
 //!
 //! The protocol classifier filter (available in the `praxis-ai` package) parses
-//! JSON-RPC bodies and stashes `protocol.method` / `protocol.name` in
+//! JSON-RPC bodies and stashes `mcp.method` / `mcp.name` in
 //! `ctx.filter_metadata`. This module consumes that metadata and
 //! resolves the matching CMF hook name + entity-type discriminator so
 //! APL routes annotated to `tools/<x>`, `prompts/<x>`, or
@@ -17,12 +17,12 @@
 //!
 //! | Method            | Entity type | Pre-hook                   | Post-hook                   |
 //! |-------------------|-------------|----------------------------|-----------------------------|
-//! | `service/invoke`      | tool        | `cmf.tool.pre_invoke`      | `cmf.tool.post_invoke`      |
-//! | `template/get`     | prompt      | `cmf.prompt.pre_invoke`    | `cmf.prompt.post_invoke`    |
-//! | `resource/read`  | resource    | `cmf.resource.pre_fetch`   | `cmf.resource.post_fetch`   |
+//! | `tools/call`      | tool        | `cmf.tool.pre_invoke`      | `cmf.tool.post_invoke`      |
+//! | `prompts/get`     | prompt      | `cmf.prompt.pre_invoke`    | `cmf.prompt.post_invoke`    |
+//! | `resources/read`  | resource    | `cmf.resource.pre_fetch`   | `cmf.resource.post_fetch`   |
 //!
-//! Every other method (`initialize`, `service/list`, `template/list`,
-//! `resource/list`, `resources/subscribe`, `ping`, `notifications/*`,
+//! Every other method (`initialize`, `tools/list`, `prompts/list`,
+//! `resources/list`, `resources/subscribe`, `ping`, `notifications/*`,
 //! `roots/*`, `sampling/*`) is **identity-only by design**: the
 //! `on_request` identity gate still runs, but `on_request_body`
 //! returns `BodyDone` without dispatching CMF. The premise is that
@@ -48,7 +48,7 @@ use cpex::cpex_core::cmf::constants::{
 
 /// Map a JSON-RPC method to `(entity_type, pre_hook_name)` for the
 /// request-phase CMF dispatch. Returns `None` for methods that don't
-/// carry an entity (`service/list`, `initialize`, `template/list`, etc.)
+/// carry an entity (`tools/list`, `initialize`, `prompts/list`, etc.)
 /// — in those cases identity still runs but CMF dispatch is skipped.
 pub(super) fn entity_for_protocol_method(method: &str) -> Option<(&'static str, &'static str)> {
     match method {

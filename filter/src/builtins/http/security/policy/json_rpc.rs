@@ -4,7 +4,7 @@
 //! JSON-RPC body parsing + typed CMF content-part builders.
 //!
 //! The upstream protocol classifier filter (from `praxis-ai`) parses JSON-RPC bodies
-//! and stashes `protocol.method` / `protocol.name` in `filter_metadata`, but
+//! and stashes `mcp.method` / `mcp.name` in `filter_metadata`, but
 //! it doesn't materialize `params.arguments` (or `result.content`)
 //! into a typed form that APL `args.*` / `result.*` predicates can
 //! evaluate. This module does that second parse, builds the matching
@@ -107,8 +107,8 @@ pub(super) fn build_content_for_method(
             }]
         },
         "resources/read" => {
-            // For `resource/read`, `params.uri` is the resource
-            // identifier; `protocol.name` is set to the same URI by the
+            // For `resources/read`, `params.uri` is the resource
+            // identifier; `mcp.name` is set to the same URI by the
             // protocol classifier filter (it treats `uri` as the "selector"). Carry
             // it through as the `ResourceReference`.
             let uri = params
@@ -142,9 +142,9 @@ pub(super) fn build_content_for_method(
 /// (no matching content part, malformed original, etc.).
 ///
 /// Touched fields by JSON-RPC method:
-///   * `service/invoke`     → `params.arguments` (from the first `ContentPart::ToolCall.arguments`)
-///   * `template/get`    → `params.arguments` (from the first `ContentPart::PromptRequest.arguments`)
-///   * `resource/read` → `params.uri` (from `ContentPart::ResourceRef.uri`)
+///   * `tools/call`     → `params.arguments` (from the first `ContentPart::ToolCall.arguments`)
+///   * `prompts/get`    → `params.arguments` (from the first `ContentPart::PromptRequest.arguments`)
+///   * `resources/read` → `params.uri` (from `ContentPart::ResourceRef.uri`)
 ///
 /// All other JSON-RPC envelope fields (`jsonrpc`, `id`, `method`,
 /// `params.name`) pass through unchanged. This minimizes the
@@ -199,8 +199,8 @@ pub(super) fn reserialize_json_rpc_body(original: &Bytes, method: &str, message:
 
 /// Build the typed CMF `ContentPart` list from a JSON-RPC *response*
 /// body — the post-phase mirror of [`build_content_for_method`]. Today
-/// only `service/invoke` produces a structured `ToolResult`; `template/get`
-/// and `resource/read` return TBD shapes the filter can extend later.
+/// only `tools/call` produces a structured `ToolResult`; `prompts/get`
+/// and `resources/read` return TBD shapes the filter can extend later.
 ///
 /// The actual tool data lives in `result.content[].text` (a
 /// JSON-stringified payload) and/or `result.structuredContent`

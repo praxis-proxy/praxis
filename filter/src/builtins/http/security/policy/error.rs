@@ -28,7 +28,7 @@ const GATEWAY_DENIED_CODE: i64 = -32001;
 ///
 /// * HTTP 401 ([`auth_rejection`]) — identity / transport-level deny.
 /// * HTTP 200 ([`json_rpc_error_rejection`]) — application-level deny wrapped in a JSON-RPC error envelope.
-/// * HTTP 500 (`missing_protocol_metadata_rejection`) — `protocol.method` missing from filter metadata.
+/// * HTTP 500 (`missing_protocol_metadata_rejection`) — `mcp.method` missing from filter metadata.
 ///
 /// Operators consuming this in audit / SIEM pipelines should treat the
 /// header value as a stable identifier (the code namespace is part of
@@ -132,14 +132,18 @@ pub(super) fn json_rpc_error_envelope_bytes(
     // client can distinguish "pending approval" from a flat deny. Honor it
     // when present, and pass the violation's structured `details` (the
     // elicitation bundle: id / approver / expires_at / …) through `data`.
-    let code = violation.and_then(|v| v.proto_error_code).unwrap_or(GATEWAY_DENIED_CODE);
+    let code = violation
+        .and_then(|v| v.proto_error_code)
+        .unwrap_or(GATEWAY_DENIED_CODE);
     let mut data = serde_json::Map::new();
-    data.insert("violation".to_owned(), serde_json::Value::String(violation_code));
     if let Some(v) = violation {
         for (key, val) in &v.details {
             data.insert(key.clone(), val.clone());
         }
     }
+    // Canonical classifier code is authoritative — insert last so a stray
+    // `violation` key in `details` can never shadow it.
+    data.insert("violation".to_owned(), serde_json::Value::String(violation_code));
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": request_id,
@@ -227,9 +231,11 @@ fn header_is_safe(s: &str) -> bool {
 }
 
 #[cfg(test)]
+#[expect(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
-    use super::*;
     use std::collections::HashMap;
+
+    use super::*;
 
     fn envelope(v: &PluginViolation) -> serde_json::Value {
         let bytes = json_rpc_error_envelope_bytes(Some(v), &serde_json::json!(1));
@@ -259,5 +265,14 @@ mod tests {
         assert_eq!(env["error"]["data"]["elicitation_id"], "elic-7");
         assert_eq!(env["error"]["data"]["approver"], "alice");
         assert_eq!(env["error"]["data"]["violation"], "elicitation.pending");
+    }
+
+    #[test]
+    fn details_cannot_shadow_the_canonical_violation_key() {
+        let mut details = HashMap::new();
+        details.insert("violation".to_owned(), serde_json::json!("attacker-supplied"));
+        let v = PluginViolation::new("apl.policy", "denied").with_details(details);
+        let env = envelope(&v);
+        assert_eq!(env["error"]["data"]["violation"], "apl.policy");
     }
 }

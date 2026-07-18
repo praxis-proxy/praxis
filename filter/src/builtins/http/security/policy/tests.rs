@@ -326,7 +326,7 @@ routes:
     (dir, path_str)
 }
 
-/// Run a `service/invoke` for the `echo` tool as `subject`, returning the
+/// Run a `tools/call` for the `echo` tool as `subject`, returning the
 /// filter's body-phase action. Shared by the CEL allow/deny cases.
 async fn dispatch_echo_as(filter: &PolicyFilter, subject: &str) -> FilterAction {
     dispatch_echo_method(filter, subject, Method::POST).await
@@ -403,7 +403,7 @@ routes:
     (dir, path_str)
 }
 
-/// Dispatch a `service/invoke` for `tool` as `subject` with the given
+/// Dispatch a `tools/call` for `tool` as `subject` with the given
 /// `X-Session-Id`. Returns the filter's body-phase action. Threads the
 /// session header so cpex's session-scoped taint store can persist /
 /// hydrate labels across calls.
@@ -628,6 +628,57 @@ async fn request_without_auth_header_rejects_401() {
     }
 }
 
+/// When a downstream pre-read ran `on_request_body` first and stashed
+/// `ResolvedIdentity` (having stripped the inbound credential for the
+/// upstream), the early `identity_gate` must skip rather than re-resolve
+/// against the now-missing headers. A credential-less request that would
+/// normally 401 here passes because the body phase is authoritative.
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_gate_skips_when_body_phase_already_resolved() {
+    use cpex::cpex_core::identity::{IdentityPayload, TokenSource};
+
+    use super::filter::ResolvedIdentity;
+
+    let (_dir, path) = write_cel_policy_config(); // routes-only → identity_gate path
+    let filter = build_filter(path);
+
+    // A request with NO Authorization header — identity_gate would normally 401.
+    let req = make_request(Method::POST, "/");
+    let mut ctx = make_filter_context(&req);
+
+    // Simulate the body phase having already resolved + enforced identity
+    // and stripped the inbound credential for the upstream.
+    ctx.extensions.insert(ResolvedIdentity(IdentityPayload::new(
+        String::new(),
+        TokenSource::Bearer,
+    )));
+
+    let action = filter.on_request(&mut ctx).await.expect("on_request ran");
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "gate must be skipped when ResolvedIdentity is already stashed; got {action:?}",
+    );
+}
+
+/// Control for `identity_gate_skips_when_body_phase_already_resolved`: the
+/// same credential-less request with no `ResolvedIdentity` stashed must run
+/// the gate and reject — proving the skip (not something else) is what flips
+/// the outcome to `Continue`.
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_gate_rejects_when_identity_not_yet_resolved() {
+    let (_dir, path) = write_cel_policy_config();
+    let filter = build_filter(path);
+
+    let req = make_request(Method::POST, "/");
+    let mut ctx = make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.expect("on_request ran");
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "no resolved identity → gate must reject; got {action:?}",
+    );
+}
+
 /// A valid HS256 JWT in the configured header passes the identity
 /// chain and the filter emits Continue.
 #[tokio::test(flavor = "multi_thread")]
@@ -847,7 +898,7 @@ fn config_init_timeout_honors_override() {
 
 /// For an entity-aware policy (declares tool/prompt/resource routes) with
 /// `require_protocol_metadata: true` (default), a request that reaches the
-/// body phase without `protocol.method` is rejected with
+/// body phase without `mcp.method` is rejected with
 /// HTTP 500 + `X-Policy-Violation: config.missing_protocol_metadata`. This
 /// catches a misconfigured chain (protocol classifier filter missing or ordered
 /// after policy) loudly at the first body-phase request.
@@ -887,7 +938,7 @@ async fn missing_protocol_metadata_rejects_when_required() {
 }
 
 /// For an entity-aware policy with `require_protocol_metadata: false`, a
-/// request with no `protocol.method` passes through (identity-only mode for
+/// request with no `mcp.method` passes through (identity-only mode for
 /// non-classified traffic). Pins the opt-out behavior.
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_protocol_metadata_passes_when_not_required() {
@@ -1256,7 +1307,7 @@ fn json_rpc_id_value_preserves_json_type() {
     assert_eq!(json_rpc_id_value(&bad), serde_json::Value::Null);
 }
 
-/// `service/invoke` parses `params.arguments` into a `ToolCall` content
+/// `tools/call` parses `params.arguments` into a `ToolCall` content
 /// part so APL `args.<field>` predicates have something to read.
 #[test]
 fn build_content_for_method_tools_call() {
@@ -1281,7 +1332,7 @@ fn build_content_for_method_tools_call() {
     }
 }
 
-/// `resource/read` produces a `ResourceRef` keyed off `params.uri`
+/// `resources/read` produces a `ResourceRef` keyed off `params.uri`
 /// so route resolution and APL `resource.*` predicates work.
 #[test]
 fn build_content_for_method_resources_read() {
@@ -1310,13 +1361,13 @@ fn build_content_for_method_resources_read() {
 #[test]
 fn build_content_for_method_unknown_method_yields_empty() {
     use super::json_rpc::build_content_for_method;
-    let body = bytes::Bytes::from_static(br#"{"method":"service/list"}"#);
-    let parts = build_content_for_method("service/list", "n/a", "corr-1", &body);
+    let body = bytes::Bytes::from_static(br#"{"method":"tools/list"}"#);
+    let parts = build_content_for_method("tools/list", "n/a", "corr-1", &body);
     assert!(parts.is_empty());
 }
 
 /// `reserialize_json_rpc_body` mutates only `params.arguments` (for
-/// `service/invoke`), leaving `jsonrpc`, `id`, `method`, `params.name`
+/// `tools/call`), leaving `jsonrpc`, `id`, `method`, `params.name`
 /// untouched. Operators who hash the envelope only see deltas when
 /// APL actually mutated.
 #[test]
@@ -1501,7 +1552,7 @@ fn deny_envelope_fits_committed_length() {
 // -----------------------------------------------------------------------------
 
 /// `on_request_body` for an identity-only policy (no entity routes): even
-/// with `protocol.method` / `protocol.name` present, there are no entity
+/// with `mcp.method` / `mcp.name` present, there are no entity
 /// routes to authorize, so the body phase short-circuits to `BodyDone`.
 /// (Actual per-entity CMF dispatch is covered by the routed-policy tests.)
 #[tokio::test(flavor = "multi_thread")]

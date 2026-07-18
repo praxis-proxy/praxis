@@ -45,10 +45,10 @@
 //! gate but are not evaluated against the `global` HTTP policy.
 //! See `examples/configs/security/policy-http.yaml`.
 //!
-//! The protocol classifier filter parses the JSON-RPC body and writes `protocol.method` /
-//! `protocol.name` into filter metadata; `policy` reads that to pick the
+//! The protocol classifier filter parses the JSON-RPC body and writes `mcp.method` /
+//! `mcp.name` into filter metadata; `policy` reads that to pick the
 //! matching policy route. With `require_protocol_metadata: true` (the
-//! default), a request that reaches `policy` without `protocol.method` is
+//! default), a request that reaches `policy` without `mcp.method` is
 //! rejected — catching a chain that is missing the protocol classifier filter or has
 //! it ordered after `policy`.
 //!
@@ -109,7 +109,7 @@
 //! | Identity / transport failure | HTTP 401, `WWW-Authenticate: Bearer`, `X-Policy-Violation: <code>`. |
 //! | Policy deny (PDP, predicate, PII, taint, delegation) | HTTP 200 with a JSON-RPC error envelope (`code -32001`) and `X-Policy-Violation: <code>` — per the JSON-RPC spec, gateway denials are JSON-RPC errors, not HTTP 4xx. |
 //! | Generic-HTTP (L7) policy deny | Plain HTTP response (default 403) with status / body / headers from the policy's `denyWith`, plus `X-Policy-Violation: <code>` — a non-MCP client gets a real HTTP status, not a JSON-RPC envelope. |
-//! | Missing `protocol.method` metadata | HTTP 500 (server-side misconfiguration; protocol classifier filter from `praxis-ai` missing or misordered). |
+//! | Missing `mcp.method` metadata | HTTP 500 (server-side misconfiguration; protocol classifier filter from `praxis-ai` missing or misordered). |
 //!
 //! # Runtime compatibility
 //!
