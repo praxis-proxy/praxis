@@ -3,7 +3,7 @@
 
 //! Integration tests for hot config reload.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use praxis_test_utils::{
     net::{
@@ -13,6 +13,27 @@ use praxis_test_utils::{
     },
     start_reloadable_proxy,
 };
+
+/// Poll `GET path` until `pred(status, body)` holds, returning the last
+/// observed response (after ~15s if the predicate never holds, so the
+/// caller's assertion produces a clear diff).
+///
+/// Hot reload is applied asynchronously by the file watcher (500ms debounce
+/// then pipeline rebuild). Under coverage instrumentation the apply can exceed
+/// any fixed settle window, so a post-reload assertion must poll for the new
+/// behavior rather than race a single request. This does not mask failures:
+/// if the reload never takes effect the poll times out and the last (wrong)
+/// response is returned for the assertion to reject.
+fn get_eventually(addr: &str, path: &str, pred: impl Fn(u16, &str) -> bool) -> (u16, String) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let (status, body) = http_get(addr, path, None);
+        if pred(status, &body) || Instant::now() >= deadline {
+            return (status, body);
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Core Reload
@@ -33,7 +54,7 @@ fn reload_route_change_shifts_traffic() {
 
     proxy.reload(&proxy_yaml(proxy_port, backend2.port()));
 
-    let (status, body) = http_get(proxy.addr(), "/", None);
+    let (status, body) = get_eventually(proxy.addr(), "/", |_, b| b == "backend2");
     assert_eq!(status, 200, "reloaded request should succeed");
     assert_eq!(body, "backend2", "should route to backend2 after reload");
 }
@@ -51,7 +72,7 @@ fn reload_endpoint_swap_shifts_traffic() {
 
     proxy.reload(&proxy_yaml(proxy_port, backend2.port()));
 
-    let (_, body) = http_get(proxy.addr(), "/", None);
+    let (_, body) = get_eventually(proxy.addr(), "/", |_, b| b == "endpoint-b");
     assert_eq!(body, "endpoint-b", "should hit endpoint-b after reload");
 }
 
@@ -68,7 +89,7 @@ fn reload_adds_filter() {
 
     proxy.reload(&static_yaml(proxy_port, "intercepted"));
 
-    let (status, body) = http_get(proxy.addr(), "/", None);
+    let (status, body) = get_eventually(proxy.addr(), "/", |_, b| b == "intercepted");
     assert_eq!(status, 200);
     assert_eq!(
         body, "intercepted",
@@ -89,7 +110,7 @@ fn reload_removes_filter() {
 
     proxy.reload(&proxy_yaml(proxy_port, backend.port()));
 
-    let (status, body) = http_get(proxy.addr(), "/", None);
+    let (status, body) = get_eventually(proxy.addr(), "/", |_, b| b == "backend-response");
     assert_eq!(status, 200);
     assert_eq!(
         body, "backend-response",
@@ -163,7 +184,7 @@ fn reload_recovers_after_invalid_then_valid() {
 
     proxy.reload(&proxy_yaml(proxy_port, backend2.port()));
 
-    let (_, body) = http_get(proxy.addr(), "/", None);
+    let (_, body) = get_eventually(proxy.addr(), "/", |_, b| b == "v2");
     assert_eq!(body, "v2", "should recover and serve v2 after valid config");
 }
 
@@ -185,9 +206,8 @@ fn reload_mid_flight_old_request_completes_with_old_pipeline() {
     std::thread::sleep(Duration::from_millis(200));
 
     proxy.write_config(&proxy_yaml(proxy_port, fast_backend.port()));
-    std::thread::sleep(Duration::from_millis(1500));
 
-    let (status, body) = http_get(proxy.addr(), "/", None);
+    let (status, body) = get_eventually(proxy.addr(), "/", |_, b| b == "fast-response");
     assert_eq!(status, 200);
     assert_eq!(body, "fast-response", "new request should use new pipeline");
 
@@ -221,7 +241,7 @@ fn reload_resets_rate_limit_bucket() {
 
     proxy.reload(&rate_limit_yaml(proxy_port, backend.port(), 5));
 
-    let (s_after, _) = http_get(proxy.addr(), "/", None);
+    let (s_after, _) = get_eventually(proxy.addr(), "/", |s, _| s == 200);
     assert_eq!(s_after, 200, "after reload, rate limit bucket should be fresh");
 }
 
@@ -267,7 +287,7 @@ filter_chains:
 
     proxy.reload(&cb_yaml(backend2.port()));
 
-    let (s2, body) = http_get(proxy.addr(), "/", None);
+    let (s2, body) = get_eventually(proxy.addr(), "/", |_, b| b == "cb-v2");
     assert_eq!(s2, 200, "reloaded circuit breaker should be closed (fresh state)");
     assert_eq!(body, "cb-v2", "should route to new backend after reload");
 }
@@ -377,11 +397,11 @@ fn reload_multiple_successive_changes() {
     assert_eq!(body, "iteration-1");
 
     proxy.reload(&proxy_yaml(proxy_port, b2.port()));
-    let (_, body) = http_get(proxy.addr(), "/", None);
+    let (_, body) = get_eventually(proxy.addr(), "/", |_, b| b == "iteration-2");
     assert_eq!(body, "iteration-2", "second config should take effect");
 
     proxy.reload(&proxy_yaml(proxy_port, b3.port()));
-    let (_, body) = http_get(proxy.addr(), "/", None);
+    let (_, body) = get_eventually(proxy.addr(), "/", |_, b| b == "iteration-3");
     assert_eq!(body, "iteration-3", "third config should take effect");
 
     proxy.reload("broken yaml [[[");
@@ -389,7 +409,7 @@ fn reload_multiple_successive_changes() {
     assert_eq!(body, "iteration-3", "invalid reload should keep iteration-3");
 
     proxy.reload(&proxy_yaml(proxy_port, b4.port()));
-    let (_, body) = http_get(proxy.addr(), "/", None);
+    let (_, body) = get_eventually(proxy.addr(), "/", |_, b| b == "iteration-4");
     assert_eq!(body, "iteration-4", "fourth config should take effect after recovery");
 }
 
@@ -467,7 +487,7 @@ filter_chains:
         "api route should still work after adding health route"
     );
 
-    let (s, body) = http_get(proxy.addr(), "/health/check", None);
+    let (s, body) = get_eventually(proxy.addr(), "/health/check", |s, _| s == 200);
     assert_eq!(s, 200);
     assert_eq!(body, "health-ok", "new health route should work after reload");
 }

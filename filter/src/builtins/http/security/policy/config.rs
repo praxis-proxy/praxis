@@ -80,6 +80,11 @@ pub struct PolicyFilterConfig {
     /// traffic through the `policy` filter for identity-only
     /// enforcement (legacy behavior).
     ///
+    /// Only consulted when the loaded policy declares entity routes
+    /// (tool/prompt/resource). A pure-L7 (`global`-only) or identity-only
+    /// policy never reaches this gate — `on_request_body` returns
+    /// `BodyDone` before it, so the flag has no effect there.
+    ///
     /// Note: JSON-RPC methods that legitimately carry no entity (e.g.
     /// `service/list`, `initialize`, `template/list`) still pass —
     /// `require_protocol_metadata` only rejects when the metadata is

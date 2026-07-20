@@ -27,12 +27,23 @@
 //!
 //! # Where it sits in the chain
 //!
-//! The filter consumes metadata produced by a protocol classifier filter (available in
-//! the `praxis-ai` package), so that filter must run before it:
+//! The evaluation shape is derived from the loaded policy. A policy that
+//! declares entity routes (tool/prompt/resource) consumes metadata produced
+//! by a protocol classifier filter (available in the `praxis-ai` package),
+//! so that filter must run before it:
 //!
 //! ```text
 //! classifier  ->  policy  ->  router  ->  load_balancer
 //! ```
+//!
+//! A policy that declares only a `global` HTTP policy (no entity routes) runs
+//! as a pure L7 authorization check: it authorizes at `on_request` over
+//! `http.*` + identity, needs no classifier, and does not buffer the body.
+//! When a policy declares both, the `global` block is enforced as the
+//! per-entity layer on classified entity methods; classified non-entity
+//! methods (`initialize`, `ping`, `tools/list`, …) still pass the identity
+//! gate but are not evaluated against the `global` HTTP policy.
+//! See `examples/configs/security/policy-http.yaml`.
 //!
 //! The protocol classifier filter parses the JSON-RPC body and writes `protocol.method` /
 //! `protocol.name` into filter metadata; `policy` reads that to pick the
@@ -97,6 +108,7 @@
 //! |---|---|
 //! | Identity / transport failure | HTTP 401, `WWW-Authenticate: Bearer`, `X-Policy-Violation: <code>`. |
 //! | Policy deny (PDP, predicate, PII, taint, delegation) | HTTP 200 with a JSON-RPC error envelope (`code -32001`) and `X-Policy-Violation: <code>` — per the JSON-RPC spec, gateway denials are JSON-RPC errors, not HTTP 4xx. |
+//! | Generic-HTTP (L7) policy deny | Plain HTTP response (default 403) with status / body / headers from the policy's `denyWith`, plus `X-Policy-Violation: <code>` — a non-MCP client gets a real HTTP status, not a JSON-RPC envelope. |
 //! | Missing `protocol.method` metadata | HTTP 500 (server-side misconfiguration; protocol classifier filter from `praxis-ai` missing or misordered). |
 //!
 //! # Runtime compatibility
@@ -108,6 +120,7 @@
 //! # See also
 //!
 //! - `examples/configs/security/policy.yaml` for a runnable filter config.
+//! - `examples/configs/security/policy-http.yaml` for a pure-L7 (generic-HTTP) authorization config.
 //! - The CPEX HR demo in the praxis-demos repository for an end-to-end walkthrough (identity, Cedar and CEL PDPs,
 //!   delegation, redaction, PII scanning, session taint).
 
