@@ -15,8 +15,9 @@ pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter, JsonRpcFilt
 #[cfg(feature = "cpex-policy-engine")]
 pub use security::PolicyFilter;
 pub use security::{
-    ContainsValue, CorsFilter, CredentialInjectionFilter, CsrfFilter, DisallowedOriginMode, ForwardedHeadersFilter,
-    GuardrailsAction, GuardrailsFilter, IpAclFilter, PeerIdentityTrustFilter, PiiKind, RuleTargetKind,
+    BasicAuthFilter, ContainsValue, CorsFilter, CredentialInjectionFilter, CsrfFilter, DisallowedOriginMode,
+    ForwardedHeadersFilter, GuardrailsAction, GuardrailsFilter, IpAclFilter, PeerIdentityTrustFilter, PiiKind,
+    RuleTargetKind,
 };
 pub use traffic_management::{
     CircuitBreakerFilter, EndpointSelectorFilter, GrpcDetectionFilter, LoadBalancerFilter, RateLimitFilter,

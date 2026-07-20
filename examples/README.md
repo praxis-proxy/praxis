@@ -104,6 +104,7 @@ page.
 
 | File | Description |
 | ------ | ------------- |
+| [basic-auth.yaml](configs/security/basic-auth.yaml) | Authenticate requests using HTTP Basic Authentication (RFC 7617) |
 | [cors.yaml](configs/security/cors.yaml) | Spec-compliant CORS filter with preflight handling, origin validation, and credential support |
 | [csrf.yaml](configs/security/csrf.yaml) | Cross-site request forgery protection via origin validation |
 | [downstream-read-timeout.yaml](configs/security/downstream-read-timeout.yaml) | Protects against slow client attacks by limiting how long the proxy waits for data from downstream clients |

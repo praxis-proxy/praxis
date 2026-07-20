@@ -232,3 +232,72 @@ fn downstream_read_timeout_normal_request() {
     assert_eq!(status, 200, "normal GET within timeout should return 200");
     assert_eq!(body, "ok", "response body should match backend");
 }
+
+#[test]
+fn basic_auth_rejects_unauthenticated() {
+    let backend_guard = start_backend_with_shutdown("protected");
+    let proxy_port = free_port();
+    let config = load_example_config(
+        "security/basic-auth.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3000", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Connection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 401, "unauthenticated request should return 401");
+    assert!(
+        parse_header(&raw, "www-authenticate").is_some_and(|v| v.contains("Basic")),
+        "401 response should include WWW-Authenticate: Basic header"
+    );
+}
+
+#[test]
+fn basic_auth_allows_valid_credentials() {
+    let backend_guard = start_backend_with_shutdown("protected");
+    let proxy_port = free_port();
+    let config = load_example_config(
+        "security/basic-auth.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3000", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    // "admin:secret" base64-encoded
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Authorization: Basic YWRtaW46c2VjcmV0\r\n\
+         Connection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "valid credentials should return 200");
+    assert_eq!(parse_body(&raw), "protected", "response should come from backend");
+}
+
+#[test]
+fn basic_auth_rejects_wrong_password() {
+    let backend_guard = start_backend_with_shutdown("protected");
+    let proxy_port = free_port();
+    let config = load_example_config(
+        "security/basic-auth.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3000", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    // "admin:wrong" base64-encoded
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Authorization: Basic YWRtaW46d3Jvbmc=\r\n\
+         Connection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 401, "wrong password should return 401");
+}

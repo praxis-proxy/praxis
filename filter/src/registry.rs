@@ -220,13 +220,14 @@ impl FilterRegistry {
 #[expect(clippy::too_many_lines, reason = "one line per filter, will grow")]
 fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     use crate::builtins::{
-        AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter, CsrfFilter,
-        ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter,
-        PathRewriteFilter, PeerIdentityTrustFilter, RateLimitFilter, RedirectFilter, RequestIdFilter,
-        StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
+        AccessLogFilter, BasicAuthFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter,
+        CredentialInjectionFilter, CsrfFilter, ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter,
+        JsonBodyFieldFilter, JsonRpcFilter, PathRewriteFilter, PeerIdentityTrustFilter, RateLimitFilter,
+        RedirectFilter, RequestIdFilter, StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
     };
 
     register_http(filters, "access_log", AccessLogFilter::from_config);
+    register_http_security(filters, "basic_auth", BasicAuthFilter::from_config);
     register_http(filters, "circuit_breaker", CircuitBreakerFilter::from_config);
     register_http(filters, "compression", CompressionFilter::from_config);
     register_http_security(filters, "cors", CorsFilter::from_config);
@@ -346,6 +347,7 @@ mod tests {
         names.sort();
 
         assert!(names.contains(&"access_log"), "access_log should be registered");
+        assert!(names.contains(&"basic_auth"), "basic_auth should be registered");
         assert!(
             names.contains(&"circuit_breaker"),
             "circuit_breaker should be registered"
@@ -459,6 +461,7 @@ mod tests {
     fn builtin_security_filters_classified() {
         let registry = FilterRegistry::with_builtins();
         let expected_security = [
+            "basic_auth",
             "cors",
             "credential_injection",
             "csrf",
@@ -511,6 +514,7 @@ mod tests {
         let mut sec = registry.security_filters();
         sec.sort();
 
+        assert!(sec.contains(&"basic_auth"), "basic_auth should be in security_filters");
         assert!(sec.contains(&"cors"), "cors should be in security_filters");
         assert!(
             sec.contains(&"credential_injection"),

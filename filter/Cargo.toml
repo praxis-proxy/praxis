@@ -25,6 +25,7 @@ workspace = true
 
 [dependencies]
 async-trait = { workspace = true }
+base64 = { workspace = true }
 bytes = { workspace = true }
 cpex = { workspace = true, optional = true }
 dashmap = { workspace = true }
@@ -39,6 +40,8 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 smallvec = { workspace = true }
 serde_yaml = { workspace = true }
+sha2 = { workspace = true }
+subtle = { workspace = true }
 thiserror = { workspace = true }
 # Used by `cpex-policy-engine` for plugin `initialize()` at filter
 # construction and JWT identity plugins that fetch JWKS at init time.

@@ -3127,6 +3127,7 @@ name = "praxis-proxy-filter"
 version = "0.4.0"
 dependencies = [
  "async-trait",
+ "base64",
  "bytes",
  "chrono",
  "cpex",
@@ -3142,7 +3143,9 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
+ "sha2",
  "smallvec",
+ "subtle",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
