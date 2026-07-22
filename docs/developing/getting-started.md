@@ -24,7 +24,9 @@ make fmt
 make lint
 ```
 
-It is recommended you run `make setup-hooks` to setup pre-commit hooks that ensure linting is always done before commiting code.
+It is recommended you run `make setup-hooks` to set
+up pre-commit hooks that ensure linting is always
+done before committing code.
 
 ## Build
 
