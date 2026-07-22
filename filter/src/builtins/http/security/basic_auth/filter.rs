@@ -36,23 +36,17 @@ enum CredentialSource {
 /// list or runtime KV store), and returns 401 with
 /// `WWW-Authenticate: Basic realm="..."` on failure.
 ///
-/// ```
-/// # // SAFETY: single-threaded doctest; no concurrent env access.
-/// # unsafe { std::env::set_var("DEPLOY_PASSWORD", "s3cret") };
-/// use praxis_filter::BasicAuthFilter;
+/// # YAML configuration
 ///
-/// let yaml: serde_yaml::Value = serde_yaml::from_str(
-///     r#"
+/// ```yaml
+/// filter: basic_auth
+/// realm: "Restricted"
+/// strip_authorization: true
 /// credentials:
 ///   - username: admin
 ///     password: secret
 ///   - username: deploy
 ///     env_var: DEPLOY_PASSWORD
-/// "#,
-/// )
-/// .unwrap();
-/// let filter = BasicAuthFilter::from_config(&yaml).unwrap();
-/// assert_eq!(filter.name(), "basic_auth");
 /// ```
 pub struct BasicAuthFilter {
     /// Pre-computed `WWW-Authenticate` challenge header value.

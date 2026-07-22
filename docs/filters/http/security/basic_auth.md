@@ -9,4 +9,15 @@ HTTP Basic Authentication filter (RFC 7617).
 
 Extracts credentials from the `Authorization: Basic` header, validates against a configurable credential source (inline list or runtime KV store), and returns 401 with `WWW-Authenticate: Basic realm="..."` on failure.
 
-let yaml: serde_yaml::Value = serde_yaml::from_str( r#" credentials: - username: admin password: secret - username: deploy env_var: DEPLOY_PASSWORD "#, ) .unwrap(); let filter = BasicAuthFilter::from_config(&yaml).unwrap(); assert_eq!(filter.name(), "basic_auth");
+## Example
+
+```yaml
+filter: basic_auth
+realm: "Restricted"
+strip_authorization: true
+credentials:
+  - username: admin
+    password: secret
+  - username: deploy
+    env_var: DEPLOY_PASSWORD
+```
