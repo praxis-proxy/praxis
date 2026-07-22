@@ -281,6 +281,34 @@ fn basic_auth_allows_valid_credentials() {
 }
 
 #[test]
+fn basic_auth_strips_authorization_header() {
+    let backend_guard = start_header_echo_backend();
+    let proxy_port = free_port();
+    let config = load_example_config(
+        "security/basic-auth.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3000", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    // "admin:secret" base64-encoded
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Authorization: Basic YWRtaW46c2VjcmV0\r\n\
+         Connection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "valid credentials should return 200");
+
+    let body = parse_body(&raw);
+    assert!(
+        !body.to_lowercase().contains("authorization:"),
+        "Authorization header should be stripped before forwarding"
+    );
+}
+
+#[test]
 fn basic_auth_rejects_wrong_password() {
     let backend_guard = start_backend_with_shutdown("protected");
     let proxy_port = free_port();
