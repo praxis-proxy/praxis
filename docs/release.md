@@ -39,7 +39,7 @@ Container images are published to [GitHub Container Registry][ghcr] (GHCR).
 After pushing a tag, manually trigger the **Publish**
 workflow via the GitHub Actions UI
 (`workflow_dispatch`). The workflow builds a multi-stage
-Alpine image from the `Containerfile` and pushes it to
+image from the `Containerfile` and pushes it to
 `ghcr.io/praxis-proxy/praxis`.
 
 [ghcr]: https://ghcr.io/praxis-proxy/praxis
@@ -80,12 +80,14 @@ triggered as usual.
 
 ## Container Details
 
-The production image is a minimal Alpine container:
+The production image uses Red Hat UBI 10 Minimal as the
+runtime base. The binary is a static musl build produced
+in a separate `rust:1.96-alpine` builder stage (UBI 10
+Rust Toolset ships 1.92, below the project's MSRV).
 
-- Static musl build with LTO, single codegen unit, and stripped symbols
-- Runs as non-root user (`praxis`)
+- Static musl binary with LTO, single codegen unit, and stripped symbols
+- Runtime: `registry.access.redhat.com/ubi10/ubi-minimal:latest`
+- Runs as non-root user `praxis`
 - Exposes ports `8080` (proxy) and `9901` (admin)
-- Built-in health check at `http://127.0.0.1:9901/healthy`
+- Built-in health check via `curl` at `http://127.0.0.1:9901/healthy`
 - Config directory: `/etc/praxis`
-
-> **Note**: This is subject to change.

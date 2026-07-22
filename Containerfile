@@ -84,15 +84,24 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 # Stage 2: Runtime
 # ------------------------------------------------------------------------------
 
-FROM alpine:3.23
+FROM registry.access.redhat.com/ubi10/ubi-minimal:latest
 
 LABEL org.opencontainers.image.source="https://github.com/praxis-proxy/praxis" \
     org.opencontainers.image.description="Praxis proxy server" \
     org.opencontainers.image.licenses="MIT"
 
-RUN apk add --no-cache ca-certificates \
-    && addgroup -S praxis \
-    && adduser -S -G praxis -h /nonexistent -s /sbin/nologin praxis \
+RUN microdnf install -y \
+        --setopt install_weak_deps=0 \
+        ca-certificates curl shadow-utils \
+    && groupadd --system praxis \
+    && useradd --system \
+        --gid praxis \
+        --no-create-home \
+        --home-dir /nonexistent \
+        --shell /sbin/nologin \
+        praxis \
+    && microdnf remove -y shadow-utils \
+    && microdnf clean all \
     && mkdir -p /etc/praxis
 
 COPY --from=builder --chown=root:root --chmod=0555 \
@@ -109,6 +118,7 @@ WORKDIR /etc/praxis
 EXPOSE 8080 9901
 
 HEALTHCHECK --interval=5s --timeout=3s --start-period=2s \
-    CMD wget -qO- http://127.0.0.1:9901/healthy || exit 1
+    CMD curl --fail --silent --show-error \
+        http://127.0.0.1:9901/healthy || exit 1
 
 ENTRYPOINT ["praxis", "-c", "/etc/praxis/config.yaml"]
