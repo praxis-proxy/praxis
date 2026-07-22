@@ -113,6 +113,38 @@ credentials:
 }
 
 #[test]
+fn rejects_empty_username() {
+    let yaml = yaml(
+        "
+credentials:
+  - username: ''
+    password: secret
+",
+    );
+    let err = BasicAuthFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("username must not be empty"),
+        "should reject empty username: {err}"
+    );
+}
+
+#[test]
+fn rejects_whitespace_only_username() {
+    let yaml = yaml(
+        "
+credentials:
+  - username: '  '
+    password: secret
+",
+    );
+    let err = BasicAuthFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("username must not be empty"),
+        "should reject whitespace-only username: {err}"
+    );
+}
+
+#[test]
 fn rejects_realm_with_double_quote() {
     let yaml = yaml(
         r#"

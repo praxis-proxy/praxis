@@ -148,6 +148,10 @@ impl TryFrom<RawInlineCredential> for InlineCredential {
                 ));
             },
         };
+        if raw.username.trim().is_empty() {
+            return Err("username must not be empty".to_owned());
+        }
+
         Ok(Self {
             username: raw.username,
             source,
