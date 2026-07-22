@@ -7,6 +7,12 @@ name: Container
 on:
   push:
     branches: [main]
+  pull_request:
+    paths:
+      - Containerfile
+      - Cargo.toml
+      - Cargo.lock
+      - '**/Cargo.toml'
 
 permissions: {}
 
@@ -42,6 +48,22 @@ jobs:
           docker inspect --format='{{json .State.Health}}' praxis
           docker logs praxis
           exit 1
+
+      - name: Verify non-root user
+        run: |
+          user=$(docker exec praxis whoami)
+          if [ "${user}" != "praxis" ]; then
+            echo "Expected user 'praxis', got '${user}'"
+            exit 1
+          fi
+
+      - name: Verify health endpoint
+        run: |
+          response=$(docker exec praxis curl -fsS http://127.0.0.1:9901/healthy)
+          if [ "${response}" != '{"status":"ok"}' ]; then
+            echo "Unexpected health response: ${response}"
+            exit 1
+          fi
 
       - name: Stop container
         if: always()
