@@ -1,8 +1,9 @@
 <img width="3159" height="540" alt="image" src="https://github.com/user-attachments/assets/0c33e340-a3d4-42e5-93f3-c1e3817b8f35"/>
 
 [![Tests](https://github.com/praxis-proxy/praxis/actions/workflows/tests.yaml/badge.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/tests.yaml)
-[![Coverage: ≥95%](https://img.shields.io/badge/Coverage-≥95%25-brightgreen.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/coverage.yaml)
+[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13756/badge)](https://www.bestpractices.dev/projects/13756)
 [![Conformance](https://github.com/praxis-proxy/praxis/actions/workflows/conformance.yaml/badge.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/conformance.yaml)
+[![Coverage: ≥95%](https://img.shields.io/badge/Coverage-≥95%25-brightgreen.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/coverage.yaml)
 [![MSRV: 1.96](https://img.shields.io/badge/MSRV-1.96-brightgreen.svg)](https://blog.rust-lang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
@@ -47,6 +48,9 @@ with the following documentation first:
 
 For larger changes, open a [discussion] and follow the
 [proposal process](docs/proposals.md).
+
+All participants are expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
 
 [Issues]:https://github.com/praxis-proxy/praxis/issues/new
 [pull requests]:https://github.com/praxis-proxy/praxis/compare
