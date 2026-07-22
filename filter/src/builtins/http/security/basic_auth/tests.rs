@@ -113,6 +113,33 @@ credentials:
 }
 
 #[test]
+fn rejects_realm_with_double_quote() {
+    let yaml = yaml(
+        r#"
+realm: 'has"quote'
+credentials:
+  - username: admin
+    password: secret
+"#,
+    );
+    let err = BasicAuthFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("realm must not contain"),
+        "should reject realm with double-quote: {err}"
+    );
+}
+
+#[test]
+fn rejects_realm_with_control_character() {
+    let yaml = yaml("realm: \"has\\x00null\"\ncredentials:\n  - username: admin\n    password: secret\n");
+    let err = BasicAuthFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("realm must not contain"),
+        "should reject realm with control character: {err}"
+    );
+}
+
+#[test]
 fn rejects_missing_env_var() {
     let yaml = yaml(
         "
