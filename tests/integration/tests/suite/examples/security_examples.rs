@@ -309,6 +309,28 @@ fn basic_auth_strips_authorization_header() {
 }
 
 #[test]
+fn basic_auth_allows_second_credential() {
+    let backend_guard = start_backend_with_shutdown("protected");
+    let proxy_port = free_port();
+    let config = load_example_config(
+        "security/basic-auth.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3000", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Authorization: Basic cmVhZG9ubHk6dmlld2Vy\r\n\
+         Connection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "second credential (readonly:viewer) should return 200");
+    assert_eq!(parse_body(&raw), "protected", "response should come from backend");
+}
+
+#[test]
 fn basic_auth_rejects_wrong_password() {
     let backend_guard = start_backend_with_shutdown("protected");
     let proxy_port = free_port();
