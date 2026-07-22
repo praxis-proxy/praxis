@@ -224,6 +224,9 @@ pub struct HttpFilterContext<'a> {
     /// Named key-value stores for runtime mappings.
     pub kv_stores: Option<&'a KvStoreRegistry>,
 
+    /// Shared HTTP connector for iterative sub-requests.
+    pub subrequest_connector: Option<&'a praxis_core::subrequest::SubRequestConnector>,
+
     /// Transport-agnostic request headers, URI, and method.
     pub request: &'a Request,
 
@@ -297,6 +300,11 @@ impl HttpFilterContext<'_> {
     /// Upstream peer address, if selected.
     pub fn upstream_addr(&self) -> Option<&str> {
         self.upstream.as_ref().map(|u| &*u.address)
+    }
+
+    /// Shared sub-request connector, if set.
+    pub(crate) fn subrequest_connector(&self) -> Option<&praxis_core::subrequest::SubRequestConnector> {
+        self.subrequest_connector
     }
 
     /// Read a durable metadata value by key.

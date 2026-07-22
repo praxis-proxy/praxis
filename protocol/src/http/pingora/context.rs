@@ -289,6 +289,7 @@ macro_rules! filter_context {
             peer_identity: $ctx.peer_identity.clone(),
             id_generator: $pipeline.id_generator(),
             kv_stores: $pipeline.kv_stores(),
+            subrequest_connector: $pipeline.subrequest_connector(),
             request: $request,
             request_body_bytes: $ctx.request_body_bytes,
             request_body_mode: $ctx.request_body_mode,

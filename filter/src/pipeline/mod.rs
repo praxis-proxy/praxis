@@ -41,6 +41,9 @@ mod extension;
 pub(crate) mod filter;
 mod http;
 mod http_utils;
+/// Sub-request execution for iterative request routing.
+#[expect(dead_code, reason = "consumed by iterative_request_router (#786)")]
+pub(crate) mod subrequest;
 mod tcp;
 #[cfg(test)]
 mod test_filters;
@@ -116,6 +119,9 @@ pub struct FilterPipeline {
 
     /// Named key-value stores for runtime mappings.
     kv_stores: Option<KvStoreRegistry>,
+
+    /// Shared HTTP connector for iterative sub-requests.
+    subrequest_connector: Option<praxis_core::subrequest::SubRequestConnector>,
 
     /// External pipeline extensions injected after construction.
     pipeline_extensions: Vec<Box<dyn PipelineExtension>>,
@@ -245,6 +251,18 @@ impl FilterPipeline {
     /// Set the shared [`KvStoreRegistry`] for this pipeline.
     pub fn set_kv_stores(&mut self, stores: KvStoreRegistry) {
         self.kv_stores = Some(stores);
+    }
+
+    /// The shared sub-request connector, if set.
+    pub fn subrequest_connector(&self) -> Option<&praxis_core::subrequest::SubRequestConnector> {
+        self.subrequest_connector.as_ref()
+    }
+
+    /// Set the shared [`SubRequestConnector`] for this pipeline.
+    ///
+    /// [`SubRequestConnector`]: praxis_core::subrequest::SubRequestConnector
+    pub fn set_subrequest_connector(&mut self, connector: praxis_core::subrequest::SubRequestConnector) {
+        self.subrequest_connector = Some(connector);
     }
 
     /// Register an external pipeline extension.

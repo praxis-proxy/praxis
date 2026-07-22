@@ -103,6 +103,7 @@ impl FilterPipeline {
             kv_stores: None,
             pipeline_extensions: Vec::new(),
             record_filter_duration_metrics: false,
+            subrequest_connector: None,
             time_source: Arc::new(SystemTimeSource),
         }
     }

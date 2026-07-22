@@ -28,6 +28,8 @@ pub mod memory;
 pub mod reserved_headers;
 /// Server factory and runtime options.
 pub mod server;
+/// Shared HTTP connector for sub-request execution.
+pub mod subrequest;
 /// Wall-clock time abstraction for filters.
 pub mod time;
 
