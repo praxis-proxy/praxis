@@ -11,7 +11,7 @@ use std::{
 
 use praxis_core::config::{
     AdminConfig, BodyLimitsConfig, Cluster, Config, Endpoint, FailureMode, FilterChainConfig, FilterEntry,
-    InsecureOptions, Listener, MetricsConfig, ProtocolKind, RuntimeConfig,
+    InsecureOptions, Listener, MetricsConfig, ProtocolKind, RuntimeConfig, TelemetryConfig,
 };
 
 use super::specialized::{BackendGuard, read_until_headers_complete, spawn_tcp_server, spawn_tcp_server_with_shutdown};
@@ -429,6 +429,7 @@ fn build_config(address: &str, clusters: Vec<Cluster>, filters: Vec<FilterEntry>
         metrics: MetricsConfig::default(),
         runtime: RuntimeConfig::default(),
         shutdown_timeout_secs: 5,
+        telemetry: TelemetryConfig::default(),
     }
 }
 

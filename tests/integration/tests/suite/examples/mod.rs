@@ -56,6 +56,8 @@ mod session_affinity;
 mod static_response;
 mod stream_buffer;
 mod timeout;
+#[cfg(feature = "otel")]
+mod tracing_otlp;
 mod traffic_management_examples;
 mod url_rewriting;
 mod virtual_hosts;

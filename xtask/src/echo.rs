@@ -6,7 +6,7 @@
 use clap::Parser;
 use praxis_core::config::{
     AdminConfig, BodyLimitsConfig, Config, FailureMode, FilterChainConfig, FilterEntry, InsecureOptions, Listener,
-    MetricsConfig, ProtocolKind, RuntimeConfig,
+    MetricsConfig, ProtocolKind, RuntimeConfig, TelemetryConfig,
 };
 
 // -----------------------------------------------------------------------------
@@ -73,6 +73,7 @@ fn build_config(args: &Args) -> Config {
         metrics: MetricsConfig::default(),
         runtime: RuntimeConfig::default(),
         shutdown_timeout_secs: 30,
+        telemetry: TelemetryConfig::default(),
     }
 }
 
