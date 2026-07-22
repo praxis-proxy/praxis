@@ -246,7 +246,7 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     register_http_security(filters, "ip_acl", IpAclFilter::from_config);
     register_http(filters, "load_balancer", crate::LoadBalancerFilter::from_config);
     register_http(filters, "path_rewrite", PathRewriteFilter::from_config);
-    register_http(filters, "rate_limit", RateLimitFilter::from_config);
+    register_http_security(filters, "rate_limit", RateLimitFilter::from_config);
     register_http(filters, "redirect", RedirectFilter::from_config);
     register_http(filters, "request_id", RequestIdFilter::from_config);
     register_http(filters, "router", crate::RouterFilter::from_config);
@@ -465,6 +465,7 @@ mod tests {
             "forwarded_headers",
             "guardrails",
             "ip_acl",
+            "rate_limit",
         ];
 
         for name in &expected_security {
@@ -523,6 +524,7 @@ mod tests {
         );
         assert!(sec.contains(&"guardrails"), "guardrails should be in security_filters");
         assert!(sec.contains(&"ip_acl"), "ip_acl should be in security_filters");
+        assert!(sec.contains(&"rate_limit"), "rate_limit should be in security_filters");
         assert!(!sec.contains(&"router"), "router should not be in security_filters");
     }
 
