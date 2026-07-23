@@ -55,6 +55,10 @@ pub(crate) struct WatcherParams {
     /// Health check shutdown token, swapped on each reload.
     pub(crate) health_shutdown: Arc<Mutex<CancellationToken>>,
 
+    /// Hash of the config file content at server startup, used to
+    /// detect changes that occurred before the watcher was ready.
+    pub(crate) initial_content_hash: u64,
+
     /// Initial config for diffing against reloaded versions.
     pub(crate) initial_config: Config,
 
@@ -133,11 +137,23 @@ fn should_skip_for_backoff(consecutive_failures: u32, last_failure: Option<Insta
 }
 
 /// Process filesystem events until shutdown is requested.
+#[expect(clippy::too_many_lines, reason = "pre run checks")]
 async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
     let mut current_config = params.initial_config.clone();
-    let mut content_hash = std::fs::read_to_string(&params.config_path).map_or(0, |c| hash_content(&c));
+    let mut content_hash = params.initial_content_hash;
     let mut consecutive_failures: u32 = 0;
     let mut last_failure: Option<Instant> = None;
+
+    // Check for changes that may have occurred between config load and watcher startup
+    handle_reload(
+        &params.config_path,
+        &mut current_config,
+        &mut content_hash,
+        &params.registry,
+        &params.pipelines,
+        &params.health_shutdown,
+        &params.kv_stores,
+    );
 
     loop {
         tokio::select! {
@@ -295,7 +311,7 @@ fn backoff_duration(consecutive_failures: u32) -> Duration {
 }
 
 /// Compute a hash of file content for change detection.
-fn hash_content(content: &str) -> u64 {
+pub(crate) fn hash_content(content: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
     hasher.write(content.as_bytes());
     hasher.finish()
@@ -370,6 +386,7 @@ mod tests {
         let handle = spawn_config_watcher(WatcherParams {
             config_path,
             health_shutdown,
+            initial_content_hash: hash_content(VALID_YAML),
             initial_config: config,
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines,
@@ -402,6 +419,7 @@ mod tests {
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: config_path.clone(),
             health_shutdown,
+            initial_content_hash: hash_content(VALID_YAML),
             initial_config: config,
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines: Arc::clone(&pipelines),
@@ -442,6 +460,7 @@ mod tests {
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: config_path.clone(),
             health_shutdown,
+            initial_content_hash: hash_content(VALID_YAML),
             initial_config: config,
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines: Arc::clone(&pipelines),
@@ -512,6 +531,7 @@ mod tests {
         let handle = spawn_config_watcher(WatcherParams {
             config_path: PathBuf::from("praxis.yaml"),
             health_shutdown,
+            initial_content_hash: hash_content(VALID_YAML),
             initial_config: config,
             kv_stores,
             pipelines,
@@ -564,6 +584,7 @@ mod tests {
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: config_path.clone(),
             health_shutdown,
+            initial_content_hash: hash_content(VALID_YAML),
             initial_config: config,
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines: Arc::clone(&pipelines),

@@ -256,15 +256,39 @@ fn try_parse_alternate_ip(host: &str) -> Option<IpAddr> {
                 ];
                 Some(IpAddr::V4(Ipv4Addr::from(octets)))
             },
+            [a, b] => {
+                let hi = parse_flexible_octet(a)?;
+                let lo = parse_flexible_u32(b).filter(|&v| v <= 0x00FF_FFFF)?;
+                let n = u32::from(hi) << 24 | lo;
+                Some(IpAddr::V4(Ipv4Addr::from(n)))
+            },
+            [a, b, c] => {
+                let o1 = parse_flexible_octet(a)?;
+                let o2 = parse_flexible_octet(b)?;
+                let lo = parse_flexible_u32(c).filter(|&v| v <= 0xFFFF)?;
+                let n = u32::from(o1) << 24 | u32::from(o2) << 16 | lo;
+                Some(IpAddr::V4(Ipv4Addr::from(n)))
+            },
             _ => None,
         };
     }
-    let n = if let Some(hex) = host.strip_prefix("0x").or_else(|| host.strip_prefix("0X")) {
-        u32::from_str_radix(hex, 16).ok()?
-    } else {
-        host.parse::<u32>().ok()?
-    };
+    let n = parse_flexible_u32(host)?;
     Some(IpAddr::V4(Ipv4Addr::from(n)))
+}
+
+/// Parse a value as decimal, octal (leading `0`), or hexadecimal
+/// (`0x`) into a `u32`.
+fn parse_flexible_u32(s: &str) -> Option<u32> {
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        return u32::from_str_radix(hex, 16).ok();
+    }
+    if s.len() > 1 && s.starts_with('0') && s.bytes().all(|b| b.is_ascii_digit()) {
+        return u32::from_str_radix(s, 8).ok();
+    }
+    s.parse::<u32>().ok()
 }
 
 /// Parse a single octet that may use decimal, octal (leading `0`),
@@ -1207,6 +1231,68 @@ clusters:
         assert!(
             super::try_parse_alternate_ip("").is_none(),
             "empty string should return None"
+        );
+    }
+
+    #[test]
+    fn try_parse_alternate_ip_two_part_loopback() {
+        let ip = super::try_parse_alternate_ip("127.1").unwrap();
+        assert_eq!(
+            ip,
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+            "2-part 127.1 should parse as 127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn try_parse_alternate_ip_three_part_loopback() {
+        let ip = super::try_parse_alternate_ip("127.0.1").unwrap();
+        assert_eq!(
+            ip,
+            "127.0.0.1".parse::<std::net::IpAddr>().unwrap(),
+            "3-part 127.0.1 should parse as 127.0.0.1"
+        );
+    }
+
+    #[test]
+    fn try_parse_alternate_ip_two_part_link_local() {
+        let ip = super::try_parse_alternate_ip("169.16646144").unwrap();
+        assert_eq!(
+            ip,
+            "169.254.0.0".parse::<std::net::IpAddr>().unwrap(),
+            "2-part 169.16646144 should parse as 169.254.0.0"
+        );
+    }
+
+    #[test]
+    fn try_parse_alternate_ip_two_part_overflow_rejected() {
+        assert!(
+            super::try_parse_alternate_ip("127.16777216").is_none(),
+            "2-part with value > 0x00FFFFFF should be rejected"
+        );
+    }
+
+    #[test]
+    fn try_parse_alternate_ip_three_part_overflow_rejected() {
+        assert!(
+            super::try_parse_alternate_ip("127.0.65536").is_none(),
+            "3-part with value > 0xFFFF should be rejected"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_hostname_flags_two_part_loopback() {
+        assert!(
+            super::is_ssrf_sensitive_hostname("127.1"),
+            "2-part 127.1 (127.0.0.1) should be flagged"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_hostname_flags_three_part_loopback() {
+        assert!(
+            super::is_ssrf_sensitive_hostname("127.0.1"),
+            "3-part 127.0.1 (127.0.0.1) should be flagged"
         );
     }
 

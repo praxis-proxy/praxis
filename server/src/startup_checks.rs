@@ -23,12 +23,8 @@ pub(crate) fn warn_insecure_options(config: &Config) {
         "allow_open_security_filters: open failure_mode allowed",
     );
     insecure_warn(
-        o.allow_public_admin,
-        "allow_public_admin: admin may bind non-loopback addresses",
-    );
-    insecure_warn(
-        o.allow_tls_without_sni,
-        "allow_tls_without_sni: TLS hostname verification weakened",
+        o.allow_private_endpoints,
+        "allow_private_endpoints: SSRF-sensitive endpoint addresses allowed",
     );
     insecure_warn(
         o.allow_private_health_checks,
@@ -37,6 +33,18 @@ pub(crate) fn warn_insecure_options(config: &Config) {
     insecure_warn(
         o.allow_private_upstreams,
         "allow_private_upstreams: runtime SSRF protection disabled for upstream connections",
+    );
+    insecure_warn(
+        o.allow_public_admin,
+        "allow_public_admin: admin may bind non-loopback addresses",
+    );
+    insecure_warn(
+        o.allow_tls_no_verify,
+        "allow_tls_no_verify: upstream TLS certificate verification disabled",
+    );
+    insecure_warn(
+        o.allow_tls_without_sni,
+        "allow_tls_without_sni: TLS hostname verification weakened",
     );
     insecure_warn(o.csrf_log_only, "csrf_log_only: CSRF violations logged, not rejected");
     insecure_warn(
