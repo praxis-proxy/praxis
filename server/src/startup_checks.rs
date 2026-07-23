@@ -174,3 +174,9 @@ pub(crate) fn warn_insecure_key_permissions(config: &Config) {
 /// No-op on non-Unix platforms.
 #[cfg(not(unix))]
 pub(crate) fn warn_insecure_key_permissions(_config: &Config) {}
+
+/// Logs a warning when the server includes any experimental features.
+#[cfg(feature = "experimental")]
+pub(crate) fn warn_experimental_features() {
+    tracing::warn!("experimental features are enabled that should not be used in production");
+}

@@ -233,6 +233,7 @@ fn downstream_read_timeout_normal_request() {
     assert_eq!(body, "ok", "response body should match backend");
 }
 
+#[cfg(feature = "basic-auth-filter")]
 #[test]
 fn basic_auth_rejects_unauthenticated() {
     let backend_guard = start_backend_with_shutdown("protected");
@@ -257,6 +258,7 @@ fn basic_auth_rejects_unauthenticated() {
     );
 }
 
+#[cfg(feature = "basic-auth-filter")]
 #[test]
 fn basic_auth_allows_valid_credentials() {
     let backend_guard = start_backend_with_shutdown("protected");
@@ -280,6 +282,7 @@ fn basic_auth_allows_valid_credentials() {
     assert_eq!(parse_body(&raw), "protected", "response should come from backend");
 }
 
+#[cfg(feature = "basic-auth-filter")]
 #[test]
 fn basic_auth_strips_authorization_header() {
     let backend_guard = start_header_echo_backend();
@@ -308,6 +311,7 @@ fn basic_auth_strips_authorization_header() {
     );
 }
 
+#[cfg(feature = "basic-auth-filter")]
 #[test]
 fn basic_auth_allows_second_credential() {
     let backend_guard = start_backend_with_shutdown("protected");
@@ -334,6 +338,7 @@ fn basic_auth_allows_second_credential() {
     assert_eq!(parse_body(&raw), "protected", "response should come from backend");
 }
 
+#[cfg(feature = "basic-auth-filter")]
 #[test]
 fn basic_auth_rejects_wrong_password() {
     let backend_guard = start_backend_with_shutdown("protected");

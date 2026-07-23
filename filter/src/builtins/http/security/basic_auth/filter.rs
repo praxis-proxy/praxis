@@ -130,6 +130,10 @@ impl BasicAuthFilter {
         let source = CredentialSource::from_config(cfg.source)?;
         let challenge = format!("Basic realm=\"{}\"", cfg.realm);
 
+        tracing::warn!(
+            "basic_auth is an experimental filter with plaintext credential storage. \
+             It is not suitable for production use."
+        );
         Ok(Box::new(Self {
             challenge,
             strip_authorization: cfg.strip_authorization,
