@@ -11,11 +11,8 @@ use praxis_filter::{BodyMode, FilterAction, FilterPipeline};
 use tracing::{debug, error};
 
 use super::{
-    super::context::PingoraRequestCtx,
-    body_helpers::{
-        BodyFilterOutput, accumulate_stream_buffer, check_body_size_limit, release_stream_buffer,
-        suppress_stream_buffer_chunk,
-    },
+    super::context::PingoraRequestCtx, BodyFilterOutput, accumulate_stream_buffer, check_body_size_limit,
+    release_stream_buffer, suppress_stream_buffer_chunk,
 };
 
 // -----------------------------------------------------------------------------

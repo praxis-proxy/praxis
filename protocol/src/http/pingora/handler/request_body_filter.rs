@@ -11,10 +11,8 @@ use tracing::error;
 
 use super::{
     super::{context::PingoraRequestCtx, convert::send_rejection},
-    body_helpers::{
-        BodyFilterOutput, accumulate_stream_buffer, check_body_size_limit, release_stream_buffer,
-        suppress_stream_buffer_chunk,
-    },
+    BodyFilterOutput, accumulate_stream_buffer, check_body_size_limit, release_stream_buffer,
+    suppress_stream_buffer_chunk,
 };
 
 // -----------------------------------------------------------------------------
