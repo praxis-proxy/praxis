@@ -525,6 +525,8 @@ impl BodyFilterOutput {
 mod tests {
     use std::sync::Arc;
 
+    use praxis_core::connectivity::ConnectionOptions;
+
     use super::*;
 
     #[test]
@@ -1021,19 +1023,38 @@ mod tests {
     #[test]
     fn write_back_transfers_fields() {
         let mut ctx = PingoraRequestCtx::default();
+
+        let mut extensions = RequestExtensions::new();
+        extensions.insert(42_u32);
+
+        let state_val: Box<dyn std::any::Any + Send + Sync> = Box::new(99_i32);
+        let filter_state = HashMap::from([(0_usize, state_val)]);
+
         let output = BodyFilterOutput {
             cluster: Some(Arc::from("test-cluster")),
-            upstream: None,
-            extensions: RequestExtensions::new(),
+            upstream: Some(Upstream {
+                address: Arc::from("10.0.0.1:80"),
+                connection: Arc::new(ConnectionOptions::default()),
+                tls: None,
+            }),
+            extensions,
             filter_metadata: HashMap::from([("key".to_owned(), "val".to_owned())]),
-            filter_state: HashMap::new(),
+            filter_state,
             executed_filter_indices: vec![true, false],
             body_done_indices: vec![false, true],
         };
         output.write_back(&mut ctx);
 
         assert_eq!(ctx.cluster.as_deref(), Some("test-cluster"));
+        assert!(ctx.upstream.is_some(), "upstream should transfer");
+        assert_eq!(ctx.upstream.as_ref().unwrap().address.as_ref(), "10.0.0.1:80");
+        assert_eq!(ctx.extensions.get::<u32>(), Some(&42));
         assert_eq!(ctx.filter_metadata.get("key").map(String::as_str), Some("val"));
+        assert_eq!(ctx.filter_state.len(), 1, "filter_state should transfer");
+        assert_eq!(
+            ctx.filter_state.get(&0).and_then(|v| v.downcast_ref::<i32>()),
+            Some(&99)
+        );
         assert_eq!(ctx.cached_executed_filter_indices, vec![true, false]);
         assert_eq!(ctx.cached_body_done_indices, vec![false, true]);
     }
