@@ -108,8 +108,13 @@
 //! |---|---|
 //! | Identity / transport failure | HTTP 401, `WWW-Authenticate: Bearer`, `X-Policy-Violation: <code>`. |
 //! | Policy deny (PDP, predicate, PII, taint, delegation) | HTTP 200 with a JSON-RPC error envelope (`code -32001`) and `X-Policy-Violation: <code>` — per the JSON-RPC spec, gateway denials are JSON-RPC errors, not HTTP 4xx. |
+//! | Policy suspend (human-in-the-loop approval pending) | HTTP 200 with a JSON-RPC error envelope carrying the violation's `proto_error_code` (`-32120`) instead of the generic deny code, plus the elicitation bundle (`elicitation_id` / `approver` / `expires_at` / `channel`) in `error.data` — a distinct code so the client can retry rather than treat it as a flat deny. |
 //! | Generic-HTTP (L7) policy deny | Plain HTTP response (default 403) with status / body / headers from the policy's `denyWith`, plus `X-Policy-Violation: <code>` — a non-MCP client gets a real HTTP status, not a JSON-RPC envelope. |
 //! | Missing `mcp.method` metadata | HTTP 500 (server-side misconfiguration; protocol classifier filter from `praxis-ai` missing or misordered). |
+//!
+//! Any violation carrying a `proto_error_code` overrides `-32001` on the
+//! wire, and its `details` map is merged into `error.data`; the pending
+//! elicitation above is the one producer of that today.
 //!
 //! # Runtime compatibility
 //!

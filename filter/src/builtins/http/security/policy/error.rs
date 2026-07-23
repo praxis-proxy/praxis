@@ -95,10 +95,19 @@ pub(super) fn auth_rejection(violation: Option<&PluginViolation>) -> Rejection {
 ///   "error": {
 ///     "code": -32001,
 ///     "message": "<human reason from the violation>",
-///     "data": { "violation": "<violation code>" }
+///     "data": { "violation": "<violation code>", "...": "<violation details>" }
 ///   }
 /// }
 /// ```
+///
+/// `code` defaults to `GATEWAY_DENIED_CODE` (`-32001`) but a violation
+/// carrying a [`PluginViolation::proto_error_code`] overrides it — a
+/// suspended human-in-the-loop elicitation surfaces as `-32120` so the
+/// client can tell "pending approval" from a flat deny. `data` always
+/// carries `violation` (the canonical classifier code) and additionally
+/// every entry of the violation's `details` map — for a pending
+/// elicitation, the bundle of `elicitation_id` / `approver` /
+/// `expires_at` / `channel` the client needs to retry.
 pub(super) fn json_rpc_error_rejection(
     violation: Option<&PluginViolation>,
     request_id: &serde_json::Value,
@@ -259,12 +268,22 @@ mod tests {
             .with_proto_error_code(-32120)
             .with_details(details);
         let env = envelope(&v);
-        // The pending code reaches the wire (not collapsed to -32001) …
-        assert_eq!(env["error"]["code"], -32120);
-        // … and the elicitation bundle rides in `data`.
-        assert_eq!(env["error"]["data"]["elicitation_id"], "elic-7");
-        assert_eq!(env["error"]["data"]["approver"], "alice");
-        assert_eq!(env["error"]["data"]["violation"], "elicitation.pending");
+        assert_eq!(
+            env["error"]["code"], -32120,
+            "pending code must reach the wire, not collapse to the generic deny code",
+        );
+        assert_eq!(
+            env["error"]["data"]["elicitation_id"], "elic-7",
+            "elicitation bundle must ride in `data` so the client can retry",
+        );
+        assert_eq!(
+            env["error"]["data"]["approver"], "alice",
+            "every `details` entry must reach `data`",
+        );
+        assert_eq!(
+            env["error"]["data"]["violation"], "elicitation.pending",
+            "canonical violation code must survive alongside the details",
+        );
     }
 
     #[test]

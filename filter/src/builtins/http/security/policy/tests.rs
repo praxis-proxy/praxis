@@ -633,21 +633,22 @@ async fn request_without_auth_header_rejects_401() {
 /// upstream), the early `identity_gate` must skip rather than re-resolve
 /// against the now-missing headers. A credential-less request that would
 /// normally 401 here passes because the body phase is authoritative.
+///
+/// The routes-only config is what puts `on_request` on the `identity_gate`
+/// path, and stashing `ResolvedIdentity` is what a body phase that already
+/// resolved and enforced identity leaves behind.
 #[tokio::test(flavor = "multi_thread")]
 async fn identity_gate_skips_when_body_phase_already_resolved() {
     use cpex::cpex_core::identity::{IdentityPayload, TokenSource};
 
     use super::filter::ResolvedIdentity;
 
-    let (_dir, path) = write_cel_policy_config(); // routes-only → identity_gate path
+    let (_dir, path) = write_cel_policy_config();
     let filter = build_filter(path);
 
-    // A request with NO Authorization header — identity_gate would normally 401.
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
 
-    // Simulate the body phase having already resolved + enforced identity
-    // and stripped the inbound credential for the upstream.
     ctx.extensions.insert(ResolvedIdentity(IdentityPayload::new(
         String::new(),
         TokenSource::Bearer,
