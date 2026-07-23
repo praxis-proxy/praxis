@@ -14,6 +14,8 @@ use tracing::{debug, warn};
 
 use super::{context::PingoraRequestCtx, metrics};
 
+/// Shared request/response body filter helpers.
+mod body_helpers;
 /// Shared hop-by-hop header stripping logic.
 mod hop_by_hop;
 /// HTTP handler without body filter hooks.
