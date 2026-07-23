@@ -27,7 +27,10 @@ struct ActiveFeatures {
 }
 
 fn main() {
-    let metadata = load_metadata();
+    let Some(metadata) = load_metadata() else {
+        write_generated_file(&generate_registration_code(&[]));
+        return;
+    };
     let crates = discover_external_filter_crates(&metadata);
     let code = generate_registration_code(&crates);
     write_generated_file(&code);
@@ -55,28 +58,24 @@ fn discover_external_filter_crates(metadata: &Metadata) -> Vec<String> {
 
 /// Load cargo metadata, narrowed to dependencies available for the current
 /// target when Cargo provides one.
-fn load_metadata() -> Metadata {
-    let active_features = active_features();
+///
+/// Returns `None` when metadata resolution fails (e.g. during `cargo publish`
+/// verification where path dependencies are not available).
+fn load_metadata() -> Option<Metadata> {
+    let active_features = active_features()?;
     let mut command = cargo_metadata::MetadataCommand::new();
     apply_active_features(&mut command, active_features);
     if let Ok(target) = std::env::var("TARGET") {
         command.other_options(vec!["--filter-platform".to_owned(), target]);
     }
 
-    command.exec().expect("failed to run cargo metadata")
+    command.exec().ok()
 }
 
 /// Resolve active package features from Cargo's build-script environment.
-fn active_features() -> ActiveFeatures {
-    let metadata = cargo_metadata::MetadataCommand::new()
-        .no_deps()
-        .exec()
-        .expect("failed to read package feature metadata");
-    let package = metadata
-        .packages
-        .iter()
-        .find(|pkg| pkg.name == "praxis-proxy")
-        .expect("praxis package not found in metadata");
+fn active_features() -> Option<ActiveFeatures> {
+    let metadata = cargo_metadata::MetadataCommand::new().no_deps().exec().ok()?;
+    let package = metadata.packages.iter().find(|pkg| pkg.name == "praxis-proxy")?;
 
     let feature_names_by_env: HashMap<String, String> = package
         .features
@@ -92,10 +91,10 @@ fn active_features() -> ActiveFeatures {
     names.sort();
     names.dedup();
 
-    ActiveFeatures {
+    Some(ActiveFeatures {
         default_enabled: std::env::var_os("CARGO_FEATURE_DEFAULT").is_some(),
         names,
-    }
+    })
 }
 
 /// Convert a Cargo feature name to the corresponding build-script env suffix.

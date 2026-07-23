@@ -16,9 +16,14 @@ Before tagging a release:
 - [ ] Lints are clean (`make lint`)
 - [ ] All tests pass locally (`make test`)
 - [ ] Dependency audit passes (`make audit`)
-- [ ] Benchmarks have been run; performance is similar or better than the previous release
+- [ ] Benchmarks have been run; performance is similar
+  or better than the previous release
 - [ ] Version in root `Cargo.toml` is bumped
+  (both `workspace.package.version` and
+  `workspace.dependencies` inter-crate versions)
 - [ ] `Cargo.lock` is regenerated with the new version
+- [ ] `cargo publish --dry-run --allow-dirty` succeeds
+  for all publishable crates
 - [ ] `SECURITY.md` lists the new minor version
 - [ ] GitHub Release changelog is drafted (see below)
 

@@ -8,11 +8,10 @@ readme = "../../README.md"
 publish = false
 
 [features]
-default = ["ext-proc"]
+default = []
 cpex-policy-engine = ["praxis-filter/cpex-policy-engine"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter"]
-ext-proc = ["praxis/ext-proc"]
-no-mac-cert-rotation-tests = [] # We use this to disable testing cert rotation on macOS
+no-mac-cert-rotation-tests = []
 
 [lints]
 workspace = true
@@ -26,14 +25,11 @@ http = { workspace = true }
 # Used only by the cpex example test to mint HS256 JWTs for the
 # happy-path case (matches the filter crate's signing dependency).
 jsonwebtoken = "10.4.0"
-praxis = { version = "0.4.0", path = "../../server", package = "praxis-proxy" }
+praxis = { version = "0.4.1", path = "../../server", package = "praxis-proxy" }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-protocol = { workspace = true }
 praxis-test-utils = { workspace = true }
-prost = { workspace = true }
-prost-types = { workspace = true }
-prost-wkt-types = { workspace = true }
 rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 serde = { workspace = true }
@@ -46,8 +42,3 @@ tokio-stream = { workspace = true }
 tokio-tungstenite = { workspace = true }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }
-
-[build-dependencies]
-prost-build = { workspace = true }
-protox = { workspace = true }
-tonic-prost-build = { workspace = true }

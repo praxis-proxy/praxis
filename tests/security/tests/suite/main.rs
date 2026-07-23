@@ -47,4 +47,5 @@ mod host_header;
 mod info_leakage;
 mod ip_acl;
 mod request_smuggling;
+mod ssrf_runtime;
 mod ssrf_validation;

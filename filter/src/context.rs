@@ -188,7 +188,7 @@ pub struct HttpFilterContext<'a> {
     /// Unlike [`filter_metadata`] which stores flat string
     /// key-value pairs, this stores nested JSON values per
     /// namespace. Used by filters that need to pass structured
-    /// data (e.g. `ext_proc` dynamic metadata) across lifecycle
+    /// data (e.g. dynamic metadata from external filters) across lifecycle
     /// phases.
     ///
     /// [`filter_metadata`]: Self::filter_metadata
@@ -1518,9 +1518,9 @@ mod tests {
     fn set_and_get_structured_metadata() {
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.set_structured_metadata("ext_proc", "model", serde_json::json!("gpt-4"));
+        ctx.set_structured_metadata("test_filter", "model", serde_json::json!("gpt-4"));
         assert_eq!(
-            ctx.get_structured_metadata("ext_proc", "model"),
+            ctx.get_structured_metadata("test_filter", "model"),
             Some(&serde_json::json!("gpt-4")),
             "get should return the value set by set_structured_metadata"
         );

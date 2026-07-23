@@ -17,9 +17,6 @@ path = "src/lib.rs"
 name = "praxis"
 path = "src/main.rs"
 
-[package.metadata.cargo-machete]
-ignored = ["praxis-ext-proc"]
-
 [lints]
 workspace = true
 
@@ -28,7 +25,6 @@ clap = { workspace = true }
 notify = { workspace = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
-praxis-ext-proc = { workspace = true, optional = true }
 praxis-protocol = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
@@ -50,7 +46,6 @@ tempfile = { workspace = true }
 default = []
 dev = ["basic-auth-filter"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter", "experimental"]
-ext-proc = ["dep:praxis-ext-proc"]
 cpex-policy-engine = ["praxis-filter/cpex-policy-engine"]
 # Marker feature activated transitively by any experimental feature.
 # Used to gate the startup warning in startup_checks::warn_experimental_features.

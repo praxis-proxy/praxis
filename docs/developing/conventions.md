@@ -134,6 +134,9 @@ Security is enforced at the lint level. See lints in
 
 ### Lint Suppression Policy
 
+By default, do _not_ suppress lints. Use your best
+judgement if the situation really calls for it.
+
 Use `#[expect(...)]` instead of `#[allow(...)]`. The
 `allow_attributes` lint enforces this mechanically.
 Every suppression must include a `reason`:

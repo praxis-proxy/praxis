@@ -103,7 +103,10 @@ clusters:
       sni: ""
 "#;
     let err = Config::from_yaml(yaml).unwrap_err();
-    assert!(err.to_string().contains("sni"), "got: {err}");
+    assert!(
+        err.to_string().contains("sni must be a valid DNS hostname"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -129,7 +132,10 @@ clusters:
 "#
     );
     let err = Config::from_yaml(&yaml).unwrap_err();
-    assert!(err.to_string().contains("sni"), "got: {err}");
+    assert!(
+        err.to_string().contains("sni must be a valid DNS hostname"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -155,7 +161,10 @@ clusters:
 "#
     );
     let err = Config::from_yaml(&yaml).unwrap_err();
-    assert!(err.to_string().contains("sni"), "got: {err}");
+    assert!(
+        err.to_string().contains("sni must be a valid DNS hostname"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -177,7 +186,10 @@ clusters:
       sni: "api..example.com"
 "#;
     let err = Config::from_yaml(yaml).unwrap_err();
-    assert!(err.to_string().contains("sni"), "got: {err}");
+    assert!(
+        err.to_string().contains("sni must be a valid DNS hostname"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -199,7 +211,10 @@ clusters:
       sni: "api.exam ple.com"
 "#;
     let err = Config::from_yaml(yaml).unwrap_err();
-    assert!(err.to_string().contains("sni"), "got: {err}");
+    assert!(
+        err.to_string().contains("sni must be a valid DNS hostname"),
+        "got: {err}"
+    );
 }
 
 #[test]

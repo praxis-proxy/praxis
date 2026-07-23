@@ -172,9 +172,11 @@ fn spawn_watcher(
     state: ServerState,
 ) -> Option<std::thread::JoinHandle<()>> {
     let path = config_path?;
+    let initial_content_hash = std::fs::read_to_string(&path).map_or(0, |c| crate::watcher::hash_content(&c));
     let handle = crate::watcher::spawn_config_watcher(crate::watcher::WatcherParams {
         config_path: path,
         health_shutdown: state.health_shutdown,
+        initial_content_hash,
         initial_config: config,
         kv_stores: state.kv_stores,
         pipelines: state.pipelines,

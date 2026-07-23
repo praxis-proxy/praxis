@@ -654,18 +654,18 @@ mod tests {
     async fn structured_metadata_persists_through_pipeline() {
         let mut ctx = make_ctx();
         ctx.structured_metadata.insert(
-            "ext_proc".to_owned(),
+            "test_filter".to_owned(),
             serde_json::json!({"model": "test-model", "score": 0.95}),
         );
 
         drop(run_pipeline(&empty_pipeline(), make_request(), &mut ctx).await.unwrap());
 
-        let md = ctx.structured_metadata.get("ext_proc");
+        let md = ctx.structured_metadata.get("test_filter");
         assert!(
             md.is_some(),
             "structured_metadata set before pipeline should survive after run_pipeline"
         );
-        let obj = md.unwrap().as_object().expect("ext_proc metadata should be an object");
+        let obj = md.unwrap().as_object().expect("metadata should be an object");
         assert_eq!(
             obj.get("model"),
             Some(&serde_json::json!("test-model")),

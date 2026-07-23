@@ -20,6 +20,8 @@ const SECURITY_FILTERS: &[&str] = &[
     "forwarded_headers",
     "guardrails",
     "ip_acl",
+    #[cfg(feature = "cpex-policy-engine")]
+    "policy",
     "rate_limit",
 ];
 
@@ -354,6 +356,20 @@ mod tests {
         branch::{RejoinTarget, ResolvedBranch},
         test_filters::{lb_filter, noop_filter_with_conditions, selector_filter},
     };
+
+    #[test]
+    fn security_filter_list_matches_registry_metadata() {
+        let registry = crate::FilterRegistry::with_builtins();
+        let mut expected = registry.security_filters();
+        let mut actual = SECURITY_FILTERS.to_vec();
+        expected.sort_unstable();
+        actual.sort_unstable();
+
+        assert_eq!(
+            actual, expected,
+            "pipeline checks and registry security metadata diverged"
+        );
+    }
 
     #[test]
     fn lb_without_router_errors() {

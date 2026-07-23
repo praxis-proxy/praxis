@@ -231,58 +231,10 @@ jobs:
           fi
 
   # ----------------------------------------------------------------------------
-  # Signoff Check
+  # Authorship Check
   # ----------------------------------------------------------------------------
 
-  signoff-check:
-    if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Generate token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
-          private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
-
-      - name: Check commits for Signed-off-by
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          labels=$(gh pr view "$PR_NUMBER" \
-            --repo "${{ github.repository }}" \
-            --json labels -q '.labels[].name')
-          if echo "$labels" | grep -q '^skip/signoff$'; then
-            echo "skip/signoff label present — skipping signoff check"
-            exit 0
-          fi
-
-          missing=$(gh api \
-            "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
-            --paginate \
-            --jq '[.[] | select(.parents | length == 1) | select(.commit.message | test("(?m)^Signed-off-by: ") | not) | .sha[:7]] | join(", ")')
-
-          if [ -n "$missing" ]; then
-            marker="<!-- praxis:signoff-check -->"
-            already=$(gh api \
-              "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
-              --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
-            if [ "$already" -eq 0 ]; then
-              gh pr comment "$PR_NUMBER" \
-                --repo "${{ github.repository }}" \
-                --body "${marker}
-          **Missing Signed-off-by**: ${missing}. All commits require sign-off (via \`git commit --signoff\`)."
-            fi
-            echo "::error::Commits missing Signed-off-by: ${missing}"
-            exit 1
-          fi
-
-  # ----------------------------------------------------------------------------
-  # AI Authorship Check
-  # ----------------------------------------------------------------------------
-
-  ai-authorship-check:
+  authorship-check:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
     steps:
@@ -298,14 +250,6 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          labels=$(gh pr view "$PR_NUMBER" \
-            --repo "${{ github.repository }}" \
-            --json labels -q '.labels[].name')
-          if echo "$labels" | grep -q '^skip/ai-authorship$'; then
-            echo "skip/ai-authorship label present — skipping"
-            exit 0
-          fi
-
           commits=$(gh api \
             "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
             --paginate)
@@ -363,14 +307,15 @@ jobs:
               gh pr comment "$PR_NUMBER" \
                 --repo "${{ github.repository }}" \
                 --body "${marker}
-          **AI tool authorship detected**:
+          **Tool authorship detected**:
 
           ${violations}
 
-          Sorry, this project does not accept commits authored by tools as valid.
-          Commits need to be authored by and signed-off by the human(s) responsible for the PR, with their name and contact."
+          This project doesn't allow commits which are authored or signed-off by tools.
+          Commits need to be authored by and signed-off by the human(s) responsible for the PR, with their name and contact.
+          Please see our development documentation for more details."
             fi
-            echo "::error::AI tool authorship found in PR commits"
+            echo "::error::Tool authorship found in PR commits"
             exit 1
           fi
 
