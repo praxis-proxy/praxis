@@ -13,7 +13,7 @@ use base64::{Engine as _, engine::general_purpose::STANDARD};
 use sha2::{Digest as _, Sha256};
 use subtle::ConstantTimeEq as _;
 
-use super::config::{BasicAuthConfig, CredentialSourceConfig, InlineCredential, PasswordSource};
+use super::config::{BasicAuthConfig, CredentialSourceConfig, InlineCredential};
 use crate::{
     FilterAction, FilterError, Rejection,
     factory::parse_filter_config,
@@ -27,6 +27,63 @@ enum CredentialSource {
 
     /// Named KV store, looked up at request time.
     KvStore(String),
+}
+
+impl CredentialSource {
+    /// Converts the parsed config source into a runtime [`CredentialSource`].
+    fn from_config(config: CredentialSourceConfig) -> Result<Self, FilterError> {
+        match config {
+            CredentialSourceConfig::Inline(credentials) => Self::build_inline(&credentials),
+            CredentialSourceConfig::KvStore(store) => Ok(Self::KvStore(store)),
+        }
+    }
+
+    /// Resolves and hashes inline credentials into a lookup map.
+    fn build_inline(credentials: &[InlineCredential]) -> Result<Self, FilterError> {
+        let mut map = HashMap::with_capacity(credentials.len());
+        for cred in credentials {
+            let raw = cred.source.resolve(&cred.username)?;
+            let key = Arc::<str>::from(cred.username.as_str());
+            match map.entry(key) {
+                Entry::Occupied(_) => return Err(format!("basic_auth: duplicate username '{}'", cred.username).into()),
+                Entry::Vacant(e) => e.insert(hash_password(raw.as_bytes())),
+            };
+        }
+        Ok(Self::Inline(map))
+    }
+
+    /// Dispatches credential verification to the configured source.
+    fn verify(&self, ctx: &HttpFilterContext<'_>, username: &str, password: &str) -> bool {
+        match self {
+            Self::Inline(credentials) => Self::verify_inline(credentials, username, password),
+            Self::KvStore(store_name) => Self::verify_kv(ctx, store_name, username, password),
+        }
+    }
+
+    /// Verify against inline credential map.
+    fn verify_inline(credentials: &HashMap<Arc<str>, [u8; 32]>, username: &str, password: &str) -> bool {
+        let provided = hash_password(password.as_bytes());
+        verify_password_hash(&provided, credentials.get(username))
+    }
+
+    /// Verify against a KV store.
+    fn verify_kv(ctx: &HttpFilterContext<'_>, store_name: &str, username: &str, password: &str) -> bool {
+        let Some(registry) = ctx.kv_stores else {
+            tracing::warn!("KV store registry unavailable, denying request");
+            return false;
+        };
+        let Some(store) = registry.get(store_name) else {
+            tracing::warn!(store = %store_name, "KV store not found, denying request");
+            return false;
+        };
+        let provided = hash_password(password.as_bytes());
+        let (stored_hash, user_found) = match store.get(username) {
+            Some(v) => (hash_password(v.as_ref().as_bytes()), true),
+            None => (hash_password(b""), false),
+        };
+        let stored = user_found.then_some(stored_hash);
+        verify_password_hash(&provided, stored.as_ref())
+    }
 }
 
 /// HTTP Basic Authentication filter (RFC 7617).
@@ -70,7 +127,7 @@ impl BasicAuthFilter {
     /// is not set.
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: BasicAuthConfig = parse_filter_config("basic_auth", config)?;
-        let source = build_source(cfg.source)?;
+        let source = CredentialSource::from_config(cfg.source)?;
         let challenge = format!("Basic realm=\"{}\"", cfg.realm);
 
         Ok(Box::new(Self {
@@ -97,7 +154,7 @@ impl HttpFilter for BasicAuthFilter {
             return Ok(challenge_rejection(&self.challenge));
         };
 
-        if !verify_credentials(&self.source, ctx, &username, &password) {
+        if !self.source.verify(ctx, &username, &password) {
             tracing::debug!(username = %username, "authentication failed");
             return Ok(challenge_rejection(&self.challenge));
         }
@@ -133,39 +190,6 @@ fn decode_basic_credentials(header: &http::HeaderValue) -> Option<(String, Strin
     Some((username.to_owned(), password.to_owned()))
 }
 
-/// Dispatches credential verification to the configured source.
-fn verify_credentials(source: &CredentialSource, ctx: &HttpFilterContext<'_>, username: &str, password: &str) -> bool {
-    match source {
-        CredentialSource::Inline(credentials) => verify_inline(credentials, username, password),
-        CredentialSource::KvStore(store_name) => verify_kv(ctx, store_name, username, password),
-    }
-}
-
-/// Verify against inline credential map.
-fn verify_inline(credentials: &HashMap<Arc<str>, [u8; 32]>, username: &str, password: &str) -> bool {
-    let provided = hash_password(password.as_bytes());
-    verify_password_hash(&provided, credentials.get(username))
-}
-
-/// Verify against a KV store.
-fn verify_kv(ctx: &HttpFilterContext<'_>, store_name: &str, username: &str, password: &str) -> bool {
-    let Some(registry) = ctx.kv_stores else {
-        tracing::warn!("KV store registry unavailable, denying request");
-        return false;
-    };
-    let Some(store) = registry.get(store_name) else {
-        tracing::warn!(store = %store_name, "KV store not found, denying request");
-        return false;
-    };
-    let provided = hash_password(password.as_bytes());
-    let (stored_hash, user_found) = match store.get(username) {
-        Some(v) => (hash_password(v.as_ref().as_bytes()), true),
-        None => (hash_password(b""), false),
-    };
-    let stored = user_found.then_some(stored_hash);
-    verify_password_hash(&provided, stored.as_ref())
-}
-
 /// Constant-time password hash check with dummy comparison for unknown
 /// users to prevent timing-based user enumeration.
 ///
@@ -179,28 +203,6 @@ fn verify_password_hash(provided: &[u8; 32], stored: Option<&[u8; 32]>) -> bool 
     matches && stored.is_some()
 }
 
-/// Converts the parsed config source into a runtime [`CredentialSource`].
-fn build_source(config: CredentialSourceConfig) -> Result<CredentialSource, FilterError> {
-    match config {
-        CredentialSourceConfig::Inline(credentials) => build_inline_source(&credentials),
-        CredentialSourceConfig::KvStore(store) => Ok(CredentialSource::KvStore(store)),
-    }
-}
-
-/// Resolves and hashes inline credentials into a lookup map.
-fn build_inline_source(credentials: &[InlineCredential]) -> Result<CredentialSource, FilterError> {
-    let mut map = HashMap::with_capacity(credentials.len());
-    for cred in credentials {
-        let password = resolve_password(cred)?;
-        let key = Arc::<str>::from(cred.username.as_str());
-        match map.entry(key) {
-            Entry::Occupied(_) => return Err(format!("basic_auth: duplicate username '{}'", cred.username).into()),
-            Entry::Vacant(e) => e.insert(password),
-        };
-    }
-    Ok(CredentialSource::Inline(map))
-}
-
 /// Builds a 401 rejection with the `WWW-Authenticate` challenge header.
 fn challenge_rejection(challenge: &str) -> FilterAction {
     FilterAction::Reject(Rejection::status(401).with_header("WWW-Authenticate", challenge))
@@ -209,22 +211,4 @@ fn challenge_rejection(challenge: &str) -> FilterAction {
 /// Returns the SHA-256 digest of the given bytes.
 fn hash_password(password: &[u8]) -> [u8; 32] {
     Sha256::digest(password).into()
-}
-
-/// Returns the SHA-256 hash of the resolved password.
-fn resolve_password(cred: &InlineCredential) -> Result<[u8; 32], FilterError> {
-    match &cred.source {
-        PasswordSource::Password(val) => Ok(hash_password(val.as_bytes())),
-        PasswordSource::EnvVar(var) => {
-            std::env::var(var)
-                .map(|v| hash_password(v.as_bytes()))
-                .map_err(|e| -> FilterError {
-                    format!(
-                        "basic_auth: environment variable '{var}' not set for user '{}': {e}",
-                        cred.username
-                    )
-                    .into()
-                })
-        },
-    }
 }

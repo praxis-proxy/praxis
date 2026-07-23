@@ -69,10 +69,8 @@ impl TryFrom<RawBasicAuthConfig> for BasicAuthConfig {
             (false, None) => CredentialSourceConfig::Inline(raw.credentials),
             (true, Some(store)) => CredentialSourceConfig::KvStore(store),
         };
-        if raw.realm.contains('"') || raw.realm.bytes().any(|b| b < 0x20 || b == 0x7f) {
-            return Err(
-                "realm must not contain double-quotes or control characters".into(),
-            );
+        if raw.realm.contains('"') || raw.realm.bytes().any(|b| b < 0x20 || b == 0x7F) {
+            return Err("realm must not contain double-quotes or control characters".into());
         }
 
         Ok(Self {
@@ -90,6 +88,17 @@ pub(super) enum PasswordSource {
 
     /// Environment variable name resolved at filter construction time.
     EnvVar(String),
+}
+
+impl PasswordSource {
+    /// Resolves the password value from the configured source.
+    pub(super) fn resolve(&self, username: &str) -> Result<String, String> {
+        match self {
+            Self::Password(val) => Ok(val.clone()),
+            Self::EnvVar(var) => std::env::var(var)
+                .map_err(|e| format!("basic_auth: environment variable '{var}' not set for user '{username}': {e}")),
+        }
+    }
 }
 
 impl fmt::Debug for PasswordSource {

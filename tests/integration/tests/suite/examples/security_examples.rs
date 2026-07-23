@@ -326,7 +326,11 @@ fn basic_auth_allows_second_credential() {
          Authorization: Basic cmVhZG9ubHk6dmlld2Vy\r\n\
          Connection: close\r\n\r\n",
     );
-    assert_eq!(parse_status(&raw), 200, "second credential (readonly:viewer) should return 200");
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "second credential (readonly:viewer) should return 200"
+    );
     assert_eq!(parse_body(&raw), "protected", "response should come from backend");
 }
 
