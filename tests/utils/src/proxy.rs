@@ -248,10 +248,16 @@ pub fn start_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> 
 /// [`PingoraServerRuntime`]: praxis_core::PingoraServerRuntime
 fn build_full_server(config: &Config) -> praxis_core::PingoraServerRuntime {
     let registry = praxis::build_full_registry();
+    build_full_server_with_registry(config, &registry)
+}
+
+/// Build a [`PingoraServerRuntime`] with a caller-supplied filter
+/// registry, HTTP and TCP protocols, and background health probes.
+fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -> praxis_core::PingoraServerRuntime {
     let health_registry = build_health_registry(&config.clusters);
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
     let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8);
-    let pipelines = praxis::resolve_pipelines(config, &registry, &health_registry, &kv_stores, &subrequest_connector)
+    let pipelines = praxis::resolve_pipelines(config, registry, &health_registry, &kv_stores, &subrequest_connector)
         .expect("pipeline resolution should succeed in test");
 
     let mut runtime = praxis_core::PingoraServerRuntime::new(config);
@@ -319,14 +325,33 @@ fn spawn_test_health_checks(config: &Config, registry: &HealthRegistry) {
 /// [`wait_for_tcp`]: crate::net::wait::wait_for_tcp
 /// [`wait_for_tls`]: crate::net::tls::wait_for_tls
 pub fn start_full_proxy(config: &Config) -> ProxyGuard {
+    let runtime = build_full_server(config);
+    start_full_proxy_runtime(config, runtime)
+}
+
+/// Start a full proxy server with a caller-supplied filter registry.
+///
+/// Unlike [`start_proxy_with_registry`], this path wires the shared
+/// subrequest connector and other runtime resources required by
+/// framework-level filters such as `iterative_request_router`.
+///
+/// # Panics
+///
+/// Panics if `config.listeners` is empty or pipeline resolution
+/// fails.
+pub fn start_full_proxy_with_registry(config: &Config, registry: &FilterRegistry) -> ProxyGuard {
+    let runtime = build_full_server_with_registry(config, registry);
+    start_full_proxy_runtime(config, runtime)
+}
+
+/// Spawn a fully configured proxy runtime in a background thread.
+fn start_full_proxy_runtime(config: &Config, runtime: praxis_core::PingoraServerRuntime) -> ProxyGuard {
     let addr = config
         .listeners
         .first()
         .expect("config must have at least one listener")
         .address
         .clone();
-
-    let runtime = build_full_server(config);
 
     let notify = Arc::new(Notify::new());
     let watch_notify = Arc::clone(&notify);

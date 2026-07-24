@@ -9,11 +9,152 @@
 //!
 //! [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    net::SocketAddr,
+    sync::{Arc, Mutex, OnceLock},
+    time::Instant,
+};
 
 use pingora_core::upstreams::peer::HttpPeer;
 
 use super::ConnectionOptions;
+
+/// TTL for cached DNS entries.
+const DNS_TTL_SECS: u64 = 60;
+
+/// Maximum cached DNS entries before oldest-entry eviction.
+const MAX_DNS_ENTRIES: usize = 1_024;
+
+/// Address resolution failure.
+#[derive(Debug, thiserror::Error)]
+pub enum AddressResolutionError {
+    /// The blocking resolver task could not complete.
+    #[error("DNS resolution task failed for '{address}': {message}")]
+    Task {
+        /// Address being resolved.
+        address: String,
+        /// Join error text.
+        message: String,
+    },
+
+    /// The operating-system resolver failed.
+    #[error("upstream address resolution failed for '{address}': {source}")]
+    Resolve {
+        /// Address being resolved.
+        address: String,
+        /// Resolver error.
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// DNS returned no usable address.
+    #[error("upstream address '{0}' resolved to zero addresses")]
+    Empty(String),
+}
+
+/// Cached DNS resolution result.
+struct DnsCacheEntry {
+    /// All addresses returned by the resolver.
+    addrs: Vec<SocketAddr>,
+    /// Cache insertion time.
+    resolved_at: Instant,
+}
+
+/// Process-wide bounded DNS cache.
+fn dns_cache() -> &'static Mutex<HashMap<String, DnsCacheEntry>> {
+    static CACHE: OnceLock<Mutex<HashMap<String, DnsCacheEntry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Resolve an upstream address without blocking the async worker.
+///
+/// Literal socket addresses take the allocation-free fast path. Hostnames use
+/// a bounded process-wide cache and run the operating-system resolver through
+/// [`tokio::task::spawn_blocking`].
+///
+/// # Errors
+///
+/// Returns [`AddressResolutionError`] when resolution fails or returns no
+/// usable addresses.
+#[expect(
+    clippy::too_many_lines,
+    reason = "cache lookup, resolution, and insertion form one operation"
+)]
+pub async fn resolve_address(address: &str) -> Result<SocketAddr, AddressResolutionError> {
+    if let Ok(addr) = address.parse::<SocketAddr>() {
+        return Ok(addr);
+    }
+    if let Some(addr) = lookup_cached(address) {
+        return Ok(addr);
+    }
+
+    let owned = address.to_owned();
+    let task_address = owned.clone();
+    let addrs = tokio::task::spawn_blocking(move || {
+        use std::net::ToSocketAddrs as _;
+        task_address.to_socket_addrs().map(Iterator::collect::<Vec<_>>)
+    })
+    .await
+    .map_err(|error| AddressResolutionError::Task {
+        address: owned.clone(),
+        message: error.to_string(),
+    })?
+    .map_err(|source| AddressResolutionError::Resolve {
+        address: owned.clone(),
+        source,
+    })?;
+    let preferred = select_preferred_address(&addrs, address)?;
+
+    let mut cache = dns_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if cache.len() >= MAX_DNS_ENTRIES && !cache.contains_key(address) {
+        cache.retain(|_, entry| entry.resolved_at.elapsed().as_secs() < DNS_TTL_SECS);
+        if cache.len() >= MAX_DNS_ENTRIES
+            && let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, entry)| entry.resolved_at)
+                .map(|(key, _)| key.clone())
+        {
+            cache.remove(&oldest);
+        }
+    }
+    cache.insert(
+        owned,
+        DnsCacheEntry {
+            addrs,
+            resolved_at: Instant::now(),
+        },
+    );
+    drop(cache);
+    Ok(preferred)
+}
+
+/// Return a non-expired cached address, preferring IPv4.
+fn lookup_cached(address: &str) -> Option<SocketAddr> {
+    let cache = dns_cache().lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache.get(address).and_then(|entry| {
+        (entry.resolved_at.elapsed().as_secs() < DNS_TTL_SECS)
+            .then(|| {
+                entry
+                    .addrs
+                    .iter()
+                    .find(|addr| addr.is_ipv4())
+                    .or_else(|| entry.addrs.first())
+                    .copied()
+            })
+            .flatten()
+    })
+}
+
+/// Select IPv4 when available, otherwise the first result.
+fn select_preferred_address(addrs: &[SocketAddr], address: &str) -> Result<SocketAddr, AddressResolutionError> {
+    addrs
+        .iter()
+        .find(|addr| addr.is_ipv4())
+        .or_else(|| addrs.first())
+        .copied()
+        .ok_or_else(|| AddressResolutionError::Empty(address.to_owned()))
+}
 
 // ---------------------------------------------------------------------------
 // Connection Options
@@ -129,6 +270,24 @@ pub fn derive_sni(address: &str) -> String {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn resolve_address_parses_literal_without_dns() {
+        let address = resolve_address("127.0.0.1:8080").await.unwrap();
+        assert_eq!(address, "127.0.0.1:8080".parse().unwrap());
+    }
+
+    #[tokio::test]
+    async fn resolve_address_rejects_missing_port() {
+        assert!(resolve_address("127.0.0.1").await.is_err());
+    }
+
+    #[test]
+    fn preferred_address_favors_ipv4() {
+        let ipv6 = "[::1]:8080".parse().unwrap();
+        let ipv4 = "127.0.0.1:8080".parse().unwrap();
+        assert_eq!(select_preferred_address(&[ipv6, ipv4], "example:8080").unwrap(), ipv4);
+    }
 
     #[test]
     fn derive_sni_extracts_hostname() {

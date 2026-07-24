@@ -584,14 +584,18 @@ request extensions (`ctx.extensions.get::<IterationState>()`),
 which carries the original request, previous response,
 and a cross-step accumulator. Filters can provide a
 custom body for the next iteration by inserting
-`NextIterationBody` into extensions.
+`NextIterationBody` into extensions. Both types are
+exported from `praxis_filter` for use by external filter
+crates.
 
 Nesting an `iterative_request_router` inside another
 `iterative_request_router`'s step chain is not
 supported and will be rejected at config validation.
-Step pipelines only execute the request phase of their
-filters; the iteration loop runs in the body phase,
-which step pipelines do not invoke.
+Step pipelines execute the complete request-header,
+request-body, response-header, and response-body filter
+lifecycle around each sub-request. The caller's filter
+registry and request extensions are preserved so external
+filters and pipeline-scoped resources remain available.
 
 See the
 [`iterative_request_router` reference](http/traffic_management/iterative_request_router.md)

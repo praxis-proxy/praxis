@@ -23,16 +23,17 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use http::HeaderMap;
 use pingora_core::upstreams::peer::HttpPeer;
-use praxis_core::{id::IdGenerator, time::SystemTimeSource};
 use tracing::{debug, info, warn};
 
 use self::config::IterativeRequestRouterConfig;
 use crate::{
-    FilterEntry, FilterError, FilterPipeline, FilterRegistry,
+    FilterEntry, FilterError, FilterPipeline, FilterRegistry, IterationState, NextIterationBody, SubRequest,
+    SubResponse,
     actions::{FilterAction, Rejection},
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
-    pipeline::subrequest::{self, DEPTH_HEADER, IterationState, SubRequest, SubResponse},
+    pipeline::subrequest::{self, DEPTH_HEADER},
+    results::RetainedFilterResults,
 };
 
 // ---------------------------------------------------------------------------
@@ -42,10 +43,10 @@ use crate::{
 /// Framework-level filter for iterative sub-request execution.
 ///
 /// Holds named steps, each backed by a pre-built sub-pipeline.
-/// During `on_request`, runs an iteration loop: execute a step's
-/// pipeline to resolve routing, make the HTTP call via Pingora's
-/// `Connector`, evaluate transition rules, and continue or
-/// return the final response.
+/// During request processing, runs an iteration loop: execute each
+/// step's request filters, make the HTTP call via Pingora's
+/// `Connector`, execute its response filters, evaluate transition
+/// rules, and continue or return the final response.
 ///
 /// # YAML configuration
 ///
@@ -77,7 +78,7 @@ pub struct IterativeRequestRouterFilter {
     max_response_bytes: usize,
 
     /// Maximum accumulated state bytes.
-    _max_state_bytes: usize,
+    max_state_bytes: usize,
 
     /// Pre-built sub-pipelines keyed by step name.
     step_pipelines: HashMap<Arc<str>, FilterPipeline>,
@@ -98,9 +99,35 @@ impl IterativeRequestRouterFilter {
     /// pipelines fail to build.
     pub fn from_config(value: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", value)?;
-        config::validate(&cfg)?;
+        Self::from_parsed_config(cfg, &FilterRegistry::with_builtins())
+    }
 
-        let registry = FilterRegistry::with_builtins();
+    /// Create from YAML config, resolving step filters through the
+    /// registry that owns the containing pipeline.
+    pub(crate) fn from_config_with_registry(
+        value: &serde_yaml::Value,
+        registry: &FilterRegistry,
+    ) -> Result<Box<dyn HttpFilter>, FilterError> {
+        let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", value)?;
+        Self::from_parsed_config(cfg, registry)
+    }
+
+    /// Validate parsed configuration and build each step pipeline.
+    #[expect(clippy::too_many_lines, reason = "validation and named step construction")]
+    fn from_parsed_config(
+        cfg: IterativeRequestRouterConfig,
+        registry: &FilterRegistry,
+    ) -> Result<Box<dyn HttpFilter>, FilterError> {
+        config::validate(&cfg)?;
+        let timeout = Duration::from_millis(cfg.timeout_ms);
+        if Instant::now().checked_add(timeout).is_none() {
+            return Err(
+                "iterative_request_router: timeout_ms exceeds the platform Instant range"
+                    .to_owned()
+                    .into(),
+            );
+        }
+
         let mut step_pipelines = HashMap::new();
         let mut step_transitions = HashMap::new();
 
@@ -108,7 +135,17 @@ impl IterativeRequestRouterFilter {
             let name: Arc<str> = Arc::from(step.name.as_str());
 
             let mut entries: Vec<FilterEntry> = step.filters.into_iter().collect();
-            let pipeline = FilterPipeline::build(&mut entries, &registry)?;
+            let pipeline = FilterPipeline::build(&mut entries, registry)?;
+            let ordering_errors =
+                pipeline.ordering_errors(&entries, false, &praxis_core::config::SkipPipelineChecks::default());
+            if !ordering_errors.is_empty() {
+                return Err(format!(
+                    "iterative_request_router: invalid step '{}': {}",
+                    step.name,
+                    ordering_errors.join("; ")
+                )
+                .into());
+            }
 
             step_pipelines.insert(Arc::clone(&name), pipeline);
             step_transitions.insert(Arc::clone(&name), step.on_result);
@@ -118,10 +155,10 @@ impl IterativeRequestRouterFilter {
             initial_step: Arc::from(cfg.initial_step.as_str()),
             max_iterations: cfg.max_iterations,
             max_response_bytes: cfg.max_response_bytes,
-            _max_state_bytes: cfg.max_state_bytes,
+            max_state_bytes: cfg.max_state_bytes,
             step_pipelines,
             step_transitions,
-            timeout: Duration::from_millis(cfg.timeout_ms),
+            timeout,
         }))
     }
 }
@@ -138,11 +175,12 @@ impl HttpFilter for IterativeRequestRouterFilter {
 
     fn request_body_mode(&self) -> crate::body::BodyMode {
         crate::body::BodyMode::StreamBuffer {
-            max_bytes: Some(self.max_response_bytes),
+            max_bytes: Some(self.max_state_bytes),
         }
     }
 
-    /// Early validation: depth check and connector availability.
+    /// Validate the request, then run the iteration at the router's normal
+    /// request-header position after preceding filters have completed.
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let depth = parse_depth(ctx.request);
         if depth >= config::max_depth() {
@@ -161,30 +199,35 @@ impl HttpFilter for IterativeRequestRouterFilter {
                 .into());
         }
 
-        Ok(FilterAction::Continue)
-    }
+        let request_body = ctx.buffered_request_body.take().ok_or_else(|| -> FilterError {
+            "iterative_request_router: buffered request body unavailable"
+                .to_owned()
+                .into()
+        })?;
 
-    /// Runs the iteration loop once the full request body is
-    /// buffered.
+        Box::pin(self.run_iterations(ctx, request_body)).await
+    }
+}
+
+#[expect(
+    clippy::multiple_inherent_impl,
+    reason = "lifecycle implementation is kept separate from construction"
+)]
+impl IterativeRequestRouterFilter {
+    /// Run the complete iterative subrequest lifecycle.
     #[expect(clippy::too_many_lines, reason = "iteration loop is inherently sequential")]
     #[expect(clippy::large_stack_frames, reason = "sub-pipeline execution needs stack space")]
-    async fn on_request_body(
+    async fn run_iterations(
         &self,
         ctx: &mut HttpFilterContext<'_>,
-        body: &mut Option<Bytes>,
-        end_of_stream: bool,
+        request_body: Bytes,
     ) -> Result<FilterAction, FilterError> {
-        if !end_of_stream {
-            return Ok(FilterAction::Continue);
-        }
-
         let depth = parse_depth(ctx.request);
         let connector = ctx
             .subrequest_connector()
             .ok_or_else(|| -> FilterError { "iterative_request_router: no sub-request connector".to_owned().into() })?
             .clone();
-
-        let request_body = body.take().unwrap_or_default();
+        let max_response_bytes = effective_response_limit(self.max_response_bytes, ctx.response_body_mode);
 
         let original_request = SubRequest {
             method: ctx.request.method.clone(),
@@ -199,10 +242,17 @@ impl HttpFilter for IterativeRequestRouterFilter {
             accumulator: HashMap::new(),
             iteration: 0,
             max_iterations: self.max_iterations,
-            deadline: Instant::now() + self.timeout,
-            max_response_bytes: self.max_response_bytes,
+            deadline: Instant::now().checked_add(self.timeout).ok_or_else(|| -> FilterError {
+                "iterative_request_router: deadline exceeds the platform Instant range"
+                    .to_owned()
+                    .into()
+            })?,
+            max_response_bytes,
             depth,
         };
+        if state.retained_bytes() > self.max_state_bytes {
+            return Ok(FilterAction::Reject(Rejection::status(413)));
+        }
 
         let mut current_step = Arc::clone(&self.initial_step);
         let mut current_request = original_request;
@@ -252,77 +302,258 @@ impl HttpFilter for IterativeRequestRouterFilter {
             );
 
             let mut sub_headers = current_request.headers.clone();
+            strip_reserved_headers(&mut sub_headers);
+            // Praxis ingress deliberately rejects this reserved marker from
+            // every network peer. That prevents spoofing and terminates a
+            // cross-listener cycle at its first hop; do not weaken the ingress
+            // boundary merely to permit recursive proxy topologies.
             if let Ok(depth_val) = http::HeaderValue::from_str(&(depth + 1).to_string()) {
                 sub_headers.insert(DEPTH_HEADER, depth_val);
             }
-            strip_reserved_headers(&mut sub_headers);
 
             let sub_req = crate::Request {
                 method: current_request.method.clone(),
                 uri: current_request.uri.clone(),
                 headers: sub_headers.clone(),
             };
+            let mut routed_req = sub_req.clone();
 
-            let mut filter_ctx = build_sub_filter_context(pipeline, &sub_req, Some(&connector));
+            // Keep the response metadata alive for the full step
+            // context so response-header and response-body hooks share
+            // the same lifecycle state.
+            let mut response_header = crate::Response {
+                headers: HeaderMap::new(),
+                status: http::StatusCode::OK,
+            };
+            let runtime_resources = SubPipelineRuntimeResources {
+                client_addr: ctx.client_addr,
+                downstream_tls: ctx.downstream_tls,
+                health_registry: ctx.health_registry,
+                id_generator: ctx.id_generator,
+                kv_stores: ctx.kv_stores,
+                peer_identity: ctx.peer_identity.as_ref(),
+                request_start: ctx.request_start,
+                subrequest_connector: Some(&connector),
+                time_source: ctx.time_source,
+            };
+            let mut filter_ctx = build_sub_filter_context(pipeline, &sub_req, runtime_resources);
+            std::mem::swap(&mut filter_ctx.extensions, &mut ctx.extensions);
             filter_ctx.extensions.insert(state.clone());
-            let action = pipeline.execute_http_request(&mut filter_ctx).await?;
-
-            if let FilterAction::Reject(r) = &action {
-                debug!(
-                    step = current_step.as_ref(),
-                    status = r.status,
-                    "step pipeline rejected request"
-                );
-                return Ok(action);
-            }
-
-            let upstream = filter_ctx.upstream.ok_or_else(|| -> FilterError {
-                format!(
-                    "iterative_request_router: step \
-                     '{current_step}' did not resolve an upstream"
-                )
-                .into()
-            })?;
-
-            let peer = build_peer(&upstream);
-
-            for (name, value) in &filter_ctx.extra_request_headers {
-                if let (Ok(hn), Ok(hv)) = (
-                    http::header::HeaderName::from_bytes(name.as_bytes()),
-                    http::HeaderValue::from_str(value),
+            filter_ctx.extensions.insert(RetainedFilterResults::default());
+            let step_result: Result<StepExecution, FilterError> = match tokio::time::timeout(remaining, async {
+                let mut request_body = Some(current_request.body.clone());
+                if body_exceeds_limit(
+                    pipeline.body_capabilities().request_body_mode,
+                    request_body.as_ref().map_or(0, Bytes::len),
                 ) {
-                    sub_headers.insert(hn, hv);
+                    return Ok(StepExecution::Rejected(Rejection::status(413)));
                 }
-            }
 
-            let sub_request_for_exec = SubRequest {
-                method: current_request.method.clone(),
-                uri: filter_ctx.rewritten_path.as_ref().map_or_else(
-                    || current_request.uri.clone(),
-                    |p| http::Uri::try_from(p.as_str()).unwrap_or_else(|_| current_request.uri.clone()),
-                ),
-                headers: sub_headers,
-                body: current_request.body.clone(),
+                let pre_read_body = matches!(
+                    pipeline.body_capabilities().request_body_mode,
+                    crate::body::BodyMode::StreamBuffer { .. }
+                );
+                if pre_read_body {
+                    let action = pipeline
+                        .execute_http_request_body(&mut filter_ctx, &mut request_body, true)
+                        .await?;
+                    if let FilterAction::Reject(rejection) = action {
+                        return Ok(StepExecution::Rejected(rejection));
+                    }
+                    if iteration_state_exceeds_limit(&filter_ctx, self.max_state_bytes) {
+                        return Ok(StepExecution::Rejected(Rejection::status(413)));
+                    }
+                    apply_pre_read_header_mutations(&mut routed_req.headers, &filter_ctx);
+                    filter_ctx.extra_request_headers.clear();
+                    filter_ctx.request_headers_to_remove.clear();
+                    filter_ctx.request_headers_to_set.clear();
+                    filter_ctx.pre_read_mutations.clear();
+                    sub_headers.clone_from(&routed_req.headers);
+                    filter_ctx.request = &routed_req;
+                }
+
+                let action = pipeline.execute_http_request(&mut filter_ctx).await?;
+                if let FilterAction::Reject(rejection) = action {
+                    return Ok(StepExecution::Rejected(rejection));
+                }
+                if iteration_state_exceeds_limit(&filter_ctx, self.max_state_bytes) {
+                    return Ok(StepExecution::Rejected(Rejection::status(413)));
+                }
+
+                if !pre_read_body {
+                    let action = pipeline
+                        .execute_http_request_body(&mut filter_ctx, &mut request_body, true)
+                        .await?;
+                    if let FilterAction::Reject(rejection) = action {
+                        return Ok(StepExecution::Rejected(rejection));
+                    }
+                    if iteration_state_exceeds_limit(&filter_ctx, self.max_state_bytes) {
+                        return Ok(StepExecution::Rejected(Rejection::status(413)));
+                    }
+                }
+
+                let upstream = filter_ctx.upstream.as_ref().ok_or_else(|| -> FilterError {
+                    format!(
+                        "iterative_request_router: step \
+                         '{current_step}' did not resolve an upstream"
+                    )
+                    .into()
+                })?;
+                let peer = build_peer(upstream).await;
+
+                apply_request_header_mutations(&mut sub_headers, &filter_ctx);
+                ensure_destination_host(&mut sub_headers, &upstream.address)?;
+                sanitize_subrequest_headers(&mut sub_headers);
+                let sub_request_for_exec = SubRequest {
+                    method: current_request.method.clone(),
+                    uri: filter_ctx.rewritten_path.as_ref().map_or_else(
+                        || current_request.uri.clone(),
+                        |p| http::Uri::try_from(p.as_str()).unwrap_or_else(|_| current_request.uri.clone()),
+                    ),
+                    headers: sub_headers,
+                    body: request_body.unwrap_or_default(),
+                };
+
+                let per_request_timeout = state
+                    .deadline
+                    .checked_duration_since(Instant::now())
+                    .unwrap_or(Duration::ZERO);
+                if per_request_timeout.is_zero() {
+                    return Ok(StepExecution::Rejected(Rejection::status(504)));
+                }
+                let mut response = match peer {
+                    Ok(peer) => match subrequest::execute(
+                        &connector,
+                        &peer,
+                        &sub_request_for_exec,
+                        max_response_bytes,
+                        per_request_timeout,
+                    )
+                    .await
+                    {
+                        Ok(response) => response,
+                        Err(error) => {
+                            let status = transport_failure_status(&error);
+                            warn!(
+                                step = current_step.as_ref(),
+                                %error,
+                                status,
+                                "iterative_request_router: sub-request transport failure"
+                            );
+                            SubResponse {
+                                status,
+                                headers: HeaderMap::new(),
+                                body: Bytes::new(),
+                            }
+                        },
+                    },
+                    Err(error) => {
+                        let status = 502;
+                        warn!(
+                            step = current_step.as_ref(),
+                            %error,
+                            status,
+                            "iterative_request_router: sub-request transport failure"
+                        );
+                        SubResponse {
+                            status,
+                            headers: HeaderMap::new(),
+                            body: Bytes::new(),
+                        }
+                    },
+                };
+                sanitize_subresponse_headers(&mut response.headers);
+
+                response_header.status = http::StatusCode::from_u16(response.status).map_err(|e| -> FilterError {
+                    format!("iterative_request_router: invalid upstream status: {e}").into()
+                })?;
+                response_header.headers.clone_from(&response.headers);
+                filter_ctx.response_header = Some(&mut response_header);
+
+                let action = pipeline.execute_http_response(&mut filter_ctx).await?;
+                if let FilterAction::Reject(rejection) = action {
+                    return Ok(StepExecution::Rejected(rejection));
+                }
+                if iteration_state_exceeds_limit(&filter_ctx, self.max_state_bytes) {
+                    return Ok(StepExecution::Rejected(Rejection::status(413)));
+                }
+
+                let mut response_body = Some(std::mem::take(&mut response.body));
+                if response_body_exceeds_limits(
+                    pipeline.body_capabilities().response_body_mode,
+                    max_response_bytes,
+                    response_body.as_ref().map_or(0, Bytes::len),
+                ) {
+                    return Err("iterative_request_router: step response exceeds configured body limit"
+                        .to_owned()
+                        .into());
+                }
+                let action = pipeline.execute_http_response_body(&mut filter_ctx, &mut response_body, true)?;
+                if let FilterAction::Reject(rejection) = action {
+                    return Ok(StepExecution::Rejected(rejection));
+                }
+                if iteration_state_exceeds_limit(&filter_ctx, self.max_state_bytes) {
+                    return Ok(StepExecution::Rejected(Rejection::status(413)));
+                }
+                if response_body_exceeds_limits(
+                    pipeline.body_capabilities().response_body_mode,
+                    max_response_bytes,
+                    response_body.as_ref().map_or(0, Bytes::len),
+                ) {
+                    return Err(
+                        "iterative_request_router: transformed step response exceeds configured body limit"
+                            .to_owned()
+                            .into(),
+                    );
+                }
+
+                if let Some(meta) = filter_ctx.response_header.as_deref() {
+                    response.status = meta.status.as_u16();
+                    response.headers.clone_from(&meta.headers);
+                }
+                response.body = response_body.unwrap_or_default();
+                sanitize_subresponse_headers(&mut response.headers);
+
+                Ok(StepExecution::Complete(response))
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_elapsed) => Ok(StepExecution::Rejected(Rejection::status(504))),
             };
 
-            let per_request_timeout = remaining.min(Duration::from_secs(30));
+            if let Some(updated_state) = filter_ctx.extensions.remove::<IterationState>() {
+                state = updated_state;
+            }
+            if state.retained_bytes() > self.max_state_bytes {
+                return Ok(FilterAction::Reject(Rejection::status(413)));
+            }
+            let next_iteration_body = filter_ctx.extensions.remove::<NextIterationBody>();
+            let mut step_filter_results = filter_ctx
+                .extensions
+                .remove::<RetainedFilterResults>()
+                .unwrap_or_default()
+                .0;
+            step_filter_results.extend(
+                filter_ctx
+                    .filter_results
+                    .iter()
+                    .map(|(name, results)| (*name, results.clone())),
+            );
+            std::mem::swap(&mut filter_ctx.extensions, &mut ctx.extensions);
 
-            #[expect(clippy::large_futures, reason = "Pingora session types are large")]
-            let response = subrequest::execute(
-                &connector,
-                &peer,
-                &sub_request_for_exec,
-                self.max_response_bytes,
-                per_request_timeout,
-            )
-            .await
-            .map_err(|e| -> FilterError {
-                format!(
-                    "iterative_request_router: step \
-                     '{current_step}' sub-request failed: {e}"
-                )
-                .into()
-            })?;
+            let mut response = match step_result? {
+                StepExecution::Complete(response) => response,
+                StepExecution::Rejected(rejection) => {
+                    debug!(
+                        step = current_step.as_ref(),
+                        status = rejection.status,
+                        "step pipeline produced a local response"
+                    );
+                    subresponse_from_rejection(rejection)
+                },
+            };
+            sanitize_subresponse_headers(&mut response.headers);
 
             info!(
                 step = current_step.as_ref(),
@@ -334,16 +565,22 @@ impl HttpFilter for IterativeRequestRouterFilter {
 
             state.previous_response = Some(response.clone());
             state.iteration += 1;
+            if state.retained_bytes() > self.max_state_bytes {
+                return Ok(FilterAction::Reject(Rejection::status(413)));
+            }
 
             let transitions = self
                 .step_transitions
                 .get(&current_step)
                 .map_or(&[][..], |v| v.as_slice());
 
-            match evaluate_transitions(transitions, &response, &filter_ctx.filter_results) {
+            match evaluate_transitions(transitions, &response, &step_filter_results) {
                 TransitionResult::Done => {
                     debug!(step = current_step.as_ref(), "iteration complete, returning response");
-                    return Ok(FilterAction::Reject(build_response_rejection(&response)));
+                    return Ok(FilterAction::Reject(build_response_rejection(
+                        &response,
+                        current_request.method == http::Method::HEAD,
+                    )));
                 },
                 TransitionResult::Next(next_step) => {
                     debug!(
@@ -351,18 +588,11 @@ impl HttpFilter for IterativeRequestRouterFilter {
                         to = next_step.as_ref(),
                         "transitioning to next step"
                     );
-                    let mut next_headers = HeaderMap::new();
-                    for (name, value) in &filter_ctx.request_headers_to_set {
-                        next_headers.insert(name.clone(), value.clone());
-                    }
-                    let next_body = filter_ctx
-                        .extensions
-                        .remove::<NextIterationBody>()
-                        .map_or_else(|| current_request.body.clone(), |b| b.0);
+                    let next_body = next_iteration_body.map_or_else(|| current_request.body.clone(), |b| b.0);
                     current_request = SubRequest {
                         method: current_request.method.clone(),
                         uri: current_request.uri.clone(),
-                        headers: next_headers,
+                        headers: HeaderMap::new(),
                         body: next_body,
                     };
                     current_step = next_step;
@@ -372,7 +602,10 @@ impl HttpFilter for IterativeRequestRouterFilter {
                         step = current_step.as_ref(),
                         "no transition matched, returning response"
                     );
-                    return Ok(FilterAction::Reject(build_response_rejection(&response)));
+                    return Ok(FilterAction::Reject(build_response_rejection(
+                        &response,
+                        current_request.method == http::Method::HEAD,
+                    )));
                 },
             }
         }
@@ -380,16 +613,17 @@ impl HttpFilter for IterativeRequestRouterFilter {
 }
 
 // ---------------------------------------------------------------------------
-// NextIterationBody
-// ---------------------------------------------------------------------------
-
-/// Newtype for step chain filters to provide a custom body for the
-/// next iteration. Set via `ctx.extensions.insert(NextIterationBody(body))`.
-pub(crate) struct NextIterationBody(pub(crate) Bytes);
-
-// ---------------------------------------------------------------------------
 // Transition Evaluation
 // ---------------------------------------------------------------------------
+
+/// Result of executing one step's complete filter and HTTP lifecycle.
+enum StepExecution {
+    /// A step filter rejected the request or response.
+    Rejected(Rejection),
+
+    /// The upstream exchange completed after all response hooks.
+    Complete(SubResponse),
+}
 
 /// Result of evaluating step transition rules.
 enum TransitionResult {
@@ -401,6 +635,50 @@ enum TransitionResult {
 
     /// No transition matched.
     NoMatch,
+}
+
+/// Convert transport failures into gateway responses so ordinary status
+/// transitions can drive provider failover.
+fn transport_failure_status(error: &subrequest::SubRequestError) -> u16 {
+    match error {
+        subrequest::SubRequestError::DeadlineExceeded => 504,
+        subrequest::SubRequestError::Connect(_)
+        | subrequest::SubRequestError::Io(_)
+        | subrequest::SubRequestError::ResponseTooLarge { .. } => 502,
+    }
+}
+
+/// Convert a nested filter's local response into transition input.
+fn subresponse_from_rejection(rejection: Rejection) -> SubResponse {
+    let status = normalize_response_status(rejection.status);
+    let mut headers = HeaderMap::new();
+    for (name, value) in rejection.headers {
+        let Ok(name) = http::HeaderName::try_from(name) else {
+            continue;
+        };
+        let Ok(value) = http::HeaderValue::try_from(value) else {
+            continue;
+        };
+        headers.append(name, value);
+    }
+    if let Some(header_map) = rejection.header_map {
+        for (name, value) in header_map.iter() {
+            headers.append(name.clone(), value.clone());
+        }
+    }
+    let mut response = SubResponse {
+        status,
+        headers,
+        body: rejection.body.unwrap_or_default(),
+    };
+    sanitize_subresponse_headers(&mut response.headers);
+    response
+}
+
+/// Keep final locally generated statuses inside the terminal response range.
+/// Informational, invalid upstream, or invalid custom-filter values become 502.
+fn normalize_response_status(status: u16) -> u16 {
+    if (200..=599).contains(&status) { status } else { 502 }
 }
 
 /// Evaluate transition rules against a sub-request response.
@@ -476,50 +754,241 @@ fn strip_reserved_headers(headers: &mut HeaderMap) {
     }
 }
 
-/// Shared ID generator for sub-request filter contexts.
-static SUB_ID_GENERATOR: std::sync::LazyLock<IdGenerator> = std::sync::LazyLock::new(IdGenerator::new);
+/// Apply request mutations emitted across the step's header and body
+/// filter phases before dispatching its upstream request.
+fn apply_request_header_mutations(headers: &mut HeaderMap, ctx: &HttpFilterContext<'_>) {
+    for name in &ctx.request_headers_to_remove {
+        headers.remove(name);
+    }
+    for (name, value) in &ctx.request_headers_to_set {
+        headers.insert(name.clone(), value.clone());
+    }
+    for (name, value) in &ctx.extra_request_headers {
+        if let (Ok(name), Ok(value)) = (
+            http::header::HeaderName::from_bytes(name.as_bytes()),
+            http::HeaderValue::from_str(value),
+        ) {
+            headers.insert(name, value);
+        }
+    }
+}
 
-/// Build a minimal [`HttpFilterContext`] for running a step's
-/// sub-pipeline.
+/// Apply body pre-read mutations to the request snapshot that header
+/// filters use for classification and routing.
+fn apply_pre_read_header_mutations(headers: &mut HeaderMap, ctx: &HttpFilterContext<'_>) {
+    if ctx.pre_read_mutations.is_empty() {
+        apply_request_header_mutations(headers, ctx);
+        return;
+    }
+
+    for mutation in &ctx.pre_read_mutations {
+        match mutation {
+            crate::TrustedHeaderMutation::Remove(name) => {
+                headers.remove(name);
+            },
+            crate::TrustedHeaderMutation::Set(name, value) => {
+                headers.insert(name.clone(), value.clone());
+            },
+            crate::TrustedHeaderMutation::Add(name, value) => {
+                if let Ok(value) = http::HeaderValue::from_str(value) {
+                    headers.append(name.clone(), value);
+                }
+            },
+        }
+    }
+}
+
+/// Remove inbound message-framing headers after request-body filters
+/// have potentially changed the payload. The subrequest executor adds
+/// the correct `Content-Length` for non-empty bodies.
+fn strip_request_framing_headers(headers: &mut HeaderMap) {
+    headers.remove(http::header::CONTENT_LENGTH);
+    headers.remove(http::header::TRANSFER_ENCODING);
+}
+
+/// Headers that apply only to one HTTP connection and must not cross it.
+const REQUEST_HOP_BY_HOP: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "proxy-authorization",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
+/// Response-side hop-by-hop headers.
+const RESPONSE_HOP_BY_HOP: &[&str] = &[
+    "connection",
+    "keep-alive",
+    "proxy-authenticate",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+];
+
+/// Apply the same forwarding boundary as the normal upstream path.
+fn sanitize_subrequest_headers(headers: &mut HeaderMap) {
+    strip_hop_by_hop_headers(headers, REQUEST_HOP_BY_HOP);
+    strip_reserved_headers_except_depth(headers);
+    strip_request_framing_headers(headers);
+}
+
+/// Supply the selected upstream authority without carrying a prior step's Host.
+fn ensure_destination_host(headers: &mut HeaderMap, address: &str) -> Result<(), FilterError> {
+    if !headers.contains_key(http::header::HOST) {
+        let value = http::HeaderValue::from_str(address).map_err(|error| -> FilterError {
+            format!("iterative_request_router: invalid upstream Host: {error}").into()
+        })?;
+        headers.insert(http::header::HOST, value);
+    }
+    Ok(())
+}
+
+/// Remove connection-scoped and proxy-internal response metadata.
+fn sanitize_subresponse_headers(headers: &mut HeaderMap) {
+    strip_hop_by_hop_headers(headers, RESPONSE_HOP_BY_HOP);
+    strip_reserved_headers(headers);
+}
+
+/// Remove the static hop-by-hop set and headers named by `Connection`.
+fn strip_hop_by_hop_headers(headers: &mut HeaderMap, static_headers: &[&str]) {
+    let connection_values: Vec<_> = headers.get_all(http::header::CONNECTION).iter().cloned().collect();
+    for name in static_headers {
+        headers.remove(*name);
+    }
+    for value in connection_values {
+        let Ok(value) = value.to_str() else { continue };
+        for token in value.split(',').map(str::trim).filter(|token| !token.is_empty()) {
+            headers.remove(token);
+        }
+    }
+}
+
+/// Strip proxy metadata while retaining the recursion-depth marker.
+fn strip_reserved_headers_except_depth(headers: &mut HeaderMap) {
+    let reserved: Vec<_> = headers
+        .keys()
+        .filter(|name| name.as_str() != DEPTH_HEADER && praxis_core::reserved_headers::is_reserved(name.as_str()))
+        .cloned()
+        .collect();
+    for name in reserved {
+        headers.remove(name);
+    }
+}
+
+/// Whether a fully buffered nested body exceeds its pipeline mode's
+/// configured ceiling.
+fn body_exceeds_limit(mode: crate::body::BodyMode, body_len: usize) -> bool {
+    match mode {
+        crate::body::BodyMode::SizeLimit { max_bytes }
+        | crate::body::BodyMode::StreamBuffer {
+            max_bytes: Some(max_bytes),
+        } => body_len > max_bytes,
+        crate::body::BodyMode::Stream | crate::body::BodyMode::StreamBuffer { max_bytes: None } => false,
+    }
+}
+
+/// Whether a response exceeds either the iterative router's global
+/// per-step ceiling or the nested pipeline's body-mode ceiling.
+fn response_body_exceeds_limits(mode: crate::body::BodyMode, max_response_bytes: usize, body_len: usize) -> bool {
+    body_len > max_response_bytes || body_exceeds_limit(mode, body_len)
+}
+
+/// Clamp the router-specific response cap to the listener's global body mode.
+fn effective_response_limit(configured: usize, parent_mode: crate::body::BodyMode) -> usize {
+    match parent_mode {
+        crate::body::BodyMode::SizeLimit { max_bytes }
+        | crate::body::BodyMode::StreamBuffer {
+            max_bytes: Some(max_bytes),
+        } => configured.min(max_bytes),
+        crate::body::BodyMode::Stream | crate::body::BodyMode::StreamBuffer { max_bytes: None } => configured,
+    }
+}
+
+/// Whether a step filter grew the shared iteration state past its ceiling.
+fn iteration_state_exceeds_limit(ctx: &HttpFilterContext<'_>, max_state_bytes: usize) -> bool {
+    ctx.extensions
+        .get::<IterationState>()
+        .is_some_and(|state| state.retained_bytes() > max_state_bytes)
+}
+
+/// Runtime resources inherited from the pipeline that contains the
+/// iterative router.
+#[derive(Clone, Copy)]
+struct SubPipelineRuntimeResources<'a> {
+    /// Original downstream client address.
+    client_addr: Option<std::net::IpAddr>,
+
+    /// Whether the original downstream connection uses TLS.
+    downstream_tls: bool,
+
+    /// Shared endpoint-health state.
+    health_registry: Option<&'a praxis_core::health::HealthRegistry>,
+
+    /// Shared request ID generator.
+    id_generator: &'a praxis_core::id::IdGenerator,
+
+    /// Named runtime key-value stores.
+    kv_stores: Option<&'a praxis_core::kv::KvStoreRegistry>,
+
+    /// Verified downstream mTLS identity.
+    peer_identity: Option<&'a praxis_tls::TlsPeerIdentity>,
+
+    /// Start time of the containing client request.
+    request_start: Instant,
+
+    /// Shared connector used for recursive subrequests.
+    subrequest_connector: Option<&'a praxis_core::subrequest::SubRequestConnector>,
+
+    /// Server-provided wall-clock source.
+    time_source: &'a dyn praxis_core::time::TimeSource,
+}
+
+/// Build a [`HttpFilterContext`] for running a step's sub-pipeline,
+/// inheriting server-injected resources from the containing request.
 #[expect(clippy::too_many_lines, reason = "all fields must be initialized")]
 fn build_sub_filter_context<'a>(
     pipeline: &'a FilterPipeline,
     request: &'a crate::Request,
-    connector: Option<&'a praxis_core::subrequest::SubRequestConnector>,
+    runtime: SubPipelineRuntimeResources<'a>,
 ) -> HttpFilterContext<'a> {
     HttpFilterContext {
+        buffered_request_body: None,
         body_done_indices: Vec::new(),
         branch_iterations: HashMap::new(),
-        client_addr: None,
+        client_addr: runtime.client_addr,
         cluster: None,
         current_filter_id: None,
-        downstream_tls: false,
+        downstream_tls: runtime.downstream_tls,
         extensions: crate::extensions::RequestExtensions::default(),
         executed_filter_indices: Vec::new(),
         extra_request_headers: Vec::new(),
         filter_metadata: HashMap::new(),
         filter_results: HashMap::new(),
         filter_state: HashMap::new(),
-        health_registry: pipeline.health_registry(),
-        id_generator: &SUB_ID_GENERATOR,
-        kv_stores: pipeline.kv_stores(),
-        peer_identity: None,
+        health_registry: runtime.health_registry,
+        id_generator: runtime.id_generator,
+        kv_stores: runtime.kv_stores,
+        peer_identity: runtime.peer_identity.cloned(),
         pre_read_mutations: Vec::new(),
         request,
         request_body_bytes: 0,
-        request_body_mode: crate::body::BodyMode::Stream,
+        request_body_mode: pipeline.body_capabilities().request_body_mode,
         request_headers_to_remove: Vec::new(),
         request_headers_to_set: Vec::new(),
-        request_start: Instant::now(),
+        request_start: runtime.request_start,
         response_body_bytes: 0,
-        response_body_mode: crate::body::BodyMode::Stream,
+        response_body_mode: pipeline.body_capabilities().response_body_mode,
         response_header: None,
         response_headers_modified: false,
         rewritten_path: None,
         selected_endpoint_index: None,
         structured_metadata: HashMap::new(),
-        subrequest_connector: connector.or_else(|| pipeline.subrequest_connector()),
-        time_source: &SystemTimeSource,
+        subrequest_connector: runtime.subrequest_connector,
+        time_source: runtime.time_source,
         upstream: None,
     }
 }
@@ -531,10 +1000,13 @@ fn build_sub_filter_context<'a>(
 /// SNI from the address hostname when not explicitly configured.
 ///
 /// [`Upstream`]: praxis_core::connectivity::Upstream
-fn build_peer(upstream: &praxis_core::connectivity::Upstream) -> HttpPeer {
+async fn build_peer(
+    upstream: &praxis_core::connectivity::Upstream,
+) -> Result<HttpPeer, praxis_core::connectivity::peer::AddressResolutionError> {
     use praxis_core::connectivity::peer as peer_utils;
 
     let addr: &str = &upstream.address;
+    let socket_addr = peer_utils::resolve_address(addr).await?;
     let tls_enabled = upstream.tls.is_some();
     let sni = upstream
         .tls
@@ -548,25 +1020,40 @@ fn build_peer(upstream: &praxis_core::connectivity::Upstream) -> HttpPeer {
             }
         });
 
-    let mut peer = HttpPeer::new(addr, tls_enabled, sni);
+    let mut peer = HttpPeer::new(socket_addr, tls_enabled, sni);
     peer_utils::apply_connection_options(&mut peer, &upstream.connection);
 
     if let Some(tls) = &upstream.tls {
         peer_utils::apply_cached_tls(&mut peer, tls, addr);
     }
 
-    peer
+    Ok(peer)
 }
 
 /// Build a [`Rejection`] that carries the sub-request response.
-fn build_response_rejection(response: &SubResponse) -> Rejection {
-    let mut rejection = Rejection::status(response.status);
+fn build_response_rejection(response: &SubResponse, preserve_content_length: bool) -> Rejection {
+    let status = normalize_response_status(response.status);
+    let mut rejection = Rejection::status(status).preserving_keepalive();
     if !response.body.is_empty() {
         rejection = rejection.with_body(response.body.clone());
     }
     for (name, value) in &response.headers {
-        if let Ok(val_str) = value.to_str() {
-            rejection = rejection.with_header(name.to_string(), val_str);
+        if (name == http::header::CONTENT_LENGTH && !preserve_content_length) || name == http::header::TRANSFER_ENCODING
+        {
+            continue;
+        }
+        rejection
+            .header_map
+            .get_or_insert_with(Default::default)
+            .append(name.clone(), value.clone());
+    }
+    if !preserve_content_length && status != 204 && status != 304 {
+        let content_length = response.body.len().to_string();
+        if let Ok(value) = http::HeaderValue::from_str(&content_length) {
+            rejection
+                .header_map
+                .get_or_insert_with(Default::default)
+                .insert(http::header::CONTENT_LENGTH, value);
         }
     }
     rejection

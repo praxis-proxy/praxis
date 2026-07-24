@@ -42,7 +42,6 @@ pub(crate) mod filter;
 mod http;
 mod http_utils;
 /// Sub-request execution for iterative request routing.
-#[expect(dead_code, reason = "consumed by iterative_request_router (#786)")]
 pub(crate) mod subrequest;
 mod tcp;
 #[cfg(test)]

@@ -95,6 +95,14 @@ pub enum PendingHeaderResult {
 /// Created by the protocol layer for each incoming request. Filters read
 /// and mutate it to select clusters, choose upstreams, and inject headers.
 pub struct HttpFilterContext<'a> {
+    /// Complete request body captured by protocol pre-read, when the
+    /// pipeline's effective request mode is [`BodyMode::StreamBuffer`].
+    ///
+    /// This remains available during `on_request` even when a filter's body
+    /// hook was skipped because body-derived header mutations changed its
+    /// request conditions between the pre-read and header phases.
+    pub buffered_request_body: Option<bytes::Bytes>,
+
     /// Per-filter body-done tracking. When `true` at index `i`,
     /// filter `i` is skipped for remaining body chunks.
     pub body_done_indices: Vec<bool>,

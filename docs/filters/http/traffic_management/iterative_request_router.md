@@ -7,7 +7,7 @@ Framework-level filter for iterative sub-request execution.
 
 ## Configuration Notes
 
-Holds named steps, each backed by a pre-built sub-pipeline. During `on_request`, runs an iteration loop: execute a step's pipeline to resolve routing, make the HTTP call via Pingora's `Connector`, evaluate transition rules, and continue or return the final response.
+Holds named steps, each backed by a pre-built sub-pipeline. During request processing, runs an iteration loop: execute each step's request filters, make the HTTP call via Pingora's `Connector`, execute its response filters, evaluate transition rules, and continue or return the final response.
 
 ## Configuration
 
@@ -41,7 +41,7 @@ Holds named steps, each backed by a pre-built sub-pipeline. During `on_request`,
 | `steps[].on_result[].filter` | string | no | Filter name whose results to check. |
 | `steps[].on_result[].key` | string | no | Result key to match. |
 | `steps[].on_result[].next` | string | no | Name of the step to transition to (mutually exclusive with `done`). |
-| `steps[].on_result[].status` | integer[] | no | Response status codes to match (e.g., [502, 503, 504]). |
+| `steps[].on_result[].status` | integer[] | no | Response status codes to match (e.g., [502, 503, 504]). Transport failures are exposed as 502 and deadline expiry as 504. |
 | `steps[].on_result[].value` | string | no | Result value to match. |
 | `steps[].on_result[].done` | bool | no | If true, return the current response to the client. |
 | `timeout_ms` | integer | no | Overall timeout in milliseconds (default 30000). |

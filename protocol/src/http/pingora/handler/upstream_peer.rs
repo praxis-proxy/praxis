@@ -5,27 +5,12 @@
 //!
 //! [`Upstream`]: praxis_core::connectivity::Upstream
 
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::{Mutex, OnceLock},
-    time::Instant,
-};
+use std::net::SocketAddr;
 
 use pingora_core::{Result, upstreams::peer::HttpPeer};
 use praxis_core::connectivity::{Upstream, peer as peer_utils};
 
 use super::super::context::PingoraRequestCtx;
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// TTL for cached DNS entries.
-const DNS_TTL_SECS: u64 = 60;
-
-/// Maximum cached DNS entries before oldest-entry eviction.
-const MAX_DNS_ENTRIES: usize = 1_024;
 
 // -----------------------------------------------------------------------------
 // Execution/Conversion
@@ -89,25 +74,6 @@ async fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
     Ok(Box::new(peer))
 }
 
-
-// -----------------------------------------------------------------------------
-// DNS Cache
-// -----------------------------------------------------------------------------
-
-/// Cached DNS resolution result.
-struct DnsCacheEntry {
-    /// Resolved socket addresses.
-    addrs: Vec<SocketAddr>,
-    /// When the resolution was performed.
-    resolved_at: Instant,
-}
-
-/// Process-wide DNS cache for upstream hostname resolution.
-fn dns_cache() -> &'static Mutex<HashMap<String, DnsCacheEntry>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, DnsCacheEntry>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
 // -----------------------------------------------------------------------------
 // Resolution
 // -----------------------------------------------------------------------------
@@ -124,125 +90,9 @@ fn dns_cache() -> &'static Mutex<HashMap<String, DnsCacheEntry>> {
 /// [`SocketAddr`]: std::net::SocketAddr
 /// [`spawn_blocking`]: tokio::task::spawn_blocking
 async fn resolve_address(address: &str) -> Result<SocketAddr> {
-    if let Ok(addr) = address.parse::<SocketAddr>() {
-        return Ok(addr);
-    }
-
-    if let Some(addr) = lookup_cached(address) {
-        tracing::trace!(address, "DNS cache hit");
-        return Ok(addr);
-    }
-
-    let addrs = resolve_blocking(address).await?;
-    let preferred = select_preferred_address(&addrs, address)?;
-
-    let mut cache = dns_cache().lock().unwrap_or_else(|e| {
-        tracing::warn!("DNS cache mutex poisoned; recovering");
-        e.into_inner()
-    });
-
-    if cache.len() >= MAX_DNS_ENTRIES && !cache.contains_key(address) {
-        evict_dns_entries(&mut cache);
-    }
-
-    cache.insert(
-        address.to_owned(),
-        DnsCacheEntry {
-            addrs,
-            resolved_at: Instant::now(),
-        },
-    );
-
-    drop(cache);
-    Ok(preferred)
-}
-
-/// Evict expired entries from the DNS cache. If still at capacity
-/// after removing expired entries, evicts the oldest entry.
-fn evict_dns_entries(cache: &mut HashMap<String, DnsCacheEntry>) {
-    cache.retain(|_, entry| entry.resolved_at.elapsed().as_secs() < DNS_TTL_SECS);
-
-    if cache.len() >= MAX_DNS_ENTRIES
-        && let Some(oldest_key) = cache
-            .iter()
-            .min_by_key(|(_, entry)| entry.resolved_at)
-            .map(|(k, _)| k.clone())
-    {
-        cache.remove(&oldest_key);
-        tracing::debug!(evicted = %oldest_key, remaining = cache.len(), "DNS cache: evicted oldest entry at capacity");
-    }
-}
-
-/// Check the DNS cache for a non-expired entry.
-///
-/// Evicts expired entries on every 64th call to bound cache growth.
-fn lookup_cached(address: &str) -> Option<SocketAddr> {
-    static CALL_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-    let mut cache = dns_cache().lock().unwrap_or_else(|e| {
-        tracing::warn!("DNS cache mutex poisoned; recovering");
-        e.into_inner()
-    });
-    let result = cache.get(address).and_then(|entry| {
-        if entry.resolved_at.elapsed().as_secs() >= DNS_TTL_SECS {
-            return None;
-        }
-        entry
-            .addrs
-            .iter()
-            .find(|a| a.is_ipv4())
-            .or_else(|| entry.addrs.first())
-            .copied()
-    });
-
-    if CALL_COUNT
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        .is_multiple_of(64)
-    {
-        cache.retain(|_, entry| entry.resolved_at.elapsed().as_secs() < DNS_TTL_SECS);
-    }
-
-    drop(cache);
-    result
-}
-
-/// Perform blocking DNS resolution off the async runtime.
-async fn resolve_blocking(address: &str) -> Result<Vec<SocketAddr>> {
-    let owned = address.to_owned();
-    tokio::task::spawn_blocking(move || {
-        use std::net::ToSocketAddrs as _;
-        owned.to_socket_addrs().map(Iterator::collect::<Vec<_>>)
-    })
-    .await
-    .map_err(|e| {
-        pingora_core::Error::explain(
-            pingora_core::ErrorType::InternalError,
-            format!("DNS resolution task panicked for '{address}': {e}"),
-        )
-    })?
-    .map_err(|e| {
-        tracing::error!(address, error = %e, "failed to resolve upstream address");
-        pingora_core::Error::explain(
-            pingora_core::ErrorType::InternalError,
-            format!("upstream address resolution failed for '{address}': {e}"),
-        )
-    })
-}
-
-/// Select the preferred address from resolved results, favoring IPv4.
-fn select_preferred_address(addrs: &[SocketAddr], address: &str) -> Result<SocketAddr> {
-    addrs
-        .iter()
-        .find(|a| a.is_ipv4())
-        .or_else(|| addrs.first())
-        .copied()
-        .ok_or_else(|| {
-            tracing::error!(address, "DNS resolved but returned no addresses");
-            pingora_core::Error::explain(
-                pingora_core::ErrorType::InternalError,
-                format!("upstream address '{address}' resolved to zero addresses"),
-            )
-        })
+    peer_utils::resolve_address(address)
+        .await
+        .map_err(|error| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, error.to_string()))
 }
 
 // -----------------------------------------------------------------------------
@@ -405,32 +255,6 @@ mod tests {
         assert!(
             build_peer(&make_upstream("localhost:8080")).await.is_ok(),
             "hostname address should build peer via DNS resolution"
-        );
-    }
-
-    #[test]
-    fn select_preferred_address_prefers_ipv4_from_mixed_results() {
-        let ipv6: SocketAddr = "[::1]:8080".parse().unwrap();
-        let ipv4: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let selected =
-            select_preferred_address(&[ipv6, ipv4], "mixed.example:8080").expect("mixed results should select address");
-        assert_eq!(selected, ipv4, "IPv4 should be preferred over IPv6");
-    }
-
-    #[test]
-    fn select_preferred_address_returns_ipv6_when_ipv6_only() {
-        let ipv6: SocketAddr = "[::1]:8080".parse().unwrap();
-        let selected =
-            select_preferred_address(&[ipv6], "ipv6.example:8080").expect("IPv6-only results should select IPv6");
-        assert_eq!(selected, ipv6, "IPv6 should be used when it is the only result");
-    }
-
-    #[test]
-    fn select_preferred_address_errors_on_empty_results() {
-        let err = select_preferred_address(&[], "empty.example:8080").expect_err("empty DNS result should fail");
-        assert!(
-            err.to_string().contains("resolved to zero addresses"),
-            "unexpected error: {err}"
         );
     }
 

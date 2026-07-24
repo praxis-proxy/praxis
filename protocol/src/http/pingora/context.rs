@@ -269,6 +269,10 @@ macro_rules! filter_context {
     ($ctx:expr, $pipeline:expr, $request:expr, $response_header:expr) => {{
         $pipeline.prepare_extensions(&mut $ctx.extensions);
         praxis_filter::HttpFilterContext {
+            buffered_request_body: $ctx
+                .pre_read_body
+                .as_ref()
+                .map(|chunks| chunks.front().cloned().unwrap_or_default()),
             body_done_indices: std::mem::take(&mut $ctx.cached_body_done_indices),
             branch_iterations: std::collections::HashMap::new(),
             client_addr: $ctx.client_addr,

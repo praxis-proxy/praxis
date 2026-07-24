@@ -51,6 +51,7 @@ pub(crate) fn evaluate_branches<'a>(
 }
 
 /// Inner implementation of branch evaluation.
+#[expect(clippy::too_many_lines, reason = "branch execution and optional result retention")]
 async fn evaluate_branches_inner(
     branches: &[ResolvedBranch],
     ctx: &mut HttpFilterContext<'_>,
@@ -81,15 +82,31 @@ async fn evaluate_branches_inner(
             RejoinTarget::Terminal => return Ok(BranchOutcome::Terminal),
             RejoinTarget::SkipTo(target) => return Ok(BranchOutcome::SkipTo(*target)),
             RejoinTarget::ReEnter(target) => {
+                retain_filter_results(ctx);
                 ctx.filter_results.clear();
                 return Ok(BranchOutcome::ReEnter(*target));
             },
         }
     }
 
+    retain_filter_results(ctx);
     ctx.filter_results.clear();
 
     Ok(BranchOutcome::Continue)
+}
+
+/// Snapshot ephemeral results when a caller opted into cross-phase retention.
+fn retain_filter_results(ctx: &mut HttpFilterContext<'_>) {
+    if ctx.filter_results.is_empty() {
+        return;
+    }
+    if let Some(retained) = ctx.extensions.get_mut::<crate::results::RetainedFilterResults>() {
+        retained.0.extend(
+            ctx.filter_results
+                .iter()
+                .map(|(name, results)| (*name, results.clone())),
+        );
+    }
 }
 
 /// Check whether a branch's condition is met.
@@ -218,6 +235,31 @@ mod tests {
     use crate::{
         FilterError, Rejection, filter::HttpFilter, pipeline::branch::ResolvedBranchCondition, results::FilterResultSet,
     };
+
+    #[tokio::test]
+    async fn opted_in_results_survive_branch_evaluation() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.extensions.insert(crate::results::RetainedFilterResults::default());
+        ctx.filter_results
+            .entry("probe")
+            .or_default()
+            .set("result", "yes")
+            .unwrap();
+
+        let outcome = evaluate_branches(&[], &mut ctx).await.unwrap();
+
+        assert!(matches!(outcome, BranchOutcome::Continue));
+        assert!(ctx.filter_results.is_empty());
+        assert!(
+            ctx.extensions
+                .get::<crate::results::RetainedFilterResults>()
+                .unwrap()
+                .0
+                .get("probe")
+                .is_some_and(|results| results.matches("result", "yes"))
+        );
+    }
 
     #[tokio::test]
     async fn unconditional_branch_fires() {

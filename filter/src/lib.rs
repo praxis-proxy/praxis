@@ -38,7 +38,10 @@ pub use context::{HttpFilterContext, PendingHeaderResult, Request, Response, Tru
 pub use extensions::RequestExtensions;
 pub use factory::{FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config, tcp_builtin};
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
-pub use pipeline::{FilterPipeline, PipelineExtension};
+pub use pipeline::{
+    FilterPipeline, PipelineExtension,
+    subrequest::{IterationState, NextIterationBody, SubRequest, SubResponse},
+};
 pub use praxis_core::config::{FailureMode, FilterEntry};
 pub use praxis_tls::TlsPeerIdentity;
 pub use registry::{FilterRegistry, SecurityClass};
@@ -395,6 +398,7 @@ pub(crate) mod test_utils {
     )]
     pub(crate) fn make_filter_context(req: &Request) -> HttpFilterContext<'_> {
         HttpFilterContext {
+            buffered_request_body: None,
             body_done_indices: Vec::new(),
             branch_iterations: std::collections::HashMap::new(),
             client_addr: None,

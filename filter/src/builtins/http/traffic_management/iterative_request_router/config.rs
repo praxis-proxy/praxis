@@ -20,6 +20,9 @@ const MAX_ITERATIONS_CEILING: u32 = 100;
 /// Default overall timeout in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000; // 30s
 
+/// Hard ceiling on the overall iterative deadline (24 hours).
+const MAX_TIMEOUT_MS: u64 = 86_400_000;
+
 /// Maximum number of named steps.
 const MAX_STEPS: usize = 20;
 
@@ -122,6 +125,8 @@ pub(crate) struct StepTransition {
     pub(crate) next: Option<String>,
 
     /// Response status codes to match (e.g., [502, 503, 504]).
+    /// Transport failures are exposed as 502 and deadline expiry
+    /// as 504.
     #[serde(default)]
     pub(crate) status: Option<Vec<u16>>,
 
@@ -156,6 +161,19 @@ pub(crate) fn validate(cfg: &IterativeRequestRouterConfig) -> Result<(), FilterE
 
     if cfg.timeout_ms == 0 {
         return Err("iterative_request_router: timeout_ms must be > 0".to_owned().into());
+    }
+    if cfg.timeout_ms > MAX_TIMEOUT_MS {
+        return Err(format!(
+            "iterative_request_router: timeout_ms must be <= {MAX_TIMEOUT_MS}, got {}",
+            cfg.timeout_ms
+        )
+        .into());
+    }
+
+    if cfg.max_state_bytes == 0 {
+        return Err("iterative_request_router: max_state_bytes must be > 0"
+            .to_owned()
+            .into());
     }
 
     if cfg.steps.is_empty() {
@@ -208,9 +226,17 @@ pub(crate) fn validate(cfg: &IterativeRequestRouterConfig) -> Result<(), FilterE
                 return Err(format!(
                     "iterative_request_router: nested \
                      iterative_request_router not allowed in \
-                     step '{}' (step pipelines only execute the \
-                     request phase, not the body phase where \
-                     the iteration loop runs)",
+                     step '{}' (recursive iterative execution is \
+                     not supported)",
+                    step.name
+                )
+                .into());
+            }
+
+            if entry.filter_type == "compression" {
+                return Err(format!(
+                    "iterative_request_router: protocol-only filter \
+                     'compression' is not supported in step '{}'",
                     step.name
                 )
                 .into());
@@ -290,6 +316,41 @@ fn validate_transitions(
                  specify 'filter' or 'status'"
             )
             .into());
+        }
+
+        let filter_fields = [t.filter.as_deref(), t.key.as_deref(), t.value.as_deref()];
+        let filter_field_count = filter_fields.iter().filter(|field| field.is_some()).count();
+        if filter_field_count != 0 && filter_field_count != filter_fields.len() {
+            return Err(format!(
+                "iterative_request_router: step '{step_name}' \
+                 transition {i}: 'filter', 'key', and 'value' must be \
+                 specified together"
+            )
+            .into());
+        }
+        if filter_fields.iter().flatten().any(|field| field.is_empty()) {
+            return Err(format!(
+                "iterative_request_router: step '{step_name}' \
+                 transition {i}: filter predicate fields must not be empty"
+            )
+            .into());
+        }
+
+        if let Some(statuses) = &t.status {
+            if statuses.is_empty() {
+                return Err(format!(
+                    "iterative_request_router: step '{step_name}' \
+                     transition {i}: status predicate must not be empty"
+                )
+                .into());
+            }
+            if let Some(status) = statuses.iter().find(|&&status| !(100..=599).contains(&status)) {
+                return Err(format!(
+                    "iterative_request_router: step '{step_name}' \
+                     transition {i}: status must be 100..=599, got {status}"
+                )
+                .into());
+            }
         }
     }
 

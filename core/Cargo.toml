@@ -25,6 +25,7 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 

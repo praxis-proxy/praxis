@@ -64,6 +64,13 @@ pub struct FilterResultSet {
     entries: HashMap<Cow<'static, str>, Cow<'static, str>>,
 }
 
+/// Opt-in cross-phase snapshot of ephemeral filter results.
+///
+/// The iterative router inserts this extension into nested contexts so results
+/// can drive step transitions after ordinary branch evaluation clears them.
+#[derive(Default)]
+pub(crate) struct RetainedFilterResults(pub HashMap<&'static str, FilterResultSet>);
+
 impl FilterResultSet {
     /// Create an empty result set.
     ///

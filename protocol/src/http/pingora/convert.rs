@@ -67,8 +67,8 @@ pub(crate) fn response_header_from_pingora(upstream: &mut pingora_http::Response
 
 /// Send a rejection response to the client, including any headers and body from the [`Rejection`].
 ///
-/// Disables downstream keep-alive so the connection closes after the
-/// response.
+/// Disables downstream keep-alive by default so the connection closes after
+/// a short-circuit response. Complete responses may explicitly preserve it.
 ///
 /// ```ignore
 /// // Requires an active `pingora_proxy::Session` from a live request.
@@ -81,7 +81,9 @@ pub(crate) fn response_header_from_pingora(upstream: &mut pingora_http::Response
 /// [`Rejection`]: praxis_filter::Rejection
 pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) {
     debug!(status = rejection.status, "sending rejection response");
-    session.set_keepalive(None);
+    if !rejection.preserve_keepalive {
+        session.set_keepalive(None);
+    }
 
     let mut header = build_rejection_header(&rejection);
     let has_body = rejection.body.is_some();
@@ -105,7 +107,12 @@ pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) 
 /// [`ResponseHeader`]: pingora_http::ResponseHeader
 /// [`Rejection`]: praxis_filter::Rejection
 fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader {
-    let header_count = Some(rejection.headers.len());
+    let header_count = Some(
+        rejection
+            .headers
+            .len()
+            .saturating_add(rejection.header_map.as_ref().map_or(0, |headers| headers.len())),
+    );
     let mut header = match pingora_http::ResponseHeader::build(rejection.status, header_count) {
         Ok(h) => h,
         Err(e) => {
@@ -115,7 +122,12 @@ fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader
         },
     };
     for (name, value) in &rejection.headers {
-        let _insert = header.insert_header(name.clone(), value.clone());
+        let _append = header.append_header(name.clone(), value.clone());
+    }
+    if let Some(headers) = &rejection.header_map {
+        for (name, value) in headers.iter() {
+            let _append = header.append_header(name.clone(), value.clone());
+        }
     }
     header
 }
@@ -191,5 +203,35 @@ mod tests {
             resp.headers.is_empty(),
             "headers should be empty when upstream has none"
         );
+    }
+
+    #[test]
+    fn rejection_header_preserves_duplicate_values() {
+        let rejection = Rejection::status(200)
+            .with_header("set-cookie", "first=1")
+            .with_header("set-cookie", "second=2");
+
+        let header = build_rejection_header(&rejection);
+        let values: Vec<_> = header
+            .headers
+            .get_all("set-cookie")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
+
+        assert_eq!(values, ["first=1", "second=2"]);
+    }
+
+    #[test]
+    fn rejection_header_preserves_opaque_values() {
+        let mut rejection = Rejection::status(200);
+        rejection
+            .header_map
+            .get_or_insert_with(Default::default)
+            .append("x-opaque", http::HeaderValue::from_bytes(&[b'a', 0x80, b'z']).unwrap());
+
+        let header = build_rejection_header(&rejection);
+
+        assert_eq!(header.headers["x-opaque"].as_bytes(), &[b'a', 0x80, b'z']);
     }
 }

@@ -216,6 +216,26 @@ steps:
 }
 
 #[test]
+fn rejects_protocol_only_compression_step() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+steps:
+  - name: step1
+    filters:
+      - filter: compression
+    on_result:
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", &yaml).unwrap();
+    let err = config::validate(&cfg).unwrap_err();
+    assert!(err.to_string().contains("protocol-only"));
+}
+
+#[test]
 fn rejects_done_and_next_together() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         "
@@ -265,6 +285,69 @@ steps:
 }
 
 #[test]
+fn rejects_partial_filter_transition_predicate() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+steps:
+  - name: step1
+    filters:
+      - filter: static_response
+        status: 200
+    on_result:
+      - filter: classifier
+        next: step1
+",
+    )
+    .unwrap();
+    let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", &yaml).unwrap();
+    let err = config::validate(&cfg).unwrap_err();
+    assert!(err.to_string().contains("specified together"));
+}
+
+#[test]
+fn rejects_empty_status_transition_predicate() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+steps:
+  - name: step1
+    filters:
+      - filter: static_response
+        status: 200
+    on_result:
+      - status: []
+        next: step1
+",
+    )
+    .unwrap();
+    let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", &yaml).unwrap();
+    let err = config::validate(&cfg).unwrap_err();
+    assert!(err.to_string().contains("must not be empty"));
+}
+
+#[test]
+fn rejects_out_of_range_status_transition_predicate() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+steps:
+  - name: step1
+    filters:
+      - filter: static_response
+        status: 200
+    on_result:
+      - status: [700]
+        next: step1
+",
+    )
+    .unwrap();
+    let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", &yaml).unwrap();
+    let err = config::validate(&cfg).unwrap_err();
+    assert!(err.to_string().contains("100..=599"));
+}
+
+#[test]
 fn rejects_zero_timeout() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         "
@@ -287,6 +370,51 @@ steps:
         err.to_string().contains("timeout_ms"),
         "error should mention timeout: {err}"
     );
+}
+
+#[test]
+fn rejects_timeout_outside_platform_instant_range() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+timeout_ms: 18446744073709551615
+steps:
+  - name: step1
+    filters:
+      - filter: static_response
+        status: 200
+    on_result:
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    let result = super::IterativeRequestRouterFilter::from_config(&yaml);
+    assert!(result.is_err(), "overflowing timeout should be rejected");
+    let error = result.err().unwrap();
+    assert!(error.to_string().contains("timeout_ms must be <="));
+}
+
+#[test]
+fn rejects_zero_max_state_bytes() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+max_state_bytes: 0
+steps:
+  - name: step1
+    filters:
+      - filter: static_response
+        status: 200
+    on_result:
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", &yaml).unwrap();
+    let err = config::validate(&cfg).unwrap_err();
+    assert!(err.to_string().contains("max_state_bytes"));
 }
 
 #[test]
@@ -515,8 +643,47 @@ fn transition_first_match_wins() {
 #[test]
 fn build_rejection_preserves_status() {
     let response = make_response(201);
-    let rejection = super::build_response_rejection(&response);
+    let rejection = super::build_response_rejection(&response, false);
     assert_eq!(rejection.status, 201, "rejection status should match response");
+}
+
+#[test]
+fn build_rejection_normalizes_unsupported_status() {
+    let response = make_response(700);
+    let rejection = super::build_response_rejection(&response, false);
+    assert_eq!(rejection.status, 502, "unsupported upstream status should become 502");
+}
+
+#[test]
+fn build_rejection_normalizes_informational_status() {
+    let response = make_response(103);
+    let rejection = super::build_response_rejection(&response, false);
+    assert_eq!(
+        rejection.status, 502,
+        "an informational status cannot terminate a response"
+    );
+}
+
+#[test]
+fn local_rejection_becomes_transition_response() {
+    let mut rejection = crate::Rejection::status(503)
+        .with_header("Retry-After", "1")
+        .with_header("Connection", "x-private")
+        .with_header("x-private", "secret")
+        .with_header("x-praxis-private", "secret")
+        .with_body(bytes::Bytes::from_static(b"unavailable"));
+    rejection
+        .header_map
+        .get_or_insert_with(Default::default)
+        .append("x-opaque", http::HeaderValue::from_bytes(&[0x80]).unwrap());
+    let response = super::subresponse_from_rejection(rejection);
+    assert_eq!(response.status, 503);
+    assert_eq!(response.headers.get("retry-after").unwrap(), "1");
+    assert!(!response.headers.contains_key("connection"));
+    assert!(!response.headers.contains_key("x-private"));
+    assert!(!response.headers.contains_key("x-praxis-private"));
+    assert_eq!(response.headers.get("x-opaque").unwrap().as_bytes(), &[0x80]);
+    assert_eq!(response.body, bytes::Bytes::from_static(b"unavailable"));
 }
 
 #[test]
@@ -528,11 +695,21 @@ fn build_rejection_preserves_body() {
         headers: http::HeaderMap::new(),
         body: bytes::Bytes::from_static(b"test body"),
     };
-    let rejection = super::build_response_rejection(&response);
+    let rejection = super::build_response_rejection(&response, false);
     assert_eq!(
         rejection.body.as_deref(),
         Some(b"test body".as_slice()),
         "rejection body should match response body"
+    );
+    assert_eq!(
+        rejection
+            .header_map
+            .as_deref()
+            .unwrap()
+            .get(http::header::CONTENT_LENGTH)
+            .unwrap(),
+        "9",
+        "the finalized body should be explicitly framed"
     );
 }
 
@@ -547,13 +724,18 @@ fn build_rejection_preserves_headers() {
         headers,
         body: bytes::Bytes::new(),
     };
-    let rejection = super::build_response_rejection(&response);
+    let rejection = super::build_response_rejection(&response, false);
     assert!(
         rejection
-            .headers
-            .iter()
-            .any(|(k, v)| k == "content-type" && v == "application/json"),
+            .header_map
+            .as_deref()
+            .and_then(|headers| headers.get("content-type"))
+            .is_some_and(|value| value == "application/json"),
         "rejection should preserve content-type header"
+    );
+    assert!(
+        rejection.preserve_keepalive,
+        "complete responses should preserve keepalive"
     );
 }
 
@@ -1050,8 +1232,13 @@ fn request_body_mode_returns_stream_buffer() {
     let filter = build_filter();
     let mode = filter.request_body_mode();
     assert!(
-        matches!(mode, crate::body::BodyMode::StreamBuffer { max_bytes: Some(_) }),
-        "should return StreamBuffer with max_bytes"
+        matches!(
+            mode,
+            crate::body::BodyMode::StreamBuffer {
+                max_bytes: Some(52_428_800)
+            }
+        ),
+        "request buffering should use the independent state budget"
     );
 }
 
@@ -1316,7 +1503,7 @@ fn transition_filter_wrong_value_no_match() {
 #[test]
 fn build_rejection_empty_body_has_no_body() {
     let response = make_response(200);
-    let rejection = super::build_response_rejection(&response);
+    let rejection = super::build_response_rejection(&response, false);
     assert!(
         rejection.body.is_none(),
         "empty response body should result in None rejection body"
@@ -1335,8 +1522,283 @@ fn build_rejection_multiple_headers() {
         headers,
         body: bytes::Bytes::new(),
     };
-    let rejection = super::build_response_rejection(&response);
-    assert!(rejection.headers.len() >= 2, "rejection should preserve all headers");
+    let rejection = super::build_response_rejection(&response, false);
+    let headers = rejection.header_map.as_deref().unwrap();
+    assert!(headers.len() >= 2, "rejection should preserve all headers");
+}
+
+#[test]
+fn build_rejection_reframes_empty_response_for_keepalive() {
+    use crate::pipeline::subrequest::SubResponse;
+
+    let mut headers = http::HeaderMap::new();
+    headers.insert(http::header::CONTENT_LENGTH, "99".parse().unwrap());
+    headers.insert(http::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
+    headers.insert(http::header::CONTENT_TYPE, "application/json".parse().unwrap());
+    let response = SubResponse {
+        status: 200,
+        headers,
+        body: bytes::Bytes::new(),
+    };
+
+    let rejection = super::build_response_rejection(&response, false);
+    let headers = rejection.header_map.as_deref().unwrap();
+
+    assert_eq!(headers.get("content-length").unwrap(), "0");
+    assert!(!headers.contains_key("transfer-encoding"));
+    assert!(headers.contains_key("content-type"));
+    assert!(rejection.body.is_none());
+}
+
+#[test]
+fn build_rejection_does_not_frame_bodyless_status() {
+    let response = make_response(204);
+    let rejection = super::build_response_rejection(&response, false);
+
+    assert!(
+        rejection
+            .header_map
+            .as_deref()
+            .is_none_or(|headers| !headers.contains_key(http::header::CONTENT_LENGTH))
+    );
+}
+
+#[test]
+fn build_rejection_preserves_head_content_length() {
+    use crate::pipeline::subrequest::SubResponse;
+
+    let mut headers = http::HeaderMap::new();
+    headers.insert(http::header::CONTENT_LENGTH, "123".parse().unwrap());
+    let response = SubResponse {
+        status: 200,
+        headers,
+        body: bytes::Bytes::new(),
+    };
+
+    let rejection = super::build_response_rejection(&response, true);
+
+    assert_eq!(
+        rejection
+            .header_map
+            .as_deref()
+            .unwrap()
+            .get(http::header::CONTENT_LENGTH)
+            .unwrap(),
+        "123"
+    );
+}
+
+#[test]
+fn build_rejection_preserves_opaque_header_bytes() {
+    use crate::pipeline::subrequest::SubResponse;
+
+    let mut headers = http::HeaderMap::new();
+    headers.insert("x-opaque", http::HeaderValue::from_bytes(&[b'a', 0x80, b'z']).unwrap());
+    let response = SubResponse {
+        status: 200,
+        headers,
+        body: bytes::Bytes::new(),
+    };
+
+    let rejection = super::build_response_rejection(&response, false);
+
+    assert_eq!(
+        rejection
+            .header_map
+            .as_deref()
+            .unwrap()
+            .get("x-opaque")
+            .unwrap()
+            .as_bytes(),
+        &[b'a', 0x80, b'z']
+    );
+}
+
+#[test]
+fn nested_body_limit_detects_oversized_buffer() {
+    assert!(super::body_exceeds_limit(
+        crate::BodyMode::StreamBuffer { max_bytes: Some(4) },
+        5
+    ));
+    assert!(!super::body_exceeds_limit(
+        crate::BodyMode::SizeLimit { max_bytes: 5 },
+        5
+    ));
+    assert!(!super::body_exceeds_limit(crate::BodyMode::Stream, usize::MAX));
+}
+
+#[test]
+fn transformed_response_must_remain_within_all_limits() {
+    assert!(super::response_body_exceeds_limits(crate::BodyMode::Stream, 4, 5));
+    assert!(super::response_body_exceeds_limits(
+        crate::BodyMode::StreamBuffer { max_bytes: Some(3) },
+        4,
+        4,
+    ));
+    assert!(!super::response_body_exceeds_limits(
+        crate::BodyMode::StreamBuffer { max_bytes: Some(4) },
+        4,
+        4,
+    ));
+}
+
+#[test]
+fn listener_response_limit_clamps_router_limit() {
+    assert_eq!(
+        super::effective_response_limit(
+            crate::pipeline::subrequest::default_max_response_bytes(),
+            crate::BodyMode::SizeLimit { max_bytes: 4 }
+        ),
+        4
+    );
+    assert_eq!(super::effective_response_limit(4, crate::BodyMode::Stream), 4);
+}
+
+#[test]
+fn strip_request_framing_headers_removes_stale_lengths() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(http::header::CONTENT_LENGTH, "100".parse().unwrap());
+    headers.insert(http::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
+    headers.insert(http::header::CONTENT_TYPE, "application/json".parse().unwrap());
+
+    super::strip_request_framing_headers(&mut headers);
+
+    assert!(!headers.contains_key(http::header::CONTENT_LENGTH));
+    assert!(!headers.contains_key(http::header::TRANSFER_ENCODING));
+    assert!(headers.contains_key(http::header::CONTENT_TYPE));
+}
+
+#[test]
+fn request_sanitization_strips_hop_by_hop_and_internal_headers() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(http::header::CONNECTION, "x-remove, keep-alive".parse().unwrap());
+    headers.insert("x-remove", "secret".parse().unwrap());
+    headers.insert("keep-alive", "timeout=5".parse().unwrap());
+    headers.insert("x-praxis-route", "internal".parse().unwrap());
+    headers.insert(super::DEPTH_HEADER, "1".parse().unwrap());
+    headers.insert(http::header::AUTHORIZATION, "Bearer step-token".parse().unwrap());
+    headers.insert(http::header::CONTENT_LENGTH, "99".parse().unwrap());
+
+    super::sanitize_subrequest_headers(&mut headers);
+
+    assert!(!headers.contains_key(http::header::CONNECTION));
+    assert!(!headers.contains_key("x-remove"));
+    assert!(!headers.contains_key("keep-alive"));
+    assert!(!headers.contains_key("x-praxis-route"));
+    assert!(!headers.contains_key(http::header::CONTENT_LENGTH));
+    assert_eq!(headers.get(super::DEPTH_HEADER).unwrap(), "1");
+    assert_eq!(headers.get(http::header::AUTHORIZATION).unwrap(), "Bearer step-token");
+}
+
+#[test]
+fn response_sanitization_strips_hop_by_hop_and_internal_headers() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(http::header::CONNECTION, "x-remove".parse().unwrap());
+    headers.insert("x-remove", "secret".parse().unwrap());
+    headers.insert("upgrade", "h2c".parse().unwrap());
+    headers.insert("x-ext-agent-task", "internal".parse().unwrap());
+    headers.append(http::header::SET_COOKIE, "first=1".parse().unwrap());
+    headers.append(http::header::SET_COOKIE, "second=2".parse().unwrap());
+
+    super::sanitize_subresponse_headers(&mut headers);
+
+    assert!(!headers.contains_key(http::header::CONNECTION));
+    assert!(!headers.contains_key("x-remove"));
+    assert!(!headers.contains_key("upgrade"));
+    assert!(!headers.contains_key("x-ext-agent-task"));
+    assert_eq!(headers.get_all(http::header::SET_COOKIE).iter().count(), 2);
+}
+
+#[test]
+fn destination_host_is_synthesized_without_overwriting_step_override() {
+    let mut generated = http::HeaderMap::new();
+    super::ensure_destination_host(&mut generated, "model.example:443").unwrap();
+    assert_eq!(generated.get(http::header::HOST).unwrap(), "model.example:443");
+
+    let mut explicit = http::HeaderMap::new();
+    explicit.insert(http::header::HOST, "override.example".parse().unwrap());
+    super::ensure_destination_host(&mut explicit, "model.example:443").unwrap();
+    assert_eq!(explicit.get(http::header::HOST).unwrap(), "override.example");
+}
+
+#[test]
+fn nested_security_pipeline_rejects_failure_mode_open() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+initial_step: protected
+steps:
+  - name: protected
+    filters:
+      - filter: ip_acl
+        failure_mode: open
+        allow: ["127.0.0.0/8"]
+    on_result:
+      - default: true
+        done: true
+"#,
+    )
+    .unwrap();
+    let registry = crate::FilterRegistry::with_builtins();
+
+    let error = super::IterativeRequestRouterFilter::from_config_with_registry(&yaml, &registry)
+        .err()
+        .expect("open security filter must fail nested validation");
+
+    assert!(error.to_string().contains("failure_mode: open"));
+}
+
+#[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "resource identity assertions are intentionally explicit"
+)]
+fn sub_filter_context_inherits_parent_runtime_resources() {
+    use std::{collections::HashMap, sync::Arc, time::Duration};
+
+    use praxis_core::{
+        health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, subrequest::SubRequestConnector,
+        time::FixedTimeSource,
+    };
+
+    let registry = crate::FilterRegistry::with_builtins();
+    let pipeline = crate::FilterPipeline::build(&mut [], &registry).unwrap();
+    let request = crate::Request {
+        headers: http::HeaderMap::new(),
+        method: http::Method::POST,
+        uri: http::Uri::from_static("/v1/responses"),
+    };
+    let health_registry: HealthRegistry = Arc::new(HashMap::new());
+    let id_generator = IdGenerator::with_seed(42);
+    let kv_stores = KvStoreRegistry::new();
+    let connector = SubRequestConnector::new(1);
+    let time_source = FixedTimeSource::new(Duration::from_secs(123));
+
+    let ctx = super::build_sub_filter_context(
+        &pipeline,
+        &request,
+        super::SubPipelineRuntimeResources {
+            client_addr: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)),
+            downstream_tls: true,
+            health_registry: Some(&health_registry),
+            id_generator: &id_generator,
+            kv_stores: Some(&kv_stores),
+            peer_identity: None,
+            request_start: std::time::Instant::now(),
+            subrequest_connector: Some(&connector),
+            time_source: &time_source,
+        },
+    );
+
+    assert!(std::ptr::eq(ctx.health_registry.unwrap(), &health_registry));
+    assert!(std::ptr::eq(ctx.id_generator, &id_generator));
+    assert!(std::ptr::eq(ctx.kv_stores.unwrap(), &kv_stores));
+    assert!(std::ptr::eq(ctx.subrequest_connector.unwrap(), &connector));
+    assert_eq!(
+        ctx.client_addr,
+        Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))
+    );
+    assert!(ctx.downstream_tls);
+    assert_eq!(ctx.time_source.now(), Duration::from_secs(123));
 }
 
 // ---------------------------------------------------------------------------

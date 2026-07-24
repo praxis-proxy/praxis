@@ -91,6 +91,19 @@ pub struct Rejection {
     /// Response headers.
     pub headers: Vec<(String, String)>,
 
+    /// Byte-preserving response headers.
+    ///
+    /// Used when proxying an existing response whose values may contain
+    /// opaque bytes that are valid in HTTP but are not UTF-8.
+    pub header_map: Option<Box<http::HeaderMap>>,
+
+    /// Keep the downstream connection reusable after this response.
+    ///
+    /// Short-circuit rejections default to closing because the request body
+    /// may be unread. Filters that have consumed the complete body and are
+    /// returning a normal terminal response may opt into reuse.
+    pub preserve_keepalive: bool,
+
     /// HTTP status code.
     pub status: u16,
 }
@@ -110,7 +123,9 @@ impl Rejection {
         Self {
             status: code,
             headers: Vec::new(),
+            header_map: None,
             body: None,
+            preserve_keepalive: false,
         }
     }
 
@@ -123,6 +138,12 @@ impl Rejection {
     /// Add a header to the rejection response.
     pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.headers.push((name.into(), value.into()));
+        self
+    }
+
+    /// Preserve downstream keepalive after sending this complete response.
+    pub fn preserving_keepalive(mut self) -> Self {
+        self.preserve_keepalive = true;
         self
     }
 }
@@ -148,7 +169,12 @@ mod tests {
         let r = Rejection::status(404);
         assert_eq!(r.status, 404, "status should match constructor arg");
         assert!(r.headers.is_empty(), "headers should default to empty");
+        assert!(
+            r.header_map.is_none(),
+            "byte-preserving headers should default to empty"
+        );
         assert!(r.body.is_none(), "body should default to None");
+        assert!(!r.preserve_keepalive, "rejections should close by default");
     }
 
     #[test]
@@ -191,6 +217,12 @@ mod tests {
             ("X-Request-Id".into(), "abc".into()),
             "second header should match"
         );
+    }
+
+    #[test]
+    fn preserving_keepalive_is_explicit() {
+        let rejection = Rejection::status(200).preserving_keepalive();
+        assert!(rejection.preserve_keepalive);
     }
 
     #[test]

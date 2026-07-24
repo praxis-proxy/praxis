@@ -201,7 +201,9 @@ After each sub-request, the filter evaluates
 `on_result` transitions in order (first match wins):
 
 - **Status match**: `status: [502, 503, 504]` matches
-  the response status code
+  the response status code. Transport failures are exposed as
+  502 and deadline expiry as 504 so the same transitions cover
+  connection-level outages.
 - **Filter result match**: `filter: classifier`,
   `key: action`, `value: loop` matches
   `filter_results` written by filters in the step
@@ -216,8 +218,11 @@ response to the client).
 
 ### Safety rails
 
-- **Depth**: `x-praxis-iterative-depth` header
-  prevents recursive nesting (max depth: 3)
+- **Depth**: `x-praxis-iterative-depth` marks iterative
+  subrequests. Praxis ingress rejects reserved internal headers
+  from network peers, so cross-listener cycles terminate at the
+  first hop rather than trusting a spoofable depth value. The
+  max depth of 3 remains a defense for trusted/in-process reuse.
 - **Max iterations**: configurable cap (default 10,
   max 100) prevents infinite loops
 - **Deadline**: overall timeout (default 30s) across
