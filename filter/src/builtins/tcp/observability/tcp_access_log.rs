@@ -110,6 +110,13 @@ mod tests {
         assert_eq!(filter.name(), "tcp_access_log", "filter name should be tcp_access_log");
     }
 
+    #[test]
+    fn from_config_rejects_unknown_fields() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("bogus: true").unwrap();
+        let result = TcpAccessLogFilter::from_config(&yaml);
+        assert!(result.is_err(), "unknown fields should be rejected");
+    }
+
     #[tokio::test]
     async fn on_connect_returns_ok() {
         let filter = TcpAccessLogFilter;

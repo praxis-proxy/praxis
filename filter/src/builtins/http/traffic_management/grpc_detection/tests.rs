@@ -16,6 +16,13 @@ fn from_config_succeeds() {
     assert_eq!(filter.name(), "grpc_detection", "filter name should be grpc_detection");
 }
 
+#[test]
+fn from_config_rejects_unknown_fields() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str("bogus: true").unwrap();
+    let result = GrpcDetectionFilter::from_config(&yaml);
+    assert!(result.is_err(), "unknown fields should be rejected");
+}
+
 #[tokio::test]
 async fn non_grpc_produces_no_metadata() {
     let req = make_request(http::Method::POST, "/api");
