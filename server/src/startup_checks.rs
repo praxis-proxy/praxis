@@ -188,3 +188,285 @@ pub(crate) fn warn_insecure_key_permissions(_config: &Config) {}
 pub(crate) fn warn_experimental_features() {
     tracing::warn!("experimental features are enabled that should not be used in production");
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::needless_raw_strings,
+    clippy::needless_raw_string_hashes,
+    clippy::too_many_lines,
+    reason = "tests use unwrap/expect/indexing/raw strings for brevity"
+)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use praxis_core::config::{Config, InsecureOptions, SkipPipelineChecks};
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    #[test]
+    fn insecure_warn_active_emits_warning() {
+        let warnings = capture_warnings(|| super::insecure_warn(true, "test_flag: active"));
+        assert_eq!(warnings.len(), 1, "active flag should produce one warning");
+        assert!(
+            warnings[0].contains("test_flag"),
+            "warning should contain the flag name: got {:?}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn insecure_warn_inactive_emits_nothing() {
+        let warnings = capture_warnings(|| super::insecure_warn(false, "test_flag: inactive"));
+        assert!(warnings.is_empty(), "inactive flag should produce no warnings");
+    }
+
+    #[test]
+    fn warn_insecure_options_default_config_emits_no_warnings() {
+        let config = minimal_config();
+        let warnings = capture_warnings(|| super::warn_insecure_options(&config));
+        assert!(
+            warnings.is_empty(),
+            "default config should produce no warnings, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn warn_insecure_options_each_flag_produces_one_warning() {
+        #[expect(clippy::type_complexity, reason = "test-local inline table")]
+        let flags: &[(&str, fn(&mut InsecureOptions))] = &[
+            ("allow_unbounded_body", |o| o.allow_unbounded_body = true),
+            ("allow_open_security_filters", |o| o.allow_open_security_filters = true),
+            ("allow_private_endpoints", |o| o.allow_private_endpoints = true),
+            ("allow_private_health_checks", |o| o.allow_private_health_checks = true),
+            ("allow_private_upstreams", |o| o.allow_private_upstreams = true),
+            ("allow_public_admin", |o| o.allow_public_admin = true),
+            ("allow_tls_no_verify", |o| o.allow_tls_no_verify = true),
+            ("allow_tls_without_sni", |o| o.allow_tls_without_sni = true),
+            ("csrf_log_only", |o| o.csrf_log_only = true),
+            ("skip_pipeline_validation", |o| o.skip_pipeline_validation = true),
+        ];
+
+        for (name, setter) in flags {
+            let mut config = minimal_config();
+            setter(&mut config.insecure_options);
+            let warnings = capture_warnings(|| super::warn_insecure_options(&config));
+            assert_eq!(
+                warnings.len(),
+                1,
+                "flag {name} should produce exactly one warning, got: {warnings:?}"
+            );
+            assert!(
+                warnings[0].contains(name),
+                "warning for {name} should contain the flag name: {:?}",
+                warnings[0]
+            );
+        }
+    }
+
+    #[test]
+    fn warn_insecure_options_all_flags_produces_expected_count() {
+        let mut config = minimal_config();
+        config.insecure_options = all_insecure_options();
+        let warnings = capture_warnings(|| super::warn_insecure_options(&config));
+        assert_eq!(
+            warnings.len(),
+            18,
+            "expected 18 warnings (10 options + 8 pipeline checks): {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn warn_insecure_options_pipeline_check_flags_each_produce_warning() {
+        #[expect(clippy::type_complexity, reason = "test-local inline table")]
+        let flags: &[(&str, fn(&mut SkipPipelineChecks))] = &[
+            ("conditional_security", |s| s.conditional_security = true),
+            ("conflicting_cluster_selectors", |s| {
+                s.conflicting_cluster_selectors = true;
+            }),
+            ("duplicate_load_balancers", |s| s.duplicate_load_balancers = true),
+            ("duplicate_rewrite_filters", |s| s.duplicate_rewrite_filters = true),
+            ("duplicate_routers", |s| s.duplicate_routers = true),
+            ("lb_without_router", |s| s.lb_without_router = true),
+            ("misaligned_clusters", |s| s.misaligned_clusters = true),
+            ("unreachable_filters", |s| s.unreachable_filters = true),
+        ];
+
+        for (name, setter) in flags {
+            let mut config = minimal_config();
+            setter(&mut config.insecure_options.skip_pipeline_checks);
+            let warnings = capture_warnings(|| super::warn_insecure_options(&config));
+            assert_eq!(
+                warnings.len(),
+                1,
+                "pipeline check {name} should produce exactly one warning, got: {warnings:?}"
+            );
+            assert!(
+                warnings[0].contains(name),
+                "warning for {name} should contain the check name: {:?}",
+                warnings[0]
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn warn_key_permissions_permissive_emits_warning() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let key_path = dir.path().join("key.pem");
+        let cert_path = dir.path().join("cert.pem");
+        std::fs::write(&key_path, "fake-key").expect("write key");
+        std::fs::write(&cert_path, "fake-cert").expect("write cert");
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        let config = config_with_tls(cert_path.to_str().expect("cert"), key_path.to_str().expect("key"));
+        let warnings = capture_warnings(|| super::warn_insecure_key_permissions(&config));
+        assert_eq!(warnings.len(), 1, "permissive key should produce one warning");
+        assert!(
+            warnings[0].contains("overly permissive"),
+            "warning should mention permissive permissions: {:?}",
+            warnings[0]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn warn_key_permissions_restrictive_emits_no_warning() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let key_path = dir.path().join("key.pem");
+        let cert_path = dir.path().join("cert.pem");
+        std::fs::write(&key_path, "fake-key").expect("write key");
+        std::fs::write(&cert_path, "fake-cert").expect("write cert");
+        std::fs::set_permissions(&key_path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+
+        let config = config_with_tls(cert_path.to_str().expect("cert"), key_path.to_str().expect("key"));
+        let warnings = capture_warnings(|| super::warn_insecure_key_permissions(&config));
+        assert!(
+            warnings.is_empty(),
+            "restrictive key should produce no warnings: {warnings:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn warn_key_permissions_missing_file_emits_no_warning() {
+        let config = config_with_tls("/nonexistent/cert.pem", "/nonexistent/key.pem");
+        let warnings = capture_warnings(|| super::warn_insecure_key_permissions(&config));
+        assert!(
+            warnings.is_empty(),
+            "missing key file should produce no warnings: {warnings:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test Utilities
+    // -----------------------------------------------------------------------
+
+    /// Exhaustive construction guards against new fields: adding a field to
+    /// [`InsecureOptions`] without updating this function causes a compile error,
+    /// and the count assertion in [`warn_insecure_options_all_flags_produces_expected_count`]
+    /// catches missing `insecure_warn` calls.
+    fn all_insecure_options() -> InsecureOptions {
+        InsecureOptions {
+            allow_open_security_filters: true,
+            allow_private_endpoints: true,
+            allow_private_health_checks: true,
+            allow_private_upstreams: true,
+            allow_public_admin: true,
+            allow_root: true,
+            allow_tls_no_verify: true,
+            allow_tls_without_sni: true,
+            allow_unbounded_body: true,
+            csrf_log_only: true,
+            skip_pipeline_checks: SkipPipelineChecks::all(),
+            skip_pipeline_validation: true,
+        }
+    }
+
+    fn minimal_config() -> Config {
+        Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .expect("minimal config should parse")
+    }
+
+    #[cfg(unix)]
+    fn config_with_tls(cert_path: &str, key_path: &str) -> Config {
+        Config::from_yaml(&format!(
+            r#"
+listeners:
+  - name: tls
+    address: "127.0.0.1:8443"
+    filter_chains: [main]
+    tls:
+      certificates:
+        - cert_path: "{cert_path}"
+          key_path: "{key_path}"
+          server_names: ["localhost"]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+"#,
+        ))
+        .expect("test config should parse")
+    }
+
+    fn capture_warnings<F: FnOnce()>(f: F) -> Vec<String> {
+        let messages = Arc::new(Mutex::new(Vec::<String>::new()));
+        let capture = WarningCapture(Arc::clone(&messages));
+        let subscriber = tracing_subscriber::registry().with(capture);
+        tracing::subscriber::with_default(subscriber, f);
+        std::mem::take(&mut *messages.lock().unwrap())
+    }
+
+    struct WarningCapture(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningCapture {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                let mut visitor = MessageVisitor(String::new());
+                event.record(&mut visitor);
+                self.0.lock().unwrap().push(visitor.0);
+            }
+        }
+    }
+
+    struct MessageVisitor(String);
+
+    impl tracing::field::Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+}

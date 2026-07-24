@@ -33,7 +33,7 @@ use super::filters::FilterEntry;
 /// .unwrap();
 /// assert!(matches!(inline, ChainRef::Inline { ref name, .. } if name == "inline_chain"));
 /// ```
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(untagged)]
 pub enum ChainRef {
     /// Inline chain definition.

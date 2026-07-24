@@ -2,6 +2,14 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Pipeline filter: a filter with its conditions and branch chains.
+//!
+//! [`PipelineFilter`] wraps an [`AnyFilter`] together with its
+//! request/response conditions, failure mode, optional user name,
+//! and resolved branch chains. It is the unit of execution in the
+//! pipeline's while-loop: the executor reads conditions to decide
+//! whether to invoke the filter, then evaluates branches afterward.
+//!
+//! [`AnyFilter`]: crate::any_filter::AnyFilter
 
 use std::{fmt, sync::Arc};
 
@@ -10,9 +18,9 @@ use praxis_core::config::{Condition, FailureMode, ResponseCondition};
 use super::branch::ResolvedBranch;
 use crate::any_filter::AnyFilter;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // PipelineFilter
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// A filter with its conditions and branches.
 ///

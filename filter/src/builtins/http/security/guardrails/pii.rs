@@ -13,9 +13,9 @@ use std::sync::LazyLock;
 use regex::Regex;
 use serde::Deserialize;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Matches US SSNs in the canonical `NNN-NN-NNNN` format.
 #[expect(
@@ -101,7 +101,7 @@ static EMAIL_RE: LazyLock<Regex> =
 /// let kinds: Vec<PiiKind> = serde_yaml::from_str("[ssn, credit_card, phone, email]").unwrap();
 /// assert_eq!(kinds.len(), 4);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum PiiKind {
     /// US Social Security Numbers (e.g. `123-45-6789`).

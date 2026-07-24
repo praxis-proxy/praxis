@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 /// ```
 ///
 /// [`SupportedCipherSuite`]: rustls::SupportedCipherSuite
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, Hash)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub enum CipherSuiteId {
     // TLS 1.3 suites
     /// TLS 1.3 AES-128-GCM with SHA-256.

@@ -59,6 +59,7 @@ page.
 | [compression.yaml](configs/payload-processing/compression.yaml) | Enables transparent response compression using Pingora's built-in compression module |
 | [conditional-field-extraction.yaml](configs/payload-processing/conditional-field-extraction.yaml) | Uses the condition system to apply json_body_field only on specific request paths |
 | [field-extraction-access-control.yaml](configs/payload-processing/field-extraction-access-control.yaml) | Extracts the "tenant_id" field from the JSON request body and promotes it to an X-Tenant-Id header |
+| [json-rpc.yaml](configs/payload-processing/json-rpc.yaml) | Extracts JSON-RPC 2.0 envelope metadata from request bodies and promotes method, id, and kind to request headers |
 | [multi-field-extraction.yaml](configs/payload-processing/multi-field-extraction.yaml) | A single json_body_field filter extracts multiple top-level JSON fields into separate request headers in one pass |
 | [multi-listener-body-pipeline.yaml](configs/payload-processing/multi-listener-body-pipeline.yaml) | Three listeners, each with a different body processing strategy |
 | [stream-buffer.yaml](configs/payload-processing/stream-buffer.yaml) | json_body_field inspects request body chunks as they arrive and defers upstream forwarding until the field is extracted (or end-of-stream) |
@@ -106,11 +107,13 @@ page.
 | ------ | ------------- |
 | [basic-auth.yaml](configs/security/basic-auth.yaml) | Authenticate requests using HTTP Basic Authentication (RFC 7617) |
 | [cors.yaml](configs/security/cors.yaml) | Spec-compliant CORS filter with preflight handling, origin validation, and credential support |
+| [credential-injection.yaml](configs/security/credential-injection.yaml) | Injects per-cluster API credentials into upstream requests |
 | [csrf.yaml](configs/security/csrf.yaml) | Cross-site request forgery protection via origin validation |
 | [downstream-read-timeout.yaml](configs/security/downstream-read-timeout.yaml) | Protects against slow client attacks by limiting how long the proxy waits for data from downstream clients |
 | [forwarded-headers.yaml](configs/security/forwarded-headers.yaml) | Injects X-Forwarded-For, X-Forwarded-Proto, and X-Forwarded-Host into upstream requests |
 | [guardrails.yaml](configs/security/guardrails.yaml) | Reject requests that match header or body inspection rules |
 | [ip-acl.yaml](configs/security/ip-acl.yaml) | Allow or deny requests by source IP/CIDR |
+| [peer-identity-trust.yaml](configs/security/peer-identity-trust.yaml) | Validates downstream mTLS peer identity against a set of trusted peers |
 | [policy-http.yaml](configs/security/policy-http.yaml) | Generic-HTTP authorization for non-MCP traffic using the CPEX policy engine |
 | [policy.yaml](configs/security/policy.yaml) | Embeds the CPEX policy engine in-process to enforce multi-source JWT identity, APL route policy, RFC 8693 OAuth 2.0 token exchange, PII scanning, audit emission, and (under `body_access: read_write`) request / response body rewriting |
 
@@ -121,6 +124,7 @@ page.
 | [basic-reverse-proxy.yaml](configs/traffic-management/basic-reverse-proxy.yaml) | Minimal config: one listener, one upstream, default filter chain |
 | [canary-routing.yaml](configs/traffic-management/canary-routing.yaml) | Sends ~10% of traffic to a canary backend while the stable backend handles the remaining ~90% |
 | [circuit-breaker.yaml](configs/traffic-management/circuit-breaker.yaml) | Prevents cascading failures by tracking consecutive upstream errors per cluster |
+| [endpoint-selector.yaml](configs/traffic-management/endpoint-selector.yaml) | Selects an upstream endpoint from a trusted mutation source (e.g. ext_proc) |
 | [grpc-detection.yaml](configs/traffic-management/grpc-detection.yaml) | Detects gRPC requests from the content-type header and promotes the variant to filter metadata and results |
 | [health-checks.yaml](configs/traffic-management/health-checks.yaml) | Per-cluster health checks probe endpoints on a timer and remove unhealthy backends from the load balancer rotation |
 | [hostname-upstream.yaml](configs/traffic-management/hostname-upstream.yaml) | Demonstrates using DNS hostnames instead of IP addresses for upstream endpoints |

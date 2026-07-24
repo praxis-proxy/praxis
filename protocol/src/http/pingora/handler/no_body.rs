@@ -194,9 +194,9 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Utilities
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Write a 503 response with `Retry-After` and return the corresponding error.
 async fn reject_503(session: &mut Session, retry_after: &'static str, reason: &'static str) -> Result<()> {

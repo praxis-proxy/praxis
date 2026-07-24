@@ -13,7 +13,7 @@ use std::{
 // -----------------------------------------------------------------------------
 
 /// The three states of a circuit breaker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum CircuitState {
     /// Requests pass through; failures are counted.
     Closed,

@@ -1919,9 +1919,9 @@ fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
     assert_eq!(ctx.request_headers_to_set.len(), 2);
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // spawn_blocking offload
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Concurrent CMF dispatches must not block the async runtime. With the
 /// evaluation offloaded to `spawn_blocking`, multiple requests can

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 // -----------------------------------------------------------------------------
 
 /// Load-balancing algorithm used by a cluster.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum LoadBalancerStrategy {
     /// Plain-string strategies: `"round_robin"` or `"least_connections"`.
@@ -27,7 +27,7 @@ impl Default for LoadBalancerStrategy {
 }
 
 /// String-serialisable load-balancing strategies.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SimpleStrategy {
     /// Cycle through endpoints in order, respecting weights.
@@ -43,7 +43,7 @@ pub enum SimpleStrategy {
 }
 
 /// Load-balancing strategies that carry parameters.
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum ParameterisedStrategy {
     /// Hash a request attribute to route requests to a stable endpoint.
     #[serde(rename = "consistent_hash")]
@@ -51,7 +51,7 @@ pub enum ParameterisedStrategy {
 }
 
 /// Options for the `consistent_hash` load-balancing strategy.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq, Eq, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsistentHashOpts {
     /// Name of the request header to use as the hash key.

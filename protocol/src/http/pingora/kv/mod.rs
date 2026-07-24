@@ -15,18 +15,18 @@ use tracing::{info, warn};
 
 use crate::http::pingora::{health::escape_json_string, json::json_response};
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Maximum request body size for KV admin API operations (1 MiB).
 ///
 /// Prevents unbounded memory allocation from oversized PUT requests.
 const MAX_BODY_BYTES: usize = 1_048_576; // 1 MiB
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // PingoraKvService
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// HTTP service for KV store admin endpoints.
 ///
@@ -74,7 +74,7 @@ pub(crate) async fn dispatch_kv_request(registry: &KvStoreRegistry, session: &mu
 }
 
 /// Resolved KV API route from method + path.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Eq, PartialEq)]
 enum KvRoute {
     /// `GET /api/kv/{store}`
     List(String),
@@ -113,9 +113,9 @@ impl ServeHttp for PingoraKvService {
     }
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Request Body
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Read the request body as a UTF-8 string, up to [`MAX_BODY_BYTES`].
 ///
@@ -145,9 +145,9 @@ async fn read_body(session: &mut ServerSession) -> Result<String, Response<Vec<u
     })
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Route Handlers
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// `GET /api/kv/{store}/{key}`: retrieve a single value.
 fn handle_get(registry: &KvStoreRegistry, store: &str, key: &str) -> Response<Vec<u8>> {
@@ -210,9 +210,9 @@ fn handle_list(registry: &KvStoreRegistry, store: &str) -> Response<Vec<u8>> {
     json_response(200, body.as_bytes())
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Server Registration
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Register KV admin endpoints on the admin listener.
 ///
@@ -234,9 +234,9 @@ pub fn add_kv_endpoint_to_pingora_server(server: &mut Server, admin_addr: &str, 
     server.add_service(service);
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Tests
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
@@ -457,9 +457,9 @@ mod tests {
         assert!(parsed.is_ok(), "response should be valid JSON: {body}");
     }
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Test Utilities
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     /// Build a registry with a single store pre-populated with pairs.
     fn make_registry_with(name: &str, pairs: &[(&str, &str)]) -> KvStoreRegistry {

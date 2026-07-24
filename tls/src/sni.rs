@@ -73,7 +73,7 @@ const CLIENT_HELLO_FIXED_LEN: usize = 34;
 /// };
 /// assert_eq!(info.sni.as_deref(), Some("example.com"));
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ClientHelloInfo {
     /// The SNI hostname, if present in the `ClientHello`.
     pub sni: Option<String>,
@@ -91,7 +91,7 @@ pub struct ClientHelloInfo {
 /// let e = SniParseError::TooShort;
 /// assert!(e.to_string().contains("too short"));
 /// ```
-#[derive(Debug, Error, PartialEq, Eq)]
+#[derive(Debug, Eq, Error, PartialEq)]
 pub enum SniParseError {
     /// The buffer is too short to contain a valid TLS record header.
     #[error("buffer too short for TLS record header")]
@@ -791,9 +791,9 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Test Utilities
-    // -----------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     /// Build an SNI extension payload (type 0x0000).
     fn build_sni_extension(hostname: &str) -> Vec<u8> {

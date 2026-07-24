@@ -7,9 +7,9 @@ use serde::Deserialize;
 
 use super::pii::PiiKind;
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Default maximum body size for body inspection (1 MiB).
 pub(super) const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
@@ -96,7 +96,7 @@ impl ContainsValue {
 /// let flag: GuardrailsAction = serde_yaml::from_str("flag").unwrap();
 /// assert!(matches!(flag, GuardrailsAction::Flag));
 /// ```
-#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum GuardrailsAction {
     /// Reject the request immediately with 403 (default).

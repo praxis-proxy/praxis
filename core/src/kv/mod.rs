@@ -19,7 +19,7 @@ use dashmap::DashMap;
 /// let m = MatchType::Exact;
 /// assert!(matches!(m, MatchType::Exact));
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MatchType {
     /// Key must equal the lookup key exactly.
     Exact,
@@ -158,7 +158,7 @@ pub trait KvBackend: Send + Sync + Debug {
 /// assert!(missing_store.is_store_not_found());
 /// assert_eq!(missing_store.into_value(), None);
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum KvLookup {
     /// The store and key both exist; contains the value.
     Value(Arc<str>),
@@ -237,7 +237,7 @@ impl KvLookup {
 /// ```
 ///
 /// [`get_or_create`]: KvStoreRegistry::get_or_create
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct KvStoreRegistry {
     /// Named store backends.
     #[expect(clippy::type_complexity, reason = "single-field struct wrapping DashMap")]
