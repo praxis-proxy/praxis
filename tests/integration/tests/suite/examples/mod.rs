@@ -25,6 +25,8 @@ mod header_manipulation;
 mod health_checks;
 mod hostname_upstream;
 mod json_rpc;
+mod iterative_request_router_failover;
+mod iterative_request_router_sequence;
 mod least_connections;
 mod logging;
 mod max_body_guard;

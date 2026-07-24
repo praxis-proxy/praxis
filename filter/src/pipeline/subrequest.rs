@@ -320,4 +320,102 @@ mod tests {
     fn default_max_response_bytes_is_10_mib() {
         assert_eq!(default_max_response_bytes(), 10_485_760, "default max should be 10 MiB");
     }
+
+    #[test]
+    #[allow(clippy::too_many_lines, reason = "comprehensive clone verification")]
+    fn iteration_state_clone_with_populated_fields() {
+        let mut accumulator = HashMap::new();
+        accumulator.insert("key".to_owned(), Bytes::from_static(b"value"));
+
+        let prev = SubResponse {
+            status: 200,
+            headers: {
+                let mut h = HeaderMap::new();
+                h.insert("content-type", "application/json".parse().unwrap());
+                h
+            },
+            body: Bytes::from_static(b"previous response body"),
+        };
+
+        let state = IterationState {
+            original_request: SubRequest {
+                method: http::Method::POST,
+                uri: "/v1/chat".parse().unwrap(),
+                headers: HeaderMap::new(),
+                body: Bytes::from_static(b"original body"),
+            },
+            previous_response: Some(prev),
+            accumulator,
+            iteration: 3,
+            max_iterations: 10,
+            deadline: std::time::Instant::now() + Duration::from_secs(30),
+            max_response_bytes: 1024,
+            depth: 2,
+        };
+
+        let cloned = state.clone();
+        assert_eq!(cloned.iteration, 3, "iteration should survive clone");
+        assert_eq!(cloned.depth, 2, "depth should survive clone");
+        assert_eq!(
+            cloned.max_response_bytes, 1024,
+            "max_response_bytes should survive clone"
+        );
+        assert!(
+            cloned.previous_response.is_some(),
+            "previous_response should survive clone"
+        );
+        assert_eq!(
+            cloned.previous_response.as_ref().unwrap().body,
+            Bytes::from_static(b"previous response body"),
+            "previous response body should survive clone"
+        );
+        assert_eq!(
+            cloned.accumulator.get("key").unwrap(),
+            &Bytes::from_static(b"value"),
+            "accumulator entry should survive clone"
+        );
+        assert_eq!(
+            cloned.original_request.body,
+            Bytes::from_static(b"original body"),
+            "original request body should survive clone"
+        );
+    }
+
+    #[test]
+    fn subrequest_error_connect_display() {
+        let err = SubRequestError::Connect("connection refused".to_owned());
+        assert!(
+            err.to_string().contains("connection refused"),
+            "Connect error should include reason: {err}"
+        );
+    }
+
+    #[test]
+    fn subrequest_error_io_display() {
+        let err = SubRequestError::Io("broken pipe".to_owned());
+        assert!(
+            err.to_string().contains("broken pipe"),
+            "Io error should include reason: {err}"
+        );
+    }
+
+    #[test]
+    fn subrequest_error_response_too_large_display() {
+        let err = SubRequestError::ResponseTooLarge {
+            actual: 20_000,
+            limit: 10_000,
+        };
+        let msg = err.to_string();
+        assert!(msg.contains("20000"), "should include actual: {msg}");
+        assert!(msg.contains("10000"), "should include limit: {msg}");
+    }
+
+    #[test]
+    fn subrequest_error_deadline_exceeded_display() {
+        let err = SubRequestError::DeadlineExceeded;
+        assert!(
+            !err.to_string().is_empty(),
+            "DeadlineExceeded should have a display message"
+        );
+    }
 }

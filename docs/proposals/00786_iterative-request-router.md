@@ -149,3 +149,114 @@ within the existing life-cycle.
 - As an AI gateway operator, I want to add RAG context
   injection and semantic caching as proxy-level
   filters without modifying application code.
+
+## How?
+
+### Architecture
+
+The `iterative_request_router` is a framework-level
+HTTP filter that owns the sub-request lifecycle. It
+holds named **steps**, each backed by a pre-built
+`FilterPipeline`. At request time it runs an iteration
+loop: execute a step's pipeline to resolve routing and
+credentials, make the HTTP call via Pingora's native
+`Connector`, evaluate transition rules against the
+response, and either continue to the next step or
+return the final response to the client.
+
+```text
+Client -> [iterative_request_router]
+             |
+             +-> Step "primary" pipeline
+             |     router -> LB -> [sub-request via Connector]
+             |     <- 503
+             |     transition: status [503] -> "fallback"
+             |
+             +-> Step "fallback" pipeline
+                   router -> LB -> [sub-request via Connector]
+                   <- 200
+                   transition: default done
+                   <- return 200 to client
+```
+
+### Sub-request execution
+
+Sub-requests use Pingora's `Connector` (connection
+pooling, HTTP/2, TLS) via a shared
+`SubRequestConnector` wired through the pipeline at
+startup. This replaces the reqwest-based
+`CalloutClient` ([proposal 00358][p358], now
+deferred) with a single HTTP stack.
+
+Each sub-request builds an `HttpPeer` with full TLS
+support (CA certs, mTLS client certificates, verify
+toggle, SNI derivation, connection timeouts) using
+the same helpers as the production upstream path.
+
+[p358]: 00358_http-callout-filter.md
+
+### Transition evaluation
+
+After each sub-request, the filter evaluates
+`on_result` transitions in order (first match wins):
+
+- **Status match**: `status: [502, 503, 504]` matches
+  the response status code
+- **Filter result match**: `filter: classifier`,
+  `key: action`, `value: loop` matches
+  `filter_results` written by filters in the step
+  chain
+- **Combined**: both status and filter result must
+  match
+- **Default**: always matches (fallback)
+
+Each transition specifies either `next: step-name`
+(continue iterating) or `done: true` (return the
+response to the client).
+
+### Safety rails
+
+- **Depth**: `x-praxis-iterative-depth` header
+  prevents recursive nesting (max depth: 3)
+- **Max iterations**: configurable cap (default 10,
+  max 100) prevents infinite loops
+- **Deadline**: overall timeout (default 30s) across
+  all iterations
+- **Max steps**: at most 20 named steps per filter
+- **Reserved headers**: all `x-praxis-*`,
+  `x-ext-protocol-*`, and `x-ext-agent-*` headers
+  are stripped from sub-requests
+- **Credential isolation**: each step runs a fresh
+  `HttpFilterContext` with empty headers; credentials
+  injected by one step do not leak to another
+- **Pipeline validation**: `iterative_request_router`
+  cannot coexist with `router` or `load_balancer` in
+  the same parent chain
+
+### Relationship to other primitives
+
+- **Branch chains**: operate within a single HTTP
+  exchange (request-phase composition). The IRR
+  operates across multiple HTTP exchanges
+  (response-driven re-dispatch). They are
+  complementary but should not be nested (ReEnter
+  branches wrapping an IRR are rejected).
+- **CalloutClient** (proposal 00358): superseded.
+  The Pingora-native `SubRequestConnector` provides
+  the same capability without a separate HTTP stack.
+- **Agentic loop** (ai repo issue #26): the IRR
+  provides the framework-level primitive that the
+  `agentic_loop` filter will use for pipeline
+  re-entry.
+
+### Key files
+
+- `core/src/subrequest.rs` - `SubRequestConnector`
+- `core/src/connectivity/peer.rs` - shared TLS/SNI
+  helpers
+- `filter/src/pipeline/subrequest.rs` - executor,
+  types, `IterationState`
+- `filter/src/builtins/http/traffic_management/
+  iterative_request_router/` - filter + config +
+  tests
+- `server/src/pipelines.rs` - connector wiring

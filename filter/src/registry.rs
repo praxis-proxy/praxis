@@ -244,6 +244,11 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     register_http(filters, "grpc_detection", GrpcDetectionFilter::from_config);
     register_http_security(filters, "guardrails", crate::GuardrailsFilter::from_config);
     register_http_security(filters, "ip_acl", IpAclFilter::from_config);
+    register_http(
+        filters,
+        "iterative_request_router",
+        crate::builtins::IterativeRequestRouterFilter::from_config,
+    );
     register_http(filters, "load_balancer", crate::LoadBalancerFilter::from_config);
     register_http(filters, "path_rewrite", PathRewriteFilter::from_config);
     register_http_security(filters, "rate_limit", RateLimitFilter::from_config);
@@ -391,7 +396,15 @@ mod tests {
             names.contains(&"json_body_field"),
             "json_body_field should be registered"
         );
+        assert!(
+            names.contains(&"iterative_request_router"),
+            "iterative_request_router should be registered"
+        );
         assert!(names.contains(&"json_rpc"), "json_rpc should be registered");
+        assert!(
+            names.contains(&"peer_identity_trust"),
+            "peer_identity_trust should be registered"
+        );
         #[cfg(feature = "cpex-policy-engine")]
         assert!(names.contains(&"policy"), "policy should be registered");
     }

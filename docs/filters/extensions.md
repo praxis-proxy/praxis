@@ -569,3 +569,31 @@ cargo xtask generate-filter-docs
 ```
 
 CI runs `cargo xtask lint-filter-docs` as part of `make lint`.
+
+## Advanced: Iterative Request Router
+
+The `iterative_request_router` filter composes other
+filters within named step chains. Each step is a
+pre-built `FilterPipeline` that runs independently,
+producing an upstream exchange via Pingora's native
+`Connector`. Transition rules on each step's response
+drive the iteration loop.
+
+Step chain filters have access to `IterationState` via
+request extensions (`ctx.extensions.get::<IterationState>()`),
+which carries the original request, previous response,
+and a cross-step accumulator. Filters can provide a
+custom body for the next iteration by inserting
+`NextIterationBody` into extensions.
+
+Nesting an `iterative_request_router` inside another
+`iterative_request_router`'s step chain is not
+supported and will be rejected at config validation.
+Step pipelines only execute the request phase of their
+filters; the iteration loop runs in the body phase,
+which step pipelines do not invoke.
+
+See the
+[`iterative_request_router` reference](http/traffic_management/iterative_request_router.md)
+and [proposal 00786](../proposals/00786_iterative-request-router.md)
+for the full design.
