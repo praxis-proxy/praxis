@@ -3062,6 +3062,8 @@ dependencies = [
  "percent-encoding",
  "praxis-proxy-core",
  "praxis-proxy-tls",
+ "quixotic-plecostomus-core",
+ "quixotic-plecostomus-http",
  "rand 0.10.2",
  "regex",
  "secrecy",

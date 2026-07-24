@@ -31,6 +31,8 @@ dashmap = { workspace = true }
 http = { workspace = true }
 metrics = { workspace = true }
 percent-encoding = { workspace = true }
+pingora-core = { workspace = true }
+pingora-http = { workspace = true }
 praxis-core = { workspace = true }
 praxis-tls = { workspace = true }
 rand = { workspace = true }
