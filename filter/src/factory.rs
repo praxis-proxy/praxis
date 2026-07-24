@@ -81,6 +81,8 @@ fn strip_structural_keys(config: &serde_yaml::Value) -> serde_yaml::Value {
 ///
 /// Deserializes from an empty YAML mapping or `null` (via
 /// [`parse_filter_config`]) and rejects unknown fields.
+///
+/// [`parse_filter_config`]: crate::parse_filter_config
 #[derive(serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 #[expect(
