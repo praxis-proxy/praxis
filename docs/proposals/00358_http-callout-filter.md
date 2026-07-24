@@ -1,7 +1,8 @@
 ---
 issue: https://github.com/praxis-proxy/praxis/issues/358
 discussion: https://github.com/praxis-proxy/praxis/discussions/87
-status: proposed
+status: deferred
+deferred_to: https://github.com/praxis-proxy/praxis/issues/786
 authors:
   - usize
 graduation_criteria:
@@ -15,6 +16,17 @@ stakeholders:
 ---
 
 # HTTP Callout Filter
+
+> **Status: Deferred.** The sub-request capability this
+> proposal required is now provided by the
+> `iterative_request_router` filter
+> ([proposal 00786](00786_iterative-request-router.md)),
+> which uses Pingora's native Connector for sub-request
+> execution with connection pooling, HTTP/2, and TLS.
+> The reqwest-based `CalloutClient` has been removed.
+> If a standalone `http_callout` filter is needed in
+> the future, it should build on the Pingora-native
+> `SubRequestConnector` rather than reqwest.
 
 ## What?
 
