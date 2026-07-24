@@ -35,7 +35,7 @@ use super::ConnectionOptions;
 /// ```
 ///
 /// [`CachedClusterTls`]: praxis_tls::CachedClusterTls
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct Upstream {
     /// Address in `host:port` form.
     pub address: Arc<str>,

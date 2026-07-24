@@ -2,6 +2,13 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Cluster name extraction from filter pipeline capabilities.
+//!
+//! Collects the set of cluster names declared by cluster-selecting
+//! filters (routers, endpoint selectors) and load-balancer filters.
+//! The ordering checks in [`checks`] compare these two sets to detect
+//! misaligned or orphaned cluster references at build time.
+//!
+//! [`checks`]: super::checks
 
 use std::collections::HashSet;
 
@@ -13,20 +20,15 @@ use super::filter::PipelineFilter;
 
 /// Cluster selectors declare every cluster name they may assign.
 pub(super) fn extract_selected_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
-    let mut clusters = HashSet::new();
-    for filter in filters {
-        clusters.extend(filter.filter.selected_clusters());
-    }
-    clusters
+    filters.iter().flat_map(|pf| pf.filter.selected_clusters()).collect()
 }
 
 /// Load-balancers declare the cluster names they can consume.
 pub(super) fn extract_lb_clusters(filters: &[PipelineFilter]) -> HashSet<String> {
-    let mut clusters = HashSet::new();
-    for filter in filters {
-        clusters.extend(filter.filter.load_balancer_clusters());
-    }
-    clusters
+    filters
+        .iter()
+        .flat_map(|pf| pf.filter.load_balancer_clusters())
+        .collect()
 }
 
 // -----------------------------------------------------------------------------

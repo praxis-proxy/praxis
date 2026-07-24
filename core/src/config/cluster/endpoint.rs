@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 ///   - address: "10.0.0.2:8080"
 ///     weight: 3
 /// ```
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Endpoint {
     /// Plain `host:port` string; weight is implicitly 1.

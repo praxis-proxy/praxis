@@ -5,7 +5,7 @@
 - Rust stable 1.96+
 - Rust nightly
 - CMake 3.31+
-- Docker 29.3.0+
+- Docker 29.3.0+ or Podman (for container builds)
 
 ## Conventions
 

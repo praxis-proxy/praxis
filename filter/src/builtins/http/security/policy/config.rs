@@ -30,7 +30,7 @@ use serde::Deserialize;
 /// and identity-source declarations. The filter loads it once at
 /// construction and rejects misconfigured policy at server startup
 /// (fail-fast rather than at first request).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyFilterConfig {
     /// Body-access tier. `ReadOnly` (default) lets APL inspect request
@@ -117,7 +117,7 @@ fn default_max_buffer_bytes() -> usize {
 /// Mirrors `praxis_filter::BodyAccess` but lifts the decision to
 /// operator configuration: the choice changes pipeline behavior (and
 /// cost), so a per-filter knob is the right granularity.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum BodyAccessMode {
     /// Body is buffered for inspection / routing; mutations are

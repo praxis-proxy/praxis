@@ -259,6 +259,7 @@ graph LR
     praxis-protocol --> praxis-core
     praxis-protocol --> praxis-tls
     praxis-filter --> praxis-core
+    praxis-filter --> praxis-tls
     praxis-core --> praxis-tls
 ```
 

@@ -45,7 +45,7 @@ const DEFAULT_POOL_MAX_IDLE_PER_HOST: usize = 4;
 // -----------------------------------------------------------------------------
 
 /// What happens when a callout fails.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum FailureMode {
     /// Reject the original request on callout failure.
     Closed,
@@ -59,7 +59,7 @@ pub enum FailureMode {
 // -----------------------------------------------------------------------------
 
 /// Rejection details returned to the downstream client.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Rejection {
     /// HTTP status code to return.
     pub status: u16,
@@ -145,7 +145,7 @@ pub enum CalloutError {
 // -----------------------------------------------------------------------------
 
 /// Circuit breaker configuration for callout requests.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct CircuitBreakerConfig {
     /// Number of consecutive failures to trip the breaker.
     pub consecutive_failures: u32,
@@ -159,7 +159,7 @@ pub struct CircuitBreakerConfig {
 // -----------------------------------------------------------------------------
 
 /// Configuration for a [`CalloutClient`].
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct CalloutConfig {
     /// Optional circuit breaker settings.
     pub circuit_breaker: Option<CircuitBreakerConfig>,
@@ -293,9 +293,9 @@ impl CalloutClient {
         }
     }
 
-    // -----------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Private helpers
-    // -----------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     /// Check depth and circuit breaker before sending.
     fn check_preconditions(&self, request: &CalloutRequest) -> Option<CalloutResult> {

@@ -42,7 +42,7 @@ pub(crate) const DEFAULT_CONTENT_TYPES: &[&str] = &[
 /// assert!(config.zstd_enabled);
 /// ```
 #[expect(clippy::struct_excessive_bools, reason = "algorithm flags")]
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct CompressionConfig {
     /// Default compression level for all algorithms.
     pub default_level: u32,

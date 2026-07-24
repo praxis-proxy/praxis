@@ -2,6 +2,19 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Ordering validation checks for filter pipelines.
+//!
+//! Detects structural misconfigurations that would cause runtime
+//! failures: load balancers without a preceding cluster selector,
+//! unreachable filters behind unconditional static responses,
+//! conditional security filters (bypass risk), duplicate routers or
+//! load balancers, and cluster name mismatches. Each check is
+//! individually skippable via [`SkipPipelineChecks`].
+//!
+//! Called by [`FilterPipeline::ordering_errors`] at startup and on
+//! dynamic config reload.
+//!
+//! [`SkipPipelineChecks`]: praxis_core::config::SkipPipelineChecks
+//! [`FilterPipeline::ordering_errors`]: super::FilterPipeline::ordering_errors
 
 use praxis_core::config::{FailureMode, FilterEntry};
 use tracing::warn;

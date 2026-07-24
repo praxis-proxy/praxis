@@ -1,7 +1,17 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! Request body filter: buffers or streams body chunks through the pipeline, enforcing size limits.
+//! Request body filter: buffers or streams body chunks through the
+//! pipeline, enforcing size limits.
+//!
+//! Implements Pingora's `request_body_filter` hook. Chunks are
+//! accumulated or streamed based on the pipeline's [`BodyMode`];
+//! the absolute ceiling ([`ABSOLUTE_MAX_BODY_BYTES`]) is enforced
+//! regardless of per-filter declarations. Rejections from body
+//! filters are converted to downstream error responses.
+//!
+//! [`BodyMode`]: praxis_filter::BodyMode
+//! [`ABSOLUTE_MAX_BODY_BYTES`]: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
 
 use bytes::Bytes;
 use pingora_core::Result;

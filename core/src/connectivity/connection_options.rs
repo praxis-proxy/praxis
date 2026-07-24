@@ -28,7 +28,7 @@ use crate::config::Cluster;
 /// assert_eq!(opts.connection_timeout, Some(Duration::from_secs(5)));
 /// assert!(opts.idle_timeout.is_none());
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct ConnectionOptions {
     /// TCP connection timeout.
     pub connection_timeout: Option<Duration>,

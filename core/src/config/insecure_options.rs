@@ -144,7 +144,7 @@ impl SkipPipelineChecks {
 /// assert!(!opts.allow_unbounded_body);
 /// ```
 #[expect(clippy::struct_excessive_bools, reason = "security override flags")]
-#[derive(Debug, Clone, Default, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct InsecureOptions {
     /// Allow security-critical filters to use `failure_mode: open`,

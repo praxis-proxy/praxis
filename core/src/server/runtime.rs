@@ -26,7 +26,7 @@
 /// };
 /// assert_eq!(opts.threads, 4);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct RuntimeOptions {
     /// Worker threads per service. `0` means auto-detect.
     pub threads: usize,

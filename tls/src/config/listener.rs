@@ -34,7 +34,7 @@ use crate::TlsError;
 /// let tls: ListenerTls = serde_yaml::from_str(&yaml).unwrap();
 /// assert_eq!(tls.certificates.len(), 1);
 /// ```
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct ListenerTls {
     /// Server certificates. At least one required.
     ///
@@ -288,7 +288,7 @@ impl ListenerTls {
 /// let mode: ClientCertMode = serde_yaml::from_str("none").unwrap();
 /// assert!(matches!(mode, ClientCertMode::None));
 /// ```
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientCertMode {
     /// Do not request a client certificate (default).
@@ -317,7 +317,7 @@ pub enum ClientCertMode {
 /// let v: TlsVersion = serde_yaml::from_str("tls12").unwrap();
 /// assert!(matches!(v, TlsVersion::Tls12));
 /// ```
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TlsVersion {
     /// TLS 1.2 (allows both 1.2 and 1.3).
@@ -881,9 +881,9 @@ certificates:
         }
     }
 
-    // ---------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Test Utilities
-    // ---------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     /// Temp file paths for cert and key, kept alive by the temp dir.
     struct TempPaths {

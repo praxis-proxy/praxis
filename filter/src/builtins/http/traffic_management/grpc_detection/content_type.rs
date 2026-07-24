@@ -8,7 +8,7 @@
 // -----------------------------------------------------------------------------
 
 /// Classifies the gRPC variant from the request `content-type` header.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) enum GrpcKind {
     /// Not a gRPC request.
     #[default]
