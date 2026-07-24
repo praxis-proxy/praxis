@@ -27,6 +27,7 @@ use serde::Deserialize;
 /// assert!(cfg.work_stealing);
 /// assert_eq!(cfg.global_queue_interval, Some(61));
 /// assert!(cfg.log_overrides.is_empty());
+/// assert_eq!(cfg.subrequest_pool_size, Some(128));
 /// assert_eq!(cfg.upstream_keepalive_pool_size, Some(64));
 /// assert!(cfg.upstream_ca_file.is_none());
 ///
@@ -113,6 +114,18 @@ pub struct RuntimeConfig {
     #[serde(default)]
     pub max_memory_bytes: Option<usize>,
 
+    /// Maximum idle connections in the sub-request connection pool
+    /// used by `iterative_request_router` step chains.
+    ///
+    /// ```
+    /// use praxis_core::config::RuntimeConfig;
+    ///
+    /// let cfg = RuntimeConfig::default();
+    /// assert_eq!(cfg.subrequest_pool_size, Some(128));
+    /// ```
+    #[serde(default = "default_subrequest_pool_size")]
+    pub subrequest_pool_size: Option<usize>,
+
     /// Number of worker threads per service.
     ///
     /// `0` (the default) auto-detects based on available CPU
@@ -172,6 +185,7 @@ impl Default for RuntimeConfig {
         Self {
             max_connections: None,
             max_memory_bytes: None,
+            subrequest_pool_size: default_subrequest_pool_size(),
             threads: 0,
             work_stealing: default_work_stealing(),
             global_queue_interval: default_global_queue_interval(),
@@ -185,6 +199,15 @@ impl Default for RuntimeConfig {
 /// Serde default for [`RuntimeConfig::work_stealing`].
 fn default_work_stealing() -> bool {
     true
+}
+
+/// Default sub-request connection pool size.
+pub const DEFAULT_SUBREQUEST_POOL_SIZE: usize = 128;
+
+/// Serde default for [`RuntimeConfig::subrequest_pool_size`].
+#[expect(clippy::unnecessary_wraps, reason = "serde default")]
+fn default_subrequest_pool_size() -> Option<usize> {
+    Some(DEFAULT_SUBREQUEST_POOL_SIZE)
 }
 
 /// Serde default for [`RuntimeConfig::upstream_keepalive_pool_size`].

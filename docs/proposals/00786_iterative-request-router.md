@@ -158,11 +158,18 @@ The `iterative_request_router` is a framework-level
 HTTP filter that owns the sub-request lifecycle. It
 holds named **steps**, each backed by a pre-built
 `FilterPipeline`. At request time it runs an iteration
-loop: execute a step's pipeline to resolve routing and
-credentials, make the HTTP call via Pingora's native
-`Connector`, evaluate transition rules against the
-response, and either continue to the next step or
-return the final response to the client.
+loop: execute a step's full four-phase filter lifecycle
+(on_request, on_request_body, sub-request via
+Connector, on_response, on_response_body), evaluate
+transition rules against the response, and either
+continue to the next step or return the final response
+to the client.
+
+Step pipelines resolve their filters through the same
+`FilterRegistry` that owns the parent pipeline via a
+`RegisteredFilterFactory` enum, so external filters
+(agentic_loop, tool_parse, MCP) can load in step
+chains.
 
 ```text
 Client -> [iterative_request_router]
@@ -226,7 +233,10 @@ response to the client).
 - **Max iterations**: configurable cap (default 10,
   max 100) prevents infinite loops
 - **Deadline**: overall timeout (default 30s) across
-  all iterations
+  all iterations, with configurable `step_timeout_ms`
+  per-step cap
+- **Pool size**: configurable `subrequest_pool_size`
+  in runtime config (default 128)
 - **Max steps**: at most 20 named steps per filter
 - **Reserved headers**: all `x-praxis-*`,
   `x-ext-protocol-*`, and `x-ext-agent-*` headers
@@ -253,6 +263,10 @@ response to the client).
   provides the framework-level primitive that the
   `agentic_loop` filter will use for pipeline
   re-entry.
+
+### Implementation
+
+[PR #849](https://github.com/praxis-proxy/praxis/pull/849)
 
 ### Key files
 

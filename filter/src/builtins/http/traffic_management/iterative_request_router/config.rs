@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Praxis Contributors
+// Copyright (c) 2026 Praxis Contributors
 
 //! Configuration types for the iterative request router filter.
 
@@ -78,6 +78,10 @@ pub(crate) struct IterativeRequestRouterConfig {
     /// Maximum accumulated iteration state bytes.
     #[serde(default = "default_max_state_bytes")]
     pub(crate) max_state_bytes: usize,
+
+    /// Per-step timeout in milliseconds. Defaults to `timeout_ms`.
+    #[serde(default)]
+    pub(crate) step_timeout_ms: Option<u64>,
 
     /// Named steps, each with filters and transition rules.
     pub(crate) steps: Vec<StepConfig>,

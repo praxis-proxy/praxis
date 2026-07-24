@@ -116,14 +116,15 @@ struct ServerState {
     health_shutdown: Arc<Mutex<CancellationToken>>,
 }
 
-/// Default keepalive pool size for the sub-request connector.
-const SUBREQUEST_POOL_SIZE: usize = 128;
-
 /// Build filter pipelines, health checks, and registries.
 fn build_server_state(config: &Config, registry: &FilterRegistry, health_registry: &HealthRegistry) -> ServerState {
     info!("building filter pipelines");
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-    let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(SUBREQUEST_POOL_SIZE);
+    let pool_size = config
+        .runtime
+        .subrequest_pool_size
+        .unwrap_or(praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE);
+    let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(pool_size);
 
     let pipelines = resolve_pipelines(config, registry, health_registry, &kv_stores, &subrequest_connector)
         .unwrap_or_else(|e| fatal(&e));

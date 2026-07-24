@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Praxis Contributors
+// Copyright (c) 2026 Praxis Contributors
 
 //! Sub-request execution for the iterative request router.
 //!

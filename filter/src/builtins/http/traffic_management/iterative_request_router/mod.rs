@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Praxis Contributors
+// Copyright (c) 2026 Praxis Contributors
 
 //! Iterative request router: a framework-level filter that executes
 //! multiple sequential HTTP sub-requests through composable filter
@@ -80,6 +80,9 @@ pub struct IterativeRequestRouterFilter {
     /// Maximum accumulated state bytes.
     max_state_bytes: usize,
 
+    /// Per-step timeout cap.
+    step_timeout: Duration,
+
     /// Pre-built sub-pipelines keyed by step name.
     step_pipelines: HashMap<Arc<str>, FilterPipeline>,
 
@@ -151,12 +154,15 @@ impl IterativeRequestRouterFilter {
             step_transitions.insert(Arc::clone(&name), step.on_result);
         }
 
+        let step_timeout = cfg.step_timeout_ms.map_or(timeout, Duration::from_millis);
+
         Ok(Box::new(Self {
             initial_step: Arc::from(cfg.initial_step.as_str()),
             max_iterations: cfg.max_iterations,
             max_response_bytes: cfg.max_response_bytes,
             max_state_bytes: cfg.max_state_bytes,
             step_pipelines,
+            step_timeout,
             step_transitions,
             timeout,
         }))
@@ -340,7 +346,8 @@ impl IterativeRequestRouterFilter {
             std::mem::swap(&mut filter_ctx.extensions, &mut ctx.extensions);
             filter_ctx.extensions.insert(state.clone());
             filter_ctx.extensions.insert(RetainedFilterResults::default());
-            let step_result: Result<StepExecution, FilterError> = match tokio::time::timeout(remaining, async {
+            let step_timeout = remaining.min(self.step_timeout);
+            let step_result: Result<StepExecution, FilterError> = match tokio::time::timeout(step_timeout, async {
                 let mut request_body = Some(current_request.body.clone());
                 if body_exceeds_limit(
                     pipeline.body_capabilities().request_body_mode,

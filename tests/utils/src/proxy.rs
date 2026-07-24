@@ -253,6 +253,8 @@ fn build_full_server(config: &Config) -> praxis_core::PingoraServerRuntime {
 
 /// Build a [`PingoraServerRuntime`] with a caller-supplied filter
 /// registry, HTTP and TCP protocols, and background health probes.
+///
+/// [`PingoraServerRuntime`]: praxis_core::PingoraServerRuntime
 fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -> praxis_core::PingoraServerRuntime {
     let health_registry = build_health_registry(&config.clusters);
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();

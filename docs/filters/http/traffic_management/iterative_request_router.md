@@ -17,6 +17,7 @@ Holds named steps, each backed by a pre-built sub-pipeline. During request proce
 | `max_iterations` | integer | no | Maximum iterations before aborting (default 10, max 100). |
 | `max_response_bytes` | integer | no | Maximum response body bytes per sub-request. |
 | `max_state_bytes` | integer | no | Maximum accumulated iteration state bytes. |
+| `step_timeout_ms` | integer | no | Per-step timeout in milliseconds. Defaults to `timeout_ms`. |
 | `steps` | StepConfig[] | yes | Named steps, each with filters and transition rules. |
 | `steps[].name` | string | yes | Step name (must be unique within the router). |
 | `steps[].filters` | FilterEntry[] | yes | Filters to execute for this step's sub-request. |
