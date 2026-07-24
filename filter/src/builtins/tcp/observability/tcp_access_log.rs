@@ -7,8 +7,10 @@ use async_trait::async_trait;
 use tracing::info;
 
 use crate::{
+    EmptyFilterConfig,
     actions::FilterAction,
     filter::FilterError,
+    parse_filter_config,
     tcp_filter::{TcpFilter, TcpFilterContext},
 };
 
@@ -44,8 +46,8 @@ impl TcpAccessLogFilter {
     /// Returns [`FilterError`] if the YAML config is invalid.
     ///
     /// [`FilterError`]: crate::FilterError
-    #[expect(clippy::unnecessary_wraps, reason = "matches factory signature")]
-    pub fn from_config(_config: &serde_yaml::Value) -> Result<Box<dyn TcpFilter>, FilterError> {
+    pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn TcpFilter>, FilterError> {
+        let _: EmptyFilterConfig = parse_filter_config("tcp_access_log", config)?;
         Ok(Box::new(Self))
     }
 }

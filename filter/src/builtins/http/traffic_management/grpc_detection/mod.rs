@@ -21,8 +21,9 @@ use tracing::trace;
 
 use self::content_type::GrpcKind;
 use crate::{
-    FilterAction, FilterError,
+    EmptyFilterConfig, FilterAction, FilterError,
     filter::{HttpFilter, HttpFilterContext},
+    parse_filter_config,
 };
 
 /// Detects gRPC requests from the `content-type` header and promotes the
@@ -48,8 +49,8 @@ impl GrpcDetectionFilter {
     /// # Errors
     ///
     /// Returns [`FilterError`] if the YAML config is invalid.
-    #[expect(clippy::unnecessary_wraps, reason = "signature required by FilterFactory")]
-    pub fn from_config(_config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
+    pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
+        let _: EmptyFilterConfig = parse_filter_config("grpc_detection", config)?;
         Ok(Box::new(Self))
     }
 }

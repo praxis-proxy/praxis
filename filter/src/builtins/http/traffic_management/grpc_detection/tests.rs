@@ -10,6 +10,12 @@ use crate::{
     test_utils::{make_filter_context, make_request},
 };
 
+#[test]
+fn from_config_succeeds() {
+    let filter = GrpcDetectionFilter::from_config(&serde_yaml::Value::Null).unwrap();
+    assert_eq!(filter.name(), "grpc_detection", "filter name should be grpc_detection");
+}
+
 #[tokio::test]
 async fn non_grpc_produces_no_metadata() {
     let req = make_request(http::Method::POST, "/api");
