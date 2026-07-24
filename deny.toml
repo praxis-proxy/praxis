@@ -2,10 +2,9 @@
 unmaintained = "all"
 maximum-db-staleness = "P30D"
 ignore = [
-    # Pingora transitive dependencies; not under our control.
-    # derivative 2.2.0: unmaintained
+    # derivative 2.2.0: unmaintained (pingora transitive)
     "RUSTSEC-2024-0388",
-    # rustls-pemfile 2.2.0: unmaintained (via pingora-rustls)
+    # rustls-pemfile 2.2.0: unmaintained (direct dep in praxis-tls + transitive via pingora-rustls)
     "RUSTSEC-2025-0134",
 ]
 
@@ -21,6 +20,7 @@ allow = [
     "ISC",
     "MIT",
     "Unicode-3.0",
+    "Unicode-DFS-2016",
     "Unlicense",
     "Zlib",
 ]

@@ -239,19 +239,16 @@ use std::io::Write;
      separator)
 - **Attribute formatting on structs, enums, fields,
   and variants**:
-  - Place a blank line between each `#[...]` attribute
-    annotation.
   - Order items within `#[derive(...)]` alphabetically.
   - Order parameters within `#[serde(...)]` alphabetically.
 
   ```rust
   // Good:
   #[derive(Clone, Debug, Default, Deserialize, Serialize)]
-
   #[serde(default, deny_unknown_fields)]
   pub struct Foo {
 
-  // Bad (no blank lines, non-alphabetical):
+  // Bad (non-alphabetical):
   #[derive(Debug, Clone, Default, Serialize, Deserialize)]
   #[serde(deny_unknown_fields, default)]
   pub struct Foo {

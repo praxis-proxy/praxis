@@ -255,7 +255,7 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     register_http(filters, "url_rewrite", UrlRewriteFilter::from_config);
     register_http(filters, "json_body_field", JsonBodyFieldFilter::from_config);
     register_http(filters, "json_rpc", JsonRpcFilter::from_config);
-    register_http(filters, "peer_identity_trust", PeerIdentityTrustFilter::from_config);
+    register_http_security(filters, "peer_identity_trust", PeerIdentityTrustFilter::from_config);
 }
 
 /// Registers a single HTTP filter factory with [`SecurityClass::Standard`].
@@ -465,6 +465,7 @@ mod tests {
             "forwarded_headers",
             "guardrails",
             "ip_acl",
+            "peer_identity_trust",
             "rate_limit",
         ];
 
@@ -524,6 +525,10 @@ mod tests {
         );
         assert!(sec.contains(&"guardrails"), "guardrails should be in security_filters");
         assert!(sec.contains(&"ip_acl"), "ip_acl should be in security_filters");
+        assert!(
+            sec.contains(&"peer_identity_trust"),
+            "peer_identity_trust should be in security_filters"
+        );
         assert!(sec.contains(&"rate_limit"), "rate_limit should be in security_filters");
         assert!(!sec.contains(&"router"), "router should not be in security_filters");
     }

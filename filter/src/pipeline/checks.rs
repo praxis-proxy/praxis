@@ -33,6 +33,7 @@ const SECURITY_FILTERS: &[&str] = &[
     "forwarded_headers",
     "guardrails",
     "ip_acl",
+    "peer_identity_trust",
     #[cfg(feature = "cpex-policy-engine")]
     "policy",
     "rate_limit",
