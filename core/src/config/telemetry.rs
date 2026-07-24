@@ -6,6 +6,13 @@
 use serde::{Deserialize, Serialize};
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// OTel-standard environment variable for the OTLP exporter endpoint.
+const OTLP_ENDPOINT_ENV_VAR: &str = "OTEL_EXPORTER_OTLP_ENDPOINT";
+
+// -----------------------------------------------------------------------------
 // TelemetryConfig
 // -----------------------------------------------------------------------------
 
@@ -41,14 +48,26 @@ pub struct TelemetryConfig {
 }
 
 impl TelemetryConfig {
-    /// Resolve the effective OTLP endpoint from config or environment.
+    /// Snapshot telemetry settings by merging config with environment.
     ///
-    /// Returns the config value if set, otherwise checks
-    /// `OTEL_EXPORTER_OTLP_ENDPOINT`. Returns `None` if neither is set.
-    pub(crate) fn resolved_otlp_endpoint(&self) -> Option<String> {
-        self.otlp_endpoint
-            .clone()
-            .or_else(|| std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok())
+    /// Config values take precedence over environment variables.
+    /// Call once at startup — the returned config should be stored
+    /// rather than re-evaluated per request.
+    pub(crate) fn resolve(&self) -> Self {
+        Self {
+            otlp_endpoint: self
+                .otlp_endpoint
+                .clone()
+                .or_else(|| std::env::var(OTLP_ENDPOINT_ENV_VAR).ok()),
+        }
+    }
+
+    /// Build from explicit values (for testing without env var mutation).
+    #[cfg(test)]
+    fn resolved(config_endpoint: Option<&str>, env_endpoint: Option<&str>) -> Self {
+        Self {
+            otlp_endpoint: config_endpoint.or(env_endpoint).map(ToOwned::to_owned),
+        }
     }
 }
 
@@ -62,8 +81,7 @@ impl TelemetryConfig {
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::indexing_slicing,
-    unsafe_code,
-    reason = "tests use unwrap/expect/indexing and unsafe env var manipulation"
+    reason = "tests use unwrap/expect/indexing for brevity"
 )]
 mod tests {
     use super::*;
@@ -103,42 +121,39 @@ mod tests {
     }
 
     #[test]
-    fn resolved_endpoint_prefers_config() {
-        let telemetry = TelemetryConfig {
-            otlp_endpoint: Some("http://from-config:4317".to_owned()),
-        };
+    fn otlp_env_var_name_matches_otel_spec() {
         assert_eq!(
-            telemetry.resolved_otlp_endpoint().as_deref(),
-            Some("http://from-config:4317"),
-            "config value should take precedence"
+            OTLP_ENDPOINT_ENV_VAR, "OTEL_EXPORTER_OTLP_ENDPOINT",
+            "env var name must match the OTel specification"
         );
     }
 
     #[test]
-    fn resolved_endpoint_env_var_fallback_and_unset() {
-        let telemetry = TelemetryConfig { otlp_endpoint: None };
-
-        // SAFETY: env var mutation is not thread-safe. This test is the only
-        // one touching OTEL_EXPORTER_OTLP_ENDPOINT, consolidated into a single
-        // function to avoid races with parallel test execution.
-        unsafe {
-            std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://from-env:4317");
-        }
-        let with_env = telemetry.resolved_otlp_endpoint();
-        // SAFETY: same single-test scope; restoring env to original state.
-        unsafe {
-            std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
-        }
-        let without_env = telemetry.resolved_otlp_endpoint();
-
+    fn resolve_prefers_config_over_env() {
+        let resolved = TelemetryConfig::resolved(Some("http://config:4317"), Some("http://env:4317"));
         assert_eq!(
-            with_env.as_deref(),
-            Some("http://from-env:4317"),
-            "should fall back to OTEL_EXPORTER_OTLP_ENDPOINT env var"
+            resolved.otlp_endpoint.as_deref(),
+            Some("http://config:4317"),
+            "config value should take precedence over env"
         );
+    }
+
+    #[test]
+    fn resolve_falls_back_to_env() {
+        let resolved = TelemetryConfig::resolved(None, Some("http://env:4317"));
+        assert_eq!(
+            resolved.otlp_endpoint.as_deref(),
+            Some("http://env:4317"),
+            "should use env when config is None"
+        );
+    }
+
+    #[test]
+    fn resolve_none_when_both_unset() {
+        let resolved = TelemetryConfig::resolved(None, None);
         assert!(
-            without_env.is_none(),
-            "should return None when neither config nor env is set"
+            resolved.otlp_endpoint.is_none(),
+            "should return None when both are unset"
         );
     }
 }

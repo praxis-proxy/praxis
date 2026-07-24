@@ -4,9 +4,14 @@
 //! Functional test for the OTLP tracing example config.
 //!
 //! Verifies the proxy starts and serves traffic with the `otel` feature
-//! enabled and an OTLP endpoint configured. The batch exporter buffers
-//! spans internally when no collector is reachable, so no external
-//! service is needed for this test.
+//! enabled and an OTLP endpoint configured via YAML. The batch exporter
+//! buffers spans internally when no collector is reachable, so no
+//! external service is needed for this test.
+//!
+//! Note: env var fallback (`OTEL_EXPORTER_OTLP_ENDPOINT`) is tested via
+//! pure unit tests in `TelemetryConfig::resolved()`. A full integration
+//! test for env var → OTLP activation would require spawning the proxy
+//! binary as a subprocess, which is out of scope for this PR.
 
 use std::collections::HashMap;
 

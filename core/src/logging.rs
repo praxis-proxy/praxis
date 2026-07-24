@@ -73,11 +73,12 @@ impl Drop for TracingGuard {
 pub fn init_tracing(config: &Config) -> Result<TracingGuard, ProxyError> {
     let env_filter = build_env_filter(config)?;
     let json = std::env::var("PRAXIS_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
+    let telemetry = config.telemetry.resolve();
 
-    warn_if_endpoint_without_feature(config);
+    warn_if_endpoint_without_feature(telemetry.otlp_endpoint.is_some());
 
     #[cfg(feature = "otel")]
-    return init_with_otel(env_filter, json, config);
+    return init_with_otel(env_filter, json, &telemetry);
 
     #[cfg(not(feature = "otel"))]
     {
@@ -129,11 +130,11 @@ pub fn validate_log_overrides(config: &Config) -> Result<(), ProxyError> {
 fn init_with_otel(
     env_filter: tracing_subscriber::EnvFilter,
     json: bool,
-    config: &Config,
+    telemetry: &crate::config::TelemetryConfig,
 ) -> Result<TracingGuard, ProxyError> {
     use opentelemetry::trace::TracerProvider as _;
 
-    let provider = build_otel_provider(config)?;
+    let provider = build_otel_provider(telemetry)?;
 
     // `OpenTelemetryLayer<S>` requires `S` to match the composed subscriber type.
     // JSON and text fmt produce different types, preventing a shared binding.
@@ -195,16 +196,18 @@ fn init_fmt_only(env_filter: tracing_subscriber::EnvFilter, json: bool) {
 /// Returns `Some(provider)` when an OTLP endpoint is configured,
 /// `None` otherwise. Sets the global tracer provider and W3C propagator.
 #[cfg(feature = "otel")]
-fn build_otel_provider(config: &Config) -> Result<Option<opentelemetry_sdk::trace::SdkTracerProvider>, ProxyError> {
+fn build_otel_provider(
+    config: &crate::config::TelemetryConfig,
+) -> Result<Option<opentelemetry_sdk::trace::SdkTracerProvider>, ProxyError> {
     use opentelemetry_otlp::WithExportConfig as _;
 
-    let Some(endpoint) = config.telemetry.resolved_otlp_endpoint() else {
+    let Some(endpoint) = config.otlp_endpoint.as_deref() else {
         return Ok(None);
     };
 
     let exporter = opentelemetry_otlp::SpanExporter::builder()
         .with_tonic()
-        .with_endpoint(&endpoint)
+        .with_endpoint(endpoint)
         .build()
         .map_err(|e| ProxyError::Config(format!("failed to build OTLP span exporter: {e}")))?;
 
@@ -233,9 +236,9 @@ fn build_otel_provider(config: &Config) -> Result<Option<opentelemetry_sdk::trac
     not(feature = "otel"),
     expect(clippy::print_stderr, reason = "tracing not yet initialized")
 )]
-fn warn_if_endpoint_without_feature(config: &Config) {
+fn warn_if_endpoint_without_feature(has_endpoint: bool) {
     #[cfg(not(feature = "otel"))]
-    if config.telemetry.resolved_otlp_endpoint().is_some() {
+    if has_endpoint {
         eprintln!(
             "warning: telemetry.otlp_endpoint is configured but the `otel` feature is not \
              enabled; OTLP export is disabled. Rebuild with `--features otel` to enable it."
@@ -243,7 +246,7 @@ fn warn_if_endpoint_without_feature(config: &Config) {
     }
 
     #[cfg(feature = "otel")]
-    let _ = config;
+    let _ = has_endpoint;
 }
 
 // -----------------------------------------------------------------------------
@@ -534,7 +537,7 @@ telemetry:
     #[cfg(feature = "otel")]
     #[test]
     fn otel_provider_none_when_no_endpoint() {
-        let config = config_with_overrides(HashMap::new());
+        let config = crate::config::TelemetryConfig::default();
         let provider = build_otel_provider(&config).expect("should succeed with no endpoint");
         assert!(
             provider.is_none(),
