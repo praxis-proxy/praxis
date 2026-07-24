@@ -96,10 +96,12 @@ async fn evaluate_branches_inner(
 fn should_branch_fire(branch: &ResolvedBranch, ctx: &HttpFilterContext<'_>) -> bool {
     match &branch.condition {
         None => true,
-        Some(cond) => ctx
-            .filter_results
-            .get(cond.filter_name.as_ref())
-            .is_some_and(|rs| rs.matches(cond.key.as_ref(), cond.value.as_ref())),
+        Some(cond) => crate::matches_filter_result(
+            &ctx.filter_results,
+            cond.filter_name.as_ref(),
+            cond.key.as_ref(),
+            cond.value.as_ref(),
+        ),
     }
 }
 

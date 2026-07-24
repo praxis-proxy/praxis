@@ -23,8 +23,6 @@ const DEFAULT_TIMEOUT_MS: u64 = 30_000; // 30s
 /// Maximum number of named steps.
 const MAX_STEPS: usize = 20;
 
-/// Default maximum response body bytes per sub-request.
-const DEFAULT_MAX_RESPONSE_BYTES: usize = 10_485_760; // 10 MiB
 
 /// Default maximum iteration state accumulator bytes.
 const DEFAULT_MAX_STATE_BYTES: usize = 52_428_800; // 50 MiB
@@ -343,7 +341,7 @@ fn default_max_iterations() -> u32 {
 
 /// Serde default for `max_response_bytes`.
 fn default_max_response_bytes() -> usize {
-    DEFAULT_MAX_RESPONSE_BYTES
+    crate::pipeline::subrequest::default_max_response_bytes()
 }
 
 /// Serde default for `max_state_bytes`.

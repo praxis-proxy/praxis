@@ -3,9 +3,7 @@
 
 //! Conversions between Pingora types and Praxis transport-agnostic types.
 
-use pingora_core::upstreams::peer::HttpPeer;
 use pingora_proxy::Session;
-use praxis_core::connectivity::ConnectionOptions;
 use praxis_filter::{Rejection, Request, Response};
 use tracing::debug;
 
@@ -122,32 +120,6 @@ fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader
     header
 }
 
-// -----------------------------------------------------------------------------
-// Pingora - Connection Options
-// -----------------------------------------------------------------------------
-
-/// Apply [`ConnectionOptions`] timeouts to a Pingora [`HttpPeer`].
-///
-/// ```ignore
-/// // Requires `pingora_core::upstreams::peer::HttpPeer` from Pingora.
-/// use praxis_protocol::http::pingora::convert::apply_connection_options;
-///
-/// let opts = praxis_core::connectivity::ConnectionOptions::default();
-/// let mut peer = HttpPeer::new("10.0.0.1:80", false, String::new());
-/// apply_connection_options(&mut peer, &opts);
-/// ```
-///
-/// [`ConnectionOptions`]: praxis_core::connectivity::ConnectionOptions
-/// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
-// Hot path: called per upstream_peer, cross-crate boundary.
-#[inline]
-pub(crate) fn apply_connection_options(peer: &mut HttpPeer, opts: &ConnectionOptions) {
-    peer.options.connection_timeout = opts.connection_timeout;
-    peer.options.total_connection_timeout = opts.total_connection_timeout;
-    peer.options.idle_timeout = opts.idle_timeout;
-    peer.options.read_timeout = opts.read_timeout;
-    peer.options.write_timeout = opts.write_timeout;
-}
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -163,10 +135,7 @@ pub(crate) fn apply_connection_options(peer: &mut HttpPeer, opts: &ConnectionOpt
     reason = "tests"
 )]
 mod tests {
-    use std::time::Duration;
-
     use http::StatusCode;
-    use praxis_core::connectivity::ConnectionOptions;
 
     use super::*;
 
@@ -221,63 +190,6 @@ mod tests {
         assert!(
             resp.headers.is_empty(),
             "headers should be empty when upstream has none"
-        );
-    }
-
-    #[test]
-    fn apply_connection_options_sets_timeouts() {
-        let opts = ConnectionOptions {
-            connection_timeout: Some(Duration::from_secs(5)),
-            total_connection_timeout: Some(Duration::from_secs(10)),
-            idle_timeout: Some(Duration::from_secs(60)),
-            read_timeout: Some(Duration::from_secs(30)),
-            write_timeout: Some(Duration::from_secs(15)),
-        };
-
-        let mut peer = HttpPeer::new("10.0.0.1:80", false, String::new());
-        apply_connection_options(&mut peer, &opts);
-
-        assert_eq!(
-            peer.options.connection_timeout,
-            Some(Duration::from_secs(5)),
-            "connection_timeout should be set"
-        );
-        assert_eq!(
-            peer.options.total_connection_timeout,
-            Some(Duration::from_secs(10)),
-            "total_connection_timeout should be set"
-        );
-        assert_eq!(
-            peer.options.idle_timeout,
-            Some(Duration::from_secs(60)),
-            "idle_timeout should be set"
-        );
-        assert_eq!(
-            peer.options.read_timeout,
-            Some(Duration::from_secs(30)),
-            "read_timeout should be set"
-        );
-        assert_eq!(
-            peer.options.write_timeout,
-            Some(Duration::from_secs(15)),
-            "write_timeout should be set"
-        );
-    }
-
-    #[test]
-    fn apply_connection_options_none_values() {
-        let opts = ConnectionOptions::default();
-
-        let mut peer = HttpPeer::new("10.0.0.1:80", false, String::new());
-        apply_connection_options(&mut peer, &opts);
-
-        assert!(
-            peer.options.connection_timeout.is_none(),
-            "default connection_timeout should be None"
-        );
-        assert!(
-            peer.options.total_connection_timeout.is_none(),
-            "default total_connection_timeout should be None"
         );
     }
 }

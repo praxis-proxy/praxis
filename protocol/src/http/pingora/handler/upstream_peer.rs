@@ -8,14 +8,14 @@
 use std::{
     collections::HashMap,
     net::SocketAddr,
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Mutex, OnceLock},
     time::Instant,
 };
 
 use pingora_core::{Result, upstreams::peer::HttpPeer};
-use praxis_core::connectivity::Upstream;
+use praxis_core::connectivity::{Upstream, peer as peer_utils};
 
-use super::super::{context::PingoraRequestCtx, convert::apply_connection_options};
+use super::super::context::PingoraRequestCtx;
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -73,84 +73,22 @@ async fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
         .and_then(|t| t.sni().map(str::to_owned))
         .unwrap_or_else(|| {
             if tls_enabled {
-                derive_sni(&upstream.address)
+                peer_utils::derive_sni(&upstream.address)
             } else {
                 String::new()
             }
         });
 
     let mut peer = HttpPeer::new(addr, tls_enabled, sni);
-    apply_connection_options(&mut peer, &upstream.connection);
+    peer_utils::apply_connection_options(&mut peer, &upstream.connection);
 
     if let Some(tls) = &upstream.tls {
-        apply_cached_tls(&mut peer, tls, &upstream.address);
+        peer_utils::apply_cached_tls(&mut peer, tls, &upstream.address);
     }
 
     Ok(Box::new(peer))
 }
 
-/// Apply pre-cached TLS settings to an [`HttpPeer`].
-///
-/// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
-fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls, address: &str) {
-    // verify: false disables both cert and hostname verification as a
-    // single toggle. Splitting into verify_cert / verify_hostname would
-    // require a config schema change (accepted design limitation).
-    if !tls.verify() {
-        tracing::debug!(upstream = %address, "upstream TLS verification disabled for this peer");
-        peer.options.verify_cert = false;
-        peer.options.verify_hostname = false;
-    }
-
-    if let Some(ca) = tls.ca() {
-        peer.options.ca = Some(Arc::from(ca_from_cached(ca)));
-    }
-
-    if let Some(client) = tls.client_cert() {
-        peer.client_cert_key = Some(Arc::new(client_cert_from_cached(client)));
-    }
-}
-
-/// Convert cached CA DER bytes into [`WrappedX509`] values.
-///
-/// [`WrappedX509`]: pingora_core::utils::tls::WrappedX509
-fn ca_from_cached(cached: &praxis_tls::CachedCaCerts) -> Vec<pingora_core::utils::tls::WrappedX509> {
-    cached
-        .der_certs()
-        .iter()
-        .filter_map(|der| {
-            pingora_core::utils::tls::WrappedX509::parse(der.clone())
-                .inspect_err(|e| tracing::warn!("failed to parse cached CA cert: {e}"))
-                .ok()
-        })
-        .collect()
-}
-
-/// Convert cached client cert/key DER bytes into a [`CertKey`].
-///
-/// [`CertKey`]: pingora_core::utils::tls::CertKey
-fn client_cert_from_cached(cached: &praxis_tls::CachedClientCert) -> pingora_core::utils::tls::CertKey {
-    pingora_core::utils::tls::CertKey::new(cached.cert_der().to_vec(), cached.key_der().to_vec())
-}
-
-/// Derive an SNI hostname from an `address` string in `host:port` form.
-///
-/// Returns the host portion if it is a DNS name. Returns an empty string
-/// if the host is an IP address (IP-based SNI is not standard per [RFC 6066]).
-///
-/// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066
-fn derive_sni(address: &str) -> String {
-    let host = address.rsplit_once(':').map_or(address, |(h, _)| h);
-    if host.parse::<std::net::IpAddr>().is_ok() {
-        tracing::warn!(
-            address,
-            "upstream is an IP without explicit SNI; TLS hostname verification is meaningless"
-        );
-        return String::new();
-    }
-    tracing::debug!(address, sni = host, "derived SNI from upstream address");
-    host.to_owned()
-}
 
 // -----------------------------------------------------------------------------
 // DNS Cache
@@ -357,7 +295,7 @@ mod tests {
 
     #[test]
     fn sni_not_set_with_hostname_address_derives_sni() {
-        let sni = derive_sni("backend.example.com:8443");
+        let sni = peer_utils::derive_sni("backend.example.com:8443");
         assert_eq!(
             sni, "backend.example.com",
             "SNI should be derived from hostname address"
@@ -366,7 +304,7 @@ mod tests {
 
     #[test]
     fn sni_not_set_with_ip_address_leaves_sni_empty() {
-        let sni = derive_sni("127.0.0.1:8443");
+        let sni = peer_utils::derive_sni("127.0.0.1:8443");
         assert_eq!(sni, "", "SNI should be empty for IP address");
     }
 
@@ -595,7 +533,7 @@ mod tests {
         let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
         let cached = praxis_tls::CachedCaCerts::from_pem_file(ca_path).expect("valid CA should parse");
-        let wrapped = ca_from_cached(&cached);
+        let wrapped = peer_utils::ca_from_cached(&cached);
         assert_eq!(wrapped.len(), 1, "should produce one WrappedX509");
     }
 
@@ -607,7 +545,7 @@ mod tests {
 
         let cached =
             praxis_tls::CachedClientCert::from_pem_files(cert_path, key_path).expect("valid cert+key should parse");
-        let _cert_key = client_cert_from_cached(&cached);
+        let _cert_key = peer_utils::client_cert_from_cached(&cached);
     }
 
     // -------------------------------------------------------------------------

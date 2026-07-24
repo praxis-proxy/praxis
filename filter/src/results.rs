@@ -141,6 +141,51 @@ impl FilterResultSet {
 }
 
 // -----------------------------------------------------------------------------
+// Cross-filter result matching
+// -----------------------------------------------------------------------------
+
+/// Whether a filter's result set contains a specific key-value pair.
+///
+/// Looks up `filter_name` in the results map, then checks whether
+/// the result set contains `key` with value `value`. Used by both
+/// branch chain evaluation and step transition matching.
+///
+/// ```
+/// use std::collections::HashMap;
+///
+/// use praxis_filter::{FilterResultSet, matches_filter_result};
+///
+/// let mut results = HashMap::new();
+/// let mut rs = FilterResultSet::new();
+/// rs.set("action", "loop").unwrap();
+/// results.insert("classifier", rs);
+///
+/// assert!(matches_filter_result(
+///     &results,
+///     "classifier",
+///     "action",
+///     "loop"
+/// ));
+/// assert!(!matches_filter_result(
+///     &results,
+///     "classifier",
+///     "action",
+///     "done"
+/// ));
+/// assert!(!matches_filter_result(
+///     &results, "unknown", "action", "loop"
+/// ));
+/// ```
+pub fn matches_filter_result(
+    results: &HashMap<&str, FilterResultSet>,
+    filter_name: &str,
+    key: &str,
+    value: &str,
+) -> bool {
+    results.get(filter_name).is_some_and(|rs| rs.matches(key, value))
+}
+
+// -----------------------------------------------------------------------------
 // Validation
 // -----------------------------------------------------------------------------
 

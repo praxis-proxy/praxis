@@ -440,9 +440,9 @@ fn matches_transition(
         transition.key.as_deref(),
         transition.value.as_deref(),
     ) {
-        (Some(filter_name), Some(key), Some(value)) => filter_results
-            .get(filter_name)
-            .is_some_and(|rs| rs.get(key).is_some_and(|v| v == value)),
+        (Some(filter_name), Some(key), Some(value)) => {
+            crate::matches_filter_result(filter_results, filter_name, key, value)
+        },
         (None, None, None) => true,
         _ => false,
     };
@@ -464,11 +464,11 @@ fn parse_depth(request: &crate::Request) -> u8 {
         .unwrap_or(0)
 }
 
-/// Strip `x-praxis-*` reserved headers from sub-request headers.
+/// Strip all reserved internal headers from sub-request headers.
 fn strip_reserved_headers(headers: &mut HeaderMap) {
     let reserved: Vec<http::header::HeaderName> = headers
         .keys()
-        .filter(|name| name.as_str().starts_with("x-praxis-"))
+        .filter(|name| praxis_core::reserved_headers::is_reserved(name.as_str()))
         .cloned()
         .collect();
     for name in reserved {
@@ -526,18 +526,36 @@ fn build_sub_filter_context<'a>(
 
 /// Convert a Praxis [`Upstream`] to a Pingora [`HttpPeer`].
 ///
+/// Applies TLS settings (CA, client cert, verify toggle) and
+/// connection options (timeouts) from the upstream config. Derives
+/// SNI from the address hostname when not explicitly configured.
+///
 /// [`Upstream`]: praxis_core::connectivity::Upstream
 fn build_peer(upstream: &praxis_core::connectivity::Upstream) -> HttpPeer {
+    use praxis_core::connectivity::peer as peer_utils;
+
     let addr: &str = &upstream.address;
-    let tls = upstream.tls.is_some();
+    let tls_enabled = upstream.tls.is_some();
     let sni = upstream
         .tls
         .as_ref()
-        .and_then(|t| t.sni())
-        .unwrap_or_default()
-        .to_owned();
+        .and_then(|t| t.sni().map(str::to_owned))
+        .unwrap_or_else(|| {
+            if tls_enabled {
+                peer_utils::derive_sni(addr)
+            } else {
+                String::new()
+            }
+        });
 
-    HttpPeer::new(addr, tls, sni)
+    let mut peer = HttpPeer::new(addr, tls_enabled, sni);
+    peer_utils::apply_connection_options(&mut peer, &upstream.connection);
+
+    if let Some(tls) = &upstream.tls {
+        peer_utils::apply_cached_tls(&mut peer, tls, addr);
+    }
+
+    peer
 }
 
 /// Build a [`Rejection`] that carries the sub-request response.

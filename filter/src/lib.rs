@@ -42,7 +42,7 @@ pub use pipeline::{FilterPipeline, PipelineExtension};
 pub use praxis_core::config::{FailureMode, FilterEntry};
 pub use praxis_tls::TlsPeerIdentity;
 pub use registry::{FilterRegistry, SecurityClass};
-pub use results::FilterResultSet;
+pub use results::{FilterResultSet, matches_filter_result};
 pub use tcp_filter::{TcpFilter, TcpFilterContext};
 
 // -----------------------------------------------------------------------------
