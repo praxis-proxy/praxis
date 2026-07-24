@@ -27,7 +27,7 @@ use tracing::info;
 
 /// Cloud and AI-native proxy server.
 #[derive(Parser)]
-#[command(name = "praxis", version)]
+#[command(name = "praxis", version = env!("PRAXIS_VERSION"))]
 struct Cli {
     /// Path to the YAML configuration file.
     #[arg(short = 'c', long = "config")]
@@ -71,7 +71,7 @@ fn main() {
     let config_path = praxis::resolve_config_path(explicit.as_deref());
     let config = praxis::load_config(explicit.as_deref()).unwrap_or_else(|e| praxis::fatal(&e));
     praxis::init_tracing(&config).unwrap_or_else(|e| praxis::fatal(&e));
-    info!("starting server");
+    info!(version = env!("PRAXIS_VERSION"), "starting server");
     praxis::run_server(config, config_path)
 }
 
@@ -164,6 +164,15 @@ mod tests {
         assert!(
             matches!(&result, Err(e) if e.kind() == clap::error::ErrorKind::DisplayVersion),
             "--version should be recognized"
+        );
+    }
+
+    #[test]
+    fn cli_version_short_flag() {
+        let result = Cli::try_parse_from(["praxis", "-V"]);
+        assert!(
+            matches!(&result, Err(e) if e.kind() == clap::error::ErrorKind::DisplayVersion),
+            "-V should be recognized"
         );
     }
 }
