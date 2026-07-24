@@ -14,7 +14,7 @@ use praxis_filter::{
 use tracing::{debug, error, warn};
 
 use super::super::{
-    context::PingoraRequestCtx,
+    context::{FilterWriteback, PingoraRequestCtx},
     convert::{request_header_from_session, send_rejection},
 };
 
@@ -178,7 +178,7 @@ pub(in crate::http) async fn execute(
 /// Run the request-phase filter pipeline and snapshot the request for later phases.
 ///
 /// Returns the final action and any extra headers promoted by filters.
-#[expect(clippy::too_many_lines, reason = "writeback destructuring")]
+#[expect(clippy::too_many_lines, reason = "pipeline execution and result dispatch")]
 async fn run_pipeline(
     pipeline: &FilterPipeline,
     mut request: Request,
@@ -190,43 +190,36 @@ async fn run_pipeline(
         extra_headers,
         headers_to_remove,
         headers_to_set,
-        cluster,
         upstream,
         rewritten_path,
         request_body_mode,
         selected_endpoint_index,
-        extensions,
-        filter_metadata,
-        filter_state,
-        executed_indices,
-        body_done,
-        // Pre-read mutations were consumed by endpoint_selector during
-        // on_request. Cleared below to prevent stale provenance reuse.
-        _pre_read_mutations,
         structured_metadata,
+        mut writeback,
     ) = {
         let mut filter_ctx = ctx.build_filter_context(pipeline, &request, None);
 
         let action = pipeline.execute_http_request(&mut filter_ctx).await;
         (
             action,
-            filter_ctx.extra_request_headers,
-            filter_ctx.request_headers_to_remove,
-            filter_ctx.request_headers_to_set,
-            filter_ctx.cluster,
-            filter_ctx.upstream,
-            filter_ctx.rewritten_path,
+            std::mem::take(&mut filter_ctx.extra_request_headers),
+            std::mem::take(&mut filter_ctx.request_headers_to_remove),
+            std::mem::take(&mut filter_ctx.request_headers_to_set),
+            filter_ctx.upstream.take(),
+            filter_ctx.rewritten_path.take(),
             filter_ctx.request_body_mode,
             filter_ctx.selected_endpoint_index,
-            filter_ctx.extensions,
-            filter_ctx.filter_metadata,
-            filter_ctx.filter_state,
-            filter_ctx.executed_filter_indices,
-            filter_ctx.body_done_indices,
-            filter_ctx.pre_read_mutations,
-            filter_ctx.structured_metadata,
+            std::mem::take(&mut filter_ctx.structured_metadata),
+            // Pre-read mutations were consumed by endpoint_selector during
+            // on_request. Dropped here and cleared below to prevent stale
+            // provenance reuse.
+            FilterWriteback::from(filter_ctx),
         )
     };
+
+    // Cluster is written back only when the pipeline continues; take it
+    // out so rejections leave `ctx.cluster` unset.
+    let cluster = writeback.take_cluster();
 
     // Apply pipeline headers_to_remove to request_snapshot so that
     // later phases (body, response) see stripped headers.
@@ -234,11 +227,7 @@ async fn run_pipeline(
         request.headers.remove(name);
     }
     ctx.request_snapshot = Some(request);
-    ctx.extensions = extensions;
-    ctx.filter_metadata = filter_metadata;
-    ctx.filter_state = filter_state;
-    ctx.cached_executed_filter_indices = executed_indices;
-    ctx.cached_body_done_indices = body_done;
+    ctx.apply_writeback(writeback);
     // Pre-read mutations were consumed by the request pipeline (e.g.
     // endpoint_selector). Clear them so later phases cannot reuse stale
     // routing authority from a previous request phase.

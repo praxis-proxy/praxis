@@ -310,7 +310,119 @@ macro_rules! filter_context {
     }};
 }
 
+// -----------------------------------------------------------------------------
+// FilterWriteback
+// -----------------------------------------------------------------------------
+
+/// Fields carried back from an executed [`HttpFilterContext`] into the
+/// request context.
+///
+/// Consuming the filter context into this owned struct ends its borrow
+/// of the request context, so the caller can then apply the writeback
+/// via [`PingoraRequestCtx::apply_writeback`]. Phase-specific fields
+/// (e.g. `upstream`, body byte counts) remain the caller's
+/// responsibility.
+///
+/// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+pub struct FilterWriteback {
+    /// Per-filter body-done indices.
+    body_done_indices: Vec<bool>,
+    /// Cluster selected by a cluster-selecting filter.
+    cluster: Option<Arc<str>>,
+    /// Per-filter execution indices.
+    executed_filter_indices: Vec<bool>,
+    /// Type-safe request-scoped extension container.
+    extensions: praxis_filter::RequestExtensions,
+    /// Durable per-request metadata.
+    filter_metadata: std::collections::HashMap<String, String>,
+    /// Typed per-filter state keyed by filter invocation ID.
+    filter_state: std::collections::HashMap<usize, Box<dyn std::any::Any + Send + Sync>>,
+}
+
+impl From<praxis_filter::HttpFilterContext<'_>> for FilterWriteback {
+    fn from(fctx: praxis_filter::HttpFilterContext<'_>) -> Self {
+        Self {
+            body_done_indices: fctx.body_done_indices,
+            cluster: fctx.cluster,
+            executed_filter_indices: fctx.executed_filter_indices,
+            extensions: fctx.extensions,
+            filter_metadata: fctx.filter_metadata,
+            filter_state: fctx.filter_state,
+        }
+    }
+}
+
+impl FilterWriteback {
+    /// Take the cluster selection, leaving `None` behind.
+    ///
+    /// For call sites that write the cluster back conditionally
+    /// (e.g. only when the request pipeline continues).
+    ///
+    /// ```
+    /// use praxis_filter::{FilterPipeline, FilterRegistry, Request};
+    /// use praxis_protocol::http::pingora::context::{FilterWriteback, PingoraRequestCtx};
+    ///
+    /// let registry = FilterRegistry::with_builtins();
+    /// let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+    /// let request = Request {
+    ///     method: http::Method::GET,
+    ///     uri: http::Uri::from_static("/"),
+    ///     headers: http::HeaderMap::new(),
+    /// };
+    /// let mut ctx = PingoraRequestCtx::default();
+    /// let fctx = ctx.build_filter_context(&pipeline, &request, None);
+    /// let mut writeback = FilterWriteback::from(fctx);
+    /// assert!(writeback.take_cluster().is_none());
+    ///
+    /// ctx.cluster = Some(std::sync::Arc::from("api-cluster"));
+    /// let fctx = ctx.build_filter_context(&pipeline, &request, None);
+    /// let mut writeback = FilterWriteback::from(fctx);
+    /// assert_eq!(writeback.take_cluster().as_deref(), Some("api-cluster"));
+    /// assert!(writeback.take_cluster().is_none());
+    /// ```
+    pub fn take_cluster(&mut self) -> Option<Arc<str>> {
+        self.cluster.take()
+    }
+}
+
 impl PingoraRequestCtx {
+    /// Write back the common filter-context fields after pipeline execution.
+    ///
+    /// Restores the swapped-out containers (`extensions`,
+    /// `filter_metadata`, `filter_state`, cached index vectors) and the
+    /// cluster selection so they persist into the next lifecycle phase.
+    ///
+    /// ```
+    /// use praxis_filter::{FilterPipeline, FilterRegistry, Request};
+    /// use praxis_protocol::http::pingora::context::{FilterWriteback, PingoraRequestCtx};
+    ///
+    /// let registry = FilterRegistry::with_builtins();
+    /// let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+    /// let request = Request {
+    ///     method: http::Method::GET,
+    ///     uri: http::Uri::from_static("/"),
+    ///     headers: http::HeaderMap::new(),
+    /// };
+    /// let mut ctx = PingoraRequestCtx::default();
+    /// ctx.filter_metadata.insert("key".into(), "value".into());
+    /// ctx.cluster = Some(std::sync::Arc::from("api-cluster"));
+    /// let fctx = ctx.build_filter_context(&pipeline, &request, None);
+    /// ctx.apply_writeback(FilterWriteback::from(fctx));
+    /// assert_eq!(
+    ///     ctx.filter_metadata.get("key").map(String::as_str),
+    ///     Some("value")
+    /// );
+    /// assert_eq!(ctx.cluster.as_deref(), Some("api-cluster"));
+    /// ```
+    pub fn apply_writeback(&mut self, writeback: FilterWriteback) {
+        self.cached_body_done_indices = writeback.body_done_indices;
+        self.cluster = writeback.cluster;
+        self.cached_executed_filter_indices = writeback.executed_filter_indices;
+        self.extensions = writeback.extensions;
+        self.filter_metadata = writeback.filter_metadata;
+        self.filter_state = writeback.filter_state;
+    }
+
     /// Build an [`HttpFilterContext`] using an external request reference.
     ///
     /// Takes `cluster` and `upstream` from `self` (leaving `None`
