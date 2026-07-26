@@ -427,6 +427,20 @@ impl PingoraRequestCtx {
             .as_ref()
             .map_or_else(|| swap.load_full(), Arc::clone)
     }
+
+    /// Writes back the fields common to every filter phase, taken from a
+    /// [`WriteBackContext`] built from an executed [`HttpFilterContext`].
+    ///
+    /// Conditional fields (e.g. `cluster`, `upstream`) are not included
+    /// callers write those back themselves after calling this.
+    /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+    pub fn apply_writeback(&mut self, writeback: WriteBackContext) {
+        self.cached_body_done_indices = writeback.body_done_indices;
+        self.cached_executed_filter_indices = writeback.executed_filter_indices;
+        self.extensions = writeback.extensions;
+        self.filter_metadata = writeback.filter_metadata;
+        self.filter_state = writeback.filter_state;
+    }
 }
 
 impl Default for PingoraRequestCtx {
@@ -476,6 +490,43 @@ impl Default for PingoraRequestCtx {
             selected_endpoint_index: None,
             upstream: None,
             upstream_for_retry: None,
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// WriteBackContext
+// -----------------------------------------------------------------------------
+
+/// Common Fields carried back from [`HttpFilterContext`] into the
+/// request context.
+///
+/// Consuming the filter context into this owned struct ends its borrow
+/// of the request context, so the caller can then apply the writeback
+/// via [`PingoraRequestCtx::apply_writeback`]. Conditional fields
+/// like `cluster`, `upstream`, body byte counts ...
+/// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
+pub struct WriteBackContext {
+    /// Per-filter body-done indices.
+    body_done_indices: Vec<bool>,
+    /// Per-filter execution indices.
+    executed_filter_indices: Vec<bool>,
+    /// Request-scoped extension container.
+    extensions: praxis_filter::RequestExtensions,
+    /// Request-scoped metadata.
+    filter_metadata: std::collections::HashMap<String, String>,
+    /// Per-filter state, keyed by filter ID.
+    filter_state: std::collections::HashMap<usize, Box<dyn std::any::Any + Send + Sync>>,
+}
+
+impl From<praxis_filter::HttpFilterContext<'_>> for WriteBackContext {
+    fn from(fctx: praxis_filter::HttpFilterContext<'_>) -> Self {
+        Self {
+            body_done_indices: fctx.body_done_indices,
+            executed_filter_indices: fctx.executed_filter_indices,
+            extensions: fctx.extensions,
+            filter_metadata: fctx.filter_metadata,
+            filter_state: fctx.filter_state,
         }
     }
 }

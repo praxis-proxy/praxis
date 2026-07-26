@@ -11,6 +11,8 @@ use praxis_core::connectivity::normalize_mapped_ipv4;
 use praxis_filter::{BodyMode, FilterAction, FilterError, FilterPipeline, Rejection, Request, TrustedHeaderMutation};
 use tracing::{error, warn};
 
+use crate::http::pingora::context::WriteBackContext;
+
 use super::super::{
     context::PingoraRequestCtx,
     convert::{request_header_from_session, send_rejection},
@@ -186,36 +188,28 @@ async fn run_pipeline(
         rewritten_path,
         request_body_mode,
         selected_endpoint_index,
-        extensions,
-        filter_metadata,
-        filter_state,
-        executed_indices,
-        body_done,
         // Pre-read mutations were consumed by endpoint_selector during
         // on_request. Cleared below to prevent stale provenance reuse.
         _pre_read_mutations,
         structured_metadata,
+        write_back,
     ) = {
         let mut filter_ctx = ctx.build_filter_context(pipeline, &request, None);
 
         let action = pipeline.execute_http_request(&mut filter_ctx).await;
         (
             action,
-            filter_ctx.extra_request_headers,
-            filter_ctx.request_headers_to_remove,
-            filter_ctx.request_headers_to_set,
-            filter_ctx.cluster,
-            filter_ctx.upstream,
-            filter_ctx.rewritten_path,
+            std::mem::take(&mut filter_ctx.extra_request_headers),
+            std::mem::take(&mut filter_ctx.request_headers_to_remove),
+            std::mem::take(&mut filter_ctx.request_headers_to_set),
+            filter_ctx.cluster.take(),
+            filter_ctx.upstream.take(),
+            filter_ctx.rewritten_path.take(),
             filter_ctx.request_body_mode,
             filter_ctx.selected_endpoint_index,
-            filter_ctx.extensions,
-            filter_ctx.filter_metadata,
-            filter_ctx.filter_state,
-            filter_ctx.executed_filter_indices,
-            filter_ctx.body_done_indices,
-            filter_ctx.pre_read_mutations,
-            filter_ctx.structured_metadata,
+            std::mem::take(&mut filter_ctx.pre_read_mutations),
+            std::mem::take(&mut filter_ctx.structured_metadata),
+            WriteBackContext::from(filter_ctx),
         )
     };
 
@@ -225,11 +219,6 @@ async fn run_pipeline(
         request.headers.remove(name);
     }
     ctx.request_snapshot = Some(request);
-    ctx.extensions = extensions;
-    ctx.filter_metadata = filter_metadata;
-    ctx.filter_state = filter_state;
-    ctx.cached_executed_filter_indices = executed_indices;
-    ctx.cached_body_done_indices = body_done;
     // Pre-read mutations were consumed by the request pipeline (e.g.
     // endpoint_selector). Clear them so later phases cannot reuse stale
     // routing authority from a previous request phase.
@@ -237,6 +226,7 @@ async fn run_pipeline(
     ctx.structured_metadata = structured_metadata;
     ctx.metrics_cluster_shared = cluster.as_ref().map(|c| ::metrics::SharedString::from(Arc::clone(c)));
     ctx.metrics_cluster.clone_from(&cluster);
+    ctx.apply_writeback(write_back);
 
     match action {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {

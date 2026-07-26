@@ -13,6 +13,8 @@ use pingora_core::Result;
 use praxis_filter::{FilterAction, FilterPipeline};
 use tracing::{debug, error, warn};
 
+use crate::http::pingora::context::WriteBackContext;
+
 use super::super::{context::PingoraRequestCtx, convert::response_header_from_pingora};
 
 // -----------------------------------------------------------------------------
@@ -75,17 +77,7 @@ async fn run_response_pipeline(
     resp: &mut praxis_filter::Response,
 ) -> Result<(std::result::Result<FilterAction, praxis_filter::FilterError>, bool)> {
     let baseline_response_body_mode = ctx.response_body_mode;
-    let (
-        r,
-        headers_modified,
-        response_body_mode,
-        cluster,
-        extensions,
-        filter_metadata,
-        filter_state,
-        executed_indices,
-        body_done,
-    ) = {
+    let (r, headers_modified, response_body_mode, cluster, write_back) = {
         let mut fctx = ctx.filter_context_for(pipeline, Some(resp)).ok_or_else(|| {
             pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
@@ -97,21 +89,13 @@ async fn run_response_pipeline(
             r,
             fctx.response_headers_modified,
             fctx.response_body_mode,
-            fctx.cluster,
-            fctx.extensions,
-            fctx.filter_metadata,
-            fctx.filter_state,
-            fctx.executed_filter_indices,
-            fctx.body_done_indices,
+            fctx.cluster.take(),
+            WriteBackContext::from(fctx),
         )
     };
     ctx.cluster = cluster;
     ctx.response_body_mode = super::clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode);
-    ctx.extensions = extensions;
-    ctx.filter_metadata = filter_metadata;
-    ctx.filter_state = filter_state;
-    ctx.cached_executed_filter_indices = executed_indices;
-    ctx.cached_body_done_indices = body_done;
+    ctx.apply_writeback(write_back);
     Ok((r, headers_modified))
 }
 
