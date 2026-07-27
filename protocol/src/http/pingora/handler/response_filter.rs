@@ -1,7 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! Response-phase filter execution: runs the pipeline on upstream response headers and syncs modifications.
+//! Response-phase filter execution: runs the pipeline on upstream
+//! response headers and syncs modifications.
+//!
+//! Implements Pingora's `upstream_response_filter` hook. Strips
+//! hop-by-hop and reserved internal headers before the pipeline
+//! runs, then diffs the header map to sync additions, removals,
+//! and modifications back into Pingora's response object.
 
 use pingora_core::Result;
 use praxis_filter::{FilterAction, FilterPipeline};

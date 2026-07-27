@@ -2,6 +2,14 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Configuration loading with fallback resolution.
+//!
+//! [`load_config`] tries three sources in order: an explicit CLI
+//! path, `praxis.yaml` in the working directory, then the built-in
+//! [`DEFAULT_CONFIG`] (a static-response-only fallback). YAML safety
+//! checks from [`parse`] run before deserialization to guard against
+//! oversized files and alias expansion bombs.
+//!
+//! [`parse`]: super::parse
 
 use super::Config;
 use crate::errors::ProxyError;

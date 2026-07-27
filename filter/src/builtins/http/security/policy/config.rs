@@ -30,7 +30,7 @@ use serde::Deserialize;
 /// and identity-source declarations. The filter loads it once at
 /// construction and rejects misconfigured policy at server startup
 /// (fail-fast rather than at first request).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PolicyFilterConfig {
     /// Body-access tier. `ReadOnly` (default) lets APL inspect request
@@ -69,7 +69,7 @@ pub struct PolicyFilterConfig {
 
     /// Fail-closed policy gate for misconfigured chains. When `true`
     /// (default), `on_request_body` rejects any request that reaches
-    /// it without `protocol.method` filter-metadata. The metadata is set
+    /// it without `mcp.method` filter-metadata. The metadata is set
     /// by the protocol classifier filter (available in the `praxis-ai` package), so
     /// its absence means either (a) the protocol classifier filter is missing from
     /// the chain, or (b) it is ordered AFTER `policy` instead of
@@ -86,7 +86,7 @@ pub struct PolicyFilterConfig {
     /// `BodyDone` before it, so the flag has no effect there.
     ///
     /// Note: JSON-RPC methods that legitimately carry no entity (e.g.
-    /// `service/list`, `initialize`, `template/list`) still pass —
+    /// `tools/list`, `initialize`, `prompts/list`) still pass —
     /// `require_protocol_metadata` only rejects when the metadata is
     /// missing entirely.
     #[serde(default = "default_true")]
@@ -117,7 +117,7 @@ fn default_max_buffer_bytes() -> usize {
 /// Mirrors `praxis_filter::BodyAccess` but lifts the decision to
 /// operator configuration: the choice changes pipeline behavior (and
 /// cost), so a per-filter knob is the right granularity.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum BodyAccessMode {
     /// Body is buffered for inspection / routing; mutations are

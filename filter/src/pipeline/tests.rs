@@ -3544,26 +3544,9 @@ fn multiple_pipeline_extensions_are_all_injected() {
 // -----------------------------------------------------------------------------
 
 mod filter_duration_metrics_tests {
-    use std::sync::OnceLock;
-
     use bytes::Bytes;
-    use metrics_exporter_prometheus::PrometheusBuilder;
 
     use super::*;
-
-    static RECORDER: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
-
-    fn install_test_recorder() -> &'static metrics_exporter_prometheus::PrometheusHandle {
-        RECORDER.get_or_init(|| {
-            PrometheusBuilder::new()
-                .install_recorder()
-                .expect("failed to install test Prometheus recorder")
-        })
-    }
-
-    fn render_metrics() -> String {
-        install_test_recorder().render()
-    }
 
     fn assert_filter_metric(metrics: &str, filter: &str, phase: &str, stream: &str) {
         let filter_label = format!("filter=\"{filter}\"");
@@ -3663,7 +3646,7 @@ mod filter_duration_metrics_tests {
 
     #[tokio::test]
     async fn filter_duration_metric_emitted_on_request_headers() {
-        install_test_recorder();
+        crate::test_utils::install_metrics_recorder();
 
         let pipeline = make_filter_duration_pipeline(vec![Box::new(AllStreamsFilter)]);
         let req = crate::test_utils::make_request(Method::GET, "/");
@@ -3671,12 +3654,17 @@ mod filter_duration_metrics_tests {
 
         drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
 
-        assert_filter_metric(&render_metrics(), "all_streams", "request", "headers");
+        assert_filter_metric(
+            &crate::test_utils::render_metrics(),
+            "all_streams",
+            "request",
+            "headers",
+        );
     }
 
     #[tokio::test]
     async fn filter_duration_metric_emitted_on_request_body() {
-        install_test_recorder();
+        crate::test_utils::install_metrics_recorder();
 
         let pipeline = make_filter_duration_pipeline(vec![Box::new(AllStreamsFilter)]);
         let req = crate::test_utils::make_request(Method::POST, "/");
@@ -3691,12 +3679,12 @@ mod filter_duration_metrics_tests {
                 .unwrap(),
         );
 
-        assert_filter_metric(&render_metrics(), "all_streams", "request", "body");
+        assert_filter_metric(&crate::test_utils::render_metrics(), "all_streams", "request", "body");
     }
 
     #[tokio::test]
     async fn filter_duration_metric_emitted_on_response_headers() {
-        install_test_recorder();
+        crate::test_utils::install_metrics_recorder();
 
         let pipeline = make_filter_duration_pipeline(vec![Box::new(AllStreamsFilter)]);
         let req = crate::test_utils::make_request(Method::GET, "/");
@@ -3707,12 +3695,17 @@ mod filter_duration_metrics_tests {
         ctx.response_header = Some(&mut resp);
         drop(pipeline.execute_http_response(&mut ctx).await.unwrap());
 
-        assert_filter_metric(&render_metrics(), "all_streams", "response", "headers");
+        assert_filter_metric(
+            &crate::test_utils::render_metrics(),
+            "all_streams",
+            "response",
+            "headers",
+        );
     }
 
     #[tokio::test]
     async fn filter_duration_metric_emitted_on_response_body() {
-        install_test_recorder();
+        crate::test_utils::install_metrics_recorder();
 
         let pipeline = make_filter_duration_pipeline(vec![Box::new(AllStreamsFilter)]);
         let req = crate::test_utils::make_request(Method::GET, "/");
@@ -3725,12 +3718,12 @@ mod filter_duration_metrics_tests {
         let mut body = Some(Bytes::from_static(b"resp"));
         drop(pipeline.execute_http_response_body(&mut ctx, &mut body, true).unwrap());
 
-        assert_filter_metric(&render_metrics(), "all_streams", "response", "body");
+        assert_filter_metric(&crate::test_utils::render_metrics(), "all_streams", "response", "body");
     }
 
     #[tokio::test]
     async fn filter_duration_metric_skipped_when_condition_not_met() {
-        install_test_recorder();
+        crate::test_utils::install_metrics_recorder();
 
         let pipeline =
             make_filter_duration_pipeline_with_conditions(vec![(Box::new(GatedFilter), vec![when_path("/api")])]);
@@ -3739,7 +3732,7 @@ mod filter_duration_metrics_tests {
 
         drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
 
-        let metrics = render_metrics();
+        let metrics = crate::test_utils::render_metrics();
         assert!(
             !metrics.contains("filter=\"gated_filter\""),
             "condition-gated skip should not emit filter metric: {metrics}"
@@ -3748,7 +3741,7 @@ mod filter_duration_metrics_tests {
 
     #[tokio::test]
     async fn filter_duration_not_recorded_when_disabled() {
-        install_test_recorder();
+        crate::test_utils::install_metrics_recorder();
 
         let pipeline = make_pipeline(vec![Box::new(DisabledOnlyFilter)]);
         let req = crate::test_utils::make_request(Method::GET, "/");
@@ -3756,7 +3749,7 @@ mod filter_duration_metrics_tests {
 
         drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
 
-        let metrics = render_metrics();
+        let metrics = crate::test_utils::render_metrics();
         assert!(
             !metrics.contains("filter=\"disabled_only\""),
             "disabled filter metrics should not record this filter: {metrics}"

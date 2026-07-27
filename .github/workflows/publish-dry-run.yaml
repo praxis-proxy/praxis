@@ -1,0 +1,29 @@
+name: Publish Dry Run
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main]
+
+permissions: {}
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Verify crates can be packaged and published
+  # ----------------------------------------------------------------------------
+
+  publish-dry-run:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+
+      - name: Publish dry run
+        run: make publish-dry-run

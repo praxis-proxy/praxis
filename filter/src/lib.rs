@@ -36,7 +36,10 @@ pub use builtins::{
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{HttpFilterContext, PendingHeaderResult, Request, Response, TrustedHeaderMutation};
 pub use extensions::RequestExtensions;
-pub use factory::{FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config, tcp_builtin};
+pub use factory::{
+    EmptyFilterConfig, FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config,
+    tcp_builtin,
+};
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
 pub use pipeline::{FilterPipeline, PipelineExtension};
 pub use praxis_core::config::{FailureMode, FilterEntry};
@@ -307,9 +310,9 @@ mod macro_tests {
         collision::register_filters(&mut registry);
     }
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Test Utilities
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     register_filters! {
         http "dummy_http" => DummyHttpFilter::from_config,
@@ -436,5 +439,27 @@ pub(crate) mod test_utils {
             headers: HeaderMap::new(),
             status: http::StatusCode::OK,
         }
+    }
+
+    /// Returns a shared Prometheus recorder handle for metrics tests.
+    ///
+    /// The global recorder is installed at most once per process. All
+    /// test modules that need to verify Prometheus output must use this
+    /// function instead of creating their own recorder.
+    #[cfg(test)]
+    pub(crate) fn install_metrics_recorder() -> &'static metrics_exporter_prometheus::PrometheusHandle {
+        use std::sync::OnceLock;
+        static HANDLE: OnceLock<metrics_exporter_prometheus::PrometheusHandle> = OnceLock::new();
+        HANDLE.get_or_init(|| {
+            metrics_exporter_prometheus::PrometheusBuilder::new()
+                .install_recorder()
+                .expect("failed to install test Prometheus recorder")
+        })
+    }
+
+    /// Renders the current Prometheus metrics output as a string.
+    #[cfg(test)]
+    pub(crate) fn render_metrics() -> String {
+        install_metrics_recorder().render()
     }
 }

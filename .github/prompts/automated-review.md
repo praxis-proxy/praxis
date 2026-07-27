@@ -15,7 +15,7 @@ gh pr view "$PR_NUMBER" \
 gh pr diff "$PR_NUMBER"
 ```
 
-Read the project's .github/CLAUDE.md and all
+Read the project's .claude/CLAUDE.md and all
 documents in the `docs/` directory for conventions
 and test requirements (it is already checked out
 in the working directory).

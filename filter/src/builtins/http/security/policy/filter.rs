@@ -100,7 +100,7 @@ pub struct PolicyFilter {
     http_global: bool,
     /// Derived from the loaded policy: it declares per-entity routes
     /// (tool/prompt/resource). When true, authorization runs at the body
-    /// phase after classification, and a missing `protocol.method` fails
+    /// phase after classification, and a missing `mcp.method` fails
     /// closed (the classifier is required).
     entity_routes: bool,
 }
@@ -325,6 +325,19 @@ impl PolicyFilter {
     /// paid. For entity-aware policies, authorization runs later, in
     /// `on_request_body`, once the request is classified.
     async fn identity_gate(&self, ctx: &HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        // When a downstream body-buffering filter (e.g. the protocol
+        // classifier) forces a pre-read, praxis runs `on_request_body` BEFORE
+        // this header phase. That body phase already resolved and enforced
+        // identity (stashing `ResolvedIdentity`) and may have stripped the
+        // inbound identity headers (`X-User-Token`, `Authorization`) for the
+        // upstream. Re-resolving here would fail on the now-stripped headers
+        // and spuriously reject an already-authorized request. The body phase
+        // is authoritative — skip the early gate when it already ran.
+        if ctx.extensions.get::<ResolvedIdentity>().is_some() {
+            tracing::trace!(target: "policy.filter", "identity already resolved in body phase; skipping early gate");
+            return Ok(FilterAction::Continue);
+        }
+
         let (result, _bg) = self
             .mgr
             .invoke_named::<IdentityHook>(
@@ -442,7 +455,7 @@ impl PolicyFilter {
 /// rebuild `Extensions` without re-validating the (possibly-expired)
 /// token. Held as typed state rather than serialized metadata so the
 /// inbound credentials never land in a plaintext string.
-struct ResolvedIdentity(IdentityPayload);
+pub(super) struct ResolvedIdentity(pub(super) IdentityPayload);
 
 #[async_trait]
 impl HttpFilter for PolicyFilter {
@@ -543,24 +556,24 @@ impl HttpFilter for PolicyFilter {
 
         // This policy declares entity routes (tool/prompt/resource), so it
         // needs the request classified into an entity before authorization.
-        // Missing `protocol.method` means the protocol classifier filter (from
+        // Missing `mcp.method` means the protocol classifier filter (from
         // praxis-ai) did not run before us — the classifier is absent or
         // ordered after `policy` in the chain. Fail closed so the misconfig is
         // loud at the first request. Operators intentionally running this
         // policy for identity-only enforcement can opt out via
         // `require_protocol_metadata: false`.
-        let Some(method) = ctx.get_metadata("protocol.method").map(str::to_owned) else {
+        let Some(method) = ctx.get_metadata("mcp.method").map(str::to_owned) else {
             if self.cfg.require_protocol_metadata {
                 tracing::error!(
                     target: "policy.filter",
                     "policy declares entity routes (tool/prompt/resource) which require a protocol \
-                     classifier filter ordered before `policy` in the chain, but no `protocol.method` \
+                     classifier filter ordered before `policy` in the chain, but no `mcp.method` \
                      metadata was found — the classifier is missing or misordered. Denying (fail-closed). \
                      Set `require_protocol_metadata: false` only to run this policy for identity-only enforcement.",
                 );
                 return Ok(FilterAction::Reject(missing_protocol_metadata_rejection()));
             }
-            tracing::trace!(target: "policy.filter", "no protocol.method in metadata; no CMF dispatch");
+            tracing::trace!(target: "policy.filter", "no mcp.method in metadata; no CMF dispatch");
             return Ok(FilterAction::BodyDone);
         };
         let Some((entity_type, hook_name)) = entity_for_protocol_method(&method) else {
@@ -571,11 +584,11 @@ impl HttpFilter for PolicyFilter {
             );
             return Ok(FilterAction::BodyDone);
         };
-        let Some(entity_name) = ctx.get_metadata("protocol.name").map(str::to_owned) else {
+        let Some(entity_name) = ctx.get_metadata("mcp.name").map(str::to_owned) else {
             tracing::debug!(
                 target: "policy.filter",
                 protocol_method = %method,
-                "JSON-RPC method missing protocol.name metadata; skipping CMF dispatch",
+                "JSON-RPC method missing mcp.name metadata; skipping CMF dispatch",
             );
             return Ok(FilterAction::BodyDone);
         };
@@ -725,13 +738,13 @@ impl HttpFilter for PolicyFilter {
         // phase and praxis preserves `filter_metadata` across phases,
         // so we can route the post-phase hook without re-parsing the
         // body.
-        let Some(method) = ctx.get_metadata("protocol.method").map(str::to_owned) else {
+        let Some(method) = ctx.get_metadata("mcp.method").map(str::to_owned) else {
             return Ok(FilterAction::Continue);
         };
         let Some((entity_type, hook_name)) = entity_for_protocol_method_post(&method) else {
             return Ok(FilterAction::Continue);
         };
-        let Some(entity_name) = ctx.get_metadata("protocol.name").map(str::to_owned) else {
+        let Some(entity_name) = ctx.get_metadata("mcp.name").map(str::to_owned) else {
             return Ok(FilterAction::Continue);
         };
 
@@ -919,14 +932,14 @@ pub(super) fn fit_to_original_length(new_bytes: Bytes, original_len: usize, meth
 }
 
 /// Rejection emitted when `require_protocol_metadata` is on (default) and
-/// no `protocol.method` metadata was set by an upstream filter. HTTP 500
+/// no `mcp.method` metadata was set by an upstream filter. HTTP 500
 /// because the misconfiguration is server-side, not client-side.
 fn missing_protocol_metadata_rejection() -> Rejection {
     Rejection::status(500)
         .with_header("Content-Type", "text/plain")
         .with_header(VIOLATION_HEADER, "config.missing_protocol_metadata")
         .with_body(Bytes::from_static(
-            b"policy: no protocol.method in filter metadata. An protocol classifier filter \
+            b"policy: no mcp.method in filter metadata. A protocol classifier filter \
               (from the praxis-ai package) must be present in the chain \
               and ordered before `policy`. Set the filter's \
               `require_protocol_metadata: false` to disable this guard \

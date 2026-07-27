@@ -506,12 +506,12 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Bodyless response detection
     //
     // Pingora skips response_body_filter for 204, 304, and HEAD responses,
     // so on_response must emit the access log directly for these cases.
-    // -----------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     #[test]
     fn is_bodyless_detects_1xx() {

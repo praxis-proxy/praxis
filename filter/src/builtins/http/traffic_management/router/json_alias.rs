@@ -35,7 +35,7 @@ pub(super) fn pattern_specificity(pattern: &str) -> u32 {
 
 /// Carries the matched route so alias resolution can select the target cluster
 /// without re-running route resolution.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct AliasMatch<'a> {
     /// The matching alias rule.
     pub alias: &'a JsonAlias,
@@ -261,9 +261,9 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Test Utilities
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     fn test_route_with_alias(pattern: &str, target: Option<&str>) -> ResolvedRoute {
         test_route_with_aliases(vec![(pattern, target)])

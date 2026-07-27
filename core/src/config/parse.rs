@@ -2,6 +2,12 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! YAML input safety checks: size limits and alias expansion guards.
+//!
+//! Prevents denial-of-service via crafted YAML by enforcing a raw
+//! file size ceiling (`MAX_YAML_BYTES`, 4 MiB) and a post-parse
+//! expansion threshold (`MAX_EXPANDED_BYTES`, 16 MiB). The expansion
+//! check catches "billion laughs" style alias bombs that are small
+//! on disk but expand to enormous in-memory structures.
 
 use std::path::Path;
 

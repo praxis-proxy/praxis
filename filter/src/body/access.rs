@@ -15,7 +15,7 @@
 /// let access = BodyAccess::default();
 /// assert_eq!(access, BodyAccess::None);
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum BodyAccess {
     /// No body access needed.
     #[default]

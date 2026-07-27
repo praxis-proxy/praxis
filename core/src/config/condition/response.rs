@@ -30,7 +30,7 @@ use super::{impl_condition_deserialize, impl_condition_serialize};
 /// .unwrap();
 /// assert_eq!(conditions.len(), 2);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub enum ResponseCondition {
     /// Execute the filter only if the response predicate matches.
     When(ResponseConditionMatch),
@@ -61,7 +61,7 @@ impl_condition_serialize!(ResponseCondition, ResponseConditionMatch);
 /// .unwrap();
 /// assert_eq!(m.status.as_ref().unwrap(), &[200, 201]);
 /// ```
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ResponseConditionMatch {
     /// Response status code must be one of these.

@@ -3,6 +3,7 @@
 *.toml linguist-detectable=false
 *.md linguist-detectable=false
 *.cfg linguist-detectable=false
+*.sh linguist-detectable=false
 Makefile linguist-detectable=false
 Containerfile linguist-detectable=false
 Dockerfile linguist-detectable=false

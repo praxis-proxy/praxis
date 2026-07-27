@@ -2,6 +2,14 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Response body filter execution.
+//!
+//! Implements Pingora's synchronous `response_body_filter` hook.
+//! Runs the pipeline's response-body filters on each chunk,
+//! buffering or streaming per the pipeline's [`BodyMode`]. The
+//! synchronous constraint (no `.await`) is a Pingora API limitation;
+//! body filters must complete without async I/O.
+//!
+//! [`BodyMode`]: praxis_filter::BodyMode
 
 use std::time::Duration;
 

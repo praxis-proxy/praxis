@@ -60,7 +60,7 @@ pub(super) struct RouterConfig {
 /// `Route`'s own `deny_unknown_fields`.
 ///
 /// [`praxis_core::config::Route`]: praxis_core::config::Route
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 pub(super) struct RouterRouteConfig {
     /// Generic path, host, header, and cluster routing fields.
     #[serde(flatten)]
@@ -81,7 +81,7 @@ impl From<Route> for RouterRouteConfig {
 }
 
 /// JSON field alias rule scoped to a router route.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct JsonAlias {
     /// Request JSON field whose string value is compared with `pattern`.

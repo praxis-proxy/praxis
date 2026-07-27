@@ -7,8 +7,10 @@ use async_trait::async_trait;
 use tracing::info;
 
 use crate::{
+    EmptyFilterConfig,
     actions::FilterAction,
     filter::FilterError,
+    parse_filter_config,
     tcp_filter::{TcpFilter, TcpFilterContext},
 };
 
@@ -44,8 +46,8 @@ impl TcpAccessLogFilter {
     /// Returns [`FilterError`] if the YAML config is invalid.
     ///
     /// [`FilterError`]: crate::FilterError
-    #[expect(clippy::unnecessary_wraps, reason = "matches factory signature")]
-    pub fn from_config(_config: &serde_yaml::Value) -> Result<Box<dyn TcpFilter>, FilterError> {
+    pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn TcpFilter>, FilterError> {
+        let _: EmptyFilterConfig = parse_filter_config("tcp_access_log", config)?;
         Ok(Box::new(Self))
     }
 }
@@ -106,6 +108,13 @@ mod tests {
     fn from_config_succeeds() {
         let filter = TcpAccessLogFilter::from_config(&serde_yaml::Value::Null).unwrap();
         assert_eq!(filter.name(), "tcp_access_log", "filter name should be tcp_access_log");
+    }
+
+    #[test]
+    fn from_config_rejects_unknown_fields() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("bogus: true").unwrap();
+        let result = TcpAccessLogFilter::from_config(&yaml);
+        assert!(result.is_err(), "unknown fields should be rejected");
     }
 
     #[tokio::test]

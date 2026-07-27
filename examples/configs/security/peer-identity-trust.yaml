@@ -1,0 +1,41 @@
+# Peer Identity Trust
+#
+# Validates downstream mTLS peer identity against a
+# set of trusted peers. Requests without a verified
+# peer identity or with an untrusted identity are
+# rejected with 403.
+#
+# Requires mTLS on the listener. Each trusted peer
+# entry matches on certificate digest, organization,
+# or serial number. All configured fields on an entry
+# must match.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- \
+#     -c examples/configs/security/peer-identity-trust.yaml
+
+listeners:
+  - name: mtls-gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - trusted-peers
+
+filter_chains:
+  - name: trusted-peers
+    filters:
+      - filter: peer_identity_trust
+        trusted_peers:
+          - cert_digest: "a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2"
+            organization: gateway-peer
+          - organization: trusted-sidecar
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

@@ -19,53 +19,15 @@ permissions: {}
 
 jobs:
   # ----------------------------------------------------------------------------
-  # Security Audit
+  # Security Audit & Dependency Check
   # ----------------------------------------------------------------------------
 
-  security-audit:
+  audit:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
-
-      - name: Cache cargo binaries
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin
-          key: ${{ runner.os }}-cargo-bin-audit
-
-      - name: Install cargo-audit
-        run: command -v cargo-audit || cargo install cargo-audit --locked
-
-      - name: Run cargo audit
-        run: cargo audit
-
-  # ----------------------------------------------------------------------------
-  # License & Dependency Check
-  # ----------------------------------------------------------------------------
-
-  dependency-check:
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
-
-      - name: Cache cargo binaries
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin
-          key: ${{ runner.os }}-cargo-bin-deny
-
-      - name: Install cargo-deny
-        run: command -v cargo-deny || cargo install cargo-deny --locked
-
-      - name: Run cargo deny
-        run: cargo deny check
+      - name: Supply chain audit
+        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0

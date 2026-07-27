@@ -2,6 +2,19 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Body capabilities computation for filter pipelines.
+//!
+//! Scans every filter's [`BodyAccess`] and [`BodyMode`] declarations to
+//! produce a single [`BodyCapabilities`] that the handler layer uses to
+//! decide whether to enable body filter hooks. Mode merging picks the
+//! most demanding mode (`StreamBuffer` > `SizeLimit` > `Stream`) and
+//! keeps the largest buffer limit so every filter gets enough data.
+//!
+//! Called once at pipeline build time by [`FilterPipeline::from_filters`].
+//!
+//! [`BodyAccess`]: crate::body::BodyAccess
+//! [`BodyMode`]: crate::body::BodyMode
+//! [`BodyCapabilities`]: crate::body::BodyCapabilities
+//! [`FilterPipeline::from_filters`]: super::FilterPipeline
 
 use praxis_core::config::ResponseCondition;
 
@@ -445,9 +458,9 @@ mod tests {
         );
     }
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Test Utilities
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     /// Noop HTTP filter for body capability branch testing.
     struct NoopHttpFilter;

@@ -10,9 +10,9 @@ use tracing::warn;
 
 use super::{Condition, ResponseCondition};
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Fields handled by `FilterEntry`'s serde derives.
 const KNOWN_FILTER_FIELDS: &[&str] = &[
@@ -31,7 +31,7 @@ const KNOWN_FILTER_FIELDS: &[&str] = &[
 /// Per-filter failure behaviour.
 ///
 /// Controls what happens when a filter returns an error during execution.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum FailureMode {
     /// The request is aborted on filter error (default, current behaviour).
@@ -63,7 +63,7 @@ pub enum FailureMode {
 /// assert_eq!(chain.name, "observability");
 /// assert_eq!(chain.filters.len(), 2);
 /// ```
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FilterChainConfig {
     /// Unique name for this filter chain.
@@ -96,7 +96,7 @@ pub struct FilterChainConfig {
 /// assert!(entry.conditions.is_empty());
 /// assert!(entry.name.is_none());
 /// ```
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 pub struct FilterEntry {
     /// Filter type name (e.g. `"router"`, `"load_balancer"`, or a custom name).
     #[serde(rename = "filter")]
@@ -140,9 +140,9 @@ pub struct FilterEntry {
     pub config: serde_yaml::Value,
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // FilterEntry Typo Detection
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 impl FilterEntry {
     /// Warn if `config` contains keys that look like typos of known fields.

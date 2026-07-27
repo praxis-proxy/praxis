@@ -13,9 +13,9 @@ use praxis_tls::TlsPeerIdentity;
 
 use crate::{body::BodyMode, extensions::RequestExtensions, pipeline::body::merge_body_mode, results::FilterResultSet};
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 // Constants
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------------
 
 /// Maximum number of keys per namespace in structured metadata.
 ///
@@ -41,7 +41,7 @@ const MAX_METADATA_ENTRIES: usize = 128;
 /// Downstream-supplied headers are untrusted. Only mutations in this
 /// log are considered authoritative by provenance-aware filters such
 /// as `endpoint_selector`.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub enum TrustedHeaderMutation {
     /// Remove the header from the request.
     Remove(HeaderName),
@@ -76,7 +76,7 @@ impl TrustedHeaderMutation {
 /// Distinguishes "not mentioned" from "explicitly removed" so that
 /// callers like `endpoint_selector` know whether to fall through to
 /// pre-read provenance.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PendingHeaderResult {
     /// The header was not mentioned in any pending mutation list.
     Absent,
@@ -627,7 +627,7 @@ fn require_unique_value(values: Vec<String>, name: &HeaderName, source: &str) ->
 /// };
 /// assert_eq!(req.uri.path(), "/api/users");
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct Request {
     /// HTTP header map.
     pub headers: HeaderMap,

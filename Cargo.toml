@@ -37,7 +37,7 @@ async-trait = "0.1.91"
 benchmarks = { path = "benchmarks" }
 bytes = "1.12.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-cpex = { version = "0.2.2", features = ["jwt", "oauth", "pii", "audit", "cedar", "cel", "valkey"] }
+cpex = { version = "0.2.2", features = ["jwt", "oauth", "pii", "audit", "elicitation-ciba", "cedar", "cel", "valkey"] }
 clap = { version = "4.6.4", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.2.1"
@@ -53,11 +53,6 @@ pingora-core = { version = "0.8.2", package = "quixotic-plecostomus-core", featu
 pingora-http = { version = "0.8.2", package = "quixotic-plecostomus-http" }
 pingora-proxy = { version = "0.8.2", package = "quixotic-plecostomus-proxy", features = ["rustls"] }
 percent-encoding = "2.3.2"
-prost = "0.14.4"
-prost-build = "0.14.4"
-prost-types = "0.14.4"
-prost-wkt-types = { version = "0.7.1", features = ["vendored-protox"] }
-protox = "0.9.1"
 rand = "0.10.2"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
 quote = "1.0.47"
@@ -78,7 +73,6 @@ rustls-pemfile = "2.2.0"
 # NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.
 serde_yaml = { package = "yaml_serde", version = "0.10.4" }
 syn = { version = "3.0.3", features = ["full", "extra-traits", "visit"] }
-sync_wrapper = "1.0.2"
 tempfile = "3.27.0"
 tokio-rustls = "0.26.4"
 tokio-tungstenite = "0.30.0"
@@ -86,7 +80,6 @@ thiserror = "2.0.19"
 tikv-jemallocator = "0.7.0"
 tonic = "0.14.6"
 tonic-prost = "0.14.6"
-tonic-prost-build = { version = "0.14.6", features = ["transport"] }
 tokio = { version = "1.53.1", features = ["macros", "rt"] }
 tokio-stream = "0.1.19"
 tokio-util = "0.7.19"

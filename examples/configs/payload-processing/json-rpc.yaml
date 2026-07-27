@@ -1,0 +1,51 @@
+# JSON-RPC Metadata Extraction
+#
+# Extracts JSON-RPC 2.0 envelope metadata from request
+# bodies and promotes method, id, and kind to request
+# headers. Enables routing and observability based on
+# JSON-RPC method names. Batch arrays are rejected by
+# default.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- \
+#     -c examples/configs/payload-processing/json-rpc.yaml
+#
+# Exercise:
+#   # Single JSON-RPC request
+#   curl -X POST http://localhost:8080/ \
+#     -H "Content-Type: application/json" \
+#     -d '{"jsonrpc":"2.0","method":"eth_blockNumber","id":1}'
+#
+#   # Notification (no id)
+#   curl -X POST http://localhost:8080/ \
+#     -H "Content-Type: application/json" \
+#     -d '{"jsonrpc":"2.0","method":"eth_subscribe","params":[]}'
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - rpc-pipeline
+
+filter_chains:
+  - name: rpc-pipeline
+    filters:
+      - filter: json_rpc
+        max_body_bytes: 1048576 # 1 MiB
+        batch_policy: reject
+        on_invalid: reject
+        headers:
+          method: X-Json-Rpc-Method
+          id: X-Json-Rpc-Id
+          kind: X-Json-Rpc-Kind
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: rpc-backend
+
+      - filter: load_balancer
+        clusters:
+          - name: rpc-backend
+            endpoints:
+              - "127.0.0.1:3000"
