@@ -5,6 +5,11 @@ the building blocks for building bespoke proxy servers.
 Multiple extension mechanisms are provided to support a
 variety of needs.
 
+If this is your first custom filter, start with the
+[HTTP Filter Tutorial](http-filter-tutorial.md). It walks
+through a complete filter crate before this guide's more
+advanced registration and implementation options.
+
 ## Auto-Discovery (Recommended)
 
 External filter crates can self-register into Praxis at

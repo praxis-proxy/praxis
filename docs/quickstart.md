@@ -68,3 +68,5 @@ curl http://127.0.0.1:8080/
   for every feature.
 - [Filters](filters/README.md): built-in filters and
   how to write your own.
+- [HTTP Filter Tutorial](filters/http-filter-tutorial.md):
+  build and run a custom filter from scratch.
