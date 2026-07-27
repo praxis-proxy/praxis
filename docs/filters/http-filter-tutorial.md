@@ -39,10 +39,7 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
-praxis-filter = {
-  package = "praxis-proxy-filter",
-  path = "../../filter",
-}
+praxis-filter = { package = "praxis-proxy-filter", path = "../../filter" }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = { package = "yaml_serde", version = "0.10.4" }
 ```
@@ -177,9 +174,7 @@ dependencies. Add this entry under `[dependencies]` in
 `server/Cargo.toml`:
 
 ```toml
-require-header-filter = {
-  path = "../extensions/require-header-filter",
-}
+require-header-filter = { path = "../extensions/require-header-filter" }
 ```
 
 No Rust changes to the server are needed. On the next build, the
