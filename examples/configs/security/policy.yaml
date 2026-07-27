@@ -8,7 +8,7 @@
 # Experimental: requires the `cpex-policy-engine` cargo feature, which
 # is off by default.
 #
-# The policy filter consumes `protocol.method` / `protocol.name` metadata from
+# The policy filter consumes `mcp.method` / `mcp.name` metadata from
 # an upstream protocol classifier filter (available in the `praxis-ai` package), which
 # MUST be ordered before it in the chain.
 #
@@ -37,14 +37,14 @@
 #   # X-Policy-Violation header:
 #   curl -i -X POST http://localhost:8080/rpc \
 #     -H "Content-Type: application/json" \
-#     -d '{"jsonrpc":"2.0","id":1,"method":"service/invoke",
+#     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
 #          "params":{"name":"echo","arguments":{}}}'
 #
 #   # Token rejected by HS256 signature mismatch → 401:
 #   curl -i -X POST http://localhost:8080/rpc \
 #     -H "Authorization: Bearer bogus.token.bytes" \
 #     -H "Content-Type: application/json" \
-#     -d '{"jsonrpc":"2.0","id":1,"method":"service/invoke",
+#     -d '{"jsonrpc":"2.0","id":1,"method":"tools/call",
 #          "params":{"name":"echo","arguments":{}}}'
 #
 # Supply your own policy document at `config_path` before running this
@@ -60,13 +60,13 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      # An protocol classifier filter (from praxis-ai) must precede `policy` in the
-      # chain to stash protocol.method / protocol.name in filter_metadata.
+      # A protocol classifier filter (from praxis-ai) must precede `policy` in the
+      # chain to stash mcp.method / mcp.name in filter_metadata.
       # See the praxis-ai documentation for setup instructions.
 
       - filter: policy
         config_path: /etc/praxis/cpex-policy.yaml
-        # Fail-closed when protocol.method metadata is missing. Set to
+        # Fail-closed when mcp.method metadata is missing. Set to
         # `false` only when intentionally fronting non-classified traffic
         # through the policy filter for identity-only enforcement.
         require_protocol_metadata: true

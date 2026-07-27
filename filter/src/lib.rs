@@ -38,7 +38,10 @@ pub use builtins::{
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{HttpFilterContext, PendingHeaderResult, Request, Response, TrustedHeaderMutation};
 pub use extensions::RequestExtensions;
-pub use factory::{FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config, tcp_builtin};
+pub use factory::{
+    EmptyFilterConfig, FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config,
+    tcp_builtin,
+};
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
 pub use pipeline::{FilterPipeline, PipelineExtension};
 pub use praxis_core::config::{FailureMode, FilterEntry};

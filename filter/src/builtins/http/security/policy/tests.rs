@@ -326,7 +326,7 @@ routes:
     (dir, path_str)
 }
 
-/// Run a `service/invoke` for the `echo` tool as `subject`, returning the
+/// Run a `tools/call` for the `echo` tool as `subject`, returning the
 /// filter's body-phase action. Shared by the CEL allow/deny cases.
 async fn dispatch_echo_as(filter: &PolicyFilter, subject: &str) -> FilterAction {
     dispatch_echo_method(filter, subject, Method::POST).await
@@ -342,10 +342,10 @@ async fn dispatch_echo_method(filter: &PolicyFilter, subject: &str, method: Meth
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("protocol.method", "service/invoke");
-    ctx.set_metadata("protocol.name", "echo");
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
     let body = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"method":"service/invoke","params":{"name":"echo","arguments":{}}}"#,
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
     );
     filter
         .on_request_body(&mut ctx, &mut Some(body), true)
@@ -403,7 +403,7 @@ routes:
     (dir, path_str)
 }
 
-/// Dispatch a `service/invoke` for `tool` as `subject` with the given
+/// Dispatch a `tools/call` for `tool` as `subject` with the given
 /// `X-Session-Id`. Returns the filter's body-phase action. Threads the
 /// session header so cpex's session-scoped taint store can persist /
 /// hydrate labels across calls.
@@ -419,10 +419,10 @@ async fn dispatch_tool_session(filter: &PolicyFilter, subject: &str, tool: &str,
         HeaderValue::from_str(session_id).expect("session header"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("protocol.method", "service/invoke");
-    ctx.set_metadata("protocol.name", tool);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", tool);
     let body = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"method":"service/invoke","params":{"name":"t","arguments":{}}}"#,
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{}}}"#,
     );
     filter
         .on_request_body(&mut ctx, &mut Some(body), true)
@@ -626,6 +626,58 @@ async fn request_without_auth_header_rejects_401() {
         FilterAction::Reject(rej) => assert_eq!(rej.status, 401),
         other => panic!("expected Reject(401); got {other:?}"),
     }
+}
+
+/// When a downstream pre-read ran `on_request_body` first and stashed
+/// `ResolvedIdentity` (having stripped the inbound credential for the
+/// upstream), the early `identity_gate` must skip rather than re-resolve
+/// against the now-missing headers. A credential-less request that would
+/// normally 401 here passes because the body phase is authoritative.
+///
+/// The routes-only config is what puts `on_request` on the `identity_gate`
+/// path, and stashing `ResolvedIdentity` is what a body phase that already
+/// resolved and enforced identity leaves behind.
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_gate_skips_when_body_phase_already_resolved() {
+    use cpex::cpex_core::identity::{IdentityPayload, TokenSource};
+
+    use super::filter::ResolvedIdentity;
+
+    let (_dir, path) = write_cel_policy_config();
+    let filter = build_filter(path);
+
+    let req = make_request(Method::POST, "/");
+    let mut ctx = make_filter_context(&req);
+
+    ctx.extensions.insert(ResolvedIdentity(IdentityPayload::new(
+        String::new(),
+        TokenSource::Bearer,
+    )));
+
+    let action = filter.on_request(&mut ctx).await.expect("on_request ran");
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "gate must be skipped when ResolvedIdentity is already stashed; got {action:?}",
+    );
+}
+
+/// Control for `identity_gate_skips_when_body_phase_already_resolved`: the
+/// same credential-less request with no `ResolvedIdentity` stashed must run
+/// the gate and reject — proving the skip (not something else) is what flips
+/// the outcome to `Continue`.
+#[tokio::test(flavor = "multi_thread")]
+async fn identity_gate_rejects_when_identity_not_yet_resolved() {
+    let (_dir, path) = write_cel_policy_config();
+    let filter = build_filter(path);
+
+    let req = make_request(Method::POST, "/");
+    let mut ctx = make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.expect("on_request ran");
+    assert!(
+        matches!(action, FilterAction::Reject(_)),
+        "no resolved identity → gate must reject; got {action:?}",
+    );
 }
 
 /// A valid HS256 JWT in the configured header passes the identity
@@ -847,7 +899,7 @@ fn config_init_timeout_honors_override() {
 
 /// For an entity-aware policy (declares tool/prompt/resource routes) with
 /// `require_protocol_metadata: true` (default), a request that reaches the
-/// body phase without `protocol.method` is rejected with
+/// body phase without `mcp.method` is rejected with
 /// HTTP 500 + `X-Policy-Violation: config.missing_protocol_metadata`. This
 /// catches a misconfigured chain (protocol classifier filter missing or ordered
 /// after policy) loudly at the first body-phase request.
@@ -887,7 +939,7 @@ async fn missing_protocol_metadata_rejects_when_required() {
 }
 
 /// For an entity-aware policy with `require_protocol_metadata: false`, a
-/// request with no `protocol.method` passes through (identity-only mode for
+/// request with no `mcp.method` passes through (identity-only mode for
 /// non-classified traffic). Pins the opt-out behavior.
 #[tokio::test(flavor = "multi_thread")]
 async fn missing_protocol_metadata_passes_when_not_required() {
@@ -1158,7 +1210,7 @@ fn http_authz_rejection_falls_back_to_sentinel_when_no_violation() {
 fn fit_to_original_length_pads_on_shrink() {
     use super::filter::fit_to_original_length;
     let new = bytes::Bytes::from_static(b"abc");
-    let out = fit_to_original_length(new, 8, "service/invoke", "test");
+    let out = fit_to_original_length(new, 8, "tools/call", "test");
     assert_eq!(out.len(), 8, "padded length must match original");
     assert_eq!(&out[..3], b"abc");
     assert!(
@@ -1175,7 +1227,7 @@ fn fit_to_original_length_pads_on_shrink() {
 fn fit_to_original_length_passes_through_on_equal() {
     use super::filter::fit_to_original_length;
     let new = bytes::Bytes::from_static(b"redacted");
-    let out = fit_to_original_length(new.clone(), 8, "service/invoke", "test");
+    let out = fit_to_original_length(new.clone(), 8, "tools/call", "test");
     assert_eq!(out, new);
 }
 
@@ -1189,7 +1241,7 @@ fn fit_to_original_length_passes_through_on_equal() {
 fn fit_to_original_length_truncates_on_grow() {
     use super::filter::fit_to_original_length;
     let new = bytes::Bytes::from_static(b"a much longer rewritten payload");
-    let out = fit_to_original_length(new.clone(), 4, "service/invoke", "test");
+    let out = fit_to_original_length(new.clone(), 4, "tools/call", "test");
     assert_eq!(out.len(), 4, "grow path must truncate to the original length");
     assert_eq!(&*out, &new[..4], "truncation keeps the leading bytes");
 }
@@ -1203,9 +1255,9 @@ fn fit_to_original_length_truncates_on_grow() {
 #[test]
 fn entity_for_protocol_method_covers_known_methods() {
     use super::common_message_format::entity_for_protocol_method;
-    assert!(entity_for_protocol_method("service/invoke").is_some());
-    assert!(entity_for_protocol_method("template/get").is_some());
-    assert!(entity_for_protocol_method("resource/read").is_some());
+    assert!(entity_for_protocol_method("tools/call").is_some());
+    assert!(entity_for_protocol_method("prompts/get").is_some());
+    assert!(entity_for_protocol_method("resources/read").is_some());
     assert!(entity_for_protocol_method("service/list").is_none());
     assert!(entity_for_protocol_method("initialize").is_none());
     assert!(entity_for_protocol_method("unknown/method").is_none());
@@ -1215,9 +1267,9 @@ fn entity_for_protocol_method_covers_known_methods() {
 #[test]
 fn entity_for_protocol_method_post_covers_known_methods() {
     use super::common_message_format::entity_for_protocol_method_post;
-    assert!(entity_for_protocol_method_post("service/invoke").is_some());
-    assert!(entity_for_protocol_method_post("template/get").is_some());
-    assert!(entity_for_protocol_method_post("resource/read").is_some());
+    assert!(entity_for_protocol_method_post("tools/call").is_some());
+    assert!(entity_for_protocol_method_post("prompts/get").is_some());
+    assert!(entity_for_protocol_method_post("resources/read").is_some());
     assert!(entity_for_protocol_method_post("service/list").is_none());
     assert!(entity_for_protocol_method_post("initialize").is_none());
 }
@@ -1256,7 +1308,7 @@ fn json_rpc_id_value_preserves_json_type() {
     assert_eq!(json_rpc_id_value(&bad), serde_json::Value::Null);
 }
 
-/// `service/invoke` parses `params.arguments` into a `ToolCall` content
+/// `tools/call` parses `params.arguments` into a `ToolCall` content
 /// part so APL `args.<field>` predicates have something to read.
 #[test]
 fn build_content_for_method_tools_call() {
@@ -1265,10 +1317,10 @@ fn build_content_for_method_tools_call() {
     use super::json_rpc::build_content_for_method;
 
     let body = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"method":"service/invoke",
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
              "params":{"name":"echo","arguments":{"text":"hi","n":7}}}"#,
     );
-    let parts = build_content_for_method("service/invoke", "echo", "corr-1", &body);
+    let parts = build_content_for_method("tools/call", "echo", "corr-1", &body);
     assert_eq!(parts.len(), 1);
     match &parts[0] {
         ContentPart::ToolCall { content } => {
@@ -1281,7 +1333,7 @@ fn build_content_for_method_tools_call() {
     }
 }
 
-/// `resource/read` produces a `ResourceRef` keyed off `params.uri`
+/// `resources/read` produces a `ResourceRef` keyed off `params.uri`
 /// so route resolution and APL `resource.*` predicates work.
 #[test]
 fn build_content_for_method_resources_read() {
@@ -1290,10 +1342,10 @@ fn build_content_for_method_resources_read() {
     use super::json_rpc::build_content_for_method;
 
     let body = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"method":"resource/read",
+        br#"{"jsonrpc":"2.0","id":1,"method":"resources/read",
              "params":{"uri":"file:///etc/example"}}"#,
     );
-    let parts = build_content_for_method("resource/read", "file:///etc/example", "corr-1", &body);
+    let parts = build_content_for_method("resources/read", "file:///etc/example", "corr-1", &body);
     assert_eq!(parts.len(), 1);
     match &parts[0] {
         ContentPart::ResourceRef { content } => {
@@ -1310,13 +1362,13 @@ fn build_content_for_method_resources_read() {
 #[test]
 fn build_content_for_method_unknown_method_yields_empty() {
     use super::json_rpc::build_content_for_method;
-    let body = bytes::Bytes::from_static(br#"{"method":"service/list"}"#);
-    let parts = build_content_for_method("service/list", "n/a", "corr-1", &body);
+    let body = bytes::Bytes::from_static(br#"{"method":"tools/list"}"#);
+    let parts = build_content_for_method("tools/list", "n/a", "corr-1", &body);
     assert!(parts.is_empty());
 }
 
 /// `reserialize_json_rpc_body` mutates only `params.arguments` (for
-/// `service/invoke`), leaving `jsonrpc`, `id`, `method`, `params.name`
+/// `tools/call`), leaving `jsonrpc`, `id`, `method`, `params.name`
 /// untouched. Operators who hash the envelope only see deltas when
 /// APL actually mutated.
 #[test]
@@ -1326,7 +1378,7 @@ fn reserialize_tools_call_round_trips_with_mutated_args() {
     use super::json_rpc::reserialize_json_rpc_body;
 
     let original = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"method":"service/invoke",
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
              "params":{"name":"echo","arguments":{"a":1}}}"#,
     );
     let mut new_args: std::collections::HashMap<String, serde_json::Value> = std::collections::HashMap::new();
@@ -1342,11 +1394,11 @@ fn reserialize_tools_call_round_trips_with_mutated_args() {
             },
         }],
     );
-    let new_bytes = reserialize_json_rpc_body(&original, "service/invoke", &message).expect("rewrite Some");
+    let new_bytes = reserialize_json_rpc_body(&original, "tools/call", &message).expect("rewrite Some");
     let parsed: serde_json::Value = serde_json::from_slice(&new_bytes).expect("valid JSON");
     assert_eq!(parsed["jsonrpc"], "2.0");
     assert_eq!(parsed["id"], 1);
-    assert_eq!(parsed["method"], "service/invoke");
+    assert_eq!(parsed["method"], "tools/call");
     assert_eq!(parsed["params"]["name"], "echo");
     assert_eq!(parsed["params"]["arguments"]["a"], "[REDACTED]");
 }
@@ -1366,7 +1418,7 @@ fn build_response_content_for_method_text_fallback() {
              "content":[{"type":"text","text":"{\"k\":\"v\"}"}],
              "isError":false}}"#,
     );
-    let parts = build_response_content_for_method("service/invoke", "echo", "corr-1", &body);
+    let parts = build_response_content_for_method("tools/call", "echo", "corr-1", &body);
     assert_eq!(parts.len(), 1);
     match &parts[0] {
         ContentPart::ToolResult { content } => {
@@ -1391,7 +1443,7 @@ fn build_response_content_for_method_prefers_structured_content() {
              "structuredContent":{"hi":"there"},
              "isError":true}}"#,
     );
-    let parts = build_response_content_for_method("service/invoke", "echo", "corr-1", &body);
+    let parts = build_response_content_for_method("tools/call", "echo", "corr-1", &body);
     assert_eq!(parts.len(), 1);
     match &parts[0] {
         ContentPart::ToolResult { content } => {
@@ -1421,7 +1473,7 @@ fn build_response_content_for_method_folds_all_text_blocks() {
              ],
              "isError":false}}"#,
     );
-    let parts = build_response_content_for_method("service/invoke", "echo", "corr-1", &body);
+    let parts = build_response_content_for_method("tools/call", "echo", "corr-1", &body);
     assert_eq!(parts.len(), 1);
     match &parts[0] {
         ContentPart::ToolResult { content } => {
@@ -1461,7 +1513,7 @@ fn reserialize_response_collapses_to_single_vetted_block() {
             },
         }],
     );
-    let out = reserialize_json_rpc_response_body(&original, "service/invoke", &message).expect("Some");
+    let out = reserialize_json_rpc_response_body(&original, "tools/call", &message).expect("Some");
     let parsed: serde_json::Value = serde_json::from_slice(&out).expect("valid JSON");
     let content = parsed["result"]["content"].as_array().expect("content array");
     assert_eq!(content.len(), 1, "extra blocks must be dropped; got {content:?}");
@@ -1488,7 +1540,7 @@ fn deny_envelope_fits_committed_length() {
     let violation = PluginViolation::new("gateway.response_rewrite_overflow", "too large to fit");
     let envelope = json_rpc_error_envelope_bytes(Some(&violation), &serde_json::json!(1));
     let original_len = envelope.len() + 64;
-    let fitted = fit_to_original_length(envelope, original_len, "service/invoke", "overflow");
+    let fitted = fit_to_original_length(envelope, original_len, "tools/call", "overflow");
     assert_eq!(
         fitted.len(),
         original_len,
@@ -1501,7 +1553,7 @@ fn deny_envelope_fits_committed_length() {
 // -----------------------------------------------------------------------------
 
 /// `on_request_body` for an identity-only policy (no entity routes): even
-/// with `protocol.method` / `protocol.name` present, there are no entity
+/// with `mcp.method` / `mcp.name` present, there are no entity
 /// routes to authorize, so the body phase short-circuits to `BodyDone`.
 /// (Actual per-entity CMF dispatch is covered by the routed-policy tests.)
 #[tokio::test(flavor = "multi_thread")]
@@ -1516,11 +1568,11 @@ async fn on_request_body_dispatches_cmf_when_metadata_present() {
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("protocol.method", "service/invoke");
-    ctx.set_metadata("protocol.name", "echo");
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
 
     let body = bytes::Bytes::from_static(
-        br#"{"jsonrpc":"2.0","id":1,"method":"service/invoke",
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call",
              "params":{"name":"echo","arguments":{}}}"#,
     );
 
@@ -1781,8 +1833,8 @@ async fn response_phase_without_request_identity_fails_closed() {
 
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
-    ctx.set_metadata("protocol.method", "service/invoke");
-    ctx.set_metadata("protocol.name", "echo");
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
 
     // No `on_request_body` ran on this ctx, so no `ResolvedIdentity` is
     // stashed. The response body is comfortably larger than the deny
