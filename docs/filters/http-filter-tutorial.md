@@ -39,6 +39,7 @@ publish = false
 
 [dependencies]
 async-trait = "0.1"
+http = "1"
 praxis-filter = { package = "praxis-proxy-filter", path = "../../filter" }
 serde = { version = "1", features = ["derive"] }
 serde_yaml = { package = "yaml_serde", version = "0.10.4" }
@@ -78,6 +79,10 @@ struct RequireHeaderFilter {
 impl RequireHeaderFilter {
     fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let config: RequireHeaderConfig = parse_filter_config("require_header", config)?;
+        http::header::HeaderName::from_bytes(config.header.as_bytes())
+            .map_err(|_| FilterError::from(
+                format!("require_header: invalid header name: '{}'", config.header),
+            ))?;
 
         Ok(Box::new(Self { header: config.header }))
     }
@@ -112,7 +117,9 @@ The implementation has four parts:
 - `RequireHeaderConfig` is the operator-facing YAML schema.
   `deny_unknown_fields` catches misspelled settings at startup.
 - `from_config` validates configuration once and constructs the
-  filter. Request hooks should not repeatedly parse configuration.
+  filter. The `HeaderName` check rejects invalid names at startup
+  instead of silently failing every request. Request hooks should
+  not repeatedly parse configuration.
 - `on_request` returns `Continue` to run the next filter or
   `Reject` to stop the pipeline and send a response immediately.
 - `export_filters!` associates the YAML name `require_header`
@@ -141,7 +148,7 @@ mod tests {
 
         let filter = registry.create("require_header", &config).expect("filter should build");
 
-        assert_eq!(filter.name(), "require_header");
+        assert_eq!(filter.name(), "require_header", "factory should produce filter with matching name");
     }
 
     #[test]
@@ -152,7 +159,7 @@ mod tests {
             .err()
             .expect("unknown field should fail");
 
-        assert!(error.to_string().contains("unexpected"));
+        assert!(error.to_string().contains("unexpected"), "error should mention the unknown field");
     }
 }
 ```
