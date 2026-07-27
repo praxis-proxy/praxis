@@ -162,6 +162,16 @@ credentials:
 }
 
 #[test]
+fn rejects_realm_with_backslash() {
+    let yaml = yaml("realm: 'has\\\\slash'\ncredentials:\n  - username: admin\n    password: secret\n");
+    let err = BasicAuthFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("realm must not contain"),
+        "should reject realm with backslash: {err}"
+    );
+}
+
+#[test]
 fn rejects_realm_with_control_character() {
     let yaml = yaml("realm: \"has\\x00null\"\ncredentials:\n  - username: admin\n    password: secret\n");
     let err = BasicAuthFilter::from_config(&yaml).err().expect("should fail");

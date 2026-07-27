@@ -69,8 +69,8 @@ impl TryFrom<RawBasicAuthConfig> for BasicAuthConfig {
             (false, None) => CredentialSourceConfig::Inline(raw.credentials),
             (true, Some(store)) => CredentialSourceConfig::KvStore(store),
         };
-        if raw.realm.contains('"') || raw.realm.bytes().any(|b| b < 0x20 || b == 0x7F) {
-            return Err("realm must not contain double-quotes or control characters".into());
+        if raw.realm.contains('"') || raw.realm.contains('\\') || raw.realm.bytes().any(|b| b < 0x20 || b == 0x7F) {
+            return Err("realm must not contain double-quotes, backslashes, or control characters".into());
         }
 
         Ok(Self {
