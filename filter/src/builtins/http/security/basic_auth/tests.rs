@@ -244,6 +244,41 @@ async fn rejects_invalid_base64() {
 }
 
 #[tokio::test]
+async fn rejects_non_utf8_base64() {
+    let f = make_filter(&[("admin", "secret")], "Restricted");
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers.insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("Basic gP8="),
+    );
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = f.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(r) if r.status == 401),
+        "non-UTF-8 decoded payload should return 401"
+    );
+}
+
+#[tokio::test]
+async fn rejects_credentials_without_colon() {
+    let f = make_filter(&[("admin", "secret")], "Restricted");
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    let encoded = STANDARD.encode("usernameonly");
+    req.headers.insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_str(&format!("Basic {encoded}")).unwrap(),
+    );
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = f.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(&action, FilterAction::Reject(r) if r.status == 401),
+        "credentials without colon separator should return 401"
+    );
+}
+
+#[tokio::test]
 async fn rejects_wrong_password() {
     let f = make_filter(&[("admin", "secret")], "Restricted");
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
