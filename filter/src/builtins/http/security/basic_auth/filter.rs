@@ -88,6 +88,10 @@ impl CredentialSource {
 
 /// HTTP Basic Authentication filter (RFC 7617).
 ///
+/// Experimental: requires the `basic-auth-filter` cargo feature,
+/// which is off by default. Credentials are stored in plaintext;
+/// this filter is intended for development and testing only.
+///
 /// Extracts credentials from the `Authorization: Basic` header,
 /// validates against a configurable credential source (inline
 /// list or runtime KV store), and returns 401 with
