@@ -113,6 +113,98 @@ clean:
 	cargo clean
 
 # -------------------------------------------------------------------
+# Binutils (must precede Test/Bench — Make expands prerequisites
+# immediately, so H2SPEC/VEGETA/FORTIO_DEP must be defined first)
+# -------------------------------------------------------------------
+
+BINUTILS_DIR   ?= target/praxis-binutils
+BINUTILS_PATH  := $(abspath $(BINUTILS_DIR))
+
+H2SPEC_VERSION := 2.6.0
+VEGETA_VERSION := 12.13.0
+FORTIO_VERSION := 1.75.1
+
+H2SPEC := $(BINUTILS_DIR)/h2spec
+VEGETA := $(BINUTILS_DIR)/vegeta
+FORTIO := $(BINUTILS_DIR)/fortio
+
+# The MacOS / OSX sha256 command does not support the needed options.
+# On Mac, `brew install coreutils` provides gsha256sum.
+SHA256SUM := sha256sum
+ifeq ($(UNAME_S),darwin)
+  SHA256SUM := gsha256sum
+endif
+
+
+# Map architecture names
+ifeq ($(UNAME_M),x86_64)
+  ARCH_GO := amd64
+else ifeq ($(UNAME_M),aarch64)
+  ARCH_GO := arm64
+else
+  ARCH_GO := $(UNAME_M)
+endif
+
+$(BINUTILS_DIR):
+	mkdir -p $(BINUTILS_DIR)
+
+H2SPEC_SHA256_linux_amd64  := 157ee0de702e01ad40e752dbf074b366027e550c8e7504f9450da2809e279318
+H2SPEC_SHA256_darwin_amd64 := 981cb9f90a6f5e36300063022bd4eb7438d3dcf66d63a146a8541359697d1601
+
+# h2spec has no arm64 builds; fall back to amd64.
+ifeq ($(ARCH_GO),arm64)
+  H2SPEC_ARCH := amd64
+else
+  H2SPEC_ARCH := $(ARCH_GO)
+endif
+
+H2SPEC_SHA256 := $(H2SPEC_SHA256_$(UNAME_S)_$(H2SPEC_ARCH))
+
+$(H2SPEC): | $(BINUTILS_DIR)
+	curl -sSfL -o $(BINUTILS_DIR)/h2spec.tar.gz \
+		https://github.com/summerwind/h2spec/releases/download/v$(H2SPEC_VERSION)/h2spec_$(UNAME_S)_$(H2SPEC_ARCH).tar.gz
+	$(if $(H2SPEC_SHA256),echo "$(H2SPEC_SHA256)  $(BINUTILS_DIR)/h2spec.tar.gz" | $(SHA256SUM) -c,)
+	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/h2spec.tar.gz h2spec
+	rm -f $(BINUTILS_DIR)/h2spec.tar.gz
+
+VEGETA_SHA256_linux_amd64  := e8759ce45c14e18374bdccd3ba6068197bc3a9f9b7e484db3837f701b9d12e61
+VEGETA_SHA256_linux_arm64  := 950381173a5575e25e8e086f36fc03bf65d61a2433329b48e41e1cb5e4133bba
+VEGETA_SHA256_darwin_amd64 := 4e912c83ce07db4e1e394e1cbb657f2396dff2f7ed90f03869a184cc17d0f994
+VEGETA_SHA256_darwin_arm64 := fc408e242c4f4839e6fe536dbf1130bb02f430134827f6d831bf367a0929a799
+VEGETA_SHA256 := $(VEGETA_SHA256_$(UNAME_S)_$(ARCH_GO))
+
+$(VEGETA): | $(BINUTILS_DIR)
+	curl -sSfL -o $(BINUTILS_DIR)/vegeta.tar.gz \
+		https://github.com/tsenart/vegeta/releases/download/v$(VEGETA_VERSION)/vegeta_$(VEGETA_VERSION)_$(UNAME_S)_$(ARCH_GO).tar.gz
+	$(if $(VEGETA_SHA256),echo "$(VEGETA_SHA256)  $(BINUTILS_DIR)/vegeta.tar.gz" | $(SHA256SUM) -c,)
+	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/vegeta.tar.gz vegeta
+	rm -f $(BINUTILS_DIR)/vegeta.tar.gz
+
+FORTIO_SHA256_linux_amd64  := 92da34238dee258191a9dc6691c8bc75305b308951e934e2c3b4e658db0d77d1
+FORTIO_SHA256_linux_arm64  := f66275a56ef41e9a5afb2ea8181eb53ca36b34c6d19a201b58aec17dbe95a853
+FORTIO_SHA256 := $(FORTIO_SHA256_$(UNAME_S)_$(ARCH_GO))
+
+$(FORTIO): | $(BINUTILS_DIR)
+	curl -sSfL -o $(BINUTILS_DIR)/fortio.tgz \
+		https://github.com/fortio/fortio/releases/download/v$(FORTIO_VERSION)/fortio-$(UNAME_S)_$(ARCH_GO)-$(FORTIO_VERSION).tgz
+	$(if $(FORTIO_SHA256),echo "$(FORTIO_SHA256)  $(BINUTILS_DIR)/fortio.tgz" | $(SHA256SUM) -c,)
+	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/fortio.tgz usr/bin/fortio --strip-components=2
+	rm -f $(BINUTILS_DIR)/fortio.tgz
+
+# Fortio builds are not available on GitHub for Darwin (Mac OSX).
+# On Mac, use `brew install fortio` so it is on $PATH at bench time.
+ifeq ($(UNAME_S),darwin)
+  FORTIO_DEP :=
+else
+  FORTIO_DEP := $(FORTIO)
+endif
+
+tools: $(H2SPEC) $(VEGETA) $(FORTIO_DEP)
+
+clean-tools:
+	rm -rf $(BINUTILS_DIR)
+
+# -------------------------------------------------------------------
 # Container
 # -------------------------------------------------------------------
 
@@ -254,97 +346,6 @@ run-echo:
 
 run-debug:
 	cargo xtask debug
-
-# -------------------------------------------------------------------
-# Binutils
-# -------------------------------------------------------------------
-
-BINUTILS_DIR   ?= target/praxis-binutils
-BINUTILS_PATH  := $(abspath $(BINUTILS_DIR))
-
-H2SPEC_VERSION := 2.6.0
-VEGETA_VERSION := 12.13.0
-FORTIO_VERSION := 1.75.1
-
-H2SPEC := $(BINUTILS_DIR)/h2spec
-VEGETA := $(BINUTILS_DIR)/vegeta
-FORTIO := $(BINUTILS_DIR)/fortio
-
-# The MacOS / OSX sha256 command does not support the needed options.
-# On Mac, `brew install coreutils` provides gsha256sum.
-SHA256SUM := sha256sum
-ifeq ($(UNAME_S),darwin)
-  SHA256SUM := gsha256sum
-endif
-
-
-# Map architecture names
-ifeq ($(UNAME_M),x86_64)
-  ARCH_GO := amd64
-else ifeq ($(UNAME_M),aarch64)
-  ARCH_GO := arm64
-else
-  ARCH_GO := $(UNAME_M)
-endif
-
-$(BINUTILS_DIR):
-	mkdir -p $(BINUTILS_DIR)
-
-H2SPEC_SHA256_linux_amd64  := 157ee0de702e01ad40e752dbf074b366027e550c8e7504f9450da2809e279318
-H2SPEC_SHA256_darwin_amd64 := 981cb9f90a6f5e36300063022bd4eb7438d3dcf66d63a146a8541359697d1601
-
-# h2spec has no arm64 builds; fall back to amd64.
-ifeq ($(ARCH_GO),arm64)
-  H2SPEC_ARCH := amd64
-else
-  H2SPEC_ARCH := $(ARCH_GO)
-endif
-
-H2SPEC_SHA256 := $(H2SPEC_SHA256_$(UNAME_S)_$(H2SPEC_ARCH))
-
-$(H2SPEC): | $(BINUTILS_DIR)
-	curl -sSfL -o $(BINUTILS_DIR)/h2spec.tar.gz \
-		https://github.com/summerwind/h2spec/releases/download/v$(H2SPEC_VERSION)/h2spec_$(UNAME_S)_$(H2SPEC_ARCH).tar.gz
-	$(if $(H2SPEC_SHA256),echo "$(H2SPEC_SHA256)  $(BINUTILS_DIR)/h2spec.tar.gz" | $(SHA256SUM) -c,)
-	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/h2spec.tar.gz h2spec
-	rm -f $(BINUTILS_DIR)/h2spec.tar.gz
-
-VEGETA_SHA256_linux_amd64  := e8759ce45c14e18374bdccd3ba6068197bc3a9f9b7e484db3837f701b9d12e61
-VEGETA_SHA256_linux_arm64  := 950381173a5575e25e8e086f36fc03bf65d61a2433329b48e41e1cb5e4133bba
-VEGETA_SHA256_darwin_amd64 := 4e912c83ce07db4e1e394e1cbb657f2396dff2f7ed90f03869a184cc17d0f994
-VEGETA_SHA256_darwin_arm64 := fc408e242c4f4839e6fe536dbf1130bb02f430134827f6d831bf367a0929a799
-VEGETA_SHA256 := $(VEGETA_SHA256_$(UNAME_S)_$(ARCH_GO))
-
-$(VEGETA): | $(BINUTILS_DIR)
-	curl -sSfL -o $(BINUTILS_DIR)/vegeta.tar.gz \
-		https://github.com/tsenart/vegeta/releases/download/v$(VEGETA_VERSION)/vegeta_$(VEGETA_VERSION)_$(UNAME_S)_$(ARCH_GO).tar.gz
-	$(if $(VEGETA_SHA256),echo "$(VEGETA_SHA256)  $(BINUTILS_DIR)/vegeta.tar.gz" | $(SHA256SUM) -c,)
-	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/vegeta.tar.gz vegeta
-	rm -f $(BINUTILS_DIR)/vegeta.tar.gz
-
-FORTIO_SHA256_linux_amd64  := 92da34238dee258191a9dc6691c8bc75305b308951e934e2c3b4e658db0d77d1
-FORTIO_SHA256_linux_arm64  := f66275a56ef41e9a5afb2ea8181eb53ca36b34c6d19a201b58aec17dbe95a853
-FORTIO_SHA256 := $(FORTIO_SHA256_$(UNAME_S)_$(ARCH_GO))
-
-$(FORTIO): | $(BINUTILS_DIR)
-	curl -sSfL -o $(BINUTILS_DIR)/fortio.tgz \
-		https://github.com/fortio/fortio/releases/download/v$(FORTIO_VERSION)/fortio-$(UNAME_S)_$(ARCH_GO)-$(FORTIO_VERSION).tgz
-	$(if $(FORTIO_SHA256),echo "$(FORTIO_SHA256)  $(BINUTILS_DIR)/fortio.tgz" | $(SHA256SUM) -c,)
-	tar xz -C $(BINUTILS_DIR) -f $(BINUTILS_DIR)/fortio.tgz usr/bin/fortio --strip-components=2
-	rm -f $(BINUTILS_DIR)/fortio.tgz
-
-# Fortio builds are not available on GitHub for Darwin (Mac OSX).
-# On Mac, use `brew install fortio` so it is on $PATH at bench time.
-ifeq ($(UNAME_S),darwin)
-  FORTIO_DEP :=
-else
-  FORTIO_DEP := $(FORTIO)
-endif
-
-tools: $(H2SPEC) $(VEGETA) $(FORTIO_DEP)
-
-clean-tools:
-	rm -rf $(BINUTILS_DIR)
 
 # -------------------------------------------------------------------
 # Help
