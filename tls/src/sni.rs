@@ -695,25 +695,31 @@ mod tests {
 
     #[test]
     fn dns_validation_rejects_leading_hyphen() {
-        assert!(
-            crate::dns::validate_dns_hostname("-example.com").is_err(),
-            "leading hyphen should be rejected"
+        assert_eq!(
+            crate::dns::validate_dns_hostname("-example.com"),
+            Err(crate::dns::DnsHostnameError::Label(
+                crate::dns::DnsLabelError::HyphenBoundary
+            )),
         );
     }
 
     #[test]
     fn dns_validation_rejects_trailing_hyphen() {
-        assert!(
-            crate::dns::validate_dns_hostname("example-.com").is_err(),
-            "trailing hyphen should be rejected"
+        assert_eq!(
+            crate::dns::validate_dns_hostname("example-.com"),
+            Err(crate::dns::DnsHostnameError::Label(
+                crate::dns::DnsLabelError::HyphenBoundary
+            )),
         );
     }
 
     #[test]
     fn dns_validation_rejects_space() {
-        assert!(
-            crate::dns::validate_dns_hostname("ex ample.com").is_err(),
-            "space in hostname should be rejected"
+        assert_eq!(
+            crate::dns::validate_dns_hostname("ex ample.com"),
+            Err(crate::dns::DnsHostnameError::Label(
+                crate::dns::DnsLabelError::InvalidCharacter
+            )),
         );
     }
 
@@ -721,34 +727,40 @@ mod tests {
     fn dns_validation_rejects_label_over_63_chars() {
         let long_label = "a".repeat(64);
         let hostname = format!("{long_label}.com");
-        assert!(
-            crate::dns::validate_dns_hostname(&hostname).is_err(),
-            "label >63 chars should be rejected"
+        assert_eq!(
+            crate::dns::validate_dns_hostname(&hostname),
+            Err(crate::dns::DnsHostnameError::Label(
+                crate::dns::DnsLabelError::LabelTooLong
+            )),
         );
     }
 
     #[test]
     fn dns_validation_rejects_total_over_253_chars() {
         let hostname = format!("{}.com", "a".repeat(250));
-        assert!(
-            crate::dns::validate_dns_hostname(&hostname).is_err(),
-            "hostname >253 chars should be rejected"
+        assert_eq!(
+            crate::dns::validate_dns_hostname(&hostname),
+            Err(crate::dns::DnsHostnameError::HostnameTooLong),
         );
     }
 
     #[test]
     fn dns_validation_rejects_control_chars() {
-        assert!(
-            crate::dns::validate_dns_hostname("host\r\nname.com").is_err(),
-            "CRLF in hostname should be rejected"
+        assert_eq!(
+            crate::dns::validate_dns_hostname("host\r\nname.com"),
+            Err(crate::dns::DnsHostnameError::Label(
+                crate::dns::DnsLabelError::InvalidCharacter
+            )),
         );
     }
 
     #[test]
     fn trailing_dot_hostname_rejected() {
-        assert!(
-            crate::dns::validate_dns_hostname("example.com.").is_err(),
-            "trailing dot produces an empty label which should be rejected"
+        assert_eq!(
+            crate::dns::validate_dns_hostname("example.com."),
+            Err(crate::dns::DnsHostnameError::Label(
+                crate::dns::DnsLabelError::EmptyLabel
+            )),
         );
     }
 
