@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Shared HTTP connector for sub-request execution.
+//! Sub-request types and shared HTTP connector.
 //!
-//! Wraps a Pingora [`Connector`] in an [`Arc`] so it can be cloned
-//! cheaply and shared across filter pipelines and config reloads.
-//! The connector provides connection pooling, HTTP/2 ALPN
-//! negotiation, and TLS — the same transport layer that Pingora
-//! uses for normal upstream exchanges.
+//! Defines the `SubRequest` and `SubResponse` data types used by
+//! sub-request exchanges, plus the `SubRequestConnector` that wraps
+//! a Pingora `Connector` for connection pooling, HTTP/2 ALPN
+//! negotiation, and TLS.
 //!
 //! ```
 //! use praxis_core::subrequest::SubRequestConnector;
@@ -16,13 +15,47 @@
 //! let clone = connector.clone(); // Arc bump, same pool
 //! ```
 //!
-//! [`Arc`]: std::sync::Arc
 //! [`Connector`]: pingora_core::connectors::http::Connector
 
 use std::sync::Arc;
 
+use bytes::Bytes;
+use http::HeaderMap;
 use pingora_core::connectors::{ConnectorOptions, http::Connector};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+// ---------------------------------------------------------------------------
+// SubRequest / SubResponse
+// ---------------------------------------------------------------------------
+
+/// An outbound HTTP request for a sub-request exchange.
+#[derive(Clone, Debug)]
+pub struct SubRequest {
+    /// HTTP method.
+    pub method: http::Method,
+
+    /// Request URI (path + query).
+    pub uri: http::Uri,
+
+    /// Request headers.
+    pub headers: HeaderMap,
+
+    /// Request body.
+    pub body: Bytes,
+}
+
+/// The response from a sub-request exchange.
+#[derive(Clone, Debug)]
+pub struct SubResponse {
+    /// HTTP status code.
+    pub status: u16,
+
+    /// Response headers.
+    pub headers: HeaderMap,
+
+    /// Buffered response body.
+    pub body: Bytes,
+}
 
 // ---------------------------------------------------------------------------
 // SubRequestConnector
@@ -204,5 +237,30 @@ mod tests {
             Arc::ptr_eq(a.admission.as_ref().unwrap(), b.admission.as_ref().unwrap()),
             "cloned connectors should share the semaphore"
         );
+    }
+
+    #[test]
+    fn subrequest_clone_preserves_fields() {
+        let req = SubRequest {
+            method: http::Method::POST,
+            uri: "/v1/chat".parse().unwrap(),
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(b"hello"),
+        };
+        let cloned = req.clone();
+        assert_eq!(cloned.method, http::Method::POST);
+        assert_eq!(cloned.body, Bytes::from_static(b"hello"));
+    }
+
+    #[test]
+    fn subresponse_clone_preserves_fields() {
+        let resp = SubResponse {
+            status: 200,
+            headers: HeaderMap::new(),
+            body: Bytes::from_static(b"world"),
+        };
+        let cloned = resp.clone();
+        assert_eq!(cloned.status, 200);
+        assert_eq!(cloned.body, Bytes::from_static(b"world"));
     }
 }

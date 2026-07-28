@@ -684,7 +684,7 @@ fn local_rejection_becomes_transition_response() {
 
 #[test]
 fn build_terminal_preserves_body() {
-    use crate::pipeline::subrequest::SubResponse;
+    use crate::SubResponse;
 
     let response = SubResponse {
         status: 200,
@@ -706,7 +706,7 @@ fn build_terminal_preserves_body() {
 
 #[test]
 fn build_terminal_preserves_headers() {
-    use crate::pipeline::subrequest::SubResponse;
+    use crate::SubResponse;
 
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json".parse().unwrap());
@@ -743,8 +743,8 @@ fn make_default_done() -> config::StepTransition {
 }
 
 /// Build a minimal `SubResponse` with the given status.
-fn make_response(status: u16) -> crate::pipeline::subrequest::SubResponse {
-    crate::pipeline::subrequest::SubResponse {
+fn make_response(status: u16) -> crate::SubResponse {
+    crate::SubResponse {
         status,
         headers: HeaderMap::new(),
         body: bytes::Bytes::new(),
@@ -1791,7 +1791,7 @@ fn build_terminal_empty_body_has_no_body() {
 
 #[test]
 fn build_terminal_multiple_headers() {
-    use crate::pipeline::subrequest::SubResponse;
+    use crate::SubResponse;
 
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json".parse().unwrap());
@@ -1807,7 +1807,7 @@ fn build_terminal_multiple_headers() {
 
 #[test]
 fn build_terminal_reframes_empty_response_for_keepalive() {
-    use crate::pipeline::subrequest::SubResponse;
+    use crate::SubResponse;
 
     let mut headers = HeaderMap::new();
     headers.insert(http::header::CONTENT_LENGTH, "99".parse().unwrap());
@@ -1837,7 +1837,7 @@ fn build_terminal_does_not_frame_bodyless_status() {
 
 #[test]
 fn build_terminal_preserves_head_content_length() {
-    use crate::pipeline::subrequest::SubResponse;
+    use crate::SubResponse;
 
     let mut headers = HeaderMap::new();
     headers.insert(http::header::CONTENT_LENGTH, "123".parse().unwrap());
@@ -1854,7 +1854,7 @@ fn build_terminal_preserves_head_content_length() {
 
 #[test]
 fn build_terminal_preserves_opaque_header_bytes() {
-    use crate::pipeline::subrequest::SubResponse;
+    use crate::SubResponse;
 
     let mut headers = HeaderMap::new();
     headers.insert("x-opaque", http::HeaderValue::from_bytes(&[b'a', 0x80, b'z']).unwrap());

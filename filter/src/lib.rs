@@ -43,9 +43,12 @@ pub use factory::{
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
 pub use pipeline::{
     FilterPipeline, PipelineExtension,
-    subrequest::{IterationState, NextIterationBody, SubRequest, SubResponse},
+    subrequest::{IterationState, NextIterationBody},
 };
-pub use praxis_core::config::{FailureMode, FilterEntry};
+pub use praxis_core::{
+    config::{FailureMode, FilterEntry},
+    subrequest::{SubRequest, SubResponse},
+};
 pub use praxis_tls::TlsPeerIdentity;
 pub use registry::{FilterRegistry, SecurityClass};
 pub use results::{FilterResultSet, matches_filter_result};

@@ -1037,7 +1037,7 @@ dependencies = [
  "base64",
  "chrono",
  "cpex-core",
- "reqwest 0.12.28",
+ "reqwest",
  "serde",
  "serde_json",
  "tokio",
@@ -2971,7 +2971,9 @@ dependencies = [
 name = "praxis-proxy-core"
 version = "0.4.1"
 dependencies = [
+ "bytes",
  "dashmap 6.2.1",
+ "http",
  "praxis-proxy-tls",
  "quixotic-plecostomus-core",
  "rand 0.10.2",

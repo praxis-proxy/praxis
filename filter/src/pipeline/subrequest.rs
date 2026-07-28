@@ -15,7 +15,7 @@ use std::{collections::HashMap, time::Duration};
 use bytes::Bytes;
 use http::HeaderMap;
 use pingora_core::upstreams::peer::{HttpPeer, Peer as _};
-use praxis_core::subrequest::SubRequestConnector;
+use praxis_core::subrequest::{SubRequest, SubRequestConnector, SubResponse};
 use thiserror::Error;
 use tracing::{debug, warn};
 
@@ -33,35 +33,6 @@ pub(crate) const DEPTH_HEADER: &str = "x-praxis-iterative-depth";
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
-
-/// An outbound HTTP request for a sub-request exchange.
-#[derive(Clone, Debug)]
-pub struct SubRequest {
-    /// HTTP method.
-    pub method: http::Method,
-
-    /// Request URI (path + query).
-    pub uri: http::Uri,
-
-    /// Request headers.
-    pub headers: HeaderMap,
-
-    /// Request body.
-    pub body: Bytes,
-}
-
-/// The response from a sub-request exchange.
-#[derive(Clone, Debug)]
-pub struct SubResponse {
-    /// HTTP status code.
-    pub status: u16,
-
-    /// Response headers.
-    pub headers: HeaderMap,
-
-    /// Buffered response body.
-    pub body: Bytes,
-}
 
 /// Per-request accumulator for state that persists across
 /// iterations of the iterative request router.
@@ -423,31 +394,6 @@ mod tests {
         assert!(empty_body_needs_framing(&http::Method::PATCH));
         assert!(!empty_body_needs_framing(&http::Method::GET));
         assert!(!empty_body_needs_framing(&http::Method::HEAD));
-    }
-
-    #[test]
-    fn subrequest_clone_preserves_fields() {
-        let req = SubRequest {
-            method: http::Method::POST,
-            uri: "/v1/chat".parse().unwrap(),
-            headers: HeaderMap::new(),
-            body: Bytes::from_static(b"hello"),
-        };
-        let cloned = req.clone();
-        assert_eq!(cloned.method, http::Method::POST);
-        assert_eq!(cloned.body, Bytes::from_static(b"hello"));
-    }
-
-    #[test]
-    fn subresponse_clone_preserves_fields() {
-        let resp = SubResponse {
-            status: 200,
-            headers: HeaderMap::new(),
-            body: Bytes::from_static(b"world"),
-        };
-        let cloned = resp.clone();
-        assert_eq!(cloned.status, 200);
-        assert_eq!(cloned.body, Bytes::from_static(b"world"));
     }
 
     #[test]
