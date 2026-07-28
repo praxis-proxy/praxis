@@ -39,6 +39,7 @@ make check
 ### Test
 
 ```console
+make tools
 make test
 make test-integration
 ```

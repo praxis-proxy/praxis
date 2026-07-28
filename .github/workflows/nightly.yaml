@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust (stable + nightly fmt)
-        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
 
       - name: Install cargo-machete
         run: cargo install cargo-machete --locked
@@ -53,7 +53,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
         with:
           cache-suffix: doc
 
@@ -72,7 +72,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
 
       - name: Unit tests
         run: make test-unit
@@ -89,7 +89,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
 
       - name: Schema tests
         run: make test-schema
@@ -115,7 +115,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
 
       - name: Install Tools
         run: make target/praxis-binutils/h2spec
@@ -135,7 +135,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Supply chain audit
-        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
 
   # ----------------------------------------------------------------------------
   # Coverage gate
@@ -149,4 +149,4 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Check coverage
-        uses: praxis-proxy/conventions/.github/actions/coverage-check@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/coverage-check@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
