@@ -48,7 +48,7 @@ pub fn resolve_pipelines(
     registry: &FilterRegistry,
     health_registry: &praxis_core::health::HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
-    subrequest_connector: &praxis_core::subrequest::SubRequestConnector,
+    subrequest_client: &praxis_core::subrequest::SubRequestClient,
 ) -> Result<ListenerPipelines, Box<dyn std::error::Error + Send + Sync>> {
     let chains: HashMap<&str, &[_]> = config
         .filter_chains
@@ -71,7 +71,7 @@ pub fn resolve_pipelines(
         validate_terminal_position(&entries, &listener.name)?;
 
         let mut pipeline = FilterPipeline::build_with_chains(&mut entries, registry, &chains)?;
-        configure_pipeline(&mut pipeline, config, health_registry, kv_stores, subrequest_connector)?;
+        configure_pipeline(&mut pipeline, config, health_registry, kv_stores, subrequest_client)?;
 
         validate_pipeline(&pipeline, &entries, &listener.name, &config.insecure_options)?;
 
@@ -88,7 +88,7 @@ fn configure_pipeline(
     config: &Config,
     health_registry: &praxis_core::health::HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
-    subrequest_connector: &praxis_core::subrequest::SubRequestConnector,
+    subrequest_client: &praxis_core::subrequest::SubRequestClient,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     pipeline.apply_body_limits(
         config.body_limits.max_request_bytes,
@@ -102,7 +102,7 @@ fn configure_pipeline(
     if !kv_stores.is_empty() {
         pipeline.set_kv_stores(kv_stores.clone());
     }
-    pipeline.set_subrequest_connector(subrequest_connector.clone());
+    pipeline.set_subrequest_client(subrequest_client.clone());
     pipeline.apply_insecure_options(&config.insecure_options);
     Ok(())
 }
@@ -193,7 +193,7 @@ mod tests {
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         )
         .unwrap();
         assert!(
@@ -243,7 +243,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         )
         .unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
@@ -284,7 +284,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         )
         .unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
@@ -322,7 +322,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         )
         .unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
@@ -368,7 +368,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         );
         assert!(result.is_ok(), "router without LB should be a warning, not an error");
     }
@@ -399,7 +399,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         );
         assert!(result.is_ok(), "skip_pipeline_validation should allow startup");
     }
@@ -432,7 +432,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         );
         assert!(result.is_err(), "misaligned clusters should fail validation");
         let err = result.err().unwrap().to_string();
@@ -473,7 +473,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         );
         assert!(result.is_err(), "open security filter should fail validation");
         let err = result.err().unwrap().to_string();
@@ -516,7 +516,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         );
         assert!(result.is_ok(), "allow_open_security_filters should permit open ip_acl");
     }
@@ -551,7 +551,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         )
         .unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
@@ -571,7 +571,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &kv,
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         )
         .unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
@@ -588,7 +588,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &kv,
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         )
         .unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
@@ -629,7 +629,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         );
         assert!(
             result.is_ok(),
@@ -668,7 +668,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         );
         assert!(
             result.is_err(),
@@ -702,7 +702,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
-            &empty_subrequest_connector(),
+            &empty_subrequest_client(),
         );
         assert!(
             result.is_err(),
@@ -729,9 +729,9 @@ filter_chains:
         praxis_core::kv::KvStoreRegistry::new()
     }
 
-    /// Empty sub-request connector for tests.
-    fn empty_subrequest_connector() -> praxis_core::subrequest::SubRequestConnector {
-        praxis_core::subrequest::SubRequestConnector::new(8, None)
+    /// Empty sub-request client for tests.
+    fn empty_subrequest_client() -> praxis_core::subrequest::SubRequestClient {
+        praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None))
     }
 
     /// KV store registry with one test store.

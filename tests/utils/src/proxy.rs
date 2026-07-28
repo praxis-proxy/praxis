@@ -255,11 +255,19 @@ fn build_full_server(config: &Config) -> praxis_core::PingoraServerRuntime {
 /// registry, HTTP and TCP protocols, and background health probes.
 ///
 /// [`PingoraServerRuntime`]: praxis_core::PingoraServerRuntime
+#[expect(clippy::too_many_lines, reason = "test helper wiring")]
 fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -> praxis_core::PingoraServerRuntime {
     let health_registry = build_health_registry(&config.clusters);
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-    let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8, None);
-    let pipelines = praxis::resolve_pipelines(config, registry, &health_registry, &kv_stores, &subrequest_connector)
+    let ceiling = config
+        .body_limits
+        .max_response_bytes
+        .unwrap_or(praxis_core::config::ABSOLUTE_MAX_BODY_BYTES);
+    let subrequest_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
+        praxis_core::subrequest::SubRequestConnector::new(8, None),
+        ceiling,
+    );
+    let pipelines = praxis::resolve_pipelines(config, registry, &health_registry, &kv_stores, &subrequest_client)
         .expect("pipeline resolution should succeed in test");
 
     let mut runtime = praxis_core::PingoraServerRuntime::new(config);

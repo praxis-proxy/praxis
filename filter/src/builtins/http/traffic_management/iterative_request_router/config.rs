@@ -139,9 +139,10 @@ pub(crate) struct StepTransition {
     #[serde(default)]
     pub(crate) status: Option<Vec<u16>>,
 
-    /// Transport error kind to match: `connect`, `io`,
-    /// `deadline_exceeded`, or `response_too_large`. Only
-    /// meaningful when `origin: transport`.
+    /// Transport error kind to match: `admission_timeout`,
+    /// `connect`, `io`, `deadline_exceeded`, or
+    /// `response_too_large`. Only meaningful when
+    /// `origin: transport`.
     #[serde(default)]
     pub(crate) transport_error: Option<TransportErrorKind>,
 
@@ -170,6 +171,8 @@ pub(crate) enum ResponseOrigin {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum TransportErrorKind {
+    /// All concurrency slots were busy and the admission wait timed out.
+    AdmissionTimeout,
     /// TCP or TLS connection establishment failed.
     Connect,
     /// Post-connect I/O error during request/response exchange.

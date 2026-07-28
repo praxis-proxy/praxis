@@ -110,8 +110,8 @@ struct ServerState {
     pipelines: Arc<ListenerPipelines>,
     /// KV store registry.
     kv_stores: praxis_core::kv::KvStoreRegistry,
-    /// Shared HTTP connector for iterative sub-requests.
-    subrequest_connector: praxis_core::subrequest::SubRequestConnector,
+    /// Shared sub-request client for iterative sub-requests.
+    subrequest_client: praxis_core::subrequest::SubRequestClient,
     /// Health check cancellation token.
     health_shutdown: Arc<Mutex<CancellationToken>>,
 }
@@ -126,8 +126,16 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
         .unwrap_or(praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE);
     let subrequest_connector =
         praxis_core::subrequest::SubRequestConnector::new(pool_size, config.runtime.subrequest_max_connections);
+    let subrequest_response_ceiling = config
+        .body_limits
+        .max_response_bytes
+        .unwrap_or(praxis_core::config::ABSOLUTE_MAX_BODY_BYTES);
+    let subrequest_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
+        subrequest_connector,
+        subrequest_response_ceiling,
+    );
 
-    let pipelines = resolve_pipelines(config, registry, health_registry, &kv_stores, &subrequest_connector)
+    let pipelines = resolve_pipelines(config, registry, health_registry, &kv_stores, &subrequest_client)
         .unwrap_or_else(|e| fatal(&e));
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
@@ -136,7 +144,7 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
     ServerState {
         pipelines: Arc::new(pipelines),
         kv_stores,
-        subrequest_connector,
+        subrequest_client,
         health_shutdown,
     }
 }
@@ -188,7 +196,7 @@ fn spawn_watcher(
         pipelines: state.pipelines,
         registry: Arc::new(registry),
         shutdown: CancellationToken::new(),
-        subrequest_connector: state.subrequest_connector,
+        subrequest_client: state.subrequest_client,
     });
     Some(handle)
 }

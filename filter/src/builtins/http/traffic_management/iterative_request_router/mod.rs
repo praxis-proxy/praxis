@@ -58,7 +58,7 @@ use crate::{
     actions::{FilterAction, Rejection, TerminalResponse},
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
-    pipeline::subrequest::{self, DEPTH_HEADER},
+    pipeline::subrequest::DEPTH_HEADER,
     results::RetainedFilterResults,
 };
 
@@ -224,9 +224,9 @@ impl HttpFilter for IterativeRequestRouterFilter {
             return Ok(FilterAction::Reject(Rejection::status(508)));
         }
 
-        if ctx.subrequest_connector().is_none() {
+        if ctx.subrequest_client().is_none() {
             return Err("iterative_request_router: no sub-request \
-                 connector available"
+                 client available"
                 .to_owned()
                 .into());
         }
@@ -255,9 +255,9 @@ impl IterativeRequestRouterFilter {
         request_body: Bytes,
     ) -> Result<FilterAction, FilterError> {
         let depth = parse_depth(ctx.request);
-        let connector = ctx
-            .subrequest_connector()
-            .ok_or_else(|| -> FilterError { "iterative_request_router: no sub-request connector".to_owned().into() })?
+        let client = ctx
+            .subrequest_client()
+            .ok_or_else(|| -> FilterError { "iterative_request_router: no sub-request client".to_owned().into() })?
             .clone();
         let max_response_bytes = effective_response_limit(self.max_response_bytes, ctx.response_body_mode);
 
@@ -358,7 +358,7 @@ impl IterativeRequestRouterFilter {
                 kv_stores: ctx.kv_stores,
                 peer_identity: ctx.peer_identity.as_ref(),
                 request_start: ctx.request_start,
-                subrequest_connector: Some(&connector),
+                subrequest_client: Some(&client),
                 time_source: ctx.time_source,
             };
             let mut filter_ctx = build_sub_filter_context(pipeline, &sub_req, runtime_resources);
@@ -366,6 +366,7 @@ impl IterativeRequestRouterFilter {
             filter_ctx.extensions.insert(state.clone());
             filter_ctx.extensions.insert(RetainedFilterResults::default());
             let step_timeout = remaining.min(self.step_timeout);
+            let step_start = Instant::now();
             let in_transport = Arc::new(AtomicBool::new(false));
             let in_transport_inner = Arc::clone(&in_transport);
             let step_result: Result<StepExecution, FilterError> = match tokio::time::timeout(step_timeout, async {
@@ -433,7 +434,6 @@ impl IterativeRequestRouterFilter {
                 apply_request_header_mutations(&mut sub_headers, &filter_ctx);
                 ensure_destination_host(&mut sub_headers, &upstream.address)?;
                 sanitize_subrequest_headers(&mut sub_headers);
-                inject_depth_header(&mut sub_headers, depth);
                 let sub_request_for_exec = SubRequest {
                     method: current_request.method.clone(),
                     uri: filter_ctx.rewritten_path.as_ref().map_or_else(
@@ -444,24 +444,28 @@ impl IterativeRequestRouterFilter {
                     body: request_body.unwrap_or_default(),
                 };
 
-                let per_request_timeout = state
-                    .deadline
-                    .checked_duration_since(Instant::now())
-                    .unwrap_or(Duration::ZERO);
+                let mut fw_headers = HeaderMap::new();
+                let depth_value = (depth + 1).to_string();
+                if let Ok(val) = http::HeaderValue::from_str(&depth_value) {
+                    fw_headers.insert(DEPTH_HEADER, val);
+                }
+
+                let per_request_timeout = step_timeout.checked_sub(step_start.elapsed()).unwrap_or(Duration::ZERO);
                 if per_request_timeout.is_zero() {
                     return Ok(StepExecution::Rejected(Rejection::status(504)));
                 }
                 let mut step_origin = config::ResponseOrigin::Upstream;
                 let mut step_transport_error = None;
                 let mut response = match peer {
-                    Ok(peer) => match subrequest::execute(
-                        &connector,
-                        &peer,
-                        &sub_request_for_exec,
-                        max_response_bytes,
-                        per_request_timeout,
-                    )
-                    .await
+                    Ok(peer) => match client
+                        .execute(
+                            &peer,
+                            &sub_request_for_exec,
+                            max_response_bytes,
+                            per_request_timeout,
+                            Some(&fw_headers),
+                        )
+                        .await
                     {
                         Ok(response) => response,
                         Err(error) => {
@@ -724,12 +728,14 @@ enum TransitionResult {
 }
 
 /// Convert transport failures into a gateway status and error classification.
-fn classify_transport_failure(error: &subrequest::SubRequestError) -> (u16, config::TransportErrorKind) {
+fn classify_transport_failure(error: &praxis_core::subrequest::SubRequestError) -> (u16, config::TransportErrorKind) {
+    use praxis_core::subrequest::SubRequestError;
     match error {
-        subrequest::SubRequestError::Connect(_) => (502, config::TransportErrorKind::Connect),
-        subrequest::SubRequestError::Io(_) => (502, config::TransportErrorKind::Io),
-        subrequest::SubRequestError::DeadlineExceeded => (504, config::TransportErrorKind::DeadlineExceeded),
-        subrequest::SubRequestError::ResponseTooLarge { .. } => (502, config::TransportErrorKind::ResponseTooLarge),
+        SubRequestError::AdmissionTimeout { .. } => (503, config::TransportErrorKind::AdmissionTimeout),
+        SubRequestError::Connect(_) => (502, config::TransportErrorKind::Connect),
+        SubRequestError::DeadlineExceeded => (504, config::TransportErrorKind::DeadlineExceeded),
+        SubRequestError::ResponseTooLarge { .. } => (502, config::TransportErrorKind::ResponseTooLarge),
+        _ => (502, config::TransportErrorKind::Io),
     }
 }
 
@@ -927,15 +933,6 @@ fn sanitize_subrequest_headers(headers: &mut HeaderMap) {
     strip_request_framing_headers(headers);
 }
 
-/// Unconditionally set the framework-owned depth header immediately
-/// before dispatch, after all filter mutations and sanitization.
-fn inject_depth_header(headers: &mut HeaderMap, current_depth: u8) {
-    headers.remove(DEPTH_HEADER);
-    if let Ok(val) = http::HeaderValue::from_str(&(current_depth + 1).to_string()) {
-        headers.insert(DEPTH_HEADER, val);
-    }
-}
-
 /// Supply the selected upstream authority without carrying a prior step's Host.
 fn ensure_destination_host(headers: &mut HeaderMap, address: &str) -> Result<(), FilterError> {
     if !headers.contains_key(http::header::HOST) {
@@ -1028,8 +1025,8 @@ struct SubPipelineRuntimeResources<'a> {
     /// Start time of the containing client request.
     request_start: Instant,
 
-    /// Shared connector used for recursive subrequests.
-    subrequest_connector: Option<&'a praxis_core::subrequest::SubRequestConnector>,
+    /// Shared client used for recursive subrequests.
+    subrequest_client: Option<&'a praxis_core::subrequest::SubRequestClient>,
 
     /// Server-provided wall-clock source.
     time_source: &'a dyn praxis_core::time::TimeSource,
@@ -1075,7 +1072,7 @@ fn build_sub_filter_context<'a>(
         rewritten_path: None,
         selected_endpoint_index: None,
         structured_metadata: HashMap::new(),
-        subrequest_connector: runtime.subrequest_connector,
+        subrequest_client: runtime.subrequest_client,
         time_source: runtime.time_source,
         upstream: None,
     }

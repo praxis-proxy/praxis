@@ -922,44 +922,6 @@ fn max_depth_is_three() {
     assert_eq!(config::max_depth(), 3, "max_depth should be 3");
 }
 
-// ---------------------------------------------------------------------------
-// inject_depth_header
-// ---------------------------------------------------------------------------
-
-#[test]
-fn inject_depth_header_sets_incremented_value() {
-    let mut headers = HeaderMap::new();
-    super::inject_depth_header(&mut headers, 0);
-    assert_eq!(
-        headers.get(DEPTH_HEADER).unwrap().to_str().unwrap(),
-        "1",
-        "should set depth + 1"
-    );
-}
-
-#[test]
-fn inject_depth_header_overwrites_existing() {
-    let mut headers = HeaderMap::new();
-    headers.insert(DEPTH_HEADER, "99".parse().unwrap());
-    super::inject_depth_header(&mut headers, 2);
-    assert_eq!(
-        headers.get(DEPTH_HEADER).unwrap().to_str().unwrap(),
-        "3",
-        "should overwrite any existing depth value"
-    );
-}
-
-#[test]
-fn inject_depth_header_after_filter_mutation() {
-    let mut headers = HeaderMap::new();
-    headers.insert(DEPTH_HEADER, "spoofed".parse().unwrap());
-    super::inject_depth_header(&mut headers, 1);
-    assert_eq!(
-        headers.get(DEPTH_HEADER).unwrap().to_str().unwrap(),
-        "2",
-        "filter-set depth values must be replaced"
-    );
-}
 
 // ---------------------------------------------------------------------------
 // Config Validation - Boundaries
@@ -1946,27 +1908,25 @@ fn request_sanitization_strips_all_reserved_headers_including_depth() {
     assert!(!headers.contains_key(http::header::CONTENT_LENGTH));
     assert!(
         !headers.contains_key(DEPTH_HEADER),
-        "sanitize must strip depth; inject_depth_header reasserts it"
+        "sanitize must strip depth; core executor re-injects via framework_headers"
     );
     assert_eq!(headers.get(http::header::AUTHORIZATION).unwrap(), "Bearer step-token");
 }
 
 #[test]
-fn sanitize_then_inject_depth_produces_correct_header() {
+fn sanitize_strips_depth_header_for_framework_reinsertion() {
     let mut headers = HeaderMap::new();
     headers.insert(DEPTH_HEADER, "spoofed".parse().unwrap());
     headers.insert("x-praxis-route", "internal".parse().unwrap());
     headers.insert(http::header::AUTHORIZATION, "Bearer token".parse().unwrap());
 
     super::sanitize_subrequest_headers(&mut headers);
-    super::inject_depth_header(&mut headers, 1);
 
-    assert!(!headers.contains_key("x-praxis-route"));
-    assert_eq!(
-        headers.get(DEPTH_HEADER).unwrap().to_str().unwrap(),
-        "2",
-        "depth should be current_depth + 1 regardless of prior value"
+    assert!(
+        !headers.contains_key(DEPTH_HEADER),
+        "sanitize must strip depth so core executor can re-inject via framework_headers"
     );
+    assert!(!headers.contains_key("x-praxis-route"));
     assert_eq!(headers.get(http::header::AUTHORIZATION).unwrap(), "Bearer token");
 }
 
@@ -2036,7 +1996,10 @@ fn sub_filter_context_inherits_parent_runtime_resources() {
     use std::{collections::HashMap, sync::Arc, time::Duration};
 
     use praxis_core::{
-        health::HealthRegistry, id::IdGenerator, kv::KvStoreRegistry, subrequest::SubRequestConnector,
+        health::HealthRegistry,
+        id::IdGenerator,
+        kv::KvStoreRegistry,
+        subrequest::{SubRequestClient, SubRequestConnector},
         time::FixedTimeSource,
     };
 
@@ -2050,7 +2013,7 @@ fn sub_filter_context_inherits_parent_runtime_resources() {
     let health_registry: HealthRegistry = Arc::new(HashMap::new());
     let id_generator = IdGenerator::with_seed(42);
     let kv_stores = KvStoreRegistry::new();
-    let connector = SubRequestConnector::new(1, None);
+    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
     let time_source = FixedTimeSource::new(Duration::from_secs(123));
 
     let ctx = super::build_sub_filter_context(
@@ -2064,7 +2027,7 @@ fn sub_filter_context_inherits_parent_runtime_resources() {
             kv_stores: Some(&kv_stores),
             peer_identity: None,
             request_start: std::time::Instant::now(),
-            subrequest_connector: Some(&connector),
+            subrequest_client: Some(&client),
             time_source: &time_source,
         },
     );
@@ -2072,7 +2035,7 @@ fn sub_filter_context_inherits_parent_runtime_resources() {
     assert!(std::ptr::eq(ctx.health_registry.unwrap(), &health_registry));
     assert!(std::ptr::eq(ctx.id_generator, &id_generator));
     assert!(std::ptr::eq(ctx.kv_stores.unwrap(), &kv_stores));
-    assert!(std::ptr::eq(ctx.subrequest_connector.unwrap(), &connector));
+    assert!(std::ptr::eq(ctx.subrequest_client.unwrap(), &client));
     assert_eq!(
         ctx.client_addr,
         Some(std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST))

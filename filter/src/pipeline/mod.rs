@@ -119,8 +119,8 @@ pub struct FilterPipeline {
     /// Named key-value stores for runtime mappings.
     kv_stores: Option<KvStoreRegistry>,
 
-    /// Shared HTTP connector for iterative sub-requests.
-    subrequest_connector: Option<praxis_core::subrequest::SubRequestConnector>,
+    /// Shared sub-request client for iterative sub-requests.
+    subrequest_client: Option<praxis_core::subrequest::SubRequestClient>,
 
     /// External pipeline extensions injected after construction.
     pipeline_extensions: Vec<Box<dyn PipelineExtension>>,
@@ -252,16 +252,16 @@ impl FilterPipeline {
         self.kv_stores = Some(stores);
     }
 
-    /// The shared sub-request connector, if set.
-    pub fn subrequest_connector(&self) -> Option<&praxis_core::subrequest::SubRequestConnector> {
-        self.subrequest_connector.as_ref()
+    /// The shared sub-request client, if set.
+    pub fn subrequest_client(&self) -> Option<&praxis_core::subrequest::SubRequestClient> {
+        self.subrequest_client.as_ref()
     }
 
-    /// Set the shared [`SubRequestConnector`] for this pipeline.
+    /// Set the shared [`SubRequestClient`] for this pipeline.
     ///
-    /// [`SubRequestConnector`]: praxis_core::subrequest::SubRequestConnector
-    pub fn set_subrequest_connector(&mut self, connector: praxis_core::subrequest::SubRequestConnector) {
-        self.subrequest_connector = Some(connector);
+    /// [`SubRequestClient`]: praxis_core::subrequest::SubRequestClient
+    pub fn set_subrequest_client(&mut self, client: praxis_core::subrequest::SubRequestClient) {
+        self.subrequest_client = Some(client);
     }
 
     /// Register an external pipeline extension.

@@ -425,7 +425,7 @@ pub(crate) mod test_utils {
             id_generator: &TEST_ID_GENERATOR,
             kv_stores: None,
             peer_identity: None,
-            subrequest_connector: None,
+            subrequest_client: None,
             request: req,
             request_body_bytes: 0,
             request_body_mode: crate::body::BodyMode::Stream,

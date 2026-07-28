@@ -74,8 +74,8 @@ pub(crate) struct WatcherParams {
     /// Token for clean watcher shutdown.
     pub(crate) shutdown: CancellationToken,
 
-    /// Shared HTTP connector for iterative sub-requests.
-    pub(crate) subrequest_connector: praxis_core::subrequest::SubRequestConnector,
+    /// Shared sub-request client for iterative sub-requests.
+    pub(crate) subrequest_client: praxis_core::subrequest::SubRequestClient,
 }
 
 // -----------------------------------------------------------------------------
@@ -156,7 +156,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
         &params.pipelines,
         &params.health_shutdown,
         &params.kv_stores,
-        &params.subrequest_connector,
+        &params.subrequest_client,
     );
 
     loop {
@@ -172,7 +172,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
                 let ok = handle_reload(
                     &params.config_path, &mut current_config, &mut content_hash,
                     &params.registry, &params.pipelines, &params.health_shutdown, &params.kv_stores,
-                    &params.subrequest_connector,
+                    &params.subrequest_client,
                 );
                 if ok { consecutive_failures = 0; last_failure = None; }
                 else {
@@ -205,7 +205,7 @@ fn handle_reload(
     pipelines: &ListenerPipelines,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
-    subrequest_connector: &praxis_core::subrequest::SubRequestConnector,
+    subrequest_client: &praxis_core::subrequest::SubRequestClient,
 ) -> bool {
     let content = match std::fs::read_to_string(config_path) {
         Ok(c) => c,
@@ -245,7 +245,7 @@ fn handle_reload(
         pipelines,
         health_shutdown,
         kv_stores,
-        subrequest_connector,
+        subrequest_client,
     ) {
         Ok(()) => {
             *current_config = new_config;
@@ -385,16 +385,11 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8, None);
+        let subrequest_client =
+            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
         let pipelines = Arc::new(
-            crate::pipelines::resolve_pipelines(
-                &config,
-                &registry,
-                &health_registry,
-                &kv_stores,
-                &subrequest_connector,
-            )
-            .unwrap(),
+            crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores, &subrequest_client)
+                .unwrap(),
         );
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
         let shutdown = CancellationToken::new();
@@ -408,7 +403,9 @@ mod tests {
             pipelines,
             registry,
             shutdown: shutdown.clone(),
-            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8, None),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
+                praxis_core::subrequest::SubRequestConnector::new(8, None),
+            ),
         });
 
         std::thread::sleep(Duration::from_millis(100));
@@ -427,16 +424,11 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8, None);
+        let subrequest_client =
+            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
         let pipelines = Arc::new(
-            crate::pipelines::resolve_pipelines(
-                &config,
-                &registry,
-                &health_registry,
-                &kv_stores,
-                &subrequest_connector,
-            )
-            .unwrap(),
+            crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores, &subrequest_client)
+                .unwrap(),
         );
         let old_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
@@ -451,7 +443,9 @@ mod tests {
             pipelines: Arc::clone(&pipelines),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
-            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8, None),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
+                praxis_core::subrequest::SubRequestConnector::new(8, None),
+            ),
         });
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
@@ -478,16 +472,11 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8, None);
+        let subrequest_client =
+            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
         let pipelines = Arc::new(
-            crate::pipelines::resolve_pipelines(
-                &config,
-                &registry,
-                &health_registry,
-                &kv_stores,
-                &subrequest_connector,
-            )
-            .unwrap(),
+            crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores, &subrequest_client)
+                .unwrap(),
         );
         let old_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
@@ -502,7 +491,9 @@ mod tests {
             pipelines: Arc::clone(&pipelines),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
-            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8, None),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
+                praxis_core::subrequest::SubRequestConnector::new(8, None),
+            ),
         });
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
@@ -560,16 +551,11 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8, None);
+        let subrequest_client =
+            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
         let pipelines = Arc::new(
-            crate::pipelines::resolve_pipelines(
-                &config,
-                &registry,
-                &health_registry,
-                &kv_stores,
-                &subrequest_connector,
-            )
-            .unwrap(),
+            crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores, &subrequest_client)
+                .unwrap(),
         );
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
         let shutdown = CancellationToken::new();
@@ -583,7 +569,9 @@ mod tests {
             pipelines,
             registry,
             shutdown: shutdown.clone(),
-            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8, None),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
+                praxis_core::subrequest::SubRequestConnector::new(8, None),
+            ),
         });
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -622,16 +610,11 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8, None);
+        let subrequest_client =
+            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
         let pipelines = Arc::new(
-            crate::pipelines::resolve_pipelines(
-                &config,
-                &registry,
-                &health_registry,
-                &kv_stores,
-                &subrequest_connector,
-            )
-            .unwrap(),
+            crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores, &subrequest_client)
+                .unwrap(),
         );
         let old_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
@@ -646,7 +629,9 @@ mod tests {
             pipelines: Arc::clone(&pipelines),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
-            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8, None),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
+                praxis_core::subrequest::SubRequestConnector::new(8, None),
+            ),
         });
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));

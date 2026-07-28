@@ -44,7 +44,7 @@ Holds named steps, each backed by a pre-built sub-pipeline. During request proce
 | `steps[].on_result[].next` | string | no | Name of the step to transition to (mutually exclusive with `done`). |
 | `steps[].on_result[].origin` | `upstream` \| `local` \| `transport` | no | Where the response originated: `upstream`, `local`, or `transport`. When unset, any origin matches. |
 | `steps[].on_result[].status` | integer[] | no | Response status codes to match (e.g., [502, 503, 504]). Transport failures are exposed as 502 and deadline expiry as 504. |
-| `steps[].on_result[].transport_error` | `connect` \| `io` \| `deadline_exceeded` \| `response_too_large` | no | Transport error kind to match: `connect`, `io`, `deadline_exceeded`, or `response_too_large`. Only meaningful when `origin: transport`. |
+| `steps[].on_result[].transport_error` | `admission_timeout` \| `connect` \| `io` \| `deadline_exceeded` \| `response_too_large` | no | Transport error kind to match: `admission_timeout`, `connect`, `io`, `deadline_exceeded`, or `response_too_large`. Only meaningful when `origin: transport`. |
 | `steps[].on_result[].value` | string | no | Result value to match. |
 | `steps[].on_result[].done` | bool | no | If true, return the current response to the client. |
 | `timeout_ms` | integer | no | Overall timeout in milliseconds (default 30000). |
