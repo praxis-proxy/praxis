@@ -9,8 +9,6 @@
 //!
 //! [RFC 1035 §2.3.1]: https://datatracker.ietf.org/doc/html/rfc1035#section-2.3.1
 
-use std::fmt;
-
 /// Maximum length of a single DNS label (octets).
 const MAX_LABEL_LEN: usize = 63;
 
@@ -26,35 +24,28 @@ const MAX_HOSTNAME_LEN: usize = 253;
 /// assert_eq!(validate_dns_label(""), Err(DnsLabelError::EmptyLabel));
 /// assert_eq!(validate_dns_label("ok"), Ok(()));
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum DnsLabelError {
     /// The label is empty (zero bytes).
+    #[error("label is empty")]
     EmptyLabel,
 
     /// The label exceeds 63 bytes.
+    #[error("label exceeds 63 characters")]
     LabelTooLong,
 
     /// The label contains a character other than ASCII alphanumeric
     /// or hyphen (`-`).
+    #[error("contains invalid characters")]
     InvalidCharacter,
 
     /// The label starts or ends with a hyphen.
+    #[error("label must not start or end with a hyphen")]
     HyphenBoundary,
 
     /// The total hostname exceeds 253 bytes.
+    #[error("exceeds 253 characters")]
     HostnameTooLong,
-}
-
-impl fmt::Display for DnsLabelError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::EmptyLabel => f.write_str("label is empty"),
-            Self::LabelTooLong => f.write_str("label exceeds 63 characters"),
-            Self::InvalidCharacter => f.write_str("contains invalid characters"),
-            Self::HyphenBoundary => f.write_str("label must not start or end with a hyphen"),
-            Self::HostnameTooLong => f.write_str("exceeds 253 characters"),
-        }
-    }
 }
 
 /// Validate a single DNS label per [RFC 1035 §2.3.1].
