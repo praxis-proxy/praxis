@@ -16,7 +16,7 @@ const MAX_LABEL_LEN: usize = 63;
 /// trailing dot.
 const MAX_HOSTNAME_LEN: usize = 253;
 
-/// Why a DNS label or hostname failed validation.
+/// Why a DNS label failed validation.
 ///
 /// ```
 /// use praxis_tls::dns::{DnsLabelError, validate_dns_label};
@@ -42,10 +42,31 @@ pub enum DnsLabelError {
     /// The label starts or ends with a hyphen.
     #[error("label must not start or end with a hyphen")]
     HyphenBoundary,
+}
 
+/// Why a DNS hostname failed validation.
+///
+/// Wraps [`DnsLabelError`] for per-label failures and adds the
+/// hostname-level [`HostnameTooLong`](Self::HostnameTooLong) variant.
+///
+/// ```
+/// use praxis_tls::dns::{DnsHostnameError, DnsLabelError, validate_dns_hostname};
+///
+/// assert_eq!(validate_dns_hostname("example.com"), Ok(()));
+/// assert_eq!(
+///     validate_dns_hostname(".."),
+///     Err(DnsHostnameError::Label(DnsLabelError::EmptyLabel)),
+/// );
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum DnsHostnameError {
     /// The total hostname exceeds 253 bytes.
     #[error("exceeds 253 characters")]
     HostnameTooLong,
+
+    /// A label within the hostname is invalid.
+    #[error(transparent)]
+    Label(#[from] DnsLabelError),
 }
 
 /// Validate a single DNS label per [RFC 1035 §2.3.1].
@@ -81,11 +102,11 @@ pub fn validate_dns_label(label: &str) -> Result<(), DnsLabelError> {
 ///
 /// # Errors
 ///
-/// Returns [`DnsLabelError`] when the hostname exceeds 253 bytes
+/// Returns [`DnsHostnameError`] when the hostname exceeds 253 bytes
 /// or any individual label fails validation.
-pub fn validate_dns_hostname(hostname: &str) -> Result<(), DnsLabelError> {
+pub fn validate_dns_hostname(hostname: &str) -> Result<(), DnsHostnameError> {
     if hostname.len() > MAX_HOSTNAME_LEN {
-        return Err(DnsLabelError::HostnameTooLong);
+        return Err(DnsHostnameError::HostnameTooLong);
     }
     for label in hostname.split('.') {
         validate_dns_label(label)?;
@@ -187,25 +208,31 @@ mod tests {
     fn reject_empty_label_in_hostname() {
         assert_eq!(
             validate_dns_hostname("api..example.com"),
-            Err(DnsLabelError::EmptyLabel)
+            Err(DnsHostnameError::Label(DnsLabelError::EmptyLabel))
         );
     }
 
     #[test]
     fn reject_trailing_dot() {
-        assert_eq!(validate_dns_hostname("example.com."), Err(DnsLabelError::EmptyLabel));
+        assert_eq!(
+            validate_dns_hostname("example.com."),
+            Err(DnsHostnameError::Label(DnsLabelError::EmptyLabel))
+        );
     }
 
     #[test]
     fn reject_leading_dot() {
-        assert_eq!(validate_dns_hostname(".example.com"), Err(DnsLabelError::EmptyLabel));
+        assert_eq!(
+            validate_dns_hostname(".example.com"),
+            Err(DnsHostnameError::Label(DnsLabelError::EmptyLabel))
+        );
     }
 
     #[test]
     fn reject_overlong_hostname() {
         let hostname = format!("{}.example.com", "a".repeat(250));
         assert!(hostname.len() > 253);
-        assert_eq!(validate_dns_hostname(&hostname), Err(DnsLabelError::HostnameTooLong));
+        assert_eq!(validate_dns_hostname(&hostname), Err(DnsHostnameError::HostnameTooLong));
     }
 
     #[test]
@@ -225,11 +252,14 @@ mod tests {
     #[test]
     fn reject_overlong_label_in_hostname() {
         let hostname = format!("{}.example.com", "a".repeat(64));
-        assert_eq!(validate_dns_hostname(&hostname), Err(DnsLabelError::LabelTooLong));
+        assert_eq!(
+            validate_dns_hostname(&hostname),
+            Err(DnsHostnameError::Label(DnsLabelError::LabelTooLong))
+        );
     }
 
     #[test]
-    fn display_messages() {
+    fn display_label_messages() {
         assert_eq!(DnsLabelError::EmptyLabel.to_string(), "label is empty");
         assert_eq!(DnsLabelError::LabelTooLong.to_string(), "label exceeds 63 characters");
         assert_eq!(
@@ -240,6 +270,14 @@ mod tests {
             DnsLabelError::HyphenBoundary.to_string(),
             "label must not start or end with a hyphen"
         );
-        assert_eq!(DnsLabelError::HostnameTooLong.to_string(), "exceeds 253 characters");
+    }
+
+    #[test]
+    fn display_hostname_messages() {
+        assert_eq!(DnsHostnameError::HostnameTooLong.to_string(), "exceeds 253 characters");
+        assert_eq!(
+            DnsHostnameError::Label(DnsLabelError::EmptyLabel).to_string(),
+            "label is empty"
+        );
     }
 }
