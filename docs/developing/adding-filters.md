@@ -1,7 +1,7 @@
 # Adding a Built-in Filter
 
-Review the [extensions guide](../filters/extensions.md)
-first.
+Review the [HTTP filter tutorial](../filters/http-filter-tutorial.md)
+and [extensions guide](../filters/extensions.md) first.
 
 1. Create the filter module under
    `filter/src/builtins/<protocol>/<category>/`.

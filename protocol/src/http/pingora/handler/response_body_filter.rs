@@ -15,11 +15,13 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use pingora_core::Result;
-use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
-use praxis_filter::{BodyBuffer, BodyMode, FilterAction, FilterPipeline};
+use praxis_filter::{BodyMode, FilterAction, FilterPipeline};
 use tracing::{debug, error};
 
-use super::super::context::PingoraRequestCtx;
+use super::{
+    super::context::PingoraRequestCtx, BodyFilterOutput, accumulate_stream_buffer, check_body_size_limit,
+    release_stream_buffer, suppress_stream_buffer_chunk,
+};
 
 // -----------------------------------------------------------------------------
 // Response Body Filters
@@ -47,43 +49,21 @@ pub(super) fn execute(
 
     match ctx.response_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
-            if let Some(chunk) = &*body {
-                #[expect(clippy::allow_attributes, reason = "cast lint is platform-dependent")]
-                #[allow(clippy::cast_possible_truncation, reason = "chunk length fits u64")]
-                let chunk_len = chunk.len() as u64;
-                ctx.response_body_bytes += chunk_len;
-
-                #[expect(clippy::allow_attributes, reason = "cast lint is platform-dependent")]
-                #[allow(clippy::cast_possible_truncation, reason = "max_bytes fits u64")]
-                let limit = max_bytes as u64;
-                if ctx.response_body_bytes > limit {
-                    return Err(pingora_core::Error::explain(
-                        pingora_core::ErrorType::InternalError,
-                        "response body exceeds maximum size",
-                    ));
-                }
+            if check_body_size_limit(body, &mut ctx.response_body_bytes, max_bytes) {
+                return Err(pingora_core::Error::explain(
+                    pingora_core::ErrorType::InternalError,
+                    "response body exceeds maximum size",
+                ));
             }
             return Ok(None);
         },
 
         BodyMode::StreamBuffer { max_bytes } if !ctx.response_body_released => {
-            if let Some(chunk) = &*body {
-                let limit = max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES);
-                let buf = ctx.response_body_buffer.get_or_insert_with(|| BodyBuffer::new(limit));
-
-                if buf.push(chunk.clone()).is_err() {
-                    return Err(pingora_core::Error::explain(
-                        pingora_core::ErrorType::InternalError,
-                        "response body exceeds stream_buffer size limit",
-                    ));
-                }
-            }
-
-            if end_of_stream {
-                tracing::trace!("stream buffer: freezing accumulated body before pipeline at EOS");
-                *body = ctx.response_body_buffer.take().map(BodyBuffer::freeze);
-            } else {
-                tracing::trace!("stream buffer: filters see the original chunk");
+            if accumulate_stream_buffer(body, &mut ctx.response_body_buffer, end_of_stream, max_bytes) {
+                return Err(pingora_core::Error::explain(
+                    pingora_core::ErrorType::InternalError,
+                    "response body exceeds stream_buffer size limit",
+                ));
             }
         },
 
@@ -91,7 +71,7 @@ pub(super) fn execute(
         _ => tracing::error!("unhandled BodyMode variant in response body filter"),
     }
 
-    let (result, body_bytes, cluster, upstream, extensions, filter_metadata, filter_state, executed_indices, body_done) = {
+    let (result, response_body_bytes, output) = {
         let (mut fctx, response_header) = ctx.response_body_context_for(pipeline).ok_or_else(|| {
             pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
@@ -100,41 +80,24 @@ pub(super) fn execute(
         })?;
         let r =
             pipeline.execute_http_response_body_with_response_header(&mut fctx, body, end_of_stream, response_header);
-        (
-            r,
-            fctx.response_body_bytes,
-            fctx.cluster,
-            fctx.upstream,
-            fctx.extensions,
-            fctx.filter_metadata,
-            fctx.filter_state,
-            fctx.executed_filter_indices,
-            fctx.body_done_indices,
-        )
+        (r, fctx.response_body_bytes, BodyFilterOutput::take_from(&mut fctx))
     };
-    ctx.response_body_bytes = body_bytes;
-    ctx.cluster = cluster;
-    ctx.upstream = upstream;
-    ctx.extensions = extensions;
-    ctx.filter_metadata = filter_metadata;
-    ctx.filter_state = filter_state;
-    ctx.cached_executed_filter_indices = executed_indices;
-    ctx.cached_body_done_indices = body_done;
+    ctx.response_body_bytes = response_body_bytes;
+    output.write_back(ctx);
 
     match result {
         Ok(FilterAction::Continue | FilterAction::BodyDone | FilterAction::TerminalResponse(_)) => {
-            if is_stream_buffer && !ctx.response_body_released && !end_of_stream {
-                *body = None;
-            }
+            suppress_stream_buffer_chunk(body, is_stream_buffer, ctx.response_body_released, end_of_stream);
             Ok(None)
         },
         Ok(FilterAction::Release) => {
-            if is_stream_buffer && !ctx.response_body_released {
-                ctx.response_body_released = true;
-                if !end_of_stream {
-                    *body = ctx.response_body_buffer.take().map(BodyBuffer::freeze);
-                }
-            }
+            release_stream_buffer(
+                body,
+                is_stream_buffer,
+                &mut ctx.response_body_released,
+                &mut ctx.response_body_buffer,
+                end_of_stream,
+            );
             Ok(None)
         },
         Ok(FilterAction::Reject(rejection)) => {
@@ -207,37 +170,6 @@ mod tests {
     }
 
     #[test]
-    fn response_stream_buffer_accumulates_and_clones() {
-        let mut ctx = make_ctx();
-        let max_bytes = 100;
-
-        let chunk = Bytes::from_static(b"response ");
-        let buf = ctx
-            .response_body_buffer
-            .get_or_insert_with(|| BodyBuffer::new(max_bytes));
-        assert!(buf.push(chunk.clone()).is_ok(), "first chunk push should succeed");
-
-        let chunk2 = Bytes::from_static(b"data");
-        let buf = ctx.response_body_buffer.as_mut().unwrap();
-        assert!(buf.push(chunk2.clone()).is_ok(), "second chunk push should succeed");
-
-        let frozen = ctx.response_body_buffer.take().unwrap().freeze();
-        assert_eq!(
-            frozen,
-            Bytes::from_static(b"response data"),
-            "frozen buffer should contain concatenated chunks"
-        );
-    }
-
-    #[test]
-    fn response_stream_buffer_release_flag_persists() {
-        let mut ctx = make_ctx();
-        assert!(!ctx.response_body_released, "release flag should start false");
-        ctx.response_body_released = true;
-        assert!(ctx.response_body_released, "release flag should be true after setting");
-    }
-
-    #[test]
     fn empty_body_none_passes_through() {
         let pipeline = make_pipeline();
         let mut body: Option<Bytes> = None;
@@ -257,55 +189,6 @@ mod tests {
         let result = execute(&pipeline, &mut body, true, &mut ctx);
         assert!(result.is_ok(), "execute should succeed at end of stream");
         assert!(body.is_none(), "body should remain None at end of stream");
-    }
-
-    #[test]
-    fn response_buffer_overflow_detected() {
-        let mut ctx = make_ctx();
-        let buf = ctx.response_body_buffer.get_or_insert_with(|| BodyBuffer::new(5));
-
-        let result = buf.push(Bytes::from_static(b"too long data"));
-        assert!(result.is_err(), "push exceeding limit should return error");
-    }
-
-    #[test]
-    fn response_buffer_exact_limit_succeeds() {
-        let mut ctx = make_ctx();
-        let buf = ctx.response_body_buffer.get_or_insert_with(|| BodyBuffer::new(5));
-
-        assert!(
-            buf.push(Bytes::from_static(b"exact")).is_ok(),
-            "push at exact limit should succeed"
-        );
-        assert_eq!(
-            ctx.response_body_buffer.unwrap().total_bytes(),
-            5,
-            "total bytes should match exact limit"
-        );
-    }
-
-    #[test]
-    fn response_buffer_empty_freeze() {
-        let buf = BodyBuffer::new(100);
-        let frozen = buf.freeze();
-        assert!(frozen.is_empty(), "freezing empty buffer should produce empty bytes");
-    }
-
-    #[test]
-    fn multiple_chunks_accumulated_correctly() {
-        let mut ctx = make_ctx();
-
-        let buf = ctx.response_body_buffer.get_or_insert_with(|| BodyBuffer::new(1024));
-        buf.push(Bytes::from_static(b"chunk1 ")).unwrap();
-        buf.push(Bytes::from_static(b"chunk2 ")).unwrap();
-        buf.push(Bytes::from_static(b"chunk3")).unwrap();
-
-        let frozen = ctx.response_body_buffer.take().unwrap().freeze();
-        assert_eq!(
-            frozen,
-            Bytes::from_static(b"chunk1 chunk2 chunk3"),
-            "chunks should be concatenated in order"
-        );
     }
 
     // -------------------------------------------------------------------------

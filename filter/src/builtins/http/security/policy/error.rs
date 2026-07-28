@@ -28,7 +28,7 @@ const GATEWAY_DENIED_CODE: i64 = -32001;
 ///
 /// * HTTP 401 ([`auth_rejection`]) — identity / transport-level deny.
 /// * HTTP 200 ([`json_rpc_error_rejection`]) — application-level deny wrapped in a JSON-RPC error envelope.
-/// * HTTP 500 (`missing_protocol_metadata_rejection`) — `protocol.method` missing from filter metadata.
+/// * HTTP 500 (`missing_protocol_metadata_rejection`) — `mcp.method` missing from filter metadata.
 ///
 /// Operators consuming this in audit / SIEM pipelines should treat the
 /// header value as a stable identifier (the code namespace is part of
@@ -95,10 +95,19 @@ pub(super) fn auth_rejection(violation: Option<&PluginViolation>) -> Rejection {
 ///   "error": {
 ///     "code": -32001,
 ///     "message": "<human reason from the violation>",
-///     "data": { "violation": "<violation code>" }
+///     "data": { "violation": "<violation code>", "...": "<violation details>" }
 ///   }
 /// }
 /// ```
+///
+/// `code` defaults to `GATEWAY_DENIED_CODE` (`-32001`) but a violation
+/// carrying a [`PluginViolation::proto_error_code`] overrides it — a
+/// suspended human-in-the-loop elicitation surfaces as `-32120` so the
+/// client can tell "pending approval" from a flat deny. `data` always
+/// carries `violation` (the canonical classifier code) and additionally
+/// every entry of the violation's `details` map — for a pending
+/// elicitation, the bundle of `elicitation_id` / `approver` /
+/// `expires_at` / `channel` the client needs to retry.
 pub(super) fn json_rpc_error_rejection(
     violation: Option<&PluginViolation>,
     request_id: &serde_json::Value,
@@ -125,13 +134,32 @@ pub(super) fn json_rpc_error_envelope_bytes(
         Some(v) => (v.code.clone(), v.reason.clone()),
         None => ("gateway.unknown".to_owned(), "denied by gateway".to_owned()),
     };
+    // Most denials share the single `GATEWAY_DENIED_CODE` (the specific rule
+    // is in `data.violation`). But a violation MAY carry a `proto_error_code`
+    // for the host to surface on the wire — e.g. a suspended human-in-the-loop
+    // elicitation uses `-32120` ("not complete — retry with this id") so the
+    // client can distinguish "pending approval" from a flat deny. Honor it
+    // when present, and pass the violation's structured `details` (the
+    // elicitation bundle: id / approver / expires_at / …) through `data`.
+    let code = violation
+        .and_then(|v| v.proto_error_code)
+        .unwrap_or(GATEWAY_DENIED_CODE);
+    let mut data = serde_json::Map::new();
+    if let Some(v) = violation {
+        for (key, val) in &v.details {
+            data.insert(key.clone(), val.clone());
+        }
+    }
+    // Canonical classifier code is authoritative — insert last so a stray
+    // `violation` key in `details` can never shadow it.
+    data.insert("violation".to_owned(), serde_json::Value::String(violation_code));
     let body = serde_json::json!({
         "jsonrpc": "2.0",
         "id": request_id,
         "error": {
-            "code": GATEWAY_DENIED_CODE,
+            "code": code,
             "message": reason,
-            "data": { "violation": violation_code },
+            "data": serde_json::Value::Object(data),
         }
     });
     // The envelope above is built entirely from owned `String`s and a
@@ -209,4 +237,61 @@ pub(super) fn http_authz_rejection(violation: Option<&PluginViolation>) -> Rejec
 /// True if a header name/value carries no control characters.
 fn header_is_safe(s: &str) -> bool {
     !s.chars().any(char::is_control)
+}
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, clippy::indexing_slicing, reason = "tests")]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn envelope(v: &PluginViolation) -> serde_json::Value {
+        let bytes = json_rpc_error_envelope_bytes(Some(v), &serde_json::json!(1));
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    #[test]
+    fn plain_violation_uses_default_deny_code() {
+        let v = PluginViolation::new("apl.policy", "denied");
+        let env = envelope(&v);
+        assert_eq!(env["error"]["code"], GATEWAY_DENIED_CODE);
+        assert_eq!(env["error"]["data"]["violation"], "apl.policy");
+    }
+
+    #[test]
+    fn pending_violation_surfaces_proto_code_and_details() {
+        let mut details = HashMap::new();
+        details.insert("elicitation_id".to_owned(), serde_json::json!("elic-7"));
+        details.insert("approver".to_owned(), serde_json::json!("alice"));
+        let v = PluginViolation::new("elicitation.pending", "awaiting approval")
+            .with_proto_error_code(-32120)
+            .with_details(details);
+        let env = envelope(&v);
+        assert_eq!(
+            env["error"]["code"], -32120,
+            "pending code must reach the wire, not collapse to the generic deny code",
+        );
+        assert_eq!(
+            env["error"]["data"]["elicitation_id"], "elic-7",
+            "elicitation bundle must ride in `data` so the client can retry",
+        );
+        assert_eq!(
+            env["error"]["data"]["approver"], "alice",
+            "every `details` entry must reach `data`",
+        );
+        assert_eq!(
+            env["error"]["data"]["violation"], "elicitation.pending",
+            "canonical violation code must survive alongside the details",
+        );
+    }
+
+    #[test]
+    fn details_cannot_shadow_the_canonical_violation_key() {
+        let mut details = HashMap::new();
+        details.insert("violation".to_owned(), serde_json::json!("attacker-supplied"));
+        let v = PluginViolation::new("apl.policy", "denied").with_details(details);
+        let env = envelope(&v);
+        assert_eq!(env["error"]["data"]["violation"], "apl.policy");
+    }
 }

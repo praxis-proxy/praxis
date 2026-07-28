@@ -69,7 +69,7 @@ pub struct PolicyFilterConfig {
 
     /// Fail-closed policy gate for misconfigured chains. When `true`
     /// (default), `on_request_body` rejects any request that reaches
-    /// it without `protocol.method` filter-metadata. The metadata is set
+    /// it without `mcp.method` filter-metadata. The metadata is set
     /// by the protocol classifier filter (available in the `praxis-ai` package), so
     /// its absence means either (a) the protocol classifier filter is missing from
     /// the chain, or (b) it is ordered AFTER `policy` instead of
@@ -86,7 +86,7 @@ pub struct PolicyFilterConfig {
     /// `BodyDone` before it, so the flag has no effect there.
     ///
     /// Note: JSON-RPC methods that legitimately carry no entity (e.g.
-    /// `service/list`, `initialize`, `template/list`) still pass —
+    /// `tools/list`, `initialize`, `prompts/list`) still pass —
     /// `require_protocol_metadata` only rejects when the metadata is
     /// missing entirely.
     #[serde(default = "default_true")]

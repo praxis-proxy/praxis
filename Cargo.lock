@@ -929,6 +929,7 @@ dependencies = [
  "cpex-pdp-cel",
  "cpex-plugin-audit-logger",
  "cpex-plugin-delegator-oauth",
+ "cpex-plugin-elicitation-ciba",
  "cpex-plugin-identity-jwt",
  "cpex-plugin-pii-scanner",
  "cpex-session-valkey",
@@ -1020,6 +1021,23 @@ dependencies = [
  "chrono",
  "cpex-core",
  "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "cpex-plugin-elicitation-ciba"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d9f0d6fbd8a25ede8544c528184d317691a543b52df1962a6d92d79ba58c172d"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "cpex-core",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "tokio",
