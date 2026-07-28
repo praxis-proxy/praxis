@@ -31,3 +31,10 @@ telemetry:
   # child spans inherit the parent decision via W3C traceparent.
   # Omit or remove to use the OTel default (ParentBased(AlwaysOn)).
   sampling_rate: 0.01
+  # service_name: "praxis"          # OTel service.name (default: "praxis")
+  # service_version: "0.1.0"        # OTel service.version
+  # environment: "production"       # deployment.environment resource attribute
+  # batch_size: 512                 # max spans per batch export (default: 512)
+  # batch_interval_secs: 5          # export interval in seconds (default: 5)
+  # otlp_headers:                   # custom gRPC metadata (e.g. API keys)
+  #   x-api-key: "your-key-here"
