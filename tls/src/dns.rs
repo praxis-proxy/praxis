@@ -9,12 +9,20 @@
 //!
 //! [RFC 1035 §2.3.1]: https://datatracker.ietf.org/doc/html/rfc1035#section-2.3.1
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
 /// Maximum length of a single DNS label (octets).
 const MAX_LABEL_LEN: usize = 63;
 
 /// Maximum total length of a DNS hostname (octets), excluding a
 /// trailing dot.
 const MAX_HOSTNAME_LEN: usize = 253;
+
+// -----------------------------------------------------------------------------
+// DnsLabelError
+// -----------------------------------------------------------------------------
 
 /// Why a DNS label failed validation.
 ///
@@ -44,6 +52,10 @@ pub enum DnsLabelError {
     HyphenBoundary,
 }
 
+// -----------------------------------------------------------------------------
+// DnsHostnameError
+// -----------------------------------------------------------------------------
+
 /// Why a DNS hostname failed validation.
 ///
 /// Wraps [`DnsLabelError`] for per-label failures and adds the
@@ -68,6 +80,10 @@ pub enum DnsHostnameError {
     #[error(transparent)]
     Label(#[from] DnsLabelError),
 }
+
+// -----------------------------------------------------------------------------
+// Validation
+// -----------------------------------------------------------------------------
 
 /// Validate a single DNS label per [RFC 1035 §2.3.1].
 ///
