@@ -431,7 +431,7 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "benchmarks"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "criterion",
@@ -581,9 +581,9 @@ checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
 name = "camino"
-version = "1.2.4"
+version = "1.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5f2d30e4173c4026932d51d31d6b0613b1fd3014bf3f9f8943d4ba139c437ba0"
+checksum = "bb1307f12aa967b5a58416e87b3653360e0fd614a016b6e970db08fecbb1b80d"
 dependencies = [
  "serde_core",
 ]
@@ -840,15 +840,6 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
-]
-
-[[package]]
-name = "concurrent-queue"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ca0197aee26d1ae37445ee532fefce43251d24cc7c166799f4d46817f1d3973"
-dependencies = [
- "crossbeam-utils",
 ]
 
 [[package]]
@@ -1404,13 +1395,13 @@ dependencies = [
 
 [[package]]
 name = "displaydoc"
-version = "0.2.6"
+version = "0.2.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ac70aa55017e108007fbaf5aa0f54b021c98f92ff8af59d42eda9da96e3dd4f"
+checksum = "c6232dd377dcc64799954cbd3a9bb882e9cdc1308ccd87b1c098f1fb2eaf82a8"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.119",
+ "syn 3.0.3",
 ]
 
 [[package]]
@@ -1439,9 +1430,9 @@ dependencies = [
 
 [[package]]
 name = "either"
-version = "1.16.0"
+version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "91622ff5e7162018101f2fea40d6ebf4a78bbe5a49736a2020649edf9693679e"
+checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
 
 [[package]]
 name = "ena"
@@ -1490,11 +1481,10 @@ dependencies = [
 
 [[package]]
 name = "event-listener"
-version = "5.4.1"
+version = "5.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e13b66accf52311f30a0db42147dadea9850cb48cd070028831ae5f5d4b856ab"
+checksum = "5a23add41df1562121a9393cb065eab5146a1242410f23a644851e90cfd669d2"
 dependencies = [
- "concurrent-queue",
  "parking",
  "pin-project-lite",
 ]
@@ -2948,7 +2938,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "cargo_metadata",
  "clap",
@@ -2969,7 +2959,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-core"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "bytes",
  "dashmap 6.2.1",
@@ -2988,7 +2978,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-filter"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -3023,7 +3013,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-protocol"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3049,7 +3039,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-tls"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "notify",
@@ -3067,7 +3057,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-test-utils"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3094,7 +3084,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-conformance"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "h2",
  "http",
@@ -3107,7 +3097,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-integration"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3136,7 +3126,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-resilience"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "benchmarks",
@@ -3152,7 +3142,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-schema"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3167,7 +3157,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-security"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "praxis-proxy-core",
  "praxis-proxy-filter",
@@ -4020,9 +4010,9 @@ dependencies = [
 
 [[package]]
 name = "schemars"
-version = "1.2.1"
+version = "1.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a2b42f36aa1cd011945615b92222f6bf73c599a102a300334cd7f8dbeec726cc"
+checksum = "687274d293b6cdc6e73e0fee520bf2049650090d7164f87672d212a3c530cf4a"
 dependencies = [
  "dyn-clone",
  "ref-cast",
@@ -4173,7 +4163,7 @@ dependencies = [
  "indexmap 1.9.3",
  "indexmap 2.14.0",
  "schemars 0.9.0",
- "schemars 1.2.1",
+ "schemars 1.2.2",
  "serde_core",
  "serde_json",
  "serde_with_macros",
@@ -5465,7 +5455,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.4.1"
+version = "0.5.0"
 dependencies = [
  "benchmarks",
  "chrono",
