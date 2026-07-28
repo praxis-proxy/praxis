@@ -29,34 +29,5 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Install stable Rust
-        uses: dtolnay/rust-toolchain@6190aa5fb88a88ee71c12769924bbe63a9ab152e # 1.96.0
-        with:
-          components: llvm-tools-preview
-
-      - name: Cache cargo-llvm-cov binary
-        id: cache-llvm-cov
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ~/.cargo/bin/cargo-llvm-cov
-          key: cargo-llvm-cov-${{ runner.os }}
-
-      - name: Install cargo-llvm-cov
-        if: steps.cache-llvm-cov.outputs.cache-hit != 'true'
-        run: cargo install cargo-llvm-cov --locked
-
-      - name: Cache Cargo registry and build artifacts
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target/llvm-cov-target
-          key: ${{ runner.os }}-rust-1.96.0-coverage-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-rust-1.96.0-coverage-
-          save-always: true
-
-      - name: Check coverage (≥96% lines)
-        run: make coverage-check
+      - name: Check coverage
+        uses: praxis-proxy/conventions/.github/actions/coverage-check@7e1e8d97c2dc820d24b31f9a65b119c4d0e5342c # v0.1.0

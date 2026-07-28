@@ -2,6 +2,15 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! TCP pipeline execution: connect and disconnect filter phases.
+//!
+//! Runs [`TcpFilter`] hooks sequentially: `on_connect` in forward
+//! order, `on_disconnect` in reverse. TCP pipelines do not support
+//! conditions, branch chains, or body processing - those features
+//! are HTTP-only. Failure mode handling follows the same pattern as
+//! the HTTP path via [`check_failure_mode`].
+//!
+//! [`TcpFilter`]: crate::tcp_filter::TcpFilter
+//! [`check_failure_mode`]: super::check_failure_mode
 
 use tracing::trace;
 

@@ -28,7 +28,7 @@ use crate::{
 ///
 /// assert!(RedirectStatus::try_from(200_u16).is_err());
 /// ```
-#[derive(Debug, Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum RedirectStatus {
     /// 301 Moved Permanently.
     MovedPermanently,

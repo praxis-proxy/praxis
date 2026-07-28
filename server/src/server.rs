@@ -168,9 +168,11 @@ fn spawn_watcher(
     state: ServerState,
 ) -> Option<std::thread::JoinHandle<()>> {
     let path = config_path?;
+    let initial_content_hash = std::fs::read_to_string(&path).map_or(0, |c| crate::watcher::hash_content(&c));
     let handle = crate::watcher::spawn_config_watcher(crate::watcher::WatcherParams {
         config_path: path,
         health_shutdown: state.health_shutdown,
+        initial_content_hash,
         initial_config: config,
         kv_stores: state.kv_stores,
         pipelines: state.pipelines,
@@ -353,9 +355,9 @@ mod tests {
         }
     }
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // insecure_warn
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     #[test]
     fn insecure_warn_inactive_does_not_panic() {
@@ -367,9 +369,9 @@ mod tests {
         insecure_warn(true, "test_option: active warning");
     }
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // init_runtime_limits
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     #[test]
     fn init_runtime_limits_no_limits_does_not_panic() {
@@ -386,9 +388,9 @@ mod tests {
         init_runtime_limits(&runtime);
     }
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // warn_insecure_key_permissions (Unix)
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     #[cfg(unix)]
     #[test]
@@ -429,9 +431,9 @@ mod tests {
         warn_insecure_key_permissions(&config);
     }
 
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Test Utilities
-    // -----------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     #[cfg(unix)]
     fn config_with_tls(cert_path: &str, key_path: &str) -> Config {

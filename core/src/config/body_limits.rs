@@ -46,7 +46,7 @@ pub const ABSOLUTE_MAX_BODY_BYTES: usize = 67_108_864; // 64 MiB
 /// assert_eq!(limits.max_request_bytes, Some(5_242_880));
 /// assert_eq!(limits.max_response_bytes, Some(2_097_152));
 /// ```
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct BodyLimitsConfig {
     /// Maximum request body size in bytes.

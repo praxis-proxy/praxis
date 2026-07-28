@@ -31,7 +31,7 @@ use crate::TlsError;
 /// // Paths without traversal pass validation:
 /// assert!(pair.validate().is_ok());
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CertKeyPair {
     /// Path to the PEM certificate file.
@@ -93,7 +93,7 @@ impl CertKeyPair {
 /// assert_eq!(ca.ca_path, "/etc/ssl/ca.pem");
 /// assert!(ca.crl_paths.is_empty());
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaConfig {
     /// Path to the PEM CA certificate file.
@@ -345,9 +345,9 @@ mod tests {
         );
     }
 
-    // ---------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Test Utilities
-    // ---------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     /// Temp file paths for cert and key, kept alive by the temp dir.
     struct TempPaths {

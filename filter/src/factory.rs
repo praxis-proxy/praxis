@@ -40,6 +40,8 @@ use crate::{
 ///
 /// [`FilterError`]: crate::FilterError
 pub fn parse_filter_config<T: DeserializeOwned>(name: &str, config: &serde_yaml::Value) -> Result<T, FilterError> {
+    let empty = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+    let config = if config.is_null() { &empty } else { config };
     let cleaned = strip_structural_keys(config);
     serde_yaml::from_value(cleaned).map_err(|e| -> FilterError { format!("{name}: {e}").into() })
 }
@@ -74,6 +76,20 @@ fn strip_structural_keys(config: &serde_yaml::Value) -> serde_yaml::Value {
 
     serde_yaml::Value::Mapping(filtered)
 }
+
+/// Config type for filters that accept no configuration.
+///
+/// Deserializes from an empty YAML mapping or `null` (via
+/// [`parse_filter_config`]) and rejects unknown fields.
+///
+/// [`parse_filter_config`]: crate::parse_filter_config
+#[derive(serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+#[expect(
+    clippy::empty_structs_with_brackets,
+    reason = "brackets required for serde mapping deserialization"
+)]
+pub struct EmptyFilterConfig {}
 
 // -----------------------------------------------------------------------------
 // Filter Factory Types
@@ -245,6 +261,60 @@ mod tests {
             result.is_empty(),
             "mapping with only structural keys should be empty after stripping"
         );
+    }
+
+    #[test]
+    fn parse_filter_config_null_deserializes_as_empty_struct() {
+        let _: EmptyFilterConfig = parse_filter_config("test", &serde_yaml::Value::Null).unwrap();
+    }
+
+    #[test]
+    fn parse_filter_config_empty_struct_rejects_unknown_fields() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("bogus: true").unwrap();
+        let result: Result<EmptyFilterConfig, _> = parse_filter_config("test", &yaml);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_filter_config_empty_struct_accepts_structural_keys_only() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("filter: grpc_detection\nconditions: []").unwrap();
+        let _: EmptyFilterConfig = parse_filter_config("test", &yaml).unwrap();
+    }
+
+    #[test]
+    fn parse_filter_config_empty_struct_rejects_scalar() {
+        let result: Result<EmptyFilterConfig, _> =
+            parse_filter_config("test", &serde_yaml::Value::String("bad".into()));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn parse_filter_config_null_fills_defaults() {
+        #[derive(serde::Deserialize)]
+        struct WithDefault {
+            #[serde(default)]
+            enabled: bool,
+        }
+
+        let cfg: WithDefault = parse_filter_config("test", &serde_yaml::Value::Null).unwrap();
+        assert!(!cfg.enabled);
+    }
+
+    #[test]
+    fn parse_filter_config_empty_mapping_deserializes_as_empty_struct() {
+        let empty = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        let _: EmptyFilterConfig = parse_filter_config("test", &empty).unwrap();
+    }
+
+    #[test]
+    fn parse_filter_config_null_rejects_required_fields() {
+        #[derive(serde::Deserialize)]
+        struct Required {
+            _name: String,
+        }
+
+        let result: Result<Required, _> = parse_filter_config("test", &serde_yaml::Value::Null);
+        assert!(result.is_err());
     }
 
     // -------------------------------------------------------------------------

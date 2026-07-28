@@ -2,6 +2,19 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Ordering validation checks for filter pipelines.
+//!
+//! Detects structural misconfigurations that would cause runtime
+//! failures: load balancers without a preceding cluster selector,
+//! unreachable filters behind unconditional static responses,
+//! conditional security filters (bypass risk), duplicate routers or
+//! load balancers, and cluster name mismatches. Each check is
+//! individually skippable via [`SkipPipelineChecks`].
+//!
+//! Called by [`FilterPipeline::ordering_errors`] at startup and on
+//! dynamic config reload.
+//!
+//! [`SkipPipelineChecks`]: praxis_core::config::SkipPipelineChecks
+//! [`FilterPipeline::ordering_errors`]: super::FilterPipeline::ordering_errors
 
 use praxis_core::config::{FailureMode, FilterEntry};
 use tracing::warn;
@@ -20,6 +33,9 @@ const SECURITY_FILTERS: &[&str] = &[
     "forwarded_headers",
     "guardrails",
     "ip_acl",
+    "peer_identity_trust",
+    #[cfg(feature = "cpex-policy-engine")]
+    "policy",
     "rate_limit",
 ];
 
@@ -354,6 +370,20 @@ mod tests {
         branch::{RejoinTarget, ResolvedBranch},
         test_filters::{lb_filter, noop_filter_with_conditions, selector_filter},
     };
+
+    #[test]
+    fn security_filter_list_matches_registry_metadata() {
+        let registry = crate::FilterRegistry::with_builtins();
+        let mut expected = registry.security_filters();
+        let mut actual = SECURITY_FILTERS.to_vec();
+        expected.sort_unstable();
+        actual.sort_unstable();
+
+        assert_eq!(
+            actual, expected,
+            "pipeline checks and registry security metadata diverged"
+        );
+    }
 
     #[test]
     fn lb_without_router_errors() {

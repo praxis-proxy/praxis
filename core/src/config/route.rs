@@ -2,6 +2,12 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Shorthand routing rules.
+//!
+//! [`PathMatch`] and [`Route`] provide the YAML-level routing model
+//! consumed by the router filter. Routes match requests by path
+//! (exact or prefix), optional host, and optional header predicates,
+//! then select a target cluster. These types are config-only; runtime
+//! matching logic lives in the router filter's `matching` module.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -30,7 +36,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// [`Exact`]: PathMatch::Exact
 /// [`Prefix`]: PathMatch::Prefix
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(untagged)]
 pub enum PathMatch {
     /// Exact path match.
@@ -151,7 +157,7 @@ impl PathMatch {
 /// assert!(route.path_match.is_exact());
 /// assert_eq!(route.path_match.value(), "/one");
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Route {
     /// Path matching strategy (exact or prefix).
     #[serde(flatten)]

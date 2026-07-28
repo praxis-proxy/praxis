@@ -47,7 +47,7 @@
 ///     BodyMode::SizeLimit { max_bytes: 2048 }
 /// ));
 /// ```
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum BodyMode {
     /// Deliver chunks as they arrive. Low latency, low memory.

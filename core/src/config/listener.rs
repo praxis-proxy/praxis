@@ -1,7 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! Network listener configuration: bind address, protocol, TLS, and filter chains.
+//! Network listener configuration: bind address, protocol, TLS, and
+//! filter chains.
+//!
+//! Each [`Listener`] maps to one bound socket. It declares the
+//! protocol ([`ProtocolKind`]), optional TLS settings, filter chain
+//! references, timeout overrides, and connection limits. The server
+//! creates one Pingora service per listener at startup; filter
+//! chains are resolved into a pipeline by the build step.
 
 pub use praxis_tls::ListenerTls;
 use serde::Deserialize;
@@ -26,7 +33,7 @@ use serde::Deserialize;
 /// assert_eq!(listener.address, "0.0.0.0:8080");
 /// assert!(listener.tls.is_none());
 /// ```
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Listener {
     /// Unique name for this listener.
@@ -121,7 +128,7 @@ pub struct Listener {
 /// let kind: ProtocolKind = serde_yaml::from_str("http").unwrap();
 /// assert_eq!(kind, ProtocolKind::Http);
 /// ```
-#[derive(Debug, Clone, Deserialize, serde::Serialize, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProtocolKind {
     /// HTTP (default).

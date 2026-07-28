@@ -34,7 +34,7 @@ use serde::{Deserialize, Serialize};
 /// assert!(cluster.read_timeout_ms.is_none());
 /// assert!(cluster.tls.is_none());
 /// ```
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Cluster {
     /// Unique name for the cluster.

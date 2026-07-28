@@ -2,6 +2,14 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Utility functions for HTTP pipeline execution.
+//!
+//! Provides the per-filter dispatch helpers called by the execution
+//! loops in [`http`]: `run_request_filter`, `run_response_filter`,
+//! and their body-phase counterparts. Also handles body byte
+//! accumulation, response condition evaluation, failure-mode
+//! fallback, and optional per-filter duration metrics.
+//!
+//! [`http`]: super::http
 
 use bytes::Bytes;
 use praxis_core::config::FailureMode;
@@ -24,7 +32,7 @@ use crate::{
 
 /// Add chunk size to accumulator.
 pub(super) fn accumulate_body_bytes(counter: &mut u64, body: &Option<Bytes>) {
-    if let Some(b) = body.as_ref() {
+    if let Some(b) = body {
         *counter += b.len() as u64;
     }
 }

@@ -2,6 +2,17 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Pipeline construction and ordering diagnostics.
+//!
+//! Provides [`FilterPipeline::build`] and [`FilterPipeline::build_with_chains`],
+//! which instantiate filters from [`FilterEntry`] slices via the
+//! [`FilterRegistry`], compute [`BodyCapabilities`], and run ordering
+//! validation checks. Branch-aware builds delegate to
+//! [`build_branch::resolve_chain_filters`] for recursive resolution.
+//!
+//! [`FilterEntry`]: praxis_core::config::FilterEntry
+//! [`FilterRegistry`]: crate::registry::FilterRegistry
+//! [`BodyCapabilities`]: crate::body::BodyCapabilities
+//! [`build_branch::resolve_chain_filters`]: super::build_branch::resolve_chain_filters
 
 use std::{collections::HashMap, mem, sync::Arc};
 
@@ -246,12 +257,8 @@ fn warn_tcp_unsupported_fields(filter: &AnyFilter, entry: &FilterEntry) {
 fn extract_compression_config(
     filters: &[PipelineFilter],
 ) -> Option<crate::builtins::http::payload_processing::compression_config::CompressionConfig> {
-    for pf in filters {
-        if let AnyFilter::Http(f) = &pf.filter
-            && let Some(cfg) = f.compression_config()
-        {
-            return Some(cfg.clone());
-        }
-    }
-    None
+    filters.iter().find_map(|pf| match &pf.filter {
+        AnyFilter::Http(f) => f.compression_config().cloned(),
+        AnyFilter::Tcp(_) => None,
+    })
 }

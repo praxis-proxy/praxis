@@ -1,16 +1,29 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! Request body filter: buffers or streams body chunks through the pipeline, enforcing size limits.
+//! Request body filter: buffers or streams body chunks through the
+//! pipeline, enforcing size limits.
+//!
+//! Implements Pingora's `request_body_filter` hook. Chunks are
+//! accumulated or streamed based on the pipeline's [`BodyMode`];
+//! the absolute ceiling ([`ABSOLUTE_MAX_BODY_BYTES`]) is enforced
+//! regardless of per-filter declarations. Rejections from body
+//! filters are converted to downstream error responses.
+//!
+//! [`BodyMode`]: praxis_filter::BodyMode
+//! [`ABSOLUTE_MAX_BODY_BYTES`]: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
 
 use bytes::Bytes;
 use pingora_core::Result;
 use pingora_proxy::Session;
-use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
-use praxis_filter::{BodyBuffer, BodyMode, FilterAction, FilterPipeline, Rejection};
+use praxis_filter::{BodyMode, FilterAction, FilterPipeline, Rejection};
 use tracing::error;
 
-use super::super::{context::PingoraRequestCtx, convert::send_rejection};
+use super::{
+    super::{context::PingoraRequestCtx, convert::send_rejection},
+    BodyFilterOutput, accumulate_stream_buffer, check_body_size_limit, release_stream_buffer,
+    suppress_stream_buffer_chunk,
+};
 
 // -----------------------------------------------------------------------------
 // Request Body Filters
@@ -49,45 +62,23 @@ pub(super) async fn execute(
 
     match ctx.request_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
-            if let Some(chunk) = &*body {
-                #[expect(clippy::allow_attributes, reason = "cast lint is platform-dependent")]
-                #[allow(clippy::cast_possible_truncation, reason = "chunk length fits u64")]
-                let chunk_len = chunk.len() as u64;
-                ctx.request_body_bytes += chunk_len;
-
-                #[expect(clippy::allow_attributes, reason = "cast lint is platform-dependent")]
-                #[allow(clippy::cast_possible_truncation, reason = "max_bytes fits u64")]
-                let limit = max_bytes as u64;
-                if ctx.request_body_bytes > limit {
-                    send_rejection(session, Rejection::status(413)).await;
-                    return Err(pingora_core::Error::explain(
-                        pingora_core::ErrorType::HTTPStatus(413),
-                        "request body exceeds maximum size",
-                    ));
-                }
+            if check_body_size_limit(body, &mut ctx.request_body_bytes, max_bytes) {
+                send_rejection(session, Rejection::status(413)).await;
+                return Err(pingora_core::Error::explain(
+                    pingora_core::ErrorType::HTTPStatus(413),
+                    "request body exceeds maximum size",
+                ));
             }
             return Ok(());
         },
 
         BodyMode::StreamBuffer { max_bytes } if !ctx.request_body_released => {
-            if let Some(chunk) = &*body {
-                let limit = max_bytes.unwrap_or(ABSOLUTE_MAX_BODY_BYTES);
-                let buf = ctx.request_body_buffer.get_or_insert_with(|| BodyBuffer::new(limit));
-
-                if buf.push(chunk.clone()).is_err() {
-                    send_rejection(session, Rejection::status(413)).await;
-                    return Err(pingora_core::Error::explain(
-                        pingora_core::ErrorType::HTTPStatus(413),
-                        "request body exceeds stream_buffer size limit",
-                    ));
-                }
-            }
-
-            if end_of_stream {
-                tracing::trace!("stream buffer: freezing accumulated body before pipeline at EOS");
-                *body = ctx.request_body_buffer.take().map(BodyBuffer::freeze);
-            } else {
-                tracing::trace!("stream buffer: filters see the original chunk");
+            if accumulate_stream_buffer(body, &mut ctx.request_body_buffer, end_of_stream, max_bytes) {
+                send_rejection(session, Rejection::status(413)).await;
+                return Err(pingora_core::Error::explain(
+                    pingora_core::ErrorType::HTTPStatus(413),
+                    "request body exceeds stream_buffer size limit",
+                ));
             }
         },
 
@@ -95,7 +86,7 @@ pub(super) async fn execute(
         _ => tracing::error!("unhandled BodyMode variant in request body filter"),
     }
 
-    let (result, body_bytes, cluster, upstream, extensions, filter_metadata, filter_state, executed_indices, body_done) = {
+    let (result, request_body_bytes, output) = {
         let mut fctx = ctx.filter_context_for(pipeline, None).ok_or_else(|| {
             pingora_core::Error::explain(
                 pingora_core::ErrorType::InternalError,
@@ -103,41 +94,24 @@ pub(super) async fn execute(
             )
         })?;
         let r = pipeline.execute_http_request_body(&mut fctx, body, end_of_stream).await;
-        (
-            r,
-            fctx.request_body_bytes,
-            fctx.cluster,
-            fctx.upstream,
-            fctx.extensions,
-            fctx.filter_metadata,
-            fctx.filter_state,
-            fctx.executed_filter_indices,
-            fctx.body_done_indices,
-        )
+        (r, fctx.request_body_bytes, BodyFilterOutput::take_from(&mut fctx))
     };
-    ctx.request_body_bytes = body_bytes;
-    ctx.cluster = cluster;
-    ctx.upstream = upstream;
-    ctx.extensions = extensions;
-    ctx.filter_metadata = filter_metadata;
-    ctx.filter_state = filter_state;
-    ctx.cached_executed_filter_indices = executed_indices;
-    ctx.cached_body_done_indices = body_done;
+    ctx.request_body_bytes = request_body_bytes;
+    output.write_back(ctx);
 
     match result {
         Ok(FilterAction::Continue | FilterAction::BodyDone) => {
-            if is_stream_buffer && !ctx.request_body_released && !end_of_stream {
-                *body = None;
-            }
+            suppress_stream_buffer_chunk(body, is_stream_buffer, ctx.request_body_released, end_of_stream);
             Ok(())
         },
         Ok(FilterAction::Release) => {
-            if is_stream_buffer && !ctx.request_body_released {
-                ctx.request_body_released = true;
-                if !end_of_stream {
-                    *body = ctx.request_body_buffer.take().map(BodyBuffer::freeze);
-                }
-            }
+            release_stream_buffer(
+                body,
+                is_stream_buffer,
+                &mut ctx.request_body_released,
+                &mut ctx.request_body_buffer,
+                end_of_stream,
+            );
             Ok(())
         },
         Ok(FilterAction::Reject(rejection)) => {
@@ -176,57 +150,8 @@ mod tests {
     use std::collections::VecDeque;
 
     use bytes::Bytes;
-    use praxis_filter::BodyBuffer;
 
     use crate::http::pingora::context::PingoraRequestCtx;
-
-    #[test]
-    fn stream_buffer_accumulates_and_clones() {
-        let mut ctx = make_ctx();
-        let max_bytes = 100;
-
-        let chunk = Bytes::from_static(b"hello ");
-        let buf = ctx
-            .request_body_buffer
-            .get_or_insert_with(|| BodyBuffer::new(max_bytes));
-        assert!(
-            buf.push(chunk.clone()).is_ok(),
-            "first stream chunk push should succeed"
-        );
-
-        let chunk2 = Bytes::from_static(b"world");
-        let buf = ctx.request_body_buffer.as_mut().unwrap();
-        assert!(
-            buf.push(chunk2.clone()).is_ok(),
-            "second stream chunk push should succeed"
-        );
-
-        let frozen = ctx.request_body_buffer.take().unwrap().freeze();
-        assert_eq!(
-            frozen,
-            Bytes::from_static(b"hello world"),
-            "stream buffer should contain concatenated chunks"
-        );
-    }
-
-    #[test]
-    fn stream_buffer_overflow_detected() {
-        let mut ctx = make_ctx();
-        let chunk = Bytes::from_static(b"too long");
-        let buf = ctx.request_body_buffer.get_or_insert_with(|| BodyBuffer::new(5));
-        assert!(
-            buf.push(chunk).is_err(),
-            "stream buffer push exceeding limit should fail"
-        );
-    }
-
-    #[test]
-    fn stream_buffer_release_flag_persists() {
-        let mut ctx = make_ctx();
-        assert!(!ctx.request_body_released, "release flag should start false");
-        ctx.request_body_released = true;
-        assert!(ctx.request_body_released, "release flag should be true after setting");
-    }
 
     #[test]
     fn pre_read_body_drains_chunks_in_order() {

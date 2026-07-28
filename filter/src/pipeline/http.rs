@@ -2,6 +2,18 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! HTTP pipeline execution: request, response, and body filter phases.
+//!
+//! Implements the three async execution loops on [`FilterPipeline`]:
+//! request filters run forward with branch evaluation and index
+//! tracking, response filters run in reverse over the subset that
+//! executed during the request phase, and body filters stream chunks
+//! through filters that declared non-`None` [`BodyAccess`].
+//!
+//! Delegates per-filter dispatch and metrics to [`http_utils`].
+//!
+//! [`FilterPipeline`]: super::FilterPipeline
+//! [`BodyAccess`]: crate::body::BodyAccess
+//! [`http_utils`]: super::http_utils
 
 use bytes::Bytes;
 use tracing::trace;

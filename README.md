@@ -1,4 +1,4 @@
-<img width="3159" height="540" alt="image" src="https://github.com/user-attachments/assets/0c33e340-a3d4-42e5-93f3-c1e3817b8f35"/>
+<img width="2000" height="342" alt="praxis-banner-medium" src="https://github.com/user-attachments/assets/9787b47a-7799-474f-912c-6711abafbca2" />
 
 [![Tests](https://github.com/praxis-proxy/praxis/actions/workflows/tests.yaml/badge.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/tests.yaml)
 [![OpenSSF Best Practices](https://www.bestpractices.dev/projects/13756/badge)](https://www.bestpractices.dev/projects/13756)

@@ -16,7 +16,7 @@ use crate::FilterError;
 // -----------------------------------------------------------------------------
 
 /// What a rule inspects.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum RuleTarget {
     /// Inspect a named request header.
     Header(String),
@@ -26,7 +26,7 @@ pub(super) enum RuleTarget {
 }
 
 /// How a rule matches content.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(super) enum RuleMatcher {
     /// Literal substring match (case-insensitive).
     Contains(String),
@@ -39,7 +39,7 @@ pub(super) enum RuleMatcher {
 }
 
 /// A compiled guardrail rule ready for per-request evaluation.
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(super) struct CompiledRule {
     /// What to inspect.
     pub target: RuleTarget,

@@ -36,7 +36,7 @@ use super::BodyMode;
 /// ));
 /// assert!(!caps.needs_response_body, "unset fields stay at default");
 /// ```
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Debug, Default)]
 #[expect(clippy::struct_excessive_bools, reason = "capability flags")]
 pub struct BodyCapabilities {
     /// Whether any filter writes to the request body.

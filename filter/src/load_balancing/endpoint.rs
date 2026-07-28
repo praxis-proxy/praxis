@@ -19,7 +19,7 @@ use praxis_core::config::Cluster;
 /// assert_eq!(ep.weight, 3);
 /// assert_eq!(ep.index, 0);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct WeightedEndpoint {
     /// Socket address as `host:port`.
     pub(crate) address: Arc<str>,
@@ -94,9 +94,9 @@ mod tests {
         assert!(weighted.is_empty(), "empty cluster should produce empty vec");
     }
 
-    // ---------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
     // Test Utilities
-    // ---------------------------------------------------------------------------
+    // -------------------------------------------------------------------------
 
     /// Assert a [`WeightedEndpoint`] has the expected address, weight, and index.
     fn assert_endpoint(ep: &WeightedEndpoint, addr: &str, weight: u32, index: usize) {

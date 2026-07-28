@@ -2,6 +2,14 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! YAML configuration parsing, defaults, and validation.
+//!
+//! Defines the root `Config` struct deserialized from
+//! `praxis.yaml`. Submodules provide per-section types
+//! (`Listener`, `RuntimeConfig`, `AdminConfig`,
+//! `BodyLimitsConfig`), filter chain and branch chain models,
+//! and a validation pass that checks structural invariants before
+//! the server starts. The `bootstrap` module handles config file
+//! discovery and fallback resolution.
 
 use std::path::Path;
 
@@ -68,7 +76,7 @@ pub use validate::{MAX_BRANCH_DEPTH, MAX_ITERATIONS_CEILING, is_ssrf_sensitive};
 /// .unwrap();
 /// assert_eq!(config.listeners[0].address, "127.0.0.1:8080");
 /// ```
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Admin endpoint settings (address and verbosity).

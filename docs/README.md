@@ -19,6 +19,13 @@ and security. AI Gateway docs live in
   all built-in filter configurations
 - [TLS](operating/tls.md):
   certificates, mTLS, SNI, hot-reload
+- [Observability](operating/observability.md):
+  Prometheus metrics, access logs, admin endpoints
+- [Health Checking](operating/health-checking.md):
+  active/passive probes, thresholds, admin endpoints
+- [Load Balancing](operating/load-balancing.md):
+  strategy selection, weighted endpoints, health-aware
+  routing
 - [Security Hardening](operating/security-hardening.md):
   production deployment guidance
 
@@ -49,17 +56,21 @@ and security. AI Gateway docs live in
   body access, StreamBuffer, conditions
 - [Crate Layout](architecture/crate-layout.md):
   workspace structure, module tree, dependency graph
+- [TCP Proxy](architecture/tcp-proxy.md):
+  SNI peek-and-forward, timeout layering, SSRF
 - [HTTP Correctness](architecture/http-correctness.md):
   RFC enforcement, Pingora boundary
 
 ## Filter Development
 
+- [HTTP Filter Tutorial](filters/http-filter-tutorial.md):
+  build, register, test, and run a custom filter
 - [Filter System](filters/README.md):
   traits, context, body access, pipeline
 - [Branch Chains](filters/branch-chains.md):
   conditional branching in pipelines
 - [Extensions](filters/extensions.md):
-  custom filter tutorial, best practices
+  registration options, advanced examples, best practices
 
 ## Reference
 

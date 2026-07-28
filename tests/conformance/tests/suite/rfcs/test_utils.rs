@@ -443,6 +443,42 @@ fn handle_request_line_echo(mut stream: TcpStream) {
     let _sent = stream.write_all(response.as_bytes());
 }
 
+/// Start a backend that returns response headers with
+/// deliberately uppercase names, to verify the H2 proxy
+/// lowercases them per [RFC 9113 Section 8.2.1].
+///
+/// [RFC 9113 Section 8.2.1]: https://datatracker.ietf.org/doc/html/rfc9113#section-8.2.1
+pub(super) fn start_uppercase_header_backend() -> u16 {
+    let (listener, port) = praxis_test_utils::net::port::bind_unique_port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                handle_uppercase_header_connection(stream);
+            });
+        }
+    });
+    port
+}
+
+/// Handle a single connection for the uppercase header backend.
+fn handle_uppercase_header_connection(mut stream: TcpStream) {
+    drop(stream.set_read_timeout(Some(Duration::from_secs(5))));
+    let mut buf = [0_u8; 4096];
+    let _bytes = stream.read(&mut buf);
+    let body = "ok";
+    let response = format!(
+        "HTTP/1.1 200 OK\r\n\
+         Content-Length: {}\r\n\
+         X-ALLCAPS-HEADER: allcaps-value\r\n\
+         X-MixedCase-Header: mixed-value\r\n\
+         Connection: close\r\n\
+         \r\n\
+         {body}",
+        body.len()
+    );
+    let _sent = stream.write_all(response.as_bytes());
+}
+
 /// Start a backend that returns 417 Expectation Failed.
 pub(super) fn start_417_backend() -> u16 {
     let (listener, port) = praxis_test_utils::net::port::bind_unique_port();

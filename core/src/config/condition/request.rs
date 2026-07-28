@@ -29,7 +29,7 @@ use super::{impl_condition_deserialize, impl_condition_serialize};
 /// .unwrap();
 /// assert_eq!(conditions.len(), 2);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub enum Condition {
     /// Execute the filter only if the predicate matches.
     When(ConditionMatch),
@@ -60,7 +60,7 @@ impl_condition_serialize!(Condition, ConditionMatch);
 /// assert_eq!(m.path_prefix.as_deref(), Some("/api"));
 /// assert_eq!(m.methods.as_ref().unwrap().len(), 2);
 /// ```
-#[derive(Debug, Clone, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConditionMatch {
     /// Request URI must match this exact path.

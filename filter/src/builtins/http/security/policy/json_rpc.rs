@@ -4,7 +4,7 @@
 //! JSON-RPC body parsing + typed CMF content-part builders.
 //!
 //! The upstream protocol classifier filter (from `praxis-ai`) parses JSON-RPC bodies
-//! and stashes `protocol.method` / `protocol.name` in `filter_metadata`, but
+//! and stashes `mcp.method` / `mcp.name` in `filter_metadata`, but
 //! it doesn't materialize `params.arguments` (or `result.content`)
 //! into a typed form that APL `args.*` / `result.*` predicates can
 //! evaluate. This module does that second parse, builds the matching
@@ -76,7 +76,7 @@ pub(super) fn build_content_for_method(
         .unwrap_or(serde_json::Value::Null);
 
     match method {
-        "service/invoke" => {
+        "tools/call" => {
             let arguments = params
                 .get("arguments")
                 .and_then(|v| v.as_object())
@@ -91,7 +91,7 @@ pub(super) fn build_content_for_method(
                 },
             }]
         },
-        "template/get" => {
+        "prompts/get" => {
             let arguments = params
                 .get("arguments")
                 .and_then(|v| v.as_object())
@@ -106,9 +106,9 @@ pub(super) fn build_content_for_method(
                 },
             }]
         },
-        "resource/read" => {
-            // For `resource/read`, `params.uri` is the resource
-            // identifier; `protocol.name` is set to the same URI by the
+        "resources/read" => {
+            // For `resources/read`, `params.uri` is the resource
+            // identifier; `mcp.name` is set to the same URI by the
             // protocol classifier filter (it treats `uri` as the "selector"). Carry
             // it through as the `ResourceReference`.
             let uri = params
@@ -142,9 +142,9 @@ pub(super) fn build_content_for_method(
 /// (no matching content part, malformed original, etc.).
 ///
 /// Touched fields by JSON-RPC method:
-///   * `service/invoke`     → `params.arguments` (from the first `ContentPart::ToolCall.arguments`)
-///   * `template/get`    → `params.arguments` (from the first `ContentPart::PromptRequest.arguments`)
-///   * `resource/read` → `params.uri` (from `ContentPart::ResourceRef.uri`)
+///   * `tools/call`     → `params.arguments` (from the first `ContentPart::ToolCall.arguments`)
+///   * `prompts/get`    → `params.arguments` (from the first `ContentPart::PromptRequest.arguments`)
+///   * `resources/read` → `params.uri` (from `ContentPart::ResourceRef.uri`)
 ///
 /// All other JSON-RPC envelope fields (`jsonrpc`, `id`, `method`,
 /// `params.name`) pass through unchanged. This minimizes the
@@ -161,11 +161,11 @@ pub(super) fn reserialize_json_rpc_body(original: &Bytes, method: &str, message:
     let params_obj = params.as_object_mut()?;
 
     match method {
-        "service/invoke" | "template/get" => {
+        "tools/call" | "prompts/get" => {
             for part in &message.content {
                 let new_args = match part {
-                    ContentPart::ToolCall { content } if method == "service/invoke" => Some(&content.arguments),
-                    ContentPart::PromptRequest { content } if method == "template/get" => Some(&content.arguments),
+                    ContentPart::ToolCall { content } if method == "tools/call" => Some(&content.arguments),
+                    ContentPart::PromptRequest { content } if method == "prompts/get" => Some(&content.arguments),
                     _ => None,
                 };
                 if let Some(args) = new_args {
@@ -180,7 +180,7 @@ pub(super) fn reserialize_json_rpc_body(original: &Bytes, method: &str, message:
             }
             None
         },
-        "resource/read" => {
+        "resources/read" => {
             for part in &message.content {
                 if let ContentPart::ResourceRef { content } = part {
                     params_obj.insert("uri".to_owned(), serde_json::Value::String(content.uri.clone()));
@@ -199,8 +199,8 @@ pub(super) fn reserialize_json_rpc_body(original: &Bytes, method: &str, message:
 
 /// Build the typed CMF `ContentPart` list from a JSON-RPC *response*
 /// body — the post-phase mirror of [`build_content_for_method`]. Today
-/// only `service/invoke` produces a structured `ToolResult`; `template/get`
-/// and `resource/read` return TBD shapes the filter can extend later.
+/// only `tools/call` produces a structured `ToolResult`; `prompts/get`
+/// and `resources/read` return TBD shapes the filter can extend later.
 ///
 /// The actual tool data lives in `result.content[].text` (a
 /// JSON-stringified payload) and/or `result.structuredContent`
@@ -227,7 +227,7 @@ pub(super) fn build_response_content_for_method(
     correlation_id: &str,
     body: &Bytes,
 ) -> Vec<ContentPart> {
-    if method != "service/invoke" {
+    if method != "tools/call" {
         return Vec::new();
     }
     let envelope: serde_json::Value = match serde_json::from_slice::<serde_json::Value>(body) {
@@ -299,7 +299,7 @@ pub(super) fn build_response_content_for_method(
 /// only when the original response already had it (we don't invent
 /// fields).
 pub(super) fn reserialize_json_rpc_response_body(original: &Bytes, method: &str, message: &Message) -> Option<Bytes> {
-    if method != "service/invoke" {
+    if method != "tools/call" {
         return None;
     }
     let mut envelope: serde_json::Value = serde_json::from_slice(original).ok()?;

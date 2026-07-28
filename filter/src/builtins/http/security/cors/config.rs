@@ -20,7 +20,7 @@ use serde::Deserialize;
 /// let mode: DisallowedOriginMode = serde_yaml::from_str("reject").unwrap();
 /// assert_eq!(mode, DisallowedOriginMode::Reject);
 /// ```
-#[derive(Debug, Default, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum DisallowedOriginMode {
     /// Omit CORS headers and return 204 (default).

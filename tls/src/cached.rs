@@ -26,7 +26,7 @@ use crate::TlsError;
 /// let cached = CachedCaCerts::new(vec![vec![1, 2, 3]]);
 /// assert_eq!(cached.der_certs().len(), 1);
 /// ```
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct CachedCaCerts {
     /// DER-encoded certificate bytes.
     der_certs: Vec<Vec<u8>>,
@@ -179,7 +179,7 @@ impl CachedClientCert {
 /// ```
 ///
 /// [`CachedClusterTls::try_from_config`]: CachedClusterTls::try_from_config
-#[derive(Debug, Clone)]
+#[derive(Clone, Debug)]
 pub struct CachedClusterTls {
     /// Cached CA certificates.
     ca: Option<Arc<CachedCaCerts>>,
