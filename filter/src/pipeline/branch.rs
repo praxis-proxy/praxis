@@ -26,7 +26,7 @@
 use std::sync::Arc;
 
 use super::filter::PipelineFilter;
-use crate::actions::Rejection;
+use crate::actions::{Rejection, TerminalResponse};
 
 // -----------------------------------------------------------------------------
 // RejoinTarget
@@ -105,6 +105,9 @@ pub(crate) enum BranchOutcome {
 
     /// A branch filter rejected the request.
     Reject(Rejection),
+
+    /// A branch filter produced a terminal response.
+    TerminalResponse(Box<TerminalResponse>),
 
     /// Re-enter at this filter index.
     ReEnter(usize),

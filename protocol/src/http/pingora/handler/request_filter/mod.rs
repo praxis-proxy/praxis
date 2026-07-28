@@ -8,8 +8,10 @@ use std::{borrow::Cow, sync::Arc};
 use pingora_core::Result;
 use pingora_proxy::Session;
 use praxis_core::connectivity::normalize_mapped_ipv4;
-use praxis_filter::{BodyMode, FilterAction, FilterError, FilterPipeline, Rejection, Request, TrustedHeaderMutation};
-use tracing::{error, warn};
+use praxis_filter::{
+    BodyMode, FilterAction, FilterError, FilterPipeline, Rejection, Request, TerminalResponse, TrustedHeaderMutation,
+};
+use tracing::{debug, error, warn};
 
 use super::super::{
     context::PingoraRequestCtx,
@@ -154,6 +156,13 @@ pub(in crate::http) async fn execute(
             send_rejection(session, rejection).await;
             Ok(true)
         },
+        Ok(PipelineResult {
+            action: FilterAction::TerminalResponse(terminal),
+            ..
+        }) => {
+            run_terminal_response(pipeline, session, ctx, *terminal).await;
+            Ok(true)
+        },
         Err(e) => {
             error!(error = %e, "filter pipeline error");
             send_rejection(session, Rejection::status(500)).await;
@@ -258,7 +267,204 @@ async fn run_pipeline(
             headers_to_remove: Vec::new(),
             headers_to_set: Vec::new(),
         }),
+        Ok(FilterAction::TerminalResponse(terminal)) => Ok(PipelineResult {
+            action: FilterAction::TerminalResponse(terminal),
+            extra_headers: Vec::new(),
+            headers_to_remove: Vec::new(),
+            headers_to_set: Vec::new(),
+        }),
         Err(e) => Err(e),
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Terminal Response
+// -----------------------------------------------------------------------------
+
+/// Run response filters on a terminal response and send it downstream.
+///
+/// Builds a [`praxis_filter::Response`] from the terminal, runs the
+/// response-header and response-body filter lifecycle so preceding
+/// filters can observe and modify the response, then writes the
+/// (potentially modified) response to the Pingora session.
+#[expect(clippy::too_many_lines, reason = "writeback destructuring")]
+#[expect(
+    clippy::large_stack_frames,
+    reason = "async fn: locals live in heap-allocated future"
+)]
+async fn run_terminal_response(
+    pipeline: &FilterPipeline,
+    session: &mut Session,
+    ctx: &mut PingoraRequestCtx,
+    terminal: TerminalResponse,
+) {
+    let status = terminal.status;
+    let mut resp = praxis_filter::Response {
+        status: http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR),
+        headers: terminal.headers,
+    };
+
+    ctx.response_phase_done = true;
+    ctx.upstream_response_status = Some(status);
+
+    // Run response-header filters so preceding filters see the response.
+    // Uses writeback destructuring to satisfy the borrow checker: the
+    // filter context borrows `ctx` and `resp`, so fields are extracted
+    // into locals before the borrow ends.
+    let response_result = {
+        let (result, extensions, filter_metadata, filter_state, executed_indices, body_done) = {
+            let Some(mut fctx) = ctx.filter_context_for(pipeline, Some(&mut resp)) else {
+                warn!("request snapshot not set for terminal response; sending as-is");
+                send_terminal_to_session(session, &resp, terminal.body).await;
+                return;
+            };
+            let r = pipeline.execute_http_response(&mut fctx).await;
+            (
+                r,
+                fctx.extensions,
+                fctx.filter_metadata,
+                fctx.filter_state,
+                fctx.executed_filter_indices,
+                fctx.body_done_indices,
+            )
+        };
+        // `resp` now contains filter-modified status and headers (filters
+        // mutated it through the `&mut` reference in the filter context).
+        ctx.extensions = extensions;
+        ctx.filter_metadata = filter_metadata;
+        ctx.filter_state = filter_state;
+        ctx.cached_executed_filter_indices = executed_indices;
+        ctx.cached_body_done_indices = body_done;
+        result
+    };
+
+    match response_result {
+        Ok(FilterAction::Reject(rejection)) => {
+            warn!(status = rejection.status, "response filter rejected terminal response");
+            send_rejection(session, rejection).await;
+            return;
+        },
+        Err(e) => {
+            error!(error = %e, "response filter error on terminal response");
+            send_rejection(session, Rejection::status(500)).await;
+            return;
+        },
+        _ => {},
+    }
+
+    // Run response-body filters on the terminal body, passing the
+    // terminal response header so response_conditions can evaluate.
+    let mut body = terminal.body;
+    let body_result = {
+        let (result, extensions, filter_metadata, filter_state, executed_indices, body_done) = {
+            let Some(mut fctx) = ctx.filter_context_for(pipeline, None) else {
+                send_terminal_to_session(session, &resp, body).await;
+                return;
+            };
+            let r = pipeline.execute_http_response_body_with_response_header(&mut fctx, &mut body, true, Some(&resp));
+            (
+                r,
+                fctx.extensions,
+                fctx.filter_metadata,
+                fctx.filter_state,
+                fctx.executed_filter_indices,
+                fctx.body_done_indices,
+            )
+        };
+        ctx.extensions = extensions;
+        ctx.filter_metadata = filter_metadata;
+        ctx.filter_state = filter_state;
+        ctx.cached_executed_filter_indices = executed_indices;
+        ctx.cached_body_done_indices = body_done;
+        result
+    };
+
+    match body_result {
+        Ok(FilterAction::Reject(rejection)) => {
+            warn!(
+                status = rejection.status,
+                "response body filter rejected terminal response"
+            );
+            send_rejection(session, rejection).await;
+            return;
+        },
+        Err(e) => {
+            error!(error = %e, "response body filter error on terminal response");
+            send_rejection(session, Rejection::status(500)).await;
+            return;
+        },
+        _ => {},
+    }
+
+    send_terminal_to_session(session, &resp, body).await;
+}
+
+/// Build a Pingora response header from filter-modified state.
+///
+/// Returns `None` (caller sends 500) for statuses outside 200..=599.
+/// Reframes Content-Length from the actual body, skipping any stale
+/// value that response-header filters may have set.  For HEAD the
+/// body is suppressed downstream but Content-Length must still
+/// reflect what GET would return.
+fn build_terminal_header(
+    resp: &praxis_filter::Response,
+    body: &Option<bytes::Bytes>,
+    body_prohibited: bool,
+    is_head: bool,
+) -> Option<pingora_http::ResponseHeader> {
+    let code = resp.status.as_u16();
+    if !(200..=599).contains(&code) {
+        warn!(status = code, "terminal response status outside 200..=599; sending 500");
+        return None;
+    }
+    let header_count = Some(resp.headers.len().saturating_add(1));
+    let mut header = match pingora_http::ResponseHeader::build(resp.status, header_count) {
+        Ok(h) => h,
+        Err(e) => {
+            error!(status = %resp.status, error = %e, "invalid terminal response status; using 500");
+            return None;
+        },
+    };
+    for (name, value) in &resp.headers {
+        if name == http::header::CONTENT_LENGTH && !is_head {
+            continue;
+        }
+        let _append = header.append_header(name.clone(), value.clone());
+    }
+    if !body_prohibited && !is_head {
+        let content_length = body.as_ref().map_or(0, bytes::Bytes::len);
+        let _insert = header.insert_header("content-length", content_length.to_string());
+    }
+    Some(header)
+}
+
+/// Write a terminal response (headers + optional body) to the Pingora session.
+///
+/// Suppresses the body for 204/304 and HEAD, and preserves
+/// Content-Length semantics for HEAD (advertises what GET would return).
+/// Statuses outside 200..=599 are rejected by `build_terminal_header`.
+async fn send_terminal_to_session(session: &mut Session, resp: &praxis_filter::Response, body: Option<bytes::Bytes>) {
+    let is_head = session.req_header().method == http::Method::HEAD;
+    let status = resp.status;
+    let body_prohibited = status == http::StatusCode::NO_CONTENT || status == http::StatusCode::NOT_MODIFIED;
+
+    let Some(header) = build_terminal_header(resp, &body, body_prohibited, is_head) else {
+        send_rejection(session, Rejection::status(500)).await;
+        return;
+    };
+    let send_body = !is_head && !body_prohibited;
+    if let Err(e) = session
+        .write_response_header(Box::new(header), !send_body || body.is_none())
+        .await
+    {
+        debug!(error = %e, "failed to write terminal response header");
+        return;
+    }
+    if send_body
+        && let Some(b) = body
+        && let Err(e) = session.write_response_body(Some(b), true).await
+    {
+        debug!(error = %e, "failed to write terminal response body");
     }
 }
 

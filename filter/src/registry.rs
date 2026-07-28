@@ -43,10 +43,35 @@ pub enum SecurityClass {
 /// A filter factory paired with its [`SecurityClass`] metadata.
 struct FilterRegistration {
     /// The factory function that creates filter instances.
-    factory: FilterFactory,
+    factory: RegisteredFilterFactory,
 
     /// Whether this filter is security-critical.
     security_class: SecurityClass,
+}
+
+/// A normal public factory or a built-in factory that also needs
+/// access to the registry currently resolving the pipeline.
+enum RegisteredFilterFactory {
+    /// A public factory whose configuration is self-contained.
+    Standard(FilterFactory),
+
+    /// A built-in HTTP factory that resolves nested filters.
+    HttpWithRegistry(RegistryHttpFilterFactory),
+}
+
+/// Factory for a built-in HTTP filter that resolves nested filters
+/// against its containing registry.
+type RegistryHttpFilterFactory =
+    fn(&serde_yaml::Value, &FilterRegistry) -> Result<Box<dyn crate::filter::HttpFilter>, FilterError>;
+
+impl RegisteredFilterFactory {
+    /// Instantiate the registered filter.
+    fn create(&self, config: &serde_yaml::Value, registry: &FilterRegistry) -> Result<AnyFilter, FilterError> {
+        match self {
+            Self::Standard(factory) => factory.create(config),
+            Self::HttpWithRegistry(factory) => Ok(AnyFilter::Http(factory(config, registry)?)),
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -132,7 +157,7 @@ impl FilterRegistry {
         self.filters.insert(
             name.to_owned(),
             FilterRegistration {
-                factory,
+                factory: RegisteredFilterFactory::Standard(factory),
                 security_class,
             },
         );
@@ -163,7 +188,7 @@ impl FilterRegistry {
             .filters
             .get(name)
             .ok_or_else(|| -> FilterError { format!("unknown filter type: '{name}'").into() })?;
-        registration.factory.create(config)
+        registration.factory.create(config, self)
     }
 
     /// Returns the names of all registered filter types.
@@ -246,6 +271,11 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     register_http(filters, "grpc_detection", GrpcDetectionFilter::from_config);
     register_http_security(filters, "guardrails", crate::GuardrailsFilter::from_config);
     register_http_security(filters, "ip_acl", IpAclFilter::from_config);
+    register_http_with_registry(
+        filters,
+        "iterative_request_router",
+        crate::builtins::IterativeRequestRouterFilter::from_config_with_registry,
+    );
     register_http(filters, "load_balancer", crate::LoadBalancerFilter::from_config);
     register_http(filters, "path_rewrite", PathRewriteFilter::from_config);
     register_http_security(filters, "rate_limit", RateLimitFilter::from_config);
@@ -268,6 +298,23 @@ fn register_http(
     factory_fn: fn(&serde_yaml::Value) -> Result<Box<dyn crate::filter::HttpFilter>, FilterError>,
 ) {
     insert_registration(filters, name, http_builtin(factory_fn), SecurityClass::Standard);
+}
+
+/// Registers a built-in HTTP filter whose nested configuration must
+/// resolve against the same registry as its containing pipeline.
+fn register_http_with_registry(
+    filters: &mut HashMap<String, FilterRegistration>,
+    name: &str,
+    factory_fn: RegistryHttpFilterFactory,
+) {
+    let prev = filters.insert(
+        name.to_owned(),
+        FilterRegistration {
+            factory: RegisteredFilterFactory::HttpWithRegistry(factory_fn),
+            security_class: SecurityClass::Standard,
+        },
+    );
+    debug_assert!(prev.is_none(), "duplicate built-in filter name: '{name}'");
 }
 
 /// Registers a single HTTP filter factory with [`SecurityClass::Security`].
@@ -315,7 +362,7 @@ fn insert_registration(
     let prev = filters.insert(
         name.to_owned(),
         FilterRegistration {
-            factory,
+            factory: RegisteredFilterFactory::Standard(factory),
             security_class,
         },
     );
@@ -395,7 +442,15 @@ mod tests {
             names.contains(&"json_body_field"),
             "json_body_field should be registered"
         );
+        assert!(
+            names.contains(&"iterative_request_router"),
+            "iterative_request_router should be registered"
+        );
         assert!(names.contains(&"json_rpc"), "json_rpc should be registered");
+        assert!(
+            names.contains(&"peer_identity_trust"),
+            "peer_identity_trust should be registered"
+        );
         #[cfg(feature = "cpex-policy-engine")]
         assert!(names.contains(&"policy"), "policy should be registered");
     }

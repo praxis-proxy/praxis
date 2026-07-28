@@ -8,7 +8,7 @@ use std::{
     io::{Read as _, Write as _},
     net::TcpStream,
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Duration,
@@ -89,6 +89,43 @@ pub fn start_slow_backend(body: &str, delay: Duration) -> u16 {
         let _bytes = stream.read(&mut buf);
         std::thread::sleep(delay);
         let _sent = write_http_response(&mut stream, &body);
+    })
+}
+
+/// Start a backend that returns different responses on each call.
+///
+/// Each entry in `responses` is `(status, body)`. After all entries
+/// are exhausted, the backend returns 500 with "exhausted".
+///
+/// # Panics
+///
+/// Panics if the server fails to bind.
+pub fn start_stateful_backend(responses: Vec<(u16, String)>) -> BackendGuard {
+    let state = Arc::new(Mutex::new(responses));
+
+    spawn_tcp_server_with_shutdown(move |mut stream| {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _headers = read_until_headers_complete(&mut stream);
+
+        let (status, body) = {
+            let mut queue = state.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            if queue.is_empty() {
+                (500_u16, "exhausted".to_owned())
+            } else {
+                queue.remove(0)
+            }
+        };
+        let reason = super::simple::reason_phrase(status);
+        let resp = format!(
+            "HTTP/1.1 {status} {reason}\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             Server: praxis-stateful-backend\r\n\
+             \r\n\
+             {body}",
+            body.len()
+        );
+        let _sent = stream.write_all(resp.as_bytes());
     })
 }
 

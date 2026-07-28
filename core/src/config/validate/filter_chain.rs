@@ -28,7 +28,28 @@ pub(super) const MAX_FILTERS_PER_CHAIN: usize = 100;
 pub(super) fn validate_filter_chains(chains: &[FilterChainConfig], listeners: &[Listener]) -> Result<(), ProxyError> {
     validate_chain_cardinality(chains)?;
     validate_chain_names(chains)?;
+    validate_terminal_filters(chains)?;
     validate_listener_references(chains, listeners)
+}
+
+/// Filter types that must be the last filter in their chain and in
+/// the flattened listener pipeline.
+pub const TERMINAL_FILTERS: &[&str] = &["iterative_request_router"];
+
+/// Reject terminal filters that are not last in their chain.
+fn validate_terminal_filters(chains: &[FilterChainConfig]) -> Result<(), ProxyError> {
+    for chain in chains {
+        for (i, entry) in chain.filters.iter().enumerate() {
+            if TERMINAL_FILTERS.contains(&entry.filter_type.as_str()) && i + 1 < chain.filters.len() {
+                return Err(ProxyError::Config(format!(
+                    "filter '{}' must be the last filter in chain '{}' \
+                     because it produces terminal responses",
+                    entry.filter_type, chain.name
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Reject configs that exceed chain or per-chain filter limits.
@@ -212,6 +233,45 @@ filter_chains:
             yaml.push_str("      - filter: headers\n");
         }
         Config::from_yaml(&yaml).expect("exactly MAX_FILTERS_PER_CHAIN should be accepted");
+    }
+
+    #[test]
+    fn reject_terminal_filter_not_last() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains:
+      - main
+filter_chains:
+  - name: main
+    filters:
+      - filter: iterative_request_router
+        steps:
+          - url: "http://example.com"
+      - filter: headers
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(err.to_string().contains("must be the last filter"), "got: {err}");
+    }
+
+    #[test]
+    fn accept_terminal_filter_when_last() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains:
+      - main
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+      - filter: iterative_request_router
+        steps:
+          - url: "http://example.com"
+"#;
+        Config::from_yaml(yaml).expect("terminal filter as last should be accepted");
     }
 
     #[test]

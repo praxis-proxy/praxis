@@ -48,6 +48,7 @@ pub fn resolve_pipelines(
     registry: &FilterRegistry,
     health_registry: &praxis_core::health::HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
+    subrequest_connector: &praxis_core::subrequest::SubRequestConnector,
 ) -> Result<ListenerPipelines, Box<dyn std::error::Error + Send + Sync>> {
     let chains: HashMap<&str, &[_]> = config
         .filter_chains
@@ -67,8 +68,10 @@ pub fn resolve_pipelines(
             entries.extend_from_slice(chain_filters);
         }
 
+        validate_terminal_position(&entries, &listener.name)?;
+
         let mut pipeline = FilterPipeline::build_with_chains(&mut entries, registry, &chains)?;
-        configure_pipeline(&mut pipeline, config, health_registry, kv_stores)?;
+        configure_pipeline(&mut pipeline, config, health_registry, kv_stores, subrequest_connector)?;
 
         validate_pipeline(&pipeline, &entries, &listener.name, &config.insecure_options)?;
 
@@ -85,6 +88,7 @@ fn configure_pipeline(
     config: &Config,
     health_registry: &praxis_core::health::HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
+    subrequest_connector: &praxis_core::subrequest::SubRequestConnector,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     pipeline.apply_body_limits(
         config.body_limits.max_request_bytes,
@@ -98,6 +102,7 @@ fn configure_pipeline(
     if !kv_stores.is_empty() {
         pipeline.set_kv_stores(kv_stores.clone());
     }
+    pipeline.set_subrequest_connector(subrequest_connector.clone());
     pipeline.apply_insecure_options(&config.insecure_options);
     Ok(())
 }
@@ -105,6 +110,28 @@ fn configure_pipeline(
 // -----------------------------------------------------------------------------
 // Pipeline Validation
 // -----------------------------------------------------------------------------
+
+/// Reject terminal filters that are not last in the flattened
+/// listener pipeline (after chain concatenation).
+fn validate_terminal_position(
+    entries: &[praxis_core::config::FilterEntry],
+    listener_name: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for (i, entry) in entries.iter().enumerate() {
+        if praxis_core::config::TERMINAL_FILTERS.contains(&entry.filter_type.as_str()) && i + 1 < entries.len() {
+            return Err(format!(
+                "filter '{}' must be the last filter in the flattened pipeline \
+                 for listener '{listener_name}' because it produces terminal responses \
+                 (at position {}, pipeline has {} filters after chain concatenation)",
+                entry.filter_type,
+                i,
+                entries.len()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
 
 /// Run pipeline ordering validation; either fail or warn depending
 /// on insecure option flags.
@@ -161,7 +188,14 @@ mod tests {
     fn resolve_pipelines_builds_for_each_listener() {
         let config = valid_config();
         let registry = FilterRegistry::with_builtins();
-        let pipelines = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores()).unwrap();
+        let pipelines = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_subrequest_connector(),
+        )
+        .unwrap();
         assert!(
             pipelines.get("web").is_some(),
             "pipeline should exist for 'web' listener"
@@ -204,7 +238,14 @@ filter_chains:
         )
         .unwrap();
         let registry = FilterRegistry::with_builtins();
-        let pipelines = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores()).unwrap();
+        let pipelines = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_subrequest_connector(),
+        )
+        .unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
         assert!(
             pipeline.is_empty(),
@@ -238,7 +279,14 @@ filter_chains:
         )
         .unwrap();
         let registry = FilterRegistry::with_builtins();
-        let pipelines = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores()).unwrap();
+        let pipelines = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_subrequest_connector(),
+        )
+        .unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
         assert_eq!(pipeline.len(), 3, "two chains should produce 3 filters total");
     }
@@ -269,7 +317,14 @@ filter_chains:
         )
         .unwrap();
         let registry = FilterRegistry::with_builtins();
-        let pipelines = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores()).unwrap();
+        let pipelines = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_subrequest_connector(),
+        )
+        .unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
         let caps = pipeline.body_capabilities();
         assert!(caps.needs_request_body, "body limits should enable request body access");
@@ -308,7 +363,13 @@ filter_chains:
         )
         .unwrap();
         let registry = FilterRegistry::with_builtins();
-        let result = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores());
+        let result = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_subrequest_connector(),
+        );
         assert!(result.is_ok(), "router without LB should be a warning, not an error");
     }
 
@@ -333,7 +394,13 @@ filter_chains:
         )
         .unwrap();
         let registry = FilterRegistry::with_builtins();
-        let result = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores());
+        let result = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_subrequest_connector(),
+        );
         assert!(result.is_ok(), "skip_pipeline_validation should allow startup");
     }
 
@@ -360,7 +427,13 @@ filter_chains:
         )
         .unwrap();
         let registry = FilterRegistry::with_builtins();
-        let result = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores());
+        let result = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_subrequest_connector(),
+        );
         assert!(result.is_err(), "misaligned clusters should fail validation");
         let err = result.err().unwrap().to_string();
         assert!(
@@ -395,7 +468,13 @@ filter_chains:
         )
         .unwrap();
         let registry = FilterRegistry::with_builtins();
-        let result = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores());
+        let result = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_subrequest_connector(),
+        );
         assert!(result.is_err(), "open security filter should fail validation");
         let err = result.err().unwrap().to_string();
         assert!(
@@ -432,7 +511,13 @@ filter_chains:
         )
         .unwrap();
         let registry = FilterRegistry::with_builtins();
-        let result = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores());
+        let result = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_subrequest_connector(),
+        );
         assert!(result.is_ok(), "allow_open_security_filters should permit open ip_acl");
     }
 
@@ -461,7 +546,14 @@ filter_chains:
         )
         .unwrap();
         let registry = FilterRegistry::with_builtins();
-        let pipelines = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores()).unwrap();
+        let pipelines = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_subrequest_connector(),
+        )
+        .unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
         assert!(
             pipeline.records_filter_duration_metrics(),
@@ -474,7 +566,14 @@ filter_chains:
         let config = valid_config();
         let registry = FilterRegistry::with_builtins();
         let kv = make_kv_registry();
-        let pipelines = resolve_pipelines(&config, &registry, &empty_health_registry(), &kv).unwrap();
+        let pipelines = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &kv,
+            &empty_subrequest_connector(),
+        )
+        .unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
         assert!(pipeline.kv_stores().is_some(), "pipeline should have kv_stores set");
     }
@@ -484,7 +583,14 @@ filter_chains:
         let config = valid_config();
         let registry = FilterRegistry::with_builtins();
         let kv = empty_kv_stores();
-        let pipelines = resolve_pipelines(&config, &registry, &empty_health_registry(), &kv).unwrap();
+        let pipelines = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &kv,
+            &empty_subrequest_connector(),
+        )
+        .unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
         assert!(
             pipeline.kv_stores().is_none(),
@@ -518,7 +624,13 @@ filter_chains:
         )
         .unwrap();
         let registry = FilterRegistry::with_builtins();
-        let result = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores());
+        let result = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_subrequest_connector(),
+        );
         assert!(
             result.is_ok(),
             "skip_pipeline_checks.misaligned_clusters should suppress cluster mismatch error"
@@ -551,10 +663,55 @@ filter_chains:
         )
         .unwrap();
         let registry = FilterRegistry::with_builtins();
-        let result = resolve_pipelines(&config, &registry, &empty_health_registry(), &empty_kv_stores());
+        let result = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_subrequest_connector(),
+        );
         assert!(
             result.is_err(),
             "skipping duplicate_routers should not suppress misaligned cluster error"
+        );
+    }
+
+    #[test]
+    fn resolve_pipelines_rejects_terminal_filter_not_last_in_flattened_pipeline() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [irr_chain, trailing]
+filter_chains:
+  - name: irr_chain
+    filters:
+      - filter: iterative_request_router
+        steps:
+          - url: "http://example.com"
+  - name: trailing
+    filters:
+      - filter: headers
+"#,
+        )
+        .unwrap();
+        let registry = FilterRegistry::with_builtins();
+        let result = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_subrequest_connector(),
+        );
+        assert!(
+            result.is_err(),
+            "terminal filter not last in flattened pipeline should fail"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("flattened pipeline") && err.contains("iterative_request_router"),
+            "error should mention flattened pipeline context: {err}"
         );
     }
 
@@ -570,6 +727,11 @@ filter_chains:
     /// Empty KV store registry for tests without KV stores.
     fn empty_kv_stores() -> praxis_core::kv::KvStoreRegistry {
         praxis_core::kv::KvStoreRegistry::new()
+    }
+
+    /// Empty sub-request connector for tests.
+    fn empty_subrequest_connector() -> praxis_core::subrequest::SubRequestConnector {
+        praxis_core::subrequest::SubRequestConnector::new(8, None)
     }
 
     /// KV store registry with one test store.

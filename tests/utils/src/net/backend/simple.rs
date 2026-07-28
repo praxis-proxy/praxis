@@ -321,14 +321,16 @@ pub fn start_backend_with_shutdown(body: &str) -> BackendGuard {
 // -----------------------------------------------------------------------------
 
 /// Map an HTTP status code to its reason phrase.
-fn reason_phrase(status: u16) -> &'static str {
+pub(super) fn reason_phrase(status: u16) -> &'static str {
     match status {
         200 => "OK",
         400 => "Bad Request",
         403 => "Forbidden",
         404 => "Not Found",
         413 => "Content Too Large",
+        429 => "Too Many Requests",
         500 => "Internal Server Error",
+        508 => "Loop Detected",
         502 => "Bad Gateway",
         503 => "Service Unavailable",
         504 => "Gateway Timeout",

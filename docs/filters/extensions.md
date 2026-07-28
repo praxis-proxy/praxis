@@ -5,6 +5,11 @@ the building blocks for building bespoke proxy servers.
 Multiple extension mechanisms are provided to support a
 variety of needs.
 
+If this is your first custom filter, start with the
+[HTTP Filter Tutorial](http-filter-tutorial.md). It walks
+through a complete filter crate before this guide's more
+advanced registration and implementation options.
+
 ## Auto-Discovery (Recommended)
 
 External filter crates can self-register into Praxis at
@@ -569,3 +574,35 @@ cargo xtask generate-filter-docs
 ```
 
 CI runs `cargo xtask lint-filter-docs` as part of `make lint`.
+
+## Advanced: Iterative Request Router
+
+The `iterative_request_router` filter composes other
+filters within named step chains. Each step is a
+pre-built `FilterPipeline` that runs independently,
+producing an upstream exchange via Pingora's native
+`Connector`. Transition rules on each step's response
+drive the iteration loop.
+
+Step chain filters have access to `IterationState` via
+request extensions (`ctx.extensions.get::<IterationState>()`),
+which carries the original request, previous response,
+and a cross-step accumulator. Filters can provide a
+custom body for the next iteration by inserting
+`NextIterationBody` into extensions. Both types are
+exported from `praxis_filter` for use by external filter
+crates.
+
+Nesting an `iterative_request_router` inside another
+`iterative_request_router`'s step chain is not
+supported and will be rejected at config validation.
+Step pipelines execute the complete request-header,
+request-body, response-header, and response-body filter
+lifecycle around each sub-request. The caller's filter
+registry and request extensions are preserved so external
+filters and pipeline-scoped resources remain available.
+
+See the
+[`iterative_request_router` reference](http/traffic_management/iterative_request_router.md)
+and [proposal 00786](../proposals/00786_iterative-request-router.md)
+for the full design.

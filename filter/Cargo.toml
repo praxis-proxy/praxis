@@ -17,7 +17,6 @@ name = "praxis_filter"
 default = []
 cpex-policy-engine = [
     "dep:cpex",
-    "dep:tokio",
 ]
 basic-auth-filter = [
     "dep:base64",
@@ -37,6 +36,8 @@ dashmap = { workspace = true }
 http = { workspace = true }
 metrics = { workspace = true }
 percent-encoding = { workspace = true }
+pingora-core = { workspace = true }
+pingora-http = { workspace = true }
 praxis-core = { workspace = true }
 praxis-tls = { workspace = true }
 rand = { workspace = true }
@@ -51,7 +52,7 @@ subtle = { workspace = true, optional = true }
 thiserror = { workspace = true }
 # Used by `cpex-policy-engine` for plugin `initialize()` at filter
 # construction and JWT identity plugins that fetch JWKS at init time.
-tokio = { workspace = true, optional = true, features = ["rt", "sync", "time", "net"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "net"] }
 tracing = { workspace = true }
 zeroize = { workspace = true }
 

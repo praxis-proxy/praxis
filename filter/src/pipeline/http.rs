@@ -77,6 +77,10 @@ impl FilterPipeline {
             ctx.current_filter_id = None;
             match outcome? {
                 HeaderFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
+                HeaderFilterOutcome::TerminalResponse(terminal) => {
+                    ctx.executed_filter_indices[idx] = true;
+                    return Ok(FilterAction::TerminalResponse(Box::new(terminal)));
+                },
                 HeaderFilterOutcome::Continue => {},
             }
             ctx.executed_filter_indices[idx] = true;
@@ -89,6 +93,7 @@ impl FilterPipeline {
                     idx = t;
                 },
                 BranchOutcome::Reject(r) => return Ok(FilterAction::Reject(r)),
+                BranchOutcome::TerminalResponse(t) => return Ok(FilterAction::TerminalResponse(t)),
             }
         }
         Ok(FilterAction::Continue)
@@ -125,7 +130,7 @@ impl FilterPipeline {
                 run_response_filter(http_filter, ctx, pf.failure_mode, self.record_filter_duration_metrics).await;
             ctx.current_filter_id = None;
             match outcome? {
-                HeaderFilterOutcome::Continue => {},
+                HeaderFilterOutcome::Continue | HeaderFilterOutcome::TerminalResponse(_) => {},
                 HeaderFilterOutcome::Rejected(rejection) => {
                     return Ok(FilterAction::Reject(rejection));
                 },
