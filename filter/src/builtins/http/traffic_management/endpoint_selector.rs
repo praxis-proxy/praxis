@@ -138,21 +138,14 @@ fn validate_sni(sni: &str) -> Result<(), FilterError> {
     }
 
     for (index, label) in sni.split('.').enumerate() {
-        if label.is_empty() || label.len() > 63 {
-            return Err("endpoint_selector: tls.sni has an invalid label length".into());
-        }
         if label.contains('*') {
             if label != "*" || index != 0 {
                 return Err("endpoint_selector: tls.sni wildcard is only valid as the complete leftmost label".into());
             }
             continue;
         }
-        if !label.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-') {
-            return Err("endpoint_selector: tls.sni contains invalid characters".into());
-        }
-        if label.starts_with('-') || label.ends_with('-') {
-            return Err("endpoint_selector: tls.sni label must not start or end with a hyphen".into());
-        }
+        praxis_tls::dns::validate_dns_label(label)
+            .map_err(|e| -> FilterError { format!("endpoint_selector: tls.sni {e}").into() })?;
     }
     Ok(())
 }
@@ -484,27 +477,9 @@ fn validate_host_port(addr: &str) -> Result<(), FilterError> {
 
 /// Validate a non-IPv6 host label (DNS name or IPv4 address).
 fn validate_host_label(host: &str, addr: &str) -> Result<(), FilterError> {
-    for ch in host.chars() {
-        if !ch.is_ascii_alphanumeric() && ch != '.' && ch != '-' {
-            return Err(format!("endpoint_selector: invalid character '{ch}' in host: '{addr}'").into());
-        }
-    }
-    if host.starts_with('.') || host.ends_with('.') || host.starts_with('-') {
-        return Err(format!("endpoint_selector: malformed host in address: '{addr}'").into());
-    }
-    if host.contains("..") {
-        return Err(format!("endpoint_selector: consecutive dots in host: '{addr}'").into());
-    }
     for label in host.split('.') {
-        if label.is_empty() {
-            continue;
-        }
-        if label.len() > 63 {
-            return Err(format!("endpoint_selector: DNS label exceeds 63 characters in: '{addr}'").into());
-        }
-        if label.starts_with('-') || label.ends_with('-') {
-            return Err(format!("endpoint_selector: DNS label starts or ends with hyphen in: '{addr}'").into());
-        }
+        praxis_tls::dns::validate_dns_label(label)
+            .map_err(|e| -> FilterError { format!("endpoint_selector: host {e} in: '{addr}'").into() })?;
     }
     Ok(())
 }
@@ -886,7 +861,7 @@ mod tests {
     fn rejects_malformed_dns_host() {
         let err = validate_host_port(".leading-dot:80").unwrap_err();
         assert!(
-            err.to_string().contains("malformed"),
+            err.to_string().contains("label is empty"),
             "should reject leading dot: {err}"
         );
     }
@@ -919,7 +894,7 @@ mod tests {
     fn rejects_consecutive_dots_in_host() {
         let err = validate_host_port("host..internal:80").unwrap_err();
         assert!(
-            err.to_string().contains("consecutive dots"),
+            err.to_string().contains("label is empty"),
             "should reject consecutive dots: {err}"
         );
     }
@@ -947,7 +922,7 @@ mod tests {
         let host = format!("{}.example:80", "a".repeat(64));
         let err = validate_host_port(&host).unwrap_err();
         assert!(
-            err.to_string().contains("63 characters"),
+            err.to_string().contains("label exceeds 63 characters"),
             "should reject overlong DNS label: {err}"
         );
     }

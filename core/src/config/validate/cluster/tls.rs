@@ -5,6 +5,7 @@
 
 use std::net::IpAddr;
 
+use praxis_tls::dns;
 use tracing::warn;
 
 use crate::{
@@ -132,11 +133,6 @@ fn validate_sni_length(sni: &str, cluster_name: &str) -> Result<(), ProxyError> 
 /// [RFC 6125]: https://datatracker.ietf.org/doc/html/rfc6125
 fn validate_sni_labels(sni: &str, cluster_name: &str) -> Result<(), ProxyError> {
     for (i, label) in sni.split('.').enumerate() {
-        if label.is_empty() || label.len() > 63 {
-            return Err(ProxyError::Config(format!(
-                "cluster '{cluster_name}': sni has invalid label length"
-            )));
-        }
         if label.contains('*') {
             if label != "*" || i != 0 {
                 return Err(ProxyError::Config(format!(
@@ -146,16 +142,7 @@ fn validate_sni_labels(sni: &str, cluster_name: &str) -> Result<(), ProxyError> 
             }
             continue;
         }
-        if !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
-            return Err(ProxyError::Config(format!(
-                "cluster '{cluster_name}': sni contains invalid characters"
-            )));
-        }
-        if label.starts_with('-') || label.ends_with('-') {
-            return Err(ProxyError::Config(format!(
-                "cluster '{cluster_name}': sni label must not start or end with a hyphen"
-            )));
-        }
+        dns::validate_dns_label(label).map_err(|e| ProxyError::Config(format!("cluster '{cluster_name}': sni {e}")))?;
     }
     Ok(())
 }
@@ -348,7 +335,7 @@ mod tests {
         }];
         let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
         assert!(
-            err.to_string().contains("invalid label length"),
+            err.to_string().contains("label exceeds 63 characters"),
             "label >63 chars should be rejected: {err}"
         );
     }
@@ -378,7 +365,7 @@ mod tests {
         }];
         let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
         assert!(
-            err.to_string().contains("invalid label length"),
+            err.to_string().contains("label is empty"),
             "empty label (consecutive dots) should be rejected: {err}"
         );
     }

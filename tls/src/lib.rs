@@ -8,6 +8,7 @@
 mod cached;
 mod client_auth;
 mod config;
+pub mod dns;
 mod error;
 mod identity;
 #[cfg(feature = "hot-reload")]

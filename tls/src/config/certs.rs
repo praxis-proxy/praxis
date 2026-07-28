@@ -158,36 +158,18 @@ fn validate_server_name(name: &str) -> Result<(), TlsError> {
             has_wildcard = true;
             continue;
         }
-        validate_dns_label(name, label)?;
+        if label.contains('*') {
+            return Err(TlsError::ServerConfigError {
+                detail: format!("server_names '{name}': wildcard only permitted as the complete leftmost label"),
+            });
+        }
+        crate::dns::validate_dns_label(label).map_err(|e| TlsError::ServerConfigError {
+            detail: format!("server_names '{name}': {e}"),
+        })?;
     }
     if has_wildcard && label_count < 3 {
         return Err(TlsError::ServerConfigError {
             detail: format!("server_names '{name}': wildcard requires at least 3 labels (e.g. *.example.com)"),
-        });
-    }
-    Ok(())
-}
-
-/// Validate a single DNS label within a server name.
-fn validate_dns_label(name: &str, label: &str) -> Result<(), TlsError> {
-    if label.is_empty() || label.len() > 63 {
-        return Err(TlsError::ServerConfigError {
-            detail: format!("server_names '{name}': label has invalid length"),
-        });
-    }
-    if label.contains('*') {
-        return Err(TlsError::ServerConfigError {
-            detail: format!("server_names '{name}': wildcard only permitted as the complete leftmost label"),
-        });
-    }
-    if !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
-        return Err(TlsError::ServerConfigError {
-            detail: format!("server_names '{name}': contains invalid characters"),
-        });
-    }
-    if label.starts_with('-') || label.ends_with('-') {
-        return Err(TlsError::ServerConfigError {
-            detail: format!("server_names '{name}': label must not start or end with a hyphen"),
         });
     }
     Ok(())

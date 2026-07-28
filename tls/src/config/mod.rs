@@ -36,23 +36,13 @@ pub(crate) fn has_parent_dir_component(path: &str) -> bool {
 /// [RFC 1035]: https://datatracker.ietf.org/doc/html/rfc1035
 /// [RFC 6066 Section 3]: https://datatracker.ietf.org/doc/html/rfc6066#section-3
 pub(crate) fn validate_sni_hostname(sni: &str) -> Result<(), TlsError> {
-    if sni.is_empty() || sni.len() > 253 {
+    if sni.is_empty() {
         return Err(TlsError::InvalidSni { value: sni.to_owned() });
     }
     if sni.parse::<std::net::IpAddr>().is_ok() {
         return Err(TlsError::InvalidSni { value: sni.to_owned() });
     }
-    for label in sni.split('.') {
-        if label.is_empty()
-            || label.len() > 63
-            || !label.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
-            || label.starts_with('-')
-            || label.ends_with('-')
-        {
-            return Err(TlsError::InvalidSni { value: sni.to_owned() });
-        }
-    }
-    Ok(())
+    crate::dns::validate_dns_hostname(sni).map_err(|_dns| TlsError::InvalidSni { value: sni.to_owned() })
 }
 
 /// Emit a warning if `path` is a symlink.
