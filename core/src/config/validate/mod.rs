@@ -13,6 +13,7 @@ mod listener;
 mod rules;
 
 pub use cluster::is_ssrf_sensitive;
+pub use filter_chain::TERMINAL_FILTERS;
 
 /// Maximum allowed `max_connections` value across listeners, clusters,
 /// and the global runtime setting (1 million).

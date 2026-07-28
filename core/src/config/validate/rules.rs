@@ -88,6 +88,7 @@ impl Config {
         validate_runtime_max_connections(self.runtime.max_connections)?;
         validate_keepalive_pool_size(self.runtime.upstream_keepalive_pool_size)?;
         validate_max_memory_bytes(self.runtime.max_memory_bytes)?;
+        validate_subrequest_max_connections(self.runtime.subrequest_max_connections)?;
         validate_global_queue_interval(self.runtime.global_queue_interval)?;
         validate_shutdown_timeout(self.shutdown_timeout_secs)?;
 
@@ -339,6 +340,29 @@ fn validate_max_memory_bytes(max_memory_bytes: Option<usize>) -> Result<(), Prox
     if v > MAX_MEMORY_BYTES {
         return Err(ProxyError::Config(format!(
             "runtime.max_memory_bytes ({v}) exceeds maximum ({MAX_MEMORY_BYTES} / 1 TiB)"
+        )));
+    }
+    Ok(())
+}
+
+/// Reject `runtime.subrequest_max_connections` of zero or above the
+/// semaphore permit ceiling.
+fn validate_subrequest_max_connections(max: Option<usize>) -> Result<(), ProxyError> {
+    let Some(v) = max else {
+        return Ok(());
+    };
+    if v == 0 {
+        return Err(ProxyError::Config(
+            "runtime.subrequest_max_connections must be >= 1 when set \
+             (0 would block all sub-requests indefinitely)"
+                .to_owned(),
+        ));
+    }
+    if v > tokio::sync::Semaphore::MAX_PERMITS {
+        return Err(ProxyError::Config(format!(
+            "runtime.subrequest_max_connections ({v}) exceeds tokio \
+             Semaphore::MAX_PERMITS ({})",
+            tokio::sync::Semaphore::MAX_PERMITS,
         )));
     }
     Ok(())
@@ -1164,6 +1188,92 @@ filter_chains:
         assert!(
             err.to_string().contains("global_queue_interval must be > 0"),
             "should reject zero global_queue_interval: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_subrequest_max_connections_zero() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  subrequest_max_connections: 0
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("subrequest_max_connections must be >= 1"),
+            "should reject zero subrequest_max_connections: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_subrequest_max_connections_positive() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  subrequest_max_connections: 1
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn accept_subrequest_max_connections_at_max_permits() {
+        let max = tokio::sync::Semaphore::MAX_PERMITS;
+        let yaml = format!(
+            r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  subrequest_max_connections: {max}
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#
+        );
+        Config::from_yaml(&yaml).unwrap();
+    }
+
+    #[test]
+    fn reject_subrequest_max_connections_above_max_permits() {
+        let above_max = tokio::sync::Semaphore::MAX_PERMITS + 1;
+        let yaml = format!(
+            r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  subrequest_max_connections: {above_max}
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#
+        );
+        let err = Config::from_yaml(&yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("Semaphore::MAX_PERMITS"),
+            "should reject above MAX_PERMITS: {err}"
         );
     }
 

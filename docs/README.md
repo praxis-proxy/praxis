@@ -63,12 +63,14 @@ and security. AI Gateway docs live in
 
 ## Filter Development
 
+- [HTTP Filter Tutorial](filters/http-filter-tutorial.md):
+  build, register, test, and run a custom filter
 - [Filter System](filters/README.md):
   traits, context, body access, pipeline
 - [Branch Chains](filters/branch-chains.md):
   conditional branching in pipelines
 - [Extensions](filters/extensions.md):
-  custom filter tutorial, best practices
+  registration options, advanced examples, best practices
 
 ## Reference
 

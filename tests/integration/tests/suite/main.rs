@@ -53,6 +53,7 @@ mod guardrails;
 mod health_check;
 mod hot_reload;
 mod ip_acl;
+mod iterative_request_router;
 mod json_body_field;
 mod json_rpc;
 mod path_rewrite;

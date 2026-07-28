@@ -5,9 +5,6 @@
 
 //! Core configuration, error types, and server factory for Praxis.
 
-/// Reusable HTTP callout client with circuit breaking and loop prevention.
-#[cfg(feature = "callout")]
-pub mod callout;
 /// YAML configuration parsing and validation.
 pub mod config;
 /// Upstream connection options and endpoint types.
@@ -28,6 +25,8 @@ pub mod memory;
 pub mod reserved_headers;
 /// Server factory and runtime options.
 pub mod server;
+/// Shared HTTP connector for sub-request execution.
+pub mod subrequest;
 /// Wall-clock time abstraction for filters.
 pub mod time;
 

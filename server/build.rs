@@ -27,6 +27,8 @@ struct ActiveFeatures {
 }
 
 fn main() {
+    emit_version_env();
+
     let Some(metadata) = load_metadata() else {
         write_generated_file(&generate_registration_code(&[]));
         return;
@@ -178,6 +180,50 @@ fn write_generated_file(code: &str) {
     let out_dir = std::env::var("OUT_DIR").expect("OUT_DIR not set");
     let dest = std::path::Path::new(&out_dir).join("external_filters.rs");
     std::fs::write(&dest, code).expect("failed to write external_filters.rs");
+}
+
+/// Emit `PRAXIS_VERSION` with the package version, git SHA, and dirty marker.
+///
+/// Produces `X.Y.Z (abc1234)` on a clean checkout or `X.Y.Z (abc1234-dirty)`
+/// when there are uncommitted changes. Falls back to the plain package version
+/// when git is unavailable.
+fn emit_version_env() {
+    let git_dir = std::path::Path::new("../.git");
+    let head_path = git_dir.join("HEAD");
+    println!("cargo:rerun-if-changed={}", head_path.display());
+
+    if let Ok(head) = std::fs::read_to_string(&head_path)
+        && let Some(ref_path) = head.strip_prefix("ref: ")
+    {
+        println!("cargo:rerun-if-changed={}", git_dir.join(ref_path.trim()).display());
+    }
+    println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
+
+    let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
+    let version = match git_version_suffix() {
+        Some(suffix) => format!("{pkg_version} ({suffix})"),
+        None => pkg_version,
+    };
+    println!("cargo:rustc-env=PRAXIS_VERSION={version}");
+}
+
+/// Return the git short SHA, optionally suffixed with `-dirty`.
+fn git_version_suffix() -> Option<String> {
+    let sha = std::process::Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())?;
+
+    let dirty = std::process::Command::new("git")
+        .args(["status", "--porcelain"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .is_some_and(|o| !o.stdout.is_empty());
+
+    Some(if dirty { format!("{sha}-dirty") } else { sha })
 }
 
 /// Tell Cargo when to re-run this build script.
