@@ -258,7 +258,7 @@ fn build_full_server(config: &Config) -> praxis_core::PingoraServerRuntime {
 fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -> praxis_core::PingoraServerRuntime {
     let health_registry = build_health_registry(&config.clusters);
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-    let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8);
+    let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8, None);
     let pipelines = praxis::resolve_pipelines(config, registry, &health_registry, &kv_stores, &subrequest_connector)
         .expect("pipeline resolution should succeed in test");
 

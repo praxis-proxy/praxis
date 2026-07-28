@@ -239,6 +239,8 @@ pub(crate) async fn execute(
     let mut bounded_peer = peer.clone();
     clamp_peer_timeouts(&mut bounded_peer, timeout);
 
+    let _permit = connector.acquire_permit().await;
+
     tokio::time::timeout(
         timeout,
         Box::pin(execute_inner(
@@ -549,7 +551,7 @@ mod tests {
             let (_socket, _) = listener.accept().await.unwrap();
             tokio::time::sleep(Duration::from_secs(1)).await;
         });
-        let connector = SubRequestConnector::new(1);
+        let connector = SubRequestConnector::new(1, None);
         let peer = HttpPeer::new(address.to_string(), false, String::new());
         let request = SubRequest {
             method: http::Method::GET,

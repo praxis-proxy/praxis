@@ -124,7 +124,8 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
         .runtime
         .subrequest_pool_size
         .unwrap_or(praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE);
-    let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(pool_size);
+    let subrequest_connector =
+        praxis_core::subrequest::SubRequestConnector::new(pool_size, config.runtime.subrequest_max_connections);
 
     let pipelines = resolve_pipelines(config, registry, health_registry, &kv_stores, &subrequest_connector)
         .unwrap_or_else(|e| fatal(&e));

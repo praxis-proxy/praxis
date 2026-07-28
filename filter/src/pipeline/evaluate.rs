@@ -73,8 +73,10 @@ async fn evaluate_branches_inner(
 
         let action = execute_branch_filters(&branch.filters, ctx).await?;
 
-        if let FilterAction::Reject(r) = action {
-            return Ok(BranchOutcome::Reject(r));
+        match action {
+            FilterAction::Reject(r) => return Ok(BranchOutcome::Reject(r)),
+            FilterAction::TerminalResponse(t) => return Ok(BranchOutcome::TerminalResponse(t)),
+            _ => {},
         }
 
         match &branch.rejoin {
@@ -160,6 +162,7 @@ async fn execute_branch_filters(
         match result {
             Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {},
             Ok(FilterAction::Reject(r)) => return Ok(FilterAction::Reject(r)),
+            Ok(FilterAction::TerminalResponse(t)) => return Ok(FilterAction::TerminalResponse(t)),
             Err(e) => {
                 check_failure_mode(http_filter.name(), e, "branch request", pf.failure_mode)?;
             },
@@ -203,6 +206,7 @@ async fn dispatch_nested_outcome(
         },
         BranchOutcome::Terminal => Ok(Some(FilterAction::Continue)),
         BranchOutcome::Reject(r) => Ok(Some(FilterAction::Reject(r))),
+        BranchOutcome::TerminalResponse(t) => Ok(Some(FilterAction::TerminalResponse(t))),
     }
 }
 

@@ -945,6 +945,6 @@ filter_chains:
 
     /// Empty sub-request connector for tests.
     fn empty_subrequest_connector() -> praxis_core::subrequest::SubRequestConnector {
-        praxis_core::subrequest::SubRequestConnector::new(8)
+        praxis_core::subrequest::SubRequestConnector::new(8, None)
     }
 }

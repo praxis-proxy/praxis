@@ -18,6 +18,7 @@ pub(crate) fn log_restart_required_changes(old: &Config, new: &Config) {
     detect_protocol_changes(old, new);
     detect_compression_additions(old, new);
     detect_tls_toggles(old, new);
+    detect_subrequest_max_connections_change(old, new);
 }
 
 /// Detect listener additions, removals, and address rebinds.
@@ -125,6 +126,18 @@ pub(crate) fn detect_tls_toggles(old: &Config, new: &Config) {
                 _ => {},
             }
         }
+    }
+}
+
+/// Detect `subrequest_max_connections` changes that require a restart.
+fn detect_subrequest_max_connections_change(old: &Config, new: &Config) {
+    if old.runtime.subrequest_max_connections != new.runtime.subrequest_max_connections {
+        warn!(
+            old = ?old.runtime.subrequest_max_connections,
+            new = ?new.runtime.subrequest_max_connections,
+            "runtime.subrequest_max_connections changed; requires restart \
+             (connector is shared and created at startup)"
+        );
     }
 }
 
@@ -327,4 +340,91 @@ pub(crate) fn diff_named_items<T: serde::Serialize>(
         .count();
 
     (added, removed, modified)
+}
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    reason = "tests use unwrap/expect/indexing for brevity"
+)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    use super::*;
+
+    fn config_with_subrequest_max(max: Option<usize>) -> Config {
+        let runtime = max.map_or_else(String::new, |n| format!("runtime:\n  subrequest_max_connections: {n}"));
+        Config::from_yaml(&format!(
+            "listeners:\n  - name: web\n    address: \"127.0.0.1:8080\"\n    \
+             filter_chains: [main]\n{runtime}\nfilter_chains:\n  - name: main\n    \
+             filters:\n      - filter: static_response\n        status: 200\n"
+        ))
+        .unwrap()
+    }
+
+    fn capture_warnings<F: FnOnce()>(f: F) -> Vec<String> {
+        let messages = Arc::new(Mutex::new(Vec::<String>::new()));
+        let capture = WarningCapture(Arc::clone(&messages));
+        let subscriber = tracing_subscriber::registry().with(capture);
+        tracing::subscriber::with_default(subscriber, f);
+        std::mem::take(&mut *messages.lock().unwrap())
+    }
+
+    struct WarningCapture(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningCapture {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                let mut visitor = MessageVisitor(String::new());
+                event.record(&mut visitor);
+                self.0.lock().unwrap().push(visitor.0);
+            }
+        }
+    }
+
+    struct MessageVisitor(String);
+
+    impl tracing::field::Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn subrequest_max_connections_changed_warns() {
+        let old = config_with_subrequest_max(Some(10));
+        let new = config_with_subrequest_max(Some(20));
+        let warnings = capture_warnings(|| detect_subrequest_max_connections_change(&old, &new));
+        assert_eq!(warnings.len(), 1, "changed value should produce one warning");
+        assert!(
+            warnings[0].contains("subrequest_max_connections"),
+            "warning should mention subrequest_max_connections: {:?}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn subrequest_max_connections_unchanged_no_warning() {
+        let config = config_with_subrequest_max(Some(10));
+        let warnings = capture_warnings(|| detect_subrequest_max_connections_change(&config, &config));
+        assert!(warnings.is_empty(), "unchanged value should produce no warnings");
+    }
+
+    #[test]
+    fn subrequest_max_connections_both_default_no_warning() {
+        let config = config_with_subrequest_max(None);
+        let warnings = capture_warnings(|| detect_subrequest_max_connections_change(&config, &config));
+        assert!(warnings.is_empty(), "both-default should produce no warnings");
+    }
 }

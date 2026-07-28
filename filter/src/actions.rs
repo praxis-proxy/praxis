@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! Filter return types: continue processing or reject with a response.
+//! Filter return types: continue, reject, or return a terminal response.
 
 use bytes::Bytes;
 
@@ -12,13 +12,16 @@ use bytes::Bytes;
 /// Result of a filter's request or response processing.
 ///
 /// ```
-/// use praxis_filter::{FilterAction, Rejection};
+/// use praxis_filter::{FilterAction, Rejection, TerminalResponse};
 ///
 /// let action = FilterAction::Continue;
 /// assert!(matches!(action, FilterAction::Continue));
 ///
 /// let reject = FilterAction::Reject(Rejection::status(403));
 /// assert!(matches!(reject, FilterAction::Reject(r) if r.status == 403));
+///
+/// let terminal = FilterAction::TerminalResponse(Box::new(TerminalResponse::new(200)));
+/// assert!(matches!(terminal, FilterAction::TerminalResponse(r) if r.status == 200));
 ///
 /// let release = FilterAction::Release;
 /// assert!(matches!(release, FilterAction::Release));
@@ -34,6 +37,22 @@ pub enum FilterAction {
 
     /// Stop processing and respond with the given rejection.
     Reject(Rejection),
+
+    /// Return a complete response to the client, running
+    /// response-phase filters for all filters that already
+    /// executed during the request phase.
+    ///
+    /// Unlike [`Reject`], this preserves downstream keepalive
+    /// and is intended for filters that produce a real response
+    /// (e.g. the iterative request router returning an upstream
+    /// response). Response-header and response-body filters
+    /// execute before the response is sent, so preceding
+    /// observability filters see the terminal response.
+    ///
+    /// Only valid in request-phase filters.
+    ///
+    /// [`Reject`]: FilterAction::Reject
+    TerminalResponse(Box<TerminalResponse>),
 
     /// Signal that accumulated body data ([`StreamBuffer`] mode)
     /// should be forwarded to upstream. After release, remaining
@@ -149,6 +168,72 @@ impl Rejection {
 }
 
 // -----------------------------------------------------------------------------
+// TerminalResponse
+// -----------------------------------------------------------------------------
+
+/// A complete response produced by a request-phase filter.
+///
+/// Unlike [`Rejection`], a terminal response preserves downstream
+/// keepalive and triggers the response-header and response-body
+/// filter lifecycle for filters that already executed during the
+/// request phase.
+///
+/// ```
+/// use praxis_filter::TerminalResponse;
+///
+/// let r = TerminalResponse::new(200)
+///     .with_headers(http::HeaderMap::new())
+///     .with_body(b"ok".as_slice());
+/// assert_eq!(r.status, 200);
+/// assert!(r.body.is_some());
+/// ```
+#[derive(Debug)]
+#[must_use]
+pub struct TerminalResponse {
+    /// HTTP status code.
+    pub status: u16,
+
+    /// Response headers.
+    pub headers: http::HeaderMap,
+
+    /// Buffered response body.
+    pub body: Option<Bytes>,
+}
+
+impl TerminalResponse {
+    /// Create a terminal response with the given status code.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `code` is outside the valid terminal status range
+    /// (200..=599). Informational (1xx) statuses cannot be terminal
+    /// because they require a subsequent final response.
+    pub fn new(code: u16) -> Self {
+        assert!(
+            (200..=599).contains(&code),
+            "terminal status must be 200..=599 (1xx is informational, not final), got {code}"
+        );
+        Self {
+            status: code,
+            headers: http::HeaderMap::new(),
+            body: None,
+        }
+    }
+
+    /// Set the headers of the terminal response.
+    pub fn with_headers(mut self, headers: http::HeaderMap) -> Self {
+        self.headers = headers;
+        self
+    }
+
+    /// Set the body of the terminal response.
+    pub fn with_body(mut self, body: impl Into<Bytes>) -> Self {
+        self.body = Some(body.into());
+        self
+    }
+}
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
@@ -250,6 +335,30 @@ mod tests {
             matches!(action, FilterAction::Reject(r) if r.status == 503),
             "Reject should carry rejection with status 503"
         );
+    }
+
+    #[test]
+    fn terminal_response_200() {
+        let r = TerminalResponse::new(200);
+        assert_eq!(r.status, 200);
+    }
+
+    #[test]
+    fn terminal_response_599() {
+        let r = TerminalResponse::new(599);
+        assert_eq!(r.status, 599);
+    }
+
+    #[test]
+    #[should_panic(expected = "terminal status must be 200..=599")]
+    fn terminal_response_1xx_panics() {
+        let _r = TerminalResponse::new(100);
+    }
+
+    #[test]
+    #[should_panic(expected = "terminal status must be 200..=599")]
+    fn terminal_response_199_panics() {
+        let _r = TerminalResponse::new(199);
     }
 
     #[test]

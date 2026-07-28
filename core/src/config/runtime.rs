@@ -114,6 +114,26 @@ pub struct RuntimeConfig {
     #[serde(default)]
     pub max_memory_bytes: Option<usize>,
 
+    /// Maximum concurrently active sub-request exchanges across
+    /// all `iterative_request_router` instances.
+    ///
+    /// When set, a semaphore limits the number of in-flight
+    /// exchanges. Requests that cannot acquire a permit within
+    /// their step timeout are treated as deadline-exceeded.
+    /// `None` (the default) means no concurrency limit.
+    ///
+    /// ```
+    /// use praxis_core::config::RuntimeConfig;
+    ///
+    /// let cfg: RuntimeConfig = serde_yaml::from_str("subrequest_max_connections: 256").unwrap();
+    /// assert_eq!(cfg.subrequest_max_connections, Some(256));
+    ///
+    /// let cfg = RuntimeConfig::default();
+    /// assert!(cfg.subrequest_max_connections.is_none());
+    /// ```
+    #[serde(default)]
+    pub subrequest_max_connections: Option<usize>,
+
     /// Maximum idle connections in the sub-request connection pool
     /// used by `iterative_request_router` step chains.
     ///
@@ -185,6 +205,7 @@ impl Default for RuntimeConfig {
         Self {
             max_connections: None,
             max_memory_bytes: None,
+            subrequest_max_connections: None,
             subrequest_pool_size: default_subrequest_pool_size(),
             threads: 0,
             work_stealing: default_work_stealing(),

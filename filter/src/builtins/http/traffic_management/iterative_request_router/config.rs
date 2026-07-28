@@ -128,11 +128,22 @@ pub(crate) struct StepTransition {
     #[serde(default)]
     pub(crate) next: Option<String>,
 
+    /// Where the response originated: `upstream`, `local`,
+    /// or `transport`. When unset, any origin matches.
+    #[serde(default)]
+    pub(crate) origin: Option<ResponseOrigin>,
+
     /// Response status codes to match (e.g., [502, 503, 504]).
     /// Transport failures are exposed as 502 and deadline expiry
     /// as 504.
     #[serde(default)]
     pub(crate) status: Option<Vec<u16>>,
+
+    /// Transport error kind to match: `connect`, `io`,
+    /// `deadline_exceeded`, or `response_too_large`. Only
+    /// meaningful when `origin: transport`.
+    #[serde(default)]
+    pub(crate) transport_error: Option<TransportErrorKind>,
 
     /// Result value to match.
     #[serde(default)]
@@ -141,6 +152,32 @@ pub(crate) struct StepTransition {
     /// If true, return the current response to the client.
     #[serde(default)]
     pub(crate) done: bool,
+}
+
+/// Where the step's response originated.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ResponseOrigin {
+    /// A real HTTP response from the upstream.
+    Upstream,
+    /// A locally generated response (filter rejection, validation).
+    Local,
+    /// A synthetic response from a transport-level failure.
+    Transport,
+}
+
+/// Classification of transport-level failures.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum TransportErrorKind {
+    /// TCP or TLS connection establishment failed.
+    Connect,
+    /// Post-connect I/O error during request/response exchange.
+    Io,
+    /// The per-step or overall deadline expired.
+    DeadlineExceeded,
+    /// Response body exceeded the configured size limit.
+    ResponseTooLarge,
 }
 
 // ---------------------------------------------------------------------------
@@ -313,11 +350,20 @@ fn validate_transitions(
             .into());
         }
 
-        if !t.default && t.filter.is_none() && t.status.is_none() {
+        if !t.default && t.filter.is_none() && t.status.is_none() && t.origin.is_none() {
             return Err(format!(
                 "iterative_request_router: step '{step_name}' \
                  transition {i}: non-default transition must \
-                 specify 'filter' or 'status'"
+                 specify 'filter', 'status', or 'origin'"
+            )
+            .into());
+        }
+
+        if t.transport_error.is_some() && t.origin != Some(ResponseOrigin::Transport) {
+            return Err(format!(
+                "iterative_request_router: step '{step_name}' \
+                 transition {i}: 'transport_error' requires \
+                 'origin: transport'"
             )
             .into());
         }

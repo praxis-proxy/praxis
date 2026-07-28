@@ -14,9 +14,9 @@ use praxis_filter::{
     BodyAccess, BodyMode, FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext,
 };
 use praxis_test_utils::{
-    Backend, free_port, http_get, http_post, http_send, json_post, parse_body, parse_status, start_backend,
-    start_backend_with_shutdown, start_echo_backend, start_full_proxy, start_full_proxy_with_registry,
-    start_header_echo_backend, start_stateful_backend,
+    Backend, free_port, http_get, http_post, http_send, json_post, parse_body, parse_header, parse_status,
+    start_backend, start_backend_with_shutdown, start_echo_backend, start_full_proxy, start_full_proxy_with_registry,
+    start_header_echo_backend, start_slow_backend, start_stateful_backend,
 };
 
 // ---------------------------------------------------------------------------
@@ -1524,8 +1524,427 @@ steps:
 }
 
 // ---------------------------------------------------------------------------
+// Terminal Response Lifecycle
+// ---------------------------------------------------------------------------
+
+#[test]
+fn preceding_filter_sees_terminal_response_body() {
+    let backend_port = start_backend("upstream-payload");
+    let proxy_port = free_port();
+    let probe = Arc::new(ResponseProbe::default());
+    let probe_clone = Arc::clone(&probe);
+    let mut registry = FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_response_probe",
+            FilterFactory::Http(Arc::new(move |_| {
+                Ok(Box::new(ResponseProbeFilter(Arc::clone(&probe_clone))))
+            })),
+        )
+        .unwrap();
+
+    let yaml = irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: primary
+steps:
+  - name: primary
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{backend_port}"]
+    on_result:
+      - default: true
+        done: true
+"#
+        ),
+    )
+    .replacen(
+        "    filters:\n      - filter: iterative_request_router",
+        "    filters:\n      - filter: test_response_probe\n      - filter: iterative_request_router",
+        1,
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let (status, body) = http_get(proxy.addr(), "/", None);
+
+    assert_eq!(status, 200);
+    assert_eq!(body, "upstream-payload");
+    let seen_body = probe.body.lock().unwrap().clone();
+    assert_eq!(
+        seen_body.as_deref(),
+        Some(b"upstream-payload".as_slice()),
+        "preceding filter must see the terminal response body"
+    );
+}
+
+#[test]
+fn response_header_mutation_reaches_client() {
+    let backend_port = start_backend("ok");
+    let proxy_port = free_port();
+    let mut registry = FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_response_tagger",
+            FilterFactory::Http(Arc::new(|_| Ok(Box::new(ResponseTaggerFilter)))),
+        )
+        .unwrap();
+
+    let yaml = irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: primary
+steps:
+  - name: primary
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{backend_port}"]
+    on_result:
+      - default: true
+        done: true
+"#
+        ),
+    )
+    .replacen(
+        "    filters:\n      - filter: iterative_request_router",
+        "    filters:\n      - filter: test_response_tagger\n      - filter: iterative_request_router",
+        1,
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(proxy.addr(), &http_get_raw("/"));
+    let status = parse_status(&raw);
+    assert_eq!(status, 200);
+    assert!(
+        raw.contains("x-response-tagged: true"),
+        "response-header mutation by preceding filter must reach the client"
+    );
+}
+
+#[test]
+fn response_hooks_execute_once() {
+    let backend_port = start_backend("once");
+    let proxy_port = free_port();
+    let probe = Arc::new(ResponseProbe::default());
+    let probe_clone = Arc::clone(&probe);
+    let mut registry = FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_response_probe",
+            FilterFactory::Http(Arc::new(move |_| {
+                Ok(Box::new(ResponseProbeFilter(Arc::clone(&probe_clone))))
+            })),
+        )
+        .unwrap();
+
+    let yaml = irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: primary
+steps:
+  - name: primary
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{backend_port}"]
+    on_result:
+      - default: true
+        done: true
+"#
+        ),
+    )
+    .replacen(
+        "    filters:\n      - filter: iterative_request_router",
+        "    filters:\n      - filter: test_response_probe\n      - filter: iterative_request_router",
+        1,
+    );
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let (status, _) = http_get(proxy.addr(), "/", None);
+
+    assert_eq!(status, 200);
+    assert_eq!(
+        probe.response_calls.load(Ordering::SeqCst),
+        1,
+        "on_response must execute exactly once"
+    );
+    assert_eq!(
+        probe.response_body_calls.load(Ordering::SeqCst),
+        1,
+        "on_response_body must execute exactly once"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// HEAD Framing
+// ---------------------------------------------------------------------------
+
+#[test]
+fn head_preserves_upstream_content_length() {
+    let backend_port = start_backend("hello");
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: primary
+steps:
+  - name: primary
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{backend_port}"]
+    on_result:
+      - default: true
+        done: true
+"#
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy(&config);
+    let raw = http_send(
+        proxy.addr(),
+        "HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    let status = parse_status(&raw);
+    let cl = parse_header(&raw, "content-length");
+    let body = parse_body(&raw);
+
+    assert_eq!(status, 200);
+    assert!(body.is_empty(), "HEAD must not return a body, got: {body:?}");
+    assert_eq!(cl.as_deref(), Some("5"), "HEAD Content-Length must match GET body size");
+}
+
+// ---------------------------------------------------------------------------
+// Transport vs Local Timeout Provenance
+// ---------------------------------------------------------------------------
+
+#[test]
+fn transport_timeout_triggers_transport_transition() {
+    let slow_port = start_slow_backend("slow", std::time::Duration::from_secs(2));
+    let fallback = start_backend_with_shutdown("fallback-ok");
+    let fallback_port = fallback.port();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: primary
+timeout_ms: 5000
+step_timeout_ms: 50
+steps:
+  - name: primary
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: primary
+      - filter: load_balancer
+        clusters:
+          - name: primary
+            endpoints: ["127.0.0.1:{slow_port}"]
+    on_result:
+      - origin: transport
+        transport_error: deadline_exceeded
+        next: fallback
+      - default: true
+        done: true
+  - name: fallback
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: fallback
+      - filter: load_balancer
+        clusters:
+          - name: fallback
+            endpoints: ["127.0.0.1:{fallback_port}"]
+    on_result:
+      - default: true
+        done: true
+"#
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy(&config);
+    let (status, body) = http_get(proxy.addr(), "/", None);
+
+    assert_eq!(
+        status, 200,
+        "transport timeout should match transport/deadline_exceeded and failover"
+    );
+    assert_eq!(body, "fallback-ok");
+}
+
+#[test]
+fn local_timeout_does_not_match_transport_transition() {
+    let backend = start_backend_with_shutdown("backend-ok");
+    let fallback = start_backend_with_shutdown("fallback-ok");
+    let fallback_port = fallback.port();
+    let proxy_port = free_port();
+    let mut registry = FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_slow_request",
+            FilterFactory::Http(Arc::new(|_config| Ok(Box::new(SlowRequestFilter)))),
+        )
+        .unwrap();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: primary
+timeout_ms: 5000
+step_timeout_ms: 50
+steps:
+  - name: primary
+    filters:
+      - filter: test_slow_request
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: primary
+      - filter: load_balancer
+        clusters:
+          - name: primary
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - origin: transport
+        transport_error: deadline_exceeded
+        next: fallback
+      - default: true
+        done: true
+  - name: fallback
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: fallback
+      - filter: load_balancer
+        clusters:
+          - name: fallback
+            endpoints: ["127.0.0.1:{fallback_port}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            backend.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+    let (status, _body) = http_get(proxy.addr(), "/", None);
+
+    assert_eq!(
+        status, 504,
+        "local filter timeout must NOT match transport/deadline_exceeded; \
+         should fall through to default:done and return 504"
+    );
+}
+
+fn http_get_raw(path: &str) -> String {
+    format!("GET {path} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+}
+
+// ---------------------------------------------------------------------------
 // Test Utilities
 // ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct ResponseProbe {
+    response_calls: AtomicUsize,
+    response_body_calls: AtomicUsize,
+    body: Mutex<Option<Bytes>>,
+}
+
+struct ResponseProbeFilter(Arc<ResponseProbe>);
+
+#[async_trait::async_trait]
+impl HttpFilter for ResponseProbeFilter {
+    fn name(&self) -> &'static str {
+        "test_response_probe"
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_response(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.0.response_calls.fetch_add(1, Ordering::SeqCst);
+        Ok(FilterAction::Continue)
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn response_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer {
+            max_bytes: Some(65_536),
+        }
+    }
+
+    fn on_response_body(
+        &self,
+        _ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        self.0.response_body_calls.fetch_add(1, Ordering::SeqCst);
+        if end_of_stream {
+            self.0.body.lock().unwrap().clone_from(body);
+        }
+        Ok(FilterAction::Continue)
+    }
+}
+
+struct ResponseTaggerFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for ResponseTaggerFilter {
+    fn name(&self) -> &'static str {
+        "test_response_tagger"
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if let Some(resp) = ctx.response_header.as_mut() {
+            resp.headers
+                .insert("x-response-tagged", http::HeaderValue::from_static("true"));
+        }
+        Ok(FilterAction::Continue)
+    }
+}
 
 struct SlowRequestFilter;
 

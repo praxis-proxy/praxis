@@ -68,6 +68,8 @@ pub fn resolve_pipelines(
             entries.extend_from_slice(chain_filters);
         }
 
+        validate_terminal_position(&entries, &listener.name)?;
+
         let mut pipeline = FilterPipeline::build_with_chains(&mut entries, registry, &chains)?;
         configure_pipeline(&mut pipeline, config, health_registry, kv_stores, subrequest_connector)?;
 
@@ -108,6 +110,28 @@ fn configure_pipeline(
 // -----------------------------------------------------------------------------
 // Pipeline Validation
 // -----------------------------------------------------------------------------
+
+/// Reject terminal filters that are not last in the flattened
+/// listener pipeline (after chain concatenation).
+fn validate_terminal_position(
+    entries: &[praxis_core::config::FilterEntry],
+    listener_name: &str,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    for (i, entry) in entries.iter().enumerate() {
+        if praxis_core::config::TERMINAL_FILTERS.contains(&entry.filter_type.as_str()) && i + 1 < entries.len() {
+            return Err(format!(
+                "filter '{}' must be the last filter in the flattened pipeline \
+                 for listener '{listener_name}' because it produces terminal responses \
+                 (at position {}, pipeline has {} filters after chain concatenation)",
+                entry.filter_type,
+                i,
+                entries.len()
+            )
+            .into());
+        }
+    }
+    Ok(())
+}
 
 /// Run pipeline ordering validation; either fail or warn depending
 /// on insecure option flags.
@@ -652,6 +676,45 @@ filter_chains:
         );
     }
 
+    #[test]
+    fn resolve_pipelines_rejects_terminal_filter_not_last_in_flattened_pipeline() {
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [irr_chain, trailing]
+filter_chains:
+  - name: irr_chain
+    filters:
+      - filter: iterative_request_router
+        steps:
+          - url: "http://example.com"
+  - name: trailing
+    filters:
+      - filter: headers
+"#,
+        )
+        .unwrap();
+        let registry = FilterRegistry::with_builtins();
+        let result = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_subrequest_connector(),
+        );
+        assert!(
+            result.is_err(),
+            "terminal filter not last in flattened pipeline should fail"
+        );
+        let err = result.err().unwrap().to_string();
+        assert!(
+            err.contains("flattened pipeline") && err.contains("iterative_request_router"),
+            "error should mention flattened pipeline context: {err}"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -668,7 +731,7 @@ filter_chains:
 
     /// Empty sub-request connector for tests.
     fn empty_subrequest_connector() -> praxis_core::subrequest::SubRequestConnector {
-        praxis_core::subrequest::SubRequestConnector::new(8)
+        praxis_core::subrequest::SubRequestConnector::new(8, None)
     }
 
     /// KV store registry with one test store.

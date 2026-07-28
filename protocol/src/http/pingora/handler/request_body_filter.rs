@@ -135,7 +135,7 @@ pub(super) async fn execute(
     ctx.cached_body_done_indices = body_done;
 
     match result {
-        Ok(FilterAction::Continue | FilterAction::BodyDone) => {
+        Ok(FilterAction::Continue | FilterAction::BodyDone | FilterAction::TerminalResponse(_)) => {
             if is_stream_buffer && !ctx.request_body_released && !end_of_stream {
                 *body = None;
             }

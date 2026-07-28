@@ -385,7 +385,7 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8);
+        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8, None);
         let pipelines = Arc::new(
             crate::pipelines::resolve_pipelines(
                 &config,
@@ -408,7 +408,7 @@ mod tests {
             pipelines,
             registry,
             shutdown: shutdown.clone(),
-            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8),
+            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8, None),
         });
 
         std::thread::sleep(Duration::from_millis(100));
@@ -427,7 +427,7 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8);
+        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8, None);
         let pipelines = Arc::new(
             crate::pipelines::resolve_pipelines(
                 &config,
@@ -451,7 +451,7 @@ mod tests {
             pipelines: Arc::clone(&pipelines),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
-            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8),
+            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8, None),
         });
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
@@ -478,7 +478,7 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8);
+        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8, None);
         let pipelines = Arc::new(
             crate::pipelines::resolve_pipelines(
                 &config,
@@ -502,7 +502,7 @@ mod tests {
             pipelines: Arc::clone(&pipelines),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
-            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8),
+            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8, None),
         });
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
@@ -560,7 +560,7 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8);
+        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8, None);
         let pipelines = Arc::new(
             crate::pipelines::resolve_pipelines(
                 &config,
@@ -583,7 +583,7 @@ mod tests {
             pipelines,
             registry,
             shutdown: shutdown.clone(),
-            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8),
+            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8, None),
         });
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -622,7 +622,7 @@ mod tests {
         let registry = Arc::new(FilterRegistry::with_builtins());
         let health_registry = Arc::new(std::collections::HashMap::new());
         let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8);
+        let subrequest_connector = praxis_core::subrequest::SubRequestConnector::new(8, None);
         let pipelines = Arc::new(
             crate::pipelines::resolve_pipelines(
                 &config,
@@ -646,7 +646,7 @@ mod tests {
             pipelines: Arc::clone(&pipelines),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
-            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8),
+            subrequest_connector: praxis_core::subrequest::SubRequestConnector::new(8, None),
         });
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));

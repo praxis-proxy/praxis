@@ -5,6 +5,29 @@
 //! multiple sequential HTTP sub-requests through composable filter
 //! chains before returning a final response to the client.
 //!
+//! # Header isolation
+//!
+//! Every transitioned step begins with empty headers. `Host` is
+//! reconstructed from the selected destination. `Content-Type`,
+//! `Accept`, authorization tokens, and custom headers are **not**
+//! inherited from the previous step. Each step must explicitly
+//! inject its own credentials and required representation headers
+//! (e.g. via a `headers` or `credential_injection` filter).
+//!
+//! # Streaming limitations
+//!
+//! Intermediate and terminal responses are fully buffered in memory
+//! (bounded by `max_response_bytes`). SSE and long-lived streaming
+//! responses are not supported. The iterative request router is
+//! designed for bounded, buffered workflows.
+//!
+//! # Position requirement
+//!
+//! This filter must be the last filter in its parent chain because
+//! it produces terminal responses that bypass remaining request-phase
+//! filters. Place accounting and observability filters before it so
+//! they participate in the response lifecycle.
+//!
 //! See proposal 00786 for the full design rationale.
 
 mod config;
@@ -15,7 +38,10 @@ mod tests;
 
 use std::{
     collections::HashMap,
-    sync::Arc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -29,7 +55,7 @@ use self::config::IterativeRequestRouterConfig;
 use crate::{
     FilterEntry, FilterError, FilterPipeline, FilterRegistry, IterationState, NextIterationBody, SubRequest,
     SubResponse,
-    actions::{FilterAction, Rejection},
+    actions::{FilterAction, Rejection, TerminalResponse},
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
     pipeline::subrequest::{self, DEPTH_HEADER},
@@ -309,13 +335,6 @@ impl IterativeRequestRouterFilter {
 
             let mut sub_headers = current_request.headers.clone();
             strip_reserved_headers(&mut sub_headers);
-            // Praxis ingress deliberately rejects this reserved marker from
-            // every network peer. That prevents spoofing and terminates a
-            // cross-listener cycle at its first hop; do not weaken the ingress
-            // boundary merely to permit recursive proxy topologies.
-            if let Ok(depth_val) = http::HeaderValue::from_str(&(depth + 1).to_string()) {
-                sub_headers.insert(DEPTH_HEADER, depth_val);
-            }
 
             let sub_req = crate::Request {
                 method: current_request.method.clone(),
@@ -347,6 +366,8 @@ impl IterativeRequestRouterFilter {
             filter_ctx.extensions.insert(state.clone());
             filter_ctx.extensions.insert(RetainedFilterResults::default());
             let step_timeout = remaining.min(self.step_timeout);
+            let in_transport = Arc::new(AtomicBool::new(false));
+            let in_transport_inner = Arc::clone(&in_transport);
             let step_result: Result<StepExecution, FilterError> = match tokio::time::timeout(step_timeout, async {
                 let mut request_body = Some(current_request.body.clone());
                 if body_exceeds_limit(
@@ -406,11 +427,13 @@ impl IterativeRequestRouterFilter {
                     )
                     .into()
                 })?;
+                in_transport_inner.store(true, Ordering::Release);
                 let peer = build_peer(upstream).await;
 
                 apply_request_header_mutations(&mut sub_headers, &filter_ctx);
                 ensure_destination_host(&mut sub_headers, &upstream.address)?;
                 sanitize_subrequest_headers(&mut sub_headers);
+                inject_depth_header(&mut sub_headers, depth);
                 let sub_request_for_exec = SubRequest {
                     method: current_request.method.clone(),
                     uri: filter_ctx.rewritten_path.as_ref().map_or_else(
@@ -428,6 +451,8 @@ impl IterativeRequestRouterFilter {
                 if per_request_timeout.is_zero() {
                     return Ok(StepExecution::Rejected(Rejection::status(504)));
                 }
+                let mut step_origin = config::ResponseOrigin::Upstream;
+                let mut step_transport_error = None;
                 let mut response = match peer {
                     Ok(peer) => match subrequest::execute(
                         &connector,
@@ -440,7 +465,9 @@ impl IterativeRequestRouterFilter {
                     {
                         Ok(response) => response,
                         Err(error) => {
-                            let status = transport_failure_status(&error);
+                            let (status, kind) = classify_transport_failure(&error);
+                            step_origin = config::ResponseOrigin::Transport;
+                            step_transport_error = Some(kind);
                             warn!(
                                 step = current_step.as_ref(),
                                 %error,
@@ -455,6 +482,8 @@ impl IterativeRequestRouterFilter {
                         },
                     },
                     Err(error) => {
+                        step_origin = config::ResponseOrigin::Transport;
+                        step_transport_error = Some(config::TransportErrorKind::Connect);
                         let status = 502;
                         warn!(
                             step = current_step.as_ref(),
@@ -469,6 +498,7 @@ impl IterativeRequestRouterFilter {
                         }
                     },
                 };
+                in_transport_inner.store(false, Ordering::Release);
                 sanitize_subresponse_headers(&mut response.headers);
 
                 response_header.status = http::StatusCode::from_u16(response.status).map_err(|e| -> FilterError {
@@ -521,12 +551,30 @@ impl IterativeRequestRouterFilter {
                 response.body = response_body.unwrap_or_default();
                 sanitize_subresponse_headers(&mut response.headers);
 
-                Ok(StepExecution::Complete(response))
+                Ok(StepExecution::Complete {
+                    response,
+                    origin: step_origin,
+                    transport_error: step_transport_error,
+                })
             })
             .await
             {
                 Ok(result) => result,
-                Err(_elapsed) => Ok(StepExecution::Rejected(Rejection::status(504))),
+                Err(_elapsed) => {
+                    if in_transport.load(Ordering::Acquire) {
+                        Ok(StepExecution::Complete {
+                            response: SubResponse {
+                                status: 504,
+                                headers: HeaderMap::new(),
+                                body: Bytes::new(),
+                            },
+                            origin: config::ResponseOrigin::Transport,
+                            transport_error: Some(config::TransportErrorKind::DeadlineExceeded),
+                        })
+                    } else {
+                        Ok(StepExecution::Rejected(Rejection::status(504)))
+                    }
+                },
             };
 
             if let Some(updated_state) = filter_ctx.extensions.remove::<IterationState>() {
@@ -549,15 +597,23 @@ impl IterativeRequestRouterFilter {
             );
             std::mem::swap(&mut filter_ctx.extensions, &mut ctx.extensions);
 
-            let mut response = match step_result? {
-                StepExecution::Complete(response) => response,
+            let (mut response, origin, transport_error) = match step_result? {
+                StepExecution::Complete {
+                    response,
+                    origin,
+                    transport_error,
+                } => (response, origin, transport_error),
                 StepExecution::Rejected(rejection) => {
                     debug!(
                         step = current_step.as_ref(),
                         status = rejection.status,
                         "step pipeline produced a local response"
                     );
-                    subresponse_from_rejection(rejection)
+                    (
+                        subresponse_from_rejection(rejection),
+                        config::ResponseOrigin::Local,
+                        None,
+                    )
                 },
             };
             sanitize_subresponse_headers(&mut response.headers);
@@ -576,18 +632,24 @@ impl IterativeRequestRouterFilter {
                 return Ok(FilterAction::Reject(Rejection::status(413)));
             }
 
+            let outcome = StepOutcome {
+                response,
+                origin,
+                transport_error,
+            };
+
             let transitions = self
                 .step_transitions
                 .get(&current_step)
                 .map_or(&[][..], |v| v.as_slice());
 
-            match evaluate_transitions(transitions, &response, &step_filter_results) {
+            match evaluate_transitions(transitions, &outcome, &step_filter_results) {
                 TransitionResult::Done => {
                     debug!(step = current_step.as_ref(), "iteration complete, returning response");
-                    return Ok(FilterAction::Reject(build_response_rejection(
-                        &response,
+                    return Ok(FilterAction::TerminalResponse(Box::new(build_terminal_response(
+                        &outcome.response,
                         current_request.method == http::Method::HEAD,
-                    )));
+                    ))));
                 },
                 TransitionResult::Next(next_step) => {
                     debug!(
@@ -609,10 +671,10 @@ impl IterativeRequestRouterFilter {
                         step = current_step.as_ref(),
                         "no transition matched, returning response"
                     );
-                    return Ok(FilterAction::Reject(build_response_rejection(
-                        &response,
+                    return Ok(FilterAction::TerminalResponse(Box::new(build_terminal_response(
+                        &outcome.response,
                         current_request.method == http::Method::HEAD,
-                    )));
+                    ))));
                 },
             }
         }
@@ -629,7 +691,24 @@ enum StepExecution {
     Rejected(Rejection),
 
     /// The upstream exchange completed after all response hooks.
-    Complete(SubResponse),
+    Complete {
+        /// The sub-request response.
+        response: SubResponse,
+        /// Where the response originated.
+        origin: config::ResponseOrigin,
+        /// Transport error classification, if any.
+        transport_error: Option<config::TransportErrorKind>,
+    },
+}
+
+/// A step's response together with metadata about where it came from.
+struct StepOutcome {
+    /// The sub-request response.
+    response: SubResponse,
+    /// Where the response originated.
+    origin: config::ResponseOrigin,
+    /// Transport error classification, if any.
+    transport_error: Option<config::TransportErrorKind>,
 }
 
 /// Result of evaluating step transition rules.
@@ -644,14 +723,13 @@ enum TransitionResult {
     NoMatch,
 }
 
-/// Convert transport failures into gateway responses so ordinary status
-/// transitions can drive provider failover.
-fn transport_failure_status(error: &subrequest::SubRequestError) -> u16 {
+/// Convert transport failures into a gateway status and error classification.
+fn classify_transport_failure(error: &subrequest::SubRequestError) -> (u16, config::TransportErrorKind) {
     match error {
-        subrequest::SubRequestError::DeadlineExceeded => 504,
-        subrequest::SubRequestError::Connect(_)
-        | subrequest::SubRequestError::Io(_)
-        | subrequest::SubRequestError::ResponseTooLarge { .. } => 502,
+        subrequest::SubRequestError::Connect(_) => (502, config::TransportErrorKind::Connect),
+        subrequest::SubRequestError::Io(_) => (502, config::TransportErrorKind::Io),
+        subrequest::SubRequestError::DeadlineExceeded => (504, config::TransportErrorKind::DeadlineExceeded),
+        subrequest::SubRequestError::ResponseTooLarge { .. } => (502, config::TransportErrorKind::ResponseTooLarge),
     }
 }
 
@@ -688,14 +766,14 @@ fn normalize_response_status(status: u16) -> u16 {
     if (200..=599).contains(&status) { status } else { 502 }
 }
 
-/// Evaluate transition rules against a sub-request response.
+/// Evaluate transition rules against a step outcome.
 fn evaluate_transitions(
     transitions: &[config::StepTransition],
-    response: &SubResponse,
+    outcome: &StepOutcome,
     filter_results: &HashMap<&str, crate::results::FilterResultSet>,
 ) -> TransitionResult {
     for t in transitions {
-        if t.default || matches_transition(t, response, filter_results) {
+        if t.default || matches_transition(t, outcome, filter_results) {
             if t.done {
                 return TransitionResult::Done;
             }
@@ -709,16 +787,22 @@ fn evaluate_transitions(
     TransitionResult::NoMatch
 }
 
-/// Check if a transition matches the response and/or filter results.
+/// Check if a transition matches the outcome and/or filter results.
 fn matches_transition(
     transition: &config::StepTransition,
-    response: &SubResponse,
+    outcome: &StepOutcome,
     filter_results: &HashMap<&str, crate::results::FilterResultSet>,
 ) -> bool {
     let status_ok = transition
         .status
         .as_ref()
-        .is_none_or(|codes| codes.contains(&response.status));
+        .is_none_or(|codes| codes.contains(&outcome.response.status));
+
+    let origin_ok = transition.origin.is_none_or(|expected| expected == outcome.origin);
+
+    let transport_ok = transition
+        .transport_error
+        .is_none_or(|expected| outcome.transport_error == Some(expected));
 
     let result_ok = match (
         transition.filter.as_deref(),
@@ -732,7 +816,7 @@ fn matches_transition(
         _ => false,
     };
 
-    status_ok && result_ok
+    status_ok && origin_ok && transport_ok && result_ok
 }
 
 // ---------------------------------------------------------------------------
@@ -839,8 +923,17 @@ const RESPONSE_HOP_BY_HOP: &[&str] = &[
 /// Apply the same forwarding boundary as the normal upstream path.
 fn sanitize_subrequest_headers(headers: &mut HeaderMap) {
     strip_hop_by_hop_headers(headers, REQUEST_HOP_BY_HOP);
-    strip_reserved_headers_except_depth(headers);
+    strip_reserved_headers(headers);
     strip_request_framing_headers(headers);
+}
+
+/// Unconditionally set the framework-owned depth header immediately
+/// before dispatch, after all filter mutations and sanitization.
+fn inject_depth_header(headers: &mut HeaderMap, current_depth: u8) {
+    headers.remove(DEPTH_HEADER);
+    if let Ok(val) = http::HeaderValue::from_str(&(current_depth + 1).to_string()) {
+        headers.insert(DEPTH_HEADER, val);
+    }
 }
 
 /// Supply the selected upstream authority without carrying a prior step's Host.
@@ -871,18 +964,6 @@ fn strip_hop_by_hop_headers(headers: &mut HeaderMap, static_headers: &[&str]) {
         for token in value.split(',').map(str::trim).filter(|token| !token.is_empty()) {
             headers.remove(token);
         }
-    }
-}
-
-/// Strip proxy metadata while retaining the recursion-depth marker.
-fn strip_reserved_headers_except_depth(headers: &mut HeaderMap) {
-    let reserved: Vec<_> = headers
-        .keys()
-        .filter(|name| name.as_str() != DEPTH_HEADER && praxis_core::reserved_headers::is_reserved(name.as_str()))
-        .cloned()
-        .collect();
-    for name in reserved {
-        headers.remove(name);
     }
 }
 
@@ -1037,31 +1118,26 @@ async fn build_peer(
     Ok(peer)
 }
 
-/// Build a [`Rejection`] that carries the sub-request response.
-fn build_response_rejection(response: &SubResponse, preserve_content_length: bool) -> Rejection {
+/// Build a [`TerminalResponse`] carrying the sub-request response.
+fn build_terminal_response(response: &SubResponse, preserve_content_length: bool) -> TerminalResponse {
     let status = normalize_response_status(response.status);
-    let mut rejection = Rejection::status(status).preserving_keepalive();
-    if !response.body.is_empty() {
-        rejection = rejection.with_body(response.body.clone());
-    }
+    let mut headers = HeaderMap::new();
     for (name, value) in &response.headers {
         if (name == http::header::CONTENT_LENGTH && !preserve_content_length) || name == http::header::TRANSFER_ENCODING
         {
             continue;
         }
-        rejection
-            .header_map
-            .get_or_insert_with(Default::default)
-            .append(name.clone(), value.clone());
+        headers.append(name.clone(), value.clone());
     }
     if !preserve_content_length && status != 204 && status != 304 {
         let content_length = response.body.len().to_string();
         if let Ok(value) = http::HeaderValue::from_str(&content_length) {
-            rejection
-                .header_map
-                .get_or_insert_with(Default::default)
-                .insert(http::header::CONTENT_LENGTH, value);
+            headers.insert(http::header::CONTENT_LENGTH, value);
         }
     }
-    rejection
+    let mut terminal = TerminalResponse::new(status).with_headers(headers);
+    if !response.body.is_empty() {
+        terminal = terminal.with_body(response.body.clone());
+    }
+    terminal
 }

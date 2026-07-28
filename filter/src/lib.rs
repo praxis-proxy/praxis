@@ -22,7 +22,7 @@ mod registry;
 mod results;
 mod tcp_filter;
 
-pub use actions::{FilterAction, Rejection};
+pub use actions::{FilterAction, Rejection, TerminalResponse};
 pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
 #[cfg(feature = "cpex-policy-engine")]
