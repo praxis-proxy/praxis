@@ -5,27 +5,12 @@
 //!
 //! [`Upstream`]: praxis_core::connectivity::Upstream
 
-use std::{
-    collections::HashMap,
-    net::SocketAddr,
-    sync::{Arc, Mutex, OnceLock},
-    time::Instant,
-};
+use std::net::SocketAddr;
 
 use pingora_core::{Result, upstreams::peer::HttpPeer};
-use praxis_core::connectivity::Upstream;
+use praxis_core::connectivity::{Upstream, peer as peer_utils};
 
-use super::super::{context::PingoraRequestCtx, convert::apply_connection_options};
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// TTL for cached DNS entries.
-const DNS_TTL_SECS: u64 = 60;
-
-/// Maximum cached DNS entries before oldest-entry eviction.
-const MAX_DNS_ENTRIES: usize = 1_024;
+use super::super::context::PingoraRequestCtx;
 
 // -----------------------------------------------------------------------------
 // Execution/Conversion
@@ -73,101 +58,20 @@ async fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
         .and_then(|t| t.sni().map(str::to_owned))
         .unwrap_or_else(|| {
             if tls_enabled {
-                derive_sni(&upstream.address)
+                peer_utils::derive_sni(&upstream.address)
             } else {
                 String::new()
             }
         });
 
     let mut peer = HttpPeer::new(addr, tls_enabled, sni);
-    apply_connection_options(&mut peer, &upstream.connection);
+    peer_utils::apply_connection_options(&mut peer, &upstream.connection);
 
     if let Some(tls) = &upstream.tls {
-        apply_cached_tls(&mut peer, tls, &upstream.address);
+        peer_utils::apply_cached_tls(&mut peer, tls, &upstream.address);
     }
 
     Ok(Box::new(peer))
-}
-
-/// Apply pre-cached TLS settings to an [`HttpPeer`].
-///
-/// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
-fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls, address: &str) {
-    // verify: false disables both cert and hostname verification as a
-    // single toggle. Splitting into verify_cert / verify_hostname would
-    // require a config schema change (accepted design limitation).
-    if !tls.verify() {
-        tracing::debug!(upstream = %address, "upstream TLS verification disabled for this peer");
-        peer.options.verify_cert = false;
-        peer.options.verify_hostname = false;
-    }
-
-    if let Some(ca) = tls.ca() {
-        peer.options.ca = Some(Arc::from(ca_from_cached(ca)));
-    }
-
-    if let Some(client) = tls.client_cert() {
-        peer.client_cert_key = Some(Arc::new(client_cert_from_cached(client)));
-    }
-}
-
-/// Convert cached CA DER bytes into [`WrappedX509`] values.
-///
-/// [`WrappedX509`]: pingora_core::utils::tls::WrappedX509
-fn ca_from_cached(cached: &praxis_tls::CachedCaCerts) -> Vec<pingora_core::utils::tls::WrappedX509> {
-    cached
-        .der_certs()
-        .iter()
-        .filter_map(|der| {
-            pingora_core::utils::tls::WrappedX509::parse(der.clone())
-                .inspect_err(|e| tracing::warn!("failed to parse cached CA cert: {e}"))
-                .ok()
-        })
-        .collect()
-}
-
-/// Convert cached client cert/key DER bytes into a [`CertKey`].
-///
-/// [`CertKey`]: pingora_core::utils::tls::CertKey
-fn client_cert_from_cached(cached: &praxis_tls::CachedClientCert) -> pingora_core::utils::tls::CertKey {
-    pingora_core::utils::tls::CertKey::new(cached.cert_der().to_vec(), cached.key_der().to_vec())
-}
-
-/// Derive an SNI hostname from an `address` string in `host:port` form.
-///
-/// Returns the host portion if it is a DNS name. Returns an empty string
-/// if the host is an IP address (IP-based SNI is not standard per [RFC 6066]).
-///
-/// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066
-fn derive_sni(address: &str) -> String {
-    let host = address.rsplit_once(':').map_or(address, |(h, _)| h);
-    if host.parse::<std::net::IpAddr>().is_ok() {
-        tracing::warn!(
-            address,
-            "upstream is an IP without explicit SNI; TLS hostname verification is meaningless"
-        );
-        return String::new();
-    }
-    tracing::debug!(address, sni = host, "derived SNI from upstream address");
-    host.to_owned()
-}
-
-// -----------------------------------------------------------------------------
-// DNS Cache
-// -----------------------------------------------------------------------------
-
-/// Cached DNS resolution result.
-struct DnsCacheEntry {
-    /// Resolved socket addresses.
-    addrs: Vec<SocketAddr>,
-    /// When the resolution was performed.
-    resolved_at: Instant,
-}
-
-/// Process-wide DNS cache for upstream hostname resolution.
-fn dns_cache() -> &'static Mutex<HashMap<String, DnsCacheEntry>> {
-    static CACHE: OnceLock<Mutex<HashMap<String, DnsCacheEntry>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 // -----------------------------------------------------------------------------
@@ -186,125 +90,9 @@ fn dns_cache() -> &'static Mutex<HashMap<String, DnsCacheEntry>> {
 /// [`SocketAddr`]: std::net::SocketAddr
 /// [`spawn_blocking`]: tokio::task::spawn_blocking
 async fn resolve_address(address: &str) -> Result<SocketAddr> {
-    if let Ok(addr) = address.parse::<SocketAddr>() {
-        return Ok(addr);
-    }
-
-    if let Some(addr) = lookup_cached(address) {
-        tracing::trace!(address, "DNS cache hit");
-        return Ok(addr);
-    }
-
-    let addrs = resolve_blocking(address).await?;
-    let preferred = select_preferred_address(&addrs, address)?;
-
-    let mut cache = dns_cache().lock().unwrap_or_else(|e| {
-        tracing::warn!("DNS cache mutex poisoned; recovering");
-        e.into_inner()
-    });
-
-    if cache.len() >= MAX_DNS_ENTRIES && !cache.contains_key(address) {
-        evict_dns_entries(&mut cache);
-    }
-
-    cache.insert(
-        address.to_owned(),
-        DnsCacheEntry {
-            addrs,
-            resolved_at: Instant::now(),
-        },
-    );
-
-    drop(cache);
-    Ok(preferred)
-}
-
-/// Evict expired entries from the DNS cache. If still at capacity
-/// after removing expired entries, evicts the oldest entry.
-fn evict_dns_entries(cache: &mut HashMap<String, DnsCacheEntry>) {
-    cache.retain(|_, entry| entry.resolved_at.elapsed().as_secs() < DNS_TTL_SECS);
-
-    if cache.len() >= MAX_DNS_ENTRIES
-        && let Some(oldest_key) = cache
-            .iter()
-            .min_by_key(|(_, entry)| entry.resolved_at)
-            .map(|(k, _)| k.clone())
-    {
-        cache.remove(&oldest_key);
-        tracing::debug!(evicted = %oldest_key, remaining = cache.len(), "DNS cache: evicted oldest entry at capacity");
-    }
-}
-
-/// Check the DNS cache for a non-expired entry.
-///
-/// Evicts expired entries on every 64th call to bound cache growth.
-fn lookup_cached(address: &str) -> Option<SocketAddr> {
-    static CALL_COUNT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-    let mut cache = dns_cache().lock().unwrap_or_else(|e| {
-        tracing::warn!("DNS cache mutex poisoned; recovering");
-        e.into_inner()
-    });
-    let result = cache.get(address).and_then(|entry| {
-        if entry.resolved_at.elapsed().as_secs() >= DNS_TTL_SECS {
-            return None;
-        }
-        entry
-            .addrs
-            .iter()
-            .find(|a| a.is_ipv4())
-            .or_else(|| entry.addrs.first())
-            .copied()
-    });
-
-    if CALL_COUNT
-        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-        .is_multiple_of(64)
-    {
-        cache.retain(|_, entry| entry.resolved_at.elapsed().as_secs() < DNS_TTL_SECS);
-    }
-
-    drop(cache);
-    result
-}
-
-/// Perform blocking DNS resolution off the async runtime.
-async fn resolve_blocking(address: &str) -> Result<Vec<SocketAddr>> {
-    let owned = address.to_owned();
-    tokio::task::spawn_blocking(move || {
-        use std::net::ToSocketAddrs as _;
-        owned.to_socket_addrs().map(Iterator::collect::<Vec<_>>)
-    })
-    .await
-    .map_err(|e| {
-        pingora_core::Error::explain(
-            pingora_core::ErrorType::InternalError,
-            format!("DNS resolution task panicked for '{address}': {e}"),
-        )
-    })?
-    .map_err(|e| {
-        tracing::error!(address, error = %e, "failed to resolve upstream address");
-        pingora_core::Error::explain(
-            pingora_core::ErrorType::InternalError,
-            format!("upstream address resolution failed for '{address}': {e}"),
-        )
-    })
-}
-
-/// Select the preferred address from resolved results, favoring IPv4.
-fn select_preferred_address(addrs: &[SocketAddr], address: &str) -> Result<SocketAddr> {
-    addrs
-        .iter()
-        .find(|a| a.is_ipv4())
-        .or_else(|| addrs.first())
-        .copied()
-        .ok_or_else(|| {
-            tracing::error!(address, "DNS resolved but returned no addresses");
-            pingora_core::Error::explain(
-                pingora_core::ErrorType::InternalError,
-                format!("upstream address '{address}' resolved to zero addresses"),
-            )
-        })
+    peer_utils::resolve_address(address)
+        .await
+        .map_err(|error| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, error.to_string()))
 }
 
 // -----------------------------------------------------------------------------
@@ -357,7 +145,7 @@ mod tests {
 
     #[test]
     fn sni_not_set_with_hostname_address_derives_sni() {
-        let sni = derive_sni("backend.example.com:8443");
+        let sni = peer_utils::derive_sni("backend.example.com:8443");
         assert_eq!(
             sni, "backend.example.com",
             "SNI should be derived from hostname address"
@@ -366,7 +154,7 @@ mod tests {
 
     #[test]
     fn sni_not_set_with_ip_address_leaves_sni_empty() {
-        let sni = derive_sni("127.0.0.1:8443");
+        let sni = peer_utils::derive_sni("127.0.0.1:8443");
         assert_eq!(sni, "", "SNI should be empty for IP address");
     }
 
@@ -470,32 +258,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn select_preferred_address_prefers_ipv4_from_mixed_results() {
-        let ipv6: SocketAddr = "[::1]:8080".parse().unwrap();
-        let ipv4: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let selected =
-            select_preferred_address(&[ipv6, ipv4], "mixed.example:8080").expect("mixed results should select address");
-        assert_eq!(selected, ipv4, "IPv4 should be preferred over IPv6");
-    }
-
-    #[test]
-    fn select_preferred_address_returns_ipv6_when_ipv6_only() {
-        let ipv6: SocketAddr = "[::1]:8080".parse().unwrap();
-        let selected =
-            select_preferred_address(&[ipv6], "ipv6.example:8080").expect("IPv6-only results should select IPv6");
-        assert_eq!(selected, ipv6, "IPv6 should be used when it is the only result");
-    }
-
-    #[test]
-    fn select_preferred_address_errors_on_empty_results() {
-        let err = select_preferred_address(&[], "empty.example:8080").expect_err("empty DNS result should fail");
-        assert!(
-            err.to_string().contains("resolved to zero addresses"),
-            "unexpected error: {err}"
-        );
-    }
-
     #[tokio::test]
     async fn invalid_address_returns_error() {
         assert!(
@@ -595,7 +357,7 @@ mod tests {
         let ca_path = ca.ca_path.to_str().expect("ca path should be valid UTF-8");
 
         let cached = praxis_tls::CachedCaCerts::from_pem_file(ca_path).expect("valid CA should parse");
-        let wrapped = ca_from_cached(&cached);
+        let wrapped = peer_utils::ca_from_cached(&cached);
         assert_eq!(wrapped.len(), 1, "should produce one WrappedX509");
     }
 
@@ -607,7 +369,7 @@ mod tests {
 
         let cached =
             praxis_tls::CachedClientCert::from_pem_files(cert_path, key_path).expect("valid cert+key should parse");
-        let _cert_key = client_cert_from_cached(&cached);
+        let _cert_key = peer_utils::client_cert_from_cached(&cached);
     }
 
     // -------------------------------------------------------------------------

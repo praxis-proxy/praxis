@@ -1,0 +1,53 @@
+# Iterative Request Router: Provider Failover
+#
+# Demonstrates provider failover using the
+# iterative_request_router filter. When the primary
+# backend returns 5xx, the request automatically
+# retries against a fallback provider.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/iterative-request-router-failover.yaml
+#   curl http://localhost:8080/
+
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - failover
+
+filter_chains:
+  - name: failover
+    filters:
+      - filter: iterative_request_router
+        initial_step: primary
+        steps:
+          - name: primary
+            filters:
+              - filter: router
+                routes:
+                  - path_prefix: "/"
+                    cluster: primary-backend
+              - filter: load_balancer
+                clusters:
+                  - name: primary-backend
+                    endpoints:
+                      - "127.0.0.1:3000"
+            on_result:
+              - status: [502, 503, 504]
+                next: fallback
+              - default: true
+                done: true
+          - name: fallback
+            filters:
+              - filter: router
+                routes:
+                  - path_prefix: "/"
+                    cluster: fallback-backend
+              - filter: load_balancer
+                clusters:
+                  - name: fallback-backend
+                    endpoints:
+                      - "127.0.0.1:3001"
+            on_result:
+              - default: true
+                done: true

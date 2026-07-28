@@ -1,0 +1,55 @@
+# Iterative Request Router: Origin-Aware Failover
+#
+# Demonstrates origin-aware failover: only an
+# upstream 429 (rate limit) triggers the fallback.
+# Locally generated 429 (e.g. from a rate limiter
+# filter) does not match, preventing infinite
+# retry loops.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/iterative-request-router-origin-failover.yaml
+#   curl http://localhost:8080/
+
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - failover
+
+filter_chains:
+  - name: failover
+    filters:
+      - filter: iterative_request_router
+        initial_step: primary
+        steps:
+          - name: primary
+            filters:
+              - filter: router
+                routes:
+                  - path_prefix: "/"
+                    cluster: primary-backend
+              - filter: load_balancer
+                clusters:
+                  - name: primary-backend
+                    endpoints:
+                      - "127.0.0.1:3000"
+            on_result:
+              - origin: upstream
+                status: [429]
+                next: fallback
+              - default: true
+                done: true
+          - name: fallback
+            filters:
+              - filter: router
+                routes:
+                  - path_prefix: "/"
+                    cluster: fallback-backend
+              - filter: load_balancer
+                clusters:
+                  - name: fallback-backend
+                    endpoints:
+                      - "127.0.0.1:3001"
+            on_result:
+              - default: true
+                done: true

@@ -73,6 +73,7 @@ page.
 | [composed-chains.yaml](configs/pipeline/composed-chains.yaml) | Multiple named chains are composed per listener |
 | [conditional-filters.yaml](configs/pipeline/conditional-filters.yaml) | Filters support `conditions` (request phase) and `response_conditions` (response phase) to gate execution |
 | [failure-mode.yaml](configs/pipeline/failure-mode.yaml) | Demonstrates open and closed failure handling for filters |
+| [iterative-request-router-sequence.yaml](configs/pipeline/iterative-request-router-sequence.yaml) | Demonstrates sequential sub-request execution where each step completes before the next begins |
 
 ### Protocols
 
@@ -128,6 +129,8 @@ page.
 | [health-checks.yaml](configs/traffic-management/health-checks.yaml) | Per-cluster health checks probe endpoints on a timer and remove unhealthy backends from the load balancer rotation |
 | [hostname-upstream.yaml](configs/traffic-management/hostname-upstream.yaml) | Demonstrates using DNS hostnames instead of IP addresses for upstream endpoints |
 | [hosts.yaml](configs/traffic-management/hosts.yaml) | One listener serves multiple domains |
+| [iterative-request-router-failover.yaml](configs/traffic-management/iterative-request-router-failover.yaml) | Demonstrates provider failover using the iterative_request_router filter |
+| [iterative-request-router-origin-failover.yaml](configs/traffic-management/iterative-request-router-origin-failover.yaml) | Demonstrates origin-aware failover: only an upstream 429 (rate limit) triggers the fallback |
 | [least-connections.yaml](configs/traffic-management/least-connections.yaml) | Routes each request to the backend with the fewest in-flight requests |
 | [p2c.yaml](configs/traffic-management/p2c.yaml) | Samples two random endpoints and picks the one with fewer in-flight requests |
 | [path-based-routing.yaml](configs/traffic-management/path-based-routing.yaml) | Routes by URL path prefix |

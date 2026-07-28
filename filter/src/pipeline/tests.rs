@@ -696,6 +696,7 @@ fn apply_body_limits_no_limits_leaves_stream_mode() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        subrequest_connector: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -732,6 +733,7 @@ fn apply_body_limits_converts_default_stream_to_size_limit() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        subrequest_connector: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -777,6 +779,7 @@ fn apply_body_limits_preserves_filter_declared_stream() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        subrequest_connector: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1526,6 +1529,7 @@ fn apply_body_limits_default_stream_becomes_size_limit() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        subrequest_connector: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1555,6 +1559,7 @@ fn apply_body_limits_filter_stricter_than_config() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        subrequest_connector: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1581,6 +1586,7 @@ fn apply_body_limits_config_stricter_than_filter() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        subrequest_connector: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1607,6 +1613,7 @@ fn apply_body_limits_rejects_unbounded_stream_buffer() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        subrequest_connector: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1632,6 +1639,7 @@ fn apply_body_limits_clamps_unbounded_stream_buffer_with_override() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        subrequest_connector: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1853,6 +1861,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        subrequest_connector: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1902,6 +1911,7 @@ async fn all_executed_filters_run_on_response() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        subrequest_connector: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1958,6 +1968,7 @@ async fn skipped_filter_skips_its_branches() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        subrequest_connector: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -3011,6 +3022,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        subrequest_connector: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }
@@ -3035,6 +3047,7 @@ fn make_pipeline_with_conditions(
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        subrequest_connector: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }
@@ -3059,6 +3072,7 @@ fn make_pipeline_with_response_conditions(
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        subrequest_connector: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }

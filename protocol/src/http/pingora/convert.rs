@@ -3,9 +3,7 @@
 
 //! Conversions between Pingora types and Praxis transport-agnostic types.
 
-use pingora_core::upstreams::peer::HttpPeer;
 use pingora_proxy::Session;
-use praxis_core::connectivity::ConnectionOptions;
 use praxis_filter::{Rejection, Request, Response};
 use tracing::debug;
 
@@ -69,8 +67,8 @@ pub(crate) fn response_header_from_pingora(upstream: &mut pingora_http::Response
 
 /// Send a rejection response to the client, including any headers and body from the [`Rejection`].
 ///
-/// Disables downstream keep-alive so the connection closes after the
-/// response.
+/// Disables downstream keep-alive by default so the connection closes after
+/// a short-circuit response. Complete responses may explicitly preserve it.
 ///
 /// ```ignore
 /// // Requires an active `pingora_proxy::Session` from a live request.
@@ -83,7 +81,9 @@ pub(crate) fn response_header_from_pingora(upstream: &mut pingora_http::Response
 /// [`Rejection`]: praxis_filter::Rejection
 pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) {
     debug!(status = rejection.status, "sending rejection response");
-    session.set_keepalive(None);
+    if !rejection.preserve_keepalive {
+        session.set_keepalive(None);
+    }
 
     let mut header = build_rejection_header(&rejection);
     let has_body = rejection.body.is_some();
@@ -107,7 +107,12 @@ pub(crate) async fn send_rejection(session: &mut Session, rejection: Rejection) 
 /// [`ResponseHeader`]: pingora_http::ResponseHeader
 /// [`Rejection`]: praxis_filter::Rejection
 fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader {
-    let header_count = Some(rejection.headers.len());
+    let header_count = Some(
+        rejection
+            .headers
+            .len()
+            .saturating_add(rejection.header_map.as_ref().map_or(0, |headers| headers.len())),
+    );
     let mut header = match pingora_http::ResponseHeader::build(rejection.status, header_count) {
         Ok(h) => h,
         Err(e) => {
@@ -117,37 +122,16 @@ fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader
         },
     };
     for (name, value) in &rejection.headers {
-        let _insert = header.insert_header(name.clone(), value.clone());
+        let _append = header.append_header(name.clone(), value.clone());
+    }
+    if let Some(headers) = &rejection.header_map {
+        for (name, value) in headers.iter() {
+            let _append = header.append_header(name.clone(), value.clone());
+        }
     }
     header
 }
 
-// -----------------------------------------------------------------------------
-// Pingora - Connection Options
-// -----------------------------------------------------------------------------
-
-/// Apply [`ConnectionOptions`] timeouts to a Pingora [`HttpPeer`].
-///
-/// ```ignore
-/// // Requires `pingora_core::upstreams::peer::HttpPeer` from Pingora.
-/// use praxis_protocol::http::pingora::convert::apply_connection_options;
-///
-/// let opts = praxis_core::connectivity::ConnectionOptions::default();
-/// let mut peer = HttpPeer::new("10.0.0.1:80", false, String::new());
-/// apply_connection_options(&mut peer, &opts);
-/// ```
-///
-/// [`ConnectionOptions`]: praxis_core::connectivity::ConnectionOptions
-/// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
-// Hot path: called per upstream_peer, cross-crate boundary.
-#[inline]
-pub(crate) fn apply_connection_options(peer: &mut HttpPeer, opts: &ConnectionOptions) {
-    peer.options.connection_timeout = opts.connection_timeout;
-    peer.options.total_connection_timeout = opts.total_connection_timeout;
-    peer.options.idle_timeout = opts.idle_timeout;
-    peer.options.read_timeout = opts.read_timeout;
-    peer.options.write_timeout = opts.write_timeout;
-}
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -163,10 +147,7 @@ pub(crate) fn apply_connection_options(peer: &mut HttpPeer, opts: &ConnectionOpt
     reason = "tests"
 )]
 mod tests {
-    use std::time::Duration;
-
     use http::StatusCode;
-    use praxis_core::connectivity::ConnectionOptions;
 
     use super::*;
 
@@ -225,59 +206,32 @@ mod tests {
     }
 
     #[test]
-    fn apply_connection_options_sets_timeouts() {
-        let opts = ConnectionOptions {
-            connection_timeout: Some(Duration::from_secs(5)),
-            total_connection_timeout: Some(Duration::from_secs(10)),
-            idle_timeout: Some(Duration::from_secs(60)),
-            read_timeout: Some(Duration::from_secs(30)),
-            write_timeout: Some(Duration::from_secs(15)),
-        };
+    fn rejection_header_preserves_duplicate_values() {
+        let rejection = Rejection::status(200)
+            .with_header("set-cookie", "first=1")
+            .with_header("set-cookie", "second=2");
 
-        let mut peer = HttpPeer::new("10.0.0.1:80", false, String::new());
-        apply_connection_options(&mut peer, &opts);
+        let header = build_rejection_header(&rejection);
+        let values: Vec<_> = header
+            .headers
+            .get_all("set-cookie")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect();
 
-        assert_eq!(
-            peer.options.connection_timeout,
-            Some(Duration::from_secs(5)),
-            "connection_timeout should be set"
-        );
-        assert_eq!(
-            peer.options.total_connection_timeout,
-            Some(Duration::from_secs(10)),
-            "total_connection_timeout should be set"
-        );
-        assert_eq!(
-            peer.options.idle_timeout,
-            Some(Duration::from_secs(60)),
-            "idle_timeout should be set"
-        );
-        assert_eq!(
-            peer.options.read_timeout,
-            Some(Duration::from_secs(30)),
-            "read_timeout should be set"
-        );
-        assert_eq!(
-            peer.options.write_timeout,
-            Some(Duration::from_secs(15)),
-            "write_timeout should be set"
-        );
+        assert_eq!(values, ["first=1", "second=2"]);
     }
 
     #[test]
-    fn apply_connection_options_none_values() {
-        let opts = ConnectionOptions::default();
+    fn rejection_header_preserves_opaque_values() {
+        let mut rejection = Rejection::status(200);
+        rejection
+            .header_map
+            .get_or_insert_with(Default::default)
+            .append("x-opaque", http::HeaderValue::from_bytes(&[b'a', 0x80, b'z']).unwrap());
 
-        let mut peer = HttpPeer::new("10.0.0.1:80", false, String::new());
-        apply_connection_options(&mut peer, &opts);
+        let header = build_rejection_header(&rejection);
 
-        assert!(
-            peer.options.connection_timeout.is_none(),
-            "default connection_timeout should be None"
-        );
-        assert!(
-            peer.options.total_connection_timeout.is_none(),
-            "default total_connection_timeout should be None"
-        );
+        assert_eq!(header.headers["x-opaque"].as_bytes(), &[b'a', 0x80, b'z']);
     }
 }
