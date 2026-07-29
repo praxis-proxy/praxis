@@ -225,11 +225,13 @@ response to the client).
 
 ### Safety rails
 
-- **Depth**: `x-praxis-iterative-depth` marks iterative
-  subrequests. Praxis ingress rejects reserved internal headers
-  from network peers, so cross-listener cycles terminate at the
-  first hop rather than trusting a spoofable depth value. The
-  max depth of 3 remains a defense for trusted/in-process reuse.
+- **Depth**: `x-iterative-depth` marks iterative subrequests.
+  The header uses a non-reserved prefix so it can be injected
+  through the typed `FrameworkHeaders` API. The IRR explicitly
+  strips this header from incoming sub-request headers to prevent
+  spoofing, then re-injects it via `FrameworkHeaders`.
+  The max depth of 3 remains a defense for trusted/in-process
+  reuse.
 - **Max iterations**: configurable cap (default 10,
   max 100) prevents infinite loops
 - **Deadline**: overall timeout (default 30s) across

@@ -49,6 +49,7 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use http::HeaderMap;
 use pingora_core::upstreams::peer::HttpPeer;
+use praxis_core::subrequest::FrameworkHeaders;
 use tracing::{debug, info, warn};
 
 use self::config::IterativeRequestRouterConfig;
@@ -444,10 +445,10 @@ impl IterativeRequestRouterFilter {
                     body: request_body.unwrap_or_default(),
                 };
 
-                let mut fw_headers = HeaderMap::new();
+                let mut fw_headers = FrameworkHeaders::new();
                 let depth_value = (depth + 1).to_string();
                 if let Ok(val) = http::HeaderValue::from_str(&depth_value) {
-                    fw_headers.insert(DEPTH_HEADER, val);
+                    let _ok = fw_headers.insert(http::header::HeaderName::from_static(DEPTH_HEADER), val);
                 }
 
                 let per_request_timeout = step_timeout.checked_sub(step_start.elapsed()).unwrap_or(Duration::ZERO);
@@ -839,14 +840,16 @@ fn parse_depth(request: &crate::Request) -> u8 {
         .unwrap_or(0)
 }
 
-/// Strip all reserved internal headers from sub-request headers.
+/// Strip all reserved internal headers and the depth header from
+/// sub-request headers so the core executor re-injects depth via
+/// [`FrameworkHeaders`].
 fn strip_reserved_headers(headers: &mut HeaderMap) {
-    let reserved: Vec<http::header::HeaderName> = headers
+    let to_remove: Vec<http::header::HeaderName> = headers
         .keys()
-        .filter(|name| praxis_core::reserved_headers::is_reserved(name.as_str()))
+        .filter(|name| praxis_core::reserved_headers::is_reserved(name.as_str()) || name.as_str() == DEPTH_HEADER)
         .cloned()
         .collect();
-    for name in reserved {
+    for name in to_remove {
         headers.remove(&name);
     }
 }

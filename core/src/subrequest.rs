@@ -46,9 +46,9 @@ pub struct SubRequest {
     /// Request headers.
     ///
     /// Reserved headers (`x-praxis-*`, `x-ext-*`) are stripped by the
-    /// executor before dispatch. Use `framework_headers` on
+    /// executor before dispatch. Use [`FrameworkHeaders`] on
     /// [`SubRequestClient::execute`] to inject metadata that must
-    /// survive sanitization.
+    /// survive sanitisation.
     pub headers: HeaderMap,
 
     /// Request body.
@@ -66,6 +66,60 @@ pub struct SubResponse {
 
     /// Buffered response body.
     pub body: Bytes,
+}
+
+/// Framework metadata injected into sub-requests after sanitisation.
+///
+/// This typed struct replaces an open `HeaderMap` so that the executor
+/// controls exactly which headers survive reserved-header stripping.
+/// Each field maps to a specific header name chosen by the caller;
+/// the executor validates that the name is neither transport-level
+/// nor reserved before injection.
+#[derive(Clone, Debug, Default)]
+pub struct FrameworkHeaders {
+    /// Validated (name, value) pairs to inject.
+    entries: Vec<(http::header::HeaderName, http::HeaderValue)>,
+}
+
+impl FrameworkHeaders {
+    /// Create an empty set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert a header, returning `Err` if the name is transport-level
+    /// or uses a reserved prefix (`x-praxis-*`, `x-ext-*`).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubRequestError::InvalidRequest`] when the header
+    /// name is forbidden.
+    pub fn insert(&mut self, name: http::header::HeaderName, value: http::HeaderValue) -> Result<(), SubRequestError> {
+        if is_transport_header(&name) {
+            return Err(SubRequestError::InvalidRequest(format!(
+                "transport header `{name}` cannot be injected as framework metadata"
+            )));
+        }
+        if crate::reserved_headers::is_reserved(name.as_str()) {
+            return Err(SubRequestError::InvalidRequest(format!(
+                "reserved header `{name}` cannot be injected as framework metadata"
+            )));
+        }
+        self.entries.push((name, value));
+        Ok(())
+    }
+
+    /// Iterate over the validated entries.
+    pub fn iter(&self) -> impl Iterator<Item = &(http::header::HeaderName, http::HeaderValue)> {
+        self.entries.iter()
+    }
+
+    /// Whether no entries have been added.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -264,15 +318,16 @@ pub struct SubRequestClient {
 impl SubRequestClient {
     /// Create a client wrapping the given shared connector.
     ///
-    /// No client-wide response ceiling is applied; each `execute()`
-    /// call is bounded solely by its per-call `max_response_bytes`.
-    /// Use [`with_max_response_bytes`] to add a hard global cap.
+    /// Defaults the client-wide response ceiling to
+    /// [`ABSOLUTE_MAX_BODY_BYTES`] (64 MiB). Use
+    /// [`with_max_response_bytes`] for a tighter cap.
     ///
+    /// [`ABSOLUTE_MAX_BODY_BYTES`]: crate::config::ABSOLUTE_MAX_BODY_BYTES
     /// [`with_max_response_bytes`]: Self::with_max_response_bytes
     pub fn new(connector: SubRequestConnector) -> Self {
         Self {
             connector,
-            max_response_bytes: usize::MAX,
+            max_response_bytes: crate::config::ABSOLUTE_MAX_BODY_BYTES,
         }
     }
 
@@ -303,12 +358,11 @@ impl SubRequestClient {
     /// and reserved internal headers (`x-praxis-*`, `x-ext-*`) are
     /// stripped from both request and response.
     ///
-    /// `framework_headers` are injected **after** all sanitization
-    /// passes. Hop-by-hop and framing headers in this map are
-    /// silently dropped so callers cannot reintroduce transport
-    /// headers. This is the mechanism for framework metadata (e.g.
-    /// loop-prevention depth) that must survive reserved-header
-    /// stripping.
+    /// `framework_headers` are injected **after** all sanitisation
+    /// passes. The [`FrameworkHeaders`] type validates at insertion
+    /// time that no transport-level or reserved internal header
+    /// (`x-praxis-*`, `x-ext-*`) can be added, so callers cannot
+    /// reintroduce sanitised headers.
     ///
     /// # Errors
     ///
@@ -317,7 +371,7 @@ impl SubRequestClient {
     /// or deadline expiry.
     #[expect(
         clippy::too_many_arguments,
-        reason = "framework_headers is the safe metadata injection point"
+        reason = "framework_headers is the typed metadata injection point"
     )]
     pub async fn execute(
         &self,
@@ -325,7 +379,7 @@ impl SubRequestClient {
         request: &SubRequest,
         max_response_bytes: usize,
         timeout: Duration,
-        framework_headers: Option<&HeaderMap>,
+        framework_headers: Option<&FrameworkHeaders>,
     ) -> Result<SubResponse, SubRequestError> {
         let deadline = tokio::time::Instant::now() + timeout;
         let mut bounded_peer = peer.clone();
@@ -373,7 +427,7 @@ async fn execute_inner(
     request: &SubRequest,
     max_response_bytes: usize,
     timeout: Duration,
-    framework_headers: Option<&HeaderMap>,
+    framework_headers: Option<&FrameworkHeaders>,
 ) -> Result<SubResponse, SubRequestError> {
     let (mut session, reused) = Box::pin(connector.connector().get_http_session(peer))
         .await
@@ -402,10 +456,8 @@ async fn execute_inner(
     strip_request_framing_headers(&mut sanitized);
     strip_reserved_headers(&mut sanitized);
     if let Some(fw) = framework_headers {
-        for (name, value) in fw {
-            if !is_transport_header(name) {
-                sanitized.insert(name.clone(), value.clone());
-            }
+        for (name, value) in fw.iter() {
+            sanitized.insert(name.clone(), value.clone());
         }
     }
 
@@ -967,10 +1019,14 @@ mod tests {
     }
 
     #[test]
-    fn client_default_has_no_ceiling() {
+    fn client_default_ceiling_is_absolute_max() {
         let connector = SubRequestConnector::new(8, None);
         let client = SubRequestClient::new(connector);
-        assert_eq!(client.max_response_bytes, usize::MAX);
+        assert_eq!(
+            client.max_response_bytes,
+            crate::config::ABSOLUTE_MAX_BODY_BYTES,
+            "default ceiling should be ABSOLUTE_MAX_BODY_BYTES (64 MiB)"
+        );
     }
 
     // -- Response header sanitization -----------------------------------------
@@ -1051,7 +1107,7 @@ mod tests {
             assert!(is_transport_header(&hdr), "{name} should be classified as transport");
         }
 
-        let safe_names = ["x-praxis-depth", "authorization", "x-request-id"];
+        let safe_names = ["authorization", "x-request-id", "x-iterative-depth"];
         for name in safe_names {
             let hdr: http::header::HeaderName = name.parse().unwrap();
             assert!(
@@ -1059,5 +1115,34 @@ mod tests {
                 "{name} should not be classified as transport"
             );
         }
+    }
+
+    #[test]
+    fn framework_headers_rejects_transport_headers() {
+        let mut fw = FrameworkHeaders::new();
+        let val = http::HeaderValue::from_static("1");
+        let result = fw.insert(http::header::CONTENT_LENGTH, val);
+        assert!(result.is_err(), "transport header should be rejected");
+        assert!(fw.is_empty());
+    }
+
+    #[test]
+    fn framework_headers_rejects_reserved_headers() {
+        let mut fw = FrameworkHeaders::new();
+        let val = http::HeaderValue::from_static("1");
+        let name: http::header::HeaderName = "x-praxis-depth".parse().unwrap();
+        let result = fw.insert(name, val);
+        assert!(result.is_err(), "reserved header should be rejected");
+        assert!(fw.is_empty());
+    }
+
+    #[test]
+    fn framework_headers_accepts_non_reserved_non_transport() {
+        let mut fw = FrameworkHeaders::new();
+        let val = http::HeaderValue::from_static("3");
+        let name: http::header::HeaderName = "x-iterative-depth".parse().unwrap();
+        fw.insert(name, val).unwrap();
+        assert!(!fw.is_empty());
+        assert_eq!(fw.iter().count(), 1);
     }
 }

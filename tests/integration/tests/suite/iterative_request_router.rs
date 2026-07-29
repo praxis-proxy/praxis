@@ -386,7 +386,7 @@ steps:
         &format!(
             "GET / HTTP/1.1\r\n\
              Host: localhost\r\n\
-             x-praxis-iterative-depth: 3\r\n\
+             x-iterative-depth: 3\r\n\
              \r\n"
         ),
     );

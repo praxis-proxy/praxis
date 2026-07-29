@@ -48,8 +48,7 @@ praxis                          Binary entry point
 └── watcher                     File watcher for hot config reload
 
 praxis-core                     Configuration, errors, and server factory
-├── callout/                    HTTP callout client with circuit breaking
-│   └── circuit                 Circuit breaker state machine
+├── subrequest                  SubRequestClient, SubRequestConnector, typed errors
 ├── config/                     YAML parsing, defaults, and validation
 │   ├── admin                   Admin endpoint address and options
 │   ├── body_limits             Global max request/response byte limits

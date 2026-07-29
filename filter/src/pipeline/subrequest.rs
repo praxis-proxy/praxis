@@ -22,8 +22,12 @@ use praxis_core::subrequest::{SubRequest, SubResponse};
 /// memory growth from sub-request responses.
 const DEFAULT_MAX_RESPONSE_BYTES: usize = 10_485_760; // 10 MiB
 
-/// Reserved header for iterative-router loop prevention.
-pub(crate) const DEPTH_HEADER: &str = "x-praxis-iterative-depth";
+/// Header for iterative-router loop prevention.
+///
+/// Uses a non-reserved name so it can pass through
+/// [`FrameworkHeaders`](praxis_core::subrequest::FrameworkHeaders)
+/// validation (reserved `x-praxis-*` prefixes are blocked).
+pub(crate) const DEPTH_HEADER: &str = "x-iterative-depth";
 
 // ---------------------------------------------------------------------------
 // Types
