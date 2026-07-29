@@ -65,10 +65,7 @@ pub(crate) fn reload_pipelines(
 
     let health_registry = build_health_registry(&new_config.clusters);
 
-    let new_ceiling = new_config
-        .body_limits
-        .max_response_bytes
-        .unwrap_or(praxis_core::config::ABSOLUTE_MAX_BODY_BYTES);
+    let new_ceiling = new_config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
     let updated_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
         subrequest_client.connector().clone(),
         new_ceiling,

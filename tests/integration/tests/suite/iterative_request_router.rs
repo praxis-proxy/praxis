@@ -386,14 +386,14 @@ steps:
         &format!(
             "GET / HTTP/1.1\r\n\
              Host: localhost\r\n\
-             x-iterative-depth: 3\r\n\
+             x-praxis-iterative-depth: 3\r\n\
              \r\n"
         ),
     );
     let status = parse_status(&raw);
-    assert!(
-        status == 400 || status == 508,
-        "depth=3 should be rejected (400 from reserved header check or 508 from filter), got {status}"
+    assert_eq!(
+        status, 400,
+        "client-spoofed reserved depth header must be rejected at ingress, got {status}"
     );
 }
 

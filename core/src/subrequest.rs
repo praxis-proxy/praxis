@@ -110,6 +110,30 @@ impl FrameworkHeaders {
         Ok(())
     }
 
+    /// Insert a reserved header (`x-praxis-*`, `x-ext-*`) for
+    /// framework-internal metadata such as depth tracking.
+    ///
+    /// Unlike [`Self::insert`], this method permits reserved prefixes.
+    /// Transport-level headers are still rejected.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubRequestError::InvalidRequest`] when the header
+    /// name is a transport-level header.
+    pub fn insert_reserved(
+        &mut self,
+        name: http::header::HeaderName,
+        value: http::HeaderValue,
+    ) -> Result<(), SubRequestError> {
+        if is_transport_header(&name) {
+            return Err(SubRequestError::InvalidRequest(format!(
+                "transport header `{name}` cannot be injected as framework metadata"
+            )));
+        }
+        self.entries.push((name, value));
+        Ok(())
+    }
+
     /// Iterate over the validated entries.
     pub fn iter(&self) -> impl Iterator<Item = &(http::header::HeaderName, http::HeaderValue)> {
         self.entries.iter()
@@ -1107,7 +1131,7 @@ mod tests {
             assert!(is_transport_header(&hdr), "{name} should be classified as transport");
         }
 
-        let safe_names = ["authorization", "x-request-id", "x-iterative-depth"];
+        let safe_names = ["authorization", "x-request-id", "x-custom-header"];
         for name in safe_names {
             let hdr: http::header::HeaderName = name.parse().unwrap();
             assert!(
@@ -1140,9 +1164,30 @@ mod tests {
     fn framework_headers_accepts_non_reserved_non_transport() {
         let mut fw = FrameworkHeaders::new();
         let val = http::HeaderValue::from_static("3");
-        let name: http::header::HeaderName = "x-iterative-depth".parse().unwrap();
+        let name: http::header::HeaderName = "x-request-id".parse().unwrap();
         fw.insert(name, val).unwrap();
         assert!(!fw.is_empty());
         assert_eq!(fw.iter().count(), 1);
+    }
+
+    #[test]
+    fn framework_headers_insert_reserved_allows_reserved_prefix() {
+        let mut fw = FrameworkHeaders::new();
+        let val = http::HeaderValue::from_static("2");
+        let name: http::header::HeaderName = "x-praxis-iterative-depth".parse().unwrap();
+        fw.insert_reserved(name, val).unwrap();
+        assert_eq!(fw.iter().count(), 1);
+    }
+
+    #[test]
+    fn framework_headers_insert_reserved_rejects_transport() {
+        let mut fw = FrameworkHeaders::new();
+        let val = http::HeaderValue::from_static("chunked");
+        let result = fw.insert_reserved(http::header::TRANSFER_ENCODING, val);
+        assert!(
+            result.is_err(),
+            "transport header should be rejected even via insert_reserved"
+        );
+        assert!(fw.is_empty());
     }
 }

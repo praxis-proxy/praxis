@@ -119,7 +119,7 @@ pub struct RuntimeConfig {
     ///
     /// When set, a semaphore limits the number of in-flight
     /// exchanges. Requests that cannot acquire a permit within
-    /// their step timeout are treated as deadline-exceeded.
+    /// their step timeout produce an admission-timeout error.
     /// `None` (the default) means no concurrency limit.
     ///
     /// ```

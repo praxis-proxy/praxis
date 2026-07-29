@@ -447,9 +447,14 @@ impl IterativeRequestRouterFilter {
 
                 let mut fw_headers = FrameworkHeaders::new();
                 let depth_value = (depth + 1).to_string();
-                if let Ok(val) = http::HeaderValue::from_str(&depth_value) {
-                    let _ok = fw_headers.insert(http::header::HeaderName::from_static(DEPTH_HEADER), val);
-                }
+                let depth_val = http::HeaderValue::from_str(&depth_value).map_err(|e| -> FilterError {
+                    format!("iterative_request_router: invalid depth header value: {e}").into()
+                })?;
+                fw_headers
+                    .insert_reserved(http::header::HeaderName::from_static(DEPTH_HEADER), depth_val)
+                    .map_err(|e| -> FilterError {
+                        format!("iterative_request_router: depth header injection failed: {e}").into()
+                    })?;
 
                 let per_request_timeout = step_timeout.checked_sub(step_start.elapsed()).unwrap_or(Duration::ZERO);
                 if per_request_timeout.is_zero() {
@@ -840,13 +845,17 @@ fn parse_depth(request: &crate::Request) -> u8 {
         .unwrap_or(0)
 }
 
-/// Strip all reserved internal headers and the depth header from
-/// sub-request headers so the core executor re-injects depth via
-/// [`FrameworkHeaders`].
+/// Strip all reserved internal headers from sub-request headers
+/// so the core executor re-injects depth via [`FrameworkHeaders`].
+///
+/// The depth header uses a reserved `x-praxis-*` prefix, so it
+/// is covered by the [`is_reserved`] check.
+///
+/// [`is_reserved`]: praxis_core::reserved_headers::is_reserved
 fn strip_reserved_headers(headers: &mut HeaderMap) {
     let to_remove: Vec<http::header::HeaderName> = headers
         .keys()
-        .filter(|name| praxis_core::reserved_headers::is_reserved(name.as_str()) || name.as_str() == DEPTH_HEADER)
+        .filter(|name| praxis_core::reserved_headers::is_reserved(name.as_str()))
         .cloned()
         .collect();
     for name in to_remove {

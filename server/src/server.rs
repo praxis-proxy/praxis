@@ -126,10 +126,7 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
         .unwrap_or(praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE);
     let subrequest_connector =
         praxis_core::subrequest::SubRequestConnector::new(pool_size, config.runtime.subrequest_max_connections);
-    let subrequest_response_ceiling = config
-        .body_limits
-        .max_response_bytes
-        .unwrap_or(praxis_core::config::ABSOLUTE_MAX_BODY_BYTES);
+    let subrequest_response_ceiling = config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
     let subrequest_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
         subrequest_connector,
         subrequest_response_ceiling,

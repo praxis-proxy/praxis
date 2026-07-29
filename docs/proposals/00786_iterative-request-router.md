@@ -225,11 +225,12 @@ response to the client).
 
 ### Safety rails
 
-- **Depth**: `x-iterative-depth` marks iterative subrequests.
-  The header uses a non-reserved prefix so it can be injected
-  through the typed `FrameworkHeaders` API. The IRR explicitly
-  strips this header from incoming sub-request headers to prevent
-  spoofing, then re-injects it via `FrameworkHeaders`.
+- **Depth**: `x-praxis-iterative-depth` marks iterative
+  subrequests. The reserved `x-praxis-*` prefix ensures
+  client-spoofed values are rejected at ingress (400).
+  The IRR injects the header into sub-requests via
+  `FrameworkHeaders::insert_reserved`, which permits
+  reserved prefixes while still blocking transport headers.
   The max depth of 3 remains a defense for trusted/in-process
   reuse.
 - **Max iterations**: configurable cap (default 10,
