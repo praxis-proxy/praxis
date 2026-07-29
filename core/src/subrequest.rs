@@ -416,6 +416,16 @@ impl SubRequestClient {
         &self.connector
     }
 
+    /// Evict idle circuit breaker entries that have been healthy for
+    /// at least `idle_threshold`. Returns the number of entries
+    /// removed, or `0` if no circuit breaker is configured.
+    pub fn evict_idle_circuits(&self, idle_threshold: Duration) -> usize {
+        self.connector
+            .circuit_breakers
+            .as_ref()
+            .map_or(0, |registry| registry.evict_idle(idle_threshold))
+    }
+
     /// Execute a buffered sub-request.
     ///
     /// Acquires an admission permit (inside the deadline), connects
@@ -1265,6 +1275,124 @@ mod tests {
         assert!(
             connector.circuit_breakers.is_some(),
             "circuit breaker config should create a registry"
+        );
+    }
+
+    // -- record_circuit_outcome ---------------------------------------------------
+
+    #[test]
+    fn circuit_outcome_success_records_success() {
+        let registry = CircuitBreakerRegistry::new(CircuitBreakerConfig {
+            threshold: 3,
+            recovery_window: Duration::from_secs(30),
+            half_open_timeout: Duration::from_secs(30),
+        });
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let check = registry.try_acquire(addr);
+        let CircuitCheck::Allowed(token) = check else {
+            panic!("should be allowed");
+        };
+        let result: Result<SubResponse, SubRequestError> = Ok(SubResponse {
+            status: 200,
+            headers: HeaderMap::new(),
+            body: Bytes::new(),
+        });
+        record_circuit_outcome(&registry, addr, token, &result);
+        assert!(registry.precheck(addr), "peer should remain healthy after success");
+    }
+
+    #[test]
+    fn circuit_outcome_connect_error_records_failure() {
+        let registry = CircuitBreakerRegistry::new(CircuitBreakerConfig {
+            threshold: 1,
+            recovery_window: Duration::from_secs(9999),
+            half_open_timeout: Duration::from_secs(9999),
+        });
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let check = registry.try_acquire(addr);
+        let CircuitCheck::Allowed(token) = check else {
+            panic!("should be allowed");
+        };
+        let result: Result<SubResponse, SubRequestError> = Err(SubRequestError::Connect("refused".to_owned()));
+        record_circuit_outcome(&registry, addr, token, &result);
+        assert!(!registry.precheck(addr), "peer should be open after connect failure");
+    }
+
+    #[test]
+    fn circuit_outcome_io_error_records_failure() {
+        let registry = CircuitBreakerRegistry::new(CircuitBreakerConfig {
+            threshold: 1,
+            recovery_window: Duration::from_secs(9999),
+            half_open_timeout: Duration::from_secs(9999),
+        });
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let check = registry.try_acquire(addr);
+        let CircuitCheck::Allowed(token) = check else {
+            panic!("should be allowed");
+        };
+        let result: Result<SubResponse, SubRequestError> = Err(SubRequestError::Io("broken pipe".to_owned()));
+        record_circuit_outcome(&registry, addr, token, &result);
+        assert!(!registry.precheck(addr), "peer should be open after I/O failure");
+    }
+
+    #[test]
+    fn circuit_outcome_deadline_exceeded_records_failure() {
+        let registry = CircuitBreakerRegistry::new(CircuitBreakerConfig {
+            threshold: 1,
+            recovery_window: Duration::from_secs(9999),
+            half_open_timeout: Duration::from_secs(9999),
+        });
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let check = registry.try_acquire(addr);
+        let CircuitCheck::Allowed(token) = check else {
+            panic!("should be allowed");
+        };
+        let result: Result<SubResponse, SubRequestError> = Err(SubRequestError::DeadlineExceeded);
+        record_circuit_outcome(&registry, addr, token, &result);
+        assert!(!registry.precheck(addr), "peer should be open after deadline exceeded");
+    }
+
+    #[test]
+    fn circuit_outcome_response_too_large_counts_as_success() {
+        let registry = CircuitBreakerRegistry::new(CircuitBreakerConfig {
+            threshold: 1,
+            recovery_window: Duration::from_secs(9999),
+            half_open_timeout: Duration::from_secs(9999),
+        });
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let check = registry.try_acquire(addr);
+        let CircuitCheck::Allowed(token) = check else {
+            panic!("should be allowed");
+        };
+        let result: Result<SubResponse, SubRequestError> = Err(SubRequestError::ResponseTooLarge {
+            actual: 20_000,
+            limit: 10_000,
+        });
+        record_circuit_outcome(&registry, addr, token, &result);
+        assert!(
+            registry.precheck(addr),
+            "response too large is not a peer fault — should remain healthy"
+        );
+    }
+
+    #[test]
+    fn circuit_outcome_admission_timeout_is_noop() {
+        let registry = CircuitBreakerRegistry::new(CircuitBreakerConfig {
+            threshold: 1,
+            recovery_window: Duration::from_secs(9999),
+            half_open_timeout: Duration::from_secs(9999),
+        });
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let check = registry.try_acquire(addr);
+        let CircuitCheck::Allowed(token) = check else {
+            panic!("should be allowed");
+        };
+        let result: Result<SubResponse, SubRequestError> =
+            Err(SubRequestError::AdmissionTimeout { max_connections: 64 });
+        record_circuit_outcome(&registry, addr, token, &result);
+        assert!(
+            registry.precheck(addr),
+            "admission timeout is not a peer fault — token should be dropped silently"
         );
     }
 

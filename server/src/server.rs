@@ -17,7 +17,7 @@ use praxis_core::{
 use praxis_filter::FilterRegistry;
 use praxis_protocol::{CertWatcherShutdowns, ListenerPipelines, Protocol as _, http::PingoraHttp, tcp::PingoraTcp};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{debug, info};
 
 pub use crate::startup_checks::check_root_privilege;
 #[cfg(test)]
@@ -153,6 +153,21 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
     spawn_health_check_tasks(config, Arc::clone(health_registry), &health_shutdown);
+
+    if config.runtime.subrequest_circuit_breaker.is_some() {
+        let client = subrequest_client.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300)); // 5 min
+            interval.tick().await; // skip immediate first tick
+            loop {
+                interval.tick().await;
+                let evicted = client.evict_idle_circuits(Duration::from_secs(600)); // 10 min idle
+                if evicted > 0 {
+                    debug!(evicted, "circuit breaker: evicted idle entries");
+                }
+            }
+        });
+    }
 
     ServerState {
         pipelines: Arc::new(pipelines),

@@ -99,6 +99,8 @@ struct CircuitInner {
     half_opened_at: Option<Instant>,
     /// When the circuit transitioned to `Open`.
     opened_at: Option<Instant>,
+    /// When the last outcome was recorded (success or failure).
+    last_activity: Instant,
     /// Current state machine position.
     state: CircuitState,
     /// Monotonic generation counter; incremented on state transitions.
@@ -113,6 +115,7 @@ impl CircuitBreaker {
                 consecutive_failures: 0,
                 half_opened_at: None,
                 opened_at: None,
+                last_activity: Instant::now(),
                 state: CircuitState::Closed,
                 generation: 0,
             }),
@@ -219,6 +222,7 @@ impl CircuitBreaker {
         if token.generation != inner.generation {
             return;
         }
+        inner.last_activity = Instant::now();
         match inner.state {
             CircuitState::Closed => {
                 inner.consecutive_failures = 0;
@@ -247,6 +251,7 @@ impl CircuitBreaker {
         if token.generation != inner.generation {
             return;
         }
+        inner.last_activity = Instant::now();
         match inner.state {
             CircuitState::Closed => {
                 inner.consecutive_failures = inner.consecutive_failures.saturating_add(1);
@@ -262,6 +267,20 @@ impl CircuitBreaker {
             },
             CircuitState::Open => {},
         }
+    }
+
+    /// Whether the breaker is `Closed` with no failures and idle
+    /// for at least `idle_threshold`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
+    #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    fn is_idle(&self, idle_threshold: Duration) -> bool {
+        let inner = self.inner.lock().expect("circuit breaker lock poisoned");
+        inner.state == CircuitState::Closed
+            && inner.consecutive_failures == 0
+            && inner.last_activity.elapsed() >= idle_threshold
     }
 
     /// Returns the current state without side effects.
@@ -328,6 +347,37 @@ impl CircuitBreakerRegistry {
         if let Some(cb) = self.breakers.get(&peer) {
             cb.record_failure(token);
         }
+    }
+
+    /// Evict idle breakers that have been `Closed` with zero failures
+    /// for at least `idle_threshold`.
+    ///
+    /// Returns the number of entries removed. The caller is
+    /// responsible for scheduling periodic invocations.
+    pub fn evict_idle(&self, idle_threshold: Duration) -> usize {
+        let stale: Vec<SocketAddr> = self
+            .breakers
+            .iter()
+            .filter(|entry| entry.value().is_idle(idle_threshold))
+            .map(|entry| *entry.key())
+            .collect();
+        let count = stale.len();
+        for addr in stale {
+            self.breakers.remove(&addr);
+        }
+        count
+    }
+
+    /// Number of tracked peers.
+    #[cfg(test)]
+    pub fn len(&self) -> usize {
+        self.breakers.len()
+    }
+
+    /// Whether the registry has no tracked peers.
+    #[cfg(test)]
+    pub fn is_empty(&self) -> bool {
+        self.breakers.is_empty()
     }
 }
 
@@ -611,6 +661,38 @@ mod tests {
         assert!(!registry.precheck(addr), "two failures should trip threshold=2");
     }
 
+    // --- Eviction ---
+
+    #[test]
+    fn evict_idle_removes_healthy_idle_entries() {
+        let registry = CircuitBreakerRegistry::new(config(3, 30_000, 9_999_000));
+        let a: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let b: SocketAddr = "127.0.0.1:9090".parse().unwrap();
+        let ta = registry.try_acquire(a);
+        record_registry_success(&registry, a, ta);
+        let tb = registry.try_acquire(b);
+        record_registry_success(&registry, b, tb);
+        assert_eq!(registry.len(), 2);
+        let evicted = registry.evict_idle(Duration::ZERO);
+        assert_eq!(evicted, 2, "both idle entries should be evicted");
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn evict_idle_preserves_active_entries() {
+        let registry = CircuitBreakerRegistry::new(config(1, 9_999_000, 9_999_000));
+        let a: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let b: SocketAddr = "127.0.0.1:9090".parse().unwrap();
+        let ta = registry.try_acquire(a);
+        record_registry_failure(&registry, a, ta);
+        let tb = registry.try_acquire(b);
+        record_registry_success(&registry, b, tb);
+        let evicted = registry.evict_idle(Duration::ZERO);
+        assert_eq!(evicted, 1, "only the healthy idle peer should be evicted");
+        assert_eq!(registry.len(), 1);
+        assert!(!registry.precheck(a), "open circuit should survive eviction");
+    }
+
     // --- Test Utilities ---
 
     fn record_success_from_check(cb: &CircuitBreaker, check: CircuitCheck) {
@@ -622,6 +704,12 @@ mod tests {
     fn record_failure_from_check(cb: &CircuitBreaker, check: CircuitCheck) {
         if let CircuitCheck::Allowed(token) = check {
             cb.record_failure(token);
+        }
+    }
+
+    fn record_registry_success(registry: &CircuitBreakerRegistry, addr: SocketAddr, check: CircuitCheck) {
+        if let CircuitCheck::Allowed(token) = check {
+            registry.record_success(addr, token);
         }
     }
 

@@ -60,14 +60,17 @@ impl SubRequestCircuitBreakerConfig {
     ///
     /// # Errors
     ///
-    /// Returns an error if `consecutive_failures` or
-    /// `recovery_window_secs` is zero.
+    /// Returns an error if `consecutive_failures`,
+    /// `recovery_window_secs`, or `half_open_timeout_secs` is zero.
     pub fn validate(&self) -> Result<(), String> {
         if self.consecutive_failures == 0 {
             return Err("subrequest_circuit_breaker: consecutive_failures must be > 0".to_owned());
         }
         if self.recovery_window_secs == 0 {
             return Err("subrequest_circuit_breaker: recovery_window_secs must be > 0".to_owned());
+        }
+        if self.half_open_timeout_secs == 0 {
+            return Err("subrequest_circuit_breaker: half_open_timeout_secs must be > 0".to_owned());
         }
         Ok(())
     }
@@ -525,6 +528,20 @@ subrequest_circuit_breaker:
         assert!(
             err.contains("recovery_window_secs must be > 0"),
             "should reject zero recovery: {err}"
+        );
+    }
+
+    #[test]
+    fn subrequest_circuit_breaker_validate_zero_half_open() {
+        let cb = SubRequestCircuitBreakerConfig {
+            consecutive_failures: 5,
+            recovery_window_secs: 30,
+            half_open_timeout_secs: 0,
+        };
+        let err = cb.validate().unwrap_err();
+        assert!(
+            err.contains("half_open_timeout_secs must be > 0"),
+            "should reject zero half_open: {err}"
         );
     }
 

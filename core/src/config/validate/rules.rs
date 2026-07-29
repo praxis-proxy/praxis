@@ -89,6 +89,7 @@ impl Config {
         validate_keepalive_pool_size(self.runtime.upstream_keepalive_pool_size)?;
         validate_max_memory_bytes(self.runtime.max_memory_bytes)?;
         validate_subrequest_max_connections(self.runtime.subrequest_max_connections)?;
+        validate_subrequest_circuit_breaker(self.runtime.subrequest_circuit_breaker.as_ref())?;
         validate_global_queue_interval(self.runtime.global_queue_interval)?;
         validate_shutdown_timeout(self.shutdown_timeout_secs)?;
 
@@ -366,6 +367,16 @@ fn validate_subrequest_max_connections(max: Option<usize>) -> Result<(), ProxyEr
         )));
     }
     Ok(())
+}
+
+/// Reject invalid `runtime.subrequest_circuit_breaker` values.
+fn validate_subrequest_circuit_breaker(
+    cb: Option<&crate::config::runtime::SubRequestCircuitBreakerConfig>,
+) -> Result<(), ProxyError> {
+    let Some(cb) = cb else {
+        return Ok(());
+    };
+    cb.validate().map_err(ProxyError::Config)
 }
 
 /// Reject `runtime.global_queue_interval` of zero.
@@ -1345,6 +1356,79 @@ listeners:
     address: "0.0.0.0:8080"
     filter_chains: [main]
 shutdown_timeout_secs: 3600
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        Config::from_yaml(yaml).unwrap();
+    }
+
+    // -------------------------------------------------------------------------
+    // Circuit breaker validation
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn reject_circuit_breaker_zero_failures() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  subrequest_circuit_breaker:
+    consecutive_failures: 0
+    recovery_window_secs: 30
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("consecutive_failures must be > 0"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_circuit_breaker_zero_half_open() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  subrequest_circuit_breaker:
+    consecutive_failures: 5
+    recovery_window_secs: 30
+    half_open_timeout_secs: 0
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("half_open_timeout_secs must be > 0"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_valid_circuit_breaker() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+runtime:
+  subrequest_circuit_breaker:
+    consecutive_failures: 5
+    recovery_window_secs: 30
 filter_chains:
   - name: main
     filters:
