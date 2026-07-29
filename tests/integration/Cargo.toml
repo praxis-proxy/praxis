@@ -24,7 +24,7 @@ http = { workspace = true }
 # Used only by the cpex example test to mint HS256 JWTs for the
 # happy-path case (matches the filter crate's signing dependency).
 jsonwebtoken = "10.4.0"
-praxis = { version = "0.4.1", path = "../../server", package = "praxis-proxy" }
+praxis = { version = "0.5.0", path = "../../server", package = "praxis-proxy" }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-protocol = { workspace = true }

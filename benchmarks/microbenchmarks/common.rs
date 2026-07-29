@@ -39,6 +39,7 @@ pub(crate) fn bench_runtime() -> tokio::runtime::Runtime {
 /// or response header set.
 pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
     HttpFilterContext {
+        buffered_request_body: None,
         body_done_indices: Vec::new(),
         branch_iterations: std::collections::HashMap::new(),
         client_addr: None,
@@ -59,6 +60,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         health_registry: None,
         id_generator: &BENCH_ID_GENERATOR,
         kv_stores: None,
+        subrequest_connector: None,
         request: req,
         request_body_bytes: 0,
         request_body_mode: praxis_filter::BodyMode::Stream,

@@ -43,7 +43,12 @@ impl FilterPipeline {
             };
             trace!(filter = tcp_filter.name(), "on_connect");
             match tcp_filter.on_connect(ctx).await {
-                Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {},
+                Ok(
+                    FilterAction::Continue
+                    | FilterAction::Release
+                    | FilterAction::BodyDone
+                    | FilterAction::TerminalResponse(_),
+                ) => {},
                 Ok(FilterAction::Reject(r)) => return Ok(FilterAction::Reject(r)),
                 Err(e) => {
                     check_failure_mode(tcp_filter.name(), e, "tcp connect", pf.failure_mode)?;
@@ -462,6 +467,7 @@ mod tests {
             health_registry: None,
             id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
             kv_stores: None,
+            subrequest_connector: None,
             pipeline_extensions: Vec::new(),
             time_source: Arc::new(praxis_core::time::SystemTimeSource),
         }

@@ -22,7 +22,7 @@ mod registry;
 mod results;
 mod tcp_filter;
 
-pub use actions::{FilterAction, Rejection};
+pub use actions::{FilterAction, Rejection, TerminalResponse};
 pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
 #[cfg(feature = "cpex-policy-engine")]
@@ -41,11 +41,17 @@ pub use factory::{
     tcp_builtin,
 };
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
-pub use pipeline::{FilterPipeline, PipelineExtension};
-pub use praxis_core::config::{FailureMode, FilterEntry};
+pub use pipeline::{
+    FilterPipeline, PipelineExtension,
+    subrequest::{IterationState, NextIterationBody},
+};
+pub use praxis_core::{
+    config::{FailureMode, FilterEntry},
+    subrequest::{SubRequest, SubResponse},
+};
 pub use praxis_tls::TlsPeerIdentity;
 pub use registry::{FilterRegistry, SecurityClass};
-pub use results::FilterResultSet;
+pub use results::{FilterResultSet, matches_filter_result};
 pub use tcp_filter::{TcpFilter, TcpFilterContext};
 
 // -----------------------------------------------------------------------------
@@ -398,6 +404,7 @@ pub(crate) mod test_utils {
     )]
     pub(crate) fn make_filter_context(req: &Request) -> HttpFilterContext<'_> {
         HttpFilterContext {
+            buffered_request_body: None,
             body_done_indices: Vec::new(),
             branch_iterations: std::collections::HashMap::new(),
             client_addr: None,
@@ -418,6 +425,7 @@ pub(crate) mod test_utils {
             id_generator: &TEST_ID_GENERATOR,
             kv_stores: None,
             peer_identity: None,
+            subrequest_connector: None,
             request: req,
             request_body_bytes: 0,
             request_body_mode: crate::body::BodyMode::Stream,

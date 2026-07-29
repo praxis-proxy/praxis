@@ -48,8 +48,8 @@ pub use metrics::MetricsConfig;
 use parse::check_yaml_safety;
 pub use praxis_tls::{CachedClusterTls, ClusterTls};
 pub use route::{PathMatch, Route};
-pub use runtime::RuntimeConfig;
-pub use validate::{MAX_BRANCH_DEPTH, MAX_ITERATIONS_CEILING, is_ssrf_sensitive};
+pub use runtime::{DEFAULT_SUBREQUEST_POOL_SIZE, RuntimeConfig};
+pub use validate::{MAX_BRANCH_DEPTH, MAX_ITERATIONS_CEILING, TERMINAL_FILTERS, is_ssrf_sensitive};
 
 // -----------------------------------------------------------------------------
 // Config

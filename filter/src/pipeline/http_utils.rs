@@ -116,7 +116,7 @@ pub(super) fn dispatch_body_result(
     failure_mode: FailureMode,
 ) -> Result<BodyFilterOutcome, FilterError> {
     match result {
-        Ok(FilterAction::Continue) => Ok(BodyFilterOutcome::Continue),
+        Ok(FilterAction::Continue | FilterAction::TerminalResponse(_)) => Ok(BodyFilterOutcome::Continue),
         Ok(FilterAction::Release) => {
             debug!(filter = filter_name, "filter released body");
             Ok(BodyFilterOutcome::Released)
@@ -178,6 +178,9 @@ pub(super) enum HeaderFilterOutcome {
 
     /// Filter rejected the request or response.
     Rejected(Rejection),
+
+    /// Filter produced a complete terminal response (request phase only).
+    TerminalResponse(crate::actions::TerminalResponse),
 }
 
 /// Run a single request header filter hook with tracing and metrics.
@@ -213,6 +216,14 @@ pub(super) async fn run_request_filter(
                 "filter rejected request"
             );
             Ok(HeaderFilterOutcome::Rejected(rejection))
+        },
+        Ok(FilterAction::TerminalResponse(terminal)) => {
+            debug!(
+                filter = http_filter.name(),
+                status = terminal.status,
+                "filter produced terminal response"
+            );
+            Ok(HeaderFilterOutcome::TerminalResponse(*terminal))
         },
         Err(e) => {
             check_failure_mode(http_filter.name(), e, "request", failure_mode)?;
@@ -302,7 +313,9 @@ pub(super) async fn run_response_filter(
         http_filter.on_response(ctx).await
     };
     match response_result {
-        Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
+        Ok(
+            FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone | FilterAction::TerminalResponse(_),
+        ) => {
             if !ctx.response_headers_modified {
                 let post_len = ctx.response_header.as_ref().map_or(0, |r| r.headers.len());
                 if pre_len != post_len {

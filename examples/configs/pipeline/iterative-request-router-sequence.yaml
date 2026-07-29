@@ -1,0 +1,51 @@
+# Iterative Request Router: Sequential Steps
+#
+# Demonstrates sequential sub-request execution
+# where each step completes before the next begins.
+# Step A's response feeds into step B, which
+# produces the final response to the client.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/pipeline/iterative-request-router-sequence.yaml
+#   curl http://localhost:8080/
+
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - sequence
+
+filter_chains:
+  - name: sequence
+    filters:
+      - filter: iterative_request_router
+        initial_step: step-a
+        steps:
+          - name: step-a
+            filters:
+              - filter: router
+                routes:
+                  - path_prefix: "/"
+                    cluster: service-a
+              - filter: load_balancer
+                clusters:
+                  - name: service-a
+                    endpoints:
+                      - "127.0.0.1:3000"
+            on_result:
+              - default: true
+                next: step-b
+          - name: step-b
+            filters:
+              - filter: router
+                routes:
+                  - path_prefix: "/"
+                    cluster: service-b
+              - filter: load_balancer
+                clusters:
+                  - name: service-b
+                    endpoints:
+                      - "127.0.0.1:3001"
+            on_result:
+              - default: true
+                done: true
