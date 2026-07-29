@@ -73,6 +73,7 @@ page.
 | [composed-chains.yaml](configs/pipeline/composed-chains.yaml) | Multiple named chains are composed per listener |
 | [conditional-filters.yaml](configs/pipeline/conditional-filters.yaml) | Filters support `conditions` (request phase) and `response_conditions` (response phase) to gate execution |
 | [failure-mode.yaml](configs/pipeline/failure-mode.yaml) | Demonstrates open and closed failure handling for filters |
+| [iterative-request-router-circuit-breaker.yaml](configs/pipeline/iterative-request-router-circuit-breaker.yaml) | Demonstrates circuit breaker integration with the iterative request router |
 | [iterative-request-router-sequence.yaml](configs/pipeline/iterative-request-router-sequence.yaml) | Demonstrates sequential sub-request execution where each step completes before the next begins |
 
 ### Protocols

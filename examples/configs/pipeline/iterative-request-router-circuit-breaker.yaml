@@ -1,0 +1,63 @@
+# Iterative Request Router: Circuit Breaker Failover
+#
+# Demonstrates circuit breaker integration with the
+# iterative request router. After consecutive failures
+# from the primary backend, the sub-request connector's
+# per-peer circuit breaker opens and subsequent requests
+# fail fast with a transport-level circuit_open error,
+# which triggers an immediate failover to the fallback.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/pipeline/iterative-request-router-circuit-breaker.yaml
+#   curl http://localhost:8080/
+
+runtime:
+  subrequest_circuit_breaker:
+    consecutive_failures: 2
+    recovery_window_secs: 60
+
+listeners:
+  - name: gateway
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - failover
+
+filter_chains:
+  - name: failover
+    filters:
+      - filter: iterative_request_router
+        initial_step: primary
+        steps:
+          - name: primary
+            filters:
+              - filter: router
+                routes:
+                  - path_prefix: "/"
+                    cluster: primary-backend
+              - filter: load_balancer
+                clusters:
+                  - name: primary-backend
+                    endpoints:
+                      - "127.0.0.1:3000"
+            on_result:
+              - origin: transport
+                transport_error: circuit_open
+                next: fallback
+              - status: [502, 503, 504]
+                next: fallback
+              - default: true
+                done: true
+          - name: fallback
+            filters:
+              - filter: router
+                routes:
+                  - path_prefix: "/"
+                    cluster: fallback-backend
+              - filter: load_balancer
+                clusters:
+                  - name: fallback-backend
+                    endpoints:
+                      - "127.0.0.1:3001"
+            on_result:
+              - default: true
+                done: true

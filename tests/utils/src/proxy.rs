@@ -260,10 +260,21 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
     let health_registry = build_health_registry(&config.clusters);
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
     let ceiling = config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
-    let subrequest_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
-        praxis_core::subrequest::SubRequestConnector::new(8, None),
-        ceiling,
+    let subrequest_connector = praxis_core::subrequest::SubRequestConnector::with_options(
+        praxis_core::subrequest::SubRequestConnectorOptions {
+            keepalive_pool_size: 8,
+            max_connections: config.runtime.subrequest_max_connections,
+            circuit_breaker: config.runtime.subrequest_circuit_breaker.as_ref().map(|cb| {
+                praxis_core::circuit::CircuitBreakerConfig {
+                    threshold: cb.consecutive_failures,
+                    recovery_window: Duration::from_secs(cb.recovery_window_secs),
+                    half_open_timeout: Duration::from_secs(cb.half_open_timeout_secs),
+                }
+            }),
+        },
     );
+    let subrequest_client =
+        praxis_core::subrequest::SubRequestClient::with_max_response_bytes(subrequest_connector, ceiling);
     let pipelines = praxis::resolve_pipelines(config, registry, &health_registry, &kv_stores, &subrequest_client)
         .expect("pipeline resolution should succeed in test");
 

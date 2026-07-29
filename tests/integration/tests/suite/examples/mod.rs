@@ -24,6 +24,7 @@ mod guardrails;
 mod header_manipulation;
 mod health_checks;
 mod hostname_upstream;
+mod iterative_request_router_circuit_breaker;
 mod iterative_request_router_failover;
 mod iterative_request_router_origin_failover;
 mod iterative_request_router_sequence;
