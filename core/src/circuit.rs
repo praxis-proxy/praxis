@@ -296,17 +296,51 @@ impl CircuitBreaker {
 }
 
 // ---------------------------------------------------------------------------
+// PeerKey
+// ---------------------------------------------------------------------------
+
+/// Logical identity of an upstream peer for circuit breaker keying.
+///
+/// Combines the socket address with an optional SNI so that peers
+/// behind the same IP:port but serving different hostnames get
+/// independent circuit breakers.
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+pub struct PeerKey {
+    /// Socket address of the peer.
+    addr: SocketAddr,
+    /// TLS SNI, empty when not applicable.
+    sni: String,
+}
+
+impl PeerKey {
+    /// Create a peer key from an address and optional SNI.
+    pub fn new(addr: SocketAddr, sni: impl Into<String>) -> Self {
+        Self { addr, sni: sni.into() }
+    }
+}
+
+impl std::fmt::Display for PeerKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.sni.is_empty() {
+            write!(f, "{}", self.addr)
+        } else {
+            write!(f, "{} ({})", self.addr, self.sni)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // CircuitBreakerRegistry
 // ---------------------------------------------------------------------------
 
 /// Per-peer circuit breaker registry backed by [`DashMap`].
 ///
-/// Lazily creates a [`CircuitBreaker`] per `SocketAddr` on first
+/// Lazily creates a [`CircuitBreaker`] per [`PeerKey`] on first
 /// access, using the shared [`CircuitBreakerConfig`].
 #[derive(Debug)]
 pub struct CircuitBreakerRegistry {
     /// Lazily populated per-peer breakers.
-    breakers: DashMap<SocketAddr, CircuitBreaker>,
+    breakers: DashMap<PeerKey, CircuitBreaker>,
     /// Shared config applied to every new breaker.
     config: CircuitBreakerConfig,
 }
@@ -322,13 +356,13 @@ impl CircuitBreakerRegistry {
 
     /// Non-mutating peek for a peer. Returns `true` if the peer has
     /// no breaker yet or if its breaker would allow a request.
-    pub fn precheck(&self, peer: SocketAddr) -> bool {
-        self.breakers.get(&peer).is_none_or(|cb| cb.precheck())
+    pub fn precheck(&self, peer: &PeerKey) -> bool {
+        self.breakers.get(peer).is_none_or(|cb| cb.precheck())
     }
 
     /// Attempt to acquire a circuit token for a peer. Creates the
     /// breaker on first access.
-    pub fn try_acquire(&self, peer: SocketAddr) -> CircuitCheck {
+    pub fn try_acquire(&self, peer: PeerKey) -> CircuitCheck {
         self.breakers
             .entry(peer)
             .or_insert_with(|| CircuitBreaker::new(self.config.clone()))
@@ -336,15 +370,15 @@ impl CircuitBreakerRegistry {
     }
 
     /// Record a successful exchange for a peer.
-    pub fn record_success(&self, peer: SocketAddr, token: CircuitToken) {
-        if let Some(cb) = self.breakers.get(&peer) {
+    pub fn record_success(&self, peer: &PeerKey, token: CircuitToken) {
+        if let Some(cb) = self.breakers.get(peer) {
             cb.record_success(token);
         }
     }
 
     /// Record a failed exchange for a peer.
-    pub fn record_failure(&self, peer: SocketAddr, token: CircuitToken) {
-        if let Some(cb) = self.breakers.get(&peer) {
+    pub fn record_failure(&self, peer: &PeerKey, token: CircuitToken) {
+        if let Some(cb) = self.breakers.get(peer) {
             cb.record_failure(token);
         }
     }
@@ -355,15 +389,15 @@ impl CircuitBreakerRegistry {
     /// Returns the number of entries removed. The caller is
     /// responsible for scheduling periodic invocations.
     pub fn evict_idle(&self, idle_threshold: Duration) -> usize {
-        let stale: Vec<SocketAddr> = self
+        let stale: Vec<PeerKey> = self
             .breakers
             .iter()
             .filter(|entry| entry.value().is_idle(idle_threshold))
-            .map(|entry| *entry.key())
+            .map(|entry| entry.key().clone())
             .collect();
         let count = stale.len();
-        for addr in stale {
-            self.breakers.remove(&addr);
+        for key in &stale {
+            self.breakers.remove(key);
         }
         count
     }
@@ -631,34 +665,53 @@ mod tests {
 
     // --- Registry ---
 
+    fn peer(addr: &str) -> PeerKey {
+        PeerKey::new(addr.parse().unwrap(), "")
+    }
+
+    fn peer_with_sni(addr: &str, sni: &str) -> PeerKey {
+        PeerKey::new(addr.parse().unwrap(), sni)
+    }
+
     #[test]
     fn registry_creates_breaker_on_first_access() {
         let registry = CircuitBreakerRegistry::new(config(3, 30_000, 9_999_000));
-        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        assert!(registry.precheck(addr));
+        let key = peer("127.0.0.1:8080");
+        assert!(registry.precheck(&key));
     }
 
     #[test]
     fn registry_isolates_peers() {
         let registry = CircuitBreakerRegistry::new(config(1, 9_999_000, 9_999_000));
-        let a: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let b: SocketAddr = "127.0.0.1:9090".parse().unwrap();
-        let t = registry.try_acquire(a);
-        record_registry_failure(&registry, a, t);
-        assert!(!registry.precheck(a), "peer a should be open");
-        assert!(registry.precheck(b), "peer b should be unaffected");
+        let a = peer("127.0.0.1:8080");
+        let b = peer("127.0.0.1:9090");
+        let t = registry.try_acquire(a.clone());
+        record_registry_failure(&registry, &a, t);
+        assert!(!registry.precheck(&a), "peer a should be open");
+        assert!(registry.precheck(&b), "peer b should be unaffected");
+    }
+
+    #[test]
+    fn registry_isolates_peers_by_sni() {
+        let registry = CircuitBreakerRegistry::new(config(1, 9_999_000, 9_999_000));
+        let a = peer_with_sni("127.0.0.1:443", "api.example.com");
+        let b = peer_with_sni("127.0.0.1:443", "web.example.com");
+        let t = registry.try_acquire(a.clone());
+        record_registry_failure(&registry, &a, t);
+        assert!(!registry.precheck(&a), "api peer should be open");
+        assert!(registry.precheck(&b), "web peer should be unaffected");
     }
 
     #[test]
     fn registry_propagates_config() {
         let registry = CircuitBreakerRegistry::new(config(2, 9_999_000, 9_999_000));
-        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let t1 = registry.try_acquire(addr);
-        record_registry_failure(&registry, addr, t1);
-        assert!(registry.precheck(addr), "one failure should not trip threshold=2");
-        let t2 = registry.try_acquire(addr);
-        record_registry_failure(&registry, addr, t2);
-        assert!(!registry.precheck(addr), "two failures should trip threshold=2");
+        let key = peer("127.0.0.1:8080");
+        let t1 = registry.try_acquire(key.clone());
+        record_registry_failure(&registry, &key, t1);
+        assert!(registry.precheck(&key), "one failure should not trip threshold=2");
+        let t2 = registry.try_acquire(key.clone());
+        record_registry_failure(&registry, &key, t2);
+        assert!(!registry.precheck(&key), "two failures should trip threshold=2");
     }
 
     // --- Eviction ---
@@ -666,12 +719,12 @@ mod tests {
     #[test]
     fn evict_idle_removes_healthy_idle_entries() {
         let registry = CircuitBreakerRegistry::new(config(3, 30_000, 9_999_000));
-        let a: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let b: SocketAddr = "127.0.0.1:9090".parse().unwrap();
-        let ta = registry.try_acquire(a);
-        record_registry_success(&registry, a, ta);
-        let tb = registry.try_acquire(b);
-        record_registry_success(&registry, b, tb);
+        let a = peer("127.0.0.1:8080");
+        let b = peer("127.0.0.1:9090");
+        let ta = registry.try_acquire(a.clone());
+        record_registry_success(&registry, &a, ta);
+        let tb = registry.try_acquire(b.clone());
+        record_registry_success(&registry, &b, tb);
         assert_eq!(registry.len(), 2);
         let evicted = registry.evict_idle(Duration::ZERO);
         assert_eq!(evicted, 2, "both idle entries should be evicted");
@@ -681,16 +734,30 @@ mod tests {
     #[test]
     fn evict_idle_preserves_active_entries() {
         let registry = CircuitBreakerRegistry::new(config(1, 9_999_000, 9_999_000));
-        let a: SocketAddr = "127.0.0.1:8080".parse().unwrap();
-        let b: SocketAddr = "127.0.0.1:9090".parse().unwrap();
-        let ta = registry.try_acquire(a);
-        record_registry_failure(&registry, a, ta);
-        let tb = registry.try_acquire(b);
-        record_registry_success(&registry, b, tb);
+        let a = peer("127.0.0.1:8080");
+        let b = peer("127.0.0.1:9090");
+        let ta = registry.try_acquire(a.clone());
+        record_registry_failure(&registry, &a, ta);
+        let tb = registry.try_acquire(b.clone());
+        record_registry_success(&registry, &b, tb);
         let evicted = registry.evict_idle(Duration::ZERO);
         assert_eq!(evicted, 1, "only the healthy idle peer should be evicted");
         assert_eq!(registry.len(), 1);
-        assert!(!registry.precheck(a), "open circuit should survive eviction");
+        assert!(!registry.precheck(&a), "open circuit should survive eviction");
+    }
+
+    // --- PeerKey ---
+
+    #[test]
+    fn peer_key_display_without_sni() {
+        let key = peer("127.0.0.1:8080");
+        assert_eq!(key.to_string(), "127.0.0.1:8080");
+    }
+
+    #[test]
+    fn peer_key_display_with_sni() {
+        let key = peer_with_sni("127.0.0.1:443", "api.example.com");
+        assert_eq!(key.to_string(), "127.0.0.1:443 (api.example.com)");
     }
 
     // --- Test Utilities ---
@@ -707,15 +774,15 @@ mod tests {
         }
     }
 
-    fn record_registry_success(registry: &CircuitBreakerRegistry, addr: SocketAddr, check: CircuitCheck) {
+    fn record_registry_success(registry: &CircuitBreakerRegistry, key: &PeerKey, check: CircuitCheck) {
         if let CircuitCheck::Allowed(token) = check {
-            registry.record_success(addr, token);
+            registry.record_success(key, token);
         }
     }
 
-    fn record_registry_failure(registry: &CircuitBreakerRegistry, addr: SocketAddr, check: CircuitCheck) {
+    fn record_registry_failure(registry: &CircuitBreakerRegistry, key: &PeerKey, check: CircuitCheck) {
         if let CircuitCheck::Allowed(token) = check {
-            registry.record_failure(addr, token);
+            registry.record_failure(key, token);
         }
     }
 }
