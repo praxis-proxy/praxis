@@ -6,6 +6,7 @@
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use praxis_core::{
@@ -124,8 +125,19 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
         .runtime
         .subrequest_pool_size
         .unwrap_or(praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE);
-    let subrequest_connector =
-        praxis_core::subrequest::SubRequestConnector::new(pool_size, config.runtime.subrequest_max_connections);
+    let subrequest_connector = praxis_core::subrequest::SubRequestConnector::with_options(
+        praxis_core::subrequest::SubRequestConnectorOptions {
+            keepalive_pool_size: pool_size,
+            max_connections: config.runtime.subrequest_max_connections,
+            circuit_breaker: config.runtime.subrequest_circuit_breaker.as_ref().map(|cb| {
+                praxis_core::circuit::CircuitBreakerConfig {
+                    threshold: cb.consecutive_failures,
+                    recovery_window: Duration::from_secs(cb.recovery_window_secs),
+                    half_open_timeout: Duration::from_secs(cb.half_open_timeout_secs),
+                }
+            }),
+        },
+    );
     let subrequest_response_ceiling = config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
     let subrequest_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
         subrequest_connector,

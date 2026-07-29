@@ -28,7 +28,7 @@ mod listener;
 mod metrics;
 mod parse;
 mod route;
-mod runtime;
+pub mod runtime;
 mod validate;
 
 pub use admin::AdminConfig;
