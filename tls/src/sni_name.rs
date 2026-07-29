@@ -44,6 +44,11 @@ pub enum SniNameError {
     #[error("must be a hostname, not an IP address")]
     IsIpAddress,
 
+    /// A bare `*` with no domain suffix (e.g. `*` instead of
+    /// `*.example.com`).
+    #[error("wildcard requires a domain suffix")]
+    BareWildcard,
+
     /// A wildcard (`*`) appears somewhere other than as the complete
     /// leftmost label.
     #[error("wildcard is only permitted as the complete leftmost label")]
@@ -86,6 +91,10 @@ pub fn validate(name: &str) -> Result<(), SniNameError> {
 
     if name.len() > 253 {
         return Err(SniNameError::TooLong);
+    }
+
+    if name == "*" {
+        return Err(SniNameError::BareWildcard);
     }
 
     let hostname = name.strip_prefix("*.").unwrap_or(name);
@@ -152,7 +161,7 @@ mod tests {
 
     #[test]
     fn reject_bare_wildcard() {
-        assert_eq!(validate("*"), Err(SniNameError::InvalidWildcard));
+        assert_eq!(validate("*"), Err(SniNameError::BareWildcard));
     }
 
     #[test]
@@ -220,6 +229,10 @@ mod tests {
         assert_eq!(
             SniNameError::IsIpAddress.to_string(),
             "must be a hostname, not an IP address"
+        );
+        assert_eq!(
+            SniNameError::BareWildcard.to_string(),
+            "wildcard requires a domain suffix"
         );
         assert_eq!(
             SniNameError::InvalidWildcard.to_string(),

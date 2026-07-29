@@ -230,8 +230,7 @@ fn validate_route_entry(entry: &SniRouteEntry, tables: &mut RouteTables) -> Resu
     }
 
     for raw_name in &entry.server_names {
-        praxis_tls::validate_sni_name(raw_name)
-            .map_err(|e| -> FilterError { format!("sni_router: server name '{raw_name}' {e}").into() })?;
+        validate_sni_name(raw_name)?;
         let name = raw_name.trim_end_matches('.');
 
         if let Some(suffix) = name.strip_prefix('*') {
@@ -252,6 +251,16 @@ fn validate_route_entry(entry: &SniRouteEntry, tables: &mut RouteTables) -> Resu
         }
     }
     Ok(())
+}
+
+/// Validate an SNI server name, mapping bare wildcards to an actionable error.
+fn validate_sni_name(name: &str) -> Result<(), FilterError> {
+    praxis_tls::validate_sni_name(name).map_err(|e| match e {
+        praxis_tls::SniNameError::BareWildcard => {
+            "sni_router: bare wildcard '*' is not allowed; use default_upstream instead".into()
+        },
+        _ => format!("sni_router: server name '{name}' {e}").into(),
+    })
 }
 
 // -----------------------------------------------------------------------------
