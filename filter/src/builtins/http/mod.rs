@@ -10,7 +10,7 @@ mod traffic_management;
 mod transformation;
 pub mod value_safety;
 
-pub use observability::{AccessLogFilter, RequestIdFilter};
+pub use observability::{AccessLogFilter, RequestIdFilter, TraceContextFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter, JsonRpcFilter};
 #[cfg(feature = "basic-auth-filter")]
 pub use security::BasicAuthFilter;

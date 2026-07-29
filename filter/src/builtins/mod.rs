@@ -16,6 +16,6 @@ pub use http::{
     GuardrailsAction, GuardrailsFilter, HeaderFilter, IpAclFilter, IterativeRequestRouterFilter, JsonBodyFieldFilter,
     JsonRpcFilter, LoadBalancerFilter, PathRewriteFilter, PeerIdentityTrustFilter, PiiKind, RateLimitFilter,
     RateLimitMode, RedirectFilter, RedirectStatus, RequestIdFilter, RouterFilter, RuleTargetKind, StaticResponseFilter,
-    TimeoutFilter, UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,
+    TimeoutFilter, TraceContextFilter, UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,
 };
 pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};

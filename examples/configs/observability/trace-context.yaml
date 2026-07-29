@@ -1,0 +1,34 @@
+# Trace Context Propagation
+#
+# W3C Trace Context header propagation. Parses incoming
+# traceparent/tracestate, joins existing traces or starts
+# new ones, and injects updated headers upstream.
+# request_id provides a correlation ID alongside tracing.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/observability/trace-context.yaml
+#   curl -H 'traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01' http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+
+      - filter: trace_context
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"

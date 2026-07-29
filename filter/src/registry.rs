@@ -248,7 +248,7 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
         AccessLogFilter, CircuitBreakerFilter, CompressionFilter, CorsFilter, CredentialInjectionFilter, CsrfFilter,
         ForwardedHeadersFilter, GrpcDetectionFilter, HeaderFilter, IpAclFilter, JsonBodyFieldFilter, JsonRpcFilter,
         PathRewriteFilter, PeerIdentityTrustFilter, RateLimitFilter, RedirectFilter, RequestIdFilter,
-        StaticResponseFilter, TimeoutFilter, UrlRewriteFilter,
+        StaticResponseFilter, TimeoutFilter, TraceContextFilter, UrlRewriteFilter,
     };
 
     register_http(filters, "access_log", AccessLogFilter::from_config);
@@ -284,6 +284,7 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     register_http(filters, "router", crate::RouterFilter::from_config);
     register_http(filters, "static_response", StaticResponseFilter::from_config);
     register_http(filters, "timeout", TimeoutFilter::from_config);
+    register_http(filters, "trace_context", TraceContextFilter::from_config);
     register_http(filters, "url_rewrite", UrlRewriteFilter::from_config);
     register_http(filters, "json_body_field", JsonBodyFieldFilter::from_config);
     register_http(filters, "json_rpc", JsonRpcFilter::from_config);
@@ -437,6 +438,7 @@ mod tests {
             "tcp_load_balancer should be registered"
         );
         assert!(names.contains(&"timeout"), "timeout should be registered");
+        assert!(names.contains(&"trace_context"), "trace_context should be registered");
         assert!(names.contains(&"url_rewrite"), "url_rewrite should be registered");
         assert!(
             names.contains(&"json_body_field"),
