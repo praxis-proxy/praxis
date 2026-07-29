@@ -33,19 +33,22 @@ fn circuit_open_triggers_failover() {
 
     // First two requests trip the circuit via connect errors
     // (matched by the status: [502, 503, 504] rule) and
-    // failover to the fallback.
+    // failover to the error-fallback step.
     for i in 0..2 {
         let (status, body) = http_get(proxy.addr(), "/", None);
         assert_eq!(status, 200, "request {i}: connect-error should failover");
-        assert_eq!(body, "fallback-ok", "request {i}: should get fallback body");
+        assert_eq!(body, "fallback-ok", "request {i}: should get error-fallback body");
     }
 
     // Third request: circuit is open, matched by the
-    // transport_error: circuit_open rule and fails over
-    // without attempting a connection.
+    // transport_error: circuit_open rule and routed to the
+    // circuit-fallback step which returns a distinct 503.
     let (status, body) = http_get(proxy.addr(), "/", None);
-    assert_eq!(status, 200, "circuit-open should failover to fallback");
-    assert_eq!(body, "fallback-ok", "circuit-open should get fallback body");
+    assert_eq!(status, 503, "circuit-open should get static 503 from circuit-fallback");
+    assert_eq!(
+        body, "circuit breaker open",
+        "circuit-open body should prove the circuit_open path was taken"
+    );
 }
 
 #[test]

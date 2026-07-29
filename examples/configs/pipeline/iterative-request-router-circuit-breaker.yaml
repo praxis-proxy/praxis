@@ -42,12 +42,12 @@ filter_chains:
             on_result:
               - origin: transport
                 transport_error: circuit_open
-                next: fallback
+                next: circuit-fallback
               - status: [502, 503, 504]
-                next: fallback
+                next: error-fallback
               - default: true
                 done: true
-          - name: fallback
+          - name: error-fallback
             filters:
               - filter: router
                 routes:
@@ -58,6 +58,14 @@ filter_chains:
                   - name: fallback-backend
                     endpoints:
                       - "127.0.0.1:3001"
+            on_result:
+              - default: true
+                done: true
+          - name: circuit-fallback
+            filters:
+              - filter: static_response
+                status: 503
+                body: "circuit breaker open"
             on_result:
               - default: true
                 done: true
