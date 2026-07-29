@@ -271,9 +271,7 @@ impl CircuitBreakerRegistry {
     /// Non-mutating peek for a peer. Returns `true` if the peer has
     /// no breaker yet or if its breaker would allow a request.
     pub fn precheck(&self, peer: SocketAddr) -> bool {
-        self.breakers
-            .get(&peer)
-            .map_or(true, |cb| cb.precheck())
+        self.breakers.get(&peer).map_or(true, |cb| cb.precheck())
     }
 
     /// Attempt to acquire a circuit token for a peer. Creates the
@@ -574,16 +572,10 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let t1 = registry.try_acquire(addr);
         record_registry_failure(&registry, addr, t1);
-        assert!(
-            registry.precheck(addr),
-            "one failure should not trip threshold=2"
-        );
+        assert!(registry.precheck(addr), "one failure should not trip threshold=2");
         let t2 = registry.try_acquire(addr);
         record_registry_failure(&registry, addr, t2);
-        assert!(
-            !registry.precheck(addr),
-            "two failures should trip threshold=2"
-        );
+        assert!(!registry.precheck(addr), "two failures should trip threshold=2");
     }
 
     // --- Test Utilities ---
@@ -600,11 +592,7 @@ mod tests {
         }
     }
 
-    fn record_registry_failure(
-        registry: &CircuitBreakerRegistry,
-        addr: SocketAddr,
-        check: CircuitCheck,
-    ) {
+    fn record_registry_failure(registry: &CircuitBreakerRegistry, addr: SocketAddr, check: CircuitCheck) {
         if let CircuitCheck::Allowed(token) = check {
             registry.record_failure(addr, token);
         }
