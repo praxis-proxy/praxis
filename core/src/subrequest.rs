@@ -442,8 +442,8 @@ impl SubRequestClient {
         reason = "framework_headers is the typed metadata injection point"
     )]
     #[expect(
-        clippy::significant_drop_tightening,
-        reason = "admission permit must span the full exchange"
+        clippy::too_many_lines,
+        reason = "circuit + admission + deadline logic is sequential"
     )]
     pub async fn execute(
         &self,
@@ -466,12 +466,12 @@ impl SubRequestClient {
             .unwrap_or_else(|| SocketAddr::from(([0, 0, 0, 0], 0)));
 
         // Circuit precheck: fast-fail before consuming an admission slot.
-        if let Some(registry) = &self.connector.circuit_breakers {
-            if !registry.precheck(peer_addr) {
-                return Err(SubRequestError::CircuitOpen {
-                    peer: peer_addr.to_string(),
-                });
-            }
+        if let Some(registry) = &self.connector.circuit_breakers
+            && !registry.precheck(peer_addr)
+        {
+            return Err(SubRequestError::CircuitOpen {
+                peer: peer_addr.to_string(),
+            });
         }
 
         let admission_budget = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -514,10 +514,10 @@ impl SubRequestClient {
         .map_err(|_elapsed| SubRequestError::DeadlineExceeded)?;
 
         // Record outcome on the circuit breaker token.
-        if let Some(registry) = &self.connector.circuit_breakers {
-            if let Some(CircuitCheck::Allowed(token)) = circuit_token {
-                record_circuit_outcome(registry, peer_addr, token, &result);
-            }
+        if let Some(registry) = &self.connector.circuit_breakers
+            && let Some(CircuitCheck::Allowed(token)) = circuit_token
+        {
+            record_circuit_outcome(registry, peer_addr, token, &result);
         }
 
         result

@@ -52,6 +52,7 @@ pub enum CircuitCheck {
 /// Dropping without recording is a deliberate no-op (used for local
 /// construction errors that are not peer faults).
 pub struct CircuitToken {
+    /// The generation at which this token was issued.
     generation: u64,
 }
 
@@ -65,10 +66,10 @@ pub struct CircuitBreakerConfig {
     /// Consecutive failure threshold to trip the circuit.
     pub threshold: u32,
 
-    /// How long the circuit stays Open before allowing a HalfOpen probe.
+    /// How long the circuit stays open before allowing a `HalfOpen` probe.
     pub recovery_window: Duration,
 
-    /// How long a HalfOpen probe may remain in-flight before the
+    /// How long a `HalfOpen` probe may remain in-flight before the
     /// circuit resets to Open with a fresh recovery window.
     pub half_open_timeout: Duration,
 }
@@ -83,17 +84,24 @@ pub struct CircuitBreakerConfig {
 /// (a few field reads/writes), so contention is negligible.
 #[derive(Debug)]
 pub struct CircuitBreaker {
+    /// Guarded interior state.
     inner: Mutex<CircuitInner>,
+    /// Shared configuration.
     config: CircuitBreakerConfig,
 }
 
 /// Mutable interior state.
 #[derive(Debug)]
 struct CircuitInner {
+    /// Running tally of consecutive failures.
     consecutive_failures: u32,
+    /// When the circuit entered `HalfOpen`.
     half_opened_at: Option<Instant>,
+    /// When the circuit transitioned to `Open`.
     opened_at: Option<Instant>,
+    /// Current state machine position.
     state: CircuitState,
+    /// Monotonic generation counter; incremented on state transitions.
     generation: u64,
 }
 
@@ -114,10 +122,14 @@ impl CircuitBreaker {
 
     /// Non-mutating peek at whether a request would likely be allowed.
     ///
-    /// Returns `true` for Closed, Open with elapsed recovery window,
-    /// or HalfOpen with elapsed probe timeout. Does **not** transition
-    /// state — use this to fast-fail before consuming an admission
-    /// slot.
+    /// Returns `true` for `Closed`, `Open` with elapsed recovery
+    /// window, or `HalfOpen` with elapsed probe timeout. Does **not**
+    /// transition state -- use this to fast-fail before consuming an
+    /// admission slot.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
     pub fn precheck(&self) -> bool {
         let inner = self.inner.lock().expect("circuit breaker lock poisoned");
@@ -134,11 +146,16 @@ impl CircuitBreaker {
 
     /// Attempt to acquire a circuit token for a request.
     ///
-    /// Transitions Open → HalfOpen when the recovery window has
+    /// Transitions `Open` to `HalfOpen` when the recovery window has
     /// elapsed, incrementing the generation. Returns
     /// [`CircuitCheck::Rejected`] when the circuit is definitively
     /// closed to traffic.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[expect(clippy::too_many_lines, reason = "three-state match with nested transitions")]
     pub fn try_acquire(&self) -> CircuitCheck {
         let mut inner = self.inner.lock().expect("circuit breaker lock poisoned");
         match inner.state {
@@ -191,7 +208,12 @@ impl CircuitBreaker {
     /// Record a successful exchange for the given token.
     ///
     /// Stale tokens (generation mismatch) are silently ignored.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[expect(clippy::needless_pass_by_value, reason = "consumed to prevent double-recording")]
     pub fn record_success(&self, token: CircuitToken) {
         let mut inner = self.inner.lock().expect("circuit breaker lock poisoned");
         if token.generation != inner.generation {
@@ -214,7 +236,12 @@ impl CircuitBreaker {
     /// Record a failed exchange for the given token.
     ///
     /// Stale tokens (generation mismatch) are silently ignored.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    #[expect(clippy::needless_pass_by_value, reason = "consumed to prevent double-recording")]
     pub fn record_failure(&self, token: CircuitToken) {
         let mut inner = self.inner.lock().expect("circuit breaker lock poisoned");
         if token.generation != inner.generation {
@@ -238,6 +265,10 @@ impl CircuitBreaker {
     }
 
     /// Returns the current state without side effects.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal mutex is poisoned.
     #[cfg(test)]
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
     pub fn state(&self) -> CircuitState {
@@ -255,7 +286,9 @@ impl CircuitBreaker {
 /// access, using the shared [`CircuitBreakerConfig`].
 #[derive(Debug)]
 pub struct CircuitBreakerRegistry {
+    /// Lazily populated per-peer breakers.
     breakers: DashMap<SocketAddr, CircuitBreaker>,
+    /// Shared config applied to every new breaker.
     config: CircuitBreakerConfig,
 }
 
@@ -271,7 +304,7 @@ impl CircuitBreakerRegistry {
     /// Non-mutating peek for a peer. Returns `true` if the peer has
     /// no breaker yet or if its breaker would allow a request.
     pub fn precheck(&self, peer: SocketAddr) -> bool {
-        self.breakers.get(&peer).map_or(true, |cb| cb.precheck())
+        self.breakers.get(&peer).is_none_or(|cb| cb.precheck())
     }
 
     /// Attempt to acquire a circuit token for a peer. Creates the

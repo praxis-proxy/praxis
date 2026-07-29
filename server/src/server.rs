@@ -118,6 +118,10 @@ struct ServerState {
 }
 
 /// Build filter pipelines, health checks, and registries.
+#[expect(
+    clippy::too_many_lines,
+    reason = "connector + pipeline + health wiring is sequential"
+)]
 fn build_server_state(config: &Config, registry: &FilterRegistry, health_registry: &HealthRegistry) -> ServerState {
     info!("building filter pipelines");
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
