@@ -15,8 +15,6 @@ pub use cipher_suite::CipherSuiteId;
 pub use cluster::ClusterTls;
 pub use listener::{ClientCertMode, ListenerTls, TlsVersion};
 
-use crate::TlsError;
-
 // -----------------------------------------------------------------------------
 // Path Validation
 // -----------------------------------------------------------------------------
@@ -26,23 +24,6 @@ use crate::TlsError;
 /// [`Component::ParentDir`]: std::path::Component::ParentDir
 pub(crate) fn has_parent_dir_component(path: &str) -> bool {
     Path::new(path).components().any(|c| matches!(c, Component::ParentDir))
-}
-
-/// Validate that `sni` is a syntactically valid DNS hostname per [RFC 1035].
-///
-/// Rejects empty strings, IP literals ([RFC 6066 Section 3]), and
-/// hostnames that violate label or length rules.
-///
-/// [RFC 1035]: https://datatracker.ietf.org/doc/html/rfc1035
-/// [RFC 6066 Section 3]: https://datatracker.ietf.org/doc/html/rfc6066#section-3
-pub(crate) fn validate_sni_hostname(sni: &str) -> Result<(), TlsError> {
-    if sni.is_empty() {
-        return Err(TlsError::InvalidSni { value: sni.to_owned() });
-    }
-    if sni.parse::<std::net::IpAddr>().is_ok() {
-        return Err(TlsError::InvalidSni { value: sni.to_owned() });
-    }
-    crate::dns::validate_dns_hostname(sni).map_err(|_dns| TlsError::InvalidSni { value: sni.to_owned() })
 }
 
 /// Emit a warning if `path` is a symlink.

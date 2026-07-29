@@ -3,9 +3,6 @@
 
 //! TLS settings and SNI hostname validation for clusters.
 
-use std::net::IpAddr;
-
-use praxis_tls::dns;
 use tracing::warn;
 
 use crate::{
@@ -30,7 +27,8 @@ pub(super) fn validate_tls_settings(cluster: &Cluster, insecure_options: &Insecu
     };
 
     if let Some(sni) = &tls.sni {
-        validate_sni(sni, &cluster.name)?;
+        praxis_tls::validate_sni_name(sni)
+            .map_err(|e| ProxyError::Config(format!("cluster '{}': sni {e}", cluster.name)))?;
     }
 
     check_sni_verify_requirement(tls.sni.is_some(), tls.verify, &cluster.name, insecure_options)?;
@@ -86,65 +84,6 @@ fn check_no_verify_requirement(
         "cluster '{cluster_name}': upstream TLS certificate verification is disabled (verify: false); \
          set insecure_options.allow_tls_no_verify: true to allow this"
     )))
-}
-
-// -----------------------------------------------------------------------------
-// SNI Validation
-// -----------------------------------------------------------------------------
-
-/// Validates that an SNI hostname is a legal DNS name.
-fn validate_sni(sni: &str, cluster_name: &str) -> Result<(), ProxyError> {
-    validate_sni_length(sni, cluster_name)?;
-    validate_sni_not_ip(sni, cluster_name)?;
-    validate_sni_labels(sni, cluster_name)
-}
-
-/// Reject SNI values that are IP addresses rather than hostnames.
-///
-/// TLS SNI is hostname-based; IP addresses bypass certificate hostname
-/// verification and can manipulate which upstream certificate is validated.
-fn validate_sni_not_ip(sni: &str, cluster_name: &str) -> Result<(), ProxyError> {
-    if sni.parse::<IpAddr>().is_ok() {
-        return Err(ProxyError::Config(format!(
-            "cluster '{cluster_name}': sni must be a hostname, not an IP address"
-        )));
-    }
-    Ok(())
-}
-
-/// Reject empty or overlong SNI hostnames.
-fn validate_sni_length(sni: &str, cluster_name: &str) -> Result<(), ProxyError> {
-    if sni.is_empty() {
-        return Err(ProxyError::Config(format!("cluster '{cluster_name}': sni is empty")));
-    }
-    if sni.len() > 253 {
-        return Err(ProxyError::Config(format!(
-            "cluster '{cluster_name}': sni exceeds 253 characters"
-        )));
-    }
-    Ok(())
-}
-
-/// Validate each DNS label in the SNI hostname.
-///
-/// Wildcard validation follows [RFC 6125]: `*` is only valid as
-/// the complete leftmost label (e.g. `*.example.com`).
-///
-/// [RFC 6125]: https://datatracker.ietf.org/doc/html/rfc6125
-fn validate_sni_labels(sni: &str, cluster_name: &str) -> Result<(), ProxyError> {
-    for (i, label) in sni.split('.').enumerate() {
-        if label.contains('*') {
-            if label != "*" || i != 0 {
-                return Err(ProxyError::Config(format!(
-                    "cluster '{cluster_name}': sni wildcard is only \
-                     permitted as the complete leftmost label (e.g. *.example.com)"
-                )));
-            }
-            continue;
-        }
-        dns::validate_dns_label(label).map_err(|e| ProxyError::Config(format!("cluster '{cluster_name}': sni {e}")))?;
-    }
-    Ok(())
 }
 
 // -----------------------------------------------------------------------------

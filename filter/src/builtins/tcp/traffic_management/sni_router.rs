@@ -230,7 +230,8 @@ fn validate_route_entry(entry: &SniRouteEntry, tables: &mut RouteTables) -> Resu
     }
 
     for raw_name in &entry.server_names {
-        validate_server_name(raw_name)?;
+        praxis_tls::validate_sni_name(raw_name)
+            .map_err(|e| -> FilterError { format!("sni_router: server name '{raw_name}' {e}").into() })?;
         let name = raw_name.trim_end_matches('.');
 
         if let Some(suffix) = name.strip_prefix('*') {
@@ -250,37 +251,6 @@ fn validate_route_entry(entry: &SniRouteEntry, tables: &mut RouteTables) -> Resu
             tables.exact.insert(lower, entry.upstream.clone());
         }
     }
-    Ok(())
-}
-
-// -----------------------------------------------------------------------------
-// Validation
-// -----------------------------------------------------------------------------
-
-/// Validate a server name pattern.
-fn validate_server_name(name: &str) -> Result<(), FilterError> {
-    if name == "*" {
-        return Err("sni_router: bare wildcard '*' is not allowed; use default_upstream instead".into());
-    }
-
-    if name.starts_with('*') && !name.starts_with("*.") {
-        return Err(format!("sni_router: invalid wildcard pattern '{name}'; wildcards must start with '*.'").into());
-    }
-
-    let check = if let Some(suffix) = name.strip_prefix("*.") {
-        suffix
-    } else {
-        name
-    };
-
-    if check.parse::<std::net::IpAddr>().is_ok() {
-        return Err(format!("sni_router: IP address '{name}' is not allowed as a server name").into());
-    }
-
-    if check.is_empty() {
-        return Err(format!("sni_router: empty server name in pattern '{name}'").into());
-    }
-
     Ok(())
 }
 
@@ -461,7 +431,7 @@ routes:
         .expect("valid YAML");
         let err = expect_config_error(&yaml);
         assert!(
-            err.to_string().contains("bare wildcard"),
+            err.to_string().contains("wildcard"),
             "bare wildcard should be rejected: {err}"
         );
     }
@@ -478,7 +448,7 @@ routes:
         .expect("valid YAML");
         let err = expect_config_error(&yaml);
         assert!(
-            err.to_string().contains("must start with '*.'"),
+            err.to_string().contains("wildcard"),
             "invalid wildcard should be rejected: {err}"
         );
     }
@@ -581,6 +551,58 @@ routes:
         assert!(
             err.to_string().contains("empty server_names"),
             "empty server_names should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_leading_hyphen_in_label() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+routes:
+  - server_names: ["-example.com"]
+    upstream: "10.0.0.1:443"
+"#,
+        )
+        .expect("valid YAML");
+        let err = expect_config_error(&yaml);
+        assert!(
+            err.to_string().contains("hyphen"),
+            "leading hyphen should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_invalid_characters_in_label() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+routes:
+  - server_names: ["invalid_host.com"]
+    upstream: "10.0.0.1:443"
+"#,
+        )
+        .expect("valid YAML");
+        let err = expect_config_error(&yaml);
+        assert!(
+            err.to_string().contains("invalid characters"),
+            "underscore should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_overlong_label() {
+        let long = "a".repeat(64);
+        let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+            r#"
+routes:
+  - server_names: ["{long}.example.com"]
+    upstream: "10.0.0.1:443"
+"#,
+        ))
+        .expect("valid YAML");
+        let err = expect_config_error(&yaml);
+        assert!(
+            err.to_string().contains("exceeds 63 characters"),
+            "label >63 chars should be rejected: {err}"
         );
     }
 
