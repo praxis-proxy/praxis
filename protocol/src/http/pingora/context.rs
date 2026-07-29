@@ -429,12 +429,9 @@ impl PingoraRequestCtx {
     }
 
     /// Writes back the fields common to every filter phase, taken from a
-    /// [`WriteBackContext`] built from an executed [`HttpFilterContext`].
-    ///
     /// Conditional fields (e.g. `cluster`, `upstream`) are not included
     /// callers write those back themselves after calling this.
-    /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
-    pub fn apply_writeback(&mut self, writeback: WriteBackContext) {
+    pub(crate) fn apply_writeback(&mut self, writeback: WriteBackContext) {
         self.cached_body_done_indices = writeback.body_done_indices;
         self.cached_executed_filter_indices = writeback.executed_filter_indices;
         self.extensions = writeback.extensions;
@@ -503,10 +500,9 @@ impl Default for PingoraRequestCtx {
 ///
 /// Consuming the filter context into this owned struct ends its borrow
 /// of the request context, so the caller can then apply the writeback
-/// via [`PingoraRequestCtx::apply_writeback`]. Conditional fields
-/// like `cluster`, `upstream`, body byte counts ...
+/// via [`PingoraRequestCtx::apply_writeback`].
 /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
-pub struct WriteBackContext {
+pub(crate) struct WriteBackContext {
     /// Per-filter body-done indices.
     body_done_indices: Vec<bool>,
     /// Per-filter execution indices.
@@ -851,6 +847,37 @@ mod tests {
             Some("42"),
             "multiple metadata keys should persist back"
         );
+    }
+
+    #[test]
+    fn writeback_context_roundtrip_fields() {
+        let registry = FilterRegistry::with_builtins();
+        let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+        let request = Request {
+            method: Method::GET,
+            uri: "/".parse::<Uri>().unwrap(),
+            headers: HeaderMap::new(),
+        };
+        let mut ctx = default_ctx();
+        let mut fctx = ctx.build_filter_context(&pipeline, &request, None);
+
+        fctx.body_done_indices = vec![true];
+        fctx.executed_filter_indices = vec![false];
+        fctx.extensions.insert(37usize);
+        fctx.filter_metadata = std::collections::HashMap::from([("trace.id".to_string(), "abc-123".to_string())]);
+
+        let state: Box<dyn std::any::Any + Send + Sync> = Box::new(37);
+        fctx.filter_state = std::collections::HashMap::from([(0usize, state)]);
+
+        let writeback = WriteBackContext::from(fctx);
+        ctx.apply_writeback(writeback);
+
+        assert_eq!(ctx.cached_body_done_indices, vec![true]);
+        assert_eq!(ctx.cached_executed_filter_indices, vec![false]);
+        assert_eq!(ctx.extensions.get::<usize>(), Some(&37));
+        assert_eq!(ctx.filter_metadata.get("trace.id").map(String::as_str), Some("abc-123"));
+        let ret_state = ctx.filter_state.get(&0usize).unwrap();
+        assert_eq!(ret_state.downcast_ref(), Some(&37));
     }
 
     // -------------------------------------------------------------------------
