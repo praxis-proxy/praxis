@@ -259,10 +259,7 @@ fn build_full_server(config: &Config) -> praxis_core::PingoraServerRuntime {
 fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -> praxis_core::PingoraServerRuntime {
     let health_registry = build_health_registry(&config.clusters);
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-    let ceiling = config
-        .body_limits
-        .max_response_bytes
-        .unwrap_or(praxis_core::config::ABSOLUTE_MAX_BODY_BYTES);
+    let ceiling = config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
     let subrequest_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
         praxis_core::subrequest::SubRequestConnector::new(8, None),
         ceiling,

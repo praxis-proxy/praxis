@@ -68,6 +68,13 @@ pub struct SubResponse {
     pub body: Bytes,
 }
 
+/// Reserved header for iterative-router loop prevention.
+///
+/// Uses the `x-praxis-*` reserved prefix so ingress rejects
+/// client-spoofed values with 400. Injected by
+/// [`FrameworkHeaders::set_depth`].
+pub const DEPTH_HEADER: &str = "x-praxis-iterative-depth";
+
 /// Framework metadata injected into sub-requests after sanitisation.
 ///
 /// This typed struct replaces an open `HeaderMap` so that the executor
@@ -110,28 +117,15 @@ impl FrameworkHeaders {
         Ok(())
     }
 
-    /// Insert a reserved header (`x-praxis-*`, `x-ext-*`) for
-    /// framework-internal metadata such as depth tracking.
+    /// Set the iterative-router depth header.
     ///
-    /// Unlike [`Self::insert`], this method permits reserved prefixes.
-    /// Transport-level headers are still rejected.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`SubRequestError::InvalidRequest`] when the header
-    /// name is a transport-level header.
-    pub fn insert_reserved(
-        &mut self,
-        name: http::header::HeaderName,
-        value: http::HeaderValue,
-    ) -> Result<(), SubRequestError> {
-        if is_transport_header(&name) {
-            return Err(SubRequestError::InvalidRequest(format!(
-                "transport header `{name}` cannot be injected as framework metadata"
-            )));
-        }
-        self.entries.push((name, value));
-        Ok(())
+    /// This is the only way to inject the reserved
+    /// `x-praxis-iterative-depth` header. The value is
+    /// formatted from `depth` and inserted unconditionally.
+    pub fn set_depth(&mut self, depth: u8) {
+        let value = http::HeaderValue::from(u16::from(depth));
+        self.entries
+            .push((http::header::HeaderName::from_static(DEPTH_HEADER), value));
     }
 
     /// Iterate over the validated entries.
@@ -1171,23 +1165,20 @@ mod tests {
     }
 
     #[test]
-    fn framework_headers_insert_reserved_allows_reserved_prefix() {
+    fn framework_headers_set_depth_injects_reserved_header() {
         let mut fw = FrameworkHeaders::new();
-        let val = http::HeaderValue::from_static("2");
-        let name: http::header::HeaderName = "x-praxis-iterative-depth".parse().unwrap();
-        fw.insert_reserved(name, val).unwrap();
+        fw.set_depth(2);
         assert_eq!(fw.iter().count(), 1);
+        let (name, value) = fw.iter().next().unwrap();
+        assert_eq!(name.as_str(), DEPTH_HEADER);
+        assert_eq!(value, "2");
     }
 
     #[test]
-    fn framework_headers_insert_reserved_rejects_transport() {
+    fn framework_headers_set_depth_zero() {
         let mut fw = FrameworkHeaders::new();
-        let val = http::HeaderValue::from_static("chunked");
-        let result = fw.insert_reserved(http::header::TRANSFER_ENCODING, val);
-        assert!(
-            result.is_err(),
-            "transport header should be rejected even via insert_reserved"
-        );
-        assert!(fw.is_empty());
+        fw.set_depth(0);
+        let (_, value) = fw.iter().next().unwrap();
+        assert_eq!(value, "0");
     }
 }

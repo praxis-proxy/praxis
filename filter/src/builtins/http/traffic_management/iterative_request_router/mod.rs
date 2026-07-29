@@ -446,15 +446,7 @@ impl IterativeRequestRouterFilter {
                 };
 
                 let mut fw_headers = FrameworkHeaders::new();
-                let depth_value = (depth + 1).to_string();
-                let depth_val = http::HeaderValue::from_str(&depth_value).map_err(|e| -> FilterError {
-                    format!("iterative_request_router: invalid depth header value: {e}").into()
-                })?;
-                fw_headers
-                    .insert_reserved(http::header::HeaderName::from_static(DEPTH_HEADER), depth_val)
-                    .map_err(|e| -> FilterError {
-                        format!("iterative_request_router: depth header injection failed: {e}").into()
-                    })?;
+                fw_headers.set_depth(depth + 1);
 
                 let per_request_timeout = step_timeout.checked_sub(step_start.elapsed()).unwrap_or(Duration::ZERO);
                 if per_request_timeout.is_zero() {

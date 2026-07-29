@@ -24,12 +24,11 @@ const DEFAULT_MAX_RESPONSE_BYTES: usize = 10_485_760; // 10 MiB
 
 /// Header for iterative-router loop prevention.
 ///
-/// Uses a reserved `x-praxis-*` name so ingress rejects
-/// client-spoofed values with 400. The IRR injects it into
-/// sub-requests via [`FrameworkHeaders::insert_reserved`].
+/// Re-exported from core where [`FrameworkHeaders::set_depth`]
+/// uses it for injection.
 ///
-/// [`FrameworkHeaders::insert_reserved`]: praxis_core::subrequest::FrameworkHeaders::insert_reserved
-pub(crate) const DEPTH_HEADER: &str = "x-praxis-iterative-depth";
+/// [`FrameworkHeaders::set_depth`]: praxis_core::subrequest::FrameworkHeaders::set_depth
+pub(crate) use praxis_core::subrequest::DEPTH_HEADER;
 
 // ---------------------------------------------------------------------------
 // Types
