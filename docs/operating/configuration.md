@@ -475,6 +475,24 @@ runtime:
   memory and rejects new requests with `503 Service
   Unavailable` when usage exceeds the threshold.
   `Option<usize>`, defaults to `None` (disabled).
+- `subrequest_circuit_breaker`: per-peer circuit breaker
+  for the shared sub-request connector used by
+  `iterative_request_router`. When configured, the
+  connector tracks consecutive transport failures per
+  upstream `SocketAddr` and rejects sub-requests while a
+  peer's circuit is open. Fields:
+  - `consecutive_failures`: failure threshold before the
+    circuit opens (required, must be > 0).
+  - `recovery_window_secs`: seconds the circuit stays
+    open before allowing a probe (required, must be > 0).
+  - `half_open_timeout_secs`: seconds a half-open probe
+    may remain in-flight before the circuit resets to open
+    (default 30).
+
+  The circuit breaker state is preserved across config
+  reloads. Use the `transport_error: circuit_open`
+  transition in `iterative_request_router` step rules
+  to match circuit-open rejections.
 
 ```yaml
 runtime:
@@ -484,6 +502,9 @@ runtime:
   upstream_keepalive_pool_size: 64
   max_connections: 10000         # process-wide limit
   max_memory_bytes: 1073741824   # 1 GiB
+  subrequest_circuit_breaker:
+    consecutive_failures: 5
+    recovery_window_secs: 30
 ```
 
 ### Upstream CA

@@ -6,6 +6,7 @@
 use std::{
     path::PathBuf,
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use praxis_core::{
@@ -16,11 +17,13 @@ use praxis_core::{
 use praxis_filter::FilterRegistry;
 use praxis_protocol::{CertWatcherShutdowns, ListenerPipelines, Protocol as _, http::PingoraHttp, tcp::PingoraTcp};
 use tokio_util::sync::CancellationToken;
-use tracing::info;
+use tracing::{debug, info};
 
 pub use crate::startup_checks::check_root_privilege;
 #[cfg(test)]
 use crate::startup_checks::insecure_warn;
+#[cfg(feature = "experimental")]
+use crate::startup_checks::warn_experimental_features;
 use crate::{
     pipelines::resolve_pipelines,
     startup_checks::{enforce_root_check, warn_insecure_key_permissions, warn_insecure_options},
@@ -80,6 +83,8 @@ pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
 #[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
 pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config_path: Option<PathBuf>) -> ! {
+    #[cfg(feature = "experimental")]
+    warn_experimental_features();
     enforce_root_check(&config);
     warn_insecure_options(&config);
     init_runtime_limits(&config.runtime);
@@ -117,6 +122,10 @@ struct ServerState {
 }
 
 /// Build filter pipelines, health checks, and registries.
+#[expect(
+    clippy::too_many_lines,
+    reason = "connector + pipeline + health wiring is sequential"
+)]
 fn build_server_state(config: &Config, registry: &FilterRegistry, health_registry: &HealthRegistry) -> ServerState {
     info!("building filter pipelines");
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
@@ -124,8 +133,19 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
         .runtime
         .subrequest_pool_size
         .unwrap_or(praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE);
-    let subrequest_connector =
-        praxis_core::subrequest::SubRequestConnector::new(pool_size, config.runtime.subrequest_max_connections);
+    let subrequest_connector = praxis_core::subrequest::SubRequestConnector::with_options(
+        praxis_core::subrequest::SubRequestConnectorOptions {
+            keepalive_pool_size: pool_size,
+            max_connections: config.runtime.subrequest_max_connections,
+            circuit_breaker: config.runtime.subrequest_circuit_breaker.as_ref().map(|cb| {
+                praxis_core::circuit::CircuitBreakerConfig {
+                    threshold: cb.consecutive_failures,
+                    recovery_window: Duration::from_secs(cb.recovery_window_secs),
+                    half_open_timeout: Duration::from_secs(cb.half_open_timeout_secs),
+                }
+            }),
+        },
+    );
     let subrequest_response_ceiling = config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
     let subrequest_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
         subrequest_connector,
@@ -137,6 +157,21 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
     spawn_health_check_tasks(config, Arc::clone(health_registry), &health_shutdown);
+
+    if config.runtime.subrequest_circuit_breaker.is_some() {
+        let client = subrequest_client.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300)); // 5 min
+            interval.tick().await; // skip immediate first tick
+            loop {
+                interval.tick().await;
+                let evicted = client.evict_idle_circuits(Duration::from_secs(600)); // 10 min idle
+                if evicted > 0 {
+                    debug!(evicted, "circuit breaker: evicted idle entries");
+                }
+            }
+        });
+    }
 
     ServerState {
         pipelines: Arc::new(pipelines),

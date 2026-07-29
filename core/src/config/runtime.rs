@@ -14,6 +14,69 @@ use std::collections::HashMap;
 use serde::Deserialize;
 
 // -----------------------------------------------------------------------------
+// SubRequestCircuitBreakerConfig
+// -----------------------------------------------------------------------------
+
+/// Circuit breaker settings for the shared sub-request connector.
+///
+/// When configured under `runtime.subrequest_circuit_breaker`, the
+/// shared connector tracks consecutive failures per upstream peer
+/// and rejects sub-requests while a peer's circuit is open.
+///
+/// ```
+/// use praxis_core::config::runtime::SubRequestCircuitBreakerConfig;
+///
+/// let yaml = r#"
+/// consecutive_failures: 5
+/// recovery_window_secs: 30
+/// "#;
+/// let cfg: SubRequestCircuitBreakerConfig = serde_yaml::from_str(yaml).unwrap();
+/// assert_eq!(cfg.consecutive_failures, 5);
+/// assert_eq!(cfg.recovery_window_secs, 30);
+/// assert_eq!(cfg.half_open_timeout_secs, 30);
+/// ```
+#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SubRequestCircuitBreakerConfig {
+    /// Consecutive failure threshold before the circuit opens.
+    pub consecutive_failures: u32,
+
+    /// Seconds the circuit stays open before allowing a probe.
+    pub recovery_window_secs: u64,
+
+    /// Seconds a half-open probe may remain in-flight before
+    /// the circuit resets to open. Defaults to 30.
+    #[serde(default = "default_half_open_timeout_secs")]
+    pub half_open_timeout_secs: u64,
+}
+
+/// Default half-open timeout (30 seconds).
+const fn default_half_open_timeout_secs() -> u64 {
+    30
+}
+
+impl SubRequestCircuitBreakerConfig {
+    /// Validate the configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `consecutive_failures`,
+    /// `recovery_window_secs`, or `half_open_timeout_secs` is zero.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.consecutive_failures == 0 {
+            return Err("subrequest_circuit_breaker: consecutive_failures must be > 0".to_owned());
+        }
+        if self.recovery_window_secs == 0 {
+            return Err("subrequest_circuit_breaker: recovery_window_secs must be > 0".to_owned());
+        }
+        if self.half_open_timeout_secs == 0 {
+            return Err("subrequest_circuit_breaker: half_open_timeout_secs must be > 0".to_owned());
+        }
+        Ok(())
+    }
+}
+
+// -----------------------------------------------------------------------------
 // RuntimeConfig
 // -----------------------------------------------------------------------------
 
@@ -114,6 +177,30 @@ pub struct RuntimeConfig {
     #[serde(default)]
     pub max_memory_bytes: Option<usize>,
 
+    /// Per-peer circuit breaker for the shared sub-request connector.
+    ///
+    /// When configured, the connector tracks consecutive failures
+    /// per upstream `SocketAddr` and rejects sub-requests while
+    /// a peer's circuit is open. See
+    /// [`SubRequestCircuitBreakerConfig`] for field descriptions.
+    ///
+    /// ```
+    /// use praxis_core::config::RuntimeConfig;
+    ///
+    /// let yaml = r#"
+    /// subrequest_circuit_breaker:
+    ///   consecutive_failures: 5
+    ///   recovery_window_secs: 30
+    /// "#;
+    /// let cfg: RuntimeConfig = serde_yaml::from_str(yaml).unwrap();
+    /// assert!(cfg.subrequest_circuit_breaker.is_some());
+    ///
+    /// let cfg = RuntimeConfig::default();
+    /// assert!(cfg.subrequest_circuit_breaker.is_none());
+    /// ```
+    #[serde(default)]
+    pub subrequest_circuit_breaker: Option<SubRequestCircuitBreakerConfig>,
+
     /// Maximum concurrently active sub-request exchanges across
     /// all `iterative_request_router` instances.
     ///
@@ -205,6 +292,7 @@ impl Default for RuntimeConfig {
         Self {
             max_connections: None,
             max_memory_bytes: None,
+            subrequest_circuit_breaker: None,
             subrequest_max_connections: None,
             subrequest_pool_size: default_subrequest_pool_size(),
             threads: 0,
@@ -376,5 +464,94 @@ log_overrides:
             Some("/etc/ssl/ca.pem"),
             "explicit upstream_ca_file should be preserved"
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // SubRequestCircuitBreakerConfig
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn subrequest_circuit_breaker_defaults_to_none() {
+        let cfg = RuntimeConfig::default();
+        assert!(cfg.subrequest_circuit_breaker.is_none(), "should default to None");
+    }
+
+    #[test]
+    fn deserialise_subrequest_circuit_breaker() {
+        let yaml = r#"
+subrequest_circuit_breaker:
+  consecutive_failures: 5
+  recovery_window_secs: 30
+"#;
+        let cfg: RuntimeConfig = serde_yaml::from_str(yaml).unwrap();
+        let cb = cfg.subrequest_circuit_breaker.unwrap();
+        assert_eq!(cb.consecutive_failures, 5, "threshold should be 5");
+        assert_eq!(cb.recovery_window_secs, 30, "recovery should be 30s");
+        assert_eq!(cb.half_open_timeout_secs, 30, "half_open should default to 30s");
+    }
+
+    #[test]
+    fn deserialise_subrequest_circuit_breaker_explicit_half_open() {
+        let yaml = r#"
+subrequest_circuit_breaker:
+  consecutive_failures: 3
+  recovery_window_secs: 60
+  half_open_timeout_secs: 15
+"#;
+        let cfg: RuntimeConfig = serde_yaml::from_str(yaml).unwrap();
+        let cb = cfg.subrequest_circuit_breaker.unwrap();
+        assert_eq!(cb.half_open_timeout_secs, 15, "explicit half_open should be 15s");
+    }
+
+    #[test]
+    fn subrequest_circuit_breaker_validate_zero_failures() {
+        let cb = SubRequestCircuitBreakerConfig {
+            consecutive_failures: 0,
+            recovery_window_secs: 30,
+            half_open_timeout_secs: 30,
+        };
+        let err = cb.validate().unwrap_err();
+        assert!(
+            err.contains("consecutive_failures must be > 0"),
+            "should reject zero failures: {err}"
+        );
+    }
+
+    #[test]
+    fn subrequest_circuit_breaker_validate_zero_recovery() {
+        let cb = SubRequestCircuitBreakerConfig {
+            consecutive_failures: 5,
+            recovery_window_secs: 0,
+            half_open_timeout_secs: 30,
+        };
+        let err = cb.validate().unwrap_err();
+        assert!(
+            err.contains("recovery_window_secs must be > 0"),
+            "should reject zero recovery: {err}"
+        );
+    }
+
+    #[test]
+    fn subrequest_circuit_breaker_validate_zero_half_open() {
+        let cb = SubRequestCircuitBreakerConfig {
+            consecutive_failures: 5,
+            recovery_window_secs: 30,
+            half_open_timeout_secs: 0,
+        };
+        let err = cb.validate().unwrap_err();
+        assert!(
+            err.contains("half_open_timeout_secs must be > 0"),
+            "should reject zero half_open: {err}"
+        );
+    }
+
+    #[test]
+    fn subrequest_circuit_breaker_validate_valid() {
+        let cb = SubRequestCircuitBreakerConfig {
+            consecutive_failures: 5,
+            recovery_window_secs: 30,
+            half_open_timeout_secs: 30,
+        };
+        assert!(cb.validate().is_ok(), "valid config should pass");
     }
 }

@@ -140,9 +140,10 @@ pub(crate) struct StepTransition {
     pub(crate) status: Option<Vec<u16>>,
 
     /// Transport error kind to match: `admission_timeout`,
-    /// `connect`, `io`, `deadline_exceeded`, or
-    /// `response_too_large`. Only meaningful when
-    /// `origin: transport`.
+    /// `circuit_open`, `connect`, `io`, `deadline_exceeded`,
+    /// or `response_too_large`. `circuit_open` requires
+    /// `runtime.subrequest_circuit_breaker` to be configured.
+    /// Only meaningful when `origin: transport`.
     #[serde(default)]
     pub(crate) transport_error: Option<TransportErrorKind>,
 
@@ -173,6 +174,9 @@ pub(crate) enum ResponseOrigin {
 pub(crate) enum TransportErrorKind {
     /// All concurrency slots were busy and the admission wait timed out.
     AdmissionTimeout,
+    /// The circuit breaker for the target peer is open. Requires
+    /// `runtime.subrequest_circuit_breaker` to be configured.
+    CircuitOpen,
     /// TCP or TLS connection establishment failed.
     Connect,
     /// Post-connect I/O error during request/response exchange.

@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.0"
+version = "0.5.1"
 edition = "2024"
 rust-version = "1.96"
 authors = ["Shane Utt <shaneutt@linux.com>"]
@@ -34,6 +34,7 @@ repository = "https://github.com/praxis-proxy/praxis"
 [workspace.dependencies]
 arc-swap = "1.9.2"
 async-trait = "0.1.91"
+base64 = "0.22.1"
 benchmarks = { path = "benchmarks" }
 bytes = "1.12.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
@@ -43,7 +44,7 @@ criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.2.1"
 futures = "0.3.33"
 h2 = "0.4.15"
-http = "1.4.2"
+http = "1.5.0"
 metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "user"] }
@@ -57,14 +58,16 @@ rand = "0.10.2"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
 quote = "1.0.47"
 praxis = { path = "server", package = "praxis-proxy" }
-praxis-core = { version = "0.5.0", path = "core", package = "praxis-proxy-core" }
-praxis-filter = { version = "0.5.0", path = "filter", package = "praxis-proxy-filter" }
-praxis-protocol = { version = "0.5.0", path = "protocol", package = "praxis-proxy-protocol" }
-praxis-tls = { version = "0.5.0", path = "tls", package = "praxis-proxy-tls" }
+praxis-core = { version = "0.5.1", path = "core", package = "praxis-proxy-core" }
+praxis-filter = { version = "0.5.1", path = "filter", package = "praxis-proxy-filter" }
+praxis-protocol = { version = "0.5.1", path = "protocol", package = "praxis-proxy-protocol" }
+praxis-tls = { version = "0.5.1", path = "tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
 smallvec = "1.15.2"
 serde_json = "1.0.151"
+sha2 = "0.10.9"
+subtle = "2.6.1"
 rcgen = "0.14.8"
 regex = "1.13.1"
 rustls = "0.23.42"

@@ -730,6 +730,7 @@ fn classify_transport_failure(error: &praxis_core::subrequest::SubRequestError) 
     use praxis_core::subrequest::SubRequestError;
     match error {
         SubRequestError::AdmissionTimeout { .. } => (503, config::TransportErrorKind::AdmissionTimeout),
+        SubRequestError::CircuitOpen { .. } => (503, config::TransportErrorKind::CircuitOpen),
         SubRequestError::Connect(_) => (502, config::TransportErrorKind::Connect),
         SubRequestError::DeadlineExceeded => (504, config::TransportErrorKind::DeadlineExceeded),
         SubRequestError::ResponseTooLarge { .. } => (502, config::TransportErrorKind::ResponseTooLarge),

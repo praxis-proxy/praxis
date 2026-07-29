@@ -4,7 +4,6 @@
 //! Per-cluster circuit breaker filter.
 
 mod config;
-mod state;
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
@@ -21,17 +20,32 @@ mod tests;
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use praxis_core::circuit::{
+    CircuitBreaker, CircuitBreakerConfig as CoreCircuitBreakerConfig, CircuitCheck, CircuitToken,
+};
 use tracing::{debug, info, warn};
 
-use self::{
-    config::CircuitBreakerConfig,
-    state::{CircuitBreaker, CircuitState},
-};
+use self::config::CircuitBreakerConfig;
 use crate::{
     FilterError,
     actions::{FilterAction, Rejection},
     filter::{HttpFilter, HttpFilterContext},
 };
+
+// -----------------------------------------------------------------------------
+// ActiveCircuitToken
+// -----------------------------------------------------------------------------
+
+/// Token stored in filter state during the request–response lifecycle.
+///
+/// Binds the cluster name to its circuit breaker generation token
+/// so that the response hook can record the correct outcome.
+struct ActiveCircuitToken {
+    /// Cluster whose breaker issued the token.
+    cluster: Arc<str>,
+    /// Generation-bearing token from [`CircuitBreaker::try_acquire`].
+    token: CircuitToken,
+}
 
 // -----------------------------------------------------------------------------
 // CircuitBreakerFilter
@@ -110,11 +124,11 @@ impl CircuitBreakerFilter {
             }
             breakers.insert(
                 Arc::clone(&cluster.name),
-                CircuitBreaker::new(
-                    cluster.consecutive_failures,
-                    cluster.recovery_window_secs,
-                    cluster.half_open_timeout_secs,
-                ),
+                CircuitBreaker::new(CoreCircuitBreakerConfig {
+                    threshold: cluster.consecutive_failures,
+                    recovery_window: std::time::Duration::from_secs(cluster.recovery_window_secs),
+                    half_open_timeout: std::time::Duration::from_secs(cluster.half_open_timeout_secs),
+                }),
             );
         }
 
@@ -137,30 +151,30 @@ impl HttpFilter for CircuitBreakerFilter {
             return Ok(FilterAction::Continue);
         };
 
-        match breaker.check() {
-            CircuitState::Closed => {
-                debug!(cluster = %cluster_name, "circuit closed, allowing request");
+        match breaker.try_acquire() {
+            CircuitCheck::Allowed(token) => {
+                debug!(cluster = %cluster_name, "circuit closed/half-open, allowing request");
+                ctx.insert_filter_state(ActiveCircuitToken {
+                    cluster: Arc::from(cluster_name),
+                    token,
+                });
                 Ok(FilterAction::Continue)
             },
-            CircuitState::Open => {
+            CircuitCheck::Rejected => {
                 info!(cluster = %cluster_name, "circuit open, rejecting request");
                 Ok(FilterAction::Reject(
                     Rejection::status(503).with_header("X-Circuit-State", "open"),
                 ))
             },
-            CircuitState::HalfOpen => {
-                info!(cluster = %cluster_name, "circuit half-open, allowing probe");
-                Ok(FilterAction::Continue)
-            },
         }
     }
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let Some(cluster_name) = ctx.cluster.as_deref() else {
+        let Some(active) = ctx.remove_filter_state::<ActiveCircuitToken>() else {
             return Ok(FilterAction::Continue);
         };
 
-        let Some(breaker) = self.breakers.get(cluster_name) else {
+        let Some(breaker) = self.breakers.get(&active.cluster) else {
             return Ok(FilterAction::Continue);
         };
 
@@ -170,11 +184,11 @@ impl HttpFilter for CircuitBreakerFilter {
             .is_some_and(|r| !r.status.is_server_error());
 
         if is_success {
-            debug!(cluster = %cluster_name, "recording upstream success");
-            breaker.record_success();
+            debug!(cluster = %active.cluster, "recording upstream success");
+            breaker.record_success(active.token);
         } else {
-            warn!(cluster = %cluster_name, "recording upstream failure");
-            breaker.record_failure();
+            warn!(cluster = %active.cluster, "recording upstream failure");
+            breaker.record_failure(active.token);
         }
 
         Ok(FilterAction::Continue)

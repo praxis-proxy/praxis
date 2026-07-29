@@ -24,6 +24,7 @@ Built-in filters organized by protocol and category.
 
 | Filter | Feature | Description |
 |--------|---------|-------------|
+| [`basic_auth`](http/security/basic_auth.md) | - | HTTP Basic Authentication filter (RFC 7617). |
 | [`cors`](http/security/cors.md) | - | Spec-compliant CORS filter implementing origin validation, preflight handling, and response header injection. |
 | [`credential_injection`](http/security/credential_injection.md) | - | Injects per-cluster API credentials into upstream requests. |
 | [`csrf`](http/security/csrf.md) | - | CSRF protection filter that validates request origins against a trusted allowlist. |

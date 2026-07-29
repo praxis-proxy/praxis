@@ -5,6 +5,8 @@
 //! forwarded-header injection, guardrails, mTLS ingress trust enforcement,
 //! and the (feature-gated) CPEX policy filter.
 
+#[cfg(feature = "basic-auth-filter")]
+mod basic_auth;
 mod cors;
 mod credential_injection;
 mod csrf;
@@ -17,6 +19,8 @@ mod peer_identity_trust;
 #[cfg(feature = "cpex-policy-engine")]
 mod policy;
 
+#[cfg(feature = "basic-auth-filter")]
+pub use basic_auth::BasicAuthFilter;
 pub use cors::{CorsFilter, DisallowedOriginMode};
 pub use credential_injection::CredentialInjectionFilter;
 pub use csrf::CsrfFilter;

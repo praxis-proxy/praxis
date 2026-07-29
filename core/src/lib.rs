@@ -5,6 +5,8 @@
 
 //! Core configuration, error types, and server factory for Praxis.
 
+/// Circuit breaker state machine for sub-request fault isolation.
+pub mod circuit;
 /// YAML configuration parsing and validation.
 pub mod config;
 /// Upstream connection options and endpoint types.

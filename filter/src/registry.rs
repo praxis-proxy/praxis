@@ -252,6 +252,8 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     };
 
     register_http(filters, "access_log", AccessLogFilter::from_config);
+    #[cfg(feature = "basic-auth-filter")]
+    register_http_security(filters, "basic_auth", crate::BasicAuthFilter::from_config);
     register_http(filters, "circuit_breaker", CircuitBreakerFilter::from_config);
     register_http(filters, "compression", CompressionFilter::from_config);
     register_http_security(filters, "cors", CorsFilter::from_config);
@@ -393,6 +395,8 @@ mod tests {
         names.sort();
 
         assert!(names.contains(&"access_log"), "access_log should be registered");
+        #[cfg(feature = "basic-auth-filter")]
+        assert!(names.contains(&"basic_auth"), "basic_auth should be registered");
         assert!(
             names.contains(&"circuit_breaker"),
             "circuit_breaker should be registered"
@@ -513,7 +517,8 @@ mod tests {
     #[test]
     fn builtin_security_filters_classified() {
         let registry = FilterRegistry::with_builtins();
-        let expected_security = [
+        #[allow(unused_mut, reason = "mutated only with basic-auth-filter")]
+        let mut expected_security = vec![
             "cors",
             "credential_injection",
             "csrf",
@@ -523,6 +528,8 @@ mod tests {
             "peer_identity_trust",
             "rate_limit",
         ];
+        #[cfg(feature = "basic-auth-filter")]
+        expected_security.push("basic_auth");
 
         for name in &expected_security {
             assert!(
@@ -568,6 +575,8 @@ mod tests {
         let mut sec = registry.security_filters();
         sec.sort();
 
+        #[cfg(feature = "basic-auth-filter")]
+        assert!(sec.contains(&"basic_auth"), "basic_auth should be in security_filters");
         assert!(sec.contains(&"cors"), "cors should be in security_filters");
         assert!(
             sec.contains(&"credential_injection"),

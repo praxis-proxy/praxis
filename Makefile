@@ -103,6 +103,9 @@ build:
 	cargo build --workspace
 	cargo build --workspace --benches
 
+build-dev:
+	cargo build --workspace --features dev
+
 release:
 	cargo build --workspace --release
 

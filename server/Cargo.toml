@@ -45,4 +45,9 @@ tracing-subscriber = { workspace = true }
 
 [features]
 default = []
+dev = ["basic-auth-filter"]
+basic-auth-filter = ["praxis-filter/basic-auth-filter", "experimental"]
 cpex-policy-engine = ["praxis-filter/cpex-policy-engine"]
+# Marker feature activated transitively by any experimental feature.
+# Used to gate the startup warning in startup_checks::warn_experimental_features.
+experimental = []
