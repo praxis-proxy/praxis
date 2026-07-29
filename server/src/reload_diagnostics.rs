@@ -19,6 +19,7 @@ pub(crate) fn log_restart_required_changes(old: &Config, new: &Config) {
     detect_compression_additions(old, new);
     detect_tls_toggles(old, new);
     detect_subrequest_max_connections_change(old, new);
+    detect_subrequest_circuit_breaker_change(old, new);
 }
 
 /// Detect listener additions, removals, and address rebinds.
@@ -137,6 +138,35 @@ fn detect_subrequest_max_connections_change(old: &Config, new: &Config) {
             new = ?new.runtime.subrequest_max_connections,
             "runtime.subrequest_max_connections changed; requires restart \
              (connector is shared and created at startup)"
+        );
+    }
+}
+
+/// Detect `subrequest_circuit_breaker` changes that require a restart.
+fn detect_subrequest_circuit_breaker_change(old: &Config, new: &Config) {
+    let old_cb = &old.runtime.subrequest_circuit_breaker;
+    let new_cb = &new.runtime.subrequest_circuit_breaker;
+    let changed = match (old_cb, new_cb) {
+        (None, None) => false,
+        (None, Some(_)) | (Some(_), None) => true,
+        (Some(a), Some(b)) => {
+            a.consecutive_failures != b.consecutive_failures
+                || a.recovery_window_secs != b.recovery_window_secs
+                || a.half_open_timeout_secs != b.half_open_timeout_secs
+        },
+    };
+    if changed {
+        warn!(
+            old = ?old_cb.as_ref().map(|c| format!(
+                "failures={}, recovery={}s, half_open={}s",
+                c.consecutive_failures, c.recovery_window_secs, c.half_open_timeout_secs
+            )),
+            new = ?new_cb.as_ref().map(|c| format!(
+                "failures={}, recovery={}s, half_open={}s",
+                c.consecutive_failures, c.recovery_window_secs, c.half_open_timeout_secs
+            )),
+            "runtime.subrequest_circuit_breaker changed; requires restart \
+             (circuit breaker registry is bound to the connector)"
         );
     }
 }
@@ -426,5 +456,67 @@ mod tests {
         let config = config_with_subrequest_max(None);
         let warnings = capture_warnings(|| detect_subrequest_max_connections_change(&config, &config));
         assert!(warnings.is_empty(), "both-default should produce no warnings");
+    }
+
+    // -------------------------------------------------------------------------
+    // Circuit Breaker Reload Detection
+    // -------------------------------------------------------------------------
+
+    fn config_with_circuit_breaker(failures: Option<u32>) -> Config {
+        let cb = failures.map_or_else(String::new, |n| {
+            format!(
+                "runtime:\n  subrequest_circuit_breaker:\n    \
+                 consecutive_failures: {n}\n    recovery_window_secs: 30\n"
+            )
+        });
+        Config::from_yaml(&format!(
+            "listeners:\n  - name: web\n    address: \"127.0.0.1:8080\"\n    \
+             filter_chains: [main]\n{cb}filter_chains:\n  - name: main\n    \
+             filters:\n      - filter: static_response\n        status: 200\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn circuit_breaker_added_warns() {
+        let old = config_with_circuit_breaker(None);
+        let new = config_with_circuit_breaker(Some(5));
+        let warnings = capture_warnings(|| detect_subrequest_circuit_breaker_change(&old, &new));
+        assert_eq!(warnings.len(), 1, "adding breaker should produce one warning");
+        assert!(
+            warnings[0].contains("subrequest_circuit_breaker"),
+            "warning should mention circuit breaker: {:?}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn circuit_breaker_removed_warns() {
+        let old = config_with_circuit_breaker(Some(5));
+        let new = config_with_circuit_breaker(None);
+        let warnings = capture_warnings(|| detect_subrequest_circuit_breaker_change(&old, &new));
+        assert_eq!(warnings.len(), 1, "removing breaker should produce one warning");
+    }
+
+    #[test]
+    fn circuit_breaker_threshold_changed_warns() {
+        let old = config_with_circuit_breaker(Some(3));
+        let new = config_with_circuit_breaker(Some(5));
+        let warnings = capture_warnings(|| detect_subrequest_circuit_breaker_change(&old, &new));
+        assert_eq!(warnings.len(), 1, "changed threshold should produce one warning");
+    }
+
+    #[test]
+    fn circuit_breaker_unchanged_no_warning() {
+        let config = config_with_circuit_breaker(Some(5));
+        let warnings = capture_warnings(|| detect_subrequest_circuit_breaker_change(&config, &config));
+        assert!(warnings.is_empty(), "unchanged config should produce no warnings");
+    }
+
+    #[test]
+    fn circuit_breaker_both_none_no_warning() {
+        let config = config_with_circuit_breaker(None);
+        let warnings = capture_warnings(|| detect_subrequest_circuit_breaker_change(&config, &config));
+        assert!(warnings.is_empty(), "both-none should produce no warnings");
     }
 }
