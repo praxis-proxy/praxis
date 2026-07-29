@@ -229,10 +229,9 @@ response to the client).
   subrequests. The reserved `x-praxis-*` prefix ensures
   client-spoofed values are rejected at ingress (400).
   The IRR injects the header into sub-requests via
-  `FrameworkHeaders::insert_reserved`, which permits
-  reserved prefixes while still blocking transport headers.
-  The max depth of 3 remains a defense for trusted/in-process
-  reuse.
+  `FrameworkHeaders::set_depth`, the only API that can
+  inject the reserved depth header. The max depth of 3
+  remains a defense for trusted/in-process reuse.
 - **Max iterations**: configurable cap (default 10,
   max 100) prevents infinite loops
 - **Deadline**: overall timeout (default 30s) across

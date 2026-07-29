@@ -724,6 +724,61 @@ fn build_terminal_preserves_headers() {
 }
 
 // ---------------------------------------------------------------------------
+// classify_transport_failure
+// ---------------------------------------------------------------------------
+
+#[test]
+fn classify_admission_timeout_returns_503() {
+    let error = praxis_core::subrequest::SubRequestError::AdmissionTimeout { max_connections: 64 };
+    let (status, kind) = super::classify_transport_failure(&error);
+    assert_eq!(status, 503, "AdmissionTimeout should return 503");
+    assert_eq!(kind, config::TransportErrorKind::AdmissionTimeout);
+}
+
+#[test]
+fn classify_connect_returns_502() {
+    let error = praxis_core::subrequest::SubRequestError::Connect("refused".to_owned());
+    let (status, kind) = super::classify_transport_failure(&error);
+    assert_eq!(status, 502, "Connect should return 502");
+    assert_eq!(kind, config::TransportErrorKind::Connect);
+}
+
+#[test]
+fn classify_deadline_exceeded_returns_504() {
+    let error = praxis_core::subrequest::SubRequestError::DeadlineExceeded;
+    let (status, kind) = super::classify_transport_failure(&error);
+    assert_eq!(status, 504, "DeadlineExceeded should return 504");
+    assert_eq!(kind, config::TransportErrorKind::DeadlineExceeded);
+}
+
+#[test]
+fn classify_response_too_large_returns_502() {
+    let error = praxis_core::subrequest::SubRequestError::ResponseTooLarge {
+        actual: 200,
+        limit: 100,
+    };
+    let (status, kind) = super::classify_transport_failure(&error);
+    assert_eq!(status, 502, "ResponseTooLarge should return 502");
+    assert_eq!(kind, config::TransportErrorKind::ResponseTooLarge);
+}
+
+#[test]
+fn classify_io_returns_502() {
+    let error = praxis_core::subrequest::SubRequestError::Io("broken pipe".to_owned());
+    let (status, kind) = super::classify_transport_failure(&error);
+    assert_eq!(status, 502, "Io should return 502");
+    assert_eq!(kind, config::TransportErrorKind::Io);
+}
+
+#[test]
+fn classify_invalid_request_falls_through_to_io() {
+    let error = praxis_core::subrequest::SubRequestError::InvalidRequest("bad uri".to_owned());
+    let (status, kind) = super::classify_transport_failure(&error);
+    assert_eq!(status, 502, "InvalidRequest wildcard should return 502");
+    assert_eq!(kind, config::TransportErrorKind::Io);
+}
+
+// ---------------------------------------------------------------------------
 // Test Utilities
 // ---------------------------------------------------------------------------
 
