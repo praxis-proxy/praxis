@@ -107,6 +107,50 @@ struct CircuitInner {
     generation: u64,
 }
 
+impl CircuitInner {
+    /// Issue a token at the current generation.
+    fn issue_token(&self) -> CircuitCheck {
+        CircuitCheck::Allowed(CircuitToken {
+            generation: self.generation,
+        })
+    }
+
+    /// Bump the generation and transition to `HalfOpen`, issuing a
+    /// probe token.
+    fn transition_to_half_open(&mut self) -> CircuitCheck {
+        self.generation = self.generation.wrapping_add(1);
+        self.state = CircuitState::HalfOpen;
+        self.half_opened_at = Some(Instant::now());
+        self.issue_token()
+    }
+
+    /// If the recovery window has elapsed, transition from `Open` to
+    /// `HalfOpen` and issue a probe token. Otherwise reject.
+    fn try_open_to_half_open(&mut self, config: &CircuitBreakerConfig) -> CircuitCheck {
+        if self.opened_at.is_some_and(|t| t.elapsed() >= config.recovery_window) {
+            self.transition_to_half_open()
+        } else {
+            CircuitCheck::Rejected
+        }
+    }
+
+    /// If the half-open probe has timed out, reset to `Open` and
+    /// re-attempt recovery. Otherwise reject (probe still in flight).
+    fn try_reset_stale_probe(&mut self, config: &CircuitBreakerConfig) -> CircuitCheck {
+        if self
+            .half_opened_at
+            .is_some_and(|t| t.elapsed() >= config.half_open_timeout)
+        {
+            self.state = CircuitState::Open;
+            self.opened_at = Some(Instant::now());
+            self.half_opened_at = None;
+            self.try_open_to_half_open(config)
+        } else {
+            CircuitCheck::Rejected
+        }
+    }
+}
+
 impl CircuitBreaker {
     /// Create a new circuit breaker starting in Closed.
     pub fn new(config: CircuitBreakerConfig) -> Self {
@@ -158,53 +202,12 @@ impl CircuitBreaker {
     ///
     /// Panics if the internal mutex is poisoned.
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
-    #[expect(clippy::too_many_lines, reason = "three-state match with nested transitions")]
     pub fn try_acquire(&self) -> CircuitCheck {
         let mut inner = self.inner.lock().expect("circuit breaker lock poisoned");
         match inner.state {
-            CircuitState::Closed => CircuitCheck::Allowed(CircuitToken {
-                generation: inner.generation,
-            }),
-            CircuitState::Open => {
-                if inner
-                    .opened_at
-                    .is_some_and(|t| t.elapsed() >= self.config.recovery_window)
-                {
-                    inner.generation = inner.generation.wrapping_add(1);
-                    inner.state = CircuitState::HalfOpen;
-                    inner.half_opened_at = Some(Instant::now());
-                    CircuitCheck::Allowed(CircuitToken {
-                        generation: inner.generation,
-                    })
-                } else {
-                    CircuitCheck::Rejected
-                }
-            },
-            CircuitState::HalfOpen => {
-                if inner
-                    .half_opened_at
-                    .is_some_and(|t| t.elapsed() >= self.config.half_open_timeout)
-                {
-                    inner.state = CircuitState::Open;
-                    inner.opened_at = Some(Instant::now());
-                    inner.half_opened_at = None;
-                    if inner
-                        .opened_at
-                        .is_some_and(|t| t.elapsed() >= self.config.recovery_window)
-                    {
-                        inner.generation = inner.generation.wrapping_add(1);
-                        inner.state = CircuitState::HalfOpen;
-                        inner.half_opened_at = Some(Instant::now());
-                        CircuitCheck::Allowed(CircuitToken {
-                            generation: inner.generation,
-                        })
-                    } else {
-                        CircuitCheck::Rejected
-                    }
-                } else {
-                    CircuitCheck::Rejected
-                }
-            },
+            CircuitState::Closed => inner.issue_token(),
+            CircuitState::Open => inner.try_open_to_half_open(&self.config),
+            CircuitState::HalfOpen => inner.try_reset_stale_probe(&self.config),
         }
     }
 
