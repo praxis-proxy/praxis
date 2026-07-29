@@ -95,6 +95,14 @@ pub enum PendingHeaderResult {
 /// Created by the protocol layer for each incoming request. Filters read
 /// and mutate it to select clusters, choose upstreams, and inject headers.
 pub struct HttpFilterContext<'a> {
+    /// Complete request body captured by protocol pre-read, when the
+    /// pipeline's effective request mode is [`BodyMode::StreamBuffer`].
+    ///
+    /// This remains available during `on_request` even when a filter's body
+    /// hook was skipped because body-derived header mutations changed its
+    /// request conditions between the pre-read and header phases.
+    pub buffered_request_body: Option<bytes::Bytes>,
+
     /// Per-filter body-done tracking. When `true` at index `i`,
     /// filter `i` is skipped for remaining body chunks.
     pub body_done_indices: Vec<bool>,
@@ -224,6 +232,9 @@ pub struct HttpFilterContext<'a> {
     /// Named key-value stores for runtime mappings.
     pub kv_stores: Option<&'a KvStoreRegistry>,
 
+    /// Shared HTTP connector for iterative sub-requests.
+    pub subrequest_connector: Option<&'a praxis_core::subrequest::SubRequestConnector>,
+
     /// Transport-agnostic request headers, URI, and method.
     pub request: &'a Request,
 
@@ -297,6 +308,11 @@ impl HttpFilterContext<'_> {
     /// Upstream peer address, if selected.
     pub fn upstream_addr(&self) -> Option<&str> {
         self.upstream.as_ref().map(|u| &*u.address)
+    }
+
+    /// Shared sub-request connector, if set.
+    pub(crate) fn subrequest_connector(&self) -> Option<&praxis_core::subrequest::SubRequestConnector> {
+        self.subrequest_connector
     }
 
     /// Read a durable metadata value by key.

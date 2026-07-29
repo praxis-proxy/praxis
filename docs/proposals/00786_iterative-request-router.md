@@ -149,3 +149,133 @@ within the existing life-cycle.
 - As an AI gateway operator, I want to add RAG context
   injection and semantic caching as proxy-level
   filters without modifying application code.
+
+## How?
+
+### Architecture
+
+The `iterative_request_router` is a framework-level
+HTTP filter that owns the sub-request lifecycle. It
+holds named **steps**, each backed by a pre-built
+`FilterPipeline`. At request time it runs an iteration
+loop: execute a step's full four-phase filter lifecycle
+(on_request, on_request_body, sub-request via
+Connector, on_response, on_response_body), evaluate
+transition rules against the response, and either
+continue to the next step or return the final response
+to the client.
+
+Step pipelines resolve their filters through the same
+`FilterRegistry` that owns the parent pipeline via a
+`RegisteredFilterFactory` enum, so external filters
+(agentic_loop, tool_parse, MCP) can load in step
+chains.
+
+```text
+Client -> [iterative_request_router]
+             |
+             +-> Step "primary" pipeline
+             |     router -> LB -> [sub-request via Connector]
+             |     <- 503
+             |     transition: status [503] -> "fallback"
+             |
+             +-> Step "fallback" pipeline
+                   router -> LB -> [sub-request via Connector]
+                   <- 200
+                   transition: default done
+                   <- return 200 to client
+```
+
+### Sub-request execution
+
+Sub-requests use Pingora's `Connector` (connection
+pooling, HTTP/2, TLS) via a shared
+`SubRequestConnector` wired through the pipeline at
+startup. This replaces the reqwest-based
+`CalloutClient` ([proposal 00358][p358], now
+deferred) with a single HTTP stack.
+
+Each sub-request builds an `HttpPeer` with full TLS
+support (CA certs, mTLS client certificates, verify
+toggle, SNI derivation, connection timeouts) using
+the same helpers as the production upstream path.
+
+[p358]: 00358_http-callout-filter.md
+
+### Transition evaluation
+
+After each sub-request, the filter evaluates
+`on_result` transitions in order (first match wins):
+
+- **Status match**: `status: [502, 503, 504]` matches
+  the response status code. Transport failures are exposed as
+  502 and deadline expiry as 504 so the same transitions cover
+  connection-level outages.
+- **Filter result match**: `filter: classifier`,
+  `key: action`, `value: loop` matches
+  `filter_results` written by filters in the step
+  chain
+- **Combined**: both status and filter result must
+  match
+- **Default**: always matches (fallback)
+
+Each transition specifies either `next: step-name`
+(continue iterating) or `done: true` (return the
+response to the client).
+
+### Safety rails
+
+- **Depth**: `x-praxis-iterative-depth` marks iterative
+  subrequests. Praxis ingress rejects reserved internal headers
+  from network peers, so cross-listener cycles terminate at the
+  first hop rather than trusting a spoofable depth value. The
+  max depth of 3 remains a defense for trusted/in-process reuse.
+- **Max iterations**: configurable cap (default 10,
+  max 100) prevents infinite loops
+- **Deadline**: overall timeout (default 30s) across
+  all iterations, with configurable `step_timeout_ms`
+  per-step cap
+- **Pool size**: configurable `subrequest_pool_size`
+  in runtime config (default 128)
+- **Max steps**: at most 20 named steps per filter
+- **Reserved headers**: all `x-praxis-*`,
+  `x-ext-protocol-*`, and `x-ext-agent-*` headers
+  are stripped from sub-requests
+- **Credential isolation**: each step runs a fresh
+  `HttpFilterContext` with empty headers; credentials
+  injected by one step do not leak to another
+- **Pipeline validation**: `iterative_request_router`
+  cannot coexist with `router` or `load_balancer` in
+  the same parent chain
+
+### Relationship to other primitives
+
+- **Branch chains**: operate within a single HTTP
+  exchange (request-phase composition). The IRR
+  operates across multiple HTTP exchanges
+  (response-driven re-dispatch). They are
+  complementary but should not be nested (ReEnter
+  branches wrapping an IRR are rejected).
+- **CalloutClient** (proposal 00358): superseded.
+  The Pingora-native `SubRequestConnector` provides
+  the same capability without a separate HTTP stack.
+- **Agentic loop** (ai repo issue #26): the IRR
+  provides the framework-level primitive that the
+  `agentic_loop` filter will use for pipeline
+  re-entry.
+
+### Implementation
+
+[PR #849](https://github.com/praxis-proxy/praxis/pull/849)
+
+### Key files
+
+- `core/src/subrequest.rs` - `SubRequestConnector`
+- `core/src/connectivity/peer.rs` - shared TLS/SNI
+  helpers
+- `filter/src/pipeline/subrequest.rs` - executor,
+  types, `IterationState`
+- `filter/src/builtins/http/traffic_management/
+  iterative_request_router/` - filter + config +
+  tests
+- `server/src/pipelines.rs` - connector wiring

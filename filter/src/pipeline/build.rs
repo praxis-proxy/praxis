@@ -103,6 +103,7 @@ impl FilterPipeline {
             kv_stores: None,
             pipeline_extensions: Vec::new(),
             record_filter_duration_metrics: false,
+            subrequest_connector: None,
             time_source: Arc::new(SystemTimeSource),
         }
     }
@@ -176,6 +177,7 @@ impl FilterPipeline {
             super::checks::check_duplicate_rewrite_filters(&names, entries, &mut errors);
         }
         super::checks::check_skip_to_bypasses_security(&self.filters, &mut errors);
+        super::checks::check_irr_with_router_or_lb(&names, &mut errors);
 
         errors
     }

@@ -14,5 +14,6 @@ pub use simple::{
 };
 pub use specialized::{
     BackendGuard, start_hop_by_hop_response_backend, start_reserved_header_response_backend, start_slow_backend,
+    start_stateful_backend,
 };
 pub use websocket::{WsBackendGuard, start_websocket_echo_backend};

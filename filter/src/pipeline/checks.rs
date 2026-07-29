@@ -289,6 +289,33 @@ pub(super) fn check_skip_to_bypasses_security(filters: &[PipelineFilter], errors
     }
 }
 
+/// `iterative_request_router` coexisting with `router` or `load_balancer`.
+///
+/// The IRR owns the full sub-request lifecycle including routing.
+/// A `router` or `load_balancer` in the same chain would conflict.
+pub(super) fn check_irr_with_router_or_lb(names: &[&str], errors: &mut Vec<String>) {
+    if !names.contains(&"iterative_request_router") {
+        return;
+    }
+    if names.contains(&"router") {
+        errors.push(
+            "iterative_request_router and router in the same \
+             chain: the IRR owns routing within its step chains; \
+             a top-level router will conflict"
+                .to_owned(),
+        );
+    }
+    if names.contains(&"load_balancer") {
+        errors.push(
+            "iterative_request_router and load_balancer in the \
+             same chain: the IRR owns endpoint selection within \
+             its step chains; a top-level load_balancer will \
+             conflict"
+                .to_owned(),
+        );
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Warning Checks
 // -----------------------------------------------------------------------------
@@ -924,6 +951,56 @@ mod tests {
         let mut errors = Vec::new();
         check_skip_to_bypasses_security(&filters, &mut errors);
         assert!(errors.is_empty(), "filters without branches should produce no error");
+    }
+
+    #[test]
+    fn irr_with_router_errors() {
+        let names = vec!["iterative_request_router", "router"];
+        let mut errors = Vec::new();
+        check_irr_with_router_or_lb(&names, &mut errors);
+        assert_eq!(errors.len(), 1, "IRR + router should produce one error");
+        assert!(
+            errors[0].contains("router"),
+            "error should mention router: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn irr_with_load_balancer_errors() {
+        let names = vec!["iterative_request_router", "load_balancer"];
+        let mut errors = Vec::new();
+        check_irr_with_router_or_lb(&names, &mut errors);
+        assert_eq!(errors.len(), 1, "IRR + LB should produce one error");
+        assert!(
+            errors[0].contains("load_balancer"),
+            "error should mention load_balancer: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn irr_with_both_router_and_lb_errors_twice() {
+        let names = vec!["iterative_request_router", "router", "load_balancer"];
+        let mut errors = Vec::new();
+        check_irr_with_router_or_lb(&names, &mut errors);
+        assert_eq!(errors.len(), 2, "IRR + router + LB should produce two errors");
+    }
+
+    #[test]
+    fn irr_alone_no_error() {
+        let names = vec!["iterative_request_router"];
+        let mut errors = Vec::new();
+        check_irr_with_router_or_lb(&names, &mut errors);
+        assert!(errors.is_empty(), "IRR alone should not error");
+    }
+
+    #[test]
+    fn no_irr_router_and_lb_no_error() {
+        let names = vec!["router", "load_balancer"];
+        let mut errors = Vec::new();
+        check_irr_with_router_or_lb(&names, &mut errors);
+        assert!(errors.is_empty(), "no IRR means no conflict");
     }
 
     // -------------------------------------------------------------------------
