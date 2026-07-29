@@ -16,7 +16,7 @@ use tokio::{
     net::TcpStream,
     sync::{Semaphore, watch},
 };
-use tracing::{debug, error, trace, warn};
+use tracing::{Instrument as _, Span, error, info, info_span, trace, warn};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -149,7 +149,7 @@ impl PingoraTcpProxy {
         match result {
             Some(Ok((c2s, s2c))) => (c2s, s2c),
             Some(Err(e)) => {
-                debug!(upstream = %upstream_addr, error = %e, "TCP session ended");
+                warn!(upstream = %upstream_addr, error = %e, phase = "forward", "connection_error");
                 (0, 0)
             },
             None => (0, 0),
@@ -213,7 +213,11 @@ impl PingoraTcpProxy {
             bytes_out: 0,
         };
 
-        resolve_connect_result(&pipeline, &mut ctx, remote_addr).await
+        let result = resolve_connect_result(&pipeline, &mut ctx, remote_addr).await;
+        if result.is_none() {
+            log_early_close(connect_time, "filter_rejection");
+        }
+        result
     }
 
     /// Run TCP disconnect filters for logging.
@@ -248,107 +252,145 @@ impl PingoraTcpProxy {
 
 #[async_trait]
 impl ServerApp for PingoraTcpProxy {
-    #[expect(clippy::too_many_lines, reason = "linear connection lifecycle")]
+    #[expect(
+        clippy::too_many_lines,
+        clippy::large_stack_frames,
+        reason = "linear connection lifecycle"
+    )]
     async fn process_new(self: &Arc<Self>, mut session: Stream, shutdown: &ShutdownWatch) -> Option<Stream> {
         let connect_time = std::time::Instant::now();
         let (remote_addr, local_addr) = extract_addrs(&session);
 
-        if praxis_core::memory::is_exceeded() {
-            warn!(remote = %remote_addr, "memory pressure threshold exceeded, closing TCP connection");
-            crate::http::pingora::metrics::record_overload_reject(
-                crate::http::pingora::metrics::OVERLOAD_REASON_MEMORY,
-            );
-            return None;
-        }
+        let span = info_span!(
+            "tcp_connection",
+            client.address = %remote_addr,
+            network.transport = "tcp",
+            upstream.address = tracing::field::Empty,
+        );
 
-        let (exceeded, _global_permit) = crate::connections::try_acquire_global();
-        if exceeded {
-            warn!(remote = %remote_addr, "global max connections reached, closing TCP connection");
-            crate::http::pingora::metrics::record_overload_reject(
-                crate::http::pingora::metrics::OVERLOAD_REASON_GLOBAL_CONNECTIONS,
-            );
-            return None;
-        }
-
-        let _permit = if let Some(sem) = &self.connection_semaphore {
-            if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
-                Some(permit)
-            } else {
-                warn!(remote = %remote_addr, "max TCP connections reached, closing connection");
+        async {
+            if praxis_core::memory::is_exceeded() {
+                warn!(remote = %remote_addr, "memory pressure threshold exceeded, closing TCP connection");
                 crate::http::pingora::metrics::record_overload_reject(
-                    crate::http::pingora::metrics::OVERLOAD_REASON_LISTENER_CONNECTIONS,
+                    crate::http::pingora::metrics::OVERLOAD_REASON_MEMORY,
                 );
                 return None;
             }
-        } else {
-            None
-        };
 
-        let _active_connection =
-            crate::http::pingora::metrics::ActiveConnectionGuard::acquire(self.listener_label_for(&local_addr));
-
-        let (sni_hostname, peeked_bytes) = if self.upstream_addr.is_none() {
-            let Ok(result) = tokio::time::timeout(SNI_PEEK_TIMEOUT, peek_sni(&mut session)).await else {
-                warn!(remote = %remote_addr, "SNI peek timed out, closing connection");
+            let (exceeded, _global_permit) = crate::connections::try_acquire_global();
+            if exceeded {
+                warn!(remote = %remote_addr, "global max connections reached, closing TCP connection");
+                crate::http::pingora::metrics::record_overload_reject(
+                    crate::http::pingora::metrics::OVERLOAD_REASON_GLOBAL_CONNECTIONS,
+                );
                 return None;
+            }
+
+            let _permit = if let Some(sem) = &self.connection_semaphore {
+                if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
+                    Some(permit)
+                } else {
+                    warn!(remote = %remote_addr, "max TCP connections reached, closing connection");
+                    crate::http::pingora::metrics::record_overload_reject(
+                        crate::http::pingora::metrics::OVERLOAD_REASON_LISTENER_CONNECTIONS,
+                    );
+                    return None;
+                }
+            } else {
+                None
             };
-            result
-        } else {
-            (None, Vec::new())
-        };
 
-        let upstream_addr = self
-            .run_connect_filters(&remote_addr, &local_addr, sni_hostname.as_deref(), connect_time)
-            .await?;
+            let _active_connection =
+                crate::http::pingora::metrics::ActiveConnectionGuard::acquire(self.listener_label_for(&local_addr));
 
-        let upstream_connect_start = std::time::Instant::now();
-        let cluster_label = self.metrics_cluster_label();
-        let mut upstream = if let Some(stream) = connect_upstream(&upstream_addr, self.allow_private_upstreams).await {
-            crate::http::pingora::metrics::record_upstream_connect_duration(
-                cluster_label,
-                upstream_connect_start.elapsed().as_secs_f64(),
-            );
-            stream
-        } else {
-            crate::http::pingora::metrics::record_upstream_connect_failure(cluster_label);
-            return None;
-        };
+            info!("connection_accepted");
 
-        if !peeked_bytes.is_empty()
-            && let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut upstream, &peeked_bytes).await
-        {
-            error!(upstream = %upstream_addr, error = %e, "failed to write peeked bytes to upstream");
+            let (sni_hostname, peeked_bytes) = if self.upstream_addr.is_none() {
+                let Ok(result) = tokio::time::timeout(SNI_PEEK_TIMEOUT, peek_sni(&mut session)).await else {
+                    warn!(remote = %remote_addr, "SNI peek timed out, closing connection");
+                    log_early_close(connect_time, "sni_timeout");
+                    return None;
+                };
+                result
+            } else {
+                (None, Vec::new())
+            };
+
+            let upstream_addr = self
+                .run_connect_filters(&remote_addr, &local_addr, sni_hostname.as_deref(), connect_time)
+                .await?;
+
+            Span::current().record("upstream.address", upstream_addr.as_str());
+
+            let upstream_connect_start = std::time::Instant::now();
+            let cluster_label = self.metrics_cluster_label();
+            let mut upstream =
+                if let Some(stream) = connect_upstream(&upstream_addr, self.allow_private_upstreams).await {
+                    crate::http::pingora::metrics::record_upstream_connect_duration(
+                        cluster_label,
+                        upstream_connect_start.elapsed().as_secs_f64(),
+                    );
+                    stream
+                } else {
+                    crate::http::pingora::metrics::record_upstream_connect_failure(cluster_label);
+                    log_early_close(connect_time, "connect_failure");
+                    return None;
+                };
+
+            if !peeked_bytes.is_empty()
+                && let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut upstream, &peeked_bytes).await
+            {
+                warn!(
+                    upstream = %upstream_addr,
+                    error = %e,
+                    phase = "peeked_write",
+                    "connection_error"
+                );
+                self.run_disconnect_filters(
+                    &remote_addr,
+                    &local_addr,
+                    &upstream_addr,
+                    sni_hostname.as_deref(),
+                    connect_time,
+                    0,
+                    0,
+                )
+                .await;
+                log_early_close(connect_time, "peeked_write_error");
+                return None;
+            }
+
+            let mut shutdown_rx: watch::Receiver<bool> = shutdown.clone();
+            let (bytes_in, bytes_out) = self
+                .forward(&mut session, &mut upstream, &mut shutdown_rx, &upstream_addr)
+                .await;
+
             self.run_disconnect_filters(
                 &remote_addr,
                 &local_addr,
                 &upstream_addr,
                 sni_hostname.as_deref(),
                 connect_time,
-                0,
-                0,
+                bytes_in,
+                bytes_out,
             )
             .await;
-            return None;
+
+            let duration = connect_time.elapsed();
+            #[expect(clippy::cast_possible_truncation, reason = "millis fit u64")]
+            let duration_ms = duration.as_millis() as u64;
+            info!(
+                bytes_in,
+                bytes_out,
+                duration_ms,
+                reason = "completed",
+                "connection_close"
+            );
+
+            None
         }
-
-        let mut shutdown_rx: watch::Receiver<bool> = shutdown.clone();
-        let (bytes_in, bytes_out) = self
-            .forward(&mut session, &mut upstream, &mut shutdown_rx, &upstream_addr)
-            .await;
-
-        self.run_disconnect_filters(
-            &remote_addr,
-            &local_addr,
-            &upstream_addr,
-            sni_hostname.as_deref(),
-            connect_time,
-            bytes_in,
-            bytes_out,
-        )
-        .await;
-
-        debug!(remote = %remote_addr, upstream = %upstream_addr, "closing TCP session (connections not pooled)");
-        None
+        .instrument(span)
+        .await
     }
 }
 
@@ -484,6 +526,20 @@ fn try_parse_sni(buf: &[u8], filled: usize) -> SniPeekResult {
 // Utilities
 // -----------------------------------------------------------------------------
 
+/// Log a `connection_close` event for early-exit paths that fire after
+/// `connection_accepted` but before the happy-path close.
+fn log_early_close(connect_time: std::time::Instant, reason: &str) {
+    #[expect(clippy::cast_possible_truncation, reason = "millis fit u64")]
+    let duration_ms = connect_time.elapsed().as_millis() as u64;
+    info!(
+        bytes_in = 0_u64,
+        bytes_out = 0_u64,
+        duration_ms,
+        reason,
+        "connection_close"
+    );
+}
+
 /// Extract remote and local address strings from a session.
 fn extract_addrs(session: &Stream) -> (String, String) {
     let digest = session.get_socket_digest();
@@ -549,10 +605,11 @@ async fn connect_upstream(upstream_addr: &str, allow_private: bool) -> Option<Tc
     {
         return result;
     }
-    error!(
+    warn!(
         upstream = %upstream_addr,
         timeout_secs = UPSTREAM_CONNECT_TIMEOUT.as_secs(),
-        "TCP upstream connect timed out"
+        phase = "connect_timeout",
+        "connection_error"
     );
     None
 }
@@ -580,7 +637,7 @@ async fn resolve_and_connect(upstream_addr: &str, allow_private: bool) -> Option
     match TcpStream::connect(addrs.as_slice()).await {
         Ok(s) => Some(s),
         Err(e) => {
-            error!(upstream = %upstream_addr, error = %e, "failed to connect to TCP upstream");
+            warn!(upstream = %upstream_addr, error = %e, phase = "connect", "connection_error");
             None
         },
     }
@@ -633,9 +690,14 @@ fn resolve_listener_label(
     clippy::indexing_slicing,
     clippy::too_many_lines,
     clippy::cast_possible_truncation,
+    clippy::significant_drop_tightening,
     reason = "tests"
 )]
 mod tests {
+    use std::sync::Mutex;
+
+    use tracing_subscriber::layer::SubscriberExt as _;
+
     use super::*;
 
     #[test]
@@ -909,6 +971,178 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // TCP Connection Lifecycle Span Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn tcp_connection_span_has_correct_name_and_fields() {
+        let (spans, _events) = capture_tracing(|| {
+            let span = info_span!(
+                "tcp_connection",
+                client.address = "192.168.1.10:54321",
+                network.transport = "tcp",
+                upstream.address = tracing::field::Empty,
+            );
+            let _guard = span.enter();
+        });
+        assert_eq!(spans.len(), 1, "should create exactly one span");
+        assert_eq!(spans[0].name, "tcp_connection", "span name should be tcp_connection");
+        assert_eq!(
+            spans[0].fields.get("client.address").map(String::as_str),
+            Some("192.168.1.10:54321"),
+            "span should contain client.address"
+        );
+        assert_eq!(
+            spans[0].fields.get("network.transport").map(String::as_str),
+            Some("tcp"),
+            "span should contain network.transport = tcp"
+        );
+    }
+
+    #[test]
+    fn tcp_connection_span_records_upstream_address() {
+        let (spans, _events) = capture_tracing(|| {
+            let span = info_span!(
+                "tcp_connection",
+                client.address = "10.0.0.5:12345",
+                network.transport = "tcp",
+                upstream.address = tracing::field::Empty,
+            );
+            let _guard = span.enter();
+            span.record("upstream.address", "10.0.0.1:5432");
+        });
+        assert_eq!(spans.len(), 1, "should create exactly one span");
+        assert_eq!(
+            spans[0].fields.get("upstream.address").map(String::as_str),
+            Some("10.0.0.1:5432"),
+            "upstream.address should be recorded after span creation"
+        );
+    }
+
+    #[test]
+    fn tcp_connection_emits_connection_accepted_event() {
+        let (_spans, events) = capture_tracing(|| {
+            let span = info_span!(
+                "tcp_connection",
+                client.address = "10.0.0.5:12345",
+                network.transport = "tcp",
+                upstream.address = tracing::field::Empty,
+            );
+            let _guard = span.enter();
+            info!("connection_accepted");
+        });
+        assert!(
+            events.iter().any(|e| e.message == "connection_accepted"),
+            "should emit connection_accepted event: {events:?}"
+        );
+    }
+
+    #[test]
+    fn tcp_connection_emits_connection_close_event_with_metrics() {
+        let (_spans, events) = capture_tracing(|| {
+            let span = info_span!(
+                "tcp_connection",
+                client.address = "10.0.0.5:12345",
+                network.transport = "tcp",
+                upstream.address = tracing::field::Empty,
+            );
+            let _guard = span.enter();
+            info!(
+                bytes_in = 1024_u64,
+                bytes_out = 2048_u64,
+                duration_ms = 500_u64,
+                "connection_close"
+            );
+        });
+        let close_event = events
+            .iter()
+            .find(|e| e.message == "connection_close")
+            .expect("should emit connection_close event");
+        assert_eq!(
+            close_event.fields.get("bytes_in").map(String::as_str),
+            Some("1024"),
+            "connection_close should include bytes_in"
+        );
+        assert_eq!(
+            close_event.fields.get("bytes_out").map(String::as_str),
+            Some("2048"),
+            "connection_close should include bytes_out"
+        );
+        assert_eq!(
+            close_event.fields.get("duration_ms").map(String::as_str),
+            Some("500"),
+            "connection_close should include duration_ms"
+        );
+    }
+
+    #[test]
+    fn tcp_connection_emits_connection_error_event() {
+        let (_spans, events) = capture_tracing(|| {
+            let span = info_span!(
+                "tcp_connection",
+                client.address = "10.0.0.5:12345",
+                network.transport = "tcp",
+                upstream.address = tracing::field::Empty,
+            );
+            let _guard = span.enter();
+            warn!(
+                upstream = "10.0.0.1:5432",
+                error = "connection refused",
+                "connection_error"
+            );
+        });
+        let error_event = events
+            .iter()
+            .find(|e| e.message == "connection_error")
+            .expect("should emit connection_error event");
+        assert_eq!(
+            error_event.fields.get("upstream").map(String::as_str),
+            Some("10.0.0.1:5432"),
+            "connection_error should include upstream"
+        );
+        assert_eq!(
+            error_event.fields.get("error").map(String::as_str),
+            Some("connection refused"),
+            "connection_error should include error"
+        );
+    }
+
+    #[test]
+    fn tcp_connection_span_events_are_within_span() {
+        let (spans, events) = capture_tracing(|| {
+            let span = info_span!(
+                "tcp_connection",
+                client.address = "10.0.0.5:12345",
+                network.transport = "tcp",
+                upstream.address = tracing::field::Empty,
+            );
+            let _guard = span.enter();
+            info!("connection_accepted");
+            span.record("upstream.address", "10.0.0.1:5432");
+            info!(
+                bytes_in = 100_u64,
+                bytes_out = 200_u64,
+                duration_ms = 50_u64,
+                "connection_close"
+            );
+        });
+        assert_eq!(spans.len(), 1, "should have exactly one span");
+        assert_eq!(
+            events.len(),
+            2,
+            "should have connection_accepted and connection_close events"
+        );
+        for event in &events {
+            assert_eq!(
+                event.span_name.as_deref(),
+                Some("tcp_connection"),
+                "event '{}' should be within tcp_connection span",
+                event.message
+            );
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
 
@@ -982,5 +1216,126 @@ mod tests {
         record.extend_from_slice(&handshake);
 
         record
+    }
+
+    // -------------------------------------------------------------------------
+    // Tracing Capture Utilities
+    // -------------------------------------------------------------------------
+
+    /// Captured span data.
+    #[derive(Debug)]
+    struct CapturedSpan {
+        name: String,
+        fields: HashMap<String, String>,
+    }
+
+    /// Captured event data.
+    #[derive(Debug)]
+    struct CapturedEvent {
+        fields: HashMap<String, String>,
+        message: String,
+        span_name: Option<String>,
+    }
+
+    /// Run `f` under a test subscriber and return captured spans and events.
+    fn capture_tracing<F: FnOnce()>(f: F) -> (Vec<CapturedSpan>, Vec<CapturedEvent>) {
+        let spans = Arc::new(Mutex::new(Vec::<CapturedSpan>::new()));
+        let events = Arc::new(Mutex::new(Vec::<CapturedEvent>::new()));
+        let layer = SpanCapture {
+            events: Arc::clone(&events),
+            spans: Arc::clone(&spans),
+        };
+        let subscriber = tracing_subscriber::registry().with(layer);
+        tracing::subscriber::with_default(subscriber, f);
+        let spans = std::mem::take(&mut *spans.lock().unwrap());
+        let events = std::mem::take(&mut *events.lock().unwrap());
+        (spans, events)
+    }
+
+    /// Layer that captures span and event data for test assertions.
+    struct SpanCapture {
+        events: Arc<Mutex<Vec<CapturedEvent>>>,
+        spans: Arc<Mutex<Vec<CapturedSpan>>>,
+    }
+
+    impl<S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>>
+        tracing_subscriber::Layer<S> for SpanCapture
+    {
+        fn on_new_span(
+            &self,
+            attrs: &tracing::span::Attributes<'_>,
+            id: &tracing::span::Id,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut fields = HashMap::new();
+            let mut visitor = FieldCapture(&mut fields);
+            attrs.record(&mut visitor);
+            let name = attrs.metadata().name().to_owned();
+            self.spans.lock().unwrap().push(CapturedSpan {
+                fields: fields.clone(),
+                name,
+            });
+            if let Some(span) = ctx.span(id) {
+                span.extensions_mut().insert(SpanFields(fields));
+            }
+        }
+
+        fn on_record(
+            &self,
+            id: &tracing::span::Id,
+            values: &tracing::span::Record<'_>,
+            ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            if let Some(span) = ctx.span(id) {
+                let mut ext = span.extensions_mut();
+                if let Some(fields) = ext.get_mut::<SpanFields>() {
+                    let mut visitor = FieldCapture(&mut fields.0);
+                    values.record(&mut visitor);
+                    // Update the captured span in the list.
+                    let mut spans = self.spans.lock().unwrap();
+                    let name = span.name();
+                    if let Some(captured) = spans.iter_mut().find(|s| s.name == name) {
+                        captured.fields = fields.0.clone();
+                    }
+                }
+            }
+        }
+
+        fn on_event(&self, event: &tracing::Event<'_>, ctx: tracing_subscriber::layer::Context<'_, S>) {
+            let mut fields = HashMap::new();
+            let mut visitor = FieldCapture(&mut fields);
+            event.record(&mut visitor);
+            let message = fields.remove("message").unwrap_or_default();
+            let span_name = ctx.event_span(event).map(|s| s.name().to_owned());
+            self.events.lock().unwrap().push(CapturedEvent {
+                fields,
+                message,
+                span_name,
+            });
+        }
+    }
+
+    /// Extension stored on span to track recorded fields.
+    struct SpanFields(HashMap<String, String>);
+
+    /// Visitor that captures field values as strings.
+    struct FieldCapture<'a>(&'a mut HashMap<String, String>);
+
+    impl tracing::field::Visit for FieldCapture<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.0.insert(field.name().to_owned(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.0.insert(field.name().to_owned(), value.to_owned());
+        }
+
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.0.insert(field.name().to_owned(), value.to_string());
+        }
+
+        fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+            self.0.insert(field.name().to_owned(), value.to_string());
+        }
     }
 }

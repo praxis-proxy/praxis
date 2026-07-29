@@ -3209,6 +3209,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "tracing-subscriber",
  "yaml_serde",
 ]
 
