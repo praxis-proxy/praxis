@@ -106,28 +106,56 @@ pub struct PolicyFilter {
 }
 
 impl PolicyFilter {
-    /// Construct a filter from a parsed config. Loads the CPEX YAML
-    /// referenced by `cfg.config_path`, registers bundled plugin
-    /// factories, wires the APL visitor, and initializes the manager.
-    /// Errors abort filter chain construction at server startup —
-    /// failing fast is what we want for misconfigured policy.
+    /// Construct a filter from a parsed config with the bundled CPEX
+    /// factories only. Equivalent to [`Self::new_with_factories`] with
+    /// no extra factories.
     ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if the referenced YAML cannot be read,
     /// the policy document fails to parse, or plugin initialization
     /// fails (e.g., a JWKS endpoint is unreachable).
+    pub fn new(cfg: PolicyFilterConfig) -> Result<Self, FilterError> {
+        Self::new_with_factories(cfg, Vec::new())
+    }
+
+    /// Like [`Self::new`], but registers additional host-supplied CPEX
+    /// plugin factories before the policy document loads.
+    ///
+    /// The bundled factories from `cpex::install_builtins` cover the
+    /// common identity / delegation / PII / audit cases, but the CPEX
+    /// plugin model is explicitly open: hosts embedding praxis may
+    /// author their own in-process plugins against `cpex-sdk` and
+    /// reference them from APL `run(...)` steps. Without this seam the
+    /// registry is closed — a custom `kind:` in the CPEX YAML fails
+    /// config load with "no factory registered for kind".
+    ///
+    /// Each entry is the `kind:` string operators write in the CPEX
+    /// YAML plus the factory that creates instances of it. Factories
+    /// register AFTER the builtins, so a host `kind` that collides
+    /// with a builtin kind shadows it — prefer namespaced kinds
+    /// (e.g. `acme/audit-sink`).
+    ///
+    /// # Errors
+    ///
+    /// Same failure modes as [`Self::new`].
     #[expect(
         clippy::too_many_lines,
         reason = "linear construction + init steps; splitting obscures the startup flow"
     )]
-    pub fn new(cfg: PolicyFilterConfig) -> Result<Self, FilterError> {
+    pub fn new_with_factories(
+        cfg: PolicyFilterConfig,
+        extra_factories: Vec<(&'static str, Box<dyn cpex::cpex_core::factory::PluginFactory>)>,
+    ) -> Result<Self, FilterError> {
         let yaml = std::fs::read_to_string(&cfg.config_path).map_err(|e| -> FilterError {
             format!("policy: failed to read config_path {}: {e}", cfg.config_path).into()
         })?;
 
         let mgr = Arc::new(PluginManager::default());
         cpex::install_builtins(&mgr);
+        for (kind, factory) in extra_factories {
+            mgr.register_factory(kind, factory);
+        }
 
         mgr.load_config_yaml(&yaml)
             .map_err(|e: Box<PluginError>| -> FilterError {
