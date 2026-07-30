@@ -1,6 +1,6 @@
 ---
-issue: TODO
-discussion: TODO
+issue: https://github.com/praxis-proxy/praxis/issues/894
+discussion: https://github.com/orgs/praxis-proxy/discussions/893
 status: proposed
 authors:
   - franciscojavierarceo
