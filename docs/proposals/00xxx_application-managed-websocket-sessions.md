@@ -137,23 +137,39 @@ transparent tunnel.
 
 ### Motivation
 
-Praxis currently forwards HTTP/1.1 WebSocket upgrades as transparent
-bidirectional byte streams. This is the correct behavior for a reverse
-proxy whose downstream and upstream speak the same application
-protocol and whose filters only need to process the opening HTTP
-exchange.
+Praxis needs application-managed WebSocket sessions so Praxis AI can
+hydrate the `response.create` messages that Codex sends over its
+Responses WebSocket before those requests reach OpenAI or vLLM. Today,
+after accepting the WebSocket upgrade, Praxis can only forward that
+connection as a transparent byte tunnel. Praxis AI cannot receive a
+complete Codex request, replace it with hydrated content, invoke vLLM
+over HTTP/SSE, or translate vLLM's streamed events back into WebSocket
+messages for Codex.
 
-After a successful upgrade, however, Praxis intentionally excludes the
-raw bytes from its ordinary HTTP body-filter lifecycle. The proxy does
-not expose complete WebSocket messages, and the HTTP lifecycle models
-the connection as one request ending in a `101` response. An extension
-therefore cannot safely implement several logical operations carried
-over one persistent socket, perform asynchronous work for an
-application message, or generate application messages independently
-of an upstream byte stream.
+This capability is required to preserve Codex's current incremental
+Responses path. When a later request extends the previous request and
+remains otherwise compatible, Codex reuses the persistent WebSocket
+connection, sends only the new input, and identifies the preceding
+response with `previous_response_id`. In current Codex, that behavior
+exists only in the Responses WebSocket request path. Codex can fall back
+to HTTP and remain functional, but the fallback sends the ordinary full
+Responses request rather than using this incremental
+`previous_response_id` exchange.
 
-That gap matters for AI clients and backends whose supported transports
-do not line up exactly.
+Praxis's existing HTTP filter lifecycle cannot implement that
+mediation. It treats the upgrade as one HTTP request ending in a `101`
+response and intentionally excludes subsequent WebSocket bytes from
+ordinary body filtering. Extensions therefore cannot process the
+multiple logical `response.create` operations carried by the persistent
+connection or independently perform asynchronous upstream work.
+
+Passive upgraded-stream observation does not close the gap. A read-only
+observer could extract metadata, but it could not hydrate or replace a
+request, wait for an external lookup, suppress forwarding, initiate
+vLLM's HTTP exchange, or synthesize downstream Responses events.
+Exposing raw upgraded bytes through HTTP body hooks would also be
+insufficient because arbitrary transport chunks are not complete
+WebSocket messages.
 
 OpenAI Codex uses the Responses API WebSocket mode and sends
 `response.create` messages over a persistent connection. OpenAI's SaaS
@@ -179,21 +195,10 @@ a separate sidecar would duplicate listener security, lifecycle,
 limits, cancellation, tracing, and configuration that Praxis already
 owns.
 
-Passive upgraded-stream observation does not close this gap. A
-read-only observer can extract metadata, but it cannot hydrate a
-request, replace a message, wait for an external lookup, suppress
-forwarding, initiate an HTTP exchange, or synthesize downstream
-events. Exposing raw upgraded bytes through HTTP body hooks is also
-insufficient: transport chunks are not WebSocket message boundaries,
-and the existing response-body callback cannot host an independent
-asynchronous application lifecycle.
-
-Forcing clients to abandon WebSocket mode would avoid the immediate
-transport mismatch but would change their preferred behavior and
-prevent Praxis from supporting persistent application sessions.
-Adding native WebSocket support to every backend would likewise make
-backend transport an unnecessary prerequisite for gateway
-compatibility.
+Forcing Codex onto its HTTP fallback would discard its incremental
+WebSocket exchange rather than mediate it. Adding native WebSocket
+support to every backend would instead make backend transport an
+unnecessary prerequisite for gateway compatibility.
 
 Application-managed sessions establish a reusable boundary:
 
