@@ -276,14 +276,14 @@ fn handle_reload(
 /// compatibility (macOS `FSEvents` reports canonical paths; Linux
 /// `inotify` reports lexical paths).
 struct PathFilter {
+    /// Absolute lexical config path (unresolved `..` components
+    /// preserved) for matching `inotify`-reported paths on Linux.
+    absolute: PathBuf,
     /// Accept all events without path filtering (symlinked configs).
     accept_all: bool,
     /// Canonical config path for matching on platforms that report
     /// resolved paths.
     canonical: PathBuf,
-    /// Absolute lexical config path (unresolved `..` components
-    /// preserved) for matching `inotify`-reported paths on Linux.
-    absolute: PathBuf,
     /// Original config path as supplied by the caller.
     original: PathBuf,
 }
@@ -302,9 +302,9 @@ impl PathFilter {
         };
 
         Self {
+            absolute,
             accept_all: is_symlink,
             canonical,
-            absolute,
             original: config_path.to_path_buf(),
         }
     }
@@ -515,7 +515,7 @@ mod tests {
 
         let filter = PathFilter::new(&config_rel);
 
-        // Simulate what inotify reports: cwd-joined absolute path.
+        tracing::info!("simulating inotify-reported cwd-joined absolute path");
         let cwd = std::env::current_dir().unwrap();
         let abs_lexical = cwd.join(&config_rel);
         let event = make_event(vec![abs_lexical]);
@@ -539,9 +539,7 @@ mod tests {
         let relative = PathBuf::from("..").join("config.yaml");
         let filter = PathFilter::new(&relative);
 
-        // The absolute field stores cwd + "../config.yaml" (with ..
-        // preserved). The canonical field resolves everything. Verify
-        // that at least the canonical matches the resolved path.
+        tracing::info!("verifying canonical match: absolute field stores cwd + ../config.yaml with .. preserved");
         let canonical = std::fs::canonicalize(&config_abs).unwrap();
         let event = make_event(vec![canonical]);
         assert!(
@@ -549,7 +547,7 @@ mod tests {
             "should match canonical path for parent-relative config"
         );
 
-        // Also verify the cwd-joined form matches.
+        tracing::info!("verifying cwd-joined form matches");
         let cwd = std::env::current_dir().unwrap();
         let abs_with_dotdot = cwd.join(&relative);
         let event = make_event(vec![abs_with_dotdot]);
@@ -879,8 +877,7 @@ mod tests {
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
         let shutdown = CancellationToken::new();
 
-        // Seed the watcher with a stale hash so any reload attempt that
-        // reads the (unchanged) file would still rebuild the pipeline.
+        tracing::info!("seeding watcher with stale hash so any reload attempt rebuilds the pipeline");
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: config_path.clone(),
             health_shutdown,
@@ -895,13 +892,13 @@ mod tests {
             ),
         });
 
-        // Wait for the startup pre-check reload (mismatched hash → swap).
+        tracing::info!("waiting for startup pre-check reload (mismatched hash triggers swap)");
         poll_until(Duration::from_secs(5), || {
             Arc::as_ptr(&pipelines.get("web").unwrap().load()) != old_ptr
         });
         let after_startup = Arc::as_ptr(&pipelines.get("web").unwrap().load());
 
-        // Only write unrelated files — no config touches.
+        tracing::info!("writing only unrelated files, no config touches");
         for i in 0..5 {
             let unrelated = dir.path().join(format!("unrelated-{i}.tmp"));
             std::fs::write(&unrelated, format!("noise {i}")).unwrap();
@@ -958,7 +955,7 @@ mod tests {
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
 
-        // Rotate symlink target (simulates K8s ConfigMap rotation)
+        tracing::info!("rotating symlink target (simulates K8s ConfigMap rotation)");
         let target_v2 = dir.path().join("config-v2.yaml");
         std::fs::write(&target_v2, VALID_YAML_CHANGED).unwrap();
         let tmp_link = dir.path().join("praxis.yaml.tmp");
