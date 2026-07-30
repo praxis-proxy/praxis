@@ -13,34 +13,31 @@ use tracing::{debug, error};
 
 /// Classified proxy error with HTTP status and machine-readable fields.
 struct ProxyError {
-    /// HTTP status code (e.g. 502, 504).
-    status: u16,
     /// Machine-readable error code (e.g. `upstream_connect_refused`).
     code: &'static str,
     /// Human-readable error message.
     message: &'static str,
+    /// HTTP status code (e.g. 502, 504).
+    status: u16,
 }
 
-/// Handle a fatal proxy error by writing an RFC 9457 Problem Details
-/// response to the downstream client.
+/// Handle a fatal proxy error by writing a structured error response
+/// to the downstream client.
 ///
 /// Guards against double-writes (filter rejections that already sent a
-/// response), downstream errors (client already gone), and HEAD requests
-/// (body suppressed).
+/// response), dead downstream connections, and HEAD requests (body
+/// suppressed). Writable downstream failures (e.g. client body read
+/// timeout) receive a structured 400 response.
 pub(super) async fn execute(session: &mut Session, e: &pingora_core::Error) -> FailToProxy {
     let etype = e.etype().clone();
 
     if let ErrorType::HTTPStatus(code) = etype {
-        if final_response_written(session) {
-            return done(code);
-        }
-        return write_status_error(session, code).await;
+        return handle_http_status(session, code).await;
     }
 
     let source = e.esource();
     if matches!(source, pingora_core::ErrorSource::Downstream) {
-        debug!("downstream error, skipping error response");
-        return done(0);
+        return handle_downstream(session, &etype).await;
     }
 
     let err = classify_error(&etype, source);
@@ -56,12 +53,49 @@ pub(super) async fn execute(session: &mut Session, e: &pingora_core::Error) -> F
     write_error_response(session, err).await
 }
 
-/// Write Pingora's default status response for explicit HTTP status errors.
-async fn write_status_error(session: &mut Session, status: u16) -> FailToProxy {
-    if let Err(e) = session.respond_error(status).await {
-        debug!(error = %e, "failed to write status error response");
+/// Structured response for explicit HTTP status errors.
+///
+/// Filter rejections typically write their own response before raising
+/// `HTTPStatus`; the double-write guard returns immediately in that case.
+async fn handle_http_status(session: &mut Session, code: u16) -> FailToProxy {
+    if final_response_written(session) {
+        return done(code);
     }
-    done(status)
+    let err = ProxyError {
+        code: "proxy_status_error",
+        message: status_title(code),
+        status: code,
+    };
+    write_error_response(session, err).await
+}
+
+/// Handle a downstream-origin error.
+///
+/// Dead connections (write failure, read failure, closed) are silently
+/// abandoned. Writable failures (e.g. body read timeout) receive a
+/// structured 400 response, matching Pingora's default status choice.
+async fn handle_downstream(session: &mut Session, etype: &ErrorType) -> FailToProxy {
+    if is_connection_dead(etype) {
+        debug!("downstream connection dead, skipping error response");
+        return done(0);
+    }
+    if final_response_written(session) {
+        return done(400);
+    }
+    let err = ProxyError {
+        code: "downstream_request_error",
+        message: "Request error",
+        status: 400,
+    };
+    write_error_response(session, err).await
+}
+
+/// Whether the downstream connection is too broken to write a response.
+fn is_connection_dead(etype: &ErrorType) -> bool {
+    matches!(
+        etype,
+        ErrorType::WriteError | ErrorType::ReadError | ErrorType::ConnectionClosed
+    )
 }
 
 /// Build and write the error response to the downstream session.
@@ -154,7 +188,7 @@ const fn done(error_code: u16) -> FailToProxy {
 /// Map a Pingora error type and source to a classified proxy error.
 fn classify_error(etype: &ErrorType, source: &pingora_core::ErrorSource) -> ProxyError {
     let (status, code, message) = classify_error_tuple(etype, source);
-    ProxyError { status, code, message }
+    ProxyError { code, message, status }
 }
 
 /// Error classification lookup table.
@@ -421,5 +455,32 @@ mod tests {
             500,
             "internal_proxy_error",
         );
+    }
+
+    // ---- is_connection_dead --------------------------------------------------
+
+    #[test]
+    fn write_error_is_dead() {
+        assert!(is_connection_dead(&ErrorType::WriteError));
+    }
+
+    #[test]
+    fn read_error_is_dead() {
+        assert!(is_connection_dead(&ErrorType::ReadError));
+    }
+
+    #[test]
+    fn connection_closed_is_dead() {
+        assert!(is_connection_dead(&ErrorType::ConnectionClosed));
+    }
+
+    #[test]
+    fn read_timeout_is_not_dead() {
+        assert!(!is_connection_dead(&ErrorType::ReadTimedout));
+    }
+
+    #[test]
+    fn connect_refused_is_not_dead() {
+        assert!(!is_connection_dead(&ErrorType::ConnectRefused));
     }
 }
