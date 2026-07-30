@@ -18,10 +18,10 @@ pub(crate) mod strategy;
 // -----------------------------------------------------------------------------
 
 /// Multiplier for the LCG RNG (Knuth MMIX, truncated to 64 bits).
-pub(super) const LCG_A: u64 = 6_364_136_223_846_793_005;
+const LCG_A: u64 = 6_364_136_223_846_793_005;
 
 /// Increment for the LCG RNG.
-pub(super) const LCG_C: u64 = 1_442_695_040_888_963_407;
+const LCG_C: u64 = 1_442_695_040_888_963_407;
 
 /// Advance an atomic LCG state and return the new value.
 fn next_random(rng: &AtomicU64) -> u64 {
