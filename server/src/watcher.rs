@@ -109,7 +109,7 @@ async fn watch_loop(params: WatcherParams) {
 
     let watch_dir = watch_dir_for_path(&params.config_path);
 
-    let _watcher = match setup_watcher(tx, &watch_dir) {
+    let _watcher = match setup_watcher(tx, &watch_dir, &params.config_path) {
         Ok(w) => w,
         Err(e) => {
             error!(error = %e, "failed to start config file watcher");
@@ -258,14 +258,85 @@ fn handle_reload(
     }
 }
 
+// -----------------------------------------------------------------------------
+// PathFilter
+// -----------------------------------------------------------------------------
+
+/// Path-based event filter for the config file watcher.
+///
+/// When the config file is itself a symlink (Kubernetes `ConfigMap`
+/// mounts, release-symlink deployments), all directory events are
+/// accepted because symlink-target rotations produce events for
+/// intermediate paths (e.g. `..data`) that cannot be predicted at
+/// startup. The content-hash check in [`handle_reload`] prevents
+/// unnecessary pipeline rebuilds.
+///
+/// When the config is a regular file, events are filtered against
+/// both the original and canonical paths for cross-platform
+/// compatibility (macOS `FSEvents` reports canonical paths; Linux
+/// `inotify` reports lexical paths).
+struct PathFilter {
+    /// Accept all events without path filtering (symlinked configs).
+    accept_all: bool,
+    /// Canonical config path for matching on platforms that report
+    /// resolved paths.
+    canonical: PathBuf,
+    /// Absolute lexical config path (unresolved `..` components
+    /// preserved) for matching `inotify`-reported paths on Linux.
+    absolute: PathBuf,
+    /// Original config path as supplied by the caller.
+    original: PathBuf,
+}
+
+impl PathFilter {
+    /// Build a filter for the given config path.
+    fn new(config_path: &std::path::Path) -> Self {
+        let is_symlink = config_path.symlink_metadata().is_ok_and(|m| m.is_symlink());
+
+        let canonical = std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf());
+
+        let absolute = if config_path.is_absolute() {
+            config_path.to_path_buf()
+        } else {
+            std::env::current_dir().map_or_else(|_| config_path.to_path_buf(), |cwd| cwd.join(config_path))
+        };
+
+        Self {
+            accept_all: is_symlink,
+            canonical,
+            absolute,
+            original: config_path.to_path_buf(),
+        }
+    }
+
+    /// Whether a filesystem event should trigger a reload attempt.
+    fn matches(&self, event: &notify::Event) -> bool {
+        self.accept_all
+            || event
+                .paths
+                .iter()
+                .any(|p| p == &self.canonical || p == &self.absolute || p == &self.original)
+    }
+}
+
 /// Set up a [`RecommendedWatcher`] that sends to the given channel
-/// on relevant filesystem events.
+/// on relevant filesystem events targeting the config file.
+///
+/// Events for unrelated files in the same directory are ignored
+/// (unless the config path is a symlink — see [`PathFilter`]).
 ///
 /// [`RecommendedWatcher`]: notify::RecommendedWatcher
-fn setup_watcher(tx: mpsc::Sender<()>, watch_dir: &std::path::Path) -> Result<RecommendedWatcher, notify::Error> {
+fn setup_watcher(
+    tx: mpsc::Sender<()>,
+    watch_dir: &std::path::Path,
+    config_path: &std::path::Path,
+) -> Result<RecommendedWatcher, notify::Error> {
+    let filter = PathFilter::new(config_path);
     let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| match res {
-        Ok(event) if is_relevant_event(event.kind) && tx.try_send(()).is_err() => {
-            tracing::trace!("config watcher channel full, event coalesced by debounce");
+        Ok(event) if is_relevant_event(event.kind) && filter.matches(&event) => {
+            if tx.try_send(()).is_err() {
+                tracing::trace!("config watcher channel full, event coalesced by debounce");
+            }
         },
         Err(e) => {
             tracing::warn!(error = %e, "config file watcher error");
@@ -374,6 +445,133 @@ mod tests {
             "remove events should be relevant"
         );
     }
+
+    // -------------------------------------------------------------------------
+    // PathFilter unit tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn path_filter_matches_original_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        std::fs::write(&config, "test").unwrap();
+
+        let filter = PathFilter::new(&config);
+        let event = make_event(vec![config.clone()]);
+        assert!(filter.matches(&event), "should match original path");
+    }
+
+    #[test]
+    fn path_filter_matches_canonical_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        std::fs::write(&config, "test").unwrap();
+
+        let filter = PathFilter::new(&config);
+        let canonical = std::fs::canonicalize(&config).unwrap();
+        let event = make_event(vec![canonical]);
+        assert!(filter.matches(&event), "should match canonical path (macOS FSEvents)");
+    }
+
+    #[test]
+    fn path_filter_rejects_unrelated_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        std::fs::write(&config, "test").unwrap();
+
+        let filter = PathFilter::new(&config);
+        let event = make_event(vec![dir.path().join("other.txt")]);
+        assert!(!filter.matches(&event), "should reject unrelated path");
+    }
+
+    #[test]
+    fn path_filter_accepts_all_for_symlink() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("real-config.yaml");
+        std::fs::write(&target, "test").unwrap();
+        let link = dir.path().join("config.yaml");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let filter = PathFilter::new(&link);
+        assert!(filter.accept_all, "symlinked config should set accept_all");
+
+        let event = make_event(vec![dir.path().join("..data")]);
+        assert!(
+            filter.matches(&event),
+            "symlinked config should accept events for unrelated paths"
+        );
+    }
+
+    #[test]
+    fn path_filter_matches_absolute_lexical_path() {
+        let _lock = CWD_MUTEX.get_or_init(Mutex::default).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _cwd = CwdGuard::new(dir.path());
+
+        let subdir_rel = PathBuf::from("conf");
+        std::fs::create_dir(&subdir_rel).unwrap();
+        let config_rel = subdir_rel.join("config.yaml");
+        std::fs::write(&config_rel, "test").unwrap();
+
+        let filter = PathFilter::new(&config_rel);
+
+        // Simulate what inotify reports: cwd-joined absolute path.
+        let cwd = std::env::current_dir().unwrap();
+        let abs_lexical = cwd.join(&config_rel);
+        let event = make_event(vec![abs_lexical]);
+        assert!(
+            filter.matches(&event),
+            "should match absolute lexical path from inotify on Linux"
+        );
+    }
+
+    #[test]
+    fn path_filter_matches_parent_relative_path() {
+        let _lock = CWD_MUTEX.get_or_init(Mutex::default).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let subdir = dir.path().join("sub");
+        std::fs::create_dir(&subdir).unwrap();
+        let _cwd = CwdGuard::new(&subdir);
+
+        let config_abs = dir.path().join("config.yaml");
+        std::fs::write(&config_abs, "test").unwrap();
+
+        let relative = PathBuf::from("..").join("config.yaml");
+        let filter = PathFilter::new(&relative);
+
+        // The absolute field stores cwd + "../config.yaml" (with ..
+        // preserved). The canonical field resolves everything. Verify
+        // that at least the canonical matches the resolved path.
+        let canonical = std::fs::canonicalize(&config_abs).unwrap();
+        let event = make_event(vec![canonical]);
+        assert!(
+            filter.matches(&event),
+            "should match canonical path for parent-relative config"
+        );
+
+        // Also verify the cwd-joined form matches.
+        let cwd = std::env::current_dir().unwrap();
+        let abs_with_dotdot = cwd.join(&relative);
+        let event = make_event(vec![abs_with_dotdot]);
+        assert!(
+            filter.matches(&event),
+            "should match cwd-joined path retaining .. components"
+        );
+    }
+
+    #[test]
+    fn path_filter_regular_file_not_accept_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("config.yaml");
+        std::fs::write(&config, "test").unwrap();
+
+        let filter = PathFilter::new(&config);
+        assert!(!filter.accept_all, "regular file should not set accept_all");
+    }
+
+    // -------------------------------------------------------------------------
+    // Integration tests
+    // -------------------------------------------------------------------------
 
     #[test]
     fn watcher_exits_on_cancellation() {
@@ -662,6 +860,125 @@ mod tests {
     }
 
     #[test]
+    fn watcher_ignores_unrelated_file_changes() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("praxis.yaml");
+        std::fs::write(&config_path, VALID_YAML).unwrap();
+
+        let config = Config::from_yaml(VALID_YAML).unwrap();
+        let registry = Arc::new(FilterRegistry::with_builtins());
+        let health_registry = Arc::new(std::collections::HashMap::new());
+        let kv_stores = praxis_core::kv::KvStoreRegistry::new();
+        let subrequest_client =
+            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
+        let pipelines = Arc::new(
+            crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores, &subrequest_client)
+                .unwrap(),
+        );
+        let old_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
+        let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let shutdown = CancellationToken::new();
+
+        // Seed the watcher with a stale hash so any reload attempt that
+        // reads the (unchanged) file would still rebuild the pipeline.
+        let _handle = spawn_config_watcher(WatcherParams {
+            config_path: config_path.clone(),
+            health_shutdown,
+            initial_content_hash: 0,
+            initial_config: config,
+            kv_stores: praxis_core::kv::KvStoreRegistry::new(),
+            pipelines: Arc::clone(&pipelines),
+            registry: Arc::clone(&registry),
+            shutdown: shutdown.clone(),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
+                praxis_core::subrequest::SubRequestConnector::new(8, None),
+            ),
+        });
+
+        // Wait for the startup pre-check reload (mismatched hash → swap).
+        poll_until(Duration::from_secs(5), || {
+            Arc::as_ptr(&pipelines.get("web").unwrap().load()) != old_ptr
+        });
+        let after_startup = Arc::as_ptr(&pipelines.get("web").unwrap().load());
+
+        // Only write unrelated files — no config touches.
+        for i in 0..5 {
+            let unrelated = dir.path().join(format!("unrelated-{i}.tmp"));
+            std::fs::write(&unrelated, format!("noise {i}")).unwrap();
+        }
+
+        std::thread::sleep(Duration::from_millis(DEBOUNCE_MS * 3));
+
+        let current_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
+        assert_eq!(
+            after_startup, current_ptr,
+            "pipeline should not be swapped when only unrelated files change"
+        );
+
+        shutdown.cancel();
+    }
+
+    #[test]
+    fn watcher_reloads_symlinked_config() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let target_v1 = dir.path().join("config-v1.yaml");
+        std::fs::write(&target_v1, VALID_YAML).unwrap();
+
+        let link = dir.path().join("praxis.yaml");
+        std::os::unix::fs::symlink(&target_v1, &link).unwrap();
+
+        let config = Config::from_yaml(VALID_YAML).unwrap();
+        let registry = Arc::new(FilterRegistry::with_builtins());
+        let health_registry = Arc::new(std::collections::HashMap::new());
+        let kv_stores = praxis_core::kv::KvStoreRegistry::new();
+        let subrequest_client =
+            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
+        let pipelines = Arc::new(
+            crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores, &subrequest_client)
+                .unwrap(),
+        );
+        let old_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
+        let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let shutdown = CancellationToken::new();
+
+        let _handle = spawn_config_watcher(WatcherParams {
+            config_path: link.clone(),
+            health_shutdown,
+            initial_content_hash: hash_content(VALID_YAML),
+            initial_config: config,
+            kv_stores: praxis_core::kv::KvStoreRegistry::new(),
+            pipelines: Arc::clone(&pipelines),
+            registry: Arc::clone(&registry),
+            shutdown: shutdown.clone(),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
+                praxis_core::subrequest::SubRequestConnector::new(8, None),
+            ),
+        });
+
+        std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
+
+        // Rotate symlink target (simulates K8s ConfigMap rotation)
+        let target_v2 = dir.path().join("config-v2.yaml");
+        std::fs::write(&target_v2, VALID_YAML_CHANGED).unwrap();
+        let tmp_link = dir.path().join("praxis.yaml.tmp");
+        std::os::unix::fs::symlink(&target_v2, &tmp_link).unwrap();
+        std::fs::rename(&tmp_link, &link).unwrap();
+
+        poll_until(Duration::from_secs(5), || {
+            Arc::as_ptr(&pipelines.get("web").unwrap().load()) != old_ptr
+        });
+
+        let new_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
+        assert_ne!(
+            old_ptr, new_ptr,
+            "pipeline should be swapped after symlink target rotation"
+        );
+
+        shutdown.cancel();
+    }
+
+    #[test]
     fn backoff_duration_starts_at_base() {
         assert_eq!(
             backoff_duration(1),
@@ -715,6 +1032,15 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Build a `notify::Event` with the given paths (for `PathFilter` unit tests).
+    fn make_event(paths: Vec<PathBuf>) -> notify::Event {
+        let mut event = notify::Event::new(EventKind::Modify(notify::event::ModifyKind::Data(
+            notify::event::DataChange::Content,
+        )));
+        event.paths = paths;
+        event
+    }
 
     /// Poll `predicate` every 20ms until it returns `true` or `timeout` elapses.
     fn poll_until(timeout: Duration, predicate: impl Fn() -> bool) {
