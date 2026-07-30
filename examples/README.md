@@ -136,6 +136,7 @@ page.
 | [least-connections.yaml](configs/traffic-management/least-connections.yaml) | Routes each request to the backend with the fewest in-flight requests |
 | [p2c.yaml](configs/traffic-management/p2c.yaml) | Samples two random endpoints and picks the one with fewer in-flight requests |
 | [path-based-routing.yaml](configs/traffic-management/path-based-routing.yaml) | Routes by URL path prefix |
+| [random.yaml](configs/traffic-management/random.yaml) | Selects an upstream endpoint at random, weighted by endpoint weight |
 | [rate-limiting.yaml](configs/traffic-management/rate-limiting.yaml) | Token bucket rate limiter with per-IP or global modes |
 | [redirect.yaml](configs/traffic-management/redirect.yaml) | Returns a 3xx redirect without contacting any upstream |
 | [round-robin.yaml](configs/traffic-management/round-robin.yaml) | Default strategy |
