@@ -170,7 +170,6 @@ fn status_title(status: u16) -> &'static str {
 fn anthropic_error_type(status: u16) -> &'static str {
     match status {
         429 => "rate_limit_error",
-        500 => "api_error",
         504 => "timeout_error",
         529 => "overloaded_error",
         _ => "api_error",
@@ -191,7 +190,7 @@ async fn send_error_response(session: &mut Session, header: pingora_http::Respon
 
 /// Build a response header with content-type and content-length.
 fn build_header(status: u16, content_length: usize, content_type: &str) -> Option<pingora_http::ResponseHeader> {
-    let mut header = match pingora_http::ResponseHeader::build(status, Some(2)) {
+    let mut header = match pingora_http::ResponseHeader::build(status, Some(3)) {
         Ok(h) => h,
         Err(err) => {
             error!(status, error = %err, "failed to build error response header");
@@ -199,10 +198,14 @@ fn build_header(status: u16, content_length: usize, content_type: &str) -> Optio
         },
     };
 
+    // no-transform: synthetic error bodies bypass Pingora's response
+    // compression pipeline (written directly to the session), so tell
+    // downstream intermediaries not to re-encode them either.
     if header.insert_header("content-type", content_type).is_err()
         || header
             .insert_header("content-length", content_length.to_string())
             .is_err()
+        || header.insert_header("cache-control", "no-transform").is_err()
     {
         error!("failed to set error response headers");
         return None;
