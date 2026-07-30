@@ -11,6 +11,7 @@ pub mod body;
 pub mod builtins;
 mod condition;
 mod context;
+mod error_response;
 mod extensions;
 mod factory;
 mod filter;
@@ -36,8 +37,9 @@ pub use builtins::{
     normalize_rewritten_path,
 };
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
-pub use context::{
-    ErrorResponseFormat, HttpFilterContext, PendingHeaderResult, Request, Response, TrustedHeaderMutation,
+pub use context::{HttpFilterContext, PendingHeaderResult, Request, Response, TrustedHeaderMutation};
+pub use error_response::{
+    ErrorResponseContext, ErrorResponseFormatter, ErrorResponseFormatterHandle, FormattedErrorResponse,
 };
 pub use extensions::RequestExtensions;
 pub use factory::{
