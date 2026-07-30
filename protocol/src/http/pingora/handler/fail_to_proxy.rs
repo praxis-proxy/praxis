@@ -252,30 +252,6 @@ fn classify_error_tuple(etype: &ErrorType, source: &pingora_core::ErrorSource) -
 mod tests {
     use super::*;
 
-    /// Test formatter proving the protocol delegates classified errors.
-    struct TestFormatter;
-
-    impl praxis_filter::ErrorResponseFormatter for TestFormatter {
-        fn format(&self, context: &ErrorResponseContext<'_>) -> FormattedErrorResponse {
-            FormattedErrorResponse::new(
-                format!(r#"{{"code":"{}","status":{}}}"#, context.code, context.status),
-                HeaderValue::from_static("application/vnd.praxis.test+json"),
-            )
-        }
-    }
-
-    fn check(etype: &ErrorType, source: &pingora_core::ErrorSource, expected_status: u16, expected_code: &str) {
-        let err = classify_error(etype, source);
-        assert_eq!(
-            err.status, expected_status,
-            "{etype:?}/{source:?} should map to status {expected_status}"
-        );
-        assert_eq!(
-            err.code, expected_code,
-            "{etype:?}/{source:?} should map to code {expected_code}"
-        );
-    }
-
     #[test]
     fn problem_details_body_has_rfc9457_fields() {
         let err = ProxyError {
@@ -537,8 +513,6 @@ mod tests {
         );
     }
 
-    // ---- is_connection_dead --------------------------------------------------
-
     #[test]
     fn write_error_is_dead() {
         assert!(is_connection_dead(&ErrorType::WriteError));
@@ -562,5 +536,32 @@ mod tests {
     #[test]
     fn connect_refused_is_not_dead() {
         assert!(!is_connection_dead(&ErrorType::ConnectRefused));
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    struct TestFormatter;
+
+    impl praxis_filter::ErrorResponseFormatter for TestFormatter {
+        fn format(&self, context: &ErrorResponseContext<'_>) -> FormattedErrorResponse {
+            FormattedErrorResponse::new(
+                format!(r#"{{"code":"{}","status":{}}}"#, context.code, context.status),
+                HeaderValue::from_static("application/vnd.praxis.test+json"),
+            )
+        }
+    }
+
+    fn check(etype: &ErrorType, source: &pingora_core::ErrorSource, expected_status: u16, expected_code: &str) {
+        let err = classify_error(etype, source);
+        assert_eq!(
+            err.status, expected_status,
+            "{etype:?}/{source:?} should map to status {expected_status}"
+        );
+        assert_eq!(
+            err.code, expected_code,
+            "{etype:?}/{source:?} should map to code {expected_code}"
+        );
     }
 }

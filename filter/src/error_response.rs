@@ -110,18 +110,6 @@ impl ErrorResponseFormatterHandle {
 mod tests {
     use super::*;
 
-    /// Test formatter proving external implementations receive the context.
-    struct TestFormatter;
-
-    impl ErrorResponseFormatter for TestFormatter {
-        fn format(&self, context: &ErrorResponseContext<'_>) -> FormattedErrorResponse {
-            FormattedErrorResponse::new(
-                format!(r#"{{"code":"{}","status":{}}}"#, context.code, context.status),
-                HeaderValue::from_static("application/vnd.praxis.test+json"),
-            )
-        }
-    }
-
     #[test]
     fn context_constructor_sets_fields() {
         let context = ErrorResponseContext::new("upstream_error", "Upstream error", 502);
@@ -146,5 +134,20 @@ mod tests {
             response.content_type,
             HeaderValue::from_static("application/vnd.praxis.test+json")
         );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    struct TestFormatter;
+
+    impl ErrorResponseFormatter for TestFormatter {
+        fn format(&self, context: &ErrorResponseContext<'_>) -> FormattedErrorResponse {
+            FormattedErrorResponse::new(
+                format!(r#"{{"code":"{}","status":{}}}"#, context.code, context.status),
+                HeaderValue::from_static("application/vnd.praxis.test+json"),
+            )
+        }
     }
 }

@@ -210,6 +210,11 @@ filter_chains:
         parse_header(&raw, "content-encoding").is_none(),
         "synthetic error response must not be compressed"
     );
+    assert_eq!(
+        parse_header(&raw, "cache-control").as_deref(),
+        Some("no-transform"),
+        "synthetic error response should include no-transform cache directive"
+    );
     let body = parse_body(&raw);
     assert!(
         body.contains(r#""status":502"#),
