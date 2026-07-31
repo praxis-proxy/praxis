@@ -48,6 +48,7 @@ mod policy;
 mod policy_http;
 mod protocol_examples;
 mod protocols;
+mod random;
 mod redirect;
 mod round_robin;
 mod security_examples;
