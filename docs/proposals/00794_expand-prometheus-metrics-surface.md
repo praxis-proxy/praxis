@@ -236,3 +236,81 @@ review of this proposal and runtime fit.
   already cover process liveness for now.
 - **Scope discipline:** prefer actionable diagnostics with bounded
   cardinality in this change; broader catalogs can follow.
+- **`route` label shape:** Exact path matches emit the bare path;
+  Prefix matches append `*` (for example `/api/v1` vs `/api/v1*`)
+  so identical path strings of different match kinds stay
+  distinguishable without a second label dimension.
+- **`connections_active` semantics:** under HTTP keep-alive the
+  gauge tracks in-flight requests (one guard per request context),
+  not raw TCP sockets; for TCP it tracks open proxy sessions.
+  Grouped TCP listeners resolve the `listener` label from the
+  connection’s local bind address.
+
+## How?
+
+### Implementation
+
+- [#825](https://github.com/praxis-proxy/praxis/pull/825)
+  (open draft) — baseline metric families, route-label
+  population, scrape integration coverage, and reload safety for
+  health / circuit-breaker gauges
+
+### Design
+
+The design below matches the code in #825 (not yet merged).
+
+Instrumentation stays on the existing `metrics` facade and
+admin `/metrics` scrape path (`metrics-exporter-prometheus`).
+Families emit only when the Prometheus recorder is installed
+(admin address configured); there is no second telemetry pipeline.
+
+**Recording sites (existing runtime paths):**
+
+- HTTP request completion → request count/duration + body-size
+  histograms (`protocol` Pingora handler)
+- Overload shedding and `ActiveConnectionGuard` →
+  `praxis_overload_rejects_total` /
+  `praxis_connections_active` (HTTP handler + TCP proxy)
+- Upstream connect timing / failures / connect-failure retries →
+  connect-duration histogram plus failure/retry counters
+  (handler / upstream peer)
+- Circuit breaker state transitions + `Drop` on pipeline swap →
+  `praxis_circuit_breaker_open` (`filter` circuit breaker)
+- HTTP/TCP load-balancer “all unhealthy” path →
+  `praxis_lb_panic_mode_total`
+- Active and passive health updates → healthy/total gauges and
+  transition counters; reload clears stale cluster gauges and
+  re-seeds from the new registry (`server` reload + health runner)
+- Config watcher → reload success/failure counter and last-success
+  timestamp
+
+**Bounded `route` label:** only the `router` filter sets
+`metrics_route` today. It precomputes a `SharedString` per
+configured route at construction (`Exact` → bare path,
+`Prefix` → `path*`) and clones it into request context on match.
+The raw request URL is never used as a label. Unmatched traffic
+(and pipelines without `router`, including
+`iterative_request_router`) keep `route="unknown"`.
+Route-label support for `iterative_request_router` is an
+intentional follow-up, not part of #825.
+
+**Cardinality and cost:** prefer cluster / listener / small fixed
+enums over per-endpoint series on the default scrape. Cheap
+`SharedString` clones (often via `Arc`) on hot paths; construction-
+time allocations for static route labels. Opt-in
+`metrics.filter_duration` remains the pattern for heavier optional
+families; the #794 pack itself is on whenever `/metrics` is live.
+
+**Tests:** unit coverage for record helpers, route Exact/Prefix
+labels, TCP listener-label resolution, and panic-mode emission;
+integration suite
+`tests/integration/tests/suite/prometheus_metrics.rs` scrapes
+admin `/metrics` for happy-path labels, overload rejects, retries,
+circuit-breaker open/recovery/Drop-on-reload, health gauges,
+HTTP+TCP panic mode, and config reload.
+
+**Explicitly out of this How (see Non-Goals / Decisions):**
+connect-failure `reason` taxonomy, `praxis_filter_rejections_total`,
+uptime gauge, per-endpoint health on the default scrape, broader
+TCP catalogs under #8, and `route` labels from
+`iterative_request_router`.
