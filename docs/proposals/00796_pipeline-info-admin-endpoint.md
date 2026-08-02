@@ -5,7 +5,7 @@ status: proposed
 authors:
   - henschwartz
 graduation_criteria:
-  - How? section with implementing PRs (or design)
+  - Implementation PRs linked from How?
   - Open questions closed in Decisions (response shape, authz, empty/partial, per-listener)
   - Admin endpoint returns the resolved pipeline view per listener
   - Response includes filter order, types, conditions, and branch points
@@ -157,8 +157,8 @@ Record of answers that close the earlier open questions from
   listener cheaply for large topologies (full-document aggregate
   alone forces compile/parse cost operators do not need). Keep a
   JSONPath-friendly `serde_json` document shape either way.
-- **Admin dispatch (for later How?):** route `GET /api/pipelines`
-  through the existing `PingoraAdminService::response` match in
+- **Admin dispatch:** route `GET /api/pipelines` through the
+  existing `PingoraAdminService::response` match in
   `protocol/src/http/pingora/health/service.rs` — same loopback
   admin port as `/healthy`, `/metrics`, `/ready`, and `/api/kv/*`.
   No new listener or service plumbing.
@@ -166,3 +166,121 @@ Record of answers that close the earlier open questions from
   `ListenerPipelines::listener_names()` naturally omits the admin
   listener (`AdminConfig` is separate from `config.listeners` and
   never enters that map). No special-case filter-out required.
+
+## How?
+
+### Implementation
+
+- _(to be linked)_ — `GET /api/pipelines` admin handler, pipeline
+  introspection, and scrape-style integration coverage
+
+### Design
+
+**Admin surface.** Add `GET /api/pipelines` (and a cheap
+per-listener selector such as `?listener=<name>`) beside the
+existing arms in `PingoraAdminService::response`
+(`protocol/src/http/pingora/health/service.rs`). Encode with
+`serde_json` via the same JSON response helpers used by
+`/api/kv/*`. No new listener, port, or auth mechanism: loopback
+bind by default unless `insecure_options.allow_public_admin: true`.
+
+**Live source of truth.** Hold an `Arc<ListenerPipelines>` (and a
+small parallel listener metadata snapshot for address / protocol /
+TLS / `chain_names`) on the admin service, populated when pipelines
+are resolved and updated on successful reload. Each request loads
+the current `ArcSwap<FilterPipeline>` so the view matches post-
+reload runtime, not a stale config-file dump. Enumerating
+`ListenerPipelines::listener_names()` omits the admin listener
+automatically.
+
+**Introspection.** `FilterPipeline` today does not expose its
+ordered filters publicly. Add a dedicated public snapshot API on
+the filter crate (for example `FilterPipeline::introspection()`)
+that walks `PipelineFilter` / `ResolvedBranch` and returns:
+
+- filter type (`AnyFilter::name()`), optional user `name`
+- request/response conditions and `failure_mode`
+- phase participation (see below)
+- for **HTTP** filters (`AnyFilter::Http`): per-filter body
+  access/mode from `HttpFilter` trait methods
+- for **TCP** filters (`AnyFilter::Tcp`): omit
+  `request_body` / `response_body` (or emit `null`); TCP has no
+  body-access API. Use TCP phase hooks
+  (`connect` / `disconnect`) instead of HTTP request/response
+  phases
+- branch points: condition, nested filters, `max_iterations`, and
+  operator-readable `rejoin` (`next` / `terminal` / named filter)
+- `filter_count` equals `filters.length`, with empty chains as
+  `filters: []`, `filter_count: 0`
+
+**Phases.** There is no trait method that declares phase
+participation today. Derive `phases` heuristically for v1:
+
+- HTTP: always include `request`; include `request_body` /
+  `response_body` when the corresponding body access is not
+  `None`; include `response` when response conditions are
+  non-empty or response-body access is not `None`
+- TCP: `connect` / `disconnect` only
+
+A dedicated `active_phases()` trait hook can replace the
+heuristic later if operators need exact override detection.
+
+Listener-level `chain_names` come from the last successfully
+applied `Listener.filter_chains` (flattened chains are not
+recoverable from the runtime pipeline alone). Prefer aligning
+field names with `server`’s config dump types where overlap helps
+a future `praxisctl pipelines` (#793).
+
+**Response shape (JSONPath-friendly).**
+
+Aggregate `GET /api/pipelines`:
+
+```json
+{
+  "listeners": [
+    {
+      "name": "web",
+      "address": "0.0.0.0:8080",
+      "protocol": "http",
+      "tls": false,
+      "chain_names": ["main"],
+      "filter_count": 1,
+      "filters": [
+        {
+          "index": 0,
+          "filter": "router",
+          "name": null,
+          "conditions": [],
+          "response_conditions": [],
+          "failure_mode": "closed",
+          "phases": ["request"],
+          "request_body": { "access": "none", "mode": "stream" },
+          "response_body": { "access": "none", "mode": "stream" },
+          "branches": []
+        }
+      ]
+    }
+  ]
+}
+```
+
+Per-listener `GET /api/pipelines?listener=<name>` uses a
+different envelope — `{"listener": { ... }}` with the same
+object shape as one element of `listeners` — or HTTP 404 when
+the name is absent. Do not reuse `{"listeners":[...]}` for the
+single-listener case. Omit raw filter config blobs and secret
+redaction in v1 (follow-up once the shape is stable).
+
+**Reload edge cases to document or tighten in the implementing
+PR:** listeners added only via hot reload may be absent until
+restart with today’s `ListenerPipelines` swap rules; removed
+listeners may linger until restart. Address / protocol / TLS
+changes already require restart — metadata should reflect the last
+successfully applied reload config.
+
+**Tests.** Unit-test route parsing and JSON serialization next to
+the admin handler. Integration test: start a proxy with admin + a
+known pipeline (for example branch-chains), `GET /api/pipelines`,
+assert structure (`chain_names`, order, at least one branch,
+empty-chain shape), then reload config and confirm the view
+updates.
