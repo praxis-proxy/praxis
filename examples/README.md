@@ -38,6 +38,7 @@ page.
 | [access-logging.yaml](configs/observability/access-logging.yaml) | Structured JSON logging with sampling; logs ~10% of requests. request_id ensures each log line has a correlation ID. access_log emits method, path, status, and timing |
 | [logging.yaml](configs/observability/logging.yaml) | request_id — ensures every request has a correlation ID |
 | [tcp-access-log.yaml](configs/observability/tcp-access-log.yaml) | Structured JSON logging of TCP connection events (connect and disconnect) |
+| [tracing-otlp.yaml](configs/observability/tracing-otlp.yaml) | Exports distributed tracing spans to an OpenTelemetry Collector via OTLP/gRPC |
 
 ### Operations
 
@@ -136,6 +137,7 @@ page.
 | [least-connections.yaml](configs/traffic-management/least-connections.yaml) | Routes each request to the backend with the fewest in-flight requests |
 | [p2c.yaml](configs/traffic-management/p2c.yaml) | Samples two random endpoints and picks the one with fewer in-flight requests |
 | [path-based-routing.yaml](configs/traffic-management/path-based-routing.yaml) | Routes by URL path prefix |
+| [random.yaml](configs/traffic-management/random.yaml) | Selects an upstream endpoint at random, weighted by endpoint weight |
 | [rate-limiting.yaml](configs/traffic-management/rate-limiting.yaml) | Token bucket rate limiter with per-IP or global modes |
 | [redirect.yaml](configs/traffic-management/redirect.yaml) | Returns a 3xx redirect without contacting any upstream |
 | [round-robin.yaml](configs/traffic-management/round-robin.yaml) | Default strategy |

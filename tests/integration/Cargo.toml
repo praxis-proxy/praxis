@@ -12,6 +12,7 @@ default = []
 cpex-policy-engine = ["praxis-filter/cpex-policy-engine"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter"]
 no-mac-cert-rotation-tests = []
+otel = ["praxis/otel"]
 
 [lints]
 workspace = true

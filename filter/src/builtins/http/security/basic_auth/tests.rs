@@ -203,10 +203,10 @@ credentials:
 
 #[tokio::test]
 async fn authenticates_valid_credentials() {
-    let f = make_filter(&[("admin", "secret")], "Restricted");
+    let f = make_filter(&[("admin", "fakecreds")], "Restricted");
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers
-        .insert(http::header::AUTHORIZATION, basic_header("admin", "secret"));
+        .insert(http::header::AUTHORIZATION, basic_header("admin", "fakecreds"));
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
     let action = f.on_request(&mut ctx).await.unwrap();
@@ -218,7 +218,7 @@ async fn authenticates_valid_credentials() {
 
 #[tokio::test]
 async fn rejects_missing_authorization_header() {
-    let f = make_filter(&[("admin", "secret")], "TestRealm");
+    let f = make_filter(&[("admin", "fakecreds")], "TestRealm");
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
@@ -228,7 +228,7 @@ async fn rejects_missing_authorization_header() {
 
 #[tokio::test]
 async fn rejects_invalid_base64() {
-    let f = make_filter(&[("admin", "secret")], "Restricted");
+    let f = make_filter(&[("admin", "fakecreds")], "Restricted");
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers.insert(
         http::header::AUTHORIZATION,
@@ -245,7 +245,7 @@ async fn rejects_invalid_base64() {
 
 #[tokio::test]
 async fn rejects_non_utf8_base64() {
-    let f = make_filter(&[("admin", "secret")], "Restricted");
+    let f = make_filter(&[("admin", "fakecreds")], "Restricted");
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers.insert(
         http::header::AUTHORIZATION,
@@ -262,7 +262,7 @@ async fn rejects_non_utf8_base64() {
 
 #[tokio::test]
 async fn rejects_credentials_without_colon() {
-    let f = make_filter(&[("admin", "secret")], "Restricted");
+    let f = make_filter(&[("admin", "fakecreds")], "Restricted");
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     let encoded = STANDARD.encode("usernameonly");
     req.headers.insert(
@@ -280,7 +280,7 @@ async fn rejects_credentials_without_colon() {
 
 #[tokio::test]
 async fn rejects_wrong_password() {
-    let f = make_filter(&[("admin", "secret")], "Restricted");
+    let f = make_filter(&[("admin", "fakecreds")], "Restricted");
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers
         .insert(http::header::AUTHORIZATION, basic_header("admin", "wrong"));
@@ -295,10 +295,10 @@ async fn rejects_wrong_password() {
 
 #[tokio::test]
 async fn rejects_unknown_username() {
-    let f = make_filter(&[("admin", "secret")], "Restricted");
+    let f = make_filter(&[("admin", "fakecreds")], "Restricted");
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers
-        .insert(http::header::AUTHORIZATION, basic_header("unknown", "secret"));
+        .insert(http::header::AUTHORIZATION, basic_header("unknown", "fakecreds"));
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
     let action = f.on_request(&mut ctx).await.unwrap();
@@ -310,7 +310,7 @@ async fn rejects_unknown_username() {
 
 #[tokio::test]
 async fn rejects_non_basic_scheme() {
-    let f = make_filter(&[("admin", "secret")], "Restricted");
+    let f = make_filter(&[("admin", "fakecreds")], "Restricted");
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers.insert(
         http::header::AUTHORIZATION,
@@ -327,10 +327,10 @@ async fn rejects_non_basic_scheme() {
 
 #[tokio::test]
 async fn strips_authorization_header_by_default() {
-    let f = make_filter(&[("admin", "secret")], "Restricted");
+    let f = make_filter(&[("admin", "fakecreds")], "Restricted");
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers
-        .insert(http::header::AUTHORIZATION, basic_header("admin", "secret"));
+        .insert(http::header::AUTHORIZATION, basic_header("admin", "fakecreds"));
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
     let action = f.on_request(&mut ctx).await.unwrap();
@@ -347,14 +347,14 @@ async fn preserves_authorization_header_when_strip_disabled() {
         "
 credentials:
   - username: admin
-    password: secret
+    password: fakecreds
 strip_authorization: false
 ",
     );
     let f = BasicAuthFilter::from_config(&yaml).unwrap();
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers
-        .insert(http::header::AUTHORIZATION, basic_header("admin", "secret"));
+        .insert(http::header::AUTHORIZATION, basic_header("admin", "fakecreds"));
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
     let action = f.on_request(&mut ctx).await.unwrap();
@@ -382,8 +382,8 @@ async fn password_may_contain_colons() {
 
 #[tokio::test]
 async fn basic_scheme_case_insensitive() {
-    let f = make_filter(&[("admin", "secret")], "Restricted");
-    let encoded = STANDARD.encode("admin:secret");
+    let f = make_filter(&[("admin", "fakecreds")], "Restricted");
+    let encoded = STANDARD.encode("admin:fakecreds");
 
     for scheme in &["BASIC", "basic", "bAsIc"] {
         let mut req = crate::test_utils::make_request(http::Method::GET, "/");
@@ -404,7 +404,7 @@ async fn basic_scheme_case_insensitive() {
 
 #[tokio::test]
 async fn realm_appears_in_challenge() {
-    let f = make_filter(&[("admin", "secret")], "My Custom Realm");
+    let f = make_filter(&[("admin", "fakecreds")], "My Custom Realm");
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
@@ -419,11 +419,11 @@ async fn kv_store_lookup_valid_credentials() {
 
     let registry = KvStoreRegistry::new();
     let store = registry.get_or_create("auth_users");
-    store.set("admin", Arc::from("secret"));
+    store.set("admin", Arc::from("fakecreds"));
 
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers
-        .insert(http::header::AUTHORIZATION, basic_header("admin", "secret"));
+        .insert(http::header::AUTHORIZATION, basic_header("admin", "fakecreds"));
     let mut ctx = crate::test_utils::make_filter_context(&req);
     ctx.kv_stores = Some(&registry);
 
@@ -442,7 +442,7 @@ async fn kv_store_missing_store_rejects() {
     let registry = KvStoreRegistry::new();
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers
-        .insert(http::header::AUTHORIZATION, basic_header("admin", "secret"));
+        .insert(http::header::AUTHORIZATION, basic_header("admin", "fakecreds"));
     let mut ctx = crate::test_utils::make_filter_context(&req);
     ctx.kv_stores = Some(&registry);
 
@@ -460,7 +460,7 @@ async fn kv_store_missing_registry_rejects() {
 
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
     req.headers
-        .insert(http::header::AUTHORIZATION, basic_header("admin", "secret"));
+        .insert(http::header::AUTHORIZATION, basic_header("admin", "fakecreds"));
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
     let action = f.on_request(&mut ctx).await.unwrap();
@@ -472,9 +472,9 @@ async fn kv_store_missing_registry_rejects() {
 
 #[tokio::test]
 async fn multiple_inline_credentials() {
-    let f = make_filter(&[("admin", "secret"), ("readonly", "viewer")], "Restricted");
+    let f = make_filter(&[("admin", "fakecreds"), ("readonly", "viewer")], "Restricted");
 
-    for (user, pass) in &[("admin", "secret"), ("readonly", "viewer")] {
+    for (user, pass) in &[("admin", "fakecreds"), ("readonly", "viewer")] {
         let mut req = crate::test_utils::make_request(http::Method::GET, "/");
         req.headers
             .insert(http::header::AUTHORIZATION, basic_header(user, pass));

@@ -1,0 +1,31 @@
+# Random Load Balancing
+#
+# Selects an upstream endpoint at random, weighted by endpoint weight.
+# With equal weights this reduces to uniform random selection.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/random.yaml
+#   curl http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            load_balancer_strategy: random
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"
+              - "127.0.0.1:3003"

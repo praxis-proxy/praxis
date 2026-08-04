@@ -17,16 +17,6 @@ use smallvec::SmallVec;
 use super::endpoint::WeightedEndpoint;
 
 // -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Multiplier for the LCG RNG (Knuth MMIX, truncated to 64 bits).
-const LCG_A: u64 = 6_364_136_223_846_793_005;
-
-/// Increment for the LCG RNG.
-const LCG_C: u64 = 1_442_695_040_888_963_407;
-
-// -----------------------------------------------------------------------------
 // PowerOfTwoChoices
 // -----------------------------------------------------------------------------
 
@@ -126,24 +116,15 @@ impl PowerOfTwoChoices {
         reason = "modulo total_weight bounds the result to usize range"
     )]
     fn pick_two(&self, total_weight: usize) -> (usize, usize) {
-        let r1 = self.next_random();
-        let mut r2 = self.next_random();
+        let r1 = super::next_random(&self.rng);
+        let mut r2 = super::next_random(&self.rng);
         let a = (r1 as usize) % total_weight;
         let mut b = (r2 as usize) % total_weight;
         while b == a {
-            r2 = r2.wrapping_mul(LCG_A).wrapping_add(LCG_C);
+            r2 = r2.wrapping_mul(super::LCG_A).wrapping_add(super::LCG_C);
             b = (r2 as usize) % total_weight;
         }
         (a, b)
-    }
-
-    /// Advance the LCG and return the new state.
-    fn next_random(&self) -> u64 {
-        self.rng
-            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |s| {
-                Some(s.wrapping_mul(LCG_A).wrapping_add(LCG_C))
-            })
-            .unwrap_or(0)
     }
 
     /// Filter to healthy endpoints, falling back to all on panic mode.

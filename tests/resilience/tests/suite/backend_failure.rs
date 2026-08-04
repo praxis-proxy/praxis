@@ -68,7 +68,7 @@ fn partial_response_backend_returns_502() {
 }
 
 #[test]
-fn slow_backend_with_read_timeout_returns_502() {
+fn slow_backend_with_read_timeout_returns_504() {
     let slow_port = start_slow_backend("slow", Duration::from_secs(5));
     let proxy_port = free_port();
     let yaml = read_timeout_proxy_yaml(proxy_port, slow_port, 500);
@@ -79,7 +79,7 @@ fn slow_backend_with_read_timeout_returns_502() {
     let (status, _) = http_get(proxy.addr(), "/", None);
     let elapsed = start.elapsed();
 
-    assert_eq!(status, 502, "slow backend with read timeout should return 502");
+    assert_eq!(status, 504, "slow backend with read timeout should return 504");
     assert!(
         elapsed < Duration::from_secs(3),
         "read timeout should fire quickly, not wait for full backend delay; took {elapsed:?}"

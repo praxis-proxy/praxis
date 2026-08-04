@@ -16,10 +16,21 @@ name = "praxis_core"
 [lints]
 workspace = true
 
+[features]
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+
 [dependencies]
 bytes = { workspace = true }
 dashmap = { workspace = true }
 http = { workspace = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
 pingora-core = { workspace = true }
 pingora-http = { workspace = true }
 praxis-tls = { workspace = true }
@@ -30,6 +41,7 @@ serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
 tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]

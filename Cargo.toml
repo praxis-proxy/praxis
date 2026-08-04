@@ -49,6 +49,9 @@ metrics = "0.24.6"
 metrics-exporter-prometheus = { version = "0.18.3", default-features = false }
 nix = { version = "0.31.3", default-features = false, features = ["process", "signal", "user"] }
 notify = "8.2.0"
+opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.32.0", default-features = false, features = ["trace", "rt-tokio"] }
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "trace"] }
 # Temporary fork: https://github.com/praxis-proxy/pingora
 pingora-core = { version = "0.8.2", package = "quixotic-plecostomus-core", features = ["rustls"] }
 pingora-http = { version = "0.8.2", package = "quixotic-plecostomus-http" }
@@ -86,7 +89,8 @@ tokio = { version = "1.53.1", features = ["macros", "rt"] }
 tokio-stream = "0.1.19"
 tokio-util = "0.7.19"
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
+tracing-opentelemetry = "0.33.0"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "registry"] }
 zeroize = "1.9.0"
 
 [profile.release]
