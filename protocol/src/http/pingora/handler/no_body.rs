@@ -22,8 +22,8 @@ use tokio::sync::Semaphore;
 use tracing::debug;
 
 use super::{
-    adjust_compression, emit_request_metrics, handle_connect_failure, logging_cleanup, record_passive_health,
-    request_filter, reserved_headers, response_filter, upstream_peer, upstream_request, via,
+    adjust_compression, emit_request_metrics, handle_connect_failure, hop_by_hop::RemoveHeader as _, logging_cleanup,
+    record_passive_health, request_filter, response_filter, upstream_peer, upstream_request, via,
 };
 use crate::http::pingora::context::PingoraRequestCtx;
 
@@ -174,7 +174,7 @@ impl ProxyHttp for PingoraHttpHandlerNoBody {
     {
         let is_upgrade = session.is_upgrade_req();
         upstream_request::strip_hop_by_hop(upstream_request, is_upgrade);
-        reserved_headers::strip_reserved_internal(upstream_request);
+        upstream_request.strip_reserved_internal();
         upstream_request::apply_rewritten_path(upstream_request, ctx)?;
         upstream_request::apply_mutated_content_length(upstream_request, ctx);
         let client_ver = ctx.client_http_version.unwrap_or(http::Version::HTTP_11);

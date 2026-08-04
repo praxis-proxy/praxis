@@ -10,6 +10,7 @@
 //! [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 
 use http::HeaderMap;
+use tracing::debug;
 
 // -----------------------------------------------------------------------------
 // Hop-by-hop Header Lists
@@ -105,13 +106,42 @@ pub(crate) fn strip_connection_tokens<R: RemoveHeader>(
 
 /// Trait abstracting header removal for both request and response types.
 pub(crate) trait RemoveHeader {
+    /// direction i.e. request or response
+    const DIRECTION: &'static str;
+
     /// Return all headers
     fn headers(&self) -> &HeaderMap;
     /// Remove a header by name, discarding the value.
     fn remove_header_by_name(&mut self, name: &str);
+
+    /// Strip reserved internal headers before forwarding to upstream.
+    /// Remove proxy-internal routing metadata that should not leak to
+    /// backends and that may echo back from backends.
+    fn strip_reserved_internal(&mut self) {
+        let to_remove: Vec<http::HeaderName> = self
+            .headers()
+            .keys()
+            .filter(|name| super::reserved_headers::is_reserved_internal_header(name))
+            .cloned()
+            .collect();
+
+        for name in &to_remove {
+            self.remove_header_by_name(name.as_str());
+        }
+
+        if !to_remove.is_empty() {
+            debug!(
+                count = to_remove.len(),
+                direction = Self::DIRECTION,
+                "stripped reserved internal headers"
+            );
+        }
+    }
 }
 
 impl RemoveHeader for pingora_http::RequestHeader {
+    const DIRECTION: &'static str = "request";
+
     fn headers(&self) -> &HeaderMap {
         &self.headers
     }
@@ -122,6 +152,8 @@ impl RemoveHeader for pingora_http::RequestHeader {
 }
 
 impl RemoveHeader for pingora_http::ResponseHeader {
+    const DIRECTION: &'static str = "response";
+
     fn headers(&self) -> &HeaderMap {
         &self.headers
     }

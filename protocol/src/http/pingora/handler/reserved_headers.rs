@@ -11,10 +11,6 @@
 //!
 //! [`is_reserved`]: praxis_core::reserved_headers::is_reserved
 
-use tracing::debug;
-
-use super::hop_by_hop::RemoveHeader;
-
 /// Return whether a header name belongs to Praxis reserved internal metadata.
 ///
 /// Delegates to [`praxis_core::reserved_headers::is_reserved`] with
@@ -23,36 +19,6 @@ use super::hop_by_hop::RemoveHeader;
 /// [`praxis_core::reserved_headers::is_reserved`]: praxis_core::reserved_headers::is_reserved
 pub(in crate::http::pingora::handler) fn is_reserved_internal_header(name: &http::HeaderName) -> bool {
     praxis_core::reserved_headers::is_reserved(name.as_str())
-}
-
-// -----------------------------------------------------------------------------
-// Reserved Internal Header Stripping
-// -----------------------------------------------------------------------------
-
-/// Strip reserved internal headers before forwarding to upstream.
-///
-/// Removes proxy-internal routing metadata that should not leak to
-/// backends. Standard protocol headers without the `x-` prefix
-/// (e.g. `ext-session-id`) are preserved because they do not match
-/// the `x-` prefixed reserved set.
-pub(in crate::http::pingora::handler) fn strip_reserved_internal<R: RemoveHeader>(msg: &mut R) {
-    let to_remove: Vec<http::HeaderName> = msg
-        .headers()
-        .keys()
-        .filter(|name| is_reserved_internal_header(name))
-        .cloned()
-        .collect();
-
-    for name in &to_remove {
-        msg.remove_header_by_name(name.as_str());
-    }
-
-    if !to_remove.is_empty() {
-        debug!(
-            count = to_remove.len(),
-            "stripped reserved internal headers from upstream message"
-        );
-    }
 }
 
 // -----------------------------------------------------------------------------

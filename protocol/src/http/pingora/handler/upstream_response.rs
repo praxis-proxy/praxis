@@ -7,9 +7,7 @@
 //! [RFC 9110 Section 7.6.1] requires intermediaries to remove
 //! hop-by-hop headers in both directions. This module handles
 //! the response path: stripping hop-by-hop headers from the
-//! upstream response before forwarding to the client. It also
-//! removes reserved internal routing headers that backends may
-//! echo back.
+//! upstream response before forwarding to the client.
 //!
 //! [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 //! [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
@@ -87,7 +85,7 @@ fn is_websocket_response(headers: &http::HeaderMap) -> bool {
 )]
 mod tests {
     use super::*;
-    use crate::http::pingora::handler::reserved_headers;
+    use crate::http::pingora::handler::hop_by_hop::RemoveHeader as _;
 
     #[test]
     fn strips_standard_response_hop_by_hop() {
@@ -415,7 +413,7 @@ mod tests {
             ("content-type", "application/json"),
         ]);
 
-        reserved_headers::strip_reserved_internal(&mut resp);
+        resp.strip_reserved_internal();
 
         assert!(
             resp.headers.get("x-praxis-filter-action").is_none(),
@@ -440,7 +438,7 @@ mod tests {
             ("server", "test"),
         ]);
 
-        reserved_headers::strip_reserved_internal(&mut resp);
+        resp.strip_reserved_internal();
 
         assert!(
             resp.headers.get("x-ext-protocol-servername").is_none(),
@@ -465,7 +463,7 @@ mod tests {
             ("cache-control", "no-cache"),
         ]);
 
-        reserved_headers::strip_reserved_internal(&mut resp);
+        resp.strip_reserved_internal();
 
         assert!(
             resp.headers.get("x-ext-agent-method").is_none(),
@@ -492,7 +490,7 @@ mod tests {
             ("content-type", "text/plain"),
         ]);
 
-        reserved_headers::strip_reserved_internal(&mut resp);
+        resp.strip_reserved_internal();
 
         assert!(
             resp.headers.get("x-praxis-filter-action").is_none(),
@@ -527,7 +525,7 @@ mod tests {
             ("ext-protocol-version", "2025-03-26"),
         ]);
 
-        reserved_headers::strip_reserved_internal(&mut resp);
+        resp.strip_reserved_internal();
 
         assert_eq!(
             resp.headers.get("ext-session-id").unwrap(),
@@ -560,7 +558,7 @@ mod tests {
             ("x-custom-header", "custom-value"),
         ]);
 
-        reserved_headers::strip_reserved_internal(&mut resp);
+        resp.strip_reserved_internal();
 
         assert_eq!(
             resp.headers.get("x-request-id").unwrap(),
@@ -592,7 +590,7 @@ mod tests {
             ("server", "test"),
         ]);
 
-        reserved_headers::strip_reserved_internal(&mut resp);
+        resp.strip_reserved_internal();
 
         assert_eq!(
             resp.headers.get("content-type").unwrap(),
@@ -614,7 +612,7 @@ mod tests {
     #[test]
     fn empty_response_reserved_strip_no_panic() {
         let mut resp = ResponseHeader::build(200, None).unwrap();
-        reserved_headers::strip_reserved_internal(&mut resp);
+        resp.strip_reserved_internal();
     }
 
     // -------------------------------------------------------------------------
