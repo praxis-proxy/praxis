@@ -27,9 +27,9 @@ use tokio::sync::Semaphore;
 use tracing::{Instrument as _, debug};
 
 use super::{
-    adjust_compression, emit_request_metrics, fail_to_proxy, handle_connect_failure, hop_by_hop::RemoveHeader as _,
-    logging_cleanup, record_passive_health, record_response_span_attributes, request_body_filter, request_filter,
-    response_body_filter, response_filter, upstream_peer, upstream_request, via,
+    adjust_compression, connected_to_upstream, emit_request_metrics, fail_to_proxy, handle_connect_failure,
+    hop_by_hop::RemoveHeader as _, logging_cleanup, record_passive_health, record_response_span_attributes,
+    request_body_filter, request_filter, response_body_filter, response_filter, upstream_peer, upstream_request, via,
 };
 use crate::http::pingora::{context::PingoraRequestCtx, metrics};
 
@@ -225,31 +225,6 @@ impl ProxyHttp for PingoraHttpHandler {
         fail_to_proxy::execute(session, e, ctx).instrument(span).await
     }
 
-    async fn connected_to_upstream(
-        &self,
-        _session: &mut Session,
-        reused: bool,
-        _peer: &HttpPeer,
-        #[cfg(unix)] _fd: std::os::unix::io::RawFd,
-        #[cfg(windows)] _sock: std::os::windows::io::RawSocket,
-        _digest: Option<&pingora_core::protocols::Digest>,
-        ctx: &mut Self::CTX,
-    ) -> Result<()>
-    where
-        Self::CTX: Send + Sync,
-    {
-        let span = ctx.request_span.clone();
-        let _entered = span.enter();
-        let cluster = ctx.metrics_cluster_shared.clone().unwrap_or_else(metrics::cluster_none);
-        if !reused && let Some(start) = ctx.upstream_connect_start.take() {
-            metrics::record_upstream_connect_duration(cluster.clone(), start.elapsed().as_secs_f64());
-        }
-        if ctx.retries > 0 {
-            metrics::record_upstream_retry(cluster, metrics::RETRY_RESULT_SUCCESS);
-        }
-        Ok(())
-    }
-
     async fn upstream_request_filter(
         &self,
         session: &mut Session,
@@ -282,7 +257,9 @@ impl ProxyHttp for PingoraHttpHandler {
     {
         let pipeline = ctx.pipeline(&self.pipeline);
         let span = ctx.request_span.clone();
+        let exchange_span = ctx.upstream_exchange_span.clone();
         let result = response_filter::execute(&pipeline, upstream_response, ctx)
+            .instrument(exchange_span)
             .instrument(span)
             .await;
         if result.is_ok() {
@@ -298,8 +275,38 @@ impl ProxyHttp for PingoraHttpHandler {
         upstream_peer::execute(ctx).instrument(span).await
     }
 
+    async fn connected_to_upstream(
+        &self,
+        _session: &mut Session,
+        reused: bool,
+        peer: &HttpPeer,
+        #[cfg(unix)] _fd: std::os::unix::io::RawFd,
+        #[cfg(windows)] _sock: std::os::windows::io::RawSocket,
+        digest: Option<&pingora_core::protocols::Digest>,
+        ctx: &mut Self::CTX,
+    ) -> Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        let span = ctx.request_span.clone();
+        let _entered = span.enter();
+        let cluster = ctx.metrics_cluster_shared.clone().unwrap_or_else(metrics::cluster_none);
+        if !reused && let Some(start) = ctx.upstream_connect_start.take() {
+            metrics::record_upstream_connect_duration(cluster.clone(), start.elapsed().as_secs_f64());
+        }
+        if ctx.retries > 0 {
+            metrics::record_upstream_retry(cluster, metrics::RETRY_RESULT_SUCCESS);
+        }
+        connected_to_upstream::execute(reused, peer, digest, ctx);
+        Ok(())
+    }
+
     async fn logging(&self, session: &mut Session, e: Option<&pingora_core::Error>, ctx: &mut Self::CTX) {
         record_response_span_attributes(session, ctx);
+        // Drop the exchange span before the request span so child
+        // ends before parent in tracing output.
+        let _exchange_span = std::mem::replace(&mut ctx.upstream_exchange_span, tracing::Span::none());
+        drop(_exchange_span);
         let span = std::mem::replace(&mut ctx.request_span, tracing::Span::none());
         async {
             let pipeline = ctx.pipeline(&self.pipeline);

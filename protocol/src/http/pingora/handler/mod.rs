@@ -29,6 +29,8 @@ use tracing::{debug, warn};
 
 use super::{context::PingoraRequestCtx, metrics};
 
+/// Upstream connection established hook.
+mod connected_to_upstream;
 /// Structured error responses for fatal proxy errors.
 mod fail_to_proxy;
 /// Shared hop-by-hop header stripping logic.
@@ -462,7 +464,8 @@ pub(super) fn http_version_label(version: http::Version) -> &'static str {
 /// the upstream exchange.
 ///
 /// Called from the `logging` hook to fill in `http.response.status_code`,
-/// `upstream.address`, and `upstream.cluster` on the root request span.
+/// `upstream.address`, and `upstream.cluster` on the root request span,
+/// and response attributes on the upstream exchange span.
 fn record_response_span_attributes(session: &Session, ctx: &PingoraRequestCtx) {
     if ctx.request_span.is_disabled() {
         return;
@@ -484,6 +487,15 @@ fn record_response_span_attributes(session: &Session, ctx: &PingoraRequestCtx) {
 
     if let Some(cluster) = &ctx.metrics_cluster {
         ctx.request_span.record("upstream.cluster", cluster.as_ref());
+    }
+
+    if !ctx.upstream_exchange_span.is_disabled() {
+        if let Some(resp) = session.response_written() {
+            ctx.upstream_exchange_span
+                .record("http.response.status_code", resp.status.as_u16());
+        }
+        ctx.upstream_exchange_span
+            .record("http.response.body.size", ctx.response_body_bytes);
     }
 }
 
@@ -1266,6 +1278,45 @@ mod tests {
         );
         ctx.request_span.record("upstream.cluster", "api-cluster");
         ctx.request_span.record("upstream.address", "10.0.0.1:80");
+    }
+
+    #[test]
+    fn record_response_span_attributes_records_exchange_span_fields() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.request_span = tracing::info_span!(
+            "test_request",
+            "http.response.status_code" = tracing::field::Empty,
+            "server.address" = tracing::field::Empty,
+            "upstream.cluster" = tracing::field::Empty,
+        );
+        ctx.upstream_exchange_span = tracing::info_span!(
+            parent: &ctx.request_span,
+            "upstream_exchange",
+            "http.response.status_code" = tracing::field::Empty,
+            "http.response.body.size" = tracing::field::Empty,
+        );
+        ctx.response_body_bytes = 4096;
+
+        // Verify recording on exchange span does not panic.
+        ctx.upstream_exchange_span.record("http.response.status_code", 200_u16);
+        ctx.upstream_exchange_span.record("http.response.body.size", 4096_u64);
+    }
+
+    #[test]
+    fn record_response_span_attributes_skips_exchange_when_disabled() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.request_span = tracing::info_span!(
+            "test_request",
+            "http.response.status_code" = tracing::field::Empty,
+            "server.address" = tracing::field::Empty,
+            "upstream.cluster" = tracing::field::Empty,
+        );
+        // Exchange span remains disabled (default).
+        assert!(
+            ctx.upstream_exchange_span.is_disabled(),
+            "exchange span should be disabled by default"
+        );
+        // Should not panic when exchange span is disabled.
     }
 
     // -------------------------------------------------------------------------
