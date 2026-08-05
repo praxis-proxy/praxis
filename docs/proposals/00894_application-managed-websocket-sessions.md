@@ -11,8 +11,9 @@ graduation_criteria:
     extension stakeholders
   - WebSocket lifecycle, backpressure, resource-limit, cancellation,
     and security requirements agreed
-  - Follow-up design demonstrates both a native WebSocket upstream and
-    an HTTP/SSE upstream without provider-specific behavior in core
+  - Follow-up How? section specifies executable integration scenarios
+    for both a native WebSocket upstream and an HTTP/SSE upstream through
+    the same provider-neutral core boundary
 stakeholders:
   - franciscojavierarceo
   - shaneutt
@@ -223,7 +224,7 @@ References:
 [openai-websocket]: https://developers.openai.com/api/docs/guides/websocket-mode
 [openai-response-create]: https://developers.openai.com/api/reference/resources/responses/websocket-events#response.create
 [vllm-server]: https://docs.vllm.ai/en/latest/serving/online_serving/
-[vllm-responses-router]: https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/responses/api_router.py
+[vllm-responses-router]: https://github.com/vllm-project/vllm/blob/68ca6fd02c6cd705c4fa6872317611c83b26b4c6/vllm/entrypoints/openai/responses/api_router.py
 
 ### User Stories
 
