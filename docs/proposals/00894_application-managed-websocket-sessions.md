@@ -18,6 +18,7 @@ stakeholders:
   - franciscojavierarceo
   - shaneutt
   - usize
+  - alexsnaps
 ---
 
 # Application-Managed WebSocket Sessions
