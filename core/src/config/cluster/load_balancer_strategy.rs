@@ -40,6 +40,9 @@ pub enum SimpleStrategy {
     /// Sample two random endpoints; pick the less loaded one.
     #[serde(rename = "p2c")]
     PowerOfTwoChoices,
+
+    /// Uniform random endpoint selection, weighted by endpoint weight.
+    Random,
 }
 
 /// Load-balancing strategies that carry parameters.
@@ -133,6 +136,17 @@ consistent_hash:
             strategy,
             LoadBalancerStrategy::Simple(SimpleStrategy::PowerOfTwoChoices),
             "should parse 'p2c' string"
+        );
+    }
+
+    #[test]
+    fn load_balancer_strategy_parses_random() {
+        let yaml = "random";
+        let strategy: LoadBalancerStrategy = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            strategy,
+            LoadBalancerStrategy::Simple(SimpleStrategy::Random),
+            "should parse 'random' string"
         );
     }
 

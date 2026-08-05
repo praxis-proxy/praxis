@@ -12,7 +12,7 @@ use praxis_core::{
 
 use super::{
     consistent_hash::ConsistentHash, endpoint::WeightedEndpoint, least_connections::LeastConnections,
-    p2c::PowerOfTwoChoices, round_robin::RoundRobin,
+    p2c::PowerOfTwoChoices, random::Random, round_robin::RoundRobin,
 };
 
 // -----------------------------------------------------------------------------
@@ -32,6 +32,9 @@ pub(crate) enum Strategy {
 
     /// Sample two random endpoints; pick the less loaded one.
     PowerOfTwoChoices(PowerOfTwoChoices),
+
+    /// Uniform random selection, weighted by endpoint weight.
+    Random(Random),
 }
 
 impl Strategy {
@@ -45,6 +48,7 @@ impl Strategy {
             Self::LeastConnections(lc) => lc.select(health),
             Self::ConsistentHash(ch) => ch.select(hash_key, health),
             Self::PowerOfTwoChoices(p2c) => p2c.select(health),
+            Self::Random(r) => r.select(health),
         }
     }
 
@@ -54,7 +58,7 @@ impl Strategy {
         match self {
             Self::LeastConnections(lc) => lc.release(addr),
             Self::PowerOfTwoChoices(p2c) => p2c.release(addr),
-            Self::RoundRobin(_) | Self::ConsistentHash(_) => {},
+            Self::RoundRobin(_) | Self::ConsistentHash(_) | Self::Random(_) => {},
         }
     }
 }
@@ -69,6 +73,7 @@ pub(crate) fn build_strategy(lb_strategy: &LoadBalancerStrategy, endpoints: Vec<
         LoadBalancerStrategy::Simple(SimpleStrategy::PowerOfTwoChoices) => {
             Strategy::PowerOfTwoChoices(PowerOfTwoChoices::new(endpoints))
         },
+        LoadBalancerStrategy::Simple(SimpleStrategy::Random) => Strategy::Random(Random::new(endpoints)),
         LoadBalancerStrategy::Parameterised(ParameterisedStrategy::ConsistentHash(opts)) => {
             Strategy::ConsistentHash(ConsistentHash::new(endpoints, opts.header.clone()))
         },
@@ -134,11 +139,26 @@ mod tests {
     }
 
     #[test]
+    fn build_strategy_random() {
+        let strategy = build_strategy(&LoadBalancerStrategy::Simple(SimpleStrategy::Random), make_endpoints());
+        assert!(
+            matches!(strategy, Strategy::Random(_)),
+            "SimpleStrategy::Random should produce Strategy::Random"
+        );
+    }
+
+    #[test]
     fn release_round_robin_is_noop() {
         let strategy = build_strategy(
             &LoadBalancerStrategy::Simple(SimpleStrategy::RoundRobin),
             make_endpoints(),
         );
+        strategy.release("10.0.0.1:80");
+    }
+
+    #[test]
+    fn release_random_is_noop() {
+        let strategy = build_strategy(&LoadBalancerStrategy::Simple(SimpleStrategy::Random), make_endpoints());
         strategy.release("10.0.0.1:80");
     }
 
@@ -238,6 +258,15 @@ mod tests {
         }
         strategy.release("10.0.0.1:80");
         strategy.release("10.0.0.2:80");
+    }
+
+    #[test]
+    fn select_random_returns_some() {
+        let strategy = build_strategy(&LoadBalancerStrategy::Simple(SimpleStrategy::Random), make_endpoints());
+        assert!(
+            strategy.select(None, None).is_some(),
+            "Random select should return Some with healthy endpoints"
+        );
     }
 
     #[test]

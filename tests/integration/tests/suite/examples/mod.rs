@@ -48,6 +48,7 @@ mod policy;
 mod policy_http;
 mod protocol_examples;
 mod protocols;
+mod random;
 mod redirect;
 mod round_robin;
 mod security_examples;
@@ -55,6 +56,8 @@ mod session_affinity;
 mod static_response;
 mod stream_buffer;
 mod timeout;
+#[cfg(feature = "otel")]
+mod tracing_otlp;
 mod traffic_management_examples;
 mod url_rewriting;
 mod virtual_hosts;

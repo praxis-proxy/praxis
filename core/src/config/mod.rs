@@ -29,6 +29,7 @@ mod metrics;
 mod parse;
 mod route;
 pub mod runtime;
+mod telemetry;
 mod validate;
 
 pub use admin::AdminConfig;
@@ -49,6 +50,7 @@ use parse::check_yaml_safety;
 pub use praxis_tls::{CachedClusterTls, ClusterTls};
 pub use route::{PathMatch, Route};
 pub use runtime::{DEFAULT_SUBREQUEST_POOL_SIZE, RuntimeConfig};
+pub use telemetry::TelemetryConfig;
 pub use validate::{MAX_BRANCH_DEPTH, MAX_ITERATIONS_CEILING, TERMINAL_FILTERS, is_ssrf_sensitive};
 
 // -----------------------------------------------------------------------------
@@ -113,6 +115,10 @@ pub struct Config {
     /// Drain time for graceful shutdown.
     #[serde(default = "default_shutdown_timeout_secs")]
     pub shutdown_timeout_secs: u64,
+
+    /// OpenTelemetry tracing export settings.
+    #[serde(default)]
+    pub telemetry: TelemetryConfig,
 }
 
 impl Config {

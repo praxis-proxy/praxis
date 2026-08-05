@@ -11,6 +11,7 @@ pub mod body;
 pub mod builtins;
 mod condition;
 mod context;
+mod error_response;
 mod extensions;
 mod factory;
 mod filter;
@@ -37,6 +38,9 @@ pub use builtins::{
 };
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{HttpFilterContext, PendingHeaderResult, Request, Response, TrustedHeaderMutation};
+pub use error_response::{
+    ErrorResponseContext, ErrorResponseFormatter, ErrorResponseFormatterHandle, FormattedErrorResponse,
+};
 pub use extensions::RequestExtensions;
 pub use factory::{
     EmptyFilterConfig, FilterFactory, HttpFilterFactory, TcpFilterFactory, http_builtin, parse_filter_config,

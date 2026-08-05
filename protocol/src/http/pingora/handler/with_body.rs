@@ -21,14 +21,15 @@ use pingora_core::{
     modules::http::{HttpModules, compression::ResponseCompressionBuilder},
     upstreams::peer::HttpPeer,
 };
-use pingora_proxy::{ProxyHttp, Session};
+use pingora_proxy::{FailToProxy, ProxyHttp, Session};
 use praxis_filter::{CompressionConfig, FilterPipeline};
 use tokio::sync::Semaphore;
 use tracing::debug;
 
 use super::{
-    adjust_compression, emit_request_metrics, handle_connect_failure, logging_cleanup, record_passive_health,
-    request_body_filter, request_filter, response_body_filter, response_filter, upstream_peer, upstream_request, via,
+    adjust_compression, emit_request_metrics, fail_to_proxy, handle_connect_failure, logging_cleanup,
+    record_passive_health, request_body_filter, request_filter, response_body_filter, response_filter, upstream_peer,
+    upstream_request, via,
 };
 use crate::http::pingora::context::PingoraRequestCtx;
 
@@ -196,6 +197,13 @@ impl ProxyHttp for PingoraHttpHandler {
         e: Box<pingora_core::Error>,
     ) -> Box<pingora_core::Error> {
         handle_connect_failure(ctx, e)
+    }
+
+    async fn fail_to_proxy(&self, session: &mut Session, e: &pingora_core::Error, ctx: &mut Self::CTX) -> FailToProxy
+    where
+        Self::CTX: Send + Sync,
+    {
+        fail_to_proxy::execute(session, e, ctx).await
     }
 
     async fn upstream_request_filter(

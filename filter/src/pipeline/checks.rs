@@ -27,6 +27,8 @@ use super::{branch::RejoinTarget, filter::PipelineFilter};
 
 /// Filters classified as security-critical (bypass risk when conditional).
 const SECURITY_FILTERS: &[&str] = &[
+    #[cfg(feature = "basic-auth-filter")]
+    "basic_auth",
     "cors",
     "credential_injection",
     "csrf",
