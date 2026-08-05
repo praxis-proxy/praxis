@@ -127,7 +127,7 @@ page.
 | [basic-reverse-proxy.yaml](configs/traffic-management/basic-reverse-proxy.yaml) | Minimal config: one listener, one upstream, default filter chain |
 | [canary-routing.yaml](configs/traffic-management/canary-routing.yaml) | Sends ~10% of traffic to a canary backend while the stable backend handles the remaining ~90% |
 | [circuit-breaker.yaml](configs/traffic-management/circuit-breaker.yaml) | Prevents cascading failures by tracking consecutive upstream errors per cluster |
-| [endpoint-selector.yaml](configs/traffic-management/endpoint-selector.yaml) | Selects an upstream endpoint from a trusted mutation source (e.g. ext_proc) |
+| [endpoint-selector.yaml](configs/traffic-management/endpoint-selector.yaml) | Selects an upstream endpoint from a trusted mutation source (e.g. external processing) |
 | [grpc-detection.yaml](configs/traffic-management/grpc-detection.yaml) | Detects gRPC requests from the content-type header and promotes the variant to filter metadata and results |
 | [health-checks.yaml](configs/traffic-management/health-checks.yaml) | Per-cluster health checks probe endpoints on a timer and remove unhealthy backends from the load balancer rotation |
 | [hostname-upstream.yaml](configs/traffic-management/hostname-upstream.yaml) | Demonstrates using DNS hostnames instead of IP addresses for upstream endpoints |

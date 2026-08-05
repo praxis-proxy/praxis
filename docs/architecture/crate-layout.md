@@ -23,13 +23,6 @@ upstream library callbacks (Pingora) into filter pipeline
 invocations. `Protocol` trait, `ListenerPipelines`, HTTP and
 TCP implementations.
 
-**`praxis-ext-proc`** : Envoy-compatible external processing
-filter (anti-pattern — see [filter docs](../filters/README.md#external-processing-anti-pattern)).
-Self-contained crate with vendored Envoy protobuf
-definitions, gRPC stubs, and the filter implementation.
-Not included in the default feature set; registered
-explicitly by callers.
-
 **`praxis-tls`** : TLS configuration types and runtime
 setup. Defines `ListenerTls` (certificate list, client CA,
 cert mode), `ClusterTls` (upstream TLS settings), TLS

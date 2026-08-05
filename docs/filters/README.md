@@ -194,42 +194,6 @@ flowchart TD
     TcpListener["TCP Listener"] -->|supports| TcpFilter
 ```
 
-## External Processing (Anti-Pattern)
-
-> **Warning**: External processing (`ext_proc`) is an
-> anti-pattern. Do not use it unless you are certain
-> it must be used.
-
-The `ext_proc` filter sends request and response data to
-an external gRPC server via the Envoy external processing
-protocol. It exists for backwards compatibility with
-Envoy deployments and for situations where no other
-solution is viable.
-
-**Why to avoid it:**
-
-- Adds a gRPC network hop to every request (latency)
-- Introduces a new failure domain (the gRPC server)
-- Requires operating and monitoring a separate service
-- Praxis native filters do the same work in-process
-  with zero-copy body streaming and no network boundary
-
-**What to use instead:**
-
-- **Body inspection**: `json_body_field`, `guardrails`,
-  `StreamBuffer` mode in a custom filter
-- **Header transforms**: `headers`, `forwarded_headers`,
-  classifier filters
-- **Routing decisions**: `router` + `load_balancer`,
-  branch chains
-- **Custom logic**: write a native `HttpFilter` — it
-  runs in-process with full pipeline context
-
-The `ext_proc` filter lives in a separate crate
-(`praxis-ext-proc`) and must be registered explicitly.
-Production deployments should plan to replace
-`ext_proc` usage with native filters.
-
 ## What Stays Outside Filters
 
 - TCP/TLS, HTTP framing, connection pooling: adapters

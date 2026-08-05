@@ -114,7 +114,8 @@ fn cache_tls(tls: Option<&ClusterTls>) -> Result<Option<CachedClusterTls>, Filte
         return Ok(None);
     };
     if let Some(sni) = tls.sni.as_deref() {
-        validate_sni(sni)?;
+        praxis_tls::validate_sni_name(sni)
+            .map_err(|e| -> FilterError { format!("endpoint_selector: tls.sni {e}").into() })?;
     } else if tls.verify {
         return Err("endpoint_selector: tls.sni is required when tls.verify is true".into());
     }
@@ -122,32 +123,6 @@ fn cache_tls(tls: Option<&ClusterTls>) -> Result<Option<CachedClusterTls>, Filte
     CachedClusterTls::try_from_config(tls)
         .map(Some)
         .map_err(|e| format!("endpoint_selector: invalid TLS configuration: {e}").into())
-}
-
-/// Validate SNI with the same DNS and wildcard rules as cluster TLS.
-///
-/// Endpoint-selector TLS is parsed as filter configuration rather than
-/// cluster configuration, so it does not pass through the cluster
-/// validator.
-fn validate_sni(sni: &str) -> Result<(), FilterError> {
-    if sni.is_empty() {
-        return Err("endpoint_selector: tls.sni must not be empty".into());
-    }
-    if sni.len() > 253 {
-        return Err("endpoint_selector: tls.sni exceeds 253 characters".into());
-    }
-
-    for (index, label) in sni.split('.').enumerate() {
-        if label.contains('*') {
-            if label != "*" || index != 0 {
-                return Err("endpoint_selector: tls.sni wildcard is only valid as the complete leftmost label".into());
-            }
-            continue;
-        }
-        praxis_tls::dns::validate_dns_label(label)
-            .map_err(|e| -> FilterError { format!("endpoint_selector: tls.sni {e}").into() })?;
-    }
-    Ok(())
 }
 
 /// Configuration for the endpoint selector filter.
@@ -205,7 +180,7 @@ fn default_strip_header() -> bool {
 /// Selects an upstream endpoint from a trusted mutation source.
 ///
 /// Only values set by trusted pre-read mutations (e.g. from an
-/// `ext_proc` filter) are considered. Original client-supplied
+/// external processing filter) are considered. Original client-supplied
 /// header values are deliberately ignored to prevent SSRF.
 ///
 /// The resolved value must be a single `host:port` authority. If no
@@ -448,16 +423,8 @@ fn validate_host_port(addr: &str) -> Result<(), FilterError> {
         return Err(format!("endpoint_selector: value contains userinfo, expected host:port: '{addr}'").into());
     }
 
-    // Handle bracketed IPv6: [host]:port
     if let Some(rest) = addr.strip_prefix('[') {
-        let (ipv6_host, port_str) = rest
-            .split_once("]:")
-            .ok_or_else(|| format!("endpoint_selector: invalid IPv6 address format: '{addr}'"))?;
-        if ipv6_host.parse::<std::net::Ipv6Addr>().is_err() {
-            return Err(format!("endpoint_selector: invalid IPv6 address in brackets: '{addr}'").into());
-        }
-        parse_port(port_str, addr)?;
-        return Ok(());
+        return validate_ipv6_host_port(rest, addr);
     }
 
     // For non-IPv6, split on the last colon.
@@ -469,18 +436,22 @@ fn validate_host_port(addr: &str) -> Result<(), FilterError> {
         return Err(format!("endpoint_selector: empty host in address: '{addr}'").into());
     }
 
-    validate_host_label(host, addr)?;
+    praxis_tls::dns::validate_dns_hostname(host)
+        .map_err(|e| -> FilterError { format!("endpoint_selector: host {e} in: '{addr}'").into() })?;
     parse_port(port_str, addr)?;
 
     Ok(())
 }
 
-/// Validate a non-IPv6 host label (DNS name or IPv4 address).
-fn validate_host_label(host: &str, addr: &str) -> Result<(), FilterError> {
-    for label in host.split('.') {
-        praxis_tls::dns::validate_dns_label(label)
-            .map_err(|e| -> FilterError { format!("endpoint_selector: host {e} in: '{addr}'").into() })?;
+/// Validate a bracketed IPv6 `[host]:port` address.
+fn validate_ipv6_host_port(rest: &str, addr: &str) -> Result<(), FilterError> {
+    let (ipv6_host, port_str) = rest
+        .split_once("]:")
+        .ok_or_else(|| format!("endpoint_selector: invalid IPv6 address format: '{addr}'"))?;
+    if ipv6_host.parse::<std::net::Ipv6Addr>().is_err() {
+        return Err(format!("endpoint_selector: invalid IPv6 address in brackets: '{addr}'").into());
     }
+    parse_port(port_str, addr)?;
     Ok(())
 }
 
