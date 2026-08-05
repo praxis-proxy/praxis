@@ -259,17 +259,24 @@ fn handle_connect_failure(ctx: &mut PingoraRequestCtx, e: Box<pingora_core::Erro
 }
 
 /// Decide whether an idempotent request may retry after a connect failure.
+#[expect(clippy::too_many_lines, reason = "retry span events add structured fields")]
 fn maybe_retry_idempotent_connect(
     ctx: &mut PingoraRequestCtx,
     cluster: ::metrics::SharedString,
     e: Box<pingora_core::Error>,
 ) -> Box<pingora_core::Error> {
+    let upstream_address = ctx
+        .upstream_for_retry
+        .as_ref()
+        .map_or("unknown", |u| u.address.as_ref());
+
     let mutated_len = ctx.mutated_request_body_len.unwrap_or(0) as u64;
     if std::cmp::max(ctx.request_body_bytes, mutated_len) > RETRY_BODY_LIMIT {
         warn!(
             body_bytes = ctx.request_body_bytes,
             mutated_len = ?ctx.mutated_request_body_len,
             limit = RETRY_BODY_LIMIT,
+            upstream_address,
             "skipping retry: request body exceeds Pingora retry buffer limit"
         );
         record_retry_exhausted_if_attempted(ctx, cluster);
@@ -277,19 +284,23 @@ fn maybe_retry_idempotent_connect(
     }
     if (ctx.retries as usize) < MAX_RETRIES {
         ctx.retries += 1;
-        debug!(
-            retries = ctx.retries,
-            max = MAX_RETRIES,
-            "retrying idempotent request after connect failure"
+        warn!(
+            attempt = ctx.retries,
+            max_retries = MAX_RETRIES,
+            upstream_address,
+            reason = %e,
+            "retry attempt after upstream connect failure"
         );
         let mut e = e;
         e.set_retry(true);
         return e;
     }
     warn!(
-        retries = ctx.retries,
-        max = MAX_RETRIES,
-        "retry limit reached for idempotent request"
+        attempt = ctx.retries,
+        max_retries = MAX_RETRIES,
+        upstream_address,
+        reason = %e,
+        "retry limit exhausted"
     );
     metrics::record_upstream_retry(cluster, metrics::RETRY_RESULT_EXHAUSTED);
     e
@@ -1266,6 +1277,69 @@ mod tests {
         );
         ctx.request_span.record("upstream.cluster", "api-cluster");
         ctx.request_span.record("upstream.address", "10.0.0.1:80");
+    }
+
+    // -------------------------------------------------------------------------
+    // Span Event Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn retry_with_upstream_address_sets_retry_flag() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.request_is_idempotent = true;
+        ctx.upstream_for_retry = Some(Upstream {
+            address: Arc::from("10.0.0.1:8080"),
+            connection: Arc::new(ConnectionOptions::default()),
+            tls: None,
+        });
+        let e = handle_connect_failure(&mut ctx, make_error());
+        assert!(e.retry(), "should retry with upstream address present");
+        assert_eq!(ctx.retries, 1, "retry counter should increment to 1");
+    }
+
+    #[test]
+    fn retry_without_upstream_address_uses_fallback() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.request_is_idempotent = true;
+        ctx.upstream_for_retry = None;
+        let e = handle_connect_failure(&mut ctx, make_error());
+        assert!(
+            e.retry(),
+            "should retry even when upstream_for_retry is None (address defaults to unknown)"
+        );
+        assert_eq!(ctx.retries, 1, "retry counter should increment to 1");
+    }
+
+    #[test]
+    fn retry_exhausted_with_upstream_address_does_not_retry() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.request_is_idempotent = true;
+        ctx.retries = MAX_RETRIES as u32;
+        ctx.upstream_for_retry = Some(Upstream {
+            address: Arc::from("10.0.0.2:443"),
+            connection: Arc::new(ConnectionOptions::default()),
+            tls: None,
+        });
+        let e = handle_connect_failure(&mut ctx, make_error());
+        assert!(
+            !e.retry(),
+            "should not retry after MAX_RETRIES even with upstream address"
+        );
+    }
+
+    #[test]
+    fn large_body_skip_with_upstream_address() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.request_is_idempotent = true;
+        ctx.request_body_bytes = RETRY_BODY_LIMIT + 1;
+        ctx.upstream_for_retry = Some(Upstream {
+            address: Arc::from("10.0.0.3:8080"),
+            connection: Arc::new(ConnectionOptions::default()),
+            tls: None,
+        });
+        let e = handle_connect_failure(&mut ctx, make_error());
+        assert!(!e.retry(), "should not retry large body even with upstream address");
+        assert_eq!(ctx.retries, 0, "retry counter should not increment");
     }
 
     // -------------------------------------------------------------------------

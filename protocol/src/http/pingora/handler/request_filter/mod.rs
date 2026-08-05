@@ -922,9 +922,6 @@ mod tests {
             "span should be disabled before pipeline runs"
         );
         drop(run_pipeline(&empty_pipeline(), make_request(), &mut ctx).await.unwrap());
-        // The span is created in execute() before run_pipeline, but
-        // run_pipeline tests don't go through execute(). Verify
-        // the default is disabled, which confirms no premature creation.
         assert!(
             ctx.request_span.is_disabled(),
             "run_pipeline alone should not create the request span"
@@ -938,7 +935,6 @@ mod tests {
         ctx.request_span = span;
 
         let result = run_pipeline(&empty_pipeline(), make_request(), &mut ctx).await.unwrap();
-        // Empty pipeline produces no extra headers containing x-request-id.
         assert!(
             result
                 .extra_headers

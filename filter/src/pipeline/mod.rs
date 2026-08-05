@@ -394,7 +394,9 @@ pub(crate) fn check_failure_mode(
             warn!(
                 filter = filter_name,
                 error = %error,
-                "filter error during {phase}, continuing (failure_mode=open)"
+                phase,
+                failure_mode = "open",
+                "filter error, continuing"
             );
             Ok(())
         },
@@ -402,7 +404,9 @@ pub(crate) fn check_failure_mode(
             error!(
                 filter = filter_name,
                 error = %error,
-                "filter error during {phase}, aborting"
+                phase,
+                failure_mode = "closed",
+                "filter error, aborting request"
             );
             Err(error)
         },
