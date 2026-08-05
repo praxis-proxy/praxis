@@ -34,8 +34,7 @@ COPY server/build.rs server/build.rs
 
 # Strip workspace members not needed for the praxis binary
 # so we don't need their Cargo.toml files.
-RUN sed -i '/xtask/d; /benchmarks/d; /tests\//d; /filter\/ext-proc/d' Cargo.toml \
-    && sed -i '/praxis-ext-proc/d' server/Cargo.toml
+RUN sed -i '/xtask/d; /benchmarks/d; /tests\//d' Cargo.toml
 RUN mkdir -p core/src \
     filter/src \
     protocol/src \

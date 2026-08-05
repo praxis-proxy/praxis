@@ -74,9 +74,6 @@ server -> protocol -> filter -> core -> tls
   admin endpoints
 - **tls** (`praxis-tls`): TLS config types, SNI
   resolution (including wildcards), cert loading
-- **ext-proc** (`praxis-ext-proc`): Envoy ext_proc
-  filter with vendored protobuf definitions
-  (anti-pattern; standalone crate, not a default dep)
 
 **Test crates** (under `tests/`):
 
