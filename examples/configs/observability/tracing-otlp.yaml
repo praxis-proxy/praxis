@@ -1,0 +1,29 @@
+# OTLP Tracing Export
+#
+# Exports distributed tracing spans to an OpenTelemetry Collector via
+# OTLP/gRPC. Requires the `otel` feature at compile time.
+#
+# The telemetry.otlp_endpoint field sets the collector address. If omitted,
+# the OTEL_EXPORTER_OTLP_ENDPOINT environment variable is used as a
+# fallback. When neither is set, OTLP export is disabled and the proxy
+# runs with fmt-only logging (the default behavior).
+#
+# Usage:
+#   cargo run --features otel -p praxis-proxy -- -c examples/configs/observability/tracing-otlp.yaml
+#   curl http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+
+      - filter: static_response
+        status: 200
+
+telemetry:
+  otlp_endpoint: "http://localhost:4317"

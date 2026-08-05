@@ -234,11 +234,8 @@ deployment guidance.
 - **Rust extensions**: compile-time custom filters with
   zero overhead via the `HttpFilter`/`TcpFilter` traits
   and `register_filters!` macro
-- **External processing** (`ext_proc`): Envoy-compatible
-  gRPC external processing filter (opt-in, separate
-  crate)
 - **Endpoint selector**: pin upstream endpoints from
-  trusted mutation sources (e.g. `ext_proc`).
+  trusted mutation sources.
 - **Failure mode**: per-filter `failure_mode: open` for
   non-security filters when runtime errors should not
   block traffic.

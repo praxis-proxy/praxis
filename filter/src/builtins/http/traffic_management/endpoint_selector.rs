@@ -205,7 +205,7 @@ fn default_strip_header() -> bool {
 /// Selects an upstream endpoint from a trusted mutation source.
 ///
 /// Only values set by trusted pre-read mutations (e.g. from an
-/// `ext_proc` filter) are considered. Original client-supplied
+/// external processing filter) are considered. Original client-supplied
 /// header values are deliberately ignored to prevent SSRF.
 ///
 /// The resolved value must be a single `host:port` authority. If no
