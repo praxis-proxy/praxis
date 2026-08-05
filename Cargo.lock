@@ -3166,6 +3166,7 @@ dependencies = [
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",
+ "opentelemetry",
  "percent-encoding",
  "praxis-proxy-core",
  "praxis-proxy-tls",
@@ -3182,6 +3183,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tracing",
+ "tracing-opentelemetry",
  "yaml_serde",
  "zeroize",
 ]
