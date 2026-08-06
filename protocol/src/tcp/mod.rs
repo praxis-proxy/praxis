@@ -64,6 +64,14 @@ impl Protocol for PingoraTcp {
                 .first()
                 .and_then(|l| l.max_connections)
                 .map(|max| Arc::new(Semaphore::new(max as usize)));
+            let listener_names: std::collections::HashMap<String, ::metrics::SharedString> = listeners
+                .iter()
+                .map(|l| (l.address.clone(), ::metrics::SharedString::from(l.name.clone())))
+                .collect();
+            let default_listener_name = listeners.first().map_or_else(
+                || ::metrics::SharedString::const_str("unknown"),
+                |l| ::metrics::SharedString::from(l.name.clone()),
+            );
             let app = proxy::PingoraTcpProxy::new(
                 upstream_opt.clone(),
                 cluster_opt.map(Arc::from),
@@ -72,6 +80,8 @@ impl Protocol for PingoraTcp {
                 max_duration,
                 connection_semaphore,
                 config.insecure_options.allow_private_upstreams,
+                listener_names,
+                default_listener_name,
             );
             let mut service = Service::new(service_name, app);
 

@@ -320,8 +320,7 @@ fn aggregate_health(registry: &HealthRegistry, verbose: bool) -> HealthAggregate
     };
     let mut first = true;
     for (name, state) in registry.iter() {
-        let eps = state.endpoints();
-        let h = eps.iter().filter(|ep| ep.is_healthy()).count();
+        let (h, total) = state.endpoint_counts();
         agg.total += 1;
         if h == 0 {
             agg.any_down = true;
@@ -329,7 +328,7 @@ fn aggregate_health(registry: &HealthRegistry, verbose: bool) -> HealthAggregate
         } else {
             agg.healthy += 1;
         }
-        append_verbose_detail(&mut agg.verbose_detail, &mut first, name, h, eps.len());
+        append_verbose_detail(&mut agg.verbose_detail, &mut first, name, h, total);
     }
     if let Some(vj) = &mut agg.verbose_detail {
         vj.push('}');

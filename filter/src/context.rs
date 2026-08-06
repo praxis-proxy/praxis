@@ -138,6 +138,9 @@ pub struct HttpFilterContext<'a> {
     /// in HTTP/1.1).
     pub downstream_tls: bool,
 
+    /// Matched route path pattern for metrics (bounded; not the raw URL).
+    pub metrics_route: Option<::metrics::SharedString>,
+
     /// Verified downstream TLS peer identity, if the connection
     /// is mTLS and the peer presented a valid client certificate.
     ///

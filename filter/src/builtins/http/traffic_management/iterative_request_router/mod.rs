@@ -1062,6 +1062,7 @@ fn build_sub_filter_context<'a>(
         health_registry: runtime.health_registry,
         id_generator: runtime.id_generator,
         kv_stores: runtime.kv_stores,
+        metrics_route: None,
         peer_identity: runtime.peer_identity.cloned(),
         pre_read_mutations: Vec::new(),
         request,

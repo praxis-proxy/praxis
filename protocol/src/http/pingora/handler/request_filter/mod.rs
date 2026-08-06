@@ -195,6 +195,7 @@ async fn run_pipeline(
         rewritten_path,
         request_body_mode,
         selected_endpoint_index,
+        metrics_route,
         extensions,
         filter_metadata,
         filter_state,
@@ -218,6 +219,7 @@ async fn run_pipeline(
             filter_ctx.rewritten_path,
             filter_ctx.request_body_mode,
             filter_ctx.selected_endpoint_index,
+            filter_ctx.metrics_route,
             filter_ctx.extensions,
             filter_ctx.filter_metadata,
             filter_ctx.filter_state,
@@ -246,6 +248,7 @@ async fn run_pipeline(
     ctx.structured_metadata = structured_metadata;
     ctx.metrics_cluster_shared = cluster.as_ref().map(|c| ::metrics::SharedString::from(Arc::clone(c)));
     ctx.metrics_cluster.clone_from(&cluster);
+    ctx.metrics_route = metrics_route;
 
     match action {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {

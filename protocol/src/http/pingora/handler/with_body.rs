@@ -31,7 +31,7 @@ use super::{
     logging_cleanup, record_passive_health, request_body_filter, request_filter, response_body_filter, response_filter,
     upstream_peer, upstream_request, via,
 };
-use crate::http::pingora::context::PingoraRequestCtx;
+use crate::http::pingora::{context::PingoraRequestCtx, metrics};
 
 // -----------------------------------------------------------------------------
 // PingoraHttpHandler
@@ -57,6 +57,7 @@ use crate::http::pingora::context::PingoraRequestCtx;
 ///     Arc::new(ArcSwap::from_pointee(pipeline)),
 ///     None,
 ///     None,
+///     ::metrics::SharedString::const_str("http"),
 /// );
 /// ```
 ///
@@ -84,6 +85,9 @@ pub struct PingoraHttpHandler {
     /// Per-listener downstream read timeout.
     downstream_read_timeout: Option<Duration>,
 
+    /// Listener name for connection metrics.
+    listener_name: ::metrics::SharedString,
+
     /// Swappable filter pipeline.
     pipeline: Arc<ArcSwap<FilterPipeline>>,
 }
@@ -94,12 +98,14 @@ impl PingoraHttpHandler {
         pipeline: Arc<ArcSwap<FilterPipeline>>,
         downstream_read_timeout: Option<Duration>,
         connection_semaphore: Option<Arc<Semaphore>>,
+        listener_name: ::metrics::SharedString,
     ) -> Self {
         let compression = pipeline.load().compression_config().cloned();
         Self {
             compression,
             connection_semaphore,
             downstream_read_timeout,
+            listener_name,
             pipeline,
         }
     }
@@ -129,12 +135,14 @@ impl ProxyHttp for PingoraHttpHandler {
         Self::CTX: Send + Sync,
     {
         if praxis_core::memory::is_exceeded() {
+            metrics::record_overload_reject(metrics::OVERLOAD_REASON_MEMORY);
             return reject_503(session, "5", "memory pressure exceeded").await;
         }
 
         let (exceeded, permit) = crate::connections::try_acquire_global();
         ctx._global_connection_permit = permit;
         if exceeded {
+            metrics::record_overload_reject(metrics::OVERLOAD_REASON_GLOBAL_CONNECTIONS);
             return reject_503(session, "1", "global max connections exceeded").await;
         }
 
@@ -142,9 +150,12 @@ impl ProxyHttp for PingoraHttpHandler {
             if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
                 ctx._connection_permit = Some(permit);
             } else {
+                metrics::record_overload_reject(metrics::OVERLOAD_REASON_LISTENER_CONNECTIONS);
                 return reject_503(session, "1", "max connections exceeded").await;
             }
         }
+
+        ctx._active_connection = Some(metrics::ActiveConnectionGuard::acquire(self.listener_name.clone()));
 
         if let Some(timeout) = self.downstream_read_timeout {
             debug!(
@@ -204,6 +215,29 @@ impl ProxyHttp for PingoraHttpHandler {
         Self::CTX: Send + Sync,
     {
         fail_to_proxy::execute(session, e, ctx).await
+    }
+
+    async fn connected_to_upstream(
+        &self,
+        _session: &mut Session,
+        reused: bool,
+        _peer: &HttpPeer,
+        #[cfg(unix)] _fd: std::os::unix::io::RawFd,
+        #[cfg(windows)] _sock: std::os::windows::io::RawSocket,
+        _digest: Option<&pingora_core::protocols::Digest>,
+        ctx: &mut Self::CTX,
+    ) -> Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        let cluster = ctx.metrics_cluster_shared.clone().unwrap_or_else(metrics::cluster_none);
+        if !reused && let Some(start) = ctx.upstream_connect_start.take() {
+            metrics::record_upstream_connect_duration(cluster.clone(), start.elapsed().as_secs_f64());
+        }
+        if ctx.retries > 0 {
+            metrics::record_upstream_retry(cluster, metrics::RETRY_RESULT_SUCCESS);
+        }
+        Ok(())
     }
 
     async fn upstream_request_filter(

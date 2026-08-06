@@ -99,7 +99,7 @@ pub(crate) fn reload_pipelines(
         }
     }
 
-    respawn_health_checks(new_config, &health_registry, health_shutdown);
+    respawn_health_checks(old_config, new_config, &health_registry, health_shutdown);
 
     info!(
         swapped = ?swapped,
@@ -114,10 +114,21 @@ pub(crate) fn reload_pipelines(
 // Health Check Lifecycle
 // -----------------------------------------------------------------------------
 
+/// Cluster names that currently have an active health-check config.
+fn health_checked_cluster_names(config: &Config) -> Vec<&str> {
+    config
+        .clusters
+        .iter()
+        .filter(|c| c.health_check.is_some())
+        .map(|c| c.name.as_ref())
+        .collect()
+}
+
 /// Cancel old health check tasks and spawn new ones from the
 /// updated config.
 #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
 fn respawn_health_checks(
+    old_config: &Config,
     config: &Config,
     health_registry: &HealthRegistry,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
@@ -129,6 +140,12 @@ fn respawn_health_checks(
         old
     };
     old_token.cancel();
+
+    praxis_protocol::http::pingora::metrics::clear_stale_upstream_health_gauges(
+        health_checked_cluster_names(old_config),
+        health_checked_cluster_names(config),
+    );
+    praxis_protocol::http::pingora::metrics::seed_upstream_health_gauges(health_registry);
 
     if health_registry.is_empty() {
         return;
