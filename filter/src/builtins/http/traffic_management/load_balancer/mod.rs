@@ -44,8 +44,12 @@ use crate::{
 /// - `round_robin` (default): cycles through endpoints in order, respecting weights via endpoint expansion.
 /// - `least_connections`: picks the endpoint with the fewest active in-flight requests; decrements the counter on
 ///   `on_response`.
+/// - `p2c`: samples two random endpoints and picks the less loaded one.
+/// - `random`: picks a uniformly random endpoint, weighted by endpoint weight.
 /// - `consistent_hash`: hashes a configurable request header (or the URI path when the header is absent) to pin
 ///   requests to a stable endpoint.
+/// - `maglev`: hashes a configurable request header (or the URI path) through a Maglev lookup table for even
+///   distribution and minimal disruption when endpoints change.
 ///
 /// # YAML configuration
 ///

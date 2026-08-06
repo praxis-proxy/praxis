@@ -1,0 +1,38 @@
+# Maglev Consistent Hashing
+#
+# Pins a user's requests to one backend by hashing a request header
+# through a Maglev lookup table. Compared to ring-based consistent
+# hashing, Maglev gives more even load distribution and reassigns
+# only ~1/N of traffic when a backend is added or removed. Falls back
+# to the URI path when the header is absent.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/maglev.yaml
+#   for i in $(seq 1 6); do
+#     curl -H "X-User-Id: user-42" http://localhost:8080/
+#   done
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            load_balancer_strategy:
+              maglev:
+                header: "X-User-Id"   # omit to hash on URI path instead
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"
+              - "127.0.0.1:3003"

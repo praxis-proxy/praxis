@@ -51,12 +51,28 @@ pub enum ParameterisedStrategy {
     /// Hash a request attribute to route requests to a stable endpoint.
     #[serde(rename = "consistent_hash")]
     ConsistentHash(ConsistentHashOpts),
+
+    /// Maglev consistent hashing: even distribution with minimal disruption
+    /// when endpoints are added or removed.
+    #[serde(rename = "maglev")]
+    Maglev(MaglevOpts),
 }
 
 /// Options for the `consistent_hash` load-balancing strategy.
 #[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ConsistentHashOpts {
+    /// Name of the request header to use as the hash key.
+    ///
+    /// Falls back to the request URI path when the header is absent or when this field is `None`.
+    #[serde(default)]
+    pub header: Option<String>,
+}
+
+/// Options for the `maglev` load-balancing strategy.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaglevOpts {
     /// Name of the request header to use as the hash key.
     ///
     /// Falls back to the request URI path when the header is absent or when this field is `None`.
@@ -160,6 +176,33 @@ consistent_hash:
                 header: None,
             })),
             "should parse consistent_hash with no header"
+        );
+    }
+
+    #[test]
+    fn load_balancer_strategy_parses_maglev() {
+        let yaml = r#"
+maglev:
+  header: "X-User-Id"
+"#;
+        let strategy: LoadBalancerStrategy = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            strategy,
+            LoadBalancerStrategy::Parameterised(ParameterisedStrategy::Maglev(MaglevOpts {
+                header: Some("X-User-Id".into()),
+            })),
+            "should parse maglev with header"
+        );
+    }
+
+    #[test]
+    fn maglev_without_header() {
+        let yaml = "maglev: {}";
+        let strategy: LoadBalancerStrategy = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            strategy,
+            LoadBalancerStrategy::Parameterised(ParameterisedStrategy::Maglev(MaglevOpts { header: None })),
+            "should parse maglev with no header"
         );
     }
 }
