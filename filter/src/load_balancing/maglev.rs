@@ -203,27 +203,6 @@ mod tests {
 
     use super::*;
 
-    /// Build `n` equal-weight endpoints `10.0.0.{i+1}:80`.
-    fn endpoints(n: usize) -> Vec<WeightedEndpoint> {
-        (0..n)
-            .map(|i| WeightedEndpoint {
-                address: Arc::from(format!("10.0.0.{}:80", i + 1).as_str()),
-                index: i,
-                weight: 1,
-            })
-            .collect()
-    }
-
-    /// Build a health state where every endpoint starts healthy.
-    fn health_state(addrs: &[&str]) -> ClusterHealthState {
-        Arc::new(ClusterHealthEntry::new(
-            addrs.iter().map(|_| EndpointHealth::new()).collect(),
-            addrs.iter().map(|a| Arc::from(*a)).collect(),
-            None,
-            None,
-        ))
-    }
-
     #[test]
     fn same_key_same_endpoint() {
         let mg = Maglev::new(endpoints(3), None);
@@ -419,5 +398,30 @@ mod tests {
         for idx in 0..3_u32 {
             assert!(mg.table.contains(&idx), "endpoint {idx} should appear in the table");
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// Build `n` equal-weight endpoints `10.0.0.{i+1}:80`.
+    fn endpoints(n: usize) -> Vec<WeightedEndpoint> {
+        (0..n)
+            .map(|i| WeightedEndpoint {
+                address: Arc::from(format!("10.0.0.{}:80", i + 1).as_str()),
+                index: i,
+                weight: 1,
+            })
+            .collect()
+    }
+
+    /// Build a health state where every endpoint starts healthy.
+    fn health_state(addrs: &[&str]) -> ClusterHealthState {
+        Arc::new(ClusterHealthEntry::new(
+            addrs.iter().map(|_| EndpointHealth::new()).collect(),
+            addrs.iter().map(|a| Arc::from(*a)).collect(),
+            None,
+            None,
+        ))
     }
 }
