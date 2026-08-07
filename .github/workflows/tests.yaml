@@ -77,7 +77,7 @@ jobs:
   # Feature-gated build verification
   # ----------------------------------------------------------------------------
 
-  test-features:
+  experimental-features:
     runs-on: ubuntu-24.04
     # Non-voting: feature-gated code may lag behind the default path.
     continue-on-error: true
