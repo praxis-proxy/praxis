@@ -101,10 +101,30 @@ jobs:
         run: cargo install cargo-hack --locked
 
       - name: Check non-default features compile
-        run: cargo hack check --each-feature --exclude-no-default-features --exclude-features default --no-dev-deps
+        run: >
+          cargo hack check --each-feature
+          --exclude-no-default-features --exclude-features default
+          --no-dev-deps
+          -p praxis-proxy-core
+          -p praxis-proxy-filter
+          -p praxis-proxy-tls
+          -p praxis-proxy
 
       - name: Clippy non-default features
-        run: cargo hack clippy --each-feature --exclude-no-default-features --exclude-features default -- -D warnings
+        run: >
+          cargo hack clippy --each-feature
+          --exclude-no-default-features --exclude-features default
+          -p praxis-proxy-core
+          -p praxis-proxy-filter
+          -p praxis-proxy-tls
+          -p praxis-proxy
+          -- -D warnings
 
       - name: Test non-default features
-        run: cargo hack test --each-feature --exclude-no-default-features --exclude-features default
+        run: >
+          cargo hack test --each-feature
+          --exclude-no-default-features --exclude-features default
+          -p praxis-proxy-core
+          -p praxis-proxy-filter
+          -p praxis-proxy-tls
+          -p praxis-proxy
