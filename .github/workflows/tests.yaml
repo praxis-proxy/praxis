@@ -100,16 +100,6 @@ jobs:
         if: steps.cache-hack.outputs.cache-hit != 'true'
         run: cargo install cargo-hack --locked
 
-      - name: Check non-default features compile
-        run: >
-          cargo hack check --each-feature
-          --exclude-no-default-features --exclude-features default
-          --no-dev-deps
-          -p praxis-proxy-core
-          -p praxis-proxy-filter
-          -p praxis-proxy-tls
-          -p praxis-proxy
-
       - name: Clippy non-default features
         run: >
           cargo hack clippy --each-feature
