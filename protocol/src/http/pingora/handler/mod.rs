@@ -18,7 +18,10 @@ use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use pingora_core::{Result, apps::HttpServerOptions, server::Server, services::listening::Service};
+use pingora_core::{
+    Result, apps::HttpServerOptions, protocols::http::v2::server::H2Options, server::Server,
+    services::listening::Service,
+};
 use pingora_proxy::{Session, http_proxy};
 use praxis_core::{config::ABSOLUTE_MAX_BODY_BYTES, connectivity::Upstream};
 use praxis_filter::{BodyBuffer, BodyMode, CompressionConfig, FilterPipeline, HttpFilterContext, RequestExtensions};
@@ -151,6 +154,7 @@ where
     let service_name = format!("http-proxy:{name}", name = listener.name);
     let mut proxy = http_proxy(&server.configuration, handler);
     proxy.server_options = Some(h2c_server_options());
+    proxy.h2_options = Some(h2_server_options());
     let mut service = Service::new(service_name, proxy);
     if let Some(tx) = super::listener::add_listener(&mut service, listener)? {
         cert_watcher_shutdowns.push(tx);
@@ -397,6 +401,21 @@ fn apply_passive_threshold(
 fn h2c_server_options() -> HttpServerOptions {
     let mut opts = HttpServerOptions::default();
     opts.h2c = true;
+    opts
+}
+
+/// Build [`H2Options`] with limits to mitigate HPACK amplification attacks
+/// (CWE-409).
+///
+/// Without explicit limits the `h2` crate defaults allow unbounded header
+/// list sizes and concurrent streams, enabling a small compressed request
+/// to allocate hundreds of megabytes on the server.
+///
+/// [`H2Options`]: pingora_core::protocols::http::v2::server::H2Options
+fn h2_server_options() -> H2Options {
+    let mut opts = H2Options::new();
+    opts.max_header_list_size(65_536); // 64 KiB
+    opts.max_concurrent_streams(128);
     opts
 }
 
