@@ -72,3 +72,51 @@ jobs:
 
       - name: Unit tests
         run: make test-unit
+
+  # ----------------------------------------------------------------------------
+  # Non-default feature verification (per crate, parallel)
+  # ----------------------------------------------------------------------------
+
+  experimental-features:
+    runs-on: ubuntu-24.04
+    # Non-voting: feature-gated code may lag behind the default path.
+    continue-on-error: true
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - praxis-proxy-core
+          - praxis-proxy-filter
+          - praxis-proxy-tls
+          - praxis-proxy
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+
+      - name: Cache cargo-hack
+        id: cache-hack
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-hack
+          key: cargo-hack-${{ runner.os }}
+
+      - name: Install cargo-hack
+        if: steps.cache-hack.outputs.cache-hit != 'true'
+        run: cargo install cargo-hack --locked
+
+      - name: Clippy non-default features
+        run: >
+          cargo hack clippy --each-feature
+          --exclude-no-default-features --exclude-features default
+          -p ${{ matrix.crate }}
+          -- -D warnings
+
+      - name: Test non-default features
+        run: >
+          cargo hack test --each-feature
+          --exclude-no-default-features --exclude-features default
+          -p ${{ matrix.crate }}
