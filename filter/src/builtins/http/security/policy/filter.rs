@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use cpex::cpex_core::{
+use ppe::praxis_policy_core::{
     cmf::{
         CmfHook, Message, MessagePayload, Role,
         constants::{
@@ -48,7 +48,7 @@ use crate::{
 /// scanning, audit emission, and (under `body_access: read_write`)
 /// request / response body rewriting.
 ///
-/// Experimental: requires the `cpex-policy-engine` cargo feature, which
+/// Experimental: requires the `policy-engine` cargo feature, which
 /// is off by default. Registered under the YAML filter name `policy`.
 ///
 /// A single request can carry multiple identity sources — user JWT in
@@ -77,7 +77,7 @@ use crate::{
 ///
 /// ```yaml
 /// filter: policy
-/// config_path: /etc/praxis/cpex-policy.yaml
+/// config_path: /etc/praxis/policy.yaml
 /// body_access: read_write       # optional; default read_only
 /// require_protocol_metadata: true    # optional; default true
 /// init_timeout_secs: 30         # optional; default 30
@@ -127,7 +127,7 @@ impl PolicyFilter {
         })?;
 
         let mgr = Arc::new(PluginManager::default());
-        cpex::install_builtins(&mgr);
+        ppe::install_builtins(&mgr);
 
         mgr.load_config_yaml(&yaml)
             .map_err(|e: Box<PluginError>| -> FilterError {
@@ -368,7 +368,7 @@ impl PolicyFilter {
         reason = "async handler over large CMF types; linear resolve/authz/delegate flow"
     )]
     async fn on_request_http_authz(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        use cpex::cpex_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL};
+        use ppe::praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL};
 
         let headers = Self::snapshot_headers(ctx);
         let identity = match self.resolve_identity(headers.clone()).await {
@@ -429,7 +429,7 @@ impl PolicyFilter {
         ext: &mut Extensions,
         request_headers: std::collections::HashMap<String, String>,
     ) {
-        use cpex::cpex_core::extensions::HttpExtension;
+        use ppe::praxis_policy_core::extensions::HttpExtension;
 
         let req = ctx.request;
         let host = req.uri.authority().map(|a| a.host().to_owned()).or_else(|| {

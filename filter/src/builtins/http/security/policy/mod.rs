@@ -10,8 +10,8 @@
 //! `body_access: read_write`) request / response body rewriting.
 //! Everything runs as linked Rust crates — no sidecar, no FFI.
 //!
-//! **Experimental.** Feature-gated behind `cpex-policy-engine`, which is
-//! off by default. Build with `--features cpex-policy-engine` to compile
+//! **Experimental.** Feature-gated behind `policy-engine`, which is
+//! off by default. Build with `--features policy-engine` to compile
 //! and register the filter (registered under the YAML name `policy`).
 //!
 //! # Why this filter

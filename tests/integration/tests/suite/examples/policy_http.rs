@@ -30,9 +30,9 @@ use praxis_test_utils::{
 };
 
 // Identity parameters mirrored from
-// `tests/integration/fixtures/policy-http-cpex-policy.yaml`.
+// `tests/integration/fixtures/policy-http.yaml`.
 const FIXTURE_ISSUER: &str = "https://idp.example.com";
-const FIXTURE_AUDIENCE: &str = "praxis-cpex-example";
+const FIXTURE_AUDIENCE: &str = "praxis-policy-example";
 const FIXTURE_SECRET: &str = "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT";
 
 /// Mint an HS256 JWT accepted by the fixture's `jwt-user` plugin.
@@ -61,10 +61,10 @@ fn mint_fixture_jwt(subject: &str) -> String {
 #[expect(clippy::needless_pass_by_value, reason = "callers construct the map inline")]
 fn load_example(proxy_port: u16, port_map: HashMap<&str, u16>) -> Config {
     let praxis_yaml_path = example_config_path("security/policy-http.yaml");
-    let policy_yaml_path = format!("{}/fixtures/policy-http-cpex-policy.yaml", env!("CARGO_MANIFEST_DIR"));
+    let policy_yaml_path = format!("{}/fixtures/policy-http.yaml", env!("CARGO_MANIFEST_DIR"));
 
     let raw = std::fs::read_to_string(&praxis_yaml_path).unwrap_or_else(|e| panic!("read {praxis_yaml_path}: {e}"));
-    let with_policy = raw.replace("/etc/praxis/policy-http-cpex-policy.yaml", &policy_yaml_path);
+    let with_policy = raw.replace("/etc/praxis/policy-http-policy.yaml", &policy_yaml_path);
     let patched = patch_yaml(&with_policy, proxy_port, &port_map);
     Config::from_yaml(&patched).unwrap_or_else(|e| panic!("parse security/policy-http.yaml: {e}"))
 }

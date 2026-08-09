@@ -143,7 +143,7 @@ deployment guidance.
   into upstream request headers with environment variable
   or inline values; client credential stripping
 - **Policy engine** (`policy`, experimental, feature
-  `cpex-policy-engine`): JWT identity, route policy, PII
+  `policy-engine`): JWT identity, route policy, PII
   scanning, audit
 
 ## Observability

@@ -11,7 +11,7 @@ use serde::Deserialize;
 
 /// Configuration block for the experimental `policy` filter, which
 /// embeds the CPEX policy engine in-process (gated behind the
-/// `cpex-policy-engine` feature, off by default).
+/// `policy-engine` feature, off by default).
 ///
 /// Praxis filter configs are flat: the filter's typed fields sit
 /// directly under the `- filter:` entry alongside the structural keys
@@ -21,7 +21,7 @@ use serde::Deserialize;
 /// ```yaml
 /// filters:
 ///   - filter: policy
-///     config_path: /etc/praxis/cpex-policy.yaml
+///     config_path: /etc/praxis/policy.yaml
 ///     body_access: read_write   # optional; default read_only
 ///     require_protocol_metadata: true
 /// ```

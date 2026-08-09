@@ -9,7 +9,7 @@ publish = false
 
 [features]
 default = []
-cpex-policy-engine = ["praxis-filter/cpex-policy-engine"]
+policy-engine = ["praxis-filter/policy-engine"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter"]
 no-mac-cert-rotation-tests = []
 otel = ["praxis/otel"]
@@ -23,7 +23,7 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 futures = { workspace = true }
 http = { workspace = true }
-# Used only by the cpex example test to mint HS256 JWTs for the
+# Used only by the policy example test to mint HS256 JWTs for the
 # happy-path case (matches the filter crate's signing dependency).
 jsonwebtoken = "10.4.0"
 praxis = { version = "0.5.1", path = "../../server", package = "praxis-proxy" }

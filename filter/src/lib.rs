@@ -28,7 +28,7 @@ pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
 #[cfg(feature = "basic-auth-filter")]
 pub use builtins::BasicAuthFilter;
-#[cfg(feature = "cpex-policy-engine")]
+#[cfg(feature = "policy-engine")]
 pub use builtins::PolicyFilter;
 pub use builtins::{
     CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, EndpointSelectorFilter,

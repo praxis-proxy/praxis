@@ -7,11 +7,11 @@
 # request line, headers, and identity claims. Denials become plain HTTP
 # responses (with a custom `denyWith` status/body/headers).
 #
-# Requires building with the `cpex-policy-engine` feature, which is off
+# Requires building with the `policy-engine` feature, which is off
 # by default:
 #
 # Usage:
-#   cargo run -p praxis-proxy --features cpex-policy-engine -- -c examples/configs/security/policy-http.yaml
+#   cargo run -p praxis-proxy --features policy-engine -- -c examples/configs/security/policy-http.yaml
 
 listeners:
   - name: default
@@ -27,7 +27,7 @@ filter_chains:
       # routes), so the filter authorizes at the HTTP layer directly — no
       # protocol classifier needed.
       - filter: policy
-        config_path: /etc/praxis/policy-http-cpex-policy.yaml
+        config_path: /etc/praxis/policy-http-policy.yaml
 
       - filter: router
         routes:

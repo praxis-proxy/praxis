@@ -5,7 +5,7 @@
 # scanning, audit emission, and (under `body_access: read_write`)
 # request / response body rewriting.
 #
-# Experimental: requires the `cpex-policy-engine` cargo feature, which
+# Experimental: requires the `policy-engine` cargo feature, which
 # is off by default.
 #
 # The policy filter consumes `mcp.method` / `mcp.name` metadata from
@@ -17,18 +17,18 @@
 # shipped here: a real policy carries your own issuers, secrets, routes,
 # PDPs, and delegators. See the praxis-demos repo
 # (`demos/cpex/cpex.yaml`) for a fully-featured policy, and
-# `tests/integration/fixtures/cpex-policy.yaml` for the minimal
+# `tests/integration/fixtures/policy.yaml` for the minimal
 # single-HS256-identity-plugin policy the integration test loads.
 #
 # `require_protocol_metadata: true` (the default) fail-closes when the
 # protocol classifier filter is missing or ordered after `policy` — this guards
 # against a misconfigured chain silently bypassing policy.
 #
-# This example builds only when the `cpex-policy-engine` cargo feature
+# This example builds only when the `policy-engine` cargo feature
 # is enabled.
 #
 # Usage:
-#   cargo run --features cpex-policy-engine -p praxis-proxy -- \
+#   cargo run --features policy-engine -p praxis-proxy -- \
 #     -c examples/configs/security/policy.yaml
 #
 # Exercise (assumes the backend at :3000 echoes 200):
@@ -65,7 +65,7 @@ filter_chains:
       # See the praxis-ai documentation for setup instructions.
 
       - filter: policy
-        config_path: /etc/praxis/cpex-policy.yaml
+        config_path: /etc/praxis/policy.yaml
         # Fail-closed when mcp.method metadata is missing. Set to
         # `false` only when intentionally fronting non-classified traffic
         # through the policy filter for identity-only enforcement.

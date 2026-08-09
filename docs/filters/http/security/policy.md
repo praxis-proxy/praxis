@@ -7,7 +7,7 @@ Embeds the CPEX policy engine in-process to enforce multi-source JWT identity, A
 
 ## Configuration Notes
 
-Experimental: requires the `cpex-policy-engine` cargo feature, which is off by default. Registered under the YAML filter name `policy`.
+Experimental: requires the `policy-engine` cargo feature, which is off by default. Registered under the YAML filter name `policy`.
 
 A single request can carry multiple identity sources — user JWT in `Authorization`, agent JWT in `X-Agent-Token`, workload JWT in `X-Workload-Token`, etc. Each registered identity plugin reads its own configured header and contributes to a typed `Extensions` context.
 
@@ -33,7 +33,7 @@ The referenced YAML is the CPEX policy document — plugins, routes, and identit
 
 ```yaml
 filter: policy
-config_path: /etc/praxis/cpex-policy.yaml
+config_path: /etc/praxis/policy.yaml
 body_access: read_write       # optional; default read_only
 require_protocol_metadata: true    # optional; default true
 init_timeout_secs: 30         # optional; default 30

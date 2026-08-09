@@ -21,9 +21,9 @@
 //! registered as a plugin. Evaluation behavior is covered by the engine's own
 //! suite and, end to end, by the acceptance demo.
 
-#![cfg(feature = "cpex-policy-engine")]
+#![cfg(feature = "policy-engine")]
 
-use cpex::cpex_core::config::parse_config;
+use ppe::praxis_policy_core::config::parse_config;
 
 /// Structural fingerprint of a parsed policy document: routing activation, the
 /// ordered plugin name and kind pairs, and the route count.

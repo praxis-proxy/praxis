@@ -28,7 +28,7 @@ plugins:
       header: Authorization
       trusted_issuers:
         - issuer: "https://idp.example.com"
-          audiences: ["praxis-cpex-example"]
+          audiences: ["praxis-policy-example"]
           algorithms: ["HS256"]
           decoding_key:
             kind: secret

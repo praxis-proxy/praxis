@@ -562,9 +562,9 @@ fn build_filter(config_path: String) -> PolicyFilter {
 /// `max_buffer_bytes`) take their documented defaults.
 #[test]
 fn config_parses_minimal_yaml() {
-    let yaml = "config_path: /etc/praxis/cpex.yaml";
+    let yaml = "config_path: /etc/praxis/policy.yaml";
     let cfg: PolicyFilterConfig = serde_yaml::from_str(yaml).expect("parse");
-    assert_eq!(cfg.config_path, "/etc/praxis/cpex.yaml", "config_path round-trips",);
+    assert_eq!(cfg.config_path, "/etc/praxis/policy.yaml", "config_path round-trips",);
     assert_eq!(cfg.max_buffer_bytes, 10_485_760, "max_buffer_bytes defaults to 10 MiB",);
 }
 
@@ -572,7 +572,7 @@ fn config_parses_minimal_yaml() {
 /// the 10 MiB default so deployments can bound `ReadWrite` buffering.
 #[test]
 fn config_max_buffer_bytes_override() {
-    let yaml = "config_path: /etc/praxis/cpex.yaml\nmax_buffer_bytes: 1048576";
+    let yaml = "config_path: /etc/praxis/policy.yaml\nmax_buffer_bytes: 1048576";
     let cfg: PolicyFilterConfig = serde_yaml::from_str(yaml).expect("parse");
     assert_eq!(cfg.max_buffer_bytes, 1_048_576, "explicit max_buffer_bytes wins");
 }
@@ -639,7 +639,7 @@ async fn request_without_auth_header_rejects_401() {
 /// resolved and enforced identity leaves behind.
 #[tokio::test(flavor = "multi_thread")]
 async fn identity_gate_skips_when_body_phase_already_resolved() {
-    use cpex::cpex_core::identity::{IdentityPayload, TokenSource};
+    use ppe::praxis_policy_core::identity::{IdentityPayload, TokenSource};
 
     use super::filter::ResolvedIdentity;
 
@@ -843,7 +843,7 @@ async fn current_thread_runtime_allows_pure_l7() {
 #[test]
 fn config_rejects_unknown_fields() {
     let yaml = "
-config_path: /etc/praxis/cpex.yaml
+config_path: /etc/praxis/policy.yaml
 body_acces: read_write
 ";
     let res: Result<PolicyFilterConfig, _> = serde_yaml::from_str(yaml);
@@ -860,7 +860,7 @@ body_acces: read_write
 /// pass-through for non-classified traffic.
 #[test]
 fn config_require_protocol_metadata_defaults_to_true() {
-    let yaml = "config_path: /etc/praxis/cpex.yaml";
+    let yaml = "config_path: /etc/praxis/policy.yaml";
     let cfg: PolicyFilterConfig = serde_yaml::from_str(yaml).expect("parse");
     assert!(cfg.require_protocol_metadata, "default must be fail-closed");
 }
@@ -869,7 +869,7 @@ fn config_require_protocol_metadata_defaults_to_true() {
 /// have to think about it; the bound is just present.
 #[test]
 fn config_init_timeout_defaults_to_30s() {
-    let yaml = "config_path: /etc/praxis/cpex.yaml";
+    let yaml = "config_path: /etc/praxis/policy.yaml";
     let cfg: PolicyFilterConfig = serde_yaml::from_str(yaml).expect("parse");
     assert_eq!(cfg.init_timeout_secs, 30);
 }
@@ -878,7 +878,7 @@ fn config_init_timeout_defaults_to_30s() {
 /// knob exists at the YAML surface, not just in the struct.
 #[test]
 fn config_init_timeout_honors_override() {
-    let yaml = "config_path: /etc/praxis/cpex.yaml\ninit_timeout_secs: 5";
+    let yaml = "config_path: /etc/praxis/policy.yaml\ninit_timeout_secs: 5";
     let cfg: PolicyFilterConfig = serde_yaml::from_str(yaml).expect("parse");
     assert_eq!(cfg.init_timeout_secs, 5);
 }
@@ -981,7 +981,7 @@ async fn missing_protocol_metadata_passes_when_not_required() {
 /// same way they parse upstream errors.
 #[test]
 fn json_rpc_error_envelope_has_expected_shape() {
-    use cpex::cpex_core::error::PluginViolation;
+    use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::json_rpc_error_envelope_bytes;
 
@@ -1032,7 +1032,7 @@ fn json_rpc_error_envelope_handles_missing_violation() {
 /// short `code: reason` diagnostic.
 #[test]
 fn auth_rejection_shape_when_violation_present() {
-    use cpex::cpex_core::error::PluginViolation;
+    use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::auth_rejection;
 
@@ -1082,7 +1082,7 @@ fn auth_rejection_falls_back_to_sentinel_when_no_violation() {
 /// `"<code>: <reason>"` body, always stamping `X-Policy-Violation`.
 #[test]
 fn http_authz_rejection_defaults_without_details() {
-    use cpex::cpex_core::error::PluginViolation;
+    use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::http_authz_rejection;
 
@@ -1109,7 +1109,7 @@ fn http_authz_rejection_defaults_without_details() {
 fn http_authz_rejection_applies_custom_denywith() {
     use std::collections::HashMap;
 
-    use cpex::cpex_core::error::PluginViolation;
+    use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::http_authz_rejection;
 
@@ -1139,7 +1139,7 @@ fn http_authz_rejection_applies_custom_denywith() {
 fn http_authz_rejection_clamps_out_of_range_status() {
     use std::collections::HashMap;
 
-    use cpex::cpex_core::error::PluginViolation;
+    use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::http_authz_rejection;
 
@@ -1156,7 +1156,7 @@ fn http_authz_rejection_clamps_out_of_range_status() {
 fn http_authz_rejection_drops_control_char_headers() {
     use std::collections::HashMap;
 
-    use cpex::cpex_core::error::PluginViolation;
+    use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::http_authz_rejection;
 
@@ -1312,7 +1312,7 @@ fn json_rpc_id_value_preserves_json_type() {
 /// part so APL `args.<field>` predicates have something to read.
 #[test]
 fn build_content_for_method_tools_call() {
-    use cpex::cpex_core::cmf::ContentPart;
+    use ppe::praxis_policy_core::cmf::ContentPart;
 
     use super::json_rpc::build_content_for_method;
 
@@ -1337,7 +1337,7 @@ fn build_content_for_method_tools_call() {
 /// so route resolution and APL `resource.*` predicates work.
 #[test]
 fn build_content_for_method_resources_read() {
-    use cpex::cpex_core::cmf::ContentPart;
+    use ppe::praxis_policy_core::cmf::ContentPart;
 
     use super::json_rpc::build_content_for_method;
 
@@ -1373,7 +1373,7 @@ fn build_content_for_method_unknown_method_yields_empty() {
 /// APL actually mutated.
 #[test]
 fn reserialize_tools_call_round_trips_with_mutated_args() {
-    use cpex::cpex_core::cmf::{ContentPart, Message, Role, ToolCall};
+    use ppe::praxis_policy_core::cmf::{ContentPart, Message, Role, ToolCall};
 
     use super::json_rpc::reserialize_json_rpc_body;
 
@@ -1409,7 +1409,7 @@ fn reserialize_tools_call_round_trips_with_mutated_args() {
 /// `isError` flag round-trips.
 #[test]
 fn build_response_content_for_method_text_fallback() {
-    use cpex::cpex_core::cmf::ContentPart;
+    use ppe::praxis_policy_core::cmf::ContentPart;
 
     use super::json_rpc::build_response_content_for_method;
 
@@ -1433,7 +1433,7 @@ fn build_response_content_for_method_text_fallback() {
 /// when present.
 #[test]
 fn build_response_content_for_method_prefers_structured_content() {
-    use cpex::cpex_core::cmf::ContentPart;
+    use ppe::praxis_policy_core::cmf::ContentPart;
 
     use super::json_rpc::build_response_content_for_method;
 
@@ -1461,7 +1461,7 @@ fn build_response_content_for_method_prefers_structured_content() {
 /// folded view exposes all blocks under `text`.
 #[test]
 fn build_response_content_for_method_folds_all_text_blocks() {
-    use cpex::cpex_core::cmf::ContentPart;
+    use ppe::praxis_policy_core::cmf::ContentPart;
 
     use super::json_rpc::build_response_content_for_method;
 
@@ -1494,7 +1494,7 @@ fn build_response_content_for_method_folds_all_text_blocks() {
 /// `structuredContent` is mirrored when the original had it.
 #[test]
 fn reserialize_response_collapses_to_single_vetted_block() {
-    use cpex::cpex_core::cmf::{ContentPart, Message, Role, ToolResult};
+    use ppe::praxis_policy_core::cmf::{ContentPart, Message, Role, ToolResult};
 
     use super::json_rpc::reserialize_json_rpc_response_body;
 
@@ -1533,7 +1533,7 @@ fn reserialize_response_collapses_to_single_vetted_block() {
 /// desync.
 #[test]
 fn deny_envelope_fits_committed_length() {
-    use cpex::cpex_core::error::PluginViolation;
+    use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::{error::json_rpc_error_envelope_bytes, filter::fit_to_original_length};
 
@@ -1882,7 +1882,7 @@ fn attach_delegated_tokens_first_writer_wins_per_outbound_header() {
     use std::sync::Arc;
 
     use chrono::{Duration, Utc};
-    use cpex::cpex_core::extensions::{
+    use ppe::praxis_policy_core::extensions::{
         container::Extensions,
         raw_credentials::{DelegationKey, DelegationMode, RawCredentialsExtension, RawDelegatedToken},
     };
@@ -1892,16 +1892,10 @@ fn attach_delegated_tokens_first_writer_wins_per_outbound_header() {
     let expires = Utc::now() + Duration::hours(1);
     let tok_a = RawDelegatedToken::new("token-a", "Authorization", "aud-a", Vec::<String>::new(), expires);
     let tok_b = RawDelegatedToken::new("token-b", "Authorization", "aud-b", Vec::<String>::new(), expires);
-    let key_a = DelegationKey {
-        subject_id: "alice".to_owned(),
-        audience: "aud-a".to_owned(),
-        scopes: Vec::new(),
-        mode: DelegationMode::OnBehalfOfUser,
-    };
-    let key_b = DelegationKey {
-        audience: "aud-b".to_owned(),
-        ..key_a.clone()
-    };
+    // Built through the constructor rather than a struct expression: the key is
+    // non-exhaustive so a future principal slot does not break callers.
+    let key_a = DelegationKey::new(DelegationMode::OnBehalfOfUser, "aud-a", Vec::new()).with_subject_id("alice");
+    let key_b = DelegationKey::new(DelegationMode::OnBehalfOfUser, "aud-b", Vec::new()).with_subject_id("alice");
     let mut creds = RawCredentialsExtension::default();
     creds.delegated_tokens.insert(key_a, tok_a);
     creds.delegated_tokens.insert(key_b, tok_b);
@@ -1935,7 +1929,7 @@ fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
     use std::sync::Arc;
 
     use chrono::{Duration, Utc};
-    use cpex::cpex_core::extensions::{
+    use ppe::praxis_policy_core::extensions::{
         container::Extensions,
         raw_credentials::{DelegationKey, DelegationMode, RawCredentialsExtension, RawDelegatedToken},
     };
@@ -1945,16 +1939,9 @@ fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
     let expires = Utc::now() + Duration::hours(1);
     let tok_auth = RawDelegatedToken::new("token-auth", "Authorization", "aud-auth", Vec::<String>::new(), expires);
     let tok_x = RawDelegatedToken::new("token-x", "X-Upstream-Token", "aud-x", Vec::<String>::new(), expires);
-    let key_auth = DelegationKey {
-        subject_id: "alice".to_owned(),
-        audience: "aud-auth".to_owned(),
-        scopes: Vec::new(),
-        mode: DelegationMode::OnBehalfOfUser,
-    };
-    let key_x = DelegationKey {
-        audience: "aud-x".to_owned(),
-        ..key_auth.clone()
-    };
+    let key_auth =
+        DelegationKey::new(DelegationMode::OnBehalfOfUser, "aud-auth", Vec::new()).with_subject_id("alice");
+    let key_x = DelegationKey::new(DelegationMode::OnBehalfOfUser, "aud-x", Vec::new()).with_subject_id("alice");
     let mut creds = RawCredentialsExtension::default();
     creds.delegated_tokens.insert(key_auth, tok_auth);
     creds.delegated_tokens.insert(key_x, tok_x);

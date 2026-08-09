@@ -16,7 +16,7 @@ mod ip_acl;
 pub(crate) mod origin_matcher;
 pub(crate) mod origin_normalize;
 mod peer_identity_trust;
-#[cfg(feature = "cpex-policy-engine")]
+#[cfg(feature = "policy-engine")]
 mod policy;
 
 #[cfg(feature = "basic-auth-filter")]
@@ -28,5 +28,5 @@ pub use forwarded_headers::ForwardedHeadersFilter;
 pub use guardrails::{ContainsValue, GuardrailsAction, GuardrailsFilter, PiiKind, RuleTargetKind};
 pub use ip_acl::IpAclFilter;
 pub use peer_identity_trust::PeerIdentityTrustFilter;
-#[cfg(feature = "cpex-policy-engine")]
+#[cfg(feature = "policy-engine")]
 pub use policy::PolicyFilter;

@@ -14,7 +14,7 @@ pub use observability::{AccessLogFilter, RequestIdFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter, JsonRpcFilter};
 #[cfg(feature = "basic-auth-filter")]
 pub use security::BasicAuthFilter;
-#[cfg(feature = "cpex-policy-engine")]
+#[cfg(feature = "policy-engine")]
 pub use security::PolicyFilter;
 pub use security::{
     ContainsValue, CorsFilter, CredentialInjectionFilter, CsrfFilter, DisallowedOriginMode, ForwardedHeadersFilter,

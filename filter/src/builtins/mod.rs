@@ -8,7 +8,7 @@ mod tcp;
 
 #[cfg(feature = "basic-auth-filter")]
 pub use http::BasicAuthFilter;
-#[cfg(feature = "cpex-policy-engine")]
+#[cfg(feature = "policy-engine")]
 pub use http::PolicyFilter;
 pub use http::{
     AccessLogFilter, CircuitBreakerFilter, CompressionFilter, ContainsValue, CorsFilter, CredentialInjectionFilter,

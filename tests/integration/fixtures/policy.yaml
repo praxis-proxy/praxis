@@ -13,7 +13,7 @@
 # requiring a Keycloak / JWKS endpoint to run the example. Production
 # deployments swap HS256 for RS256+JWKS, add routes, attach
 # delegators, and so on. See the CPEX demo in the praxis-demos
-# repository (`demos/cpex/cpex.yaml`) for a fully-featured policy.
+# repository (`demos/cpex/`) for a fully-featured policy.
 
 plugins:
   - name: jwt-user
@@ -26,7 +26,7 @@ plugins:
       header: Authorization
       trusted_issuers:
         - issuer: "https://idp.example.com"
-          audiences: ["praxis-cpex-example"]
+          audiences: ["praxis-policy-example"]
           algorithms: ["HS256"]
           decoding_key:
             kind: secret
