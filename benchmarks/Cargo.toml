@@ -62,3 +62,8 @@ harness = false
 name = "router_lookup"
 path = "microbenchmarks/router_lookup.rs"
 harness = false
+
+# Lets the policy filter be compiled into the benchmark binaries so the policy
+# hot path can be measured. Off by default, matching the filter crate.
+[features]
+cpex-policy-engine = ["praxis-filter/cpex-policy-engine"]
