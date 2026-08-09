@@ -224,7 +224,15 @@ fn handle_reload(
         tracing::debug!("config file content unchanged, skipping reload");
         return true;
     }
-    *content_hash = new_hash;
+
+    // The hash is recorded only once the reload succeeds. Recording it up front
+    // would strand the operator's edit: a reload that fails for a transient
+    // reason, such as an identity provider being briefly unreachable while a
+    // policy document is validated, would leave the new content hashed as
+    // already-seen, so the unchanged-content check would skip every subsequent
+    // attempt and the edit would never take effect. Leaving the old hash in
+    // place lets the existing consecutive-failure backoff retry the same
+    // content until it succeeds.
 
     let new_config = match Config::from_yaml(&content) {
         Ok(c) => c,
@@ -249,6 +257,7 @@ fn handle_reload(
     ) {
         Ok(()) => {
             *current_config = new_config;
+            *content_hash = new_hash;
             true
         },
         Err(e) => {
@@ -570,6 +579,67 @@ mod tests {
     // -------------------------------------------------------------------------
     // Integration tests
     // -------------------------------------------------------------------------
+
+    /// A reload that fails must not advance the content hash.
+    ///
+    /// Advancing it would strand the operator's edit: the unchanged-content check
+    /// would then skip every retry, so a transient failure would become permanent
+    /// and the edit would never take effect no matter how long the provider took
+    /// to recover.
+    #[test]
+    fn failed_reload_leaves_hash_unchanged_so_the_edit_is_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("praxis.yaml");
+        std::fs::write(&config_path, VALID_YAML).unwrap();
+
+        let mut config = Config::from_yaml(VALID_YAML).unwrap();
+        let registry = FilterRegistry::with_builtins();
+        let health_registry = Arc::new(std::collections::HashMap::new());
+        let kv_stores = praxis_core::kv::KvStoreRegistry::new();
+        let subrequest_client =
+            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
+        let pipelines =
+            crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores, &subrequest_client)
+                .unwrap();
+        let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+
+        let original_hash = hash_content(VALID_YAML);
+        let mut hash = original_hash;
+
+        // An edit that cannot be parsed stands in for any failing reload.
+        std::fs::write(&config_path, "this: is: not: valid: praxis: config\n").unwrap();
+        let ok = handle_reload(
+            &config_path,
+            &mut config,
+            &mut hash,
+            &registry,
+            &pipelines,
+            &health_shutdown,
+            &kv_stores,
+            &subrequest_client,
+        );
+
+        assert!(!ok, "an unparseable config must report failure");
+        assert_eq!(
+            hash, original_hash,
+            "a failed reload must leave the hash untouched, or the retry is skipped forever",
+        );
+
+        // Recovery: the same path now holds something valid, and because the hash
+        // was never advanced the attempt is not short-circuited.
+        std::fs::write(&config_path, VALID_YAML).unwrap();
+        let recovered = handle_reload(
+            &config_path,
+            &mut config,
+            &mut hash,
+            &registry,
+            &pipelines,
+            &health_shutdown,
+            &kv_stores,
+            &subrequest_client,
+        );
+        assert!(recovered, "a subsequent valid config must reload");
+    }
 
     #[test]
     fn watcher_exits_on_cancellation() {
