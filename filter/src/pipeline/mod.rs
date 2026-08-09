@@ -305,6 +305,30 @@ impl FilterPipeline {
     ///
     /// [`apply_insecure_options`]: crate::HttpFilter::apply_insecure_options
     /// [`InsecureOptions`]: praxis_core::config::InsecureOptions
+    /// Filesystem paths the filters in this pipeline read configuration from,
+    /// beyond the main Praxis config.
+    ///
+    /// Used by the config watcher to decide which files should trigger a reload.
+    /// Without this, a filter that loads an external document never picks up edits
+    /// to it, because the reload gate only ever sees the main config's bytes.
+    ///
+    /// Mirrors [`Self::apply_insecure_options`], including its limitation: only
+    /// top-level filters are walked, not filters nested inside branch chains. A
+    /// document referenced solely from a branch is therefore not observed. That is
+    /// the same blind spot the insecure-options walk already has, and widening both
+    /// belongs in one change rather than half of one here.
+    pub fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        self.filters
+            .iter()
+            .filter_map(|pf| match &pf.filter {
+                crate::any_filter::AnyFilter::Http(f) => Some(f.referenced_files()),
+                crate::any_filter::AnyFilter::Tcp(_) => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    /// Apply global insecure overrides to every filter in the pipeline.
     pub fn apply_insecure_options(&self, options: &InsecureOptions) {
         for pf in &self.filters {
             if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {

@@ -98,6 +98,24 @@ impl ListenerPipelines {
     }
 
     /// Returns an iterator over listener names.
+    /// Every filesystem path any filter in any listener's pipeline reads
+    /// configuration from, de-duplicated.
+    ///
+    /// Two listeners can share a filter chain, so the same document would
+    /// otherwise appear more than once and be watched and hashed repeatedly.
+    pub fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        let mut seen = std::collections::BTreeSet::new();
+        for name in self.listener_names() {
+            if let Some(slot) = self.get(name) {
+                for path in slot.load().referenced_files() {
+                    seen.insert(path);
+                }
+            }
+        }
+        seen.into_iter().collect()
+    }
+
+    /// Names of every listener with a pipeline.
     pub fn listener_names(&self) -> impl Iterator<Item = &str> {
         self.pipelines.keys().map(String::as_str)
     }

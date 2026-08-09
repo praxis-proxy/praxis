@@ -1924,7 +1924,6 @@ fn attach_delegated_tokens_first_writer_wins_per_outbound_header() {
 /// multi-audience flows (the common case for routes that delegate
 /// to multiple upstream APIs simultaneously).
 #[test]
-#[expect(clippy::too_many_lines, reason = "test fixture construction")]
 fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
     use std::sync::Arc;
 
@@ -1939,8 +1938,7 @@ fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
     let expires = Utc::now() + Duration::hours(1);
     let tok_auth = RawDelegatedToken::new("token-auth", "Authorization", "aud-auth", Vec::<String>::new(), expires);
     let tok_x = RawDelegatedToken::new("token-x", "X-Upstream-Token", "aud-x", Vec::<String>::new(), expires);
-    let key_auth =
-        DelegationKey::new(DelegationMode::OnBehalfOfUser, "aud-auth", Vec::new()).with_subject_id("alice");
+    let key_auth = DelegationKey::new(DelegationMode::OnBehalfOfUser, "aud-auth", Vec::new()).with_subject_id("alice");
     let key_x = DelegationKey::new(DelegationMode::OnBehalfOfUser, "aud-x", Vec::new()).with_subject_id("alice");
     let mut creds = RawCredentialsExtension::default();
     creds.delegated_tokens.insert(key_auth, tok_auth);
