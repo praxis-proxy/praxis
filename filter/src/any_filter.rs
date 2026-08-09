@@ -35,6 +35,15 @@ impl AnyFilter {
         }
     }
 
+    /// Filesystem paths this filter reads configuration from, beyond the main
+    /// Praxis config. Empty for TCP filters, which have no such surface.
+    pub fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        match self {
+            Self::Http(f) => f.referenced_files(),
+            Self::Tcp(_) => Vec::new(),
+        }
+    }
+
     /// The protocol level this filter operates at.
     pub fn protocol_level(&self) -> ProtocolKind {
         match self {

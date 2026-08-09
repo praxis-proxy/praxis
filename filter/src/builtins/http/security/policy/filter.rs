@@ -88,7 +88,7 @@ pub struct PolicyFilter {
     /// `request_body_access` / `request_body_mode` / their response
     /// counterparts can branch on `body_access` per request.
     cfg: PolicyFilterConfig,
-    /// CPEX plugin manager — owns the loaded plugin instances and
+    /// Policy engine plugin manager — owns the loaded plugin instances and
     /// dispatches hook chains. Wrapped in `Arc` so the response-phase
     /// `spawn_blocking` closure can hold its own handle without
     /// borrowing `&self`.
@@ -459,6 +459,12 @@ pub(super) struct ResolvedIdentity(pub(super) IdentityPayload);
 
 #[async_trait]
 impl HttpFilter for PolicyFilter {
+    fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        // The policy document. Declaring it is what lets an operator edit policy
+        // and have it take effect without a restart.
+        vec![std::path::PathBuf::from(&self.cfg.config_path)]
+    }
+
     fn name(&self) -> &'static str {
         "policy"
     }
