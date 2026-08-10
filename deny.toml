@@ -55,4 +55,7 @@ skip-tree = [
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-allow-git = []
+# The policy engine, until it is published to crates.io. Pinned to a revision in
+# Cargo.toml, not a branch, so the source is fixed. Remove together with the git
+# dependency once the crates are released.
+allow-git = ["https://github.com/praxis-proxy/policy"]

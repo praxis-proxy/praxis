@@ -38,12 +38,12 @@ base64 = "0.22.1"
 benchmarks = { path = "benchmarks" }
 bytes = "1.12.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-# Temporarily pinned to the local checkout, which sits at the extraction snapshot
-# commit the engine port was taken from. The published 0.2.2 is several commits
-# behind that, including a fix that changes emitted payload output, so a baseline
-# captured against it would make the post-swap differential fail for reasons that
-# are not port defects. Replaced by the engine path dependency at the swap.
-ppe = { path = "../praxis-policy/crates/ppe", package = "praxis-policy", features = ["jwt", "oauth", "pii", "audit", "elicitation-ciba", "cedar", "cel", "valkey"] }
+# Pinned to a git revision rather than a version: the engine is not published yet.
+# A path dependency on a sibling checkout does not resolve in CI, and publishing is
+# gated on maintainer sign-off, so a pinned revision is the only form that both
+# builds here and is reproducible. Becomes a version dependency at publish, and the
+# allow-git entry in deny.toml goes away with it.
+ppe = { git = "https://github.com/praxis-proxy/policy", rev = "de19efa674f3c23852897afa91b632441f30be80", package = "praxis-policy", features = ["jwt", "oauth", "pii", "audit", "elicitation-ciba", "cedar", "cel", "valkey"] }
 clap = { version = "4.6.6", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.2.1"
