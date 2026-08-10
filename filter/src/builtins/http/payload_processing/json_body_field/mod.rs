@@ -2,6 +2,11 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Extracts top-level JSON fields from the request body and promotes them to request headers.
+//!
+//! Parsing walks the top-level object without building a full DOM: unmapped
+//! values are skipped, and extraction stops once every configured field is
+//! found (first-wins on duplicate keys). Trailing JSON after early exit is
+//! not validated.
 
 mod config;
 mod extract;
@@ -21,7 +26,6 @@ mod tests;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use tracing::debug;
 
 use self::{
     config::{JsonBodyFieldConfig, build_mappings},
@@ -41,8 +45,12 @@ use crate::{
 /// Extracts top-level fields from a JSON request body and promotes
 /// their values to request headers using [`StreamBuffer`] mode.
 ///
-/// If the field is missing or the body is not valid JSON, the filter
-/// passes through without modification.
+/// Uses a map visitor (not a full JSON DOM). Unmapped values are skipped;
+/// once every configured field is found, parsing stops (first-wins on
+/// duplicate keys). Trailing bytes after early exit are not validated.
+///
+/// If the field is missing or the body is not valid JSON before the needed
+/// fields are collected, the filter passes through without modification.
 ///
 /// # Single-field YAML
 ///
@@ -157,12 +165,7 @@ impl HttpFilter for JsonBodyFieldFilter {
             return Ok(FilterAction::Continue);
         };
 
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(chunk) else {
-            debug!(body_len = chunk.len(), "JSON parsing failed; skipping field extraction");
-            return Ok(FilterAction::Continue);
-        };
-
-        if extract_fields(&self.mappings, &value, &mut ctx.extra_request_headers) {
+        if extract_fields(&self.mappings, chunk, &mut ctx.extra_request_headers) {
             Ok(FilterAction::Release)
         } else {
             Ok(FilterAction::Continue)

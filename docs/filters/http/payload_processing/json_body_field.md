@@ -7,7 +7,9 @@ Extracts top-level fields from a JSON request body and promotes their values to 
 
 ## Configuration Notes
 
-If the field is missing or the body is not valid JSON, the filter passes through without modification.
+Uses a map visitor (not a full JSON DOM). Unmapped values are skipped; once every configured field is found, parsing stops (first-wins on duplicate keys). Trailing bytes after early exit are not validated.
+
+If the field is missing or the body is not valid JSON before the needed fields are collected, the filter passes through without modification.
 
 Accepts either single-field syntax (`field` + `header`) or multi-field syntax (`fields` list), but not both.
 

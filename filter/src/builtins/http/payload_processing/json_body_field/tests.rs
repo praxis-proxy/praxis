@@ -197,7 +197,8 @@ async fn returns_continue_on_incomplete_json() {
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
-    let partial = br#"{"model":"model-alpha-1","pro"#;
+    // Truncated mid-value: field not yet complete, so extraction must not promote.
+    let partial = br#"{"model":"model-alp"#;
     let mut body = Some(Bytes::from_static(partial));
 
     let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
@@ -210,6 +211,102 @@ async fn returns_continue_on_incomplete_json() {
         ctx.extra_request_headers.is_empty(),
         "no headers should be added for incomplete JSON"
     );
+}
+
+#[tokio::test]
+async fn early_exit_promotes_despite_trailing_junk() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    // Valid mapped field first, then incomplete trailing key — early exit must
+    // promote without validating the unread suffix.
+    let json = br#"{"model":"model-alpha-1","pro"#;
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Release),
+        "complete mapped field should release even with trailing junk"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should promote the model header");
+    assert_eq!(ctx.extra_request_headers[0].0, "X-Model", "header name should match");
+    assert_eq!(
+        ctx.extra_request_headers[0].1, "model-alpha-1",
+        "header value should match first complete field"
+    );
+}
+
+#[tokio::test]
+async fn early_exit_with_large_trailing_unmapped_value() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut json = br#"{"model":"gpt-4","messages":"#.to_vec();
+    json.push(b'[');
+    for i in 0..1_000 {
+        if i > 0 {
+            json.push(b',');
+        }
+        json.extend_from_slice(br#"{"role":"user","content":"x"}"#);
+    }
+    json.extend_from_slice(br#"]}"#);
+    let mut body = Some(Bytes::from(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Release),
+        "mapped field before large trailing value should release"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should promote exactly one header");
+    assert_eq!(ctx.extra_request_headers[0].1, "gpt-4", "model value should match");
+}
+
+#[tokio::test]
+async fn first_wins_on_duplicate_keys() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = br#"{"model":"a","model":"b"}"#;
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Release),
+        "duplicate keys should still release on first value"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should promote exactly one header");
+    assert_eq!(
+        ctx.extra_request_headers[0].1, "a",
+        "first-wins: first duplicate value should be promoted"
+    );
+}
+
+#[tokio::test]
+async fn multi_field_early_exit_with_trailing_junk() {
+    let filter = make_multi_filter(&[("model", "X-Model"), ("user_id", "X-User-Id")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = br#"{"model":"m1","user_id":"u1","messages":"#;
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Release),
+        "all mapped fields complete should release despite trailing junk"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 2, "both headers should be promoted");
+    assert_eq!(ctx.extra_request_headers[0].0, "X-Model", "first mapping order");
+    assert_eq!(ctx.extra_request_headers[0].1, "m1", "model value");
+    assert_eq!(ctx.extra_request_headers[1].0, "X-User-Id", "second mapping order");
+    assert_eq!(ctx.extra_request_headers[1].1, "u1", "user_id value");
 }
 
 #[tokio::test]
