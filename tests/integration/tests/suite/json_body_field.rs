@@ -25,11 +25,7 @@ fn extracts_string_field_to_header() {
         &json_post("/v1/chat", r#"{"model":"model-alpha-1","prompt":"hi"}"#),
     );
     assert_eq!(parse_status(&raw), 200, "string field extraction should return 200");
-    let body = parse_body(&raw);
-    assert!(
-        body.to_lowercase().contains("x-model: model-alpha-1"),
-        "expected X-Model header echoed by backend, got:\n{body}"
-    );
+    assert_echoed_header_once(&parse_body(&raw), "X-Model", "model-alpha-1");
 }
 
 #[test]
@@ -42,11 +38,7 @@ fn custom_field_and_header_names() {
     let proxy = start_proxy(&config);
     let raw = http_send(proxy.addr(), &json_post("/api", r#"{"provider":"provider-b"}"#));
     assert_eq!(parse_status(&raw), 200, "custom field extraction should return 200");
-    let body = parse_body(&raw);
-    assert!(
-        body.to_lowercase().contains("x-provider: provider-b"),
-        "expected X-Provider header, got:\n{body}"
-    );
+    assert_echoed_header_once(&parse_body(&raw), "X-Provider", "provider-b");
 }
 
 #[test]
@@ -59,11 +51,7 @@ fn numeric_value_promoted_as_string() {
     let proxy = start_proxy(&config);
     let raw = http_send(proxy.addr(), &json_post("/api", r#"{"count":42}"#));
     assert_eq!(parse_status(&raw), 200, "numeric field extraction should return 200");
-    let body = parse_body(&raw);
-    assert!(
-        body.to_lowercase().contains("x-count: 42"),
-        "expected X-Count: 42 header, got:\n{body}"
-    );
+    assert_echoed_header_once(&parse_body(&raw), "X-Count", "42");
 }
 
 #[test]
@@ -76,11 +64,7 @@ fn boolean_value_promoted_as_string() {
     let proxy = start_proxy(&config);
     let raw = http_send(proxy.addr(), &json_post("/api", r#"{"enabled":true}"#));
     assert_eq!(parse_status(&raw), 200, "boolean field extraction should return 200");
-    let body = parse_body(&raw);
-    assert!(
-        body.to_lowercase().contains("x-enabled: true"),
-        "expected X-Enabled: true header, got:\n{body}"
-    );
+    assert_echoed_header_once(&parse_body(&raw), "X-Enabled", "true");
 }
 
 #[test]
@@ -93,11 +77,7 @@ fn missing_field_passes_through_without_header() {
     let proxy = start_proxy(&config);
     let raw = http_send(proxy.addr(), &json_post("/api", r#"{"prompt":"hello"}"#));
     assert_eq!(parse_status(&raw), 200, "missing field should still return 200");
-    let body = parse_body(&raw);
-    assert!(
-        !body.to_lowercase().contains("x-model"),
-        "X-Model should not be present when field is missing, got:\n{body}"
-    );
+    assert_echoed_header_absent(&parse_body(&raw), "X-Model");
 }
 
 #[test]
@@ -110,11 +90,7 @@ fn invalid_json_passes_through_without_error() {
     let proxy = start_proxy(&config);
     let raw = http_send(proxy.addr(), &json_post("/api", "not json at all"));
     assert_eq!(parse_status(&raw), 200, "invalid JSON should still return 200");
-    let body = parse_body(&raw);
-    assert!(
-        !body.to_lowercase().contains("x-model"),
-        "X-Model should not be present for invalid JSON, got:\n{body}"
-    );
+    assert_echoed_header_absent(&parse_body(&raw), "X-Model");
 }
 
 #[test]
@@ -130,11 +106,7 @@ fn empty_body_passes_through_without_error() {
         "POST /api HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
     );
     assert_eq!(parse_status(&raw), 200, "empty body should still return 200");
-    let body = parse_body(&raw);
-    assert!(
-        !body.to_lowercase().contains("x-model"),
-        "X-Model should not be present for empty body, got:\n{body}"
-    );
+    assert_echoed_header_absent(&parse_body(&raw), "X-Model");
 }
 
 #[test]
@@ -151,12 +123,15 @@ fn nested_object_value_promoted_as_json_string() {
     );
     assert_eq!(parse_status(&raw), 200, "nested object field should return 200");
     let body = parse_body(&raw);
-    assert!(
-        body.to_lowercase().contains("x-model:"),
-        "X-Model header should be present even for object values, got:\n{body}"
+    let lines = echoed_header_lines(&body, "X-Model");
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected exactly one X-Model header line, got {} in:\n{body}",
+        lines.len()
     );
     assert!(
-        body.contains("model-alpha-1"),
+        lines[0].contains("model-alpha-1"),
         "stringified object value should contain inner content, got:\n{body}"
     );
 }
@@ -200,16 +175,50 @@ filter_chains:
         200,
         "promoted header with routing should return 200"
     );
-    let body = parse_body(&raw);
-    assert!(
-        body.to_lowercase().contains("x-model: model-alpha-2"),
-        "expected promoted header after routing, got:\n{body}"
-    );
+    assert_echoed_header_once(&parse_body(&raw), "X-Model", "model-alpha-2");
 }
 
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// Collect echoed request-header lines for `name` (case-insensitive).
+///
+/// The header-echo backend returns upstream request headers as the response
+/// body, one line per header. Counting lines catches duplicate promotions that
+/// a substring `contains` check would miss.
+fn echoed_header_lines<'a>(body: &'a str, name: &str) -> Vec<&'a str> {
+    let prefix = format!("{}:", name.to_ascii_lowercase());
+    body.lines()
+        .filter(|line| line.trim_start().to_ascii_lowercase().starts_with(&prefix))
+        .collect()
+}
+
+fn assert_echoed_header_once(body: &str, name: &str, value: &str) {
+    let lines = echoed_header_lines(body, name);
+    assert_eq!(
+        lines.len(),
+        1,
+        "expected exactly one {name} header line, got {} in:\n{body}",
+        lines.len()
+    );
+    let expected = format!("{}: {}", name.to_ascii_lowercase(), value.to_ascii_lowercase());
+    assert_eq!(
+        lines[0].trim().to_ascii_lowercase(),
+        expected,
+        "expected {name}: {value}, got line {:?}\nfull body:\n{body}",
+        lines[0]
+    );
+}
+
+fn assert_echoed_header_absent(body: &str, name: &str) {
+    let lines = echoed_header_lines(body, name);
+    assert!(
+        lines.is_empty(),
+        "{name} should not be present, got {} line(s) in:\n{body}",
+        lines.len()
+    );
+}
 
 /// Build proxy YAML with `json_body_field` in the pipeline.
 fn proxy_yaml(proxy_port: u16, backend_port: u16, field: &str, header: &str) -> String {
