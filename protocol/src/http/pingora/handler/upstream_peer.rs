@@ -5,12 +5,86 @@
 //!
 //! [`Upstream`]: praxis_core::connectivity::Upstream
 
-use std::net::SocketAddr;
+use std::{
+    net::SocketAddr,
+    sync::{
+        Condvar, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Instant,
+};
 
 use pingora_core::{Result, upstreams::peer::HttpPeer};
 use praxis_core::connectivity::{Upstream, peer as peer_utils};
 
 use super::super::context::PingoraRequestCtx;
+
+// -----------------------------------------------------------------------------
+// Test hooks
+// -----------------------------------------------------------------------------
+
+/// Test-only: when armed, upstream connect retries park until released.
+static UPSTREAM_RETRY_GATE_ARMED: AtomicBool = AtomicBool::new(false);
+/// Park mutex for the test retry gate.
+static UPSTREAM_RETRY_GATE_PARK: Mutex<()> = Mutex::new(());
+/// Condvar for the test retry gate.
+static UPSTREAM_RETRY_GATE_CV: Condvar = Condvar::new();
+/// Serializes tests that arm the retry gate.
+static UPSTREAM_RETRY_GATE_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+/// Serializes integration tests that arm the upstream retry gate.
+///
+/// # Panics
+///
+/// Panics if the lock mutex is poisoned.
+#[doc(hidden)]
+pub fn lock_upstream_retry_gate_tests() -> std::sync::MutexGuard<'static, ()> {
+    #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    UPSTREAM_RETRY_GATE_TEST_LOCK
+        .lock()
+        .expect("upstream retry gate test lock")
+}
+
+/// Releases an armed upstream-retry wait (see [`arm_upstream_retry_gate`]).
+#[doc(hidden)]
+pub struct UpstreamRetryGateRelease {
+    /// Whether [`Self::release`] already ran.
+    released: bool,
+}
+
+impl UpstreamRetryGateRelease {
+    /// Unblock parked upstream retries.
+    pub fn release(mut self) {
+        clear_upstream_retry_gate_wait();
+        self.released = true;
+    }
+}
+
+impl Drop for UpstreamRetryGateRelease {
+    fn drop(&mut self) {
+        if !self.released {
+            clear_upstream_retry_gate_wait();
+        }
+    }
+}
+
+/// Clear the armed flag and wake parked retries.
+fn clear_upstream_retry_gate_wait() {
+    UPSTREAM_RETRY_GATE_ARMED.store(false, Ordering::SeqCst);
+    UPSTREAM_RETRY_GATE_CV.notify_all();
+}
+
+/// Arm the test gate that blocks upstream connect retries until released.
+///
+/// # Panics
+///
+/// Panics if the test-lock mutex is poisoned.
+#[doc(hidden)]
+pub fn arm_upstream_retry_gate() -> (std::sync::MutexGuard<'static, ()>, UpstreamRetryGateRelease) {
+    let guard = lock_upstream_retry_gate_tests();
+    UPSTREAM_RETRY_GATE_ARMED.store(true, Ordering::SeqCst);
+    (guard, UpstreamRetryGateRelease { released: false })
+}
 
 // -----------------------------------------------------------------------------
 // Execution/Conversion
@@ -22,6 +96,18 @@ use super::super::context::PingoraRequestCtx;
 /// `ctx.upstream_for_retry` and borrows it. On retries, borrows the
 /// saved copy directly. No clone is performed.
 pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>> {
+    if ctx.retries > 0 && UPSTREAM_RETRY_GATE_ARMED.load(Ordering::SeqCst) {
+        #[expect(clippy::expect_used, reason = "poisoned mutex/condvar is unrecoverable")]
+        {
+            let mut park = UPSTREAM_RETRY_GATE_PARK.lock().expect("upstream retry gate park lock");
+            while UPSTREAM_RETRY_GATE_ARMED.load(Ordering::SeqCst) {
+                park = UPSTREAM_RETRY_GATE_CV.wait(park).expect("upstream retry gate wait");
+            }
+            drop(park);
+        }
+    }
+    ctx.upstream_connect_start = Some(Instant::now());
+
     if ctx.upstream_for_retry.is_none() {
         ctx.upstream_for_retry = ctx.upstream.take();
     }

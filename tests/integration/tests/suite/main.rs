@@ -60,6 +60,7 @@ mod json_rpc;
 mod path_rewrite;
 mod payload_processing;
 mod per_listener_pipeline;
+mod prometheus_metrics;
 mod rate_limit;
 mod retry;
 mod routing;

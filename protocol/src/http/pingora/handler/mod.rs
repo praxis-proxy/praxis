@@ -6,10 +6,9 @@
 //!
 //! Bridges Pingora's hook-based lifecycle (`request_filter`,
 //! `upstream_peer`, `upstream_request_filter`, etc.) to the Praxis
-//! filter pipeline. Two handler variants exist:
-//! `PingoraHttpHandler` enables body filter hooks when the
-//! pipeline declares body access; `PingoraHttpHandlerNoBody`
-//! skips them for zero-overhead forwarding.
+//! filter pipeline via `PingoraHttpHandler` (body-capable). Body
+//! hooks are always available so hot reload can add body filters and
+//! Pingora compression init remains one-shot.
 //!
 //! Each submodule implements one Pingora hook. The pipeline is held
 //! behind `Arc<ArcSwap<FilterPipeline>>` for lock-free hot reload.
@@ -34,8 +33,6 @@ use super::{context::PingoraRequestCtx, metrics};
 mod fail_to_proxy;
 /// Shared hop-by-hop header stripping logic.
 mod hop_by_hop;
-/// HTTP handler without body filter hooks.
-mod no_body;
 /// Request header normalization (duplicate headers, obs-fold).
 mod normalize;
 /// Request body filter hook.
@@ -59,7 +56,7 @@ mod via;
 /// HTTP handler with body filter hooks.
 mod with_body;
 
-pub use no_body::PingoraHttpHandlerNoBody;
+pub use upstream_peer::{arm_upstream_retry_gate, lock_upstream_retry_gate_tests};
 pub use with_body::PingoraHttpHandler;
 
 // -----------------------------------------------------------------------------
@@ -135,7 +132,12 @@ pub fn load_http_handler(
     // Always use the body-capable handler: a reload may add body
     // filters, and compression init is one-shot in Pingora.
     debug!(listener = %listener.name, "loading HTTP handler with body filters");
-    let handler = PingoraHttpHandler::new(pipeline, downstream_read_timeout, connection_semaphore);
+    let handler = PingoraHttpHandler::new(
+        pipeline,
+        downstream_read_timeout,
+        connection_semaphore,
+        ::metrics::SharedString::from(listener.name.clone()),
+    );
     wire_service(server, listener, handler, cert_watcher_shutdowns)?;
     Ok(())
 }
@@ -244,36 +246,60 @@ fn adjust_compression(
 /// Body-mutating filters can change payload length after `request_filter`,
 /// so the retry guard uses the larger of the original and mutated lengths.
 fn handle_connect_failure(ctx: &mut PingoraRequestCtx, e: Box<pingora_core::Error>) -> Box<pingora_core::Error> {
+    let cluster = ctx.metrics_cluster_shared.clone().unwrap_or_else(metrics::cluster_none);
+    if let Some(start) = ctx.upstream_connect_start.take() {
+        metrics::record_upstream_connect_duration(cluster.clone(), start.elapsed().as_secs_f64());
+    }
+    metrics::record_upstream_connect_failure(cluster.clone());
     if ctx.request_is_idempotent {
-        let mutated_len = ctx.mutated_request_body_len.unwrap_or(0) as u64;
-        let effective_body_size = std::cmp::max(ctx.request_body_bytes, mutated_len);
-        if effective_body_size > RETRY_BODY_LIMIT {
-            warn!(
-                body_bytes = ctx.request_body_bytes,
-                mutated_len = ?ctx.mutated_request_body_len,
-                limit = RETRY_BODY_LIMIT,
-                "skipping retry: request body exceeds Pingora retry buffer limit"
-            );
-            return e;
-        }
-        if (ctx.retries as usize) < MAX_RETRIES {
-            ctx.retries += 1;
-            debug!(
-                retries = ctx.retries,
-                max = MAX_RETRIES,
-                "retrying idempotent request after connect failure"
-            );
-            let mut e = e;
-            e.set_retry(true);
-            return e;
-        }
+        maybe_retry_idempotent_connect(ctx, cluster, e)
+    } else {
+        e
+    }
+}
+
+/// Decide whether an idempotent request may retry after a connect failure.
+fn maybe_retry_idempotent_connect(
+    ctx: &mut PingoraRequestCtx,
+    cluster: ::metrics::SharedString,
+    e: Box<pingora_core::Error>,
+) -> Box<pingora_core::Error> {
+    let mutated_len = ctx.mutated_request_body_len.unwrap_or(0) as u64;
+    if std::cmp::max(ctx.request_body_bytes, mutated_len) > RETRY_BODY_LIMIT {
         warn!(
+            body_bytes = ctx.request_body_bytes,
+            mutated_len = ?ctx.mutated_request_body_len,
+            limit = RETRY_BODY_LIMIT,
+            "skipping retry: request body exceeds Pingora retry buffer limit"
+        );
+        record_retry_exhausted_if_attempted(ctx, cluster);
+        return e;
+    }
+    if (ctx.retries as usize) < MAX_RETRIES {
+        ctx.retries += 1;
+        debug!(
             retries = ctx.retries,
             max = MAX_RETRIES,
-            "retry limit reached for idempotent request"
+            "retrying idempotent request after connect failure"
         );
+        let mut e = e;
+        e.set_retry(true);
+        return e;
     }
+    warn!(
+        retries = ctx.retries,
+        max = MAX_RETRIES,
+        "retry limit reached for idempotent request"
+    );
+    metrics::record_upstream_retry(cluster, metrics::RETRY_RESULT_EXHAUSTED);
     e
+}
+
+/// Record `result=exhausted` only when at least one retry was already attempted.
+fn record_retry_exhausted_if_attempted(ctx: &PingoraRequestCtx, cluster: ::metrics::SharedString) {
+    if ctx.retries > 0 {
+        metrics::record_upstream_retry(cluster, metrics::RETRY_RESULT_EXHAUSTED);
+    }
 }
 
 /// Run response filters during the logging phase if the
@@ -316,20 +342,26 @@ fn emit_request_metrics(session: &Session, ctx: &PingoraRequestCtx) {
     };
     let method = metrics::method_label(raw_method);
 
-    let cluster = ctx
-        .metrics_cluster_shared
-        .clone()
-        .unwrap_or_else(|| ::metrics::SharedString::const_str("none"));
+    let cluster = ctx.metrics_cluster_shared.clone().unwrap_or_else(metrics::cluster_none);
+
+    let route = ctx.metrics_route.clone().unwrap_or_else(metrics::route_unknown);
 
     let labels = metrics::RequestMetricLabels {
-        cluster,
+        cluster: cluster.clone(),
         method,
-        route: "unknown",
+        route,
         status_class,
     };
 
     let duration_secs = ctx.request_start.elapsed().as_secs_f64();
     metrics::record_request_metrics(labels, duration_secs);
+    metrics::record_body_size_metrics(
+        method,
+        status_class,
+        cluster,
+        ctx.request_body_bytes,
+        ctx.response_body_bytes,
+    );
 }
 
 /// Record a passive health observation for the selected upstream endpoint.
@@ -379,6 +411,7 @@ fn apply_passive_threshold(
                 threshold,
                 "passive health: endpoint marked unhealthy"
             );
+            emit_passive_health_transition(health, cluster_name, metrics::HEALTH_RESULT_UNHEALTHY);
         }
     } else if let Some(threshold) = health.passive_healthy_threshold()
         && health
@@ -392,7 +425,23 @@ fn apply_passive_threshold(
             threshold,
             "passive health: endpoint recovered"
         );
+        emit_passive_health_transition(health, cluster_name, metrics::HEALTH_RESULT_HEALTHY);
     }
+}
+
+/// Refresh health gauges and increment the transition counter after a passive flip.
+fn emit_passive_health_transition(
+    health: &praxis_core::health::ClusterHealthEntry,
+    cluster_name: &Arc<str>,
+    result: &'static str,
+) {
+    let (healthy, total) = metrics::count_healthy_endpoints(health);
+    metrics::record_health_transition(
+        ::metrics::SharedString::from(Arc::clone(cluster_name)),
+        result,
+        healthy,
+        total,
+    );
 }
 
 /// Build [`HttpServerOptions`] with h2c enabled.
@@ -644,6 +693,17 @@ mod tests {
         let e = handle_connect_failure(&mut ctx, make_error());
         assert!(!e.retry(), "non-idempotent request should never retry");
         assert_eq!(ctx.retries, 0);
+    }
+
+    #[test]
+    fn connect_failure_clears_upstream_connect_start() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_connect_start = Some(std::time::Instant::now());
+        let _e = handle_connect_failure(&mut ctx, make_error());
+        assert!(
+            ctx.upstream_connect_start.is_none(),
+            "failed connect should consume upstream_connect_start for duration recording"
+        );
     }
 
     #[tokio::test]
