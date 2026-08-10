@@ -288,10 +288,12 @@ impl CircuitBreaker {
 
     /// Returns the current state without side effects.
     ///
+    /// Used by filter-layer metrics to publish open/closed gauges
+    /// without duplicating the state machine.
+    ///
     /// # Panics
     ///
     /// Panics if the internal mutex is poisoned.
-    #[cfg(test)]
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
     pub fn state(&self) -> CircuitState {
         self.inner.lock().expect("circuit breaker lock poisoned").state

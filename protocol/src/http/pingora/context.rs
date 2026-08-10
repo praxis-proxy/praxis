@@ -166,6 +166,15 @@ pub struct PingoraRequestCtx {
     /// [`SharedString`]: ::metrics::SharedString
     pub metrics_cluster_shared: Option<::metrics::SharedString>,
 
+    /// Matched route path-match pattern for the `route` metric label.
+    pub metrics_route: Option<::metrics::SharedString>,
+
+    /// RAII guard that decrements `praxis_connections_active` on drop.
+    pub(crate) _active_connection: Option<crate::http::pingora::metrics::ActiveConnectionGuard>,
+
+    /// When the current upstream connect attempt started.
+    pub upstream_connect_start: Option<Instant>,
+
     /// Pre-read body chunks (`StreamBuffer` mode). When `StreamBuffer` is
     /// active, the body is read during `request_filter` (before upstream
     /// selection) so that body-based routing can influence `upstream_peer`.
@@ -279,6 +288,8 @@ macro_rules! filter_context {
             cluster: $ctx.cluster.take(),
             current_filter_id: None,
             downstream_tls: $ctx.downstream_tls,
+            metrics_route: $ctx.metrics_route.clone(),
+            peer_identity: $ctx.peer_identity.clone(),
             extensions: std::mem::take(&mut $ctx.extensions),
             executed_filter_indices: std::mem::take(&mut $ctx.cached_executed_filter_indices),
             extra_request_headers: Vec::new(),
@@ -290,7 +301,6 @@ macro_rules! filter_context {
             filter_results: std::mem::take(&mut $ctx.filter_results),
             filter_state: std::mem::take(&mut $ctx.filter_state),
             health_registry: $pipeline.health_registry(),
-            peer_identity: $ctx.peer_identity.clone(),
             id_generator: $pipeline.id_generator(),
             kv_stores: $pipeline.kv_stores(),
             subrequest_client: $pipeline.subrequest_client(),
@@ -461,6 +471,9 @@ impl Default for PingoraRequestCtx {
             filter_state: std::collections::HashMap::new(),
             metrics_cluster: None,
             metrics_cluster_shared: None,
+            metrics_route: None,
+            _active_connection: None,
+            upstream_connect_start: None,
             pre_read_body: None,
             request_body_buffer: None,
             request_body_bytes: 0,

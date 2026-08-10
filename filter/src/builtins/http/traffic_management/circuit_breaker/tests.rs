@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use praxis_core::circuit::{CircuitBreaker, CircuitBreakerConfig as CoreCircuitBreakerConfig};
+use praxis_core::circuit::CircuitBreakerConfig as CoreCircuitBreakerConfig;
 
 use super::CircuitBreakerFilter;
 use crate::{FilterAction, filter::HttpFilter as _};
@@ -316,11 +316,14 @@ fn make_filter(threshold: u32, recovery_secs: u64) -> CircuitBreakerFilter {
     let mut breakers = std::collections::HashMap::new();
     breakers.insert(
         Arc::from("backend"),
-        CircuitBreaker::new(CoreCircuitBreakerConfig {
-            threshold,
-            recovery_window: std::time::Duration::from_secs(recovery_secs),
-            half_open_timeout: std::time::Duration::from_secs(9999),
-        }),
+        super::InstrumentedCircuitBreaker::new(
+            "backend",
+            CoreCircuitBreakerConfig {
+                threshold,
+                recovery_window: std::time::Duration::from_secs(recovery_secs),
+                half_open_timeout: std::time::Duration::from_secs(9999),
+            },
+        ),
     );
     CircuitBreakerFilter { breakers }
 }
@@ -333,7 +336,13 @@ fn make_two_cluster_filter(threshold: u32, recovery_secs: u64) -> CircuitBreaker
         half_open_timeout: std::time::Duration::from_secs(9999),
     };
     let mut breakers = std::collections::HashMap::new();
-    breakers.insert(Arc::from("cluster-a"), CircuitBreaker::new(config.clone()));
-    breakers.insert(Arc::from("cluster-b"), CircuitBreaker::new(config));
+    breakers.insert(
+        Arc::from("cluster-a"),
+        super::InstrumentedCircuitBreaker::new("cluster-a", config.clone()),
+    );
+    breakers.insert(
+        Arc::from("cluster-b"),
+        super::InstrumentedCircuitBreaker::new("cluster-b", config),
+    );
     CircuitBreakerFilter { breakers }
 }

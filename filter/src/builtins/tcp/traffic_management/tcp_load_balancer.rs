@@ -6,6 +6,7 @@
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use metrics::SharedString;
 use praxis_core::{
     config::Cluster,
     health::{ClusterHealthState, HealthRegistry},
@@ -125,11 +126,12 @@ impl TcpFilter for TcpLoadBalancerFilter {
     }
 
     async fn on_connect(&self, ctx: &mut TcpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let Some(cluster_name) = ctx.cluster.as_deref() else {
+        let Some(cluster) = ctx.cluster.as_ref() else {
             return Err(
                 "tcp_load_balancer: no cluster set in context (is a cluster configured on the listener?)".into(),
             );
         };
+        let cluster_name = cluster.as_ref();
 
         let strategy = self
             .clusters
@@ -142,6 +144,7 @@ impl TcpFilter for TcpLoadBalancerFilter {
             && h.endpoints().iter().all(|ep| !ep.is_healthy())
         {
             warn!(cluster = %cluster_name, "all endpoints unhealthy, routing to all (panic mode)");
+            crate::metrics::record_lb_panic_mode(SharedString::from(Arc::clone(cluster)));
         }
 
         let client_ip = ctx.remote_addr.rsplit_once(':').map_or(ctx.remote_addr, |(ip, _)| ip);
@@ -286,6 +289,37 @@ mod tests {
             ctx.upstream_addr.as_deref().unwrap(),
             "10.0.0.1:5432",
             "unhealthy endpoint should be skipped"
+        );
+    }
+
+    #[tokio::test]
+    async fn panic_mode_still_routes_when_all_unhealthy() {
+        crate::test_utils::install_metrics_recorder();
+
+        let cluster = test_cluster("db", &["10.0.0.1:5432", "10.0.0.2:5432"]);
+        let lb = TcpLoadBalancerFilter::new(&[cluster]);
+
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new(), EndpointHealth::new()],
+            vec![Arc::from("10.0.0.1:5432"), Arc::from("10.0.0.2:5432")],
+            None,
+            None,
+        ));
+        state.endpoints()[0].mark_unhealthy();
+        state.endpoints()[1].mark_unhealthy();
+
+        let registry: HealthRegistry = Arc::new([(Arc::from("db"), state)].into_iter().collect());
+        let mut ctx = make_ctx_with_health("db", &registry);
+        lb.on_connect(&mut ctx).await.unwrap();
+        assert!(
+            ctx.upstream_addr.is_some(),
+            "panic mode should still select an endpoint when all are unhealthy"
+        );
+
+        let rendered = crate::test_utils::render_metrics();
+        assert!(
+            rendered.contains("praxis_lb_panic_mode_total{cluster=\"db\"}"),
+            "TCP panic-mode path must increment praxis_lb_panic_mode_total:\n{rendered}"
         );
     }
 
