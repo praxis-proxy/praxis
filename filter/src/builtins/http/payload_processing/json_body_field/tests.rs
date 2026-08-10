@@ -197,7 +197,6 @@ async fn returns_continue_on_incomplete_json() {
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
-    // Truncated mid-value: field not yet complete, so extraction must not promote.
     let partial = br#"{"model":"model-alp"#;
     let mut body = Some(Bytes::from_static(partial));
 
@@ -205,11 +204,11 @@ async fn returns_continue_on_incomplete_json() {
 
     assert!(
         matches!(action, FilterAction::Continue),
-        "incomplete JSON should continue"
+        "truncated mid-value must Continue: field not yet complete"
     );
     assert!(
         ctx.extra_request_headers.is_empty(),
-        "no headers should be added for incomplete JSON"
+        "truncated mid-value must not promote a header"
     );
 }
 
@@ -219,8 +218,6 @@ async fn early_exit_promotes_despite_trailing_junk() {
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
-    // Valid mapped field first, then incomplete trailing key — early exit must
-    // promote without validating the unread suffix.
     let json = br#"{"model":"model-alpha-1","pro"#;
     let mut body = Some(Bytes::from_static(json));
 
@@ -228,13 +225,13 @@ async fn early_exit_promotes_despite_trailing_junk() {
 
     assert!(
         matches!(action, FilterAction::BodyDone),
-        "complete mapped field should return BodyDone even with trailing junk"
+        "early exit after mapped field must BodyDone without validating unread suffix"
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "should promote the model header");
     assert_eq!(ctx.extra_request_headers[0].0, "X-Model", "header name should match");
     assert_eq!(
         ctx.extra_request_headers[0].1, "model-alpha-1",
-        "header value should match first complete field"
+        "header value should match first complete field despite trailing junk"
     );
 }
 
@@ -414,6 +411,28 @@ fn body_mode_is_stream_buffer_with_default_limit() {
             max_bytes: Some(crate::body::DEFAULT_JSON_BODY_MAX_BYTES)
         },
         "body mode should be StreamBuffer with 10 MiB default limit"
+    );
+}
+
+#[tokio::test]
+async fn rejects_value_exceeding_max_dynamic_length() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let oversized = "a".repeat(super::super::MAX_DYNAMIC_VALUE_LEN + 1);
+    let json = format!(r#"{{"model":"{oversized}","prompt":"hi"}}"#);
+    let mut body = Some(Bytes::from(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "should continue when value exceeds MAX_DYNAMIC_VALUE_LEN"
+    );
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "header should not be promoted for value exceeding MAX_DYNAMIC_VALUE_LEN"
     );
 }
 
@@ -802,7 +821,6 @@ async fn empty_string_field_value_promoted() {
 
 #[tokio::test]
 async fn repeated_body_hooks_do_not_duplicate_promoted_headers() {
-    // Mid-stream extract can BodyDone before EOS; a second hook must not re-Add.
     let filter = make_filter("model", "X-Model");
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -812,7 +830,7 @@ async fn repeated_body_hooks_do_not_duplicate_promoted_headers() {
     let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
     assert!(
         matches!(action, FilterAction::BodyDone),
-        "complete mapped field in mid-stream chunk should return BodyDone"
+        "mid-stream extract can BodyDone before EOS when mapped field is complete"
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "first promotion adds one header");
 
@@ -826,15 +844,13 @@ async fn repeated_body_hooks_do_not_duplicate_promoted_headers() {
     assert_eq!(
         ctx.extra_request_headers.len(),
         1,
-        "second body hook must not append a duplicate promoted header"
+        "second body hook after mid-stream BodyDone must not re-Add a duplicate header"
     );
     assert_eq!(ctx.extra_request_headers[0].1, "gpt-4", "promoted value unchanged");
 }
 
 #[tokio::test]
 async fn promotes_even_when_target_header_already_in_extras() {
-    // Pre-existing extras (or same-named client header applied elsewhere) must
-    // not suppress the first JSON promotion.
     let filter = make_filter("model", "X-Model");
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -848,7 +864,7 @@ async fn promotes_even_when_target_header_already_in_extras() {
 
     assert!(
         matches!(action, FilterAction::BodyDone),
-        "should still promote from body when header name already present"
+        "pre-existing extras or same-named client header must not suppress first JSON promotion"
     );
     assert_eq!(ctx.extra_request_headers.len(), 2, "should append body promotion");
     assert_eq!(
@@ -857,7 +873,7 @@ async fn promotes_even_when_target_header_already_in_extras() {
     );
     assert_eq!(
         ctx.extra_request_headers[1].1, "from-body",
-        "body value must be promoted"
+        "body value must be promoted even when target header already in extras"
     );
 }
 
