@@ -90,6 +90,13 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
     init_runtime_limits(&config.runtime);
     warn_insecure_key_permissions(&config);
 
+    // Install the Prometheus recorder before health checks (or any other
+    // instrumentation) start emitting, so the first probe transitions are not
+    // dropped by `is_recorder_installed()` gates.
+    if config.admin.address.is_some() {
+        let _handle = praxis_protocol::http::pingora::metrics::install_prometheus_recorder();
+    }
+
     let health_registry = build_health_registry(&config.clusters);
     let state = build_server_state(&config, &registry, &health_registry);
 

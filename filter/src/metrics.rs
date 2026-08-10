@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Per-filter execution timing metrics.
+//! Per-filter execution timing and traffic-management metrics.
 
-use metrics::histogram;
+use metrics::{SharedString, counter, gauge, histogram};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -11,6 +11,12 @@ use metrics::histogram;
 
 /// Histogram for filter hook execution duration in seconds.
 const FILTER_DURATION_SECONDS: &str = "praxis_filter_duration_seconds";
+
+/// Gauge for circuit breaker open state (`1` = open/half-open, `0` = closed).
+const CIRCUIT_BREAKER_OPEN: &str = "praxis_circuit_breaker_open";
+
+/// Counter for load-balancer panic-mode selections.
+const LB_PANIC_MODE_TOTAL: &str = "praxis_lb_panic_mode_total";
 
 /// Request direction label value.
 pub(crate) const PHASE_REQUEST: &str = "request";
@@ -42,6 +48,18 @@ pub(crate) fn record_filter_duration(
         "stream" => stream,
     )
     .record(duration_secs);
+}
+
+/// Set the circuit-breaker open gauge for a cluster.
+///
+/// Half-open is treated as open (`1.0`).
+pub(crate) fn set_circuit_breaker_state(cluster_name: SharedString, open: bool) {
+    gauge!(CIRCUIT_BREAKER_OPEN, "cluster" => cluster_name).set(if open { 1.0 } else { 0.0 });
+}
+
+/// Increment the load-balancer panic-mode counter for a cluster.
+pub(crate) fn record_lb_panic_mode(cluster: SharedString) {
+    counter!(LB_PANIC_MODE_TOTAL, "cluster" => cluster).increment(1);
 }
 
 // ---------------------------------------------------------------------------

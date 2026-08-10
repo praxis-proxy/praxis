@@ -3,7 +3,7 @@
 
 //! Pingora-backed bidirectional TCP proxy application.
 
-use std::{borrow::Cow, future::Future, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{borrow::Cow, collections::HashMap, future::Future, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -69,6 +69,19 @@ pub(crate) struct PingoraTcpProxy {
     /// Per-listener connection semaphore for max connections.
     connection_semaphore: Option<Arc<Semaphore>>,
 
+    /// Fallback listener label when local-address lookup misses.
+    ///
+    /// Preserves the historical "first listener in the group" behavior
+    /// for rare unmatched digests, without relying on `HashMap` iteration
+    /// order.
+    default_listener_name: ::metrics::SharedString,
+
+    /// Bind-address → listener name for connection metrics.
+    ///
+    /// Grouped TCP listeners share one service; looking up by the
+    /// connection's local address keeps the `listener` label accurate.
+    listener_names: HashMap<String, ::metrics::SharedString>,
+
     /// Optional session timeout for the bidirectional forwarding phase.
     session_timeout: Option<Duration>,
 
@@ -93,16 +106,34 @@ impl PingoraTcpProxy {
         max_duration: Option<Duration>,
         connection_semaphore: Option<Arc<Semaphore>>,
         allow_private_upstreams: bool,
+        listener_names: HashMap<String, ::metrics::SharedString>,
+        default_listener_name: ::metrics::SharedString,
     ) -> Self {
         Self {
             allow_private_upstreams,
             cluster,
             connection_semaphore,
+            default_listener_name,
+            listener_names,
             session_timeout,
             max_duration,
             pipeline,
             upstream_addr,
         }
+    }
+
+    /// Resolve the metrics `listener` label for this connection's local address.
+    fn listener_label_for(&self, local_addr: &str) -> ::metrics::SharedString {
+        resolve_listener_label(&self.listener_names, &self.default_listener_name, local_addr)
+    }
+
+    /// Cluster label for upstream connect metrics.
+    fn metrics_cluster_label(&self) -> ::metrics::SharedString {
+        self.cluster
+            .as_ref()
+            .map_or_else(crate::http::pingora::metrics::cluster_none, |c| {
+                ::metrics::SharedString::from(Arc::clone(c))
+            })
     }
 
     /// Run bidirectional forwarding, returning `(bytes_in, bytes_out)`.
@@ -224,12 +255,18 @@ impl ServerApp for PingoraTcpProxy {
 
         if praxis_core::memory::is_exceeded() {
             warn!(remote = %remote_addr, "memory pressure threshold exceeded, closing TCP connection");
+            crate::http::pingora::metrics::record_overload_reject(
+                crate::http::pingora::metrics::OVERLOAD_REASON_MEMORY,
+            );
             return None;
         }
 
         let (exceeded, _global_permit) = crate::connections::try_acquire_global();
         if exceeded {
             warn!(remote = %remote_addr, "global max connections reached, closing TCP connection");
+            crate::http::pingora::metrics::record_overload_reject(
+                crate::http::pingora::metrics::OVERLOAD_REASON_GLOBAL_CONNECTIONS,
+            );
             return None;
         }
 
@@ -238,11 +275,17 @@ impl ServerApp for PingoraTcpProxy {
                 Some(permit)
             } else {
                 warn!(remote = %remote_addr, "max TCP connections reached, closing connection");
+                crate::http::pingora::metrics::record_overload_reject(
+                    crate::http::pingora::metrics::OVERLOAD_REASON_LISTENER_CONNECTIONS,
+                );
                 return None;
             }
         } else {
             None
         };
+
+        let _active_connection =
+            crate::http::pingora::metrics::ActiveConnectionGuard::acquire(self.listener_label_for(&local_addr));
 
         let (sni_hostname, peeked_bytes) = if self.upstream_addr.is_none() {
             let Ok(result) = tokio::time::timeout(SNI_PEEK_TIMEOUT, peek_sni(&mut session)).await else {
@@ -258,7 +301,18 @@ impl ServerApp for PingoraTcpProxy {
             .run_connect_filters(&remote_addr, &local_addr, sni_hostname.as_deref(), connect_time)
             .await?;
 
-        let mut upstream = connect_upstream(&upstream_addr, self.allow_private_upstreams).await?;
+        let upstream_connect_start = std::time::Instant::now();
+        let cluster_label = self.metrics_cluster_label();
+        let mut upstream = if let Some(stream) = connect_upstream(&upstream_addr, self.allow_private_upstreams).await {
+            crate::http::pingora::metrics::record_upstream_connect_duration(
+                cluster_label,
+                upstream_connect_start.elapsed().as_secs_f64(),
+            );
+            stream
+        } else {
+            crate::http::pingora::metrics::record_upstream_connect_failure(cluster_label);
+            return None;
+        };
 
         if !peeked_bytes.is_empty()
             && let Err(e) = tokio::io::AsyncWriteExt::write_all(&mut upstream, &peeked_bytes).await
@@ -542,6 +596,31 @@ fn find_private_addr(addrs: &[SocketAddr]) -> Option<std::net::IpAddr> {
     addrs.iter().map(SocketAddr::ip).find(is_private_ip)
 }
 
+/// Resolve a listener metrics label from the connection local address.
+///
+/// Prefers an exact bind-address match, then a same-port match (so
+/// `0.0.0.0:5432` config can label traffic seen as `127.0.0.1:5432`),
+/// then the group default.
+fn resolve_listener_label(
+    listener_names: &HashMap<String, ::metrics::SharedString>,
+    default_listener_name: &::metrics::SharedString,
+    local_addr: &str,
+) -> ::metrics::SharedString {
+    if let Some(name) = listener_names.get(local_addr) {
+        return name.clone();
+    }
+    // Config may use `0.0.0.0:port` while the socket digest reports a
+    // concrete interface address; fall back to matching on port.
+    if let Some(port) = local_addr.rsplit_once(':').map(|(_, p)| p) {
+        for (bind_addr, name) in listener_names {
+            if bind_addr.rsplit_once(':').is_some_and(|(_, p)| p == port) {
+                return name.clone();
+            }
+        }
+    }
+    default_listener_name.clone()
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -558,6 +637,44 @@ fn find_private_addr(addrs: &[SocketAddr]) -> Option<std::net::IpAddr> {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resolve_listener_label_exact_bind_address() {
+        let mut names = HashMap::new();
+        names.insert("127.0.0.1:5432".to_owned(), ::metrics::SharedString::const_str("db1"));
+        names.insert("127.0.0.1:5433".to_owned(), ::metrics::SharedString::const_str("db2"));
+        let default = ::metrics::SharedString::const_str("db1");
+        assert_eq!(
+            resolve_listener_label(&names, &default, "127.0.0.1:5433").as_ref(),
+            "db2",
+            "exact local address should select the matching listener"
+        );
+    }
+
+    #[test]
+    fn resolve_listener_label_matches_by_port_when_bind_is_wildcard() {
+        let mut names = HashMap::new();
+        names.insert("0.0.0.0:5432".to_owned(), ::metrics::SharedString::const_str("db1"));
+        names.insert("0.0.0.0:5433".to_owned(), ::metrics::SharedString::const_str("db2"));
+        let default = ::metrics::SharedString::const_str("db1");
+        assert_eq!(
+            resolve_listener_label(&names, &default, "127.0.0.1:5433").as_ref(),
+            "db2",
+            "wildcard bind should still label by destination port"
+        );
+    }
+
+    #[test]
+    fn resolve_listener_label_falls_back_to_default() {
+        let mut names = HashMap::new();
+        names.insert("127.0.0.1:5432".to_owned(), ::metrics::SharedString::const_str("db1"));
+        let default = ::metrics::SharedString::const_str("db1");
+        assert_eq!(
+            resolve_listener_label(&names, &default, "unknown").as_ref(),
+            "db1",
+            "unmatched local address should use the group default"
+        );
+    }
 
     #[test]
     fn try_parse_sni_valid_client_hello_with_sni() {

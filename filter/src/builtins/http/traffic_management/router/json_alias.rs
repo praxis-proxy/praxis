@@ -302,6 +302,7 @@ mod tests {
                     })
                     .collect(),
             ),
+            metrics_label: ::metrics::SharedString::const_str("/"),
             wildcard_suffix: None,
         }
     }

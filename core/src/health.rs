@@ -341,6 +341,13 @@ impl ClusterHealthEntry {
         &self.endpoints
     }
 
+    /// Return `(healthy, total)` endpoint counts for this cluster.
+    pub fn endpoint_counts(&self) -> (usize, usize) {
+        let total = self.endpoints.len();
+        let healthy = self.endpoints.iter().filter(|ep| ep.is_healthy()).count();
+        (healthy, total)
+    }
+
     /// Passive healthy threshold, if configured.
     pub fn passive_healthy_threshold(&self) -> Option<u32> {
         self.passive_healthy_threshold
@@ -563,6 +570,26 @@ mod tests {
             entry.endpoint_index("unknown:80"),
             None,
             "unknown address should return None"
+        );
+    }
+
+    #[test]
+    fn cluster_health_entry_endpoint_counts() {
+        let entry = ClusterHealthEntry::new(
+            vec![EndpointHealth::new(), EndpointHealth::new(), EndpointHealth::new()],
+            vec![
+                Arc::from("10.0.0.1:80"),
+                Arc::from("10.0.0.2:80"),
+                Arc::from("10.0.0.3:80"),
+            ],
+            None,
+            None,
+        );
+        entry.endpoints()[1].mark_unhealthy();
+        assert_eq!(
+            entry.endpoint_counts(),
+            (2, 3),
+            "should count two healthy out of three endpoints"
         );
     }
 
