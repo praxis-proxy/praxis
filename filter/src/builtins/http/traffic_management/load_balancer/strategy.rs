@@ -44,18 +44,21 @@ impl Strategy {
         &self.inner
     }
 
-    /// Extract the hash key from the HTTP context for consistent-hash.
+    /// Extract the hash key from the HTTP context for hash-based strategies.
+    ///
+    /// Consistent-hash and Maglev both hash a configured header (falling back
+    /// to the URI path); other strategies ignore the key.
     fn extract_hash_key<'a>(&self, ctx: &'a HttpFilterContext<'_>) -> Option<&'a str> {
-        if let shared::Strategy::ConsistentHash(ch) = &self.inner {
-            let key: &str = ch
-                .header()
-                .and_then(|h| ctx.request.headers.get(h))
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or_else(|| ctx.request.uri.path());
-            Some(key)
-        } else {
-            None
-        }
+        let header = match &self.inner {
+            shared::Strategy::ConsistentHash(ch) => ch.header(),
+            shared::Strategy::Maglev(m) => m.header(),
+            _ => return None,
+        };
+        let key: &str = header
+            .and_then(|h| ctx.request.headers.get(h))
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_else(|| ctx.request.uri.path());
+        Some(key)
     }
 }
 

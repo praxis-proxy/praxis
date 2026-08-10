@@ -2,40 +2,89 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Tracing subscriber setup shared by all Praxis binaries.
+//!
+//! Composes a layered [`tracing_subscriber::Registry`] with:
+//!
+//! - **fmt layer** (always) — stdout text or JSON logging
+//! - **OTLP layer** (opt-in, `otel` feature) — span export to an OTel Collector
+//!
+//! Set `PRAXIS_LOG_FORMAT=json` for structured JSON output.
+//! Per-module overrides come from `runtime.log_overrides` in the config YAML.
+
+use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 use crate::{config::Config, errors::ProxyError};
 
 // -----------------------------------------------------------------------------
-// Tracing
+// TracingGuard
+// -----------------------------------------------------------------------------
+
+/// RAII guard that flushes and shuts down the `OTel` tracer provider on drop.
+///
+/// Store this in `main()` to ensure pending spans are exported on graceful
+/// shutdown. Without the `otel` feature, this is a zero-size no-op.
+///
+/// ```no_run
+/// let config = praxis_core::config::Config::load(None, "listeners: []").unwrap();
+/// let _guard = praxis_core::logging::init_tracing(&config).unwrap();
+/// ```
+pub struct TracingGuard {
+    /// Tracer provider to shut down when the guard is dropped.
+    #[cfg(feature = "otel")]
+    provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+}
+
+#[cfg(feature = "otel")]
+impl Drop for TracingGuard {
+    #[expect(clippy::print_stderr, reason = "tracing subscriber is being torn down")]
+    fn drop(&mut self) {
+        if let Some(provider) = self.provider.take()
+            && let Err(e) = provider.shutdown()
+        {
+            eprintln!("failed to shut down OTel tracer provider: {e}");
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Tracing Initialization
 // -----------------------------------------------------------------------------
 
 /// Initialize the global tracing subscriber.
 ///
-/// Set `PRAXIS_LOG_FORMAT=json` for structured JSON output.
-/// Per-module overrides come from `runtime.log_overrides` in
-/// the config YAML.
+/// Composes a [`tracing_subscriber::Registry`] with an [`EnvFilter`] and
+/// a fmt layer (text or JSON). When the `otel` feature is enabled and an
+/// OTLP endpoint is configured, adds an OTLP trace-export layer.
+///
+/// Returns a [`TracingGuard`] that flushes pending spans on drop.
 ///
 /// # Errors
 ///
-/// Returns [`ProxyError::Config`] if any `log_overrides` entry is invalid.
+/// Returns [`ProxyError::Config`] if any `log_overrides` entry is invalid
+/// or (with the `otel` feature) if the OTLP exporter cannot be built.
 ///
 /// ```no_run
 /// let config = praxis_core::config::Config::load(None, "listeners: []").unwrap();
-/// praxis_core::logging::init_tracing(&config).unwrap();
+/// let _guard = praxis_core::logging::init_tracing(&config).unwrap();
 /// ```
 ///
+/// [`EnvFilter`]: tracing_subscriber::EnvFilter
 /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
-pub fn init_tracing(config: &Config) -> Result<(), ProxyError> {
+pub fn init_tracing(config: &Config) -> Result<TracingGuard, ProxyError> {
     let env_filter = build_env_filter(config)?;
     let json = std::env::var("PRAXIS_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
+    let telemetry = config.telemetry.resolve();
 
-    if json {
-        tracing_subscriber::fmt().json().with_env_filter(env_filter).init();
-    } else {
-        tracing_subscriber::fmt().with_env_filter(env_filter).init();
+    warn_if_endpoint_without_feature(telemetry.otlp_endpoint.is_some());
+
+    #[cfg(feature = "otel")]
+    return init_with_otel(env_filter, json, &telemetry);
+
+    #[cfg(not(feature = "otel"))]
+    {
+        init_fmt_only(env_filter, json);
+        Ok(TracingGuard {})
     }
-
-    Ok(())
 }
 
 /// Validate log overrides from config without initializing the global subscriber.
@@ -66,6 +115,138 @@ pub fn init_tracing(config: &Config) -> Result<(), ProxyError> {
 pub fn validate_log_overrides(config: &Config) -> Result<(), ProxyError> {
     build_env_filter(config)?;
     Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Subscriber Initialization
+// -----------------------------------------------------------------------------
+
+/// Initialize the layered subscriber with an optional OTLP layer.
+#[cfg(feature = "otel")]
+#[expect(
+    clippy::large_stack_frames,
+    reason = "tracing-subscriber layer composition creates deeply nested generic types; runs once at startup"
+)]
+fn init_with_otel(
+    env_filter: tracing_subscriber::EnvFilter,
+    json: bool,
+    telemetry: &crate::config::TelemetryConfig,
+) -> Result<TracingGuard, ProxyError> {
+    use opentelemetry::trace::TracerProvider as _;
+
+    let provider = build_otel_provider(telemetry)?;
+
+    // `OpenTelemetryLayer<S>` requires `S` to match the composed subscriber type.
+    // JSON and text fmt produce different types, preventing a shared binding.
+    if json {
+        let otel_layer = provider
+            .as_ref()
+            .map(|p| tracing_opentelemetry::layer().with_tracer(p.tracer("praxis")));
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_current_span(true)
+                    .with_span_list(true),
+            )
+            .with(otel_layer)
+            .init();
+    } else {
+        let otel_layer = provider
+            .as_ref()
+            .map(|p| tracing_opentelemetry::layer().with_tracer(p.tracer("praxis")));
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .with(otel_layer)
+            .init();
+    }
+
+    Ok(TracingGuard { provider })
+}
+
+/// Initialize the layered subscriber with fmt only (no `otel` feature).
+#[cfg(not(feature = "otel"))]
+fn init_fmt_only(env_filter: tracing_subscriber::EnvFilter, json: bool) {
+    if json {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_current_span(true)
+                    .with_span_list(true),
+            )
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(env_filter)
+            .with(tracing_subscriber::fmt::layer())
+            .init();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// OTLP Provider Builder
+// -----------------------------------------------------------------------------
+
+/// Build the optional OTLP tracer provider.
+///
+/// Returns `Some(provider)` when an OTLP endpoint is configured,
+/// `None` otherwise. Sets the global tracer provider and W3C propagator.
+#[cfg(feature = "otel")]
+fn build_otel_provider(
+    config: &crate::config::TelemetryConfig,
+) -> Result<Option<opentelemetry_sdk::trace::SdkTracerProvider>, ProxyError> {
+    use opentelemetry_otlp::WithExportConfig as _;
+
+    let Some(endpoint) = config.otlp_endpoint.as_deref() else {
+        return Ok(None);
+    };
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .build()
+        .map_err(|e| ProxyError::Config(format!("failed to build OTLP span exporter: {e}")))?;
+
+    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_resource(
+            opentelemetry_sdk::Resource::builder()
+                .with_service_name("praxis")
+                .build(),
+        )
+        .build();
+
+    opentelemetry::global::set_tracer_provider(provider.clone());
+    opentelemetry::global::set_text_map_propagator(opentelemetry_sdk::propagation::TraceContextPropagator::new());
+
+    Ok(Some(provider))
+}
+
+// -----------------------------------------------------------------------------
+// Warnings
+// -----------------------------------------------------------------------------
+
+/// Warn if an OTLP endpoint is configured but the `otel` feature is not
+/// compiled in.
+#[cfg_attr(
+    not(feature = "otel"),
+    expect(clippy::print_stderr, reason = "tracing not yet initialized")
+)]
+fn warn_if_endpoint_without_feature(has_endpoint: bool) {
+    #[cfg(not(feature = "otel"))]
+    if has_endpoint {
+        eprintln!(
+            "warning: telemetry.otlp_endpoint is configured but the `otel` feature is not \
+             enabled; OTLP export is disabled. Rebuild with `--features otel` to enable it."
+        );
+    }
+
+    #[cfg(feature = "otel")]
+    let _ = has_endpoint;
 }
 
 // -----------------------------------------------------------------------------
@@ -295,6 +476,73 @@ mod tests {
         for level in &["off", "critical", "trace,h2=off", ""] {
             assert!(!is_valid_log_level(level), "{level} should be rejected as log level");
         }
+    }
+
+    #[test]
+    fn telemetry_config_defaults_in_config() {
+        let config = config_with_overrides(HashMap::new());
+        assert!(
+            config.telemetry.otlp_endpoint.is_none(),
+            "telemetry.otlp_endpoint should default to None"
+        );
+    }
+
+    #[test]
+    fn telemetry_config_parsed_in_config() {
+        let yaml = r#"
+listeners:
+  - name: test
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+telemetry:
+  otlp_endpoint: "http://collector:4317"
+"#;
+        let config = Config::from_yaml(yaml).expect("config with telemetry should parse");
+        assert_eq!(
+            config.telemetry.otlp_endpoint.as_deref(),
+            Some("http://collector:4317"),
+            "otlp_endpoint should be parsed from config"
+        );
+    }
+
+    #[test]
+    fn unknown_telemetry_field_rejected() {
+        let yaml = r#"
+listeners:
+  - name: test
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+telemetry:
+  bogus_field: true
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("bogus_field"),
+            "unknown telemetry field should be rejected: {err}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // OTel Feature Tests
+    // -------------------------------------------------------------------------
+
+    #[cfg(feature = "otel")]
+    #[test]
+    fn otel_provider_none_when_no_endpoint() {
+        let config = crate::config::TelemetryConfig::default();
+        let provider = build_otel_provider(&config).expect("should succeed with no endpoint");
+        assert!(
+            provider.is_none(),
+            "provider should be None when no endpoint configured"
+        );
     }
 
     // -------------------------------------------------------------------------

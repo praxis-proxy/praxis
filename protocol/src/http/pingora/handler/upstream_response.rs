@@ -7,9 +7,7 @@
 //! [RFC 9110 Section 7.6.1] requires intermediaries to remove
 //! hop-by-hop headers in both directions. This module handles
 //! the response path: stripping hop-by-hop headers from the
-//! upstream response before forwarding to the client. It also
-//! removes reserved internal routing headers that backends may
-//! echo back.
+//! upstream response before forwarding to the client.
 //!
 //! [RFC 9110]: https://datatracker.ietf.org/doc/html/rfc9110
 //! [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
@@ -73,35 +71,6 @@ fn is_websocket_response(headers: &http::HeaderMap) -> bool {
 }
 
 // -----------------------------------------------------------------------------
-// Reserved Internal Header Stripping (Response)
-// -----------------------------------------------------------------------------
-
-/// Strip reserved internal headers from an upstream response.
-///
-/// Removes proxy-internal routing metadata that backends may echo
-/// back. These headers are for intra-proxy routing only and must
-/// not reach the client.
-pub(crate) fn strip_reserved_internal_response(resp: &mut ResponseHeader) {
-    let to_remove: Vec<http::HeaderName> = resp
-        .headers
-        .keys()
-        .filter(|name| super::reserved_headers::is_reserved_internal_header(name))
-        .cloned()
-        .collect();
-
-    for name in &to_remove {
-        let _removed = resp.remove_header(name);
-    }
-
-    if !to_remove.is_empty() {
-        debug!(
-            count = to_remove.len(),
-            "stripped reserved internal headers from upstream response"
-        );
-    }
-}
-
-// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
@@ -116,6 +85,7 @@ pub(crate) fn strip_reserved_internal_response(resp: &mut ResponseHeader) {
 )]
 mod tests {
     use super::*;
+    use crate::http::pingora::handler::hop_by_hop::RemoveHeader as _;
 
     #[test]
     fn strips_standard_response_hop_by_hop() {
@@ -443,7 +413,7 @@ mod tests {
             ("content-type", "application/json"),
         ]);
 
-        strip_reserved_internal_response(&mut resp);
+        resp.strip_reserved_internal();
 
         assert!(
             resp.headers.get("x-praxis-filter-action").is_none(),
@@ -468,7 +438,7 @@ mod tests {
             ("server", "test"),
         ]);
 
-        strip_reserved_internal_response(&mut resp);
+        resp.strip_reserved_internal();
 
         assert!(
             resp.headers.get("x-ext-protocol-servername").is_none(),
@@ -493,7 +463,7 @@ mod tests {
             ("cache-control", "no-cache"),
         ]);
 
-        strip_reserved_internal_response(&mut resp);
+        resp.strip_reserved_internal();
 
         assert!(
             resp.headers.get("x-ext-agent-method").is_none(),
@@ -520,7 +490,7 @@ mod tests {
             ("content-type", "text/plain"),
         ]);
 
-        strip_reserved_internal_response(&mut resp);
+        resp.strip_reserved_internal();
 
         assert!(
             resp.headers.get("x-praxis-filter-action").is_none(),
@@ -555,7 +525,7 @@ mod tests {
             ("ext-protocol-version", "2025-03-26"),
         ]);
 
-        strip_reserved_internal_response(&mut resp);
+        resp.strip_reserved_internal();
 
         assert_eq!(
             resp.headers.get("ext-session-id").unwrap(),
@@ -588,7 +558,7 @@ mod tests {
             ("x-custom-header", "custom-value"),
         ]);
 
-        strip_reserved_internal_response(&mut resp);
+        resp.strip_reserved_internal();
 
         assert_eq!(
             resp.headers.get("x-request-id").unwrap(),
@@ -620,7 +590,7 @@ mod tests {
             ("server", "test"),
         ]);
 
-        strip_reserved_internal_response(&mut resp);
+        resp.strip_reserved_internal();
 
         assert_eq!(
             resp.headers.get("content-type").unwrap(),
@@ -642,7 +612,7 @@ mod tests {
     #[test]
     fn empty_response_reserved_strip_no_panic() {
         let mut resp = ResponseHeader::build(200, None).unwrap();
-        strip_reserved_internal_response(&mut resp);
+        resp.strip_reserved_internal();
     }
 
     // -------------------------------------------------------------------------

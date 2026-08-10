@@ -1,7 +1,7 @@
 # Endpoint Selector
 #
 # Selects an upstream endpoint from a trusted mutation
-# source (e.g. ext_proc). Client-supplied header values
+# source (e.g. external processing). Client-supplied header values
 # are ignored to prevent SSRF. When no trusted value is
 # present and required is false, the request falls
 # through to the normal router/load_balancer pipeline.
@@ -11,7 +11,7 @@
 #     -c examples/configs/traffic-management/endpoint-selector.yaml
 #
 # Exercise:
-#   # Without ext_proc, falls through to default routing
+#   # Without a trusted mutation source, falls through to default routing
 #   curl http://localhost:8080/
 
 listeners:

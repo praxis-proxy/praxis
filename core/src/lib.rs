@@ -33,4 +33,5 @@ pub mod subrequest;
 pub mod time;
 
 pub use errors::ProxyError;
+pub use logging::TracingGuard;
 pub use server::{PingoraServerRuntime, RuntimeOptions};

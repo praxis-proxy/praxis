@@ -2136,10 +2136,10 @@ mod tests {
     #[test]
     fn render_filter_doc_marks_required_feature() {
         let mut entry = sample_filter_entry();
-        entry.required_feature = Some("ext-proc".to_owned());
+        entry.required_feature = Some("cpex".to_owned());
         let result = render_filter_doc(&entry);
         assert!(
-            result.contains("Requires Cargo feature: `ext-proc`."),
+            result.contains("Requires Cargo feature: `cpex`."),
             "feature-gated filter pages should state the required feature"
         );
     }
@@ -2387,10 +2387,10 @@ mod tests {
     #[test]
     fn render_reference_index_marks_required_feature() {
         let mut entry = sample_filter_entry();
-        entry.required_feature = Some("ext-proc".to_owned());
+        entry.required_feature = Some("cpex".to_owned());
         let result = render_reference_index(&[entry]);
         assert!(
-            result.contains("| [`timeout`](http/traffic_management/timeout.md) | `ext-proc` |"),
+            result.contains("| [`timeout`](http/traffic_management/timeout.md) | `cpex` |"),
             "reference index should expose feature-gated filters"
         );
     }

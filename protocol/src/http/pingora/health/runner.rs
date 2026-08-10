@@ -120,7 +120,7 @@ fn build_health_params(
 async fn run_health_check_loop(params: &HealthCheckParams, shutdown: CancellationToken) {
     debug!(cluster = %params.cluster_name, "health check loop started");
 
-    probe_all_endpoints(params).await;
+    probe_all_endpoints(params, &shutdown).await;
 
     let mut ticker = tokio::time::interval(params.interval);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -133,14 +133,18 @@ async fn run_health_check_loop(params: &HealthCheckParams, shutdown: Cancellatio
                 return;
             }
             _ = ticker.tick() => {
-                probe_all_endpoints(params).await;
+                probe_all_endpoints(params, &shutdown).await;
             }
         }
     }
 }
 
 /// Probe all endpoints in a cluster and update health state.
-async fn probe_all_endpoints(params: &HealthCheckParams) {
+///
+/// Returns early without recording further results once `shutdown` is
+/// cancelled so a respawned health registry cannot be overwritten by
+/// in-flight probes from the previous generation.
+async fn probe_all_endpoints(params: &HealthCheckParams, shutdown: &CancellationToken) {
     use futures::stream::{FuturesUnordered, StreamExt as _};
 
     let futures: FuturesUnordered<_> = params
@@ -152,6 +156,13 @@ async fn probe_all_endpoints(params: &HealthCheckParams) {
 
     futures::pin_mut!(futures);
     while let Some((idx, addr, success)) = futures.next().await {
+        if shutdown.is_cancelled() {
+            debug!(
+                cluster = %params.cluster_name,
+                "discarding remaining probe results after health check shutdown"
+            );
+            return;
+        }
         record_probe_result(params, idx, &addr, success);
     }
 }
@@ -181,16 +192,31 @@ fn record_probe_result(params: &HealthCheckParams, idx: usize, addr: &str, succe
     if idx >= params.state.endpoints().len() {
         return;
     }
-    if success {
+    let transitioned = if success {
         trace!(cluster = %params.cluster_name, endpoint = %addr, "probe succeeded");
-        if params.state.endpoints()[idx].record_success(params.healthy_threshold) {
-            info!(cluster = %params.cluster_name, endpoint = %addr, "endpoint transitioned to healthy");
-        }
+        params.state.endpoints()[idx].record_success(params.healthy_threshold)
     } else {
         trace!(cluster = %params.cluster_name, endpoint = %addr, "probe failed");
-        if params.state.endpoints()[idx].record_failure(params.unhealthy_threshold) {
+        params.state.endpoints()[idx].record_failure(params.unhealthy_threshold)
+    };
+    publish_probe_metrics(params, addr, success, transitioned);
+}
+
+/// Emit transition counters and/or refresh aggregate health gauges.
+fn publish_probe_metrics(params: &HealthCheckParams, addr: &str, success: bool, transitioned: bool) {
+    let cluster = ::metrics::SharedString::from(Arc::clone(&params.cluster_name));
+    let (healthy, total) = crate::http::pingora::metrics::count_healthy_endpoints(&params.state);
+    if transitioned {
+        let result = if success {
+            info!(cluster = %params.cluster_name, endpoint = %addr, "endpoint transitioned to healthy");
+            crate::http::pingora::metrics::HEALTH_RESULT_HEALTHY
+        } else {
             info!(cluster = %params.cluster_name, endpoint = %addr, "endpoint transitioned to unhealthy");
-        }
+            crate::http::pingora::metrics::HEALTH_RESULT_UNHEALTHY
+        };
+        crate::http::pingora::metrics::record_health_transition(cluster, result, healthy, total);
+    } else {
+        crate::http::pingora::metrics::set_upstream_endpoint_gauges(cluster, healthy, total);
     }
 }
 
@@ -219,7 +245,7 @@ mod tests {
         ));
         let params = test_params(vec!["127.0.0.1:1".to_owned()], Arc::clone(&state), (1, 1));
 
-        probe_all_endpoints(&params).await;
+        probe_all_endpoints(&params, &CancellationToken::new()).await;
 
         assert!(
             !state.endpoints()[0].is_healthy(),
@@ -244,7 +270,7 @@ mod tests {
 
         let probe = tokio::spawn({
             async move {
-                probe_all_endpoints(&params).await;
+                probe_all_endpoints(&params, &CancellationToken::new()).await;
             }
         });
 
@@ -253,6 +279,44 @@ mod tests {
         assert!(
             state.endpoints()[0].is_healthy(),
             "reachable endpoint should become healthy"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelled_probe_round_skips_recording() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+            vec![EndpointHealth::new()],
+            vec![Arc::from("placeholder:80")],
+            None,
+            None,
+        ));
+        assert!(state.endpoints()[0].is_healthy(), "endpoint starts healthy");
+
+        let mut params = test_params(vec![addr], Arc::clone(&state), (1, 1));
+        params.check_type = HealthCheckType::Http;
+        params.timeout = Duration::from_secs(2);
+
+        let shutdown = CancellationToken::new();
+        let probe = tokio::spawn({
+            let shutdown = shutdown.clone();
+            async move {
+                probe_all_endpoints(&params, &shutdown).await;
+            }
+        });
+
+        // Accept so the probe is in-flight, cancel, then drop the socket so the
+        // probe fails quickly — the cancelled generation must not record it.
+        let (socket, _peer) = listener.accept().await.unwrap();
+        shutdown.cancel();
+        drop(socket);
+        probe.await.unwrap();
+
+        assert!(
+            state.endpoints()[0].is_healthy(),
+            "cancelled probe must not record failure against the old registry"
         );
     }
 
@@ -272,20 +336,21 @@ mod tests {
             None,
         ));
         let params = test_params(vec!["127.0.0.1:1".to_owned()], Arc::clone(&state), (1, 3));
+        let shutdown = CancellationToken::new();
 
-        probe_all_endpoints(&params).await;
+        probe_all_endpoints(&params, &shutdown).await;
         assert!(
             state.endpoints()[0].is_healthy(),
             "one failure with threshold 3 should stay healthy"
         );
 
-        probe_all_endpoints(&params).await;
+        probe_all_endpoints(&params, &shutdown).await;
         assert!(
             state.endpoints()[0].is_healthy(),
             "two failures with threshold 3 should stay healthy"
         );
 
-        probe_all_endpoints(&params).await;
+        probe_all_endpoints(&params, &shutdown).await;
         assert!(
             !state.endpoints()[0].is_healthy(),
             "three failures with threshold 3 should mark unhealthy"
@@ -309,7 +374,7 @@ mod tests {
         params.check_type = HealthCheckType::Http;
 
         let probe = tokio::spawn(async move {
-            probe_all_endpoints(&params).await;
+            probe_all_endpoints(&params, &CancellationToken::new()).await;
         });
 
         let (mut socket, _peer) = listener.accept().await.unwrap();

@@ -401,8 +401,8 @@ listeners:
         let input = "\
 # Title
 #
-# Requires the ext-proc feature:
-#   cargo build --features ext-proc
+# Requires the cpex feature:
+#   cargo build --features cpex
 #
 # Real description here.
 ";

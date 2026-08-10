@@ -4,7 +4,7 @@
 //! Functional integration tests for the `endpoint_selector` example config.
 //!
 //! The endpoint selector only reads from trusted mutation sources (e.g.
-//! ext_proc), deliberately ignoring client-supplied headers to prevent
+//! external processing filters), deliberately ignoring client-supplied headers to prevent
 //! SSRF. In non-required mode, the filter passes through when no trusted
 //! value is present, allowing normal router/load_balancer routing.
 

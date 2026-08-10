@@ -21,6 +21,7 @@ mod tests;
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use metrics::SharedString;
 use praxis_core::{
     config::Cluster,
     health::{ClusterHealthState, HealthRegistry},
@@ -44,8 +45,12 @@ use crate::{
 /// - `round_robin` (default): cycles through endpoints in order, respecting weights via endpoint expansion.
 /// - `least_connections`: picks the endpoint with the fewest active in-flight requests; decrements the counter on
 ///   `on_response`.
+/// - `p2c`: samples two random endpoints and picks the less loaded one.
+/// - `random`: picks a uniformly random endpoint, weighted by endpoint weight.
 /// - `consistent_hash`: hashes a configurable request header (or the URI path when the header is absent) to pin
 ///   requests to a stable endpoint.
+/// - `maglev`: hashes a configurable request header (or the URI path) through a Maglev lookup table for even
+///   distribution and minimal disruption when endpoints change.
 ///
 /// # YAML configuration
 ///
@@ -126,11 +131,12 @@ impl HttpFilter for LoadBalancerFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let Some(cluster_name) = ctx.cluster.as_deref() else {
+        let Some(cluster) = ctx.cluster.as_ref() else {
             return Err(
                 "load_balancer filter: no cluster set in context (is a router filter configured before this?)".into(),
             );
         };
+        let cluster_name = cluster.as_ref();
 
         let entry = self.clusters.get(cluster_name).ok_or_else(|| -> FilterError {
             format!("load_balancer filter: unknown cluster '{cluster_name}'").into()
@@ -142,6 +148,7 @@ impl HttpFilter for LoadBalancerFilter {
             && h.endpoints().iter().all(|ep| !ep.is_healthy())
         {
             warn!(cluster = %cluster_name, "all endpoints unhealthy, routing to all (panic mode)");
+            crate::metrics::record_lb_panic_mode(SharedString::from(Arc::clone(cluster)));
         }
 
         let addr = entry.strategy.select(ctx, health).ok_or_else(|| -> FilterError {

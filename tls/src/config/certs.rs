@@ -145,29 +145,10 @@ impl CaConfig {
 
 /// Validate a `server_names` entry as a DNS hostname or wildcard.
 fn validate_server_name(name: &str) -> Result<(), TlsError> {
-    if name.is_empty() {
-        return Err(TlsError::ServerConfigError {
-            detail: "server_names entry must not be empty".to_owned(),
-        });
-    }
-    let mut has_wildcard = false;
-    let mut label_count: usize = 0;
-    for (i, label) in name.split('.').enumerate() {
-        label_count += 1;
-        if label == "*" && i == 0 {
-            has_wildcard = true;
-            continue;
-        }
-        if label.contains('*') {
-            return Err(TlsError::ServerConfigError {
-                detail: format!("server_names '{name}': wildcard only permitted as the complete leftmost label"),
-            });
-        }
-        crate::dns::validate_dns_label(label).map_err(|e| TlsError::ServerConfigError {
-            detail: format!("server_names '{name}': {e}"),
-        })?;
-    }
-    if has_wildcard && label_count < 3 {
+    crate::sni_name::validate(name).map_err(|e| TlsError::ServerConfigError {
+        detail: format!("server_names '{name}': {e}"),
+    })?;
+    if name.starts_with("*.") && name.split('.').count() < 3 {
         return Err(TlsError::ServerConfigError {
             detail: format!("server_names '{name}': wildcard requires at least 3 labels (e.g. *.example.com)"),
         });
@@ -268,7 +249,7 @@ mod tests {
     fn reject_bare_wildcard() {
         let err = validate_server_name("*").unwrap_err();
         assert!(
-            err.to_string().contains("at least 3 labels"),
+            err.to_string().contains("wildcard"),
             "bare wildcard should be rejected: {err}"
         );
     }

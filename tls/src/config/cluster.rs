@@ -88,12 +88,16 @@ impl ClusterTls {
     /// # Errors
     ///
     /// Returns [`TlsError`] if the SNI value is not a valid DNS
-    /// hostname or any path contains `..`.
+    /// hostname, contains a wildcard, is an IP literal, or any
+    /// path contains `..`.
     ///
     /// [`TlsError`]: crate::TlsError
     pub fn validate(&self) -> Result<(), TlsError> {
         if let Some(sni) = &self.sni {
-            super::validate_sni_hostname(sni)?;
+            if sni.contains('*') {
+                return Err(TlsError::InvalidSni { value: sni.to_owned() });
+            }
+            crate::sni_name::validate(sni).map_err(|_sni| TlsError::InvalidSni { value: sni.to_owned() })?;
         }
         if let Some(ca) = &self.ca {
             ca.validate()?;

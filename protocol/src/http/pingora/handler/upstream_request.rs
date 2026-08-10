@@ -109,36 +109,6 @@ pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &mut PingoraReq
     Ok(())
 }
 
-// -----------------------------------------------------------------------------
-// Reserved Internal Header Stripping
-// -----------------------------------------------------------------------------
-
-/// Strip reserved internal headers before forwarding to upstream.
-///
-/// Removes proxy-internal routing metadata that should not leak to
-/// backends. Standard protocol headers without the `x-` prefix
-/// (e.g. `ext-session-id`) are preserved because they do not match
-/// the `x-` prefixed reserved set.
-pub(crate) fn strip_reserved_internal(req: &mut RequestHeader) {
-    let to_remove: Vec<http::HeaderName> = req
-        .headers
-        .keys()
-        .filter(|name| super::reserved_headers::is_reserved_internal_header(name))
-        .cloned()
-        .collect();
-
-    for name in &to_remove {
-        let _removed = req.remove_header(name);
-    }
-
-    if !to_remove.is_empty() {
-        debug!(
-            count = to_remove.len(),
-            "stripped reserved internal headers before upstream"
-        );
-    }
-}
-
 /// Repair request framing after `StreamBuffer` body mutation.
 ///
 /// Pingora forwards upstream headers after `StreamBuffer` pre-read, so a
