@@ -802,23 +802,19 @@ async fn empty_string_field_value_promoted() {
 
 #[tokio::test]
 async fn repeated_body_hooks_do_not_duplicate_promoted_headers() {
-    // StreamBuffer pre-read delivers each chunk, then the frozen full body at EOS.
-    // Early-exit can succeed on a mid-stream chunk; a second hook must not append
-    // another TrustedHeaderMutation::Add.
+    // Mid-stream extract can BodyDone before EOS; a second hook must not re-Add.
     let filter = make_filter("model", "X-Model");
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
-    // filter_state requires a pipeline filter id (set by the executor in production).
     ctx.current_filter_id = Some(0);
 
-    let partial = br#"{"model":"gpt-4","messages":"#;
-    let mut body = Some(Bytes::from_static(partial));
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4","messages":"#));
     let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
     assert!(
         matches!(action, FilterAction::BodyDone),
         "complete mapped field in mid-stream chunk should return BodyDone"
     );
-    assert_eq!(ctx.extra_request_headers.len(), 1, "first promotion should add one header");
+    assert_eq!(ctx.extra_request_headers.len(), 1, "first promotion adds one header");
 
     let full = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#;
     let mut body = Some(Bytes::from_static(full));
@@ -832,7 +828,7 @@ async fn repeated_body_hooks_do_not_duplicate_promoted_headers() {
         1,
         "second body hook must not append a duplicate promoted header"
     );
-    assert_eq!(ctx.extra_request_headers[0].1, "gpt-4", "promoted value must be unchanged");
+    assert_eq!(ctx.extra_request_headers[0].1, "gpt-4", "promoted value unchanged");
 }
 
 #[tokio::test]
@@ -855,8 +851,14 @@ async fn promotes_even_when_target_header_already_in_extras() {
         "should still promote from body when header name already present"
     );
     assert_eq!(ctx.extra_request_headers.len(), 2, "should append body promotion");
-    assert_eq!(ctx.extra_request_headers[0].1, "client-spoof", "pre-existing value retained");
-    assert_eq!(ctx.extra_request_headers[1].1, "from-body", "body value must be promoted");
+    assert_eq!(
+        ctx.extra_request_headers[0].1, "client-spoof",
+        "pre-existing value retained"
+    );
+    assert_eq!(
+        ctx.extra_request_headers[1].1, "from-body",
+        "body value must be promoted"
+    );
 }
 
 // -----------------------------------------------------------------------------

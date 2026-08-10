@@ -53,8 +53,8 @@ struct Promoted;
 /// duplicate keys). Trailing bytes after early exit are not validated.
 ///
 /// On successful promotion the filter returns [`FilterAction::BodyDone`] so
-/// StreamBuffer pre-read does not re-run extraction on later chunks (including
-/// the frozen full body at EOS).
+/// [`StreamBuffer`] pre-read does not re-run extraction on later chunks
+/// (including the frozen full body at EOS).
 ///
 /// If the field is missing or the body is not valid JSON before the needed
 /// fields are collected, the filter passes through without modification.
