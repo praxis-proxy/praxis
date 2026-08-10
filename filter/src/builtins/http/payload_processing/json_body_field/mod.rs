@@ -38,6 +38,9 @@ use crate::{
     filter::{HttpFilter, HttpFilterContext},
 };
 
+/// Per-request marker: this filter instance already promoted headers.
+struct Promoted;
+
 // -----------------------------------------------------------------------------
 // JsonBodyFieldFilter
 // -----------------------------------------------------------------------------
@@ -48,6 +51,10 @@ use crate::{
 /// Uses a map visitor (not a full JSON DOM). Unmapped values are skipped;
 /// once every configured field is found, parsing stops (first-wins on
 /// duplicate keys). Trailing bytes after early exit are not validated.
+///
+/// On successful promotion the filter returns [`FilterAction::BodyDone`] so
+/// StreamBuffer pre-read does not re-run extraction on later chunks (including
+/// the frozen full body at EOS).
 ///
 /// If the field is missing or the body is not valid JSON before the needed
 /// fields are collected, the filter passes through without modification.
@@ -161,12 +168,22 @@ impl HttpFilter for JsonBodyFieldFilter {
         body: &mut Option<Bytes>,
         _end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
+        // Skip re-entry after a successful promote (BodyDone also tells the
+        // pipeline to stop calling us). Do not key off header names — an
+        // incoming or pre-existing X-* must not block the first promotion.
+        if ctx.get_filter_state::<Promoted>().is_some() {
+            return Ok(FilterAction::BodyDone);
+        }
+
         let Some(chunk) = body.as_ref() else {
             return Ok(FilterAction::Continue);
         };
 
         if extract_fields(&self.mappings, chunk, &mut ctx.extra_request_headers) {
-            Ok(FilterAction::Release)
+            ctx.insert_filter_state(Promoted);
+            // BodyDone skips this filter on remaining chunks; Release would
+            // still re-enter at EOS and duplicate TrustedHeaderMutation::Add.
+            Ok(FilterAction::BodyDone)
         } else {
             Ok(FilterAction::Continue)
         }
