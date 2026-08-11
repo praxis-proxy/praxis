@@ -1145,6 +1145,7 @@ async fn valid_hs256_jwt_continues() {
     claims["teams"] = json!(["platform"]);
     claims["tenant"] = json!("acme");
     claims["profile"] = json!({"tier": "gold"});
+    claims["authorization"] = json!("custom-value");
     let token = mint_jwt(&claims);
     let mut req = make_request(Method::POST, "/");
     req.headers.insert(
@@ -1174,13 +1175,17 @@ async fn valid_hs256_jwt_continues() {
     );
     assert_eq!(identity.custom_claims().get("tenant").map(String::as_str), Some("acme"));
     assert_eq!(
+        identity.custom_claims().get("authorization").map(String::as_str),
+        Some("custom-value"),
+    );
+    assert_eq!(
         identity.custom_claims().get("profile").map(String::as_str),
         Some(r#"{"tier":"gold"}"#),
     );
-    for excluded in ["iss", "aud", "sub", "exp", "iat", "roles", "teams", "authorization"] {
+    for excluded in ["iss", "aud", "sub", "exp", "iat", "roles", "teams"] {
         assert!(
             !identity.custom_claims().contains_key(excluded),
-            "registered, promoted, and credential fields must not be exposed: {excluded}",
+            "registered and promoted claims must not be exposed as custom claims: {excluded}",
         );
     }
 }
@@ -1492,12 +1497,10 @@ async fn missing_protocol_metadata_rejects_when_required() {
 async fn missing_entity_name_rejects_after_successful_identity_gate() {
     let (_dir, path) = write_tool_route_config();
     let filter = build_filter(path);
-    let token = mint_jwt(&standard_claims("alice"));
+    let authorization =
+        HeaderValue::from_str(&format!("Bearer {}", mint_jwt(&standard_claims("alice")))).expect("header value");
     let mut req = make_request(Method::POST, "/");
-    req.headers.insert(
-        "Authorization",
-        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
-    );
+    req.headers.insert("Authorization", authorization);
     let mut ctx = make_filter_context(&req);
 
     let gate = filter.on_request(&mut ctx).await.expect("identity gate ran");

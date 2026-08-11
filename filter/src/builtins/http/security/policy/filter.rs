@@ -63,7 +63,7 @@ enum GatedIdentity {
     NotRun,
     /// Validation succeeded without producing a user subject.
     NoSubject,
-    /// Validation succeeded and produced a credential-free subject.
+    /// Validation succeeded and produced a raw-credential-free subject.
     Subject(AuthenticatedIdentity),
 }
 
@@ -354,7 +354,7 @@ impl PolicyFilter {
         ext
     }
 
-    /// Publish the credential-free subject projection for downstream filters.
+    /// Publish the raw-credential-free subject projection for downstream filters.
     ///
     /// CPEX may authenticate a client or workload without resolving a user
     /// subject. In that case no `AuthenticatedIdentity` is published; a
@@ -364,7 +364,7 @@ impl PolicyFilter {
         Self::publish_identity_projection(ctx, Self::authenticated_identity(identity));
     }
 
-    /// Build the public credential-free projection from CPEX's private
+    /// Build the public raw-credential-free projection from CPEX's private
     /// validated payload.
     fn authenticated_identity(identity: &IdentityPayload) -> Option<AuthenticatedIdentity> {
         identity.subject.as_ref().and_then(|subject| {
@@ -436,7 +436,7 @@ impl PolicyFilter {
             .map_or(GatedIdentity::NotRun, |state| std::mem::take(&mut state.gated_identity))
     }
 
-    /// Run the unscoped identity hook and return only its credential-free
+    /// Run the unscoped identity hook and return only its raw-credential-free
     /// projection. Route-aware callers defer publication until classification.
     #[expect(clippy::large_stack_frames, reason = "async CPEX identity payload")]
     async fn resolve_gated_identity(

@@ -28,7 +28,7 @@ use std::{
 // AuthenticatedIdentity
 // -----------------------------------------------------------------------------
 
-/// Credential-free identity established by a trusted authentication filter.
+/// Raw-credential-free identity established by a trusted authentication filter.
 ///
 /// This is the stable, request-scoped identity contract for filters that need
 /// to consume an authenticated principal without accessing the credential or
@@ -54,7 +54,7 @@ pub struct AuthenticatedIdentity {
 }
 
 impl AuthenticatedIdentity {
-    /// Construct a credential-free identity from trusted, normalized parts.
+    /// Construct a raw-credential-free identity from trusted, normalized parts.
     ///
     /// Returns `None` when authentication did not produce a subject ID.
     #[cfg(any(feature = "cpex-policy-engine", test))]
@@ -92,6 +92,8 @@ impl AuthenticatedIdentity {
     /// Registered JWT claims and claims promoted to the typed fields above are
     /// excluded by the CPEX claim mapper. Values use CPEX's normalized string
     /// representation rather than exposing the raw decoded JWT claim set.
+    /// Wire adapters must explicitly allowlist and bound claims before
+    /// serializing them outside Praxis.
     pub fn custom_claims(&self) -> &BTreeMap<String, String> {
         &self.custom_claims
     }
