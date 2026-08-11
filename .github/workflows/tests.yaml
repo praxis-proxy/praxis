@@ -79,8 +79,6 @@ jobs:
 
   experimental-features:
     runs-on: ubuntu-24.04
-    # Non-voting: feature-gated code may lag behind the default path.
-    continue-on-error: true
     permissions:
       contents: read
     strategy:
@@ -102,11 +100,11 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cargo/bin/cargo-hack
-          key: cargo-hack-${{ runner.os }}
+          key: cargo-hack-0.6.45-${{ runner.os }}
 
       - name: Install cargo-hack
         if: steps.cache-hack.outputs.cache-hit != 'true'
-        run: cargo install cargo-hack --locked
+        run: cargo install cargo-hack@0.6.45 --locked
 
       - name: Clippy non-default features
         run: >
