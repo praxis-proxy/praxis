@@ -43,7 +43,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # gated on maintainer sign-off, so a pinned revision is the only form that both
 # builds here and is reproducible. Becomes a version dependency at publish, and the
 # allow-git entry in deny.toml goes away with it.
-ppe = { git = "https://github.com/praxis-proxy/policy", rev = "de19efa674f3c23852897afa91b632441f30be80", package = "praxis-policy", features = ["jwt", "oauth", "pii", "audit", "elicitation-ciba", "cedar", "cel", "valkey"] }
+ppe = { git = "https://github.com/praxis-proxy/policy", rev = "f37e63c3c07dfddb4148f19576466772aa48b002", package = "praxis-policy", features = ["jwt", "oauth", "pii", "audit", "elicitation-ciba", "cedar", "cel", "opa", "valkey"] }
 clap = { version = "4.6.6", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.2.1"
