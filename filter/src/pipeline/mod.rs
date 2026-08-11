@@ -41,6 +41,8 @@ mod extension;
 pub(crate) mod filter;
 mod http;
 mod http_utils;
+/// Public pipeline introspection snapshots for admin surfaces.
+pub(crate) mod introspection;
 /// Sub-request execution for iterative request routing.
 pub(crate) mod subrequest;
 mod tcp;

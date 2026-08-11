@@ -3203,6 +3203,7 @@ dependencies = [
  "quixotic-plecostomus-http",
  "quixotic-plecostomus-proxy",
  "rcgen",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",

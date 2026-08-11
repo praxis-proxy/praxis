@@ -49,6 +49,7 @@ pub use factory::{
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
 pub use pipeline::{
     FilterPipeline, PipelineExtension,
+    introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},
     subrequest::{IterationState, NextIterationBody},
 };
 pub use praxis_core::{

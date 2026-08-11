@@ -277,6 +277,10 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
         praxis_core::subrequest::SubRequestClient::with_max_response_bytes(subrequest_connector, ceiling);
     let pipelines = praxis::resolve_pipelines(config, registry, &health_registry, &kv_stores, &subrequest_client)
         .expect("pipeline resolution should succeed in test");
+    let pipelines = Arc::new(pipelines);
+    let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+        praxis_protocol::http::pingora::health::listener_meta_from_config(config),
+    );
 
     let mut runtime = praxis_core::PingoraServerRuntime::new(config);
 
@@ -296,9 +300,12 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
         praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server(
             runtime.server_mut(),
             admin_addr,
-            Some(Arc::clone(&health_registry)),
-            Some(kv_stores),
-            config.admin.verbose,
+            praxis_protocol::http::pingora::health::AdminEndpointOptions {
+                health_registry: Some(Arc::clone(&health_registry)),
+                kv_registry: Some(kv_stores),
+                pipelines: Some((Arc::clone(&pipelines), listener_meta)),
+                verbose: config.admin.verbose,
+            },
         );
     }
 
