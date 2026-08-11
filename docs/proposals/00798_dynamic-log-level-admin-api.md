@@ -10,6 +10,7 @@ graduation_criteria:
   - Both global and per-module level changes are supported
   - Temporary changes auto-revert after a configurable duration (default on the order of minutes)
   - Operators can read current effective levels and any pending revert timers
+  - Invalid level names, module targets, and durations are rejected with descriptive error responses
   - Integration coverage verifies level change, observable log effect, and revert
 stakeholders:
   - shaneutt
@@ -47,8 +48,10 @@ log **destination / delivery** (non-blocking writers, stdout /
 stderr / file, rotation) from
 [#797](https://github.com/praxis-proxy/praxis/issues/797).
 `runtime.log_overrides` remains the YAML startup baseline for
-per-module levels; `#797`’s `runtime.logging` (when landed)
-stays a sibling that controls destination and buffering only.
+per-module levels;
+[#797](https://github.com/praxis-proxy/praxis/issues/797)'s
+`runtime.logging` (when landed) stays a sibling that controls
+destination and buffering only.
 
 ### Operator-facing surface
 
@@ -156,7 +159,9 @@ No new listener, port, or auth mechanism in this change.
    overlays, merge with them, or leave temporary admin
    overlays untouched until they expire? (Today reload only
    re-validates overrides and does not swap the live
-   `EnvFilter`; `#797` likewise treats destination changes as
+   `EnvFilter`;
+   [#797](https://github.com/praxis-proxy/praxis/issues/797)
+   likewise treats destination changes as
    restart-required—this question is about levels only.)
 3. **Stacking / concurrency.** If two temporary `PUT`s overlap
    (same or different modules), what wins—last write, stacked
@@ -199,9 +204,10 @@ related to, but not blocked on,
 [#797](https://github.com/praxis-proxy/praxis/issues/797)
 (delivery path / non-blocking writers and optional file
 output). Level control is useful with today’s stdout fmt path
-and remains useful after `#797` lands: destination changes stay
-restart-required, while this proposal hot-swaps only the
-`EnvFilter` directive.
+and remains useful after
+[#797](https://github.com/praxis-proxy/praxis/issues/797)
+lands: destination changes stay restart-required, while this
+proposal hot-swaps only the `EnvFilter` directive.
 
 This work sits under
 [Epic #160 Observability](https://github.com/praxis-proxy/praxis/issues/160).
