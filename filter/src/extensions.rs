@@ -19,7 +19,83 @@
 //!
 //! [`TypeId`]: std::any::TypeId
 
-use std::{any::Any, collections::HashMap};
+use std::{
+    any::Any,
+    collections::{BTreeMap, BTreeSet, HashMap},
+};
+
+// -----------------------------------------------------------------------------
+// AuthenticatedIdentity
+// -----------------------------------------------------------------------------
+
+/// Credential-free identity established by a trusted authentication filter.
+///
+/// This is the stable, request-scoped identity contract for filters that need
+/// to consume an authenticated principal without accessing the credential or
+/// depending on an authentication provider's payload types. Presence means
+/// authentication succeeded and produced a non-empty subject identifier; it
+/// does not by itself mean that every subsequent operation was authorized.
+///
+/// The fields are intentionally read-only outside this crate. Only trusted
+/// built-in producers can construct the value, while external filters can
+/// inspect it through the getters below. The type deliberately does not
+/// implement serialization so wire adapters must choose an explicit output
+/// format rather than serializing authentication state wholesale.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AuthenticatedIdentity {
+    /// Stable identifier of the authenticated subject.
+    subject_id: String,
+    /// Roles assigned to the authenticated subject.
+    roles: BTreeSet<String>,
+    /// Teams assigned to the authenticated subject.
+    teams: BTreeSet<String>,
+    /// Provider-mapped custom claims from the validated identity.
+    custom_claims: BTreeMap<String, String>,
+}
+
+impl AuthenticatedIdentity {
+    /// Construct a credential-free identity from trusted, normalized parts.
+    ///
+    /// Returns `None` when authentication did not produce a subject ID.
+    #[cfg(any(feature = "cpex-policy-engine", test))]
+    pub(crate) fn new(
+        subject_id: String,
+        roles: impl IntoIterator<Item = String>,
+        teams: impl IntoIterator<Item = String>,
+        custom_claims: impl IntoIterator<Item = (String, String)>,
+    ) -> Option<Self> {
+        (!subject_id.is_empty()).then(|| Self {
+            subject_id,
+            roles: roles.into_iter().collect(),
+            teams: teams.into_iter().collect(),
+            custom_claims: custom_claims.into_iter().collect(),
+        })
+    }
+
+    /// Stable identifier of the authenticated subject.
+    pub fn subject_id(&self) -> &str {
+        &self.subject_id
+    }
+
+    /// Roles assigned to the authenticated subject.
+    pub fn roles(&self) -> &BTreeSet<String> {
+        &self.roles
+    }
+
+    /// Teams assigned to the authenticated subject.
+    pub fn teams(&self) -> &BTreeSet<String> {
+        &self.teams
+    }
+
+    /// Provider-mapped custom claims from the validated identity.
+    ///
+    /// Registered JWT claims and claims promoted to the typed fields above are
+    /// excluded by the CPEX claim mapper. Values use CPEX's normalized string
+    /// representation rather than exposing the raw decoded JWT claim set.
+    pub fn custom_claims(&self) -> &BTreeMap<String, String> {
+        &self.custom_claims
+    }
+}
 
 // -----------------------------------------------------------------------------
 // RequestExtensions
@@ -95,6 +171,41 @@ impl RequestExtensions {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn authenticated_identity_exposes_stable_collections_and_getters() {
+        let identity = AuthenticatedIdentity::new(
+            "alice".to_owned(),
+            ["writer".to_owned(), "admin".to_owned(), "admin".to_owned()],
+            ["platform".to_owned()],
+            [("tenant".to_owned(), "acme".to_owned())],
+        )
+        .expect("non-empty subject");
+
+        assert_eq!(identity.subject_id(), "alice");
+        assert_eq!(
+            identity.roles().iter().map(String::as_str).collect::<Vec<_>>(),
+            ["admin", "writer"],
+        );
+        assert_eq!(
+            identity.teams().iter().map(String::as_str).collect::<Vec<_>>(),
+            ["platform"]
+        );
+        assert_eq!(identity.custom_claims().get("tenant").map(String::as_str), Some("acme"));
+    }
+
+    #[test]
+    fn authenticated_identity_rejects_empty_subject() {
+        assert!(
+            AuthenticatedIdentity::new(
+                String::new(),
+                std::iter::empty(),
+                std::iter::empty(),
+                std::iter::empty(),
+            )
+            .is_none(),
+        );
+    }
 
     #[test]
     fn default_is_empty() {
