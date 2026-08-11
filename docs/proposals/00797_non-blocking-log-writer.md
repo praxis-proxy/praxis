@@ -51,15 +51,16 @@ configuration, at least:
 
 - **Destination:** `stdout` (default), `stderr`, or `file`
 - **File path:** required when destination is `file`
-- **Rotation policy:** daily, or size-based with a maximum
-  size (for example `100mb`)
+- **Rotation policy:** optional; omit for no rotation. When
+  set: daily, or size-based with a maximum size (for example
+  `100mb`)
 - **Retention:** a max-files (or equivalent max-age) bound so
   rotated files cannot grow without limit (for example
-  `max_files: 7`)
+  `max_files: 7`); applies only when rotation is set
 - **Non-blocking behavior:** on by default; may remain
   explicitly configurable
-- **Buffer sizing:** optional knobs for how much log data may
-  be buffered
+- **Buffer sizing:** optional knobs for how many log **lines**
+  may be buffered (default `128_000`; not bytes)
 - **Buffer overflow policy:** when the non-blocking buffer is
   full, new log events are **dropped** (lossy) so workers are
   never stalled on log I/O. That is the default and the v1
@@ -84,10 +85,11 @@ runtime:
   logging:
     output: stdout  # or stderr | file
     file_path: /var/log/praxis/proxy.log
-    rotation: daily  # or size:100mb
+    rotation: daily  # omit = no rotation; or size:100mb
     max_files: 7
     non_blocking: true
-    buffer_size: 8192
+    # buffer_size omitted → 128000 buffered lines (tracing-appender default)
+    # buffer_size: 8192  # optional tighter override (lines, not bytes)
 ```
 
 Default `output: stdout` must remain behaviorally compatible
@@ -241,15 +243,21 @@ covering:
 ### Design
 
 **Anchor in today’s stack.** Process logging lives in
-`core/src/logging.rs`. `server/src/main.rs` loads config, calls
-`praxis::init_tracing(&config)`, and holds the returned
-`TracingGuard` for the process lifetime. Today the fmt layer
-writes synchronously to **stdout** (text or JSON via
-`PRAXIS_LOG_FORMAT`); `runtime.log_overrides` only feeds the
-`EnvFilter` at startup. Reload (`server/src/reload.rs`) re-
-validates overrides but does **not** re-init the subscriber.
-OTLP flush already happens on `TracingGuard` drop when the
-`otel` feature is enabled; process-log flush does not.
+`core/src/logging.rs`. `init_tracing` returns
+`Result<TracingGuard, ProxyError>`; `server/src/main.rs` binds
+`let _tracing_guard = praxis::init_tracing(&config)...` for the
+process lifetime. Today that guard only shuts down the OTLP
+tracer provider on drop when the `otel` feature is enabled (a
+no-op shell without `otel`). The fmt layer still writes
+**synchronously** to **stdout** (text or JSON via
+`PRAXIS_LOG_FORMAT`); there is no process-log `WorkerGuard` and
+no flush of buffered process log lines on shutdown.
+`runtime.log_overrides` only feeds the `EnvFilter` at startup.
+Reload (`server/src/reload.rs`) re-validates overrides but does
+**not** re-init the subscriber. This change keeps the same
+`TracingGuard` ownership shape in `main` and **extends** it to
+also own the non-blocking appender `WorkerGuard` so process-log
+flush joins OTLP shutdown on drop.
 
 **Dependency.** Add workspace `tracing-appender` (tokio-rs /
 same ecosystem as `tracing-subscriber`). Use
@@ -268,10 +276,10 @@ second subscriber or replace the existing Registry + EnvFilter
 | --- | --- |
 | `output` | `stdout` (default) \| `stderr` \| `file` |
 | `file_path` | required when `output: file`; parent directory must exist or be creatable at init |
-| `rotation` | `daily`, or size form `size:<N><kb\|mb\|gb>` (for example `size:100mb`); only applied when `output: file` |
-| `max_files` | `u32`, default `7` when rotating; must be `> 0` |
+| `rotation` | **optional**; omit / unset = **no rotation** (single growing file when `output: file`). When set: `daily`, or size form `size:<N><kb\|mb\|gb>` (for example `size:100mb`). Ignored unless `output: file`; invalid token is a validation error |
+| `max_files` | `u32`, default `7` when rotating; must be `> 0`; ignored when rotation is omitted |
 | `non_blocking` | default `true`; `false` is a documented sync fallback for debugging only |
-| `buffer_size` | max **buffered lines** in the non-blocking queue (maps to `NonBlockingBuilder` capacity); default aligned with `tracing-appender`’s default line limit |
+| `buffer_size` | optional `u32`: max **buffered lines** (not bytes) in the non-blocking queue, mapped to `NonBlockingBuilder::buffered_lines_limit`. **Default when omitted: `128_000`** (`tracing_appender::non_blocking::DEFAULT_BUFFERED_LINES_LIMIT`). Operators may set a smaller value (for example `8192`) to bound memory; overflow stays lossy per What? |
 
 `runtime.log_overrides` stays on `RuntimeConfig` root. No move
 into `logging`. Validation runs from `init_tracing` and from
