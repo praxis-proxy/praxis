@@ -13,6 +13,11 @@ graduation_criteria:
     requests are logged (for example slow requests or error status classes)
   - Conditions compose with existing `sample_rate` (conditions first,
     then sampling)
+  - `trace_id` and `span_id` appear in the access record when OTel
+    tracing is active and are absent or inert without OTel
+  - Invalid field names, empty header lists, invalid status
+    classes, and out-of-bounds `sample_rate` are rejected at
+    config load time
   - Integration coverage verifies field selection and that non-matching
     requests are not logged
 stakeholders:
