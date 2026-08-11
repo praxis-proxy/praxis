@@ -212,15 +212,26 @@ fn body_info(access: BodyAccess, mode: BodyMode) -> BodyAccessInfo {
 }
 
 /// Operator-readable rejoin target.
+///
+/// Named [`RejoinTarget::SkipTo`] targets render as the sibling filter
+/// name (or `index:N`). [`RejoinTarget::ReEnter`] uses the same name with
+/// a `re-enter:` prefix so operators can tell loops apart from forward
+/// jumps.
 fn rejoin_label(rejoin: &RejoinTarget, siblings: &[PipelineFilter]) -> String {
     match rejoin {
         RejoinTarget::Next => "next".to_owned(),
         RejoinTarget::Terminal => "terminal".to_owned(),
-        RejoinTarget::SkipTo(idx) | RejoinTarget::ReEnter(idx) => siblings
-            .get(*idx)
-            .and_then(|pf| pf.name.as_ref())
-            .map_or_else(|| format!("index:{idx}"), ToString::to_string),
+        RejoinTarget::SkipTo(idx) => named_or_index(*idx, siblings),
+        RejoinTarget::ReEnter(idx) => format!("re-enter:{}", named_or_index(*idx, siblings)),
     }
+}
+
+/// Resolve a sibling filter name, or fall back to `index:N`.
+fn named_or_index(idx: usize, siblings: &[PipelineFilter]) -> String {
+    siblings
+        .get(idx)
+        .and_then(|pf| pf.name.as_ref())
+        .map_or_else(|| format!("index:{idx}"), ToString::to_string)
 }
 
 #[cfg(test)]
@@ -240,9 +251,9 @@ mod tests {
     #[test]
     fn body_info_maps_access_and_mode() {
         let info = body_info(BodyAccess::ReadOnly, BodyMode::StreamBuffer { max_bytes: Some(64) });
-        assert_eq!(info.access, "read_only");
-        assert_eq!(info.mode, "stream_buffer");
-        assert_eq!(info.max_bytes, Some(64));
+        assert_eq!(info.access, "read_only", "ReadOnly maps to read_only");
+        assert_eq!(info.mode, "stream_buffer", "StreamBuffer maps to stream_buffer");
+        assert_eq!(info.max_bytes, Some(64), "max_bytes should round-trip");
     }
 
     #[test]
@@ -254,12 +265,36 @@ mod tests {
             headers: None,
         })];
         let phases = http_phases(BodyAccess::None, BodyAccess::None, &conditions);
-        assert_eq!(phases, ["request", "response"]);
+        assert_eq!(
+            phases,
+            ["request", "response"],
+            "response conditions should add response phase"
+        );
     }
 
     #[test]
     fn http_phases_always_include_request() {
         let phases = http_phases(BodyAccess::None, BodyAccess::None, &[]);
-        assert_eq!(phases, ["request"]);
+        assert_eq!(phases, ["request"], "request phase is always present");
+    }
+
+    #[test]
+    fn rejoin_label_distinguishes_skip_to_and_re_enter() {
+        assert_eq!(
+            rejoin_label(&RejoinTarget::SkipTo(2), &[]),
+            "index:2",
+            "SkipTo should use index when sibling has no name"
+        );
+        assert_eq!(
+            rejoin_label(&RejoinTarget::ReEnter(2), &[]),
+            "re-enter:index:2",
+            "ReEnter should prefix re-enter: so loops are visible"
+        );
+        assert_eq!(rejoin_label(&RejoinTarget::Next, &[]), "next", "Next stays next");
+        assert_eq!(
+            rejoin_label(&RejoinTarget::Terminal, &[]),
+            "terminal",
+            "Terminal stays terminal"
+        );
     }
 }

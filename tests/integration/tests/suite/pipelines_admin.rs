@@ -89,29 +89,40 @@ fn pipelines_aggregate_shape_and_branches() {
         .iter()
         .find(|l| l["name"] == "web")
         .expect("web listener present");
-    assert_eq!(web["chain_names"], serde_json::json!(["main"]));
-    assert_eq!(web["protocol"], "http");
-    assert_eq!(web["tls"], false);
-    assert_eq!(web["filter_count"], 2);
-    assert_eq!(web["filters"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        web["chain_names"],
+        serde_json::json!(["main"]),
+        "web chain_names: {json}"
+    );
+    assert_eq!(web["protocol"], "http", "web protocol: {json}");
+    assert_eq!(web["tls"], false, "web tls: {json}");
+    assert_eq!(web["filter_count"], 2, "web filter_count: {json}");
+    assert_eq!(web["filters"].as_array().unwrap().len(), 2, "web filters len: {json}");
 
     let router = &web["filters"][0];
-    assert_eq!(router["filter"], "router");
-    assert_eq!(router["name"], "routing");
-    assert_eq!(router["failure_mode"], "closed");
-    assert!(router["phases"].as_array().unwrap().contains(&Value::from("request")));
+    assert_eq!(router["filter"], "router", "first filter type: {json}");
+    assert_eq!(router["name"], "routing", "router name: {json}");
+    assert_eq!(router["failure_mode"], "closed", "router failure_mode: {json}");
+    assert!(
+        router["phases"].as_array().unwrap().contains(&Value::from("request")),
+        "router should include request phase: {json}"
+    );
     assert!(router["request_body"].is_object(), "HTTP filter emits body info");
     let branches = router["branches"].as_array().expect("branches");
     assert!(!branches.is_empty(), "expected at least one branch");
-    assert_eq!(branches[0]["rejoin"], "next");
+    assert_eq!(branches[0]["rejoin"], "next", "default branch rejoin: {json}");
 
     let empty = listeners
         .iter()
         .find(|l| l["name"] == "empty")
         .expect("empty listener present");
-    assert_eq!(empty["filter_count"], 0);
-    assert_eq!(empty["filters"], serde_json::json!([]));
-    assert_eq!(empty["chain_names"], serde_json::json!(["empty_chain"]));
+    assert_eq!(empty["filter_count"], 0, "empty filter_count: {json}");
+    assert_eq!(empty["filters"], serde_json::json!([]), "empty filters: {json}");
+    assert_eq!(
+        empty["chain_names"],
+        serde_json::json!(["empty_chain"]),
+        "empty chain_names: {json}"
+    );
 }
 
 #[test]
@@ -129,7 +140,7 @@ fn pipelines_per_listener_envelope_and_404() {
     assert_eq!(status, 200, "per-listener should be 200: {json}");
     assert!(json.get("listener").is_some(), "single envelope uses listener: {json}");
     assert!(json.get("listeners").is_none(), "must not reuse listeners array");
-    assert_eq!(json["listener"]["name"], "web");
+    assert_eq!(json["listener"]["name"], "web", "per-listener name: {json}");
 
     let (missing_status, missing_json) = get_pipelines_json(&admin_addr, "/api/pipelines?listener=nope");
     assert_eq!(missing_status, 404, "missing listener => 404: {missing_json}");
@@ -196,24 +207,36 @@ filter_chains:
     wait_for_tcp(&admin_addr);
 
     let (_, before) = get_pipelines_json(&admin_addr, "/api/pipelines?listener=web");
-    assert_eq!(before["listener"]["filters"][0]["filter"], "router");
-    assert_eq!(before["listener"]["filter_count"], 2);
+    assert_eq!(
+        before["listener"]["filters"][0]["filter"], "router",
+        "before reload first filter: {before}"
+    );
+    assert_eq!(
+        before["listener"]["filter_count"], 2,
+        "before reload filter_count: {before}"
+    );
 
     guard.reload(&updated);
 
     let (_, after) = get_pipelines_json(&admin_addr, "/api/pipelines?listener=web");
-    assert_eq!(after["listener"]["filters"][0]["filter"], "static_response");
-    assert_eq!(after["listener"]["filter_count"], 1);
+    assert_eq!(
+        after["listener"]["filters"][0]["filter"], "static_response",
+        "after reload first filter: {after}"
+    );
+    assert_eq!(
+        after["listener"]["filter_count"], 1,
+        "after reload filter_count: {after}"
+    );
 
     let (status, aggregate) = get_pipelines_json(&admin_addr, "/api/pipelines");
-    assert_eq!(status, 200);
+    assert_eq!(status, 200, "aggregate after reload: {aggregate}");
     let names: Vec<&str> = aggregate["listeners"]
         .as_array()
         .unwrap()
         .iter()
         .filter_map(|l| l["name"].as_str())
         .collect();
-    assert!(names.contains(&"web"));
+    assert!(names.contains(&"web"), "web should remain: {names:?}");
     assert!(
         !names.contains(&"unused_until_restart"),
         "new hot-reload listeners stay absent: {names:?}"
@@ -292,10 +315,11 @@ filter_chains:
     assert_eq!(status, 200, "{json}");
     assert_eq!(
         json["listener"]["chain_names"],
-        serde_json::json!(["preprocessing", "main"])
+        serde_json::json!(["preprocessing", "main"]),
+        "chain_names should list both chains: {json}"
     );
     let filters = json["listener"]["filters"].as_array().unwrap();
-    assert!(!filters.is_empty());
+    assert!(!filters.is_empty(), "expected filters in rejoins fixture: {json}");
     let has_named = filters.iter().any(|f| {
         f["branches"]
             .as_array()

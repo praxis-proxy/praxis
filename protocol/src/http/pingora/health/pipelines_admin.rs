@@ -53,31 +53,41 @@ pub(super) struct ListenerPipelineView {
 // Dispatch
 // -----------------------------------------------------------------------------
 
-/// Handle `GET /api/pipelines` (optional `?listener=`).
+/// Handle `GET`/`HEAD` `/api/pipelines` (optional `?listener=`).
 pub(super) fn pipelines_response(
     pipelines: &ListenerPipelines,
     meta_store: &ListenerMetaStore,
     method: &str,
     query: Option<&str>,
 ) -> Response<Vec<u8>> {
-    if method != "GET" {
+    if method != "GET" && method != "HEAD" {
         return method_not_allowed();
     }
 
     let meta = meta_store.load();
-    if let Some(name) = parse_listener_query(query) {
-        return match build_listener_view(pipelines, meta.as_ref(), &name) {
+    let resp = if let Some(name) = parse_listener_query(query) {
+        match build_listener_view(pipelines, meta.as_ref(), &name) {
             Some(view) => match serde_json::to_vec(&PipelinesSingleResponse { listener: view }) {
                 Ok(body) => json_response(200, &body),
                 Err(_) => json_response(500, br#"{"error":"serialization failed"}"#),
             },
             None => json_response(404, br#"{"error":"listener not found"}"#),
-        };
-    }
+        }
+    } else {
+        aggregate_pipelines_response(pipelines, meta.as_ref())
+    };
 
+    if method == "HEAD" { as_head_response(resp) } else { resp }
+}
+
+/// Build the aggregate `GET /api/pipelines` JSON response.
+fn aggregate_pipelines_response(
+    pipelines: &ListenerPipelines,
+    meta: &std::collections::HashMap<String, ListenerMeta>,
+) -> Response<Vec<u8>> {
     let mut listeners = Vec::new();
     for name in pipelines.listener_names() {
-        if let Some(view) = build_listener_view(pipelines, meta.as_ref(), name) {
+        if let Some(view) = build_listener_view(pipelines, meta, name) {
             listeners.push(view);
         }
     }
@@ -88,7 +98,18 @@ pub(super) fn pipelines_response(
     }
 }
 
-/// 405 with `Allow: GET` per RFC 9110 Section 15.5.6.
+/// Strip the body for HEAD while keeping a valid Content-Length framing.
+///
+/// Pingora writes the [`Response`] as-is; leaving the GET body length with
+/// an empty body stalls clients waiting for bytes that never arrive.
+fn as_head_response(mut resp: Response<Vec<u8>>) -> Response<Vec<u8>> {
+    *resp.body_mut() = Vec::new();
+    resp.headers_mut()
+        .insert(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("0"));
+    resp
+}
+
+/// 405 with `Allow: GET, HEAD` per RFC 9110 Section 15.5.6.
 #[expect(clippy::expect_used, reason = "valid static response")]
 fn method_not_allowed() -> Response<Vec<u8>> {
     let body = br#"{"error":"method not allowed"}"#;
@@ -96,7 +117,7 @@ fn method_not_allowed() -> Response<Vec<u8>> {
         .status(405)
         .header("Content-Type", "application/json")
         .header("Content-Length", body.len())
-        .header("Allow", "GET")
+        .header("Allow", "GET, HEAD")
         .body(body.to_vec())
         .expect("valid 405 response")
 }
@@ -204,17 +225,33 @@ mod tests {
 
     #[test]
     fn parse_listener_query_extracts_name() {
-        assert_eq!(parse_listener_query(Some("listener=web")), Some("web".to_owned()));
-        assert_eq!(parse_listener_query(Some("foo=1&listener=api")), Some("api".to_owned()));
-        assert_eq!(parse_listener_query(Some("foo=1")), None);
-        assert_eq!(parse_listener_query(None), None);
-        assert_eq!(parse_listener_query(Some("listener=")), None);
+        assert_eq!(
+            parse_listener_query(Some("listener=web")),
+            Some("web".to_owned()),
+            "simple listener= should parse"
+        );
+        assert_eq!(
+            parse_listener_query(Some("foo=1&listener=api")),
+            Some("api".to_owned()),
+            "listener among other params should parse"
+        );
+        assert_eq!(
+            parse_listener_query(Some("foo=1")),
+            None,
+            "missing listener should be None"
+        );
+        assert_eq!(parse_listener_query(None), None, "absent query should be None");
+        assert_eq!(
+            parse_listener_query(Some("listener=")),
+            None,
+            "empty listener value should be None"
+        );
     }
 
     #[test]
     fn percent_decode_basic_handles_space() {
-        assert_eq!(percent_decode_basic("a+b"), "a b");
-        assert_eq!(percent_decode_basic("x%2Dy"), "x-y");
+        assert_eq!(percent_decode_basic("a+b"), "a b", "+ should decode as space");
+        assert_eq!(percent_decode_basic("x%2Dy"), "x-y", "%2D should decode as hyphen");
     }
 
     #[test]
@@ -222,10 +259,30 @@ mod tests {
         let pipelines = ListenerPipelines::new(HashMap::new());
         let meta = new_listener_meta_store(HashMap::new());
         let resp = pipelines_response(&pipelines, &meta, "POST", None);
-        assert_eq!(resp.status().as_u16(), 405);
+        assert_eq!(resp.status().as_u16(), 405, "POST should be method not allowed");
         assert_eq!(
             resp.headers().get("Allow").map(http::HeaderValue::as_bytes),
-            Some(b"GET".as_slice())
+            Some(b"GET, HEAD".as_slice()),
+            "Allow should advertise GET and HEAD"
+        );
+    }
+
+    #[test]
+    fn head_returns_200_with_empty_body() {
+        let pipelines = ListenerPipelines::new(HashMap::new());
+        let meta = new_listener_meta_store(HashMap::new());
+        let resp = pipelines_response(&pipelines, &meta, "HEAD", None);
+        assert_eq!(resp.status().as_u16(), 200, "HEAD should succeed like GET");
+        assert!(resp.body().is_empty(), "HEAD must not include a body");
+        assert_eq!(
+            resp.headers().get("Content-Type").map(http::HeaderValue::as_bytes),
+            Some(b"application/json".as_slice()),
+            "HEAD should keep JSON content type"
+        );
+        assert_eq!(
+            resp.headers().get("Content-Length").map(http::HeaderValue::as_bytes),
+            Some(b"0".as_slice()),
+            "HEAD Content-Length must be 0 after body is cleared"
         );
     }
 }

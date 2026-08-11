@@ -95,28 +95,28 @@ filter_chains:
     fn http_listener_meta_includes_chain_names() {
         let meta = listener_meta_from_config(&sample_config());
         let web = meta.get("web").expect("web listener");
-        assert_eq!(web.address, "127.0.0.1:8080");
-        assert_eq!(web.protocol, ProtocolKind::Http);
-        assert!(!web.tls);
-        assert_eq!(web.chain_names, ["main", "edge"]);
+        assert_eq!(web.address, "127.0.0.1:8080", "web address should match config");
+        assert_eq!(web.protocol, ProtocolKind::Http, "web should be HTTP");
+        assert!(!web.tls, "web listener should not enable TLS");
+        assert_eq!(web.chain_names, ["main", "edge"], "web chain_names should match config");
     }
 
     #[test]
     fn tcp_listener_meta_sets_protocol() {
         let meta = listener_meta_from_config(&sample_config());
         let tcp = meta.get("plain_tcp").expect("tcp listener");
-        assert_eq!(tcp.protocol, ProtocolKind::Tcp);
-        assert!(!tcp.tls);
-        assert_eq!(tcp.chain_names, ["tcp_main"]);
+        assert_eq!(tcp.protocol, ProtocolKind::Tcp, "plain_tcp should be TCP");
+        assert!(!tcp.tls, "plain_tcp should not enable TLS");
+        assert_eq!(tcp.chain_names, ["tcp_main"], "tcp chain_names should match config");
     }
 
     #[test]
     fn tls_listener_meta_sets_tls_flag() {
         let meta = listener_meta_from_config(&sample_config());
-        assert_eq!(meta.len(), 3);
+        assert_eq!(meta.len(), 3, "sample config has three listeners");
         let secure = meta.get("secure").expect("tls listener");
-        assert!(secure.tls);
-        assert_eq!(secure.protocol, ProtocolKind::Http);
-        assert_eq!(secure.chain_names, ["main"]);
+        assert!(secure.tls, "secure listener should enable TLS");
+        assert_eq!(secure.protocol, ProtocolKind::Http, "secure should be HTTP");
+        assert_eq!(secure.chain_names, ["main"], "secure chain_names should match config");
     }
 }
