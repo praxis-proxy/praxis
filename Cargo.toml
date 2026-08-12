@@ -43,7 +43,12 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # gated on maintainer sign-off, so a pinned revision is the only form that both
 # builds here and is reproducible. Becomes a version dependency at publish, and the
 # allow-git entry in deny.toml goes away with it.
-ppe = { git = "https://github.com/praxis-proxy/policy", rev = "f37e63c3c07dfddb4148f19576466772aa48b002", package = "praxis-policy", features = ["jwt", "oauth", "pii", "audit", "elicitation-ciba", "cedar", "cel", "opa", "valkey"] }
+#
+# `builtins` is the engine's one umbrella for every bundled extension, session
+# store included. Naming it rather than enumerating the nine granular features
+# keeps this line from drifting each time the engine gains a builtin, which is
+# how the OPA decision point had to be added by hand.
+ppe = { git = "https://github.com/praxis-proxy/policy", rev = "fb5cc1735a7839a9bfccab11c8e870130caca62d", package = "praxis-policy", features = ["builtins"] }
 clap = { version = "4.6.6", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.2.1"
