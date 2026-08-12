@@ -183,27 +183,32 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
             Some(()) = rx.recv() => {
                 tracing::debug!(debounce_ms = DEBOUNCE_MS, "config file change detected, debouncing");
                 drain_and_debounce(rx).await;
-
                 if should_skip_for_backoff(consecutive_failures, last_failure) {
                     continue;
                 }
-
                 let ok = handle_reload(
                     &params.config_path, &params.referenced_files, &mut current_config, &mut content_hash,
                     &params.registry, &params.pipelines, &params.health_shutdown, &params.kv_stores,
                     &params.subrequest_client,
                 );
-                if ok { consecutive_failures = 0; last_failure = None; }
-                else {
-                    consecutive_failures = consecutive_failures.saturating_add(1);
-                    last_failure = Some(Instant::now());
-                }
+                update_reload_backoff(ok, &mut consecutive_failures, &mut last_failure);
             }
             () = params.shutdown.cancelled() => {
                 info!("config file watcher shutting down");
                 return;
             }
         }
+    }
+}
+
+/// Reset or advance consecutive-failure backoff state after a reload attempt.
+fn update_reload_backoff(ok: bool, consecutive_failures: &mut u32, last_failure: &mut Option<Instant>) {
+    if ok {
+        *consecutive_failures = 0;
+        *last_failure = None;
+    } else {
+        *consecutive_failures = consecutive_failures.saturating_add(1);
+        *last_failure = Some(Instant::now());
     }
 }
 
@@ -235,6 +240,7 @@ fn handle_reload(
                 error = %e,
                 "failed to read config file for reload"
             );
+            praxis_protocol::http::pingora::metrics::record_config_reload_failure();
             return false;
         },
     };
@@ -262,6 +268,7 @@ fn handle_reload(
                 error = %e,
                 "config reload failed: invalid config"
             );
+            praxis_protocol::http::pingora::metrics::record_config_reload_failure();
             return false;
         },
     };
@@ -278,10 +285,12 @@ fn handle_reload(
         Ok(()) => {
             *current_config = new_config;
             *content_hash = new_hash;
+            praxis_protocol::http::pingora::metrics::record_config_reload_success();
             true
         },
         Err(e) => {
             error!(error = %e, "config reload failed");
+            praxis_protocol::http::pingora::metrics::record_config_reload_failure();
             false
         },
     }

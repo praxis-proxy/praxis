@@ -31,6 +31,7 @@ mod iterative_request_router_sequence;
 mod json_rpc;
 mod least_connections;
 mod logging;
+mod maglev;
 mod max_body_guard;
 mod max_connections;
 mod multi_listener;

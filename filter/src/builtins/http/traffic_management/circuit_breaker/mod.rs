@@ -20,8 +20,9 @@ mod tests;
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
+use metrics::SharedString;
 use praxis_core::circuit::{
-    CircuitBreaker, CircuitBreakerConfig as CoreCircuitBreakerConfig, CircuitCheck, CircuitToken,
+    CircuitBreaker, CircuitBreakerConfig as CoreCircuitBreakerConfig, CircuitCheck, CircuitState, CircuitToken,
 };
 use tracing::{debug, info, warn};
 
@@ -45,6 +46,84 @@ struct ActiveCircuitToken {
     cluster: Arc<str>,
     /// Generation-bearing token from [`CircuitBreaker::try_acquire`].
     token: CircuitToken,
+}
+
+// -----------------------------------------------------------------------------
+// InstrumentedCircuitBreaker
+// -----------------------------------------------------------------------------
+
+/// Per-cluster breaker that publishes `praxis_circuit_breaker_open`.
+///
+/// Wraps [`CircuitBreaker`] from `praxis_core` so gauge updates stay in
+/// the filter crate (where the Prometheus helpers live) without changing
+/// the shared state machine.
+struct InstrumentedCircuitBreaker {
+    /// Cluster name for the gauge label.
+    cluster_name: SharedString,
+    /// Core state machine.
+    inner: CircuitBreaker,
+}
+
+impl InstrumentedCircuitBreaker {
+    /// Create a closed breaker and seed the open gauge at `0`.
+    fn new(cluster_name: &str, config: CoreCircuitBreakerConfig) -> Self {
+        let breaker = Self {
+            cluster_name: SharedString::from(cluster_name.to_owned()),
+            inner: CircuitBreaker::new(config),
+        };
+        crate::metrics::set_circuit_breaker_state(breaker.cluster_name.clone(), false);
+        breaker
+    }
+
+    /// Publish whether the breaker should report as open (includes half-open).
+    fn publish_open_gauge(&self, state: CircuitState) {
+        let open = !matches!(state, CircuitState::Closed);
+        crate::metrics::set_circuit_breaker_state(self.cluster_name.clone(), open);
+    }
+
+    /// Acquire a request token and refresh the gauge on logical open/closed flips.
+    fn try_acquire(&self) -> CircuitCheck {
+        let before = self.inner.state();
+        let check = self.inner.try_acquire();
+        let after = self.inner.state();
+        if logical_open(before) != logical_open(after) {
+            self.publish_open_gauge(after);
+        }
+        check
+    }
+
+    /// Record a successful probe/exchange and refresh the gauge if state changed.
+    fn record_success(&self, token: CircuitToken) {
+        let before = self.inner.state();
+        self.inner.record_success(token);
+        let after = self.inner.state();
+        if logical_open(before) != logical_open(after) {
+            self.publish_open_gauge(after);
+        }
+    }
+
+    /// Record a failed probe/exchange and refresh the gauge if state changed.
+    fn record_failure(&self, token: CircuitToken) {
+        let before = self.inner.state();
+        self.inner.record_failure(token);
+        let after = self.inner.state();
+        if logical_open(before) != logical_open(after) {
+            self.publish_open_gauge(after);
+        }
+    }
+}
+
+impl Drop for InstrumentedCircuitBreaker {
+    fn drop(&mut self) {
+        // Hot reload drops the old breaker map; clear the gauge so removed
+        // clusters do not leave a stale open=1 series behind.
+        crate::metrics::set_circuit_breaker_state(self.cluster_name.clone(), false);
+    }
+}
+
+/// Whether the gauge should report the breaker as open (includes half-open).
+fn logical_open(state: CircuitState) -> bool {
+    !matches!(state, CircuitState::Closed)
 }
 
 // -----------------------------------------------------------------------------
@@ -91,7 +170,7 @@ struct ActiveCircuitToken {
 /// ```
 pub struct CircuitBreakerFilter {
     /// Per-cluster circuit breaker state.
-    breakers: HashMap<Arc<str>, CircuitBreaker>,
+    breakers: HashMap<Arc<str>, InstrumentedCircuitBreaker>,
 }
 
 impl CircuitBreakerFilter {
@@ -124,11 +203,14 @@ impl CircuitBreakerFilter {
             }
             breakers.insert(
                 Arc::clone(&cluster.name),
-                CircuitBreaker::new(CoreCircuitBreakerConfig {
-                    threshold: cluster.consecutive_failures,
-                    recovery_window: std::time::Duration::from_secs(cluster.recovery_window_secs),
-                    half_open_timeout: std::time::Duration::from_secs(cluster.half_open_timeout_secs),
-                }),
+                InstrumentedCircuitBreaker::new(
+                    &cluster.name,
+                    CoreCircuitBreakerConfig {
+                        threshold: cluster.consecutive_failures,
+                        recovery_window: std::time::Duration::from_secs(cluster.recovery_window_secs),
+                        half_open_timeout: std::time::Duration::from_secs(cluster.half_open_timeout_secs),
+                    },
+                ),
             );
         }
 

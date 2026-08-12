@@ -38,7 +38,7 @@ pub use bootstrap::{DEFAULT_CONFIG, load_config};
 pub use branch_chain::{BranchChainConfig, BranchCondition};
 pub use chain_ref::ChainRef;
 pub use cluster::{
-    Cluster, ConsistentHashOpts, Endpoint, HealthCheckConfig, HealthCheckType, LoadBalancerStrategy,
+    Cluster, ConsistentHashOpts, Endpoint, HealthCheckConfig, HealthCheckType, LoadBalancerStrategy, MaglevOpts,
     ParameterisedStrategy, SimpleStrategy,
 };
 pub use condition::{Condition, ConditionMatch, ResponseCondition, ResponseConditionMatch};

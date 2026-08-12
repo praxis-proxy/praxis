@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 pub(crate) mod consistent_hash;
 pub(crate) mod endpoint;
 pub(crate) mod least_connections;
+pub(crate) mod maglev;
 pub(crate) mod p2c;
 pub(crate) mod random;
 pub(crate) mod round_robin;

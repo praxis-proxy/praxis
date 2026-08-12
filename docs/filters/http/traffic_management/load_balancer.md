@@ -7,7 +7,7 @@ Selects an upstream endpoint using the cluster's configured strategy.
 
 ## Configuration Notes
 
-Supported strategies: - `round_robin` (default): cycles through endpoints in order, respecting weights via endpoint expansion. - `least_connections`: picks the endpoint with the fewest active in-flight requests; decrements the counter on `on_response`. - `consistent_hash`: hashes a configurable request header (or the URI path when the header is absent) to pin requests to a stable endpoint.
+Supported strategies: - `round_robin` (default): cycles through endpoints in order, respecting weights via endpoint expansion. - `least_connections`: picks the endpoint with the fewest active in-flight requests; decrements the counter on `on_response`. - `p2c`: samples two random endpoints and picks the less loaded one. - `random`: picks a uniformly random endpoint, weighted by endpoint weight. - `consistent_hash`: hashes a configurable request header (or the URI path when the header is absent) to pin requests to a stable endpoint. - `maglev`: hashes a configurable request header (or the URI path) through a Maglev lookup table for even distribution and minimal disruption when endpoints change.
 
 ## Configuration
 
@@ -30,7 +30,7 @@ Supported strategies: - `round_robin` (default): cycles through endpoints in ord
 | `clusters[].health_check.timeout_ms` | integer | no | Probe timeout in milliseconds. Must be less than `interval_ms`. |
 | `clusters[].health_check.unhealthy_threshold` | integer | no | Consecutive failures required to mark an endpoint unhealthy. |
 | `clusters[].idle_timeout_ms` | integer | no | Idle connection timeout in milliseconds. Closes pooled upstream connections that have been idle longer than this duration. `None` uses Pingora's default. |
-| `clusters[].load_balancer_strategy` | `round_robin` \| `least_connections` \| `p2c` \| `random` \| `consistent_hash` | no | Load-balancing algorithm for this cluster. Defaults to `round_robin`. |
+| `clusters[].load_balancer_strategy` | `round_robin` \| `least_connections` \| `p2c` \| `random` \| `consistent_hash` \| `maglev` | no | Load-balancing algorithm for this cluster. Defaults to `round_robin`. |
 | `clusters[].max_connections` | integer | no | Maximum concurrent in-flight requests to this cluster. When set, excess requests receive 503. Prevents a single slow upstream from consuming all available capacity. |
 | `clusters[].read_timeout_ms` | integer | no | Per-read timeout in milliseconds. Applies to each individual read operation on an established upstream connection. A timeout fires a 502 response to the client. Use [`total_connection_timeout_ms`] to bound the entire exchange instead. |
 | `clusters[].tls` | ClusterTls | no | TLS settings for upstream connections. Presence implies TLS is enabled. Omit for plaintext HTTP. |

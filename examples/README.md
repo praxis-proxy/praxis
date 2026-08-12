@@ -135,6 +135,7 @@ page.
 | [iterative-request-router-failover.yaml](configs/traffic-management/iterative-request-router-failover.yaml) | Demonstrates provider failover using the iterative_request_router filter |
 | [iterative-request-router-origin-failover.yaml](configs/traffic-management/iterative-request-router-origin-failover.yaml) | Demonstrates origin-aware failover: only an upstream 429 (rate limit) triggers the fallback |
 | [least-connections.yaml](configs/traffic-management/least-connections.yaml) | Routes each request to the backend with the fewest in-flight requests |
+| [maglev.yaml](configs/traffic-management/maglev.yaml) | Pins a user's requests to one backend by hashing a request header through a Maglev lookup table |
 | [p2c.yaml](configs/traffic-management/p2c.yaml) | Samples two random endpoints and picks the one with fewer in-flight requests |
 | [path-based-routing.yaml](configs/traffic-management/path-based-routing.yaml) | Routes by URL path prefix |
 | [random.yaml](configs/traffic-management/random.yaml) | Selects an upstream endpoint at random, weighted by endpoint weight |
