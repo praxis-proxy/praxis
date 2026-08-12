@@ -272,7 +272,7 @@ response to the client).
 
 ### Key files
 
-- `core/src/subrequest.rs` - `SubRequestConnector`
+- `core/src/subrequest/client.rs` - `SubRequestConnector`
 - `core/src/connectivity/peer.rs` - shared TLS/SNI
   helpers
 - `filter/src/pipeline/subrequest.rs` - executor,
