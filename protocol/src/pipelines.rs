@@ -97,7 +97,6 @@ impl ListenerPipelines {
         }
     }
 
-    /// Returns an iterator over listener names.
     /// Every filesystem path any filter in any listener's pipeline reads
     /// configuration from, de-duplicated.
     ///
@@ -115,7 +114,7 @@ impl ListenerPipelines {
         seen.into_iter().collect()
     }
 
-    /// Names of every listener with a pipeline.
+    /// Returns an iterator over listener names.
     pub fn listener_names(&self) -> impl Iterator<Item = &str> {
         self.pipelines.keys().map(String::as_str)
     }

@@ -84,15 +84,23 @@ fn demo_cel_policy_is_unchanged() {
 fn minimal_hs256_fixture_is_unchanged() {
     let (routing, plugins, routes) = fingerprint(include_str!("corpus/minimal-hs256.yaml"));
     assert!(!routing, "recorded: no routes, so routing is off");
-    assert_eq!(plugins, vec![("jwt-user".to_owned(), "identity/jwt".to_owned())]);
-    assert_eq!(routes, 0);
+    assert_eq!(
+        plugins,
+        vec![("jwt-user".to_owned(), "identity/jwt".to_owned())],
+        "recorded: plugin names and kind strings"
+    );
+    assert_eq!(routes, 0, "recorded: route count");
 }
 
 #[test]
 fn http_global_fixture_is_unchanged() {
     let (routing, plugins, routes) = fingerprint(include_str!("corpus/http-global.yaml"));
     assert!(routing, "recorded: the HTTP-global fixture enables routing");
-    assert_eq!(plugins, vec![("jwt-user".to_owned(), "identity/jwt".to_owned())]);
+    assert_eq!(
+        plugins,
+        vec![("jwt-user".to_owned(), "identity/jwt".to_owned())],
+        "recorded: plugin names and kind strings"
+    );
     assert_eq!(routes, 0, "recorded: global policy, no per-entity routes");
 }
 

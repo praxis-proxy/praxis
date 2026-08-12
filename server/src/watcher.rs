@@ -71,9 +71,15 @@ pub(crate) struct WatcherParams {
     /// Documents the configured filters read, beyond the main config.
     ///
     /// These are watched and hashed alongside it, so editing one triggers a
-    /// reload. Collected once at startup: the set is derived from the main
-    /// config, so it can only change when the main config does, and that always
-    /// passes the hash gate on its own.
+    /// reload. Collected once at startup and not updated afterward.
+    ///
+    /// The set only changes when the main config does, and that edit reloads on
+    /// its own because the main config passes the hash gate. What the reload does
+    /// not do is start watching the result: a document a filter points to only
+    /// after a reload is neither in this vec nor in the watched directories, so
+    /// later edits to it go unnoticed until the proxy restarts. Refreshing the
+    /// set means re-registering watch directories mid-loop and updating the
+    /// event filter, which belongs in its own change.
     pub(crate) referenced_files: Vec<PathBuf>,
 
     /// Filter registry for building new pipelines.
