@@ -208,16 +208,8 @@ fn build_otel_provider(
         return Ok(None);
     };
 
-    if let Ok(protocol) = std::env::var(crate::config::OTLP_PROTOCOL_ENV_VAR)
-        && protocol != "grpc"
-    {
-        return Err(ProxyError::Config(format!(
-            "Praxis supports only gRPC for OTLP export, but {}={protocol}",
-            crate::config::OTLP_PROTOCOL_ENV_VAR,
-        )));
-    }
-
-    let exporter = build_span_exporter(endpoint, &config.otlp_headers)?;
+    let protocol = resolve_otlp_protocol();
+    let exporter = build_span_exporter(endpoint, &config.otlp_headers, &protocol)?;
     let batch_processor = build_batch_processor(exporter, config);
     let resource = build_otel_resource(config);
 
@@ -245,9 +237,35 @@ fn build_otel_provider(
 // OTLP Exporter Builder
 // -----------------------------------------------------------------------------
 
-/// Build the OTLP span exporter with endpoint and optional gRPC headers.
+/// Resolve the OTLP export protocol from `OTEL_EXPORTER_OTLP_PROTOCOL`
+/// env var, defaulting to `"grpc"`.
+#[cfg(feature = "otel")]
+fn resolve_otlp_protocol() -> String {
+    std::env::var(crate::config::OTLP_PROTOCOL_ENV_VAR)
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .unwrap_or_else(|| "grpc".to_owned())
+}
+
+/// Build the OTLP span exporter for the selected protocol.
 #[cfg(feature = "otel")]
 fn build_span_exporter(
+    endpoint: &str,
+    headers: &Option<std::collections::HashMap<String, String>>,
+    protocol: &str,
+) -> Result<opentelemetry_otlp::SpanExporter, ProxyError> {
+    match protocol {
+        "grpc" => build_grpc_exporter(endpoint, headers),
+        "http/protobuf" => build_http_exporter(endpoint, headers),
+        other => Err(ProxyError::Config(format!(
+            "unsupported OTLP protocol \"{other}\"; supported: \"grpc\", \"http/protobuf\""
+        ))),
+    }
+}
+
+/// Build a gRPC (tonic) OTLP span exporter.
+#[cfg(feature = "otel")]
+fn build_grpc_exporter(
     endpoint: &str,
     headers: &Option<std::collections::HashMap<String, String>>,
 ) -> Result<opentelemetry_otlp::SpanExporter, ProxyError> {
@@ -263,7 +281,29 @@ fn build_span_exporter(
 
     builder
         .build()
-        .map_err(|e| ProxyError::Config(format!("failed to build OTLP span exporter: {e}")))
+        .map_err(|e| ProxyError::Config(format!("failed to build OTLP gRPC exporter: {e}")))
+}
+
+/// Build an HTTP/protobuf OTLP span exporter.
+#[cfg(feature = "otel")]
+fn build_http_exporter(
+    endpoint: &str,
+    headers: &Option<std::collections::HashMap<String, String>>,
+) -> Result<opentelemetry_otlp::SpanExporter, ProxyError> {
+    use opentelemetry_otlp::{WithExportConfig as _, WithHttpConfig as _};
+
+    let mut builder = opentelemetry_otlp::SpanExporter::builder()
+        .with_http()
+        .with_endpoint(endpoint);
+
+    if let Some(hdrs) = headers {
+        let http_headers: std::collections::HashMap<String, String> = hdrs.clone();
+        builder = builder.with_headers(http_headers);
+    }
+
+    builder
+        .build()
+        .map_err(|e| ProxyError::Config(format!("failed to build OTLP HTTP exporter: {e}")))
 }
 
 // -----------------------------------------------------------------------------

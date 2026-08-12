@@ -168,6 +168,12 @@ impl TelemetryConfig {
                 "telemetry.sampling_rate must be between 0.0 and 1.0, got {rate}"
             ));
         }
+        if self.service_name.as_ref().is_some_and(|s| s.trim().is_empty()) {
+            return Err("telemetry.service_name must not be empty when set".to_owned());
+        }
+        if self.service_version.as_ref().is_some_and(|s| s.trim().is_empty()) {
+            return Err("telemetry.service_version must not be empty when set".to_owned());
+        }
         Ok(())
     }
 
@@ -267,10 +273,17 @@ fn parse_otlp_headers_from_env() -> Option<HashMap<String, String>> {
     let headers: HashMap<String, String> = raw
         .split(',')
         .filter_map(|pair| pair.split_once('='))
-        .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
+        .map(|(k, v)| (percent_decode(k.trim()), percent_decode(v.trim())))
         .filter(|(k, _)| !k.is_empty())
         .collect();
     if headers.is_empty() { None } else { Some(headers) }
+}
+
+/// Percent-decode a string per RFC 3986.
+fn percent_decode(input: &str) -> String {
+    percent_encoding::percent_decode_str(input)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 // -----------------------------------------------------------------------------
