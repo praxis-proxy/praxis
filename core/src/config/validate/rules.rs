@@ -92,6 +92,7 @@ impl Config {
         validate_subrequest_circuit_breaker(self.runtime.subrequest_circuit_breaker.as_ref())?;
         validate_global_queue_interval(self.runtime.global_queue_interval)?;
         validate_shutdown_timeout(self.shutdown_timeout_secs)?;
+        self.telemetry.validate().map_err(ProxyError::Config)?;
 
         Ok(())
     }
