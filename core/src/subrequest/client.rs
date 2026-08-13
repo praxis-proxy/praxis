@@ -293,6 +293,8 @@ impl SubRequestClient {
         let mut bounded_peer = peer.clone();
         clamp_peer_timeouts(&mut bounded_peer, timeout);
 
+        // Unix sockets have no inet address and are excluded from
+        // circuit breaking (the fault model doesn't apply).
         let peer_key: Option<PeerKey> = bounded_peer.address().as_inet().copied().map(|addr| {
             let sni = &bounded_peer.sni;
             PeerKey::new(addr, sni.as_str())
