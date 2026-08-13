@@ -3,7 +3,7 @@
 
 //! HTTP security filters: CORS, CSRF, IP access control, credential injection,
 //! forwarded-header injection, guardrails, mTLS ingress trust enforcement,
-//! and the (feature-gated) CPEX policy filter.
+//! and the (feature-gated) `policy` filter.
 
 #[cfg(feature = "basic-auth-filter")]
 mod basic_auth;

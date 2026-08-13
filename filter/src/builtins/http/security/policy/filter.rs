@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! `PolicyFilter` — embeds the CPEX runtime in-process to resolve and
+//! `PolicyFilter` — embeds the policy engine in-process to resolve and
 //! validate identity, evaluate APL routes, optionally mint delegated
 //! credentials, scan for PII, emit audit records, and optionally
 //! rewrite request/response bodies.
@@ -44,7 +44,7 @@ use crate::{
 // PolicyFilter
 // -----------------------------------------------------------------------------
 
-/// Embeds the CPEX policy engine in-process to enforce multi-source JWT
+/// Embeds the Praxis Policy Engine in-process to enforce multi-source JWT
 /// identity, APL route policy, RFC 8693 token exchange, PII
 /// scanning, audit emission, and (under `body_access: read_write`)
 /// request / response body rewriting.
@@ -61,7 +61,7 @@ use crate::{
 /// On the body phase, the filter consumes protocol classifier filter metadata
 /// (from the `praxis-ai` package) to dispatch the matching CMF
 /// hook chain. APL routes
-/// (declared in the CPEX YAML) gate the tool/prompt/resource call by
+/// (declared in the policy document) gate the tool/prompt/resource call by
 /// role, attribute, or Cedar PDP decision. `delegate(...)` steps mint
 /// audience-scoped tokens (RFC 8693) that the allow path attaches as
 /// upstream headers.
@@ -107,7 +107,7 @@ pub struct PolicyFilter {
 }
 
 impl PolicyFilter {
-    /// Construct a filter from a parsed config. Loads the CPEX YAML
+    /// Construct a filter from a parsed config. Loads the policy document
     /// referenced by `cfg.config_path`, registers bundled plugin
     /// factories, wires the APL visitor, and initializes the manager.
     /// Errors abort filter chain construction at server startup —
@@ -388,7 +388,7 @@ impl PolicyFilter {
     }
 
     /// Generic-HTTP (L7) authorization: resolve identity, populate the
-    /// HTTP request line + headers into the CPEX bag, and evaluate the CPEX
+    /// HTTP request line + headers into the attribute bag, and evaluate the
     /// `global` policy via the `cmf.http_request` hook. A deny maps to a
     /// plain HTTP response ([`super::error::http_authz_rejection`]); an
     /// identity failure is the usual 401. Authorization runs here (not the
@@ -509,7 +509,7 @@ impl HttpFilter for PolicyFilter {
         // the protocol classifier filter populates its metadata). Operators opt into
         // `ReadWrite` via `body_access: read_write` when they want APL
         // field mutators (`redact()` / `assign()` on `args.<field>`) to
-        // rewrite the upstream body. Chain-level scoping keeps non-CPEX
+        // rewrite the upstream body. Chain-level scoping keeps non-policy
         // traffic out of this filter so the buffering cost is bounded
         // either way.
         match self.cfg.body_access {
@@ -588,7 +588,7 @@ impl HttpFilter for PolicyFilter {
 
         // No entity routes means there is nothing to authorize at the body
         // phase: a pure L7 policy already ran (and allowed) in `on_request`
-        // over the CPEX `global` policy, and an identity-only policy has no
+        // over the policy's `global` block, and an identity-only policy has no
         // per-entity step. Skip rather than trip the classifier-metadata gate.
         if !self.entity_routes {
             return Ok(FilterAction::BodyDone);
@@ -646,7 +646,7 @@ impl HttpFilter for PolicyFilter {
         let mut extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &entity_name);
         // Attach the HTTP request line + headers so a single policy can combine
         // entity/`args.*` checks with `http.*` predicates in one evaluation.
-        // CPEX grants entity route handlers the `read_headers` capability, so
+        // The engine grants entity route handlers the `read_headers` capability, so
         // these `http.*` attributes reach the CEL/APL bag at the entity phase.
         Self::attach_http_attributes(ctx, &mut extensions, headers);
         ctx.extensions.insert(ResolvedIdentity(identity));

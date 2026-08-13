@@ -5,7 +5,7 @@
 //! authorization example (`examples/configs/security/policy-http.yaml`).
 //!
 //! Exercises the `policy` filter in its pure-L7 (`http_global`) shape
-//! end-to-end against the CPEX `global` policy (admit only GET). Three cases
+//! end-to-end against the policy's `global` block (admit only GET). Three cases
 //! prove the full chain:
 //!
 //! * **Allow** — GET with a valid HS256 JWT resolves identity, the global policy admits GET, and the request reaches
@@ -15,7 +15,7 @@
 //! * **Deny (identity)** — a request with no `Authorization` header is rejected at the identity gate (HTTP 401).
 //!
 //! Together these exercise the request-line attributes, the structured
-//! denyWith carrier, the CPEX non-entity authz path, and the pure-L7
+//! denyWith carrier, the non-entity authz path, and the pure-L7
 //! (`http_global`) deny mapping.
 
 use std::{

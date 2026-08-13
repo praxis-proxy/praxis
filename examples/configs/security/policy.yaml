@@ -1,6 +1,6 @@
 # Policy Security Filter (experimental)
 #
-# Embeds the CPEX policy engine in-process to enforce multi-source JWT
+# Embeds the Praxis Policy Engine in-process to enforce multi-source JWT
 # identity, APL route policy, RFC 8693 OAuth 2.0 token exchange, PII
 # scanning, audit emission, and (under `body_access: read_write`)
 # request / response body rewriting.
@@ -12,7 +12,7 @@
 # an upstream protocol classifier filter (available in the `praxis-ai` package), which
 # MUST be ordered before it in the chain.
 #
-# `config_path` points at the CPEX policy YAML (plugins + routes) that
+# `config_path` points at the policy document (plugins + routes) that
 # the filter loads once at construction. It is operator-supplied, not
 # shipped here: a real policy carries your own issuers, secrets, routes,
 # PDPs, and delegators. See the praxis-demos repo

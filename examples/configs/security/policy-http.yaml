@@ -1,9 +1,8 @@
 # Generic-HTTP authorization (experimental)
 #
-# Generic-HTTP authorization for non-MCP traffic using the CPEX policy
-# engine. The `policy` filter loads a policy that declares only a `global`
+# Generic-HTTP authorization for non-MCP traffic using the Praxis Policy Engine. The `policy` filter loads a policy that declares only a `global`
 # HTTP policy (no entity routes), so it authorizes at the HTTP layer: it
-# resolves JWT identity and evaluates the CPEX `global` policy over the HTTP
+# resolves JWT identity and evaluates the policy's `global` block over the HTTP
 # request line, headers, and identity claims. Denials become plain HTTP
 # responses (with a custom `denyWith` status/body/headers).
 #
@@ -22,7 +21,7 @@ listeners:
 filter_chains:
   - name: main
     filters:
-      # Generic-HTTP authorization. `config_path` points at the CPEX policy
+      # Generic-HTTP authorization. `config_path` points at the policy
       # document. The policy declares only a `global` HTTP policy (no entity
       # routes), so the filter authorizes at the HTTP layer directly — no
       # protocol classifier needed.

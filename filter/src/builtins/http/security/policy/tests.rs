@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Tests for the CPEX security filter.
+//! Tests for the `policy` security filter.
 //!
 //! Uses HMAC (HS256) JWTs throughout for setup simplicity — the
 //! identity validation pipeline is symmetric across signing
@@ -64,7 +64,7 @@ fn agent_claims(client_id: &str) -> serde_json::Value {
     })
 }
 
-/// Write a single-plugin CPEX YAML referencing the HS256 test secret.
+/// Write a single-plugin policy document referencing the HS256 test secret.
 fn write_single_plugin_config() -> (TempDir, String) {
     let dir = TempDir::new().expect("create tempdir");
     let cfg_path = dir.path().join("cpex.yaml");
@@ -97,7 +97,7 @@ fn write_single_plugin_config() -> (TempDir, String) {
     (dir, path_str)
 }
 
-/// Write a CPEX YAML with a single entity route (`echo` tool) gated by a
+/// Write a policy document with a single entity route (`echo` tool) gated by a
 /// native `require(authenticated)` and no global HTTP policy. The filter
 /// derives `entity_routes = true`, so it authorizes at the body phase and
 /// requires classifier metadata.
@@ -133,7 +133,7 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Write a CPEX YAML whose `echo` tool route rule references BOTH `http.*`
+/// Write a policy document whose `echo` tool route rule references BOTH `http.*`
 /// and identity attributes in one CEL step. Proves the body-phase entity
 /// evaluation sees the HTTP request line alongside entity/identity
 /// attributes (the enrichment). `entity_routes = true`.
@@ -179,7 +179,7 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Write a CPEX YAML with only a `global` HTTP policy and no entity routes —
+/// Write a policy document with only a `global` HTTP policy and no entity routes —
 /// the pure L7 shape. The filter derives `http_global = true`,
 /// `entity_routes = false`, and authorizes at `on_request` with no
 /// classifier.
@@ -223,7 +223,7 @@ global:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Write a CPEX YAML that declares BOTH a `global` HTTP policy (canonical
+/// Write a policy document that declares BOTH a `global` HTTP policy (canonical
 /// `authentication:`/`authorization:` form, admitting only GET) AND an entity
 /// route (the `echo` tool). Derives the combined shape
 /// `(http_global = true, entity_routes = true)`.
@@ -274,7 +274,7 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Write a CPEX YAML that gates the `echo` tool through a CEL PDP step.
+/// Write a policy document that gates the `echo` tool through a CEL PDP step.
 /// Single HS256 identity plugin (so `subject.id` resolves from the JWT
 /// `sub`), a `kind: cel` PDP declared globally, and a route whose `cel:`
 /// expression allows only `alice`. Exercises the `apl-pdp-cel` backend
@@ -353,7 +353,7 @@ async fn dispatch_echo_method(filter: &PolicyFilter, subject: &str, method: Meth
         .expect("filter ran")
 }
 
-/// Write a CPEX YAML demonstrating session tainting: a `read-secret`
+/// Write a policy document demonstrating session tainting: a `read-secret`
 /// tool taints the session, and a `send-out` tool denies when the
 /// session carries that taint. Identity is the HS256 jwt plugin so
 /// `subject.id` resolves; the taint persists in the in-process session
@@ -405,7 +405,7 @@ routes:
 
 /// Dispatch a `tools/call` for `tool` as `subject` with the given
 /// `X-Session-Id`. Returns the filter's body-phase action. Threads the
-/// session header so cpex's session-scoped taint store can persist /
+/// session header so the engine's session-scoped taint store can persist /
 /// hydrate labels across calls.
 async fn dispatch_tool_session(filter: &PolicyFilter, subject: &str, tool: &str, session_id: &str) -> FilterAction {
     let token = mint_jwt(&standard_claims(subject));
@@ -430,7 +430,7 @@ async fn dispatch_tool_session(filter: &PolicyFilter, subject: &str, tool: &str,
         .expect("filter ran")
 }
 
-/// Write a CPEX YAML with two identity plugins, each reading its own
+/// Write a policy document with two identity plugins, each reading its own
 /// header. Demonstrates the multi-source agentic identity story PR1
 /// targets — one request can carry user + agent JWTs simultaneously,
 /// both validated, both contributing to a typed `Extensions` context.
@@ -488,7 +488,7 @@ fn write_multi_source_config() -> (TempDir, String) {
     (dir, path_str)
 }
 
-/// Write a CPEX YAML that exercises ROUTE-SCOPED identity. A global
+/// Write a policy document that exercises ROUTE-SCOPED identity. A global
 /// resolver (`id-global`, reads `Authorization`) is listed in
 /// `global.authentication`; a second resolver (`id-route`, reads
 /// `X-Route-Token`) is bound ONLY to the `scoped-tool` route via a
@@ -667,7 +667,7 @@ async fn route_without_authentication_inherits_global_resolver() {
     );
 }
 
-/// Write a CPEX YAML selecting the Valkey-backed session store via a
+/// Write a policy document selecting the Valkey-backed session store via a
 /// flat `global.session_store` block. The `valkey` factory connects
 /// lazily (the pool dials on first request), so this config loads
 /// without a running Valkey — it pins that the factory is registered
@@ -757,7 +757,7 @@ fn config_max_buffer_bytes_override() {
 }
 
 /// `config_path:` is mandatory — there's no default that would let
-/// the filter load a CPEX policy document, so an empty config block
+/// the filter load a policy document, so an empty config block
 /// must fail at deserialize time rather than at first request.
 #[test]
 fn config_requires_config_path() {
@@ -1282,7 +1282,7 @@ fn http_authz_rejection_defaults_without_details() {
     );
 }
 
-/// A `denyWith` (CPEX `response:`) block sets a custom status, body, and
+/// A `denyWith` (the policy's `response:`) block sets a custom status, body, and
 /// safe headers on the L7 deny.
 #[test]
 fn http_authz_rejection_applies_custom_denywith() {
@@ -1791,7 +1791,7 @@ async fn cel_route_allows_matching_subject_and_denies_others() {
 /// A single entity-route rule can combine `http.*` with entity/identity
 /// attributes: the `echo` tool is gated by `http.method == "POST" &&
 /// subject.id == "alice"`. Proves the body-phase evaluation is enriched with
-/// the HTTP request line (via CPEX's `read_headers` grant to entity routes),
+/// the HTTP request line (via the engine's `read_headers` grant to entity routes),
 /// so the same policy sees both dimensions. `alice` over POST passes; the
 /// same caller over GET is denied by the `http.method` half of the predicate.
 #[tokio::test(flavor = "multi_thread")]
@@ -1874,7 +1874,7 @@ async fn combined_shape_on_request_uses_identity_gate_not_http_authz() {
 /// taints the session (`taint(secret, session)`), and a later call in
 /// the SAME session is denied (`security.labels contains "secret"`). A
 /// DIFFERENT session id is unaffected — taint is session-scoped. Proves
-/// the `X-Session-Id` → `agent.session_id` wiring + the cpex session
+/// the `X-Session-Id` → `agent.session_id` wiring + the engine session
 /// store's hydrate/persist round-trip across requests.
 #[tokio::test(flavor = "multi_thread")]
 async fn session_taint_persists_and_denies_within_the_same_session() {

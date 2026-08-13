@@ -465,12 +465,12 @@ fn backoff_duration(consecutive_failures: u32) -> Duration {
 /// Compute a hash of file content for change detection.
 /// Hash of the main config plus every document it references.
 ///
-/// The reload gate used to hash the main config alone, which meant a filter that
-/// loads an external document never picked up edits to it: the document was never
-/// read, so the main config stayed byte-identical and the unchanged-content check
-/// suppressed the rebuild. The filter kept serving whatever it loaded at startup,
-/// with the only trace a debug line saying the config was unchanged, which was
-/// true and misleading. See praxis-proxy/praxis#900.
+/// Referenced documents have to be included, not just the main config. A filter
+/// that loads an external document would otherwise never pick up edits to it: the
+/// main config stays byte-identical, the unchanged-content check suppresses the
+/// rebuild, and the filter keeps serving what it loaded at startup. The only trace
+/// is a debug line saying the config was unchanged, which is true and misleading.
+/// See praxis-proxy/praxis#900.
 ///
 /// Paths are hashed in the order given, which the caller keeps stable, and the
 /// path itself is folded in alongside the content so that swapping two documents'

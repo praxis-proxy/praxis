@@ -1,4 +1,4 @@
-# CPEX policy fixture for the `security/policy.yaml` example integration
+# Policy fixture for the `security/policy.yaml` example integration
 # test. The example itself points `config_path` at an operator-supplied
 # deployment path; the test rewrites that to this file so the policy
 # filter constructs against a real policy without shipping one under
@@ -12,7 +12,7 @@
 # This is enough to exercise the integration's wiring without
 # requiring a Keycloak / JWKS endpoint to run the example. Production
 # deployments swap HS256 for RS256+JWKS, add routes, attach
-# delegators, and so on. See the CPEX demo in the praxis-demos
+# delegators, and so on. See the HR demo in the praxis-demos
 # repository (`demos/cpex/`) for a fully-featured policy.
 
 plugins:
