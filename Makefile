@@ -231,10 +231,13 @@ container-run: | require-container-engine
 
 test: $(H2SPEC)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo test --workspace $(_NOCAPTURE)
-	PATH="$(BINUTILS_PATH):$(PATH)" cargo test --workspace --features "$(OPTIONAL_FEATURES)" $(_NOCAPTURE)
+	cargo test -p praxis-proxy-core --features otel $(_NOCAPTURE)
+	cargo test -p praxis-proxy-filter --features "basic-auth-filter cpex-policy-engine" $(_NOCAPTURE)
+	PATH="$(BINUTILS_PATH):$(PATH)" cargo test -p praxis-tests-integration --features "$(OPTIONAL_FEATURES)" $(_NOCAPTURE)
 
 test-unit:
 	cargo test -p praxis-proxy-core $(_NOCAPTURE)
+	cargo test -p praxis-proxy-core --features otel $(_NOCAPTURE)
 	cargo test -p praxis-proxy-filter $(_NOCAPTURE)
 	cargo test -p praxis-proxy-filter --features "basic-auth-filter cpex-policy-engine" $(_NOCAPTURE)
 	cargo test -p praxis-proxy-protocol $(_NOCAPTURE)
@@ -245,7 +248,7 @@ test-schema:
 
 test-integration:
 	cargo test -p praxis-tests-integration $(_NOCAPTURE)
-	cargo test -p praxis-tests-integration --features "basic-auth-filter cpex-policy-engine otel" $(_NOCAPTURE)
+	cargo test -p praxis-tests-integration --features "$(OPTIONAL_FEATURES)" $(_NOCAPTURE)
 
 test-conformance: $(H2SPEC)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo test -p praxis-tests-conformance $(_NOCAPTURE)
