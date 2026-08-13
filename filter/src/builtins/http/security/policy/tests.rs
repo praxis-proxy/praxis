@@ -2341,6 +2341,34 @@ async fn session_taint_is_isolated_across_principals() {
     );
 }
 
+/// A non-entity policy behind a `StreamBuffer` downstream must reject
+/// unauthenticated traffic on its FIRST body chunk — before the downstream body
+/// consumer ever executes. Proves the pre-read admission path rejects (not just
+/// accepts) when credentials are absent, closing the window where a body
+/// consumer could run before authentication.
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_read_rejects_unauthenticated_before_downstream_body_consumer() {
+    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let (_dir, path) = write_single_plugin_config();
+    let pipeline = build_policy_observer_pipeline(&path, &observed);
+
+    let req = make_request(Method::POST, "/");
+    let mut ctx = make_filter_context(&req);
+    let mut partial_body = Some(bytes::Bytes::from_static(b"{"));
+    let action = pipeline
+        .execute_http_request_body(&mut ctx, &mut partial_body, false)
+        .await
+        .expect("pre-read body pipeline ran");
+    assert!(
+        matches!(&action, FilterAction::Reject(rej) if rej.status == 401),
+        "unauthenticated pre-read must reject 401 before downstream observer runs; got {action:?}",
+    );
+    assert!(
+        observed.lock().expect("observer lock").is_empty(),
+        "downstream body consumer must NOT execute when policy rejects",
+    );
+}
+
 /// Entity-routed policy waits for the full body so the upstream protocol
 /// classifier has finished parsing and writing route metadata. Non-entity
 /// policies intentionally authenticate on the first chunk instead.

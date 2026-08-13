@@ -91,7 +91,10 @@ impl AuthenticatedIdentity {
     ///
     /// Registered JWT claims and claims promoted to the typed fields above are
     /// excluded by the CPEX claim mapper. Values use CPEX's normalized string
-    /// representation rather than exposing the raw decoded JWT claim set.
+    /// representation rather than exposing the raw decoded JWT claim set:
+    /// string-typed JWT claims are passed through as-is, while non-string
+    /// values (objects, arrays, numbers, booleans) are JSON-serialized into
+    /// their compact string form (e.g. `{"tier":"gold"}` for a nested object).
     /// Wire adapters must explicitly allowlist and bound claims before
     /// serializing them outside Praxis.
     pub fn custom_claims(&self) -> &BTreeMap<String, String> {
