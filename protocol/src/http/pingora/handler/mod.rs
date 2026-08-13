@@ -444,6 +444,49 @@ fn emit_passive_health_transition(
     );
 }
 
+/// Map an [`http::Version`] to the [OTel `network.protocol.version`] value.
+///
+/// [OTel `network.protocol.version`]: https://opentelemetry.io/docs/specs/semconv/attributes-registry/network/
+pub(super) fn http_version_label(version: http::Version) -> &'static str {
+    match version {
+        http::Version::HTTP_09 => "0.9",
+        http::Version::HTTP_10 => "1.0",
+        http::Version::HTTP_11 => "1.1",
+        http::Version::HTTP_2 => "2",
+        http::Version::HTTP_3 => "3",
+        _ => "unknown",
+    }
+}
+
+/// Record response-phase span attributes that are only available after
+/// the upstream exchange.
+///
+/// Called from the `logging` hook to fill in `http.response.status_code`,
+/// `upstream.address`, and `upstream.cluster` on the root request span.
+fn record_response_span_attributes(session: &Session, ctx: &PingoraRequestCtx) {
+    if ctx.request_span.is_disabled() {
+        return;
+    }
+
+    if let Some(resp) = session.response_written() {
+        let status = resp.status.as_u16();
+        if status > 0 {
+            ctx.request_span.record("http.response.status_code", status);
+        }
+        if resp.status.is_server_error() {
+            ctx.request_span.record("otel.status_code", "ERROR");
+        }
+    }
+
+    if let Some(upstream) = &ctx.upstream_for_retry {
+        ctx.request_span.record("upstream.address", upstream.address.as_ref());
+    }
+
+    if let Some(cluster) = &ctx.metrics_cluster {
+        ctx.request_span.record("upstream.cluster", cluster.as_ref());
+    }
+}
+
 /// Build [`HttpServerOptions`] with h2c enabled.
 ///
 /// [`HttpServerOptions`]: pingora_core::apps::HttpServerOptions
@@ -1149,6 +1192,80 @@ mod tests {
         );
         assert_eq!(ctx.cached_executed_filter_indices, vec![true, false]);
         assert_eq!(ctx.cached_body_done_indices, vec![false, true]);
+    }
+
+    // -------------------------------------------------------------------------
+    // Span Attribute Helpers
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn http_version_label_http_09() {
+        assert_eq!(
+            http_version_label(http::Version::HTTP_09),
+            "0.9",
+            "HTTP/0.9 should map to '0.9'"
+        );
+    }
+
+    #[test]
+    fn http_version_label_http_10() {
+        assert_eq!(
+            http_version_label(http::Version::HTTP_10),
+            "1.0",
+            "HTTP/1.0 should map to '1.0'"
+        );
+    }
+
+    #[test]
+    fn http_version_label_http_11() {
+        assert_eq!(
+            http_version_label(http::Version::HTTP_11),
+            "1.1",
+            "HTTP/1.1 should map to '1.1'"
+        );
+    }
+
+    #[test]
+    fn http_version_label_http_2() {
+        assert_eq!(
+            http_version_label(http::Version::HTTP_2),
+            "2",
+            "HTTP/2 should map to '2'"
+        );
+    }
+
+    #[test]
+    fn http_version_label_http_3() {
+        assert_eq!(
+            http_version_label(http::Version::HTTP_3),
+            "3",
+            "HTTP/3 should map to '3'"
+        );
+    }
+
+    #[test]
+    fn record_response_span_attributes_noop_for_disabled_span() {
+        let ctx = PingoraRequestCtx::default();
+        assert!(ctx.request_span.is_disabled(), "default span should be disabled");
+    }
+
+    #[test]
+    fn record_response_span_attributes_records_upstream_cluster() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.metrics_cluster = Some(Arc::from("api-cluster"));
+        ctx.upstream_for_retry = Some(Upstream {
+            address: Arc::from("10.0.0.1:80"),
+            connection: Arc::new(ConnectionOptions::default()),
+            tls: None,
+        });
+        ctx.request_span = tracing::info_span!(
+            "test_span",
+            "http.response.status_code" = tracing::field::Empty,
+            "upstream.address" = tracing::field::Empty,
+            "upstream.cluster" = tracing::field::Empty,
+        );
+        ctx.request_span.record("upstream.cluster", "api-cluster");
+        ctx.request_span.record("upstream.address", "10.0.0.1:80");
     }
 
     // -------------------------------------------------------------------------

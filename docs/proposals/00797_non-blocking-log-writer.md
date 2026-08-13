@@ -215,11 +215,13 @@ covering:
 
 - `runtime.logging` config types + validation next to
   `runtime.log_overrides`
-- Non-blocking writer wiring inside `init_tracing`
+- Non-blocking writer wiring inside `init_tracing` (with a
+  documented sync path when `non_blocking: false`)
 - Daily file rotation via `tracing-appender`, size-based
-  rotation via a Praxis-owned writer, both behind the same
-  `WorkerGuard`
-- Shutdown flush by owning that guard on `TracingGuard`
+  rotation via a Praxis-owned writer; non-blocking mode stores
+  a `WorkerGuard` on `TracingGuard`
+- Shutdown flush by owning the optional `WorkerGuard` on
+  `TracingGuard` when `non_blocking: true`
 - Restart-required signaling when logging settings change
 - Unit + integration coverage for validation, rotation, and
   flush
@@ -256,16 +258,19 @@ no flush of buffered process log lines on shutdown.
 Reload (`server/src/reload.rs`) re-validates overrides but does
 **not** re-init the subscriber. This change keeps the same
 `TracingGuard` ownership shape in `main` and **extends** it to
-also own the non-blocking appender `WorkerGuard` so process-log
-flush joins OTLP shutdown on drop.
+also own the optional non-blocking appender `WorkerGuard` when
+`non_blocking: true` so process-log flush runs on drop after OTLP
+shutdown.
 
 **Dependency.** Add workspace `tracing-appender` (tokio-rs /
-same ecosystem as `tracing-subscriber`). Use
+same ecosystem as `tracing-subscriber`). When
+`non_blocking: true` (default), use
 `tracing_appender::non_blocking` (via `NonBlockingBuilder`
-when capacity must be set) for every destination so stdout,
-stderr, and file share one delivery model. Do not introduce a
-second subscriber or replace the existing Registry + EnvFilter
-+ fmt (+ optional OTLP) layering from
+when capacity must be set) for stdout, stderr, and file.
+When `non_blocking: false`, pass the raw writer directly to the
+fmt layer (debug sync fallback). Do not introduce a second
+subscriber or replace the existing Registry + EnvFilter + fmt
+(+ optional OTLP) layering from
 [#315](https://github.com/praxis-proxy/praxis/issues/315).
 
 **Config surface.** Extend `RuntimeConfig` with
@@ -292,12 +297,16 @@ start.
 1. Build the underlying writer for the chosen destination:
    - `stdout` / `stderr` → `std::io::{stdout,stderr}`
    - `file` → daily or size roller (below)
-2. Wrap with `NonBlockingBuilder` configured for the chosen
-   `buffer_size` and **lossy** overflow (drop when full),
-   matching What?.
-3. Pass the non-blocking handle into
+2. **When `non_blocking: true` (default):** wrap with
+   `NonBlockingBuilder` configured for the chosen `buffer_size`
+   and **lossy** overflow (drop when full), matching What?.
+   Store the returned `WorkerGuard` on `TracingGuard`.
+3. **When `non_blocking: false`:** skip step 2; pass the raw
+   writer directly to `fmt::layer().with_writer(...)`.
+   `TracingGuard` holds no `WorkerGuard` in this mode.
+4. Pass the writer (non-blocking handle or raw) into
    `fmt::layer().with_writer(...)` (text / JSON unchanged).
-4. Keep EnvFilter + optional OTLP layers as today.
+5. Keep EnvFilter + optional OTLP layers as today.
 
 **File rotation.**
 
@@ -310,17 +319,30 @@ start.
   time-based only. Own a small `Write` wrapper in `core`
   that rolls when the active file exceeds the configured
   max size and prunes older files down to `max_files`, then
-  wrap that writer in the same non-blocking path. Do not
-  special-case sync writes for size mode.
+  use the same writer path as above (non-blocking or sync per
+  `non_blocking`). Active file is exactly `file_path` (for
+  example `/var/log/praxis/proxy.log`). On roll, rename the
+  active file to `{prefix}.{n}` with a monotonically
+  increasing integer suffix (`proxy.log.1`, `proxy.log.2`, …).
+  Prune by deleting the **oldest** rotated files (lowest `n`
+  / earliest mtime) until at most `max_files - 1` archived
+  copies remain beside the active file. Document the pattern
+  in operating docs for log agents and glob exclusions.
 
-**Shutdown flush.** Extend `TracingGuard` to own the
-`WorkerGuard` from `non_blocking` (in addition to the optional
-OTLP provider). `main` already binds
-`let _tracing_guard = ...` for the process lifetime—never bind
-the worker guard as a discarded `_` alone or it flushes
-immediately. On drop: flush/join the appender worker, then shut
-down OTLP as today. Unclean kill can still lose the in-memory
-queue (accepted under Non-Goals).
+**Shutdown flush.** Extend `TracingGuard` to own the optional
+`WorkerGuard` from `non_blocking` when `non_blocking: true`
+(in addition to the optional OTLP provider). `main` already
+binds `let _tracing_guard = ...` for the process lifetime—never
+bind the worker guard as a discarded `_` alone or it flushes
+immediately. On drop: **shut down OTLP first** (when the
+`otel` feature is enabled and a provider is held), then drop
+or flush the `WorkerGuard` so buffered process-log lines drain
+while the fmt writer is still live. Reversing this order stops
+the background appender thread before OTLP teardown finishes
+and can drop events still flowing through the fmt layer.
+Unclean kill can still lose the in-memory queue (accepted
+under Non-Goals). When `non_blocking: false`, only the OTLP
+shutdown path runs on drop (no worker guard).
 
 **Reload / restart.** Subscriber init remains once-per-process.
 Changing `runtime.logging` (destination, path, rotation,
