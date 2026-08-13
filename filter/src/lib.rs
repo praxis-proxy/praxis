@@ -28,14 +28,14 @@ pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
 #[cfg(feature = "basic-auth-filter")]
 pub use builtins::BasicAuthFilter;
-#[cfg(feature = "policy-engine")]
-pub use builtins::PolicyFilter;
 pub use builtins::{
     CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, EndpointSelectorFilter,
     GuardrailsAction, GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode, RedirectStatus, RouterFilter,
     RuleTargetKind, has_dot_dot_traversal, http::payload_processing::compression_config::CompressionConfig,
     normalize_rewritten_path,
 };
+#[cfg(feature = "policy-engine")]
+pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
 pub use context::{HttpFilterContext, PendingHeaderResult, Request, Response, TrustedHeaderMutation};
 pub use error_response::{

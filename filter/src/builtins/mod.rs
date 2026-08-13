@@ -8,8 +8,6 @@ mod tcp;
 
 #[cfg(feature = "basic-auth-filter")]
 pub use http::BasicAuthFilter;
-#[cfg(feature = "policy-engine")]
-pub use http::PolicyFilter;
 pub use http::{
     AccessLogFilter, CircuitBreakerFilter, CompressionFilter, ContainsValue, CorsFilter, CredentialInjectionFilter,
     CsrfFilter, DisallowedOriginMode, EndpointSelectorFilter, ForwardedHeadersFilter, GrpcDetectionFilter,
@@ -18,4 +16,6 @@ pub use http::{
     RateLimitMode, RedirectFilter, RedirectStatus, RequestIdFilter, RouterFilter, RuleTargetKind, StaticResponseFilter,
     TimeoutFilter, UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,
 };
+#[cfg(feature = "policy-engine")]
+pub use http::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
 pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};

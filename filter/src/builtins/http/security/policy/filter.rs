@@ -130,6 +130,26 @@ impl PolicyFilter {
         let mgr = Arc::new(PluginManager::default());
         ppe::install_builtins(&mgr);
 
+        // Host-supplied factories, for `kind:` values the engine does not
+        // bundle. After the builtins on purpose: the factory registry is
+        // last-writer-wins, so a host registering a bundled `kind` replaces it,
+        // which is how a deployment swaps an implementation without forking.
+        //
+        // Re-read on every construction, not drained. `PolicyFilter::new` runs
+        // again on each hot reload, and a registry emptied by the first read
+        // would fail the reload with "no factory registered" for a config that
+        // had been serving traffic.
+        let host_factories = super::host_plugins::host_plugin_factories();
+        if !host_factories.is_empty() {
+            tracing::info!(
+                count = super::host_plugins::host_plugin_count(),
+                "policy: registering host-supplied plugin factories"
+            );
+        }
+        for (kind, factory) in host_factories {
+            mgr.register_factory(kind, factory);
+        }
+
         mgr.load_config_yaml(&yaml)
             .map_err(|e: Box<PluginError>| -> FilterError {
                 format!("policy: load_config_yaml failed for {}: {e}", cfg.config_path).into()

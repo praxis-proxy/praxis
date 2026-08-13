@@ -45,10 +45,14 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # allow-git entry in deny.toml goes away with it.
 #
 # `builtins` is the engine's one umbrella for every bundled extension, session
-# store included. Naming it rather than enumerating the nine granular features
-# keeps this line from drifting each time the engine gains a builtin, which is
-# how the OPA decision point had to be added by hand.
-ppe = { git = "https://github.com/praxis-proxy/policy", rev = "095058730927d2e4ef3e193c4f7636e336c152c3", package = "praxis-policy", features = ["builtins"] }
+# store included. Naming it rather than enumerating the granular features keeps
+# this line from drifting each time the set changes, which is how the OPA
+# decision point had to be added by hand.
+#
+# The umbrella is bundled extensions only. Anything else a policy document names
+# comes from the host via `register_policy_plugin_factory`; see the policy
+# filter's `host_plugins` module.
+ppe = { git = "https://github.com/praxis-proxy/policy", rev = "e113aea313c1bab800ee87fb5055d2eebfa706fb", package = "praxis-policy", features = ["builtins"] }
 clap = { version = "4.6.6", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.2.1"

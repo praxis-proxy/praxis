@@ -2165,3 +2165,178 @@ async fn concurrent_cmf_dispatch_completes_without_blocking() {
         );
     }
 }
+
+// -----------------------------------------------------------------------------
+// Host-supplied plugin factories
+// -----------------------------------------------------------------------------
+
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
+
+use ppe::prelude::{
+    AnyHookHandler, CmfHook, Extensions, HookHandler, MessagePayload, Plugin, PluginConfig, PluginContext, PluginError,
+    PluginFactory, PluginInstance, PluginResult, TypedHandlerAdapter,
+};
+
+use super::register_policy_plugin_factory;
+
+/// A plugin that does nothing, to stand in for one a host would supply.
+struct StubPlugin {
+    cfg: PluginConfig,
+}
+
+impl Plugin for StubPlugin {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for StubPlugin {
+    async fn handle(
+        &self,
+        _payload: &MessagePayload,
+        _ext: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        PluginResult::allow()
+    }
+}
+
+/// Counts how many times it built a plugin, so a test can tell one construction
+/// from two. Deliberately accepts any config, including one a bundled factory
+/// would reject — that difference is what the override test keys on.
+struct StubFactory {
+    builds: Arc<AtomicUsize>,
+}
+
+impl PluginFactory for StubFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        self.builds.fetch_add(1, Ordering::SeqCst);
+        let plugin = Arc::new(StubPlugin { cfg: config.clone() });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.tool_pre_invoke", adapter)],
+        })
+    }
+}
+
+/// Register a stub under `kind` and hand back its build counter.
+fn register_stub(kind: &'static str) -> Arc<AtomicUsize> {
+    let builds = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&builds);
+    register_policy_plugin_factory(
+        kind,
+        Arc::new(move || {
+            Box::new(StubFactory {
+                builds: Arc::clone(&counter),
+            })
+        }),
+    );
+    builds
+}
+
+/// A policy document whose only plugin is of `kind`, with no `config:` block.
+/// Every bundled plugin requires one, so a bundled factory rejects this and the
+/// permissive stub accepts it.
+fn write_config_naming_kind(kind: &str) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        "plugins:\n  - name: host-plugin\n    kind: {kind}\n    hooks:\n      - cmf.tool_pre_invoke\n    mode: sequential\n    priority: 50\n    on_error: fail\n"
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
+    (dir, path_str)
+}
+
+fn try_build_filter(config_path: String) -> Result<PolicyFilter, crate::FilterError> {
+    PolicyFilter::new(PolicyFilterConfig {
+        config_path,
+        body_access: super::config::BodyAccessMode::ReadOnly,
+        require_protocol_metadata: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+    })
+}
+
+/// The control for everything below. A `kind:` nobody registered must fail the
+/// load, naming the kind, so a forgotten registration is a startup error rather
+/// than a plugin that silently never runs.
+#[test]
+fn a_kind_with_no_registration_fails_the_load() {
+    let (_dir, path) = write_config_naming_kind("test/never-registered");
+    let err = try_build_filter(path).err().expect("must not construct");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no factory registered"),
+        "expected the engine's unresolved-kind error, got: {msg}"
+    );
+    assert!(
+        msg.contains("test/never-registered"),
+        "the message must name the kind so an operator knows what to register: {msg}"
+    );
+}
+
+/// The same document loads once a host registers the kind, and the host's
+/// factory is what built the plugin.
+#[test]
+fn a_host_registered_kind_loads_and_its_factory_is_used() {
+    let builds = register_stub("test/host-supplied");
+    let (_dir, path) = write_config_naming_kind("test/host-supplied");
+    try_build_filter(path).expect("a registered kind must construct");
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        1,
+        "the host's factory must be the one that built the plugin"
+    );
+}
+
+/// One registration has to serve repeated construction.
+///
+/// This is the regression test for the tempting design: a registry that hands
+/// its entries out once and empties itself. `PolicyFilter::new` runs again on
+/// every hot reload, so draining would give a gateway that starts clean and then
+/// fails its first reload with "no factory registered" for a config that had
+/// been serving traffic. Two constructions, two builds.
+#[test]
+fn one_registration_serves_repeated_filter_construction() {
+    let builds = register_stub("test/reload-survivor");
+
+    let (_dir_a, path_a) = write_config_naming_kind("test/reload-survivor");
+    try_build_filter(path_a).expect("first construction must succeed");
+
+    let (_dir_b, path_b) = write_config_naming_kind("test/reload-survivor");
+    try_build_filter(path_b).expect("a reload must construct too, from the same registration");
+
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        2,
+        "each construction must build its own plugin from the surviving registration"
+    );
+}
+
+/// A host registration replaces a bundled `kind` of the same name.
+///
+/// Host factories are applied after the engine's, and the factory registry is
+/// last-writer-wins, so a deployment can swap a bundled implementation for its
+/// own without forking. The signal is that a config with no `config:` block
+/// loads: the bundled OAuth delegator rejects that, and the stub accepts it.
+///
+/// The registration is process-global and outlives this test. `delegator/oauth`
+/// is used by no other test in this file, which is what makes hijacking it safe
+/// here; a test that needs the real delegator must not rely on the global
+/// registry.
+#[test]
+fn a_host_registration_replaces_a_bundled_kind() {
+    let builds = register_stub("delegator/oauth");
+    let (_dir, path) = write_config_naming_kind("delegator/oauth");
+    try_build_filter(path).expect("the stub accepts a config the bundled delegator would reject, so it must win");
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        1,
+        "the host's factory must have replaced the bundled one"
+    );
+}

@@ -133,9 +133,11 @@ mod common_message_format;
 mod config;
 mod error;
 mod filter;
+mod host_plugins;
 mod json_rpc;
 
 pub use filter::PolicyFilter;
+pub use host_plugins::{PolicyPluginFactoryFn, register_policy_plugin_factory};
 
 #[cfg(test)]
 #[expect(

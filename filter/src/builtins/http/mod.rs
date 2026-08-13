@@ -14,12 +14,12 @@ pub use observability::{AccessLogFilter, RequestIdFilter};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter, JsonRpcFilter};
 #[cfg(feature = "basic-auth-filter")]
 pub use security::BasicAuthFilter;
-#[cfg(feature = "policy-engine")]
-pub use security::PolicyFilter;
 pub use security::{
     ContainsValue, CorsFilter, CredentialInjectionFilter, CsrfFilter, DisallowedOriginMode, ForwardedHeadersFilter,
     GuardrailsAction, GuardrailsFilter, IpAclFilter, PeerIdentityTrustFilter, PiiKind, RuleTargetKind,
 };
+#[cfg(feature = "policy-engine")]
+pub use security::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
 pub use traffic_management::{
     CircuitBreakerFilter, EndpointSelectorFilter, GrpcDetectionFilter, IterativeRequestRouterFilter,
     LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus, RouterFilter,
