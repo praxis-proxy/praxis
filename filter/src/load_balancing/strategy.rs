@@ -11,7 +11,7 @@ use praxis_core::{
 };
 
 use super::{
-    consistent_hash::ConsistentHash, endpoint::WeightedEndpoint, least_connections::LeastConnections,
+    consistent_hash::ConsistentHash, endpoint::WeightedEndpoint, least_connections::LeastConnections, maglev::Maglev,
     p2c::PowerOfTwoChoices, random::Random, round_robin::RoundRobin,
 };
 
@@ -35,6 +35,9 @@ pub(crate) enum Strategy {
 
     /// Uniform random selection, weighted by endpoint weight.
     Random(Random),
+
+    /// Maglev consistent hashing with a fixed-size lookup table.
+    Maglev(Maglev),
 }
 
 impl Strategy {
@@ -49,6 +52,7 @@ impl Strategy {
             Self::ConsistentHash(ch) => ch.select(hash_key, health),
             Self::PowerOfTwoChoices(p2c) => p2c.select(health),
             Self::Random(r) => r.select(health),
+            Self::Maglev(m) => m.select(hash_key, health),
         }
     }
 
@@ -58,7 +62,7 @@ impl Strategy {
         match self {
             Self::LeastConnections(lc) => lc.release(addr),
             Self::PowerOfTwoChoices(p2c) => p2c.release(addr),
-            Self::RoundRobin(_) | Self::ConsistentHash(_) | Self::Random(_) => {},
+            Self::RoundRobin(_) | Self::ConsistentHash(_) | Self::Random(_) | Self::Maglev(_) => {},
         }
     }
 }
@@ -76,6 +80,9 @@ pub(crate) fn build_strategy(lb_strategy: &LoadBalancerStrategy, endpoints: Vec<
         LoadBalancerStrategy::Simple(SimpleStrategy::Random) => Strategy::Random(Random::new(endpoints)),
         LoadBalancerStrategy::Parameterised(ParameterisedStrategy::ConsistentHash(opts)) => {
             Strategy::ConsistentHash(ConsistentHash::new(endpoints, opts.header.clone()))
+        },
+        LoadBalancerStrategy::Parameterised(ParameterisedStrategy::Maglev(opts)) => {
+            Strategy::Maglev(Maglev::new(endpoints, opts.header.clone()))
         },
     }
 }
@@ -96,7 +103,7 @@ pub(crate) fn build_strategy(lb_strategy: &LoadBalancerStrategy, endpoints: Vec<
 mod tests {
     use std::sync::atomic::Ordering;
 
-    use praxis_core::config::ConsistentHashOpts;
+    use praxis_core::config::{ConsistentHashOpts, MaglevOpts};
 
     use super::*;
 
@@ -278,6 +285,39 @@ mod tests {
         assert!(
             strategy.select(None, None).is_some(),
             "P2C select should return Some with healthy endpoints"
+        );
+    }
+
+    #[test]
+    fn build_strategy_maglev() {
+        let strategy = build_strategy(
+            &LoadBalancerStrategy::Parameterised(ParameterisedStrategy::Maglev(MaglevOpts { header: None })),
+            make_endpoints(),
+        );
+        assert!(
+            matches!(strategy, Strategy::Maglev(_)),
+            "ParameterisedStrategy::Maglev should produce Strategy::Maglev"
+        );
+    }
+
+    #[test]
+    fn release_maglev_is_noop() {
+        let strategy = build_strategy(
+            &LoadBalancerStrategy::Parameterised(ParameterisedStrategy::Maglev(MaglevOpts { header: None })),
+            make_endpoints(),
+        );
+        strategy.release("10.0.0.1:80");
+    }
+
+    #[test]
+    fn select_maglev_returns_some() {
+        let strategy = build_strategy(
+            &LoadBalancerStrategy::Parameterised(ParameterisedStrategy::Maglev(MaglevOpts { header: None })),
+            make_endpoints(),
+        );
+        assert!(
+            strategy.select(Some("/path"), None).is_some(),
+            "Maglev select should return Some with healthy endpoints"
         );
     }
 

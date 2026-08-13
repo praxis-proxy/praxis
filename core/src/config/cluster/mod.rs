@@ -11,7 +11,9 @@ use std::sync::Arc;
 
 pub use endpoint::Endpoint;
 pub use health_check::{HealthCheckConfig, HealthCheckType};
-pub use load_balancer_strategy::{ConsistentHashOpts, LoadBalancerStrategy, ParameterisedStrategy, SimpleStrategy};
+pub use load_balancer_strategy::{
+    ConsistentHashOpts, LoadBalancerStrategy, MaglevOpts, ParameterisedStrategy, SimpleStrategy,
+};
 use serde::{Deserialize, Serialize};
 
 // -----------------------------------------------------------------------------

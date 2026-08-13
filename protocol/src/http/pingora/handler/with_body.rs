@@ -24,14 +24,14 @@ use pingora_core::{
 use pingora_proxy::{FailToProxy, ProxyHttp, Session};
 use praxis_filter::{CompressionConfig, FilterPipeline};
 use tokio::sync::Semaphore;
-use tracing::debug;
+use tracing::{Instrument as _, debug};
 
 use super::{
     adjust_compression, emit_request_metrics, fail_to_proxy, handle_connect_failure, hop_by_hop::RemoveHeader as _,
-    logging_cleanup, record_passive_health, request_body_filter, request_filter, response_body_filter, response_filter,
-    upstream_peer, upstream_request, via,
+    logging_cleanup, record_passive_health, record_response_span_attributes, request_body_filter, request_filter,
+    response_body_filter, response_filter, upstream_peer, upstream_request, via,
 };
-use crate::http::pingora::context::PingoraRequestCtx;
+use crate::http::pingora::{context::PingoraRequestCtx, metrics};
 
 // -----------------------------------------------------------------------------
 // PingoraHttpHandler
@@ -57,6 +57,7 @@ use crate::http::pingora::context::PingoraRequestCtx;
 ///     Arc::new(ArcSwap::from_pointee(pipeline)),
 ///     None,
 ///     None,
+///     ::metrics::SharedString::const_str("http"),
 /// );
 /// ```
 ///
@@ -84,6 +85,9 @@ pub struct PingoraHttpHandler {
     /// Per-listener downstream read timeout.
     downstream_read_timeout: Option<Duration>,
 
+    /// Listener name for connection metrics.
+    listener_name: ::metrics::SharedString,
+
     /// Swappable filter pipeline.
     pipeline: Arc<ArcSwap<FilterPipeline>>,
 }
@@ -94,12 +98,14 @@ impl PingoraHttpHandler {
         pipeline: Arc<ArcSwap<FilterPipeline>>,
         downstream_read_timeout: Option<Duration>,
         connection_semaphore: Option<Arc<Semaphore>>,
+        listener_name: ::metrics::SharedString,
     ) -> Self {
         let compression = pipeline.load().compression_config().cloned();
         Self {
             compression,
             connection_semaphore,
             downstream_read_timeout,
+            listener_name,
             pipeline,
         }
     }
@@ -129,12 +135,14 @@ impl ProxyHttp for PingoraHttpHandler {
         Self::CTX: Send + Sync,
     {
         if praxis_core::memory::is_exceeded() {
+            metrics::record_overload_reject(metrics::OVERLOAD_REASON_MEMORY);
             return reject_503(session, "5", "memory pressure exceeded").await;
         }
 
         let (exceeded, permit) = crate::connections::try_acquire_global();
         ctx._global_connection_permit = permit;
         if exceeded {
+            metrics::record_overload_reject(metrics::OVERLOAD_REASON_GLOBAL_CONNECTIONS);
             return reject_503(session, "1", "global max connections exceeded").await;
         }
 
@@ -142,9 +150,12 @@ impl ProxyHttp for PingoraHttpHandler {
             if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
                 ctx._connection_permit = Some(permit);
             } else {
+                metrics::record_overload_reject(metrics::OVERLOAD_REASON_LISTENER_CONNECTIONS);
                 return reject_503(session, "1", "max connections exceeded").await;
             }
         }
+
+        ctx._active_connection = Some(metrics::ActiveConnectionGuard::acquire(self.listener_name.clone()));
 
         if let Some(timeout) = self.downstream_read_timeout {
             debug!(
@@ -172,7 +183,10 @@ impl ProxyHttp for PingoraHttpHandler {
         Self::CTX: Send + Sync,
     {
         let pipeline = ctx.pipeline(&self.pipeline);
-        request_body_filter::execute(&pipeline, session, body, end_of_stream, ctx).await
+        let span = ctx.request_span.clone();
+        request_body_filter::execute(&pipeline, session, body, end_of_stream, ctx)
+            .instrument(span)
+            .await
     }
 
     fn response_body_filter(
@@ -185,6 +199,8 @@ impl ProxyHttp for PingoraHttpHandler {
     where
         Self::CTX: Send + Sync,
     {
+        let span = ctx.request_span.clone();
+        let _entered = span.enter();
         let pipeline = ctx.pipeline(&self.pipeline);
         response_body_filter::execute(&pipeline, body, end_of_stream, ctx)
     }
@@ -196,6 +212,8 @@ impl ProxyHttp for PingoraHttpHandler {
         ctx: &mut Self::CTX,
         e: Box<pingora_core::Error>,
     ) -> Box<pingora_core::Error> {
+        let span = ctx.request_span.clone();
+        let _entered = span.enter();
         handle_connect_failure(ctx, e)
     }
 
@@ -203,7 +221,33 @@ impl ProxyHttp for PingoraHttpHandler {
     where
         Self::CTX: Send + Sync,
     {
-        fail_to_proxy::execute(session, e, ctx).await
+        let span = ctx.request_span.clone();
+        fail_to_proxy::execute(session, e, ctx).instrument(span).await
+    }
+
+    async fn connected_to_upstream(
+        &self,
+        _session: &mut Session,
+        reused: bool,
+        _peer: &HttpPeer,
+        #[cfg(unix)] _fd: std::os::unix::io::RawFd,
+        #[cfg(windows)] _sock: std::os::windows::io::RawSocket,
+        _digest: Option<&pingora_core::protocols::Digest>,
+        ctx: &mut Self::CTX,
+    ) -> Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        let span = ctx.request_span.clone();
+        let _entered = span.enter();
+        let cluster = ctx.metrics_cluster_shared.clone().unwrap_or_else(metrics::cluster_none);
+        if !reused && let Some(start) = ctx.upstream_connect_start.take() {
+            metrics::record_upstream_connect_duration(cluster.clone(), start.elapsed().as_secs_f64());
+        }
+        if ctx.retries > 0 {
+            metrics::record_upstream_retry(cluster, metrics::RETRY_RESULT_SUCCESS);
+        }
+        Ok(())
     }
 
     async fn upstream_request_filter(
@@ -215,6 +259,8 @@ impl ProxyHttp for PingoraHttpHandler {
     where
         Self::CTX: Send + Sync,
     {
+        let span = ctx.request_span.clone();
+        let _entered = span.enter();
         let is_upgrade = session.is_upgrade_req();
         upstream_request::strip_hop_by_hop(upstream_request, is_upgrade);
         upstream_request.strip_reserved_internal();
@@ -235,7 +281,10 @@ impl ProxyHttp for PingoraHttpHandler {
         Self::CTX: Send + Sync,
     {
         let pipeline = ctx.pipeline(&self.pipeline);
-        let result = response_filter::execute(&pipeline, upstream_response, ctx).await;
+        let span = ctx.request_span.clone();
+        let result = response_filter::execute(&pipeline, upstream_response, ctx)
+            .instrument(span)
+            .await;
         if result.is_ok() {
             let client_ver = ctx.client_http_version.unwrap_or(http::Version::HTTP_11);
             via::append_response_via(upstream_response, client_ver);
@@ -245,14 +294,21 @@ impl ProxyHttp for PingoraHttpHandler {
     }
 
     async fn upstream_peer(&self, _session: &mut Session, ctx: &mut Self::CTX) -> Result<Box<HttpPeer>> {
-        upstream_peer::execute(ctx).await
+        let span = ctx.request_span.clone();
+        upstream_peer::execute(ctx).instrument(span).await
     }
 
     async fn logging(&self, session: &mut Session, e: Option<&pingora_core::Error>, ctx: &mut Self::CTX) {
-        let pipeline = ctx.pipeline(&self.pipeline);
-        emit_request_metrics(session, ctx);
-        record_passive_health(&pipeline, e, ctx);
-        logging_cleanup(&pipeline, ctx).await;
+        record_response_span_attributes(session, ctx);
+        let span = std::mem::replace(&mut ctx.request_span, tracing::Span::none());
+        async {
+            let pipeline = ctx.pipeline(&self.pipeline);
+            emit_request_metrics(session, ctx);
+            record_passive_health(&pipeline, e, ctx);
+            logging_cleanup(&pipeline, ctx).await;
+        }
+        .instrument(span)
+        .await;
     }
 }
 

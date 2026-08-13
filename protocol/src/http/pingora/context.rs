@@ -9,6 +9,7 @@ use bytes::Bytes;
 use praxis_core::connectivity::Upstream;
 use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, Response, TrustedHeaderMutation};
 use tokio::sync::OwnedSemaphorePermit;
+use tracing::Span;
 
 // -----------------------------------------------------------------------------
 // PingoraRequestCtx
@@ -166,6 +167,15 @@ pub struct PingoraRequestCtx {
     /// [`SharedString`]: ::metrics::SharedString
     pub metrics_cluster_shared: Option<::metrics::SharedString>,
 
+    /// Matched route path-match pattern for the `route` metric label.
+    pub metrics_route: Option<::metrics::SharedString>,
+
+    /// RAII guard that decrements `praxis_connections_active` on drop.
+    pub(crate) _active_connection: Option<crate::http::pingora::metrics::ActiveConnectionGuard>,
+
+    /// When the current upstream connect attempt started.
+    pub upstream_connect_start: Option<Instant>,
+
     /// Pre-read body chunks (`StreamBuffer` mode). When `StreamBuffer` is
     /// active, the body is read during `request_filter` (before upstream
     /// selection) so that body-based routing can influence `upstream_peer`.
@@ -197,6 +207,14 @@ pub struct PingoraRequestCtx {
 
     /// Snapshot of the original request for body/response body phases.
     pub request_snapshot: Option<Request>,
+
+    /// Root tracing span for this request's lifecycle.
+    ///
+    /// Created during `request_filter` with OpenTelemetry HTTP semantic
+    /// convention attributes. Response-phase attributes
+    /// (`http.response.status_code`, `upstream.address`, `upstream.cluster`)
+    /// are recorded in the `logging` hook before the span is dropped.
+    pub request_span: Span,
 
     /// When this request was received.
     pub request_start: Instant,
@@ -279,6 +297,8 @@ macro_rules! filter_context {
             cluster: $ctx.cluster.take(),
             current_filter_id: None,
             downstream_tls: $ctx.downstream_tls,
+            metrics_route: $ctx.metrics_route.clone(),
+            peer_identity: $ctx.peer_identity.clone(),
             extensions: std::mem::take(&mut $ctx.extensions),
             executed_filter_indices: std::mem::take(&mut $ctx.cached_executed_filter_indices),
             extra_request_headers: Vec::new(),
@@ -290,7 +310,6 @@ macro_rules! filter_context {
             filter_results: std::mem::take(&mut $ctx.filter_results),
             filter_state: std::mem::take(&mut $ctx.filter_state),
             health_registry: $pipeline.health_registry(),
-            peer_identity: $ctx.peer_identity.clone(),
             id_generator: $pipeline.id_generator(),
             kv_stores: $pipeline.kv_stores(),
             subrequest_client: $pipeline.subrequest_client(),
@@ -461,6 +480,9 @@ impl Default for PingoraRequestCtx {
             filter_state: std::collections::HashMap::new(),
             metrics_cluster: None,
             metrics_cluster_shared: None,
+            metrics_route: None,
+            _active_connection: None,
+            upstream_connect_start: None,
             pre_read_body: None,
             request_body_buffer: None,
             request_body_bytes: 0,
@@ -468,6 +490,7 @@ impl Default for PingoraRequestCtx {
             request_body_released: false,
             request_is_idempotent: false,
             request_snapshot: None,
+            request_span: Span::none(),
             request_start: Instant::now(),
             response_body_buffer: None,
             response_body_bytes: 0,
@@ -561,6 +584,15 @@ mod tests {
             "default response_body_buffer should be None"
         );
         assert!(ctx.pre_read_body.is_none(), "default pre_read_body should be None");
+    }
+
+    #[test]
+    fn default_state_request_span_is_disabled() {
+        let ctx = default_ctx();
+        assert!(
+            ctx.request_span.is_disabled(),
+            "default request_span should be a disabled (none) span"
+        );
     }
 
     #[test]
