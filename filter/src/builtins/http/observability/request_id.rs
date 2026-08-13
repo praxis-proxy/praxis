@@ -142,6 +142,7 @@ impl HttpFilter for RequestIdFilter {
             .map_or_else(|| ctx.id_generator.generate(ctx.time_source), str::to_owned);
 
         debug!(request_id = %id, header = %self.header_name, "forwarding request ID");
+        tracing::Span::current().record("request_id", &*id);
 
         ctx.extra_request_headers
             .push((Cow::Owned((*self.header_name).to_owned()), id));
