@@ -63,6 +63,12 @@ impl TelemetryConfig {
     }
 
     /// Build from explicit values (for testing without env var mutation).
+    ///
+    /// This duplicates the merge logic from [`resolve`] rather than calling it,
+    /// because `resolve` reads `std::env::var` which is process-global state.
+    /// Mutating env vars in tests is inherently racy under `cargo test`'s
+    /// default parallel execution, so we accept the small duplication to keep
+    /// tests deterministic without `#[serial]` or mutex coordination.
     #[cfg(test)]
     fn resolved(config_endpoint: Option<&str>, env_endpoint: Option<&str>) -> Self {
         Self {

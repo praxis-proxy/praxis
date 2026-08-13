@@ -194,7 +194,7 @@ fn init_fmt_only(env_filter: tracing_subscriber::EnvFilter, json: bool) {
 /// Build the optional OTLP tracer provider.
 ///
 /// Returns `Some(provider)` when an OTLP endpoint is configured,
-/// `None` otherwise. Sets the global tracer provider and W3C propagator.
+/// `None` otherwise. Sets the global tracer provider.
 #[cfg(feature = "otel")]
 fn build_otel_provider(
     config: &crate::config::TelemetryConfig,
@@ -221,7 +221,6 @@ fn build_otel_provider(
         .build();
 
     opentelemetry::global::set_tracer_provider(provider.clone());
-    opentelemetry::global::set_text_map_propagator(opentelemetry_sdk::propagation::TraceContextPropagator::new());
 
     Ok(Some(provider))
 }

@@ -6,6 +6,9 @@ authors:
   - henschwartz
 graduation_criteria:
   - How? section added after the What? and Why? direction is accepted
+  - Open questions closed in Decisions before How? (merge semantics,
+    config reload, stacking/concurrency, permanent vs temporary,
+    GET shape, safety limits)
   - Operators can change effective process log level at runtime via the admin API without restart
   - Both global and per-module level changes are supported
   - Temporary changes auto-revert after a configurable duration (default on the order of minutes)
