@@ -69,7 +69,7 @@ pub(super) fn pipelines_response(
         match build_listener_view(pipelines, meta.as_ref(), &name) {
             Some(view) => match serde_json::to_vec(&PipelinesSingleResponse { listener: view }) {
                 Ok(body) => json_response(200, &body),
-                Err(_) => json_response(500, br#"{"error":"serialization failed"}"#),
+                Err(e) => serialization_failed_response("per-listener pipeline view", &e),
             },
             None => json_response(404, br#"{"error":"listener not found"}"#),
         }
@@ -94,18 +94,22 @@ fn aggregate_pipelines_response(
     listeners.sort_by(|a, b| a.name.cmp(&b.name));
     match serde_json::to_vec(&PipelinesAggregateResponse { listeners }) {
         Ok(body) => json_response(200, &body),
-        Err(_) => json_response(500, br#"{"error":"serialization failed"}"#),
+        Err(e) => serialization_failed_response("aggregate pipeline view", &e),
     }
 }
 
-/// Strip the body for HEAD while keeping a valid Content-Length framing.
-///
-/// Pingora writes the [`Response`] as-is; leaving the GET body length with
-/// an empty body stalls clients waiting for bytes that never arrive.
+/// Log and return a generic 500 when introspection JSON serialization fails.
+fn serialization_failed_response(context: &str, error: &serde_json::Error) -> Response<Vec<u8>> {
+    tracing::error!(%error, context, "pipeline introspection serialization failed");
+    json_response(500, br#"{"error":"serialization failed"}"#)
+}
+
+/// Strip the body for HEAD. [`json_response`] sets `Content-Length` from the GET
+/// body; remove it after clearing the body so framing follows the empty vec
+/// (RFC 9110 §8.6 — do not send a misleading `Content-Length: 0`).
 fn as_head_response(mut resp: Response<Vec<u8>>) -> Response<Vec<u8>> {
     *resp.body_mut() = Vec::new();
-    resp.headers_mut()
-        .insert(http::header::CONTENT_LENGTH, http::HeaderValue::from_static("0"));
+    resp.headers_mut().remove(http::header::CONTENT_LENGTH);
     resp
 }
 
@@ -280,9 +284,9 @@ mod tests {
             "HEAD should keep JSON content type"
         );
         assert_eq!(
-            resp.headers().get("Content-Length").map(http::HeaderValue::as_bytes),
-            Some(b"0".as_slice()),
-            "HEAD Content-Length must be 0 after body is cleared"
+            resp.headers().get("Content-Length"),
+            None,
+            "HEAD should not send Content-Length after body is cleared"
         );
     }
 }

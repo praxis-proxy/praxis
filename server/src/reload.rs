@@ -204,7 +204,11 @@ mod tests {
     fn valid_reload_swaps_pipeline() {
         let (live, old_config, registry, shutdown, meta) = setup_live_pipelines();
         let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
-        assert_eq!(meta.load().get("web").unwrap().address, "127.0.0.1:8080");
+        assert_eq!(
+            meta.load().get("web").unwrap().address,
+            "127.0.0.1:8080",
+            "initial meta should reflect setup listener address"
+        );
 
         let new_config = Config::from_yaml(
             r#"
@@ -248,7 +252,11 @@ filter_chains:
             "127.0.0.1:9090",
             "meta should reflect reloaded listener address"
         );
-        assert_eq!(loaded.get("web").unwrap().chain_names, ["main"]);
+        assert_eq!(
+            loaded.get("web").unwrap().chain_names,
+            ["main"],
+            "meta should preserve chain names after reload"
+        );
     }
 
     #[test]
