@@ -212,8 +212,9 @@ pub struct PingoraRequestCtx {
     ///
     /// Created during `request_filter` with OpenTelemetry HTTP semantic
     /// convention attributes. Response-phase attributes
-    /// (`http.response.status_code`, `upstream.address`, `upstream.cluster`)
-    /// are recorded in the `logging` hook before the span is dropped.
+    /// (`http.response.status_code`, `http.route`, `error.type`,
+    /// `upstream.address`, `upstream.cluster`) are recorded in the
+    /// `logging` hook before the span is dropped.
     pub request_span: Span,
 
     /// When this request was received.

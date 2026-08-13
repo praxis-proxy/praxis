@@ -475,7 +475,15 @@ fn record_response_span_attributes(session: &Session, ctx: &PingoraRequestCtx) {
         }
         if resp.status.is_server_error() {
             ctx.request_span.record("otel.status_code", "ERROR");
+            ctx.request_span.record("error.type", status.to_string().as_str());
         }
+    }
+
+    if let Some(route) = &ctx.metrics_route {
+        ctx.request_span.record("http.route", route.as_ref());
+        let method = session.req_header().method.as_str();
+        ctx.request_span
+            .record("otel.name", format!("{method} {route}").as_str());
     }
 
     if let Some(upstream) = &ctx.upstream_for_retry {

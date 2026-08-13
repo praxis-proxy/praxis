@@ -546,15 +546,21 @@ fn apply_pre_read_mutations_to_session(session: &mut Session, mutations: &[Trust
 /// convention attributes.
 ///
 /// Creates an [`info_span!`] named `"http_request"` with the
-/// [OTel span name] set to `{method}` and span kind set to
-/// `SERVER`. Response-phase attributes (`http.response.status_code`,
-/// `upstream.address`) are declared as [`Empty`] and recorded later via
-/// [`record_response_span_attributes`].
+/// [OTel span name] initially set to `{method}`, upgraded to
+/// `{method} {route}` when a route is matched. Span kind is `SERVER`.
+/// Response-phase attributes (`http.response.status_code`,
+/// `http.route`, `error.type`, `upstream.address`, `upstream.cluster`,
+/// `otel.status_code`) are declared as [`Empty`] and recorded later
+/// via [`record_response_span_attributes`].
 ///
 /// [`info_span!`]: tracing::info_span
 /// [OTel span name]: https://opentelemetry.io/docs/specs/semconv/http/http-spans/
 /// [`Empty`]: tracing::field::Empty
 /// [`record_response_span_attributes`]: super::record_response_span_attributes
+#[expect(
+    clippy::too_many_lines,
+    reason = "OTel semantic convention attributes require many span fields"
+)]
 fn create_request_span(session: &Session, ctx: &PingoraRequestCtx) -> tracing::Span {
     let method = session.req_header().method.as_str();
     let path = session.req_header().uri.path();
@@ -563,6 +569,12 @@ fn create_request_span(session: &Session, ctx: &PingoraRequestCtx) -> tracing::S
     let host = session.req_header().headers.get("host").and_then(|v| v.to_str().ok());
     let server_address = host.map(|h| h.split(':').next().unwrap_or(h));
     let server_port = host.and_then(|h| h.split_once(':').and_then(|(_, p)| p.parse::<u16>().ok()));
+    let url_scheme = if ctx.downstream_tls { "https" } else { "http" };
+    let user_agent = session
+        .req_header()
+        .headers
+        .get("user-agent")
+        .and_then(|v| v.to_str().ok());
 
     let span = tracing::info_span!(
         "http_request",
@@ -570,13 +582,17 @@ fn create_request_span(session: &Session, ctx: &PingoraRequestCtx) -> tracing::S
         "otel.kind" = "server",
         "otel.status_code" = tracing::field::Empty,
         "http.request.method" = method,
+        "http.route" = tracing::field::Empty,
+        "url.scheme" = url_scheme,
         "url.path" = path,
         "http.response.status_code" = tracing::field::Empty,
+        "error.type" = tracing::field::Empty,
         "server.address" = server_address,
         "server.port" = server_port,
         "client.address" = tracing::field::Empty,
         "upstream.address" = tracing::field::Empty,
         "network.protocol.version" = protocol_version,
+        "user_agent.original" = user_agent,
         "upstream.cluster" = tracing::field::Empty,
         request_id = tracing::field::Empty,
     );
