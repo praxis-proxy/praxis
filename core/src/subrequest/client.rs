@@ -211,7 +211,7 @@ impl SubRequestClient {
         let write_timeout = min_timeout(bounded_peer.options.write_timeout, remaining);
         tokio::time::timeout(write_timeout, session.write_request_header(Box::new(req_header)))
             .await
-            .map_err(|_elapsed| classify_timeout(deadline, "write"))?
+            .map_err(|_elapsed| classify_timeout(remaining, bounded_peer.options.write_timeout, "write"))?
             .map_err(|e| SubRequestError::Io(e.to_string()))?;
 
         if !request.body.is_empty() {
@@ -223,7 +223,7 @@ impl SubRequestClient {
             let write_timeout = min_timeout(bounded_peer.options.write_timeout, remaining);
             tokio::time::timeout(write_timeout, session.write_request_body(request.body.clone(), true))
                 .await
-                .map_err(|_elapsed| classify_timeout(deadline, "write"))?
+                .map_err(|_elapsed| classify_timeout(remaining, bounded_peer.options.write_timeout, "write"))?
                 .map_err(|e| SubRequestError::Io(e.to_string()))?;
         }
 
@@ -235,7 +235,7 @@ impl SubRequestClient {
         let write_timeout = min_timeout(bounded_peer.options.write_timeout, remaining);
         tokio::time::timeout(write_timeout, session.finish_request_body())
             .await
-            .map_err(|_elapsed| classify_timeout(deadline, "write"))?
+            .map_err(|_elapsed| classify_timeout(remaining, bounded_peer.options.write_timeout, "write"))?
             .map_err(|e| SubRequestError::Io(e.to_string()))?;
 
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -244,11 +244,10 @@ impl SubRequestClient {
             return Err(SubRequestError::DeadlineExceeded);
         }
         let read_timeout = min_timeout(bounded_peer.options.read_timeout, remaining);
-        session.set_read_timeout(Some(read_timeout));
 
         tokio::time::timeout(read_timeout, session.read_response_header())
             .await
-            .map_err(|_elapsed| classify_timeout(deadline, "read"))?
+            .map_err(|_elapsed| classify_timeout(remaining, bounded_peer.options.read_timeout, "read"))?
             .map_err(|e| SubRequestError::Io(e.to_string()))?;
 
         // -- 6. Validate response --
@@ -296,6 +295,13 @@ impl SubRequestClient {
     /// Circuit breaker success is finalized when valid headers are
     /// received. Late body failures only affect stream metrics.
     ///
+    /// **Timeout semantics:** `timeout` bounds only the header phase
+    /// (connect + send + receive headers). Body reads are governed by
+    /// [`StreamLimits`]: `idle_timeout` per chunk, optional
+    /// `max_stream_duration` for end-to-end lifetime, and the peer's
+    /// configured `read_timeout`. Callers needing a single end-to-end
+    /// deadline should set `max_stream_duration` accordingly.
+    ///
     /// # Errors
     ///
     /// Returns [`SubRequestError`] on admission timeout, connection
@@ -339,7 +345,10 @@ impl SubRequestClient {
                         Some(exchange.connector.connector()),
                     )
                     .await;
-                    "header_incomplete"
+                    record_header_termination("header_incomplete");
+                    return Err(SubRequestError::Io(
+                        "upstream indicated response done but stream is not cleanly terminated".to_owned(),
+                    ));
                 },
                 Err(e) => {
                     dispose_session_abnormal(
