@@ -244,7 +244,6 @@ impl SubRequestClient {
             return Err(SubRequestError::DeadlineExceeded);
         }
         let read_timeout = min_timeout(bounded_peer.options.read_timeout, remaining);
-        session.set_read_timeout(Some(read_timeout));
 
         tokio::time::timeout(read_timeout, session.read_response_header())
             .await
