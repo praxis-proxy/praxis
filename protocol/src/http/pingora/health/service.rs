@@ -3,15 +3,28 @@
 
 //! Admin health-check HTTP service.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use http::Response;
 use pingora_core::{
-    apps::http_app::ServeHttp, protocols::http::ServerSession, server::Server, services::listening::Service,
+    apps::http_app::ServeHttp,
+    protocols::http::ServerSession,
+    server::Server,
+    services::{
+        background::{BackgroundService, background_service},
+        listening::Service,
+    },
 };
 use praxis_core::{health::HealthRegistry, kv::KvStoreRegistry};
-use tracing::info;
+use tokio::time::Duration;
+use tracing::{error, info};
 
+use super::{listener_meta::ListenerMetaStore, pipelines_admin};
 use crate::http::pingora::{json::json_response, kv::dispatch_kv_request, metrics};
+
+/// Recorder upkeep runs independently of Prometheus scrape traffic.
+const PROMETHEUS_UPKEEP_INTERVAL: Duration = Duration::from_secs(5);
 
 // -----------------------------------------------------------------------------
 // JSON Escaping
@@ -137,6 +150,9 @@ pub struct PingoraAdminService {
     /// Optional KV store registry for admin CRUD endpoints.
     kv_registry: Option<KvStoreRegistry>,
 
+    /// Optional live pipelines + metadata for `GET /api/pipelines`.
+    pipelines: Option<pipelines_admin::PipelinesAdminState>,
+
     /// When `true`, include per-cluster detail in `/ready` responses.
     verbose: bool,
 }
@@ -145,10 +161,17 @@ impl PingoraAdminService {
     /// Create a combined admin service.
     ///
     /// `kv_registry` enables `/api/kv/*` endpoints when `Some`.
-    pub fn new(health_registry: Option<HealthRegistry>, kv_registry: Option<KvStoreRegistry>, verbose: bool) -> Self {
+    /// `pipelines` enables `GET /api/pipelines` when `Some`.
+    pub fn new(
+        health_registry: Option<HealthRegistry>,
+        kv_registry: Option<KvStoreRegistry>,
+        pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
+        verbose: bool,
+    ) -> Self {
         Self {
             health_registry,
             kv_registry,
+            pipelines: pipelines.map(|(pipelines, meta)| pipelines_admin::PipelinesAdminState { pipelines, meta }),
             verbose,
         }
     }
@@ -162,13 +185,25 @@ impl PingoraAdminService {
 #[async_trait]
 impl ServeHttp for PingoraAdminService {
     async fn response(&self, http_session: &mut ServerSession) -> Response<Vec<u8>> {
-        let path = http_session.req_header().uri.path().to_owned();
+        let req = http_session.req_header();
+        let path = req.uri.path().to_owned();
+        let method = req.method.as_str().to_owned();
+        let query = req.uri.query().map(str::to_owned);
 
         if path.starts_with("/api/kv/") {
             if let Some(registry) = &self.kv_registry {
                 return dispatch_kv_request(registry, http_session).await;
             }
             return json_response(404, br#"{"error":"not found"}"#);
+        }
+
+        if path == "/api/pipelines" {
+            return match &self.pipelines {
+                Some(state) => {
+                    pipelines_admin::pipelines_response(&state.pipelines, &state.meta, &method, query.as_deref())
+                },
+                None => json_response(404, br#"{"error":"not found"}"#),
+            };
         }
 
         match path.as_str() {
@@ -203,33 +238,140 @@ fn prometheus_response() -> Response<Vec<u8>> {
     }
 }
 
+/// Optional registries and flags for [`add_admin_endpoints_to_pingora_server`].
+#[derive(Default)]
+pub struct AdminEndpointOptions {
+    /// Shared health registry for `/ready` cluster status.
+    pub health_registry: Option<HealthRegistry>,
+
+    /// Shared KV stores for `/api/kv/*`.
+    pub kv_registry: Option<KvStoreRegistry>,
+
+    /// Live pipelines + metadata for `GET /api/pipelines`.
+    pub pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
+
+    /// When `true`, include per-cluster detail in `/ready`.
+    pub verbose: bool,
+}
+
+/// Pingora-managed recorder maintenance service.
+struct PrometheusUpkeepService {
+    /// Exporter handle used by each recorder maintenance pass.
+    handle: metrics_exporter_prometheus::PrometheusHandle,
+}
+
+/// Recorder installed for the combined admin endpoint.
+///
+/// The concrete exporter handle stays private so applications cannot create a
+/// second lifecycle for the recorder. Pass this value to
+/// [`add_admin_endpoints_to_pingora_server_with_recorder`].
+pub struct PrometheusAdminRecorder {
+    /// Exporter handle shared by metrics rendering and recorder upkeep.
+    handle: metrics_exporter_prometheus::PrometheusHandle,
+}
+
+/// Install the admin Prometheus recorder before startup instrumentation runs.
+#[must_use]
+pub fn install_prometheus_admin_recorder() -> PrometheusAdminRecorder {
+    PrometheusAdminRecorder {
+        handle: metrics::install_prometheus_recorder().clone(),
+    }
+}
+
+#[async_trait]
+impl BackgroundService for PrometheusUpkeepService {
+    async fn start(&self, shutdown: pingora_core::server::ShutdownWatch) {
+        let handle = self.handle.clone();
+        run_prometheus_upkeep(
+            shutdown,
+            PROMETHEUS_UPKEEP_INTERVAL,
+            Arc::new(move || handle.run_upkeep()),
+        )
+        .await;
+    }
+}
+
+/// Closure used for one recorder maintenance pass.
+type UpkeepFn = Arc<dyn Fn() + Send + Sync>;
+
+/// Run non-overlapping upkeep passes until Pingora begins shutdown.
+async fn run_prometheus_upkeep(
+    mut shutdown: pingora_core::server::ShutdownWatch,
+    interval: Duration,
+    upkeep: UpkeepFn,
+) {
+    loop {
+        tokio::select! {
+            _ = shutdown.changed() => break,
+            () = tokio::time::sleep(interval) => {
+                let upkeep = Arc::clone(&upkeep);
+                let task = tokio::task::spawn_blocking(move || upkeep());
+                tokio::select! {
+                    // Dropping the JoinHandle does not cancel a pass that is already
+                    // running, but shutdown remains responsive and no new pass is
+                    // scheduled.
+                    _ = shutdown.changed() => break,
+                    result = task => {
+                        if let Err(error) = result {
+                            error!(?error, "Prometheus recorder upkeep task failed");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Add admin endpoints to a Pingora server.
 ///
 /// Installs the global Prometheus metrics recorder and binds a
 /// [`PingoraAdminService`] to `admin_addr`, exposing `/ready`,
-/// `/healthy`, `/metrics`, and (when `kv_registry` is `Some`)
-/// `/api/kv/*` endpoints on a single port.
+/// `/healthy`, `/metrics`, (when `kv_registry` is `Some`)
+/// `/api/kv/*`, and (when `pipelines` is `Some`) `GET /api/pipelines`
+/// on a single port.
 ///
 /// ```ignore
 /// use pingora_core::server::Server;
-/// use praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server;
+/// use praxis_protocol::http::pingora::health::{
+///     AdminEndpointOptions, add_admin_endpoints_to_pingora_server,
+/// };
 ///
 /// let mut server = Server::new(None).unwrap();
 /// server.bootstrap();
-/// add_admin_endpoints_to_pingora_server(&mut server, "127.0.0.1:9090", None, None, false);
+/// add_admin_endpoints_to_pingora_server(
+///     &mut server,
+///     "127.0.0.1:9090",
+///     AdminEndpointOptions::default(),
+/// );
 /// ```
-pub fn add_admin_endpoints_to_pingora_server(
+pub fn add_admin_endpoints_to_pingora_server(server: &mut Server, admin_addr: &str, options: AdminEndpointOptions) {
+    add_admin_endpoints_to_pingora_server_with_recorder(
+        server,
+        admin_addr,
+        options,
+        install_prometheus_admin_recorder(),
+    );
+}
+
+/// Add admin endpoints using an already-installed Prometheus recorder.
+///
+/// This entry point lets applications install the recorder before
+/// startup instrumentation begins while keeping `/metrics` and upkeep on the
+/// same handle.
+pub fn add_admin_endpoints_to_pingora_server_with_recorder(
     server: &mut Server,
     admin_addr: &str,
-    health_registry: Option<HealthRegistry>,
-    kv_registry: Option<KvStoreRegistry>,
-    verbose: bool,
+    options: AdminEndpointOptions,
+    recorder: PrometheusAdminRecorder,
 ) {
-    let _handle = metrics::install_prometheus_recorder();
-    let admin = PingoraAdminService::new(health_registry, kv_registry, verbose);
+    let verbose = options.verbose;
+    let handle = recorder.handle;
+    let upkeep = PrometheusUpkeepService { handle };
+    server.add_service(background_service("Prometheus upkeep", upkeep));
+    let admin = PingoraAdminService::new(options.health_registry, options.kv_registry, options.pipelines, verbose);
     let mut service = Service::new("admin".to_owned(), admin);
     service.add_tcp(admin_addr);
-    info!(address = %admin_addr, verbose, "admin endpoints enabled (health + metrics + kv)");
+    info!(address = %admin_addr, verbose, "admin endpoints enabled (health + metrics + kv + pipelines)");
     server.add_service(service);
 }
 
@@ -240,7 +382,15 @@ pub fn add_health_endpoint_to_pingora_server(
     registry: Option<HealthRegistry>,
     verbose: bool,
 ) {
-    add_admin_endpoints_to_pingora_server(server, admin_addr, registry, None, verbose);
+    add_admin_endpoints_to_pingora_server(
+        server,
+        admin_addr,
+        AdminEndpointOptions {
+            health_registry: registry,
+            verbose,
+            ..AdminEndpointOptions::default()
+        },
+    );
 }
 
 #[async_trait]
@@ -375,11 +525,97 @@ fn format_ready_body(status_str: &str, agg: &HealthAggregate) -> String {
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
+    use std::{
+        collections::HashMap,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+    };
 
     use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
+    use tokio::sync::Notify;
 
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn prometheus_upkeep_waits_for_interval_and_does_not_catch_up() {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let completed = Arc::new(Notify::new());
+        let observed = Arc::clone(&calls);
+        let observed_completed = Arc::clone(&completed);
+        let task = tokio::spawn(run_prometheus_upkeep(
+            shutdown_rx,
+            Duration::from_secs(5),
+            Arc::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+                observed_completed.notify_one();
+            }),
+        ));
+
+        tokio::task::yield_now().await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "upkeep must not run immediately");
+
+        tokio::time::advance(Duration::from_secs(15)).await;
+        completed.notified().await;
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "missed intervals must not queue passes"
+        );
+
+        shutdown_tx.send(true).unwrap();
+        task.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prometheus_upkeep_stops_before_the_first_pass() {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&calls);
+        let task = tokio::spawn(run_prometheus_upkeep(
+            shutdown_rx,
+            Duration::from_secs(5),
+            Arc::new(move || {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }),
+        ));
+
+        shutdown_tx.send(true).unwrap();
+        task.await.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn prometheus_upkeep_observes_shutdown_during_a_blocking_pass() {
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let started = Arc::new(AtomicUsize::new(0));
+        let release = Arc::new(AtomicUsize::new(0));
+        let started_signal = Arc::new(Notify::new());
+        let observed_started = Arc::clone(&started);
+        let observed_release = Arc::clone(&release);
+        let observed_signal = Arc::clone(&started_signal);
+        let task = tokio::spawn(run_prometheus_upkeep(
+            shutdown_rx,
+            Duration::from_secs(5),
+            Arc::new(move || {
+                observed_started.store(1, Ordering::SeqCst);
+                observed_signal.notify_one();
+                while observed_release.load(Ordering::SeqCst) == 0 {
+                    std::thread::yield_now();
+                }
+            }),
+        ));
+
+        tokio::time::advance(Duration::from_secs(5)).await;
+        started_signal.notified().await;
+        assert_eq!(started.load(Ordering::SeqCst), 1);
+
+        shutdown_tx.send(true).unwrap();
+        task.await.unwrap();
+        release.store(1, Ordering::SeqCst);
+    }
 
     #[test]
     fn json_response_200() {

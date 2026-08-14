@@ -90,3 +90,32 @@ impl HttpFilter for CapabilityFilter {
         Ok(FilterAction::Continue)
     }
 }
+
+pub(in crate::pipeline) fn streaming_capable_filter() -> PipelineFilter {
+    PipelineFilter {
+        filter_id: 0,
+        branches: vec![],
+        conditions: vec![],
+        failure_mode: FailureMode::default(),
+        filter: AnyFilter::Http(Box::new(StreamingCapableFilter)),
+        name: None,
+        response_conditions: vec![],
+    }
+}
+
+struct StreamingCapableFilter;
+
+#[async_trait]
+impl HttpFilter for StreamingCapableFilter {
+    fn name(&self) -> &'static str {
+        "streaming_capable"
+    }
+
+    fn may_select_streaming_subrequest_response(&self) -> bool {
+        true
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+}

@@ -92,6 +92,7 @@ impl Config {
         validate_subrequest_circuit_breaker(self.runtime.subrequest_circuit_breaker.as_ref())?;
         validate_global_queue_interval(self.runtime.global_queue_interval)?;
         validate_shutdown_timeout(self.shutdown_timeout_secs)?;
+        validate_telemetry(&self.telemetry)?;
 
         Ok(())
     }
@@ -400,6 +401,11 @@ fn validate_shutdown_timeout(secs: u64) -> Result<(), ProxyError> {
         )));
     }
     Ok(())
+}
+
+/// Reject invalid telemetry batch settings.
+fn validate_telemetry(telemetry: &crate::config::TelemetryConfig) -> Result<(), ProxyError> {
+    telemetry.validate().map_err(ProxyError::Config)
 }
 
 // -----------------------------------------------------------------------------

@@ -86,6 +86,20 @@ pub enum PendingHeaderResult {
     Value(String),
 }
 
+/// Transport mode selected by filters for the next sub-request response.
+///
+/// This is a provider-agnostic projection of a filter decision. Praxis does
+/// not inspect request JSON or expose a YAML switch for this value.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum SubRequestResponseMode {
+    /// Buffer the complete sub-request response before returning it.
+    #[default]
+    Buffered,
+
+    /// Return response headers plus a pull-based streaming body.
+    Streaming,
+}
+
 // -----------------------------------------------------------------------------
 // HttpFilterContext
 // -----------------------------------------------------------------------------
@@ -238,6 +252,15 @@ pub struct HttpFilterContext<'a> {
     /// Shared sub-request client for iterative sub-requests.
     pub subrequest_client: Option<&'a praxis_core::subrequest::SubRequestClient>,
 
+    /// Filter-selected transport mode for the next sub-request response.
+    ///
+    /// Every newly constructed context starts in [`Buffered`] mode. A caller
+    /// that reuses context state across iterative steps must reset this field
+    /// before running the next step pipeline.
+    ///
+    /// [`Buffered`]: SubRequestResponseMode::Buffered
+    pub subrequest_response_mode: SubRequestResponseMode,
+
     /// Transport-agnostic request headers, URI, and method.
     pub request: &'a Request,
 
@@ -316,6 +339,18 @@ impl HttpFilterContext<'_> {
     /// Shared sub-request client, if set.
     pub(crate) fn subrequest_client(&self) -> Option<&praxis_core::subrequest::SubRequestClient> {
         self.subrequest_client
+    }
+
+    /// Return the response transport mode selected for the next sub-request.
+    pub fn subrequest_response_mode(&self) -> SubRequestResponseMode {
+        self.subrequest_response_mode
+    }
+
+    /// Select the response transport mode for the next sub-request.
+    ///
+    /// Filters own this decision; the transport layer only executes it.
+    pub fn set_subrequest_response_mode(&mut self, mode: SubRequestResponseMode) {
+        self.subrequest_response_mode = mode;
     }
 
     /// Read a durable metadata value by key.

@@ -120,8 +120,8 @@ async fn extracts_field_from_complete_json() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Release),
-        "should release after extracting field"
+        matches!(action, FilterAction::BodyDone),
+        "should return BodyDone after extracting field"
     );
 }
 
@@ -137,8 +137,8 @@ async fn extracts_multiple_fields_in_single_parse() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Release),
-        "should release after extracting fields"
+        matches!(action, FilterAction::BodyDone),
+        "should return BodyDone after extracting fields"
     );
     assert_eq!(ctx.extra_request_headers.len(), 2, "should add two headers");
     let (n0, v0) = &ctx.extra_request_headers[0];
@@ -150,7 +150,7 @@ async fn extracts_multiple_fields_in_single_parse() {
 }
 
 #[tokio::test]
-async fn partial_multi_field_match_still_releases() {
+async fn partial_multi_field_match_still_body_done() {
     let filter = make_multi_filter(&[("model", "X-Model"), ("user_id", "X-User-Id")]);
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -161,8 +161,8 @@ async fn partial_multi_field_match_still_releases() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Release),
-        "should release when at least one field matches"
+        matches!(action, FilterAction::BodyDone),
+        "should return BodyDone when at least one field matches"
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "should add only matched header");
     let (name, value) = &ctx.extra_request_headers[0];
@@ -197,19 +197,113 @@ async fn returns_continue_on_incomplete_json() {
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
 
-    let partial = br#"{"model":"model-alpha-1","pro"#;
+    let partial = br#"{"model":"model-alp"#;
     let mut body = Some(Bytes::from_static(partial));
 
     let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
 
     assert!(
         matches!(action, FilterAction::Continue),
-        "incomplete JSON should continue"
+        "truncated mid-value must Continue: field not yet complete"
     );
     assert!(
         ctx.extra_request_headers.is_empty(),
-        "no headers should be added for incomplete JSON"
+        "truncated mid-value must not promote a header"
     );
+}
+
+#[tokio::test]
+async fn early_exit_promotes_despite_trailing_junk() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = br#"{"model":"model-alpha-1","pro"#;
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "early exit after mapped field must BodyDone without validating unread suffix"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should promote the model header");
+    assert_eq!(ctx.extra_request_headers[0].0, "X-Model", "header name should match");
+    assert_eq!(
+        ctx.extra_request_headers[0].1, "model-alpha-1",
+        "header value should match first complete field despite trailing junk"
+    );
+}
+
+#[tokio::test]
+async fn early_exit_with_large_trailing_unmapped_value() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let mut json = br#"{"model":"gpt-4","messages":"#.to_vec();
+    json.push(b'[');
+    for i in 0..1_000 {
+        if i > 0 {
+            json.push(b',');
+        }
+        json.extend_from_slice(br#"{"role":"user","content":"x"}"#);
+    }
+    json.extend_from_slice(br#"]}"#);
+    let mut body = Some(Bytes::from(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "mapped field before large trailing value should return BodyDone"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should promote exactly one header");
+    assert_eq!(ctx.extra_request_headers[0].1, "gpt-4", "model value should match");
+}
+
+#[tokio::test]
+async fn first_wins_on_duplicate_keys() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = br#"{"model":"a","model":"b"}"#;
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "duplicate keys should still return BodyDone on first value"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should promote exactly one header");
+    assert_eq!(
+        ctx.extra_request_headers[0].1, "a",
+        "first-wins: first duplicate value should be promoted"
+    );
+}
+
+#[tokio::test]
+async fn multi_field_early_exit_with_trailing_junk() {
+    let filter = make_multi_filter(&[("model", "X-Model"), ("user_id", "X-User-Id")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = br#"{"model":"m1","user_id":"u1","messages":"#;
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "all mapped fields complete should return BodyDone despite trailing junk"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 2, "both headers should be promoted");
+    assert_eq!(ctx.extra_request_headers[0].0, "X-Model", "first mapping order");
+    assert_eq!(ctx.extra_request_headers[0].1, "m1", "model value");
+    assert_eq!(ctx.extra_request_headers[1].0, "X-User-Id", "second mapping order");
+    assert_eq!(ctx.extra_request_headers[1].1, "u1", "user_id value");
 }
 
 #[tokio::test]
@@ -245,8 +339,8 @@ async fn promotes_to_configured_header() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Release),
-        "should release after promoting field"
+        matches!(action, FilterAction::BodyDone),
+        "should return BodyDone after promoting field"
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
     let (name, value) = &ctx.extra_request_headers[0];
@@ -289,8 +383,8 @@ async fn numeric_field_promoted_as_string() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Release),
-        "numeric field should trigger release"
+        matches!(action, FilterAction::BodyDone),
+        "numeric field should return BodyDone"
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
     let (name, value) = &ctx.extra_request_headers[0];
@@ -317,6 +411,28 @@ fn body_mode_is_stream_buffer_with_default_limit() {
             max_bytes: Some(crate::body::DEFAULT_JSON_BODY_MAX_BYTES)
         },
         "body mode should be StreamBuffer with 10 MiB default limit"
+    );
+}
+
+#[tokio::test]
+async fn rejects_value_exceeding_max_dynamic_length() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let oversized = "a".repeat(super::super::MAX_DYNAMIC_VALUE_LEN + 1);
+    let json = format!(r#"{{"model":"{oversized}","prompt":"hi"}}"#);
+    let mut body = Some(Bytes::from(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "should continue when value exceeds MAX_DYNAMIC_VALUE_LEN"
+    );
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "header should not be promoted for value exceeding MAX_DYNAMIC_VALUE_LEN"
     );
 }
 
@@ -395,7 +511,7 @@ async fn allows_value_with_tab() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Release),
+        matches!(action, FilterAction::BodyDone),
         "tab character should be allowed in header values"
     );
     assert_eq!(
@@ -417,8 +533,8 @@ async fn multi_field_skips_only_control_char_values() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Release),
-        "should release when at least one clean field found"
+        matches!(action, FilterAction::BodyDone),
+        "should return BodyDone when at least one clean field found"
     );
     assert_eq!(
         ctx.extra_request_headers.len(),
@@ -478,8 +594,8 @@ async fn boolean_field_promoted_as_string() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Release),
-        "boolean field should trigger release"
+        matches!(action, FilterAction::BodyDone),
+        "boolean field should return BodyDone"
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
     let (name, value) = &ctx.extra_request_headers[0];
@@ -499,8 +615,8 @@ async fn nested_object_field_promoted_as_json() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Release),
-        "nested object field should trigger release"
+        matches!(action, FilterAction::BodyDone),
+        "nested object field should return BodyDone"
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
     let (name, value) = &ctx.extra_request_headers[0];
@@ -606,8 +722,8 @@ async fn null_field_value_promoted_as_string() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Release),
-        "null field value should trigger release"
+        matches!(action, FilterAction::BodyDone),
+        "null field value should return BodyDone"
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
     let (name, value) = &ctx.extra_request_headers[0];
@@ -627,8 +743,8 @@ async fn deeply_nested_with_null_continues() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Release),
-        "nested object with null inner should trigger release"
+        matches!(action, FilterAction::BodyDone),
+        "nested object with null inner should return BodyDone"
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
     let (name, value) = &ctx.extra_request_headers[0];
@@ -651,7 +767,7 @@ async fn field_name_with_dot() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Release),
+        matches!(action, FilterAction::BodyDone),
         "dotted field name should be extractable"
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
@@ -672,7 +788,7 @@ async fn field_name_with_unicode() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Release),
+        matches!(action, FilterAction::BodyDone),
         "unicode field name should be extractable"
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
@@ -693,13 +809,72 @@ async fn empty_string_field_value_promoted() {
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::Release),
-        "empty string field should trigger release"
+        matches!(action, FilterAction::BodyDone),
+        "empty string field should return BodyDone"
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "should add exactly one header");
     let (name, value) = &ctx.extra_request_headers[0];
     assert_eq!(name, "X-Model", "header name should match");
     assert_eq!(value, "", "empty string value should be promoted as empty header");
+}
+
+
+#[tokio::test]
+async fn repeated_body_hooks_do_not_duplicate_promoted_headers() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.current_filter_id = Some(0);
+
+    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4","messages":"#));
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "mid-stream extract can BodyDone before EOS when mapped field is complete"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 1, "first promotion adds one header");
+
+    let full = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#;
+    let mut body = Some(Bytes::from_static(full));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "re-entry after promotion should stay BodyDone"
+    );
+    assert_eq!(
+        ctx.extra_request_headers.len(),
+        1,
+        "second body hook after mid-stream BodyDone must not re-Add a duplicate header"
+    );
+    assert_eq!(ctx.extra_request_headers[0].1, "gpt-4", "promoted value unchanged");
+}
+
+#[tokio::test]
+async fn promotes_even_when_target_header_already_in_extras() {
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.current_filter_id = Some(0);
+    ctx.extra_request_headers
+        .push((std::borrow::Cow::Borrowed("X-Model"), "client-spoof".to_owned()));
+
+    let json = br#"{"model":"from-body"}"#;
+    let mut body = Some(Bytes::from_static(json));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "pre-existing extras or same-named client header must not suppress first JSON promotion"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 2, "should append body promotion");
+    assert_eq!(
+        ctx.extra_request_headers[0].1, "client-spoof",
+        "pre-existing value retained"
+    );
+    assert_eq!(
+        ctx.extra_request_headers[1].1, "from-body",
+        "body value must be promoted even when target header already in extras"
+    );
 }
 
 // -----------------------------------------------------------------------------

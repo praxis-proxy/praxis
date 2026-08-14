@@ -81,6 +81,10 @@ impl FilterPipeline {
                     ctx.executed_filter_indices[idx] = true;
                     return Ok(FilterAction::TerminalResponse(Box::new(terminal)));
                 },
+                HeaderFilterOutcome::StreamingTerminalResponse(terminal) => {
+                    ctx.executed_filter_indices[idx] = true;
+                    return Ok(FilterAction::StreamingTerminalResponse(terminal));
+                },
                 HeaderFilterOutcome::Continue => {},
             }
             ctx.executed_filter_indices[idx] = true;
@@ -94,6 +98,9 @@ impl FilterPipeline {
                 },
                 BranchOutcome::Reject(r) => return Ok(FilterAction::Reject(r)),
                 BranchOutcome::TerminalResponse(t) => return Ok(FilterAction::TerminalResponse(t)),
+                BranchOutcome::StreamingTerminalResponse(t) => {
+                    return Ok(FilterAction::StreamingTerminalResponse(t));
+                },
             }
         }
         Ok(FilterAction::Continue)
@@ -109,6 +116,7 @@ impl FilterPipeline {
     /// Returns [`FilterError`] if any filter fails.
     ///
     /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
+    #[expect(clippy::too_many_lines, reason = "streaming terminal variant adds one match arm")]
     pub async fn execute_http_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         for (idx, pf) in self.filters.iter().enumerate().rev() {
             if ctx.executed_filter_indices.get(idx) == Some(&false) {
@@ -130,7 +138,9 @@ impl FilterPipeline {
                 run_response_filter(http_filter, ctx, pf.failure_mode, self.record_filter_duration_metrics).await;
             ctx.current_filter_id = None;
             match outcome? {
-                HeaderFilterOutcome::Continue | HeaderFilterOutcome::TerminalResponse(_) => {},
+                HeaderFilterOutcome::Continue
+                | HeaderFilterOutcome::TerminalResponse(_)
+                | HeaderFilterOutcome::StreamingTerminalResponse(_) => {},
                 HeaderFilterOutcome::Rejected(rejection) => {
                     return Ok(FilterAction::Reject(rejection));
                 },

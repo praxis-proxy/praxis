@@ -51,15 +51,16 @@ configuration, at least:
 
 - **Destination:** `stdout` (default), `stderr`, or `file`
 - **File path:** required when destination is `file`
-- **Rotation policy:** daily, or size-based with a maximum
-  size (for example `100mb`)
+- **Rotation policy:** optional; omit for no rotation. When
+  set: daily, or size-based with a maximum size (for example
+  `100mb`)
 - **Retention:** a max-files (or equivalent max-age) bound so
   rotated files cannot grow without limit (for example
-  `max_files: 7`)
+  `max_files: 7`); applies only when rotation is set
 - **Non-blocking behavior:** on by default; may remain
   explicitly configurable
-- **Buffer sizing:** optional knobs for how much log data may
-  be buffered
+- **Buffer sizing:** optional knobs for how many log **lines**
+  may be buffered (default `128_000`; not bytes)
 - **Buffer overflow policy:** when the non-blocking buffer is
   full, new log events are **dropped** (lossy) so workers are
   never stalled on log I/O. That is the default and the v1
@@ -75,8 +76,7 @@ per-module filter **levels** at the `runtime` root, while
 and buffering. No migration or deprecation of
 `log_overrides` in this change.
 
-Illustrative shape (exact field names may be refined later;
-behavior is what this proposal locks):
+Illustrative shape (field names locked in How?):
 
 ```yaml
 runtime:
@@ -85,10 +85,11 @@ runtime:
   logging:
     output: stdout  # or stderr | file
     file_path: /var/log/praxis/proxy.log
-    rotation: daily  # or size:100mb
+    rotation: daily  # omit = no rotation; or size:100mb
     max_files: 7
     non_blocking: true
-    buffer_size: 8192
+    # buffer_size omitted → 128000 buffered lines (tracing-appender default)
+    # buffer_size: 8192  # optional tighter override (lines, not bytes)
 ```
 
 Default `output: stdout` must remain behaviorally compatible
@@ -203,3 +204,167 @@ they are not separate tracked issues.
   rotation policies fail fast.
 - As a config author, I want existing `runtime.log_overrides`
   to keep working unchanged beside the new logging block.
+
+## How?
+
+### Implementation
+
+Ship as one implementation change under
+[#797](https://github.com/praxis-proxy/praxis/issues/797)
+covering:
+
+- `runtime.logging` config types + validation next to
+  `runtime.log_overrides`
+- Non-blocking writer wiring inside `init_tracing` (with a
+  documented sync path when `non_blocking: false`)
+- Daily file rotation via `tracing-appender`, size-based
+  rotation via a Praxis-owned writer; non-blocking mode stores
+  a `WorkerGuard` on `TracingGuard`
+- Shutdown flush by owning the optional `WorkerGuard` on
+  `TracingGuard` when `non_blocking: true`
+- Restart-required signaling when logging settings change
+- Unit + integration coverage for validation, rotation, and
+  flush
+
+**Key files**
+
+- `core/src/config/runtime.rs` — `LoggingConfig` on
+  `RuntimeConfig`
+- `core/src/logging.rs` — writer selection, non-blocking
+  wrap, `TracingGuard` + `WorkerGuard`, size roller
+- `Cargo.toml` / workspace deps — add `tracing-appender`
+- `server/src/main.rs` — keep holding `TracingGuard` for
+  process lifetime (already correct shape)
+- `server/src/reload.rs` — validate logging config; mark
+  destination/rotation/buffer changes restart-required
+- `docs/operating/configuration.md` /
+  `docs/operating/observability.md` — document the knobs and
+  on-disk naming
+- `tests/integration/…` — file rotation + shutdown flush
+
+### Design
+
+**Anchor in today’s stack.** Process logging lives in
+`core/src/logging.rs`. `init_tracing` returns
+`Result<TracingGuard, ProxyError>`; `server/src/main.rs` binds
+`let _tracing_guard = praxis::init_tracing(&config)...` for the
+process lifetime. Today that guard only shuts down the OTLP
+tracer provider on drop when the `otel` feature is enabled (a
+no-op shell without `otel`). The fmt layer still writes
+**synchronously** to **stdout** (text or JSON via
+`PRAXIS_LOG_FORMAT`); there is no process-log `WorkerGuard` and
+no flush of buffered process log lines on shutdown.
+`runtime.log_overrides` only feeds the `EnvFilter` at startup.
+Reload (`server/src/reload.rs`) re-validates overrides but does
+**not** re-init the subscriber. This change keeps the same
+`TracingGuard` ownership shape in `main` and **extends** it to
+also own the optional non-blocking appender `WorkerGuard` when
+`non_blocking: true` so process-log flush runs on drop after OTLP
+shutdown.
+
+**Dependency.** Add workspace `tracing-appender` (tokio-rs /
+same ecosystem as `tracing-subscriber`). When
+`non_blocking: true` (default), use
+`tracing_appender::non_blocking` (via `NonBlockingBuilder`
+when capacity must be set) for stdout, stderr, and file.
+When `non_blocking: false`, pass the raw writer directly to the
+fmt layer (debug sync fallback). Do not introduce a second
+subscriber or replace the existing Registry + EnvFilter + fmt
+(+ optional OTLP) layering from
+[#315](https://github.com/praxis-proxy/praxis/issues/315).
+
+**Config surface.** Extend `RuntimeConfig` with
+`logging: LoggingConfig` (`#[serde(default)]`,
+`deny_unknown_fields`). Field names match the What? example:
+
+| Field | Contract |
+| --- | --- |
+| `output` | `stdout` (default) \| `stderr` \| `file` |
+| `file_path` | required when `output: file`; parent directory must exist or be creatable at init |
+| `rotation` | **optional**; omit / unset = **no rotation** (single growing file when `output: file`). When set: `daily`, or size form `size:<N><kb\|mb\|gb>` (for example `size:100mb`). Ignored unless `output: file`; invalid token is a validation error |
+| `max_files` | `u32`, default `7` when rotating; must be `> 0`; ignored when rotation is omitted |
+| `non_blocking` | default `true`; `false` is a documented sync fallback for debugging only |
+| `buffer_size` | optional `u32`: max **buffered lines** (not bytes) in the non-blocking queue, mapped to `NonBlockingBuilder::buffered_lines_limit`. **Default when omitted: `128_000`** (`tracing_appender::non_blocking::DEFAULT_BUFFERED_LINES_LIMIT`). Operators may set a smaller value (for example `8192`) to bound memory; overflow stays lossy per What? |
+
+`runtime.log_overrides` stays on `RuntimeConfig` root. No move
+into `logging`. Validation runs from `init_tracing` and from
+existing validate paths (`validate_log_overrides` / config
+validate / `praxis validate`) so bad destinations fail before
+start.
+
+**Writer wiring.** In `init_tracing`:
+
+1. Build the underlying writer for the chosen destination:
+   - `stdout` / `stderr` → `std::io::{stdout,stderr}`
+   - `file` → daily or size roller (below)
+2. **When `non_blocking: true` (default):** wrap with
+   `NonBlockingBuilder` configured for the chosen `buffer_size`
+   and **lossy** overflow (drop when full), matching What?.
+   Store the returned `WorkerGuard` on `TracingGuard`.
+3. **When `non_blocking: false`:** skip step 2; pass the raw
+   writer directly to `fmt::layer().with_writer(...)`.
+   `TracingGuard` holds no `WorkerGuard` in this mode.
+4. Pass the writer (non-blocking handle or raw) into
+   `fmt::layer().with_writer(...)` (text / JSON unchanged).
+5. Keep EnvFilter + optional OTLP layers as today.
+
+**File rotation.**
+
+- **Daily:** `tracing_appender::rolling::RollingFileAppender`
+  with `Rotation::DAILY` and `max_log_files = max_files`.
+  Parse `file_path` into directory + filename prefix (and
+  optional suffix); document the resulting
+  `prefix.YYYY-MM-DD` naming in operating docs.
+- **Size-based:** stock `tracing-appender` rolling is
+  time-based only. Own a small `Write` wrapper in `core`
+  that rolls when the active file exceeds the configured
+  max size and prunes older files down to `max_files`, then
+  use the same writer path as above (non-blocking or sync per
+  `non_blocking`). Active file is exactly `file_path` (for
+  example `/var/log/praxis/proxy.log`). On roll, rename the
+  active file to `{prefix}.{n}` with a monotonically
+  increasing integer suffix (`proxy.log.1`, `proxy.log.2`, …).
+  Prune by deleting the **oldest** rotated files (lowest `n`
+  / earliest mtime) until at most `max_files - 1` archived
+  copies remain beside the active file. Document the pattern
+  in operating docs for log agents and glob exclusions.
+
+**Shutdown flush.** Extend `TracingGuard` to own the optional
+`WorkerGuard` from `non_blocking` when `non_blocking: true`
+(in addition to the optional OTLP provider). `main` already
+binds `let _tracing_guard = ...` for the process lifetime—never
+bind the worker guard as a discarded `_` alone or it flushes
+immediately. On drop: **shut down OTLP first** (when the
+`otel` feature is enabled and a provider is held), then drop
+or flush the `WorkerGuard` so buffered process-log lines drain
+while the fmt writer is still live. Reversing this order stops
+the background appender thread before OTLP teardown finishes
+and can drop events still flowing through the fmt layer.
+Unclean kill can still lose the in-memory queue (accepted
+under Non-Goals). When `non_blocking: false`, only the OTLP
+shutdown path runs on drop (no worker guard).
+
+**Reload / restart.** Subscriber init remains once-per-process.
+Changing `runtime.logging` (destination, path, rotation,
+buffering, `non_blocking`) is **restart-required**; surface
+that through the existing restart-required / audit helpers.
+`log_overrides` stays validate-on-reload only (no live filter
+swap). Dynamic level changes belong to
+[#798](https://github.com/praxis-proxy/praxis/issues/798), not
+this change.
+
+**Tests.**
+
+- Unit: parse/validate `LoggingConfig` (missing `file_path`,
+  bad rotation tokens, `max_files == 0`, stdout defaults).
+- Unit: size roller roll + prune behavior against a temp dir.
+- Integration: start Praxis with `output: file`, emit logs,
+  assert the active file and at least one rotated artifact for
+  daily and size policies with `max_files` respected; after
+  graceful shutdown the last lines are present on disk.
+
+**Explicitly out of this How (see Non-Goals):** admin dynamic
+log level (#798), access-log filter changes, OTLP redesign,
+live subscriber hot-swap for logging destination, zero-loss
+under unbounded overload, and blocking backpressure when the
+buffer is full.

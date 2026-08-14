@@ -102,6 +102,22 @@ pub trait HttpFilter: Send + Sync {
         Vec::new()
     }
 
+    /// Whether this filter may select a streaming sub-request response.
+    ///
+    /// Pipeline validation uses this declaration to reject response
+    /// pipelines that require [`BodyMode::StreamBuffer`], which is
+    /// incompatible with incremental terminal delivery. Filters that can
+    /// call [`HttpFilterContext::set_subrequest_response_mode`] with
+    /// `Streaming` must override this method.
+    ///
+    /// A runtime guard still validates an actual streaming terminal action,
+    /// protecting dynamically registered or incorrectly declared filters.
+    ///
+    /// [`HttpFilterContext::set_subrequest_response_mode`]: crate::HttpFilterContext::set_subrequest_response_mode
+    fn may_select_streaming_subrequest_response(&self) -> bool {
+        false
+    }
+
     /// Called for each response, in reverse pipeline order.
     ///
     /// Default: [`FilterAction::Continue`]

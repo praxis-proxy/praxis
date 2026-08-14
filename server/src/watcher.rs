@@ -68,6 +68,9 @@ pub(crate) struct WatcherParams {
     /// Live pipeline storage, swapped atomically on reload.
     pub(crate) pipelines: Arc<ListenerPipelines>,
 
+    /// Listener metadata for admin `/api/pipelines`, swapped on reload.
+    pub(crate) listener_meta: praxis_protocol::http::pingora::health::ListenerMetaStore,
+
     /// Filter registry for building new pipelines.
     pub(crate) registry: Arc<FilterRegistry>,
 
@@ -154,6 +157,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
         &mut content_hash,
         &params.registry,
         &params.pipelines,
+        &params.listener_meta,
         &params.health_shutdown,
         &params.kv_stores,
         &params.subrequest_client,
@@ -169,7 +173,8 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
                 }
                 let ok = handle_reload(
                     &params.config_path, &mut current_config, &mut content_hash,
-                    &params.registry, &params.pipelines, &params.health_shutdown, &params.kv_stores,
+                    &params.registry, &params.pipelines, &params.listener_meta,
+                    &params.health_shutdown, &params.kv_stores,
                     &params.subrequest_client,
                 );
                 update_reload_backoff(ok, &mut consecutive_failures, &mut last_failure);
@@ -208,6 +213,7 @@ fn handle_reload(
     content_hash: &mut u64,
     registry: &FilterRegistry,
     pipelines: &ListenerPipelines,
+    listener_meta: &praxis_protocol::http::pingora::health::ListenerMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     subrequest_client: &praxis_core::subrequest::SubRequestClient,
@@ -250,6 +256,7 @@ fn handle_reload(
         current_config,
         registry,
         pipelines,
+        listener_meta,
         health_shutdown,
         kv_stores,
         subrequest_client,
@@ -603,9 +610,12 @@ mod tests {
             config_path,
             health_shutdown,
             initial_content_hash: hash_content(VALID_YAML),
-            initial_config: config,
+            initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines,
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
             registry,
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(
@@ -643,9 +653,12 @@ mod tests {
             config_path: config_path.clone(),
             health_shutdown,
             initial_content_hash: hash_content(VALID_YAML),
-            initial_config: config,
+            initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines: Arc::clone(&pipelines),
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(
@@ -691,9 +704,12 @@ mod tests {
             config_path: config_path.clone(),
             health_shutdown,
             initial_content_hash: hash_content(VALID_YAML),
-            initial_config: config,
+            initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines: Arc::clone(&pipelines),
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(
@@ -769,9 +785,12 @@ mod tests {
             config_path: PathBuf::from("praxis.yaml"),
             health_shutdown,
             initial_content_hash: hash_content(VALID_YAML),
-            initial_config: config,
+            initial_config: config.clone(),
             kv_stores,
             pipelines,
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
             registry,
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(
@@ -829,9 +848,12 @@ mod tests {
             config_path: config_path.clone(),
             health_shutdown,
             initial_content_hash: hash_content(VALID_YAML),
-            initial_config: config,
+            initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines: Arc::clone(&pipelines),
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(
@@ -891,9 +913,12 @@ mod tests {
             config_path: config_path.clone(),
             health_shutdown,
             initial_content_hash: 0,
-            initial_config: config,
+            initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines: Arc::clone(&pipelines),
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(
@@ -952,9 +977,12 @@ mod tests {
             config_path: link.clone(),
             health_shutdown,
             initial_content_hash: hash_content(VALID_YAML),
-            initial_config: config,
+            initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines: Arc::clone(&pipelines),
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(

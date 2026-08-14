@@ -23,7 +23,7 @@ mod registry;
 mod results;
 mod tcp_filter;
 
-pub use actions::{FilterAction, Rejection, TerminalResponse};
+pub use actions::{FilterAction, Rejection, StreamingResponseBody, StreamingTerminalResponse, TerminalResponse};
 pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
 #[cfg(feature = "basic-auth-filter")]
@@ -37,7 +37,9 @@ pub use builtins::{
     normalize_rewritten_path,
 };
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
-pub use context::{HttpFilterContext, PendingHeaderResult, Request, Response, TrustedHeaderMutation};
+pub use context::{
+    HttpFilterContext, PendingHeaderResult, Request, Response, SubRequestResponseMode, TrustedHeaderMutation,
+};
 pub use error_response::{
     ErrorResponseContext, ErrorResponseFormatter, ErrorResponseFormatterHandle, FormattedErrorResponse,
 };
@@ -49,11 +51,12 @@ pub use factory::{
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
 pub use pipeline::{
     FilterPipeline, PipelineExtension,
+    introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},
     subrequest::{IterationState, NextIterationBody},
 };
 pub use praxis_core::{
     config::{FailureMode, FilterEntry},
-    subrequest::{SubRequest, SubResponse},
+    subrequest::{StreamLimits, StreamingSubResponse, SubRequest, SubResponse, SubResponseBody},
 };
 pub use praxis_tls::TlsPeerIdentity;
 pub use registry::{FilterRegistry, SecurityClass};
@@ -433,6 +436,7 @@ pub(crate) mod test_utils {
             metrics_route: None,
             peer_identity: None,
             subrequest_client: None,
+            subrequest_response_mode: crate::SubRequestResponseMode::Buffered,
             request: req,
             request_body_bytes: 0,
             request_body_mode: crate::body::BodyMode::Stream,

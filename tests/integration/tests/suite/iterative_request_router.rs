@@ -1874,6 +1874,200 @@ fn http_get_raw(path: &str) -> String {
 }
 
 // ---------------------------------------------------------------------------
+// Streaming Tests
+// ---------------------------------------------------------------------------
+
+#[test]
+fn streaming_sse_first_chunk_arrives_before_upstream_completion() {
+    let chunks = vec![
+        "data: chunk1\n\n".to_owned(),
+        "data: chunk2\n\n".to_owned(),
+        "data: chunk3\n\n".to_owned(),
+    ];
+    let backend = Backend::chunked(chunks)
+        .header("content-type", "text/event-stream")
+        .start_with_shutdown();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: stream
+steps:
+  - name: stream
+    filters:
+      - filter: test_streaming_selector
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: sse
+      - filter: load_balancer
+        clusters:
+          - name: sse
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            backend.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nx-stream-response: true\r\nConnection: close\r\n\r\n",
+    );
+
+    let status = parse_status(&raw);
+    assert_eq!(status, 200, "streaming SSE should return 200");
+    let body = parse_body(&raw);
+    assert!(body.contains("data: chunk1"), "first chunk should arrive: {body}");
+    assert!(body.contains("data: chunk3"), "last chunk should arrive: {body}");
+}
+
+#[test]
+fn streaming_header_failover_cancels_unread_body() {
+    let failing = Backend::status(503, "fail").start_with_shutdown();
+    let fallback = Backend::fixed("fallback-ok").start_with_shutdown();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: primary
+steps:
+  - name: primary
+    filters:
+      - filter: test_streaming_selector
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: primary
+      - filter: load_balancer
+        clusters:
+          - name: primary
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - status: [502, 503, 504]
+        next: fallback
+      - default: true
+        done: true
+  - name: fallback
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: fallback
+      - filter: load_balancer
+        clusters:
+          - name: fallback
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            failing.port(),
+            fallback.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nx-stream-response: true\r\nConnection: close\r\n\r\n",
+    );
+
+    let status = parse_status(&raw);
+    assert_eq!(status, 200, "failover should reach fallback");
+    let body = parse_body(&raw);
+    assert_eq!(body, "fallback-ok", "should get fallback response");
+}
+
+#[test]
+fn streaming_selector_present_but_buffered_when_header_absent() {
+    let backend_port = start_backend("buffered-ok");
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: step
+steps:
+  - name: step
+    filters:
+      - filter: test_streaming_selector
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{backend_port}"]
+    on_result:
+      - default: true
+        done: true
+"#
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let (status, body) = http_get(proxy.addr(), "/", None);
+    assert_eq!(status, 200);
+    assert_eq!(
+        body, "buffered-ok",
+        "without x-stream-response header, buffered path should be used"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test-Only Streaming Selector Filter
+// ---------------------------------------------------------------------------
+
+struct IntegrationStreamingSelectorFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for IntegrationStreamingSelectorFilter {
+    fn name(&self) -> &'static str {
+        "test_streaming_selector"
+    }
+
+    fn may_select_streaming_subrequest_response(&self) -> bool {
+        true
+    }
+
+    async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        if ctx
+            .request
+            .headers
+            .get("x-stream-response")
+            .is_some_and(|v| v == "true")
+        {
+            ctx.set_subrequest_response_mode(praxis_filter::SubRequestResponseMode::Streaming);
+        }
+        Ok(FilterAction::Continue)
+    }
+}
+
+fn streaming_registry() -> FilterRegistry {
+    let mut registry = FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_streaming_selector",
+            FilterFactory::Http(Arc::new(|_| Ok(Box::new(IntegrationStreamingSelectorFilter)))),
+        )
+        .unwrap();
+    registry
+}
+
+// ---------------------------------------------------------------------------
 // Test Utilities
 // ---------------------------------------------------------------------------
 
