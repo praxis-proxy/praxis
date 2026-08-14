@@ -1,4 +1,5 @@
-# CPEX runtime config for the HR demo.
+# Corpus copy of the HR demo's Cedar policy document
+# (`demos/cpex/policy.yaml` in praxis-demos).
 #
 # Hot path:
 #   1. jwt-user      validates X-User-Token against Keycloak (cpex-demo realm)
@@ -226,7 +227,7 @@ global:
         // implicit but spelling it out documents intent.
 
   # ----------------------------------------------------------------
-  # Session store — where CPEX persists taint labels.
+  # Session store — where the engine persists taint labels.
   # ----------------------------------------------------------------
   # `taint(secret, session)` on get_compensation writes a `secret`
   # label keyed by H(subject : X-Session-Id); send_email reads it back
