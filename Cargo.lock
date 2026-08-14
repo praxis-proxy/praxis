@@ -3280,6 +3280,7 @@ dependencies = [
  "futures",
  "http",
  "jsonwebtoken",
+ "opentelemetry-proto",
  "praxis-proxy",
  "praxis-proxy-core",
  "praxis-proxy-filter",
