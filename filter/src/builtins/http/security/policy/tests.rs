@@ -747,6 +747,19 @@ fn config_parses_minimal_yaml() {
     assert_eq!(cfg.max_buffer_bytes, 10_485_760, "max_buffer_bytes defaults to 10 MiB",);
 }
 
+/// The filter declares its policy document, which is what lets the config
+/// watcher reload when an operator edits policy. See praxis-proxy/praxis#900.
+#[test]
+fn referenced_files_declares_the_policy_document() {
+    let (_dir, path) = write_single_plugin_config();
+    let filter = build_filter(path.clone());
+    assert_eq!(
+        filter.referenced_files(),
+        vec![std::path::PathBuf::from(&path)],
+        "the policy document must be declared so edits to it trigger a reload"
+    );
+}
+
 /// `max_buffer_bytes` is operator-tunable; an explicit value overrides
 /// the 10 MiB default so deployments can bound `ReadWrite` buffering.
 #[test]

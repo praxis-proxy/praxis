@@ -339,6 +339,17 @@ mod tests {
         );
     }
 
+    /// The empty default is what makes `referenced_files` additive: a filter that
+    /// predates it declares nothing.
+    #[test]
+    fn default_referenced_files_is_empty() {
+        let filter = MinimalFilter;
+        assert!(
+            filter.referenced_files().is_empty(),
+            "a filter with no external config must declare nothing"
+        );
+    }
+
     #[test]
     fn default_cluster_capabilities_are_empty() {
         let filter = MinimalFilter;

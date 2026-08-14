@@ -177,6 +177,36 @@ mod tests {
         );
     }
 
+    #[test]
+    fn http_variant_referenced_files_delegate_to_inner_filter() {
+        let f = AnyFilter::Http(Box::new(ReferencingHttpFilter));
+        assert_eq!(
+            f.referenced_files(),
+            vec![std::path::PathBuf::from("/etc/praxis/policy.yaml")],
+            "Http variant should delegate referenced_files"
+        );
+    }
+
+    #[test]
+    fn http_variant_default_referenced_files_is_empty() {
+        let f = AnyFilter::Http(Box::new(StubHttpFilter));
+        assert!(
+            f.referenced_files().is_empty(),
+            "Http variant should default to no referenced files"
+        );
+    }
+
+    /// TCP filters have no external-config surface, so the variant answers empty
+    /// without consulting the inner filter.
+    #[test]
+    fn tcp_variant_has_no_referenced_files() {
+        let f = AnyFilter::Tcp(Box::new(StubTcpFilter));
+        assert!(
+            f.referenced_files().is_empty(),
+            "Tcp variant should not report referenced files"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -214,6 +244,24 @@ mod tests {
 
         fn load_balancer_clusters(&self) -> Vec<String> {
             vec!["web".to_owned(), "api".to_owned()]
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+    }
+
+    /// Stub HTTP filter that reads config from an external document.
+    struct ReferencingHttpFilter;
+
+    #[async_trait]
+    impl HttpFilter for ReferencingHttpFilter {
+        fn name(&self) -> &'static str {
+            "referencing_http"
+        }
+
+        fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+            vec![std::path::PathBuf::from("/etc/praxis/policy.yaml")]
         }
 
         async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {

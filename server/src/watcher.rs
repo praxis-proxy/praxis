@@ -121,12 +121,7 @@ pub(crate) fn spawn_config_watcher(params: WatcherParams) -> std::thread::JoinHa
 async fn watch_loop(params: WatcherParams) {
     let (tx, mut rx) = mpsc::channel::<()>(16);
 
-    let mut watch_dirs = vec![watch_dir_for_path(&params.config_path)];
-    for path in &params.referenced_files {
-        watch_dirs.push(watch_dir_for_path(path));
-    }
-    watch_dirs.sort();
-    watch_dirs.dedup();
+    let watch_dirs = watch_dirs_for(&params.config_path, &params.referenced_files);
 
     let _watcher = match setup_watcher(tx, &watch_dirs, &params.config_path, &params.referenced_files) {
         Ok(w) => w,
@@ -357,9 +352,11 @@ impl PathFilter {
             if let Ok(c) = std::fs::canonicalize(path) {
                 expanded.push(c);
             }
-            if path.is_absolute() {
-                expanded.push(path.clone());
-            } else if let Ok(cwd) = std::env::current_dir() {
+            // An absolute path is already covered by the push above; only a
+            // relative one needs its cwd-joined spelling.
+            if !path.is_absolute()
+                && let Ok(cwd) = std::env::current_dir()
+            {
                 expanded.push(cwd.join(path));
             }
         }
@@ -443,6 +440,21 @@ fn watch_dir_for_path(path: &std::path::Path) -> PathBuf {
         .filter(|p| !p.as_os_str().is_empty())
         .unwrap_or_else(|| std::path::Path::new("."))
         .to_path_buf()
+}
+
+/// Directories to watch: the main config's, plus one per referenced document.
+///
+/// A referenced document commonly lives outside the main config's directory, so
+/// one watch is not enough. Sorted and de-duplicated, since documents alongside
+/// the config need no second watch.
+fn watch_dirs_for(config_path: &std::path::Path, referenced: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = vec![watch_dir_for_path(config_path)];
+    for path in referenced {
+        dirs.push(watch_dir_for_path(path));
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
 }
 
 /// Compute the backoff duration for a given consecutive failure count.
@@ -744,6 +756,73 @@ mod tests {
             attrs: notify::event::EventAttributes::default(),
         };
         assert!(filter.matches(&event), "a referenced document's event must be accepted");
+    }
+
+    /// A referenced document configured as a relative path must match the
+    /// cwd-joined spelling inotify reports on Linux.
+    #[test]
+    fn path_filter_matches_a_relative_referenced_document_by_absolute_spelling() {
+        let _lock = CWD_MUTEX.get_or_init(Mutex::default).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _cwd = CwdGuard::new(dir.path());
+
+        let config = PathBuf::from("praxis.yaml");
+        let doc_rel = PathBuf::from("policy.yaml");
+        std::fs::write(&config, VALID_YAML).unwrap();
+        std::fs::write(&doc_rel, "plugins: []\n").unwrap();
+
+        let filter = PathFilter::new(&config, std::slice::from_ref(&doc_rel));
+
+        let abs_lexical = std::env::current_dir().unwrap().join(&doc_rel);
+        assert!(
+            filter.matches(&make_event(vec![abs_lexical])),
+            "a relative referenced document must match its cwd-joined spelling"
+        );
+    }
+
+    /// Adding referenced documents must not widen the filter: a sibling file
+    /// nothing references is still rejected.
+    #[test]
+    fn path_filter_rejects_a_document_that_is_not_referenced() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("praxis.yaml");
+        let doc = dir.path().join("policy.yaml");
+        std::fs::write(&config, VALID_YAML).unwrap();
+        std::fs::write(&doc, "plugins: []\n").unwrap();
+
+        let filter = PathFilter::new(&config, std::slice::from_ref(&doc));
+        let event = make_event(vec![dir.path().join("unrelated.yaml")]);
+        assert!(
+            !filter.matches(&event),
+            "a file nobody references must not trigger a reload"
+        );
+    }
+
+    /// A document outside the main config's directory needs its own watch.
+    #[test]
+    fn watch_dirs_include_a_referenced_documents_own_directory() {
+        let dirs = watch_dirs_for(
+            std::path::Path::new("/etc/praxis/praxis.yaml"),
+            &[PathBuf::from("/var/lib/praxis/policy.yaml")],
+        );
+        assert_eq!(
+            dirs,
+            vec![PathBuf::from("/etc/praxis"), PathBuf::from("/var/lib/praxis")],
+            "both directories must be watched"
+        );
+    }
+
+    /// Documents alongside the main config need no second watch.
+    #[test]
+    fn watch_dirs_collapse_documents_in_the_config_directory() {
+        let dirs = watch_dirs_for(
+            std::path::Path::new("/etc/praxis/praxis.yaml"),
+            &[
+                PathBuf::from("/etc/praxis/policy.yaml"),
+                PathBuf::from("/etc/praxis/other.yaml"),
+            ],
+        );
+        assert_eq!(dirs, vec![PathBuf::from("/etc/praxis")], "one directory, watched once");
     }
 
     /// A reload that fails must not advance the content hash.

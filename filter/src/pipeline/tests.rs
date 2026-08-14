@@ -2544,8 +2544,112 @@ async fn body_done_with_stream_buffer_mode() {
 }
 
 // -----------------------------------------------------------------------------
+// Referenced files
+// -----------------------------------------------------------------------------
+
+#[test]
+fn referenced_files_empty_for_pipeline_with_no_filters() {
+    let pipeline = make_pipeline(vec![]);
+    assert!(
+        pipeline.referenced_files().is_empty(),
+        "a pipeline with no filters declares nothing"
+    );
+}
+
+#[test]
+fn referenced_files_collects_from_every_declaring_filter() {
+    let pipeline = make_pipeline(vec![
+        Box::new(ReferencingFilter::new(&["/etc/praxis/a.yaml"])),
+        Box::new(ReferencingFilter::new(&["/etc/praxis/b.yaml"])),
+    ]);
+    assert_eq!(
+        pipeline.referenced_files(),
+        vec![
+            std::path::PathBuf::from("/etc/praxis/a.yaml"),
+            std::path::PathBuf::from("/etc/praxis/b.yaml"),
+        ],
+        "both filters' documents must be collected"
+    );
+}
+
+/// A filter with no external config must not contribute, so the watcher does not
+/// hash or watch files nothing reads.
+#[test]
+fn referenced_files_skips_filters_that_declare_nothing() {
+    let pipeline = make_pipeline(vec![
+        Box::new(PassthroughFilter),
+        Box::new(ReferencingFilter::new(&["/etc/praxis/only.yaml"])),
+        Box::new(PassthroughFilter),
+    ]);
+    assert_eq!(
+        pipeline.referenced_files(),
+        vec![std::path::PathBuf::from("/etc/praxis/only.yaml")],
+        "only the declaring filter contributes"
+    );
+}
+
+/// Duplicates survive at this level on purpose: de-duplication belongs to
+/// `ListenerPipelines::referenced_files`, which sees every listener. Collapsing
+/// here would hide a shared document from that caller.
+#[test]
+fn referenced_files_keeps_duplicates_for_the_caller_to_dedupe() {
+    let shared = "/etc/praxis/shared.yaml";
+    let pipeline = make_pipeline(vec![
+        Box::new(ReferencingFilter::new(&[shared])),
+        Box::new(ReferencingFilter::new(&[shared])),
+    ]);
+    assert_eq!(
+        pipeline.referenced_files().len(),
+        2,
+        "the pipeline reports what its filters declared, without deduping"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// A filter that reads config from external documents.
+struct ReferencingFilter {
+    referenced_files: Vec<std::path::PathBuf>,
+}
+
+impl ReferencingFilter {
+    fn new(paths: &[&str]) -> Self {
+        Self {
+            referenced_files: paths.iter().map(std::path::PathBuf::from).collect(),
+        }
+    }
+}
+
+#[async_trait]
+impl HttpFilter for ReferencingFilter {
+    fn name(&self) -> &'static str {
+        "referencing"
+    }
+
+    fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        self.referenced_files.clone()
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+}
+
+/// A filter that does nothing and declares no external config.
+struct PassthroughFilter;
+
+#[async_trait]
+impl HttpFilter for PassthroughFilter {
+    fn name(&self) -> &'static str {
+        "passthrough"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+}
 
 /// A filter that immediately rejects all requests.
 struct RejectFilter;
