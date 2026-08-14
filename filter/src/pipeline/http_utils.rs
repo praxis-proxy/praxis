@@ -13,7 +13,7 @@
 
 use bytes::Bytes;
 use praxis_core::config::FailureMode;
-use tracing::{debug, trace, warn};
+use tracing::{Instrument as _, debug, info_span, trace, warn};
 
 use super::check_failure_mode;
 use crate::{
@@ -191,20 +191,32 @@ pub(super) async fn run_request_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<HeaderFilterOutcome, FilterError> {
-    trace!(filter = http_filter.name(), "on_request");
-    let request_result = if metrics_enabled {
-        let start = std::time::Instant::now();
-        let result = http_filter.on_request(ctx).await;
-        record_filter_duration(
-            http_filter.name(),
-            PHASE_REQUEST,
-            STREAM_HEADERS,
-            start.elapsed().as_secs_f64(),
-        );
-        result
-    } else {
-        http_filter.on_request(ctx).await
-    };
+    let filter_span = info_span!(
+        "filter",
+        "otel.name" = %format_args!("filter:{}:request", http_filter.name()),
+        "filter.name" = http_filter.name(),
+        "filter.phase" = "request",
+        "filter.result" = tracing::field::Empty,
+    );
+    let request_result = async {
+        trace!("on_request");
+        if metrics_enabled {
+            let start = std::time::Instant::now();
+            let result = http_filter.on_request(ctx).await;
+            record_filter_duration(
+                http_filter.name(),
+                PHASE_REQUEST,
+                STREAM_HEADERS,
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        } else {
+            http_filter.on_request(ctx).await
+        }
+    }
+    .instrument(filter_span.clone())
+    .await;
+    record_filter_result(&filter_span, &request_result);
     match request_result {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
             Ok(HeaderFilterOutcome::Continue)
@@ -242,20 +254,32 @@ pub(super) async fn run_request_body_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<BodyFilterOutcome, FilterError> {
-    trace!(filter = http_filter.name(), "on_request_body");
-    let body_result = if metrics_enabled {
-        let start = std::time::Instant::now();
-        let result = http_filter.on_request_body(ctx, body, end_of_stream).await;
-        record_filter_duration(
-            http_filter.name(),
-            PHASE_REQUEST,
-            STREAM_BODY,
-            start.elapsed().as_secs_f64(),
-        );
-        result
-    } else {
-        http_filter.on_request_body(ctx, body, end_of_stream).await
-    };
+    let filter_span = info_span!(
+        "filter",
+        "otel.name" = %format_args!("filter:{}:request_body", http_filter.name()),
+        "filter.name" = http_filter.name(),
+        "filter.phase" = "request_body",
+        "filter.result" = tracing::field::Empty,
+    );
+    let body_result = async {
+        trace!("on_request_body");
+        if metrics_enabled {
+            let start = std::time::Instant::now();
+            let result = http_filter.on_request_body(ctx, body, end_of_stream).await;
+            record_filter_duration(
+                http_filter.name(),
+                PHASE_REQUEST,
+                STREAM_BODY,
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        } else {
+            http_filter.on_request_body(ctx, body, end_of_stream).await
+        }
+    }
+    .instrument(filter_span.clone())
+    .await;
+    record_filter_result(&filter_span, &body_result);
     dispatch_body_result(body_result, http_filter.name(), "request body", failure_mode)
 }
 
@@ -269,7 +293,15 @@ pub(super) fn run_response_body_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<BodyFilterOutcome, FilterError> {
-    trace!(filter = http_filter.name(), "on_response_body");
+    let filter_span = info_span!(
+        "filter",
+        "otel.name" = %format_args!("filter:{}:response_body", http_filter.name()),
+        "filter.name" = http_filter.name(),
+        "filter.phase" = "response_body",
+        "filter.result" = tracing::field::Empty,
+    );
+    let _entered = filter_span.enter();
+    trace!("on_response_body");
     let body_result = if metrics_enabled {
         let start = std::time::Instant::now();
         let result = http_filter.on_response_body(ctx, body, end_of_stream);
@@ -283,6 +315,7 @@ pub(super) fn run_response_body_filter(
     } else {
         http_filter.on_response_body(ctx, body, end_of_stream)
     };
+    record_filter_result(&filter_span, &body_result);
     dispatch_body_result(body_result, http_filter.name(), "response body", failure_mode)
 }
 
@@ -297,21 +330,33 @@ pub(super) async fn run_response_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<HeaderFilterOutcome, FilterError> {
-    trace!(filter = http_filter.name(), "on_response");
+    let filter_span = info_span!(
+        "filter",
+        "otel.name" = %format_args!("filter:{}:response", http_filter.name()),
+        "filter.name" = http_filter.name(),
+        "filter.phase" = "response",
+        "filter.result" = tracing::field::Empty,
+    );
     let pre_len = ctx.response_header.as_ref().map_or(0, |r| r.headers.len());
-    let response_result = if metrics_enabled {
-        let start = std::time::Instant::now();
-        let result = http_filter.on_response(ctx).await;
-        record_filter_duration(
-            http_filter.name(),
-            PHASE_RESPONSE,
-            STREAM_HEADERS,
-            start.elapsed().as_secs_f64(),
-        );
-        result
-    } else {
-        http_filter.on_response(ctx).await
-    };
+    let response_result = async {
+        trace!("on_response");
+        if metrics_enabled {
+            let start = std::time::Instant::now();
+            let result = http_filter.on_response(ctx).await;
+            record_filter_duration(
+                http_filter.name(),
+                PHASE_RESPONSE,
+                STREAM_HEADERS,
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        } else {
+            http_filter.on_response(ctx).await
+        }
+    }
+    .instrument(filter_span.clone())
+    .await;
+    record_filter_result(&filter_span, &response_result);
     match response_result {
         Ok(
             FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone | FilterAction::TerminalResponse(_),
@@ -337,6 +382,19 @@ pub(super) async fn run_response_filter(
             Ok(HeaderFilterOutcome::Continue)
         },
     }
+}
+
+/// Record the filter result on the span's `filter.result` field.
+fn record_filter_result(span: &tracing::Span, result: &Result<FilterAction, FilterError>) {
+    let label = match result {
+        Ok(FilterAction::Continue) => "continue",
+        Ok(FilterAction::Release) => "release",
+        Ok(FilterAction::BodyDone) => "body_done",
+        Ok(FilterAction::Reject(_)) => "reject",
+        Ok(FilterAction::TerminalResponse(_)) => "terminal",
+        Err(_) => "error",
+    };
+    span.record("filter.result", label);
 }
 
 // -----------------------------------------------------------------------------
