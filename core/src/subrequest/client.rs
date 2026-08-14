@@ -296,6 +296,13 @@ impl SubRequestClient {
     /// Circuit breaker success is finalized when valid headers are
     /// received. Late body failures only affect stream metrics.
     ///
+    /// **Timeout semantics:** `timeout` bounds only the header phase
+    /// (connect + send + receive headers). Body reads are governed by
+    /// [`StreamLimits`]: `idle_timeout` per chunk, optional
+    /// `max_stream_duration` for end-to-end lifetime, and the peer's
+    /// configured `read_timeout`. Callers needing a single end-to-end
+    /// deadline should set `max_stream_duration` accordingly.
+    ///
     /// # Errors
     ///
     /// Returns [`SubRequestError`] on admission timeout, connection
@@ -339,7 +346,10 @@ impl SubRequestClient {
                         Some(exchange.connector.connector()),
                     )
                     .await;
-                    "header_incomplete"
+                    record_header_termination("header_incomplete");
+                    return Err(SubRequestError::Io(
+                        "upstream indicated response done but stream is not cleanly terminated".to_owned(),
+                    ));
                 },
                 Err(e) => {
                     dispose_session_abnormal(
