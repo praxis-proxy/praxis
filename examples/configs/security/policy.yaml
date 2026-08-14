@@ -16,7 +16,7 @@
 # the filter loads once at construction. It is operator-supplied, not
 # shipped here: a real policy carries your own issuers, secrets, routes,
 # PDPs, and delegators. See the praxis-demos repo
-# (`demos/cpex/cpex.yaml`) for a fully-featured policy, and
+# (`demos/cpex/policy.yaml`) for a fully-featured policy, and
 # `tests/integration/fixtures/policy.yaml` for the minimal
 # single-HS256-identity-plugin policy the integration test loads.
 #
