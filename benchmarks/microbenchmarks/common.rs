@@ -62,6 +62,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         id_generator: &BENCH_ID_GENERATOR,
         kv_stores: None,
         subrequest_client: None,
+        subrequest_response_mode: praxis_filter::SubRequestResponseMode::Buffered,
         request: req,
         request_body_bytes: 0,
         request_body_mode: praxis_filter::BodyMode::Stream,

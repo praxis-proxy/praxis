@@ -104,6 +104,26 @@ pub(crate) fn strip_connection_tokens<R: RemoveHeader>(
     }
 }
 
+/// Strip static hop-by-hop headers and headers nominated by `Connection`
+/// from a standalone [`HeaderMap`].
+///
+/// Terminal responses are created outside Pingora's normal upstream response
+/// path, so they use this helper before downstream commitment.
+pub(crate) fn strip_hop_by_hop_header_map(headers: &mut HeaderMap, static_list: &[&str]) {
+    let connection_values = snapshot_connection_values(headers);
+    for name in static_list {
+        headers.remove(*name);
+    }
+    for value in connection_values {
+        let Ok(value) = value.to_str() else { continue };
+        for token in value.split(',').map(str::trim).filter(|token| !token.is_empty()) {
+            if !static_list.iter().any(|name| token.eq_ignore_ascii_case(name)) {
+                headers.remove(token);
+            }
+        }
+    }
+}
+
 /// Trait abstracting header removal for both request and response types.
 pub(crate) trait RemoveHeader {
     /// direction i.e. request or response

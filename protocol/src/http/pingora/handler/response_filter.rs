@@ -62,7 +62,8 @@ pub(super) async fn execute(
             Ok(FilterAction::Continue
                 | FilterAction::Release
                 | FilterAction::BodyDone
-                | FilterAction::TerminalResponse(_))
+                | FilterAction::TerminalResponse(_)
+                | FilterAction::StreamingTerminalResponse(_))
         );
     if should_snapshot_response_header {
         ctx.response_header_snapshot = Some(praxis_filter::Response {
@@ -136,7 +137,11 @@ fn handle_response_result(
 ) -> Result<()> {
     match result {
         Ok(
-            FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone | FilterAction::TerminalResponse(_),
+            FilterAction::Continue
+            | FilterAction::Release
+            | FilterAction::BodyDone
+            | FilterAction::TerminalResponse(_)
+            | FilterAction::StreamingTerminalResponse(_),
         ) => {
             if headers_modified {
                 write_headers_to_pingora(&resp.headers, resp.status, upstream_response);

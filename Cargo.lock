@@ -3280,6 +3280,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "futures",
+ "h2",
  "http",
  "jsonwebtoken",
  "praxis-proxy",

@@ -1078,6 +1078,7 @@ fn build_sub_filter_context<'a>(
         selected_endpoint_index: None,
         structured_metadata: HashMap::new(),
         subrequest_client: runtime.subrequest_client,
+        subrequest_response_mode: crate::SubRequestResponseMode::Buffered,
         time_source: runtime.time_source,
         upstream: None,
     }

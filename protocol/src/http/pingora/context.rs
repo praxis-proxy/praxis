@@ -313,6 +313,7 @@ macro_rules! filter_context {
             id_generator: $pipeline.id_generator(),
             kv_stores: $pipeline.kv_stores(),
             subrequest_client: $pipeline.subrequest_client(),
+            subrequest_response_mode: praxis_filter::SubRequestResponseMode::Buffered,
             request: $request,
             request_body_bytes: $ctx.request_body_bytes,
             request_body_mode: $ctx.request_body_mode,

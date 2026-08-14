@@ -3,7 +3,90 @@
 
 //! Filter return types: continue, reject, or return a terminal response.
 
+use std::fmt;
+
+use async_trait::async_trait;
 use bytes::Bytes;
+
+use crate::FilterError;
+
+// -----------------------------------------------------------------------------
+// Streaming terminal response
+// -----------------------------------------------------------------------------
+
+/// Opaque, pull-based body for a terminal streaming response.
+///
+/// Implementations own any inner transport and response-filter continuation
+/// state. The protocol layer pulls at most one chunk at a time and does not
+/// read the next chunk until the previous downstream write completes.
+#[async_trait]
+pub trait StreamingResponseBody: Send + 'static {
+    /// Pull the next filtered body chunk.
+    ///
+    /// `Ok(None)` means clean completion. Implementations must run their
+    /// owned completion lifecycle exactly once before returning it.
+    async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError>;
+
+    /// Suppress the unread body for HEAD, 204, or 304 delivery.
+    ///
+    /// Implementations cancel their underlying source while still running
+    /// any owned clean-suppression lifecycle exactly once.
+    async fn suppress(&mut self) -> Result<(), FilterError>;
+
+    /// Abort the source and release all owned resources.
+    ///
+    /// This operation must be idempotent.
+    async fn cancel(&mut self);
+}
+
+/// A terminal response whose body is delivered incrementally.
+#[must_use]
+pub struct StreamingTerminalResponse {
+    /// HTTP status code.
+    pub status: u16,
+
+    /// Response headers available before downstream commitment.
+    pub headers: http::HeaderMap,
+
+    /// Opaque pull-based body and its owned continuation state.
+    pub body: Box<dyn StreamingResponseBody>,
+}
+
+impl StreamingTerminalResponse {
+    /// Create a streaming terminal response.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `code` is outside 200..=599. Informational responses cannot
+    /// terminate a request.
+    pub fn new(code: u16, body: Box<dyn StreamingResponseBody>) -> Self {
+        assert!(
+            (200..=599).contains(&code),
+            "streaming terminal status must be 200..=599, got {code}"
+        );
+        Self {
+            status: code,
+            headers: http::HeaderMap::new(),
+            body,
+        }
+    }
+
+    /// Set the response headers.
+    pub fn with_headers(mut self, headers: http::HeaderMap) -> Self {
+        self.headers = headers;
+        self
+    }
+}
+
+impl fmt::Debug for StreamingTerminalResponse {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StreamingTerminalResponse")
+            .field("status", &self.status)
+            .field("headers", &self.headers)
+            .field("body", &"<opaque streaming body>")
+            .finish()
+    }
+}
 
 // -----------------------------------------------------------------------------
 // FilterAction
@@ -53,6 +136,17 @@ pub enum FilterAction {
     ///
     /// [`Reject`]: FilterAction::Reject
     TerminalResponse(Box<TerminalResponse>),
+
+    /// Return a streaming response to the client.
+    ///
+    /// Response-header filters run before commitment. After commitment, the
+    /// protocol pulls one chunk, runs response-body filters, awaits the
+    /// downstream write, and only then requests the next chunk. Source or
+    /// filter failures after commitment terminate the downstream stream and
+    /// cannot produce a replacement response.
+    ///
+    /// Only valid in request-phase filters.
+    StreamingTerminalResponse(Box<StreamingTerminalResponse>),
 
     /// Signal that accumulated body data ([`StreamBuffer`] mode)
     /// should be forwarded to upstream. After release, remaining
@@ -374,6 +468,123 @@ mod tests {
         assert!(
             matches!(FilterAction::BodyDone, FilterAction::BodyDone),
             "BodyDone should match BodyDone"
+        );
+    }
+
+    // -- Test helpers for streaming types ----------------------------------
+
+    struct NullStreamBody;
+
+    #[async_trait]
+    impl StreamingResponseBody for NullStreamBody {
+        async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
+            Ok(None)
+        }
+
+        async fn suppress(&mut self) -> Result<(), FilterError> {
+            Ok(())
+        }
+
+        async fn cancel(&mut self) {}
+    }
+
+    struct SingleChunkStreamBody(Option<Bytes>);
+
+    #[async_trait]
+    impl StreamingResponseBody for SingleChunkStreamBody {
+        async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
+            Ok(self.0.take())
+        }
+
+        async fn suppress(&mut self) -> Result<(), FilterError> {
+            self.0 = None;
+            Ok(())
+        }
+
+        async fn cancel(&mut self) {
+            self.0 = None;
+        }
+    }
+
+    // -- Streaming terminal response tests ---------------------------------
+
+    #[test]
+    fn streaming_terminal_response_200() {
+        let r = StreamingTerminalResponse::new(200, Box::new(NullStreamBody));
+        assert_eq!(r.status, 200, "status should be 200");
+    }
+
+    #[test]
+    fn streaming_terminal_response_599() {
+        let r = StreamingTerminalResponse::new(599, Box::new(NullStreamBody));
+        assert_eq!(r.status, 599, "599 is the upper boundary");
+    }
+
+    #[test]
+    #[should_panic(expected = "streaming terminal status must be 200..=599")]
+    fn streaming_terminal_response_1xx_panics() {
+        let _r = StreamingTerminalResponse::new(100, Box::new(NullStreamBody));
+    }
+
+    #[test]
+    #[should_panic(expected = "streaming terminal status must be 200..=599")]
+    fn streaming_terminal_response_199_panics() {
+        let _r = StreamingTerminalResponse::new(199, Box::new(NullStreamBody));
+    }
+
+    #[test]
+    fn streaming_terminal_response_with_headers() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-custom", "value".parse().unwrap());
+        let r = StreamingTerminalResponse::new(200, Box::new(NullStreamBody)).with_headers(headers);
+        assert_eq!(
+            r.headers.get("x-custom").unwrap(),
+            "value",
+            "custom header should be set"
+        );
+    }
+
+    #[tokio::test]
+    async fn null_stream_body_returns_none() {
+        let mut body = NullStreamBody;
+        let chunk = body.next_chunk().await.unwrap();
+        assert!(chunk.is_none(), "NullStreamBody should return None");
+    }
+
+    #[tokio::test]
+    async fn single_chunk_stream_body_yields_then_none() {
+        let mut body = SingleChunkStreamBody(Some(Bytes::from_static(b"hello")));
+        let first = body.next_chunk().await.unwrap();
+        assert_eq!(
+            first.unwrap(),
+            Bytes::from_static(b"hello"),
+            "first chunk should contain the payload"
+        );
+        let second = body.next_chunk().await.unwrap();
+        assert!(second.is_none(), "second call should return None");
+    }
+
+    #[test]
+    fn streaming_terminal_debug_format() {
+        let r = StreamingTerminalResponse::new(200, Box::new(NullStreamBody));
+        let debug = format!("{r:?}");
+        assert!(
+            debug.contains("StreamingTerminalResponse"),
+            "debug should contain type name"
+        );
+        assert!(debug.contains("200"), "debug should contain status code");
+        assert!(debug.contains("opaque"), "debug should indicate opaque body");
+    }
+
+    #[test]
+    fn filter_action_streaming_terminal_variant() {
+        let action = FilterAction::StreamingTerminalResponse(Box::new(StreamingTerminalResponse::new(
+            200,
+            Box::new(NullStreamBody),
+        )));
+        assert!(
+            matches!(action, FilterAction::StreamingTerminalResponse(_)),
+            "should match StreamingTerminalResponse variant"
         );
     }
 }

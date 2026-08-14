@@ -94,6 +94,7 @@ impl FilterPipeline {
     fn from_filters(filters: Vec<PipelineFilter>) -> Self {
         let body_capabilities = compute_body_capabilities(&filters);
         let compression = extract_compression_config(&filters);
+        let may_select_streaming_subrequest_response = filters_may_select_streaming_subrequest_response(&filters);
         Self {
             body_capabilities,
             compression,
@@ -104,6 +105,7 @@ impl FilterPipeline {
             pipeline_extensions: Vec::new(),
             record_filter_duration_metrics: false,
             subrequest_client: None,
+            may_select_streaming_subrequest_response,
             time_source: Arc::new(SystemTimeSource),
         }
     }
@@ -141,6 +143,10 @@ impl FilterPipeline {
     ///
     /// [`build`]: FilterPipeline::build
     /// [`SkipPipelineChecks`]: praxis_core::config::SkipPipelineChecks
+    #[expect(
+        clippy::too_many_lines,
+        reason = "streaming capability check adds one validation pass"
+    )]
     pub fn ordering_errors(
         &self,
         entries: &[FilterEntry],
@@ -178,6 +184,18 @@ impl FilterPipeline {
         }
         super::checks::check_skip_to_bypasses_security(&self.filters, &mut errors);
         super::checks::check_irr_with_router_or_lb(&names, &mut errors);
+        if self.may_select_streaming_subrequest_response
+            && matches!(
+                self.body_capabilities.response_body_mode,
+                crate::BodyMode::StreamBuffer { .. }
+            )
+        {
+            errors.push(
+                "pipeline contains a filter that may select a streaming sub-request response, \
+                 but its response body mode is StreamBuffer"
+                    .to_owned(),
+            );
+        }
 
         errors
     }
@@ -262,5 +280,20 @@ fn extract_compression_config(
     filters.iter().find_map(|pf| match &pf.filter {
         AnyFilter::Http(f) => f.compression_config().cloned(),
         AnyFilter::Tcp(_) => None,
+    })
+}
+
+/// Recursively detect filters that may select streaming sub-request delivery.
+fn filters_may_select_streaming_subrequest_response(filters: &[PipelineFilter]) -> bool {
+    filters.iter().any(|pf| {
+        let selects_streaming = match &pf.filter {
+            AnyFilter::Http(filter) => filter.may_select_streaming_subrequest_response(),
+            AnyFilter::Tcp(_) => false,
+        };
+        selects_streaming
+            || pf
+                .branches
+                .iter()
+                .any(|branch| filters_may_select_streaming_subrequest_response(&branch.filters))
     })
 }

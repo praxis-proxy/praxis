@@ -122,6 +122,10 @@ pub struct FilterPipeline {
     /// Shared sub-request client for iterative sub-requests.
     subrequest_client: Option<praxis_core::subrequest::SubRequestClient>,
 
+    /// Whether any filter, including branch filters, may select a streaming
+    /// sub-request response.
+    may_select_streaming_subrequest_response: bool,
+
     /// External pipeline extensions injected after construction.
     pipeline_extensions: Vec<Box<dyn PipelineExtension>>,
 
@@ -255,6 +259,12 @@ impl FilterPipeline {
     /// The shared sub-request client, if set.
     pub fn subrequest_client(&self) -> Option<&praxis_core::subrequest::SubRequestClient> {
         self.subrequest_client.as_ref()
+    }
+
+    /// Whether any filter in this pipeline or its branches may select a
+    /// streaming sub-request response.
+    pub fn may_select_streaming_subrequest_response(&self) -> bool {
+        self.may_select_streaming_subrequest_response
     }
 
     /// Set the shared [`SubRequestClient`] for this pipeline.
