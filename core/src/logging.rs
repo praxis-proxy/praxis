@@ -33,6 +33,9 @@ pub struct TracingGuard {
     /// Tracer provider to shut down when the guard is dropped.
     #[cfg(feature = "otel")]
     provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    /// Tokio runtime kept alive for the tonic gRPC exporter.
+    #[cfg(feature = "otel")]
+    _otel_runtime: Option<::tokio::runtime::Runtime>,
 }
 
 #[cfg(feature = "otel")]
@@ -135,7 +138,7 @@ fn init_with_otel(
 ) -> Result<TracingGuard, ProxyError> {
     use opentelemetry::trace::TracerProvider as _;
 
-    let provider = build_otel_provider(telemetry)?;
+    let (provider, otel_runtime) = build_otel_provider(telemetry)?;
 
     // `OpenTelemetryLayer<S>` requires `S` to match the composed subscriber type.
     // JSON and text fmt produce different types, preventing a shared binding.
@@ -164,7 +167,10 @@ fn init_with_otel(
             .init();
     }
 
-    Ok(TracingGuard { provider })
+    Ok(TracingGuard {
+        provider,
+        _otel_runtime: otel_runtime,
+    })
 }
 
 /// Initialize the layered subscriber with fmt only (no `otel` feature).
@@ -203,9 +209,15 @@ fn init_fmt_only(env_filter: tracing_subscriber::EnvFilter, json: bool) {
 #[cfg(feature = "otel")]
 fn build_otel_provider(
     config: &crate::config::TelemetryConfig,
-) -> Result<Option<opentelemetry_sdk::trace::SdkTracerProvider>, ProxyError> {
+) -> Result<
+    (
+        Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+        Option<::tokio::runtime::Runtime>,
+    ),
+    ProxyError,
+> {
     let Some(endpoint) = config.otlp_endpoint.as_deref() else {
-        return Ok(None);
+        return Ok((None, None));
     };
 
     if let Ok(protocol) = std::env::var(crate::config::OTLP_PROTOCOL_ENV_VAR)
@@ -217,7 +229,13 @@ fn build_otel_provider(
         )));
     }
 
-    let exporter = build_span_exporter(endpoint, &config.otlp_headers)?;
+    let runtime = ::tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(1)
+        .enable_all()
+        .build()
+        .map_err(|e| ProxyError::Config(format!("failed to create OTel runtime: {e}")))?;
+
+    let exporter = runtime.block_on(async { build_span_exporter(endpoint, &config.otlp_headers) })?;
     let batch_processor = build_batch_processor(exporter, config);
     let resource = build_otel_resource(config);
 
@@ -238,7 +256,7 @@ fn build_otel_provider(
 
     opentelemetry::global::set_tracer_provider(provider.clone());
 
-    Ok(Some(provider))
+    Ok((Some(provider), Some(runtime)))
 }
 
 // -----------------------------------------------------------------------------
@@ -751,7 +769,7 @@ telemetry:
         let config = crate::config::TelemetryConfig::default();
         let provider = build_otel_provider(&config).expect("should succeed with no endpoint");
         assert!(
-            provider.is_none(),
+            provider.0.is_none(),
             "provider should be None when no endpoint configured"
         );
     }
