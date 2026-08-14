@@ -389,8 +389,17 @@ pub(super) fn min_timeout(configured: Option<Duration>, deadline: Duration) -> D
 /// request deadline fired) or `Io` (a shorter operator-configured
 /// read/write timeout fired).  Call this inside the `Err(_elapsed)`
 /// arm of `tokio::time::timeout` to preserve the 502-vs-504 distinction.
-pub(super) fn classify_timeout(deadline: tokio::time::Instant, phase: &str) -> SubRequestError {
-    if tokio::time::Instant::now() >= deadline {
+///
+/// Uses the pre-computed budget and configured timeout rather than a
+/// post-hoc `Instant::now() >= deadline` check, which races with
+/// scheduler jitter when the configured timeout equals the remaining
+/// budget.
+pub(super) fn classify_timeout(
+    remaining_budget: Duration,
+    configured_timeout: Option<Duration>,
+    phase: &str,
+) -> SubRequestError {
+    if configured_timeout.is_none_or(|t| t >= remaining_budget) {
         SubRequestError::DeadlineExceeded
     } else {
         SubRequestError::Io(format!("upstream {phase} timeout"))

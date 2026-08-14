@@ -233,6 +233,66 @@ fn subrequest_error_stream_idle_timeout_display() {
     assert!(msg.contains("30s"), "should include duration: {msg}");
 }
 
+// -- classify_timeout ---------------------------------------------------
+
+#[test]
+fn classify_timeout_deadline_binding_when_no_configured_timeout() {
+    let remaining = Duration::from_millis(50);
+    let err = classify_timeout(remaining, None, "read");
+    assert!(
+        matches!(err, SubRequestError::DeadlineExceeded),
+        "no configured timeout means deadline is binding: {err}"
+    );
+}
+
+#[test]
+fn classify_timeout_deadline_binding_when_configured_exceeds_budget() {
+    let remaining = Duration::from_millis(50);
+    let configured = Some(Duration::from_secs(5));
+    let err = classify_timeout(remaining, configured, "read");
+    assert!(
+        matches!(err, SubRequestError::DeadlineExceeded),
+        "configured timeout >= remaining means deadline is binding: {err}"
+    );
+}
+
+#[test]
+fn classify_timeout_deadline_binding_when_equal() {
+    let remaining = Duration::from_millis(50);
+    let configured = Some(Duration::from_millis(50));
+    let err = classify_timeout(remaining, configured, "write");
+    assert!(
+        matches!(err, SubRequestError::DeadlineExceeded),
+        "configured timeout == remaining means deadline is binding: {err}"
+    );
+}
+
+#[test]
+fn classify_timeout_io_when_configured_is_stricter() {
+    let remaining = Duration::from_millis(500);
+    let configured = Some(Duration::from_millis(10));
+    let err = classify_timeout(remaining, configured, "read");
+    match err {
+        SubRequestError::Io(msg) => {
+            assert!(msg.contains("read"), "should include phase: {msg}");
+        },
+        other => panic!("expected Io, got: {other}"),
+    }
+}
+
+#[test]
+fn classify_timeout_io_includes_phase() {
+    let remaining = Duration::from_secs(10);
+    let configured = Some(Duration::from_millis(100));
+    let err = classify_timeout(remaining, configured, "write");
+    match err {
+        SubRequestError::Io(msg) => {
+            assert!(msg.contains("write"), "should include write phase: {msg}");
+        },
+        other => panic!("expected Io, got: {other}"),
+    }
+}
+
 // -- Header sanitization ------------------------------------------------
 
 #[test]
@@ -1922,4 +1982,127 @@ async fn send_streaming_h1_cancel_does_not_reuse_connection() {
     );
 
     handle.abort();
+}
+
+// -- Header-time completion (204, incomplete) --------------------------------
+
+async fn spawn_204_backend() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0_u8; 4096];
+        drop(tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await);
+
+        let response = "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n";
+        socket.write_all(response.as_bytes()).await.unwrap();
+        socket.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    });
+    (addr, handle)
+}
+
+#[tokio::test]
+async fn send_streaming_204_returns_done_body() {
+    use pingora_core::upstreams::peer::HttpPeer;
+    let (addr, backend) = spawn_204_backend().await;
+
+    let connector = SubRequestConnector::new(1, None);
+    let client = super::client::SubRequestClient::new(connector);
+    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let request = SubRequest {
+        method: http::Method::GET,
+        uri: "/empty".parse().unwrap(),
+        headers: HeaderMap::new(),
+        body: Bytes::new(),
+    };
+    let limits = StreamLimits {
+        idle_timeout: Duration::from_secs(5),
+        max_stream_duration: None,
+        max_total_bytes: None,
+    };
+
+    let StreamingSubResponse { status, mut body, .. } =
+        Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits, None))
+            .await
+            .unwrap();
+
+    assert_eq!(status, 204);
+    assert!(body.is_done(), "204 response body should be pre-done");
+    assert!(
+        matches!(body.next_chunk().await, Ok(None)),
+        "next_chunk on done body should return Ok(None)"
+    );
+
+    backend.abort();
+}
+
+// -- Framework headers in streaming -----------------------------------------
+
+async fn spawn_echo_headers_backend() -> (std::net::SocketAddr, tokio::task::JoinHandle<Vec<String>>) {
+    use tokio::io::AsyncWriteExt as _;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0_u8; 8192];
+        let n = tokio::io::AsyncReadExt::read(&mut socket, &mut buf).await.unwrap();
+        let request_text = String::from_utf8_lossy(buf.get(..n).unwrap_or(&[])).to_string();
+        let headers: Vec<String> = request_text
+            .lines()
+            .filter(|l| l.starts_with("x-praxis-") || l.starts_with("x-custom-"))
+            .map(String::from)
+            .collect();
+
+        let response = "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok";
+        socket.write_all(response.as_bytes()).await.unwrap();
+        socket.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        headers
+    });
+    (addr, handle)
+}
+
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "test setup and validation")]
+async fn send_streaming_propagates_framework_headers() {
+    use pingora_core::upstreams::peer::HttpPeer;
+    let (addr, backend) = spawn_echo_headers_backend().await;
+
+    let connector = SubRequestConnector::new(1, None);
+    let client = super::client::SubRequestClient::new(connector);
+    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let request = SubRequest {
+        method: http::Method::GET,
+        uri: "/fw-test".parse().unwrap(),
+        headers: HeaderMap::new(),
+        body: Bytes::new(),
+    };
+    let limits = StreamLimits {
+        idle_timeout: Duration::from_secs(5),
+        max_stream_duration: None,
+        max_total_bytes: None,
+    };
+
+    let mut fw = FrameworkHeaders::new();
+    fw.set_depth(3);
+
+    let StreamingSubResponse { status, mut body, .. } =
+        Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits, Some(&fw)))
+            .await
+            .unwrap();
+
+    assert_eq!(status, 200);
+    while body.next_chunk().await.unwrap().is_some() {}
+
+    let captured_headers = backend.await.unwrap();
+    assert!(
+        captured_headers
+            .iter()
+            .any(|h| h.contains("x-praxis-iterative-depth") && h.contains('3')),
+        "upstream should receive depth header, got: {captured_headers:?}"
+    );
 }

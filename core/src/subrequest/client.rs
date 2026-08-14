@@ -211,7 +211,7 @@ impl SubRequestClient {
         let write_timeout = min_timeout(bounded_peer.options.write_timeout, remaining);
         tokio::time::timeout(write_timeout, session.write_request_header(Box::new(req_header)))
             .await
-            .map_err(|_elapsed| classify_timeout(deadline, "write"))?
+            .map_err(|_elapsed| classify_timeout(remaining, bounded_peer.options.write_timeout, "write"))?
             .map_err(|e| SubRequestError::Io(e.to_string()))?;
 
         if !request.body.is_empty() {
@@ -223,7 +223,7 @@ impl SubRequestClient {
             let write_timeout = min_timeout(bounded_peer.options.write_timeout, remaining);
             tokio::time::timeout(write_timeout, session.write_request_body(request.body.clone(), true))
                 .await
-                .map_err(|_elapsed| classify_timeout(deadline, "write"))?
+                .map_err(|_elapsed| classify_timeout(remaining, bounded_peer.options.write_timeout, "write"))?
                 .map_err(|e| SubRequestError::Io(e.to_string()))?;
         }
 
@@ -235,7 +235,7 @@ impl SubRequestClient {
         let write_timeout = min_timeout(bounded_peer.options.write_timeout, remaining);
         tokio::time::timeout(write_timeout, session.finish_request_body())
             .await
-            .map_err(|_elapsed| classify_timeout(deadline, "write"))?
+            .map_err(|_elapsed| classify_timeout(remaining, bounded_peer.options.write_timeout, "write"))?
             .map_err(|e| SubRequestError::Io(e.to_string()))?;
 
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -248,7 +248,7 @@ impl SubRequestClient {
 
         tokio::time::timeout(read_timeout, session.read_response_header())
             .await
-            .map_err(|_elapsed| classify_timeout(deadline, "read"))?
+            .map_err(|_elapsed| classify_timeout(remaining, bounded_peer.options.read_timeout, "read"))?
             .map_err(|e| SubRequestError::Io(e.to_string()))?;
 
         // -- 6. Validate response --
