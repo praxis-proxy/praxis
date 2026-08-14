@@ -655,7 +655,13 @@ fn build_streaming_terminal_header(resp: &praxis_filter::Response) -> Option<pin
         );
         return None;
     }
-    let mut header = pingora_http::ResponseHeader::build(resp.status, Some(resp.headers.len())).ok()?;
+    let mut header = match pingora_http::ResponseHeader::build(resp.status, Some(resp.headers.len())) {
+        Ok(h) => h,
+        Err(e) => {
+            error!(status = %resp.status, error = %e, "invalid streaming terminal response status; using 500");
+            return None;
+        },
+    };
     for (name, value) in &resp.headers {
         let _append = header.append_header(name.clone(), value.clone());
     }

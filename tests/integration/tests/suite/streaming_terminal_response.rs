@@ -233,7 +233,7 @@ impl HttpFilter for SlowStreamingFilter {
 }
 
 // -----------------------------------------------------------------------------
-// Registry Helpers
+// Registry Utilities
 // -----------------------------------------------------------------------------
 
 fn registry_with_suppress(status: u16, counter: &Arc<AtomicUsize>) -> FilterRegistry {
