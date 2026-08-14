@@ -488,6 +488,185 @@ fn write_multi_source_config() -> (TempDir, String) {
     (dir, path_str)
 }
 
+/// Write a CPEX YAML that exercises ROUTE-SCOPED identity. A global
+/// resolver (`id-global`, reads `Authorization`) is listed in
+/// `global.authentication`; a second resolver (`id-route`, reads
+/// `X-Route-Token`) is bound ONLY to the `scoped-tool` route via a
+/// `replace_inherited` `authentication:` block. `open-tool` carries no
+/// route-level `authentication:`, so it inherits the global resolver.
+/// Both plugins validate the same HS256 material — only the HEADER each
+/// reads and the route each is bound to differ, which is precisely what
+/// route-scoping must select on.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_route_scoped_identity_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+
+    let yaml = format!(
+        r#"plugin_settings:
+  # Route-scoped dispatch only engages when routing is enabled.
+  routing_enabled: true
+plugins:
+  - name: id-global
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    mode: sequential
+    priority: 10
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+  - name: id-route
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    mode: sequential
+    priority: 20
+    on_error: fail
+    config:
+      header: X-Route-Token
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - id-global
+routes:
+  # `apl` is required for a route to run identity/policy at all — without
+  # a policy the body phase treats the route as passthrough.
+  - tool: open-tool
+    apl:
+      pre_invocation:
+        - "require(authenticated)"
+  - tool: scoped-tool
+    authentication:
+      replace_inherited: true
+      steps:
+        - id-route
+    apl:
+      pre_invocation:
+        - "require(authenticated)"
+"#
+    );
+
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
+    (dir, path_str)
+}
+
+/// Drive a `tools/call` for `tool`, carrying `token` in `header` as the
+/// ONLY identity header on the request, and return the body-phase
+/// action. The classifier metadata (`mcp.method` / `mcp.name`) is what
+/// tells the filter which route this is — and therefore which identity
+/// resolvers to scope to.
+async fn dispatch_tool_with_header(
+    filter: &PolicyFilter,
+    tool: &str,
+    header: &'static str,
+    token: &str,
+) -> FilterAction {
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        header,
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", tool);
+    let body = bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"t","arguments":{}}}"#,
+    );
+    filter
+        .on_request_body(&mut ctx, &mut Some(body), true)
+        .await
+        .expect("filter ran")
+}
+
+/// A route whose `authentication:` block names `id-route` (with
+/// `replace_inherited`) resolves identity with ONLY that resolver: a
+/// request carrying just `X-Route-Token` — no `Authorization` — is
+/// accepted. This is the wiring under test: the filter must stamp the
+/// route coordinates onto the `Extensions` so the identity hook scopes
+/// to the route's `authentication:` list instead of running every
+/// registered resolver.
+#[tokio::test(flavor = "multi_thread")]
+async fn route_authentication_scopes_identity_to_its_resolver() {
+    let (_dir, path) = write_route_scoped_identity_config();
+    let filter = build_filter(path);
+    let token = mint_jwt(&standard_claims("alice"));
+
+    let action = dispatch_tool_with_header(&filter, "scoped-tool", "X-Route-Token", &token).await;
+    assert!(
+        !matches!(action, FilterAction::Reject(_)),
+        "scoped-tool must scope to id-route (reads X-Route-Token); a reject means the global \
+         id-global (reads Authorization, absent here) wrongly ran; got {action:?}",
+    );
+}
+
+/// `replace_inherited` genuinely DROPS the inherited global resolver:
+/// `scoped-tool` carrying only `Authorization` (which the global
+/// `id-global` reads) and NO `X-Route-Token` is rejected — `id-global`
+/// never runs, and the route's `id-route` finds no header. Pins that the
+/// scoping EXCLUDES the inherited resolver rather than merely adding the
+/// route's on top. (Before the fix, `id-global` ran for every route, so
+/// this request would have been accepted.)
+#[tokio::test(flavor = "multi_thread")]
+async fn route_replace_inherited_excludes_global_resolver() {
+    let (_dir, path) = write_route_scoped_identity_config();
+    let filter = build_filter(path);
+    let token = mint_jwt(&standard_claims("alice"));
+
+    let action = dispatch_tool_with_header(&filter, "scoped-tool", "Authorization", &token).await;
+    assert!(
+        matches!(&action, FilterAction::Reject(rej) if rej.status == 401),
+        "scoped-tool must NOT run the global resolver; Authorization-only must 401; got {action:?}",
+    );
+}
+
+/// Control: a route with NO `authentication:` block inherits the global
+/// resolver. `open-tool` with only `Authorization` is accepted (global
+/// `id-global` runs); with only `X-Route-Token` it is rejected (the
+/// route resolver is not in scope here). Together with the scoped-tool
+/// cases, this shows the filter selects resolvers PER ROUTE — not one
+/// global set for all traffic.
+#[tokio::test(flavor = "multi_thread")]
+async fn route_without_authentication_inherits_global_resolver() {
+    let (_dir, path) = write_route_scoped_identity_config();
+    let filter = build_filter(path);
+    let token = mint_jwt(&standard_claims("alice"));
+
+    let allowed = dispatch_tool_with_header(&filter, "open-tool", "Authorization", &token).await;
+    assert!(
+        !matches!(allowed, FilterAction::Reject(_)),
+        "open-tool inherits id-global (reads Authorization); a reject means id-route \
+         (reads X-Route-Token, absent here) wrongly ran; got {allowed:?}",
+    );
+
+    let rejected = dispatch_tool_with_header(&filter, "open-tool", "X-Route-Token", &token).await;
+    assert!(
+        matches!(&rejected, FilterAction::Reject(rej) if rej.status == 401),
+        "open-tool does not use the route resolver; X-Route-Token-only must 401; got {rejected:?}",
+    );
+}
+
 /// Write a CPEX YAML selecting the Valkey-backed session store via a
 /// flat `global.session_store` block. The `valkey` factory connects
 /// lazily (the pool dials on first request), so this config loads
