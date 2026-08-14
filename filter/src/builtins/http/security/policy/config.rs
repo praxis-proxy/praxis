@@ -45,7 +45,7 @@ pub struct PolicyFilterConfig {
     /// Filesystem path to the policy document.
     pub config_path: String,
 
-    /// Maximum time, in seconds, to wait for `PluginManager::initialize`
+    /// Maximum time, in seconds, to wait for `PolicyEngine::initialize`
     /// at filter construction. Identity plugins fetch JWKS over HTTPS
     /// during init; a reachable-but-unresponsive identity provider
     /// would otherwise hang startup or hot-reload indefinitely. On
@@ -99,7 +99,7 @@ fn default_true() -> bool {
     true
 }
 
-/// Default upper bound on `PluginManager::initialize` (seconds).
+/// Default upper bound on `PolicyEngine::initialize` (seconds).
 fn default_init_timeout_secs() -> u64 {
     30
 }

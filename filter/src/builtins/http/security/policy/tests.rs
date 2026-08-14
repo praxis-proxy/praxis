@@ -1066,7 +1066,7 @@ fn config_init_timeout_honors_override() {
 // path is intentionally NOT a unit test: the bundled identity-jwt
 // plugin has its own JWKS connect/request timeouts plus soft-fail-at-
 // boot, so a hung JWKS endpoint never propagates a hang through
-// `PluginManager::initialize` in the first place. The wrap-timeout in
+// `PolicyEngine::initialize` in the first place. The wrap-timeout in
 // `PolicyFilter::new` is defense-in-depth for OTHER init paths (custom
 // plugins, future hooks) where a future could legitimately stall.
 // The unit tests above pin the surface; the timeout's behavior is

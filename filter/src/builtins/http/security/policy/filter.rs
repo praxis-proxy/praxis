@@ -17,11 +17,11 @@ use ppe::praxis_policy_core::{
             HOOK_CMF_HTTP_REQUEST, HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_PRE_INVOKE,
         },
     },
+    engine::PolicyEngine,
     error::{PluginError, PluginViolation},
     extensions::MetaExtension,
     hooks::Extensions,
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
-    manager::PluginManager,
 };
 
 use super::{
@@ -93,7 +93,7 @@ pub struct PolicyFilter {
     /// dispatches hook chains. Wrapped in `Arc` so the response-phase
     /// `spawn_blocking` closure can hold its own handle without
     /// borrowing `&self`.
-    mgr: Arc<PluginManager>,
+    mgr: Arc<PolicyEngine>,
     /// Derived from the loaded policy at construction: the `global` policy
     /// wired the entity-less HTTP path (`cmf.http_request`). When true and
     /// `entity_routes` is false, the filter is a pure L7 policy evaluated at
@@ -127,7 +127,7 @@ impl PolicyFilter {
             format!("policy: failed to read config_path {}: {e}", cfg.config_path).into()
         })?;
 
-        let mgr = Arc::new(PluginManager::default());
+        let mgr = Arc::new(PolicyEngine::default());
         ppe::install_builtins(&mgr);
 
         // Host-supplied factories, for `kind:` values the engine does not
@@ -180,9 +180,9 @@ impl PolicyFilter {
             rt.block_on(async move {
                 match tokio::time::timeout(init_timeout, mgr_for_init.initialize()).await {
                     Ok(Ok(())) => Ok(()),
-                    Ok(Err(e)) => Err(format!("policy: PluginManager::initialize failed: {e}")),
+                    Ok(Err(e)) => Err(format!("policy: PolicyEngine::initialize failed: {e}")),
                     Err(_) => Err(format!(
-                        "policy: PluginManager::initialize timed out after {}s \
+                        "policy: PolicyEngine::initialize timed out after {}s \
                          (init_timeout_secs); likely a JWKS / OAuth endpoint is unreachable",
                         init_timeout.as_secs(),
                     )),
@@ -196,7 +196,7 @@ impl PolicyFilter {
                 .map(|s| (*s).to_owned())
                 .or_else(|| panic.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "<no panic message>".to_owned());
-            format!("policy: PluginManager::initialize panicked in init thread: {msg}")
+            format!("policy: PolicyEngine::initialize panicked in init thread: {msg}")
         })?;
         init.map_err(|s: String| -> FilterError { s.into() })?;
 

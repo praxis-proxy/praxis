@@ -2969,7 +2969,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=e113aea313c1bab800ee87fb5055d2eebfa706fb#e113aea313c1bab800ee87fb5055d2eebfa706fb"
+source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
 dependencies = [
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
@@ -2987,7 +2987,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-apl-cmf"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=e113aea313c1bab800ee87fb5055d2eebfa706fb#e113aea313c1bab800ee87fb5055d2eebfa706fb"
+source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
 dependencies = [
  "praxis-policy-apl-core",
  "praxis-policy-core",
@@ -2997,7 +2997,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-apl-core"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=e113aea313c1bab800ee87fb5055d2eebfa706fb#e113aea313c1bab800ee87fb5055d2eebfa706fb"
+source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
 dependencies = [
  "async-trait",
  "futures",
@@ -3012,7 +3012,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-apl-runtime"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=e113aea313c1bab800ee87fb5055d2eebfa706fb#e113aea313c1bab800ee87fb5055d2eebfa706fb"
+source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3030,7 +3030,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-core"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=e113aea313c1bab800ee87fb5055d2eebfa706fb#e113aea313c1bab800ee87fb5055d2eebfa706fb"
+source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3052,7 +3052,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-orchestration"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=e113aea313c1bab800ee87fb5055d2eebfa706fb#e113aea313c1bab800ee87fb5055d2eebfa706fb"
+source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
 dependencies = [
  "futures",
  "tokio",
@@ -3061,7 +3061,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-pdp-cedar-direct"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=e113aea313c1bab800ee87fb5055d2eebfa706fb#e113aea313c1bab800ee87fb5055d2eebfa706fb"
+source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
 dependencies = [
  "async-trait",
  "cedar-policy",
@@ -3075,7 +3075,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-pdp-cel"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=e113aea313c1bab800ee87fb5055d2eebfa706fb#e113aea313c1bab800ee87fb5055d2eebfa706fb"
+source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
 dependencies = [
  "async-trait",
  "cel",
@@ -3088,7 +3088,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-pdp-opa"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=e113aea313c1bab800ee87fb5055d2eebfa706fb#e113aea313c1bab800ee87fb5055d2eebfa706fb"
+source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
 dependencies = [
  "async-trait",
  "praxis-policy-apl-core",
@@ -3103,7 +3103,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-plugin-delegator-oauth"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=e113aea313c1bab800ee87fb5055d2eebfa706fb#e113aea313c1bab800ee87fb5055d2eebfa706fb"
+source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
 dependencies = [
  "async-trait",
  "base64",
@@ -3120,7 +3120,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-plugin-elicitation-ciba"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=e113aea313c1bab800ee87fb5055d2eebfa706fb#e113aea313c1bab800ee87fb5055d2eebfa706fb"
+source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
 dependencies = [
  "async-trait",
  "base64",
@@ -3136,7 +3136,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-plugin-identity-jwt"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=e113aea313c1bab800ee87fb5055d2eebfa706fb#e113aea313c1bab800ee87fb5055d2eebfa706fb"
+source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
 dependencies = [
  "async-trait",
  "base64",
@@ -3154,7 +3154,7 @@ dependencies = [
 [[package]]
 name = "praxis-policy-session-valkey"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=e113aea313c1bab800ee87fb5055d2eebfa706fb#e113aea313c1bab800ee87fb5055d2eebfa706fb"
+source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
 dependencies = [
  "async-trait",
  "deadpool-redis",

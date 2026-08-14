@@ -8,7 +8,7 @@
 //! `ppe::install_builtins`. Anything else — an organisation's own PII detector,
 //! an audit sink that writes to their SIEM, a validator for a house-specific
 //! identifier — has to come from the process embedding the filter, because
-//! `PolicyFilter` builds its own [`PluginManager`] and nothing else can reach it.
+//! `PolicyFilter` builds its own [`PolicyEngine`] and nothing else can reach it.
 //!
 //! A host registers before starting the server:
 //!
@@ -34,7 +34,7 @@ use std::{
 /// Builds a fresh factory each time it is called.
 ///
 /// A closure rather than a stored factory because
-/// `PluginManager::register_factory` takes its factory by value, and one
+/// `PolicyEngine::register_factory` takes its factory by value, and one
 /// registration has to serve more than one manager: `PolicyFilter::new` runs
 /// once per filter instance and again on every hot reload.
 pub type PolicyPluginFactoryFn = Arc<dyn Fn() -> Box<dyn ppe::PluginFactory> + Send + Sync>;
