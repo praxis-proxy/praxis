@@ -196,29 +196,34 @@ fn init_fmt_only(env_filter: tracing_subscriber::EnvFilter, json: bool) {
 ///
 /// Returns `Some(provider)` when an OTLP endpoint is configured,
 /// `None` otherwise. Sets the global tracer provider.
+///
+/// Applies configured batch settings (size, interval), custom headers
+/// (as gRPC metadata or HTTP headers), and resource attributes
+/// (service name/version, deployment environment).
 #[cfg(feature = "otel")]
 fn build_otel_provider(
     config: &crate::config::TelemetryConfig,
 ) -> Result<Option<opentelemetry_sdk::trace::SdkTracerProvider>, ProxyError> {
-    use opentelemetry_otlp::WithExportConfig as _;
-
     let Some(endpoint) = config.otlp_endpoint.as_deref() else {
         return Ok(None);
     };
 
-    let exporter = opentelemetry_otlp::SpanExporter::builder()
-        .with_tonic()
-        .with_endpoint(endpoint)
-        .build()
-        .map_err(|e| ProxyError::Config(format!("failed to build OTLP span exporter: {e}")))?;
+    if let Ok(protocol) = std::env::var(crate::config::OTLP_PROTOCOL_ENV_VAR)
+        && protocol != "grpc"
+    {
+        return Err(ProxyError::Config(format!(
+            "Praxis supports only gRPC for OTLP export, but {}={protocol}",
+            crate::config::OTLP_PROTOCOL_ENV_VAR,
+        )));
+    }
+
+    let exporter = build_span_exporter(endpoint, &config.otlp_headers)?;
+    let batch_processor = build_batch_processor(exporter, config);
+    let resource = build_otel_resource(config);
 
     let mut provider_builder = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-        .with_batch_exporter(exporter)
-        .with_resource(
-            opentelemetry_sdk::Resource::builder()
-                .with_service_name("praxis")
-                .build(),
-        );
+        .with_span_processor(batch_processor)
+        .with_resource(resource);
 
     // When a sampling rate is configured, wrap TraceIdRatioBased in
     // ParentBased so root spans are sampled at the given rate while
@@ -234,6 +239,129 @@ fn build_otel_provider(
     opentelemetry::global::set_tracer_provider(provider.clone());
 
     Ok(Some(provider))
+}
+
+// -----------------------------------------------------------------------------
+// OTLP Exporter Builder
+// -----------------------------------------------------------------------------
+
+/// Build the OTLP span exporter with endpoint and optional gRPC headers.
+#[cfg(feature = "otel")]
+fn build_span_exporter(
+    endpoint: &str,
+    headers: &Option<std::collections::HashMap<String, String>>,
+) -> Result<opentelemetry_otlp::SpanExporter, ProxyError> {
+    use opentelemetry_otlp::{WithExportConfig as _, WithTonicConfig as _};
+
+    let mut builder = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint);
+
+    if let Some(hdrs) = headers {
+        builder = builder.with_metadata(build_metadata_map(hdrs)?);
+    }
+
+    builder
+        .build()
+        .map_err(|e| ProxyError::Config(format!("failed to build OTLP span exporter: {e}")))
+}
+
+// -----------------------------------------------------------------------------
+// Batch Processor Builder
+// -----------------------------------------------------------------------------
+
+/// Build a batch span processor with configured size and interval.
+///
+/// Uses explicit defaults so Praxis controls batch behaviour even if the
+/// `OTel` SDK changes its own defaults.
+#[cfg(feature = "otel")]
+fn build_batch_processor(
+    exporter: opentelemetry_otlp::SpanExporter,
+    config: &crate::config::TelemetryConfig,
+) -> opentelemetry_sdk::trace::BatchSpanProcessor {
+    let batch_size = config
+        .batch_size
+        .unwrap_or(crate::config::TelemetryConfig::DEFAULT_BATCH_SIZE);
+    let batch_interval = config
+        .batch_interval_secs
+        .unwrap_or(crate::config::TelemetryConfig::DEFAULT_BATCH_INTERVAL_SECS);
+
+    let batch_config = opentelemetry_sdk::trace::BatchConfigBuilder::default()
+        .with_max_export_batch_size(batch_size)
+        .with_max_queue_size(2048)
+        .with_scheduled_delay(std::time::Duration::from_secs(batch_interval))
+        .build();
+
+    opentelemetry_sdk::trace::BatchSpanProcessor::builder(exporter)
+        .with_batch_config(batch_config)
+        .build()
+}
+
+// -----------------------------------------------------------------------------
+// Resource Builder
+// -----------------------------------------------------------------------------
+
+/// Build the `OTel` [`Resource`] from configured service metadata.
+///
+/// Uses the SDK's [`EnvResourceDetector`] to pick up all attributes from
+/// `OTEL_RESOURCE_ATTRIBUTES`, then layers config-supplied values on top
+/// (config takes precedence over env-detected values).
+///
+/// [`Resource`]: opentelemetry_sdk::Resource
+/// [`EnvResourceDetector`]: opentelemetry_sdk::resource::EnvResourceDetector
+#[cfg(feature = "otel")]
+fn build_otel_resource(config: &crate::config::TelemetryConfig) -> opentelemetry_sdk::Resource {
+    use opentelemetry_sdk::resource::EnvResourceDetector;
+
+    let service_name = config
+        .service_name
+        .clone()
+        .unwrap_or_else(|| crate::config::TelemetryConfig::DEFAULT_SERVICE_NAME.to_owned());
+
+    // Order matters: later attributes override earlier ones in the SDK builder.
+    // Detector runs first (picks up OTEL_RESOURCE_ATTRIBUTES), then explicit
+    // config values override any colliding keys.
+    let mut builder = opentelemetry_sdk::Resource::builder()
+        .with_detector(Box::new(EnvResourceDetector::new()))
+        .with_service_name(service_name);
+
+    if let Some(version) = &config.service_version {
+        builder = builder.with_attribute(opentelemetry::KeyValue::new("service.version", version.clone()));
+    }
+    if let Some(env) = &config.environment {
+        builder = builder.with_attribute(opentelemetry::KeyValue::new("deployment.environment", env.clone()));
+    }
+
+    builder.build()
+}
+
+// -----------------------------------------------------------------------------
+// Metadata Builder
+// -----------------------------------------------------------------------------
+
+/// Build a tonic [`MetadataMap`] from the configured OTLP headers.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] if any header name or value is invalid.
+///
+/// [`MetadataMap`]: tonic::metadata::MetadataMap
+/// [`ProxyError::Config`]: crate::errors::ProxyError::Config
+#[cfg(feature = "otel")]
+fn build_metadata_map(
+    headers: &std::collections::HashMap<String, String>,
+) -> Result<tonic::metadata::MetadataMap, ProxyError> {
+    let mut metadata = tonic::metadata::MetadataMap::new();
+    for (key, value) in headers {
+        let name: tonic::metadata::MetadataKey<tonic::metadata::Ascii> = key
+            .parse()
+            .map_err(|e| ProxyError::Config(format!("invalid OTLP header name '{key}': {e}")))?;
+        let val: tonic::metadata::MetadataValue<tonic::metadata::Ascii> = value
+            .parse()
+            .map_err(|e| ProxyError::Config(format!("invalid OTLP header value for '{key}': {e}")))?;
+        metadata.insert(name, val);
+    }
+    Ok(metadata)
 }
 
 // -----------------------------------------------------------------------------

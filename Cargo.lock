@@ -3148,6 +3148,7 @@ dependencies = [
  "serde",
  "thiserror 2.0.20",
  "tokio",
+ "tonic",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",

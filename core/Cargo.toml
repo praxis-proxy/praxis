@@ -21,6 +21,7 @@ otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-otlp",
+    "dep:tonic",
     "dep:tracing-opentelemetry",
 ]
 
@@ -40,7 +41,9 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
+
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tonic = { workspace = true, optional = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true }
