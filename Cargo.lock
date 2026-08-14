@@ -2969,7 +2969,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f2aee539307927ff2bf99720d3c998c0e9a4ebf27abbe1ac862d6817ec92af2"
 dependencies = [
  "praxis-policy-apl-cmf",
  "praxis-policy-apl-core",
@@ -2987,7 +2988,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-apl-cmf"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "278ebd1a349e2201705f46c0f63d5558b578508600c84fa958889979b184dda9"
 dependencies = [
  "praxis-policy-apl-core",
  "praxis-policy-core",
@@ -2997,7 +2999,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-apl-core"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56cbea9f50f318f58790f373d5ce2323f3e6d823390117f399924a5503e13181"
 dependencies = [
  "async-trait",
  "futures",
@@ -3012,7 +3015,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-apl-runtime"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e881265d0e1655ab764664d126d90ef9887da4c03c65037b4be1549a618dab75"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3030,7 +3034,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-core"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53b9b82c7558797be9bcf048c7d359dded98ee7e9adb87391b8b98c19d7daff8"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3052,7 +3057,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-orchestration"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb58ca9610a3244f2c9eaaea11c29e83ee60d5cd545e6e5e7c087b987185b86f"
 dependencies = [
  "futures",
  "tokio",
@@ -3061,7 +3067,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-pdp-cedar-direct"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d199493cefa1ecbf5712682416d89dc3c1602ea11e17421eec6d55dc76b41474"
 dependencies = [
  "async-trait",
  "cedar-policy",
@@ -3075,7 +3082,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-pdp-cel"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2139bfe25a50486b89d0e8e7de27ce868b7991c6c9d0f1576998f99d01ae201"
 dependencies = [
  "async-trait",
  "cel",
@@ -3088,7 +3096,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-pdp-opa"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3637f3957e9ca313ad81a35b093be2fd02c53dba96f294e4d793cf3eed36da6f"
 dependencies = [
  "async-trait",
  "praxis-policy-apl-core",
@@ -3103,7 +3112,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-plugin-delegator-oauth"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ecf96fbc6946f672f4bb8fbd1c6fd29a44a238e6af31d93c76ec07bf9cc6b7c"
 dependencies = [
  "async-trait",
  "base64",
@@ -3120,7 +3130,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-plugin-elicitation-ciba"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e1dd821594ad409500ad633e9ea7ad4bc8c37374f6705d28580ec11e0d83374"
 dependencies = [
  "async-trait",
  "base64",
@@ -3136,7 +3147,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-plugin-identity-jwt"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a319ad5e8934a00b657c87556c014e39ce4d28bfbf5e515d4c765f02e80d27f"
 dependencies = [
  "async-trait",
  "base64",
@@ -3154,7 +3166,8 @@ dependencies = [
 [[package]]
 name = "praxis-policy-session-valkey"
 version = "0.1.0"
-source = "git+https://github.com/praxis-proxy/policy?rev=d68dec3ae964dfa0e3b06f82a217e30776a1eb2d#d68dec3ae964dfa0e3b06f82a217e30776a1eb2d"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4882ddf222b74ab023f0ce3b6fddf81fdee26a5c1c2920ec8f52df18fb40f62"
 dependencies = [
  "async-trait",
  "deadpool-redis",

@@ -38,12 +38,6 @@ base64 = "0.22.1"
 benchmarks = { path = "benchmarks" }
 bytes = "1.12.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-# Pinned to a git revision rather than a version: the engine is not published yet.
-# A path dependency on a sibling checkout does not resolve in CI, and publishing is
-# gated on maintainer sign-off, so a pinned revision is the only form that both
-# builds here and is reproducible. Becomes a version dependency at publish, and the
-# allow-git entry in deny.toml goes away with it.
-#
 # `builtins` is the engine's one umbrella for every bundled extension, session
 # store included. Naming it rather than enumerating the granular features keeps
 # this line from drifting each time the set changes, which is how the OPA
@@ -52,7 +46,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # The umbrella is bundled extensions only. Anything else a policy document names
 # comes from the host via `register_policy_plugin_factory`; see the policy
 # filter's `host_plugins` module.
-ppe = { git = "https://github.com/praxis-proxy/policy", rev = "d68dec3ae964dfa0e3b06f82a217e30776a1eb2d", package = "praxis-policy", features = ["builtins"] }
+ppe = { version = "0.1.0", package = "praxis-policy", features = ["builtins"] }
 clap = { version = "4.6.6", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.2.1"
