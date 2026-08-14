@@ -9,6 +9,7 @@ use bytes::Bytes;
 use praxis_core::connectivity::Upstream;
 use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, Response, TrustedHeaderMutation};
 use tokio::sync::OwnedSemaphorePermit;
+use tracing::Span;
 
 // -----------------------------------------------------------------------------
 // PingoraRequestCtx
@@ -206,6 +207,14 @@ pub struct PingoraRequestCtx {
 
     /// Snapshot of the original request for body/response body phases.
     pub request_snapshot: Option<Request>,
+
+    /// Root tracing span for this request's lifecycle.
+    ///
+    /// Created during `request_filter` with OpenTelemetry HTTP semantic
+    /// convention attributes. Response-phase attributes
+    /// (`http.response.status_code`, `upstream.address`, `upstream.cluster`)
+    /// are recorded in the `logging` hook before the span is dropped.
+    pub request_span: Span,
 
     /// When this request was received.
     pub request_start: Instant,
@@ -481,6 +490,7 @@ impl Default for PingoraRequestCtx {
             request_body_released: false,
             request_is_idempotent: false,
             request_snapshot: None,
+            request_span: Span::none(),
             request_start: Instant::now(),
             response_body_buffer: None,
             response_body_bytes: 0,
@@ -574,6 +584,15 @@ mod tests {
             "default response_body_buffer should be None"
         );
         assert!(ctx.pre_read_body.is_none(), "default pre_read_body should be None");
+    }
+
+    #[test]
+    fn default_state_request_span_is_disabled() {
+        let ctx = default_ctx();
+        assert!(
+            ctx.request_span.is_disabled(),
+            "default request_span should be a disabled (none) span"
+        );
     }
 
     #[test]

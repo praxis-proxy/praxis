@@ -28,6 +28,7 @@ use crate::{config::Config, errors::ProxyError};
 /// let config = praxis_core::config::Config::load(None, "listeners: []").unwrap();
 /// let _guard = praxis_core::logging::init_tracing(&config).unwrap();
 /// ```
+#[must_use = "dropping the guard immediately shuts down the tracer provider"]
 pub struct TracingGuard {
     /// Tracer provider to shut down when the guard is dropped.
     #[cfg(feature = "otel")]
@@ -75,7 +76,7 @@ pub fn init_tracing(config: &Config) -> Result<TracingGuard, ProxyError> {
     let json = std::env::var("PRAXIS_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
     let telemetry = config.telemetry.resolve();
 
-    warn_if_endpoint_without_feature(telemetry.otlp_endpoint.is_some());
+    warn_if_otel_config_without_feature(telemetry.otlp_endpoint.is_some(), telemetry.sampling_rate.is_some());
 
     #[cfg(feature = "otel")]
     return init_with_otel(env_filter, json, &telemetry);
@@ -194,7 +195,7 @@ fn init_fmt_only(env_filter: tracing_subscriber::EnvFilter, json: bool) {
 /// Build the optional OTLP tracer provider.
 ///
 /// Returns `Some(provider)` when an OTLP endpoint is configured,
-/// `None` otherwise. Sets the global tracer provider and W3C propagator.
+/// `None` otherwise. Sets the global tracer provider.
 #[cfg(feature = "otel")]
 fn build_otel_provider(
     config: &crate::config::TelemetryConfig,
@@ -211,17 +212,26 @@ fn build_otel_provider(
         .build()
         .map_err(|e| ProxyError::Config(format!("failed to build OTLP span exporter: {e}")))?;
 
-    let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+    let mut provider_builder = opentelemetry_sdk::trace::SdkTracerProvider::builder()
         .with_batch_exporter(exporter)
         .with_resource(
             opentelemetry_sdk::Resource::builder()
                 .with_service_name("praxis")
                 .build(),
-        )
-        .build();
+        );
+
+    // When a sampling rate is configured, wrap TraceIdRatioBased in
+    // ParentBased so root spans are sampled at the given rate while
+    // locally-created child spans inherit their parent's decision.
+    if let Some(rate) = config.sampling_rate {
+        provider_builder = provider_builder.with_sampler(opentelemetry_sdk::trace::Sampler::ParentBased(Box::new(
+            opentelemetry_sdk::trace::Sampler::TraceIdRatioBased(rate),
+        )));
+    }
+
+    let provider = provider_builder.build();
 
     opentelemetry::global::set_tracer_provider(provider.clone());
-    opentelemetry::global::set_text_map_propagator(opentelemetry_sdk::propagation::TraceContextPropagator::new());
 
     Ok(Some(provider))
 }
@@ -236,17 +246,21 @@ fn build_otel_provider(
     not(feature = "otel"),
     expect(clippy::print_stderr, reason = "tracing not yet initialized")
 )]
-fn warn_if_endpoint_without_feature(has_endpoint: bool) {
+fn warn_if_otel_config_without_feature(has_endpoint: bool, has_sampling: bool) {
     #[cfg(not(feature = "otel"))]
-    if has_endpoint {
+    if has_endpoint || has_sampling {
         eprintln!(
-            "warning: telemetry.otlp_endpoint is configured but the `otel` feature is not \
-             enabled; OTLP export is disabled. Rebuild with `--features otel` to enable it."
+            "warning: telemetry OTel settings are configured but the `otel` feature is not \
+             enabled; OTLP export and sampling are disabled. Rebuild with `--features otel` \
+             to enable them."
         );
     }
 
     #[cfg(feature = "otel")]
-    let _ = has_endpoint;
+    {
+        let _ = has_endpoint;
+        let _ = has_sampling;
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -485,6 +499,10 @@ mod tests {
             config.telemetry.otlp_endpoint.is_none(),
             "telemetry.otlp_endpoint should default to None"
         );
+        assert!(
+            config.telemetry.sampling_rate.is_none(),
+            "telemetry.sampling_rate should default to None"
+        );
     }
 
     #[test]
@@ -506,6 +524,71 @@ telemetry:
             config.telemetry.otlp_endpoint.as_deref(),
             Some("http://collector:4317"),
             "otlp_endpoint should be parsed from config"
+        );
+    }
+
+    #[test]
+    fn telemetry_sampling_rate_parsed_in_config() {
+        let yaml = r#"
+listeners:
+  - name: test
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+telemetry:
+  otlp_endpoint: "http://collector:4317"
+  sampling_rate: 0.01
+"#;
+        let config = Config::from_yaml(yaml).expect("config with sampling_rate should parse");
+        assert_eq!(
+            config.telemetry.sampling_rate,
+            Some(0.01),
+            "sampling_rate should be parsed from config"
+        );
+    }
+
+    #[test]
+    fn telemetry_sampling_rate_out_of_range_rejected() {
+        let yaml = r#"
+listeners:
+  - name: test
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+telemetry:
+  sampling_rate: 2.0
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("between 0.0 and 1.0"),
+            "out-of-range sampling_rate should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn telemetry_negative_sampling_rate_rejected() {
+        let yaml = r#"
+listeners:
+  - name: test
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+telemetry:
+  sampling_rate: -0.5
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("between 0.0 and 1.0"),
+            "negative sampling_rate should be rejected: {err}"
         );
     }
 

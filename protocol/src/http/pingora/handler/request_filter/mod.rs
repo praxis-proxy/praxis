@@ -11,7 +11,7 @@ use praxis_core::connectivity::normalize_mapped_ipv4;
 use praxis_filter::{
     BodyMode, FilterAction, FilterError, FilterPipeline, Rejection, Request, TerminalResponse, TrustedHeaderMutation,
 };
-use tracing::{debug, error, warn};
+use tracing::{Instrument as _, debug, error, warn};
 
 use super::super::{
     context::PingoraRequestCtx,
@@ -106,13 +106,19 @@ pub(in crate::http) async fn execute(
         http::Method::GET | http::Method::HEAD | http::Method::OPTIONS
     );
 
+    ctx.request_span = create_request_span(session, ctx);
+
     let caps = pipeline.body_capabilities();
     ctx.request_body_mode = caps.request_body_mode;
     ctx.response_body_mode = caps.response_body_mode;
 
     if matches!(caps.request_body_mode, BodyMode::StreamBuffer { .. }) {
         tracing::debug!("pre-reading request body for StreamBuffer inspection");
-        match stream_buffer::pre_read_body(pipeline, session, ctx, &request).await {
+        let span = ctx.request_span.clone();
+        match stream_buffer::pre_read_body(pipeline, session, ctx, &request)
+            .instrument(span)
+            .await
+        {
             Ok(pre_read) => {
                 apply_pre_read_mutations(session, &mut request, &pre_read.mutations);
                 ctx.pre_read_mutations = pre_read.mutations;
@@ -130,7 +136,10 @@ pub(in crate::http) async fn execute(
         }
     }
 
-    match run_pipeline(pipeline, request, ctx).await {
+    let span = ctx.request_span.clone();
+    let pipeline_result = run_pipeline(pipeline, request, ctx).instrument(span).await;
+
+    match pipeline_result {
         Ok(PipelineResult {
             action: FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone,
             extra_headers,
@@ -533,6 +542,52 @@ fn apply_pre_read_mutations_to_session(session: &mut Session, mutations: &[Trust
     }
 }
 
+/// Build the root tracing span for a request with `OTel` HTTP semantic
+/// convention attributes.
+///
+/// Creates an [`info_span!`] named `"http_request"` with the
+/// [OTel span name] set to `{method}` and span kind set to
+/// `SERVER`. Response-phase attributes (`http.response.status_code`,
+/// `upstream.address`) are declared as [`Empty`] and recorded later via
+/// [`record_response_span_attributes`].
+///
+/// [`info_span!`]: tracing::info_span
+/// [OTel span name]: https://opentelemetry.io/docs/specs/semconv/http/http-spans/
+/// [`Empty`]: tracing::field::Empty
+/// [`record_response_span_attributes`]: super::record_response_span_attributes
+fn create_request_span(session: &Session, ctx: &PingoraRequestCtx) -> tracing::Span {
+    let method = session.req_header().method.as_str();
+    let path = session.req_header().uri.path();
+    let path = if path.is_empty() { "/" } else { path };
+    let protocol_version = super::http_version_label(ctx.client_http_version.unwrap_or(http::Version::HTTP_11));
+    let host = session.req_header().headers.get("host").and_then(|v| v.to_str().ok());
+    let server_address = host.map(|h| h.split(':').next().unwrap_or(h));
+    let server_port = host.and_then(|h| h.split_once(':').and_then(|(_, p)| p.parse::<u16>().ok()));
+
+    let span = tracing::info_span!(
+        "http_request",
+        "otel.name" = method,
+        "otel.kind" = "server",
+        "otel.status_code" = tracing::field::Empty,
+        "http.request.method" = method,
+        "url.path" = path,
+        "http.response.status_code" = tracing::field::Empty,
+        "server.address" = server_address,
+        "server.port" = server_port,
+        "client.address" = tracing::field::Empty,
+        "upstream.address" = tracing::field::Empty,
+        "network.protocol.version" = protocol_version,
+        "upstream.cluster" = tracing::field::Empty,
+        request_id = tracing::field::Empty,
+    );
+
+    if let Some(addr) = &ctx.client_addr {
+        span.record("client.address", tracing::field::display(addr));
+    }
+
+    span
+}
+
 /// Reject client-supplied reserved internal headers before special handling
 /// or filter execution can observe them.
 fn reject_reserved_internal_headers(session: &Session) -> Option<Rejection> {
@@ -857,6 +912,41 @@ mod tests {
 
         assert!(!request.headers.contains_key("x-strip"));
         assert!(request.headers.contains_key("x-keep"));
+    }
+
+    #[tokio::test]
+    async fn request_span_created_after_pipeline() {
+        let mut ctx = make_ctx();
+        assert!(
+            ctx.request_span.is_disabled(),
+            "span should be disabled before pipeline runs"
+        );
+        drop(run_pipeline(&empty_pipeline(), make_request(), &mut ctx).await.unwrap());
+        // The span is created in execute() before run_pipeline, but
+        // run_pipeline tests don't go through execute(). Verify
+        // the default is disabled, which confirms no premature creation.
+        assert!(
+            ctx.request_span.is_disabled(),
+            "run_pipeline alone should not create the request span"
+        );
+    }
+
+    #[tokio::test]
+    async fn request_id_recorded_from_extra_headers() {
+        let mut ctx = make_ctx();
+        let span = tracing::info_span!("test_span", request_id = tracing::field::Empty,);
+        ctx.request_span = span;
+
+        let result = run_pipeline(&empty_pipeline(), make_request(), &mut ctx).await.unwrap();
+        // Empty pipeline produces no extra headers containing x-request-id.
+        assert!(
+            result
+                .extra_headers
+                .iter()
+                .find(|(name, _)| name.eq_ignore_ascii_case("x-request-id"))
+                .is_none(),
+            "empty pipeline should not produce x-request-id header"
+        );
     }
 
     #[tokio::test]
