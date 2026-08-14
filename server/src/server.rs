@@ -90,12 +90,13 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
     init_runtime_limits(&config.runtime);
     warn_insecure_key_permissions(&config);
 
-    // Install the Prometheus recorder before health checks (or any other
-    // instrumentation) start emitting, so the first probe transitions are not
-    // dropped by `is_recorder_installed()` gates.
-    if config.admin.address.is_some() {
-        let _handle = praxis_protocol::http::pingora::metrics::install_prometheus_recorder();
-    }
+    // Install before pipelines and health checks emit startup metrics. The same
+    // handle is later shared by `/metrics` and the managed upkeep service.
+    let prometheus_recorder = config
+        .admin
+        .address
+        .as_ref()
+        .map(|_| praxis_protocol::http::pingora::health::install_prometheus_admin_recorder());
 
     let health_registry = build_health_registry(&config.clusters);
     let state = build_server_state(&config, &registry, &health_registry);
@@ -109,6 +110,7 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
         health_registry,
         &state.kv_stores,
         (Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta)),
+        prometheus_recorder,
     );
 
     let _watcher = spawn_watcher(config_path, config, registry, state);
@@ -267,9 +269,10 @@ fn register_admin_endpoints(
         Arc<ListenerPipelines>,
         praxis_protocol::http::pingora::health::ListenerMetaStore,
     ),
+    prometheus_recorder: Option<praxis_protocol::http::pingora::health::PrometheusAdminRecorder>,
 ) {
-    if let Some(admin_addr) = &config.admin.address {
-        praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server(
+    if let (Some(admin_addr), Some(prometheus_recorder)) = (&config.admin.address, prometheus_recorder) {
+        praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server_with_recorder(
             server.server_mut(),
             admin_addr,
             praxis_protocol::http::pingora::health::AdminEndpointOptions {
@@ -278,6 +281,10 @@ fn register_admin_endpoints(
                 pipelines: Some(pipelines_admin),
                 verbose: config.admin.verbose,
             },
+            Some(health_registry),
+            Some(kv_stores.clone()),
+            config.admin.verbose,
+            prometheus_recorder,
         );
     }
 }

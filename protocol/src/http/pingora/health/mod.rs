@@ -17,6 +17,7 @@ mod service;
 pub use listener_meta::{ListenerMeta, ListenerMetaStore, listener_meta_from_config, new_listener_meta_store};
 pub(in crate::http::pingora) use service::escape_json_string;
 pub use service::{
-    AdminEndpointOptions, PingoraAdminService, PingoraHealthService, add_admin_endpoints_to_pingora_server,
-    add_health_endpoint_to_pingora_server,
+    PingoraAdminService, PingoraHealthService, PrometheusAdminRecorder, add_admin_endpoints_to_pingora_server,
+    add_admin_endpoints_to_pingora_server_with_recorder, add_health_endpoint_to_pingora_server,
+    install_prometheus_admin_recorder,
 };
