@@ -64,7 +64,7 @@ fn load_example(proxy_port: u16, port_map: HashMap<&str, u16>) -> Config {
     let policy_yaml_path = format!("{}/fixtures/policy-http.yaml", env!("CARGO_MANIFEST_DIR"));
 
     let raw = std::fs::read_to_string(&praxis_yaml_path).unwrap_or_else(|e| panic!("read {praxis_yaml_path}: {e}"));
-    let with_policy = raw.replace("/etc/praxis/policy-http-policy.yaml", &policy_yaml_path);
+    let with_policy = raw.replace("/etc/praxis/policy-http.yaml", &policy_yaml_path);
     let patched = patch_yaml(&with_policy, proxy_port, &port_map);
     Config::from_yaml(&patched).unwrap_or_else(|e| panic!("parse security/policy-http.yaml: {e}"))
 }

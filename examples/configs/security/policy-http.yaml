@@ -26,7 +26,7 @@ filter_chains:
       # routes), so the filter authorizes at the HTTP layer directly — no
       # protocol classifier needed.
       - filter: policy
-        config_path: /etc/praxis/policy-http-policy.yaml
+        config_path: /etc/praxis/policy-http.yaml
 
       - filter: router
         routes:
