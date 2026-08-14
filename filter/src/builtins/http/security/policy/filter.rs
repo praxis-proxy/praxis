@@ -356,7 +356,7 @@ impl PolicyFilter {
 
     /// Publish the raw-credential-free subject projection for downstream filters.
     ///
-    /// CPEX may authenticate a client or workload without resolving a user
+    /// Praxis Policy Engine (PPE) may authenticate a client or workload without resolving a user
     /// subject. In that case no `AuthenticatedIdentity` is published; a
     /// consumer that requires a user principal must fail closed when the
     /// extension is absent.
@@ -364,7 +364,7 @@ impl PolicyFilter {
         Self::publish_identity_projection(ctx, Self::authenticated_identity(identity));
     }
 
-    /// Build the public raw-credential-free projection from CPEX's private
+    /// Build the public raw-credential-free projection from PPE's private
     /// validated payload.
     fn authenticated_identity(identity: &IdentityPayload) -> Option<AuthenticatedIdentity> {
         identity.subject.as_ref().and_then(|subject| {
@@ -438,7 +438,7 @@ impl PolicyFilter {
 
     /// Run the unscoped identity hook and return only its raw-credential-free
     /// projection. Route-aware callers defer publication until classification.
-    #[expect(clippy::large_stack_frames, reason = "async CPEX identity payload")]
+    #[expect(clippy::large_stack_frames, reason = "async PPE identity payload")]
     async fn resolve_gated_identity(
         &self,
         ctx: &HttpFilterContext<'_>,
@@ -504,7 +504,7 @@ impl PolicyFilter {
             },
         };
         // Entity-routed policies resolve again once classifier metadata gives
-        // CPEX the authoritative route coordinates. Publishing this unscoped
+        // PPE the authoritative route coordinates. Publishing this unscoped
         // gate result could expose a principal from the wrong route resolver.
         if self.entity_routes {
             Self::store_gated_identity(ctx, authenticated);
