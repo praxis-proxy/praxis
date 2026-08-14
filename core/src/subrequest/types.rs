@@ -1,16 +1,14 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Sub-request and sub-response data types, error enum, and
-//! framework header injection.
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::HeaderMap;
 use thiserror::Error;
+use tokio::sync::OwnedSemaphorePermit;
 
-// ---------------------------------------------------------------------------
-// SubRequest / SubResponse
-// ---------------------------------------------------------------------------
+use super::internals::SubRequestConnector;
 
 /// An outbound HTTP request for a sub-request exchange.
 #[derive(Clone, Debug)]
@@ -81,7 +79,7 @@ impl FrameworkHeaders {
     /// Returns [`SubRequestError::InvalidRequest`] when the header
     /// name is forbidden.
     pub fn insert(&mut self, name: http::header::HeaderName, value: http::HeaderValue) -> Result<(), SubRequestError> {
-        if is_transport_header(&name) {
+        if super::internals::is_transport_header(&name) {
             return Err(SubRequestError::InvalidRequest(format!(
                 "transport header `{name}` cannot be injected as framework metadata"
             )));
@@ -153,6 +151,13 @@ pub enum SubRequestError {
     #[error("sub-request deadline exceeded")]
     DeadlineExceeded,
 
+    /// The upstream stopped sending data for longer than the idle timeout.
+    #[error("sub-request stream idle timeout ({idle_timeout:?} with no data)")]
+    StreamIdleTimeout {
+        /// The configured idle timeout that was exceeded.
+        idle_timeout: Duration,
+    },
+
     /// The circuit breaker for the target peer is open.
     #[error("sub-request circuit open for peer {peer}")]
     CircuitOpen {
@@ -174,24 +179,75 @@ pub enum SubRequestError {
 }
 
 // ---------------------------------------------------------------------------
-// Transport header classification
+// Streaming response types
 // ---------------------------------------------------------------------------
 
-/// Headers that apply only to one HTTP connection and must not be
-/// forwarded across a sub-request boundary.
-pub(super) const HOP_BY_HOP_HEADERS: &[&str] = &[
-    "connection",
-    "keep-alive",
-    "proxy-authenticate",
-    "proxy-authorization",
-    "te",
-    "trailer",
-    "transfer-encoding",
-    "upgrade",
-];
+/// Limits governing a streaming sub-request response body.
+#[derive(Clone, Debug)]
+pub struct StreamLimits {
+    /// Maximum wait for the next upstream chunk. Applied per
+    /// `next_chunk()` call. Required.
+    pub idle_timeout: Duration,
 
-/// Whether a header is a transport-level header that must not be
-/// injected via framework metadata.
-pub(super) fn is_transport_header(name: &http::header::HeaderName) -> bool {
-    HOP_BY_HOP_HEADERS.iter().any(|h| *h == name.as_str()) || name == http::header::CONTENT_LENGTH
+    /// Optional absolute stream lifetime measured from header receipt.
+    /// `None` means no duration limit.
+    pub max_stream_duration: Option<Duration>,
+
+    /// Optional cumulative byte limit across all chunks. The buffered
+    /// `max_response_bytes` ceiling is not applied to streaming
+    /// responses — only this explicit limit constrains the stream.
+    /// `None` means no byte limit.
+    pub max_total_bytes: Option<usize>,
+}
+
+/// A streaming sub-request response with headers and an opaque body handle.
+///
+/// The body handle owns the live Pingora session, admission permit,
+/// and transport deadlines. It does not borrow `SubRequestClient`
+/// or any other external state.
+pub struct StreamingSubResponse {
+    /// HTTP status code.
+    pub status: u16,
+
+    /// Response headers (sanitized).
+    pub headers: HeaderMap,
+
+    /// Opaque streaming body handle.
+    pub body: SubResponseBody,
+}
+
+/// Opaque handle to a streaming sub-request response body.
+///
+/// Pull-based: call [`next_chunk()`](Self::next_chunk) to receive
+/// the next body chunk. Returns `Ok(None)` at clean EOF.
+///
+/// Owns the live Pingora HTTP session, admission permit, connector
+/// (for session release), and all streaming deadlines. No background
+/// tasks or channels — downstream backpressure naturally paces
+/// upstream reads.
+pub struct SubResponseBody {
+    /// Live Pingora HTTP session.
+    pub(super) session: Option<pingora_core::protocols::http::client::HttpSession<()>>,
+    /// Peer address for connection pooling.
+    pub(super) peer: Option<pingora_core::upstreams::peer::HttpPeer>,
+    /// Connector for session release.
+    pub(super) connector: Option<SubRequestConnector>,
+    /// Admission permit.
+    pub(super) permit: Option<OwnedSemaphorePermit>,
+    /// Operator-configured per-read timeout from the peer.
+    pub(super) read_timeout: Option<Duration>,
+    /// Per-chunk idle timeout.
+    pub(super) idle_timeout: Duration,
+    /// Optional absolute stream deadline.
+    pub(super) stream_deadline: Option<tokio::time::Instant>,
+    /// Optional cumulative byte limit.
+    pub(super) max_total_bytes: Option<usize>,
+    /// Total bytes received so far.
+    pub(super) received_bytes: usize,
+    /// Number of chunks received so far.
+    pub(super) chunk_count: u64,
+    /// When the stream started (for metrics).
+    pub(super) stream_started_at: tokio::time::Instant,
+    /// Whether the stream is done.
+    pub(super) done: bool,
 }
