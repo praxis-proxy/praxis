@@ -455,15 +455,14 @@ impl IterativeRequestRouterFilter {
                 let mut step_origin = config::ResponseOrigin::Upstream;
                 let mut step_transport_error = None;
                 let mut response = match peer {
-                    Ok(peer) => match client
-                        .execute(
-                            &peer,
-                            &sub_request_for_exec,
-                            max_response_bytes,
-                            per_request_timeout,
-                            Some(&fw_headers),
-                        )
-                        .await
+                    Ok(peer) => match Box::pin(client.execute(
+                        &peer,
+                        &sub_request_for_exec,
+                        max_response_bytes,
+                        per_request_timeout,
+                        Some(&fw_headers),
+                    ))
+                    .await
                     {
                         Ok(response) => response,
                         Err(error) => {

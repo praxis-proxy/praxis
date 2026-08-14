@@ -3133,7 +3133,10 @@ version = "0.5.2"
 dependencies = [
  "bytes",
  "dashmap 6.2.1",
+ "h2",
  "http",
+ "metrics",
+ "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",

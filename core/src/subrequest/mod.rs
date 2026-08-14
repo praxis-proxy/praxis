@@ -18,8 +18,13 @@
 //!
 //! [`Connector`]: pingora_core::connectors::http::Connector
 
+/// Streaming body handle implementation.
+mod body;
+/// Hardened sub-request client and executor.
 mod client;
-mod internals;
+/// Connector, circuit guard, header sanitization, and shared helpers.
+pub(crate) mod internals;
+/// Data types for sub-request exchanges.
 mod types;
 
 #[cfg(test)]
@@ -27,5 +32,9 @@ mod types;
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic, reason = "tests")]
 mod tests;
 
-pub use client::{SubRequestClient, SubRequestConnector, SubRequestConnectorOptions};
-pub use types::{DEPTH_HEADER, FrameworkHeaders, SubRequest, SubRequestError, SubResponse};
+pub use client::SubRequestClient;
+pub use internals::{SubRequestConnector, SubRequestConnectorOptions};
+pub use types::{
+    DEPTH_HEADER, FrameworkHeaders, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError, SubResponse,
+    SubResponseBody,
+};

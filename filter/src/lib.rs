@@ -53,7 +53,7 @@ pub use pipeline::{
 };
 pub use praxis_core::{
     config::{FailureMode, FilterEntry},
-    subrequest::{SubRequest, SubResponse},
+    subrequest::{StreamLimits, StreamingSubResponse, SubRequest, SubResponse, SubResponseBody},
 };
 pub use praxis_tls::TlsPeerIdentity;
 pub use registry::{FilterRegistry, SecurityClass};

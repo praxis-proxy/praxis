@@ -28,6 +28,7 @@ otel = [
 bytes = { workspace = true }
 dashmap = { workspace = true }
 http = { workspace = true }
+metrics = { workspace = true }
 opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
@@ -45,4 +46,6 @@ tracing-opentelemetry = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+h2 = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net"] }
