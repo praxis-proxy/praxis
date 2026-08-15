@@ -509,6 +509,7 @@ async fn run_streaming_terminal_response(
         headers,
         body: mut streaming_body,
     } = terminal;
+    streaming_body.swap_extensions(&mut ctx.extensions);
     let mut resp = match prepare_terminal_response(pipeline, ctx, status, headers).await {
         Ok(resp) => resp,
         Err(rejection) => {
@@ -517,9 +518,11 @@ async fn run_streaming_terminal_response(
             return;
         },
     };
+    streaming_body.swap_extensions(&mut ctx.extensions);
 
     if matches!(ctx.response_body_mode, BodyMode::StreamBuffer { .. }) {
         error!("streaming terminal response is incompatible with StreamBuffer response mode");
+        streaming_body.swap_extensions(&mut ctx.extensions);
         streaming_body.cancel().await;
         send_rejection(session, Rejection::status(500)).await;
         return;
@@ -538,20 +541,40 @@ async fn run_streaming_terminal_response(
     let http_version = session.req_header().version;
     prepare_streaming_headers(&mut resp, false, false, http_version);
     let Some(header) = build_streaming_terminal_header(&resp) else {
+        streaming_body.swap_extensions(&mut ctx.extensions);
         streaming_body.cancel().await;
         send_rejection(session, Rejection::status(500)).await;
         return;
     };
     if let Err(e) = session.write_response_header(Box::new(header), false).await {
         debug!(error = %e, "failed to write streaming terminal response header");
+        streaming_body.swap_extensions(&mut ctx.extensions);
         streaming_body.cancel().await;
         session.as_downstream_mut().shutdown().await;
         return;
     }
+    // A client may validly half-close its HTTP/1 write side after sending the
+    // request while continuing to read the response. Keep FIN distinct from a
+    // real disconnect; resets and failed response writes still abort promptly.
+    session.as_downstream_mut().set_abort_on_close(false);
 
     loop {
-        match streaming_body.next_chunk().await {
+        let source_result = tokio::select! {
+            result = streaming_body.next_chunk() => Some(result),
+            downstream = session.as_downstream_mut().read_body_or_idle(true) => {
+                debug!(?downstream, "downstream disconnected while terminal stream source was pending");
+                None
+            },
+        };
+        let Some(source_result) = source_result else {
+            streaming_body.swap_extensions(&mut ctx.extensions);
+            streaming_body.cancel().await;
+            session.as_downstream_mut().shutdown().await;
+            return;
+        };
+        match source_result {
             Ok(Some(chunk)) => {
+                streaming_body.swap_extensions(&mut ctx.extensions);
                 let mut body = Some(chunk);
                 if run_parent_terminal_body_filters(pipeline, ctx, &resp, &mut body, false).is_err()
                     || streaming_size_limit_exceeded(ctx)
@@ -560,14 +583,19 @@ async fn run_streaming_terminal_response(
                     session.as_downstream_mut().shutdown().await;
                     return;
                 }
+                streaming_body.swap_extensions(&mut ctx.extensions);
                 if let Err(e) = session.write_response_body(body, false).await {
                     debug!(error = %e, "failed to write streaming terminal response body");
+                    streaming_body.swap_extensions(&mut ctx.extensions);
                     streaming_body.cancel().await;
                     session.as_downstream_mut().shutdown().await;
                     return;
                 }
             },
             Ok(None) => {
+                // Restore the default before a clean keep-alive session can be reused.
+                session.as_downstream_mut().set_abort_on_close(true);
+                streaming_body.swap_extensions(&mut ctx.extensions);
                 let mut completion_body = None;
                 if run_parent_terminal_body_filters(pipeline, ctx, &resp, &mut completion_body, true).is_err() {
                     streaming_body.cancel().await;
@@ -581,6 +609,7 @@ async fn run_streaming_terminal_response(
                 return;
             },
             Err(e) => {
+                streaming_body.swap_extensions(&mut ctx.extensions);
                 warn!(error = %e, "streaming terminal response source failed after commitment");
                 streaming_body.cancel().await;
                 session.as_downstream_mut().shutdown().await;
@@ -609,6 +638,7 @@ async fn suppress_streaming_terminal_response(
         send_rejection(session, Rejection::status(500)).await;
         return;
     }
+    streaming_body.swap_extensions(&mut ctx.extensions);
     let mut completion_body = None;
     if let Err(rejection) = run_parent_terminal_body_filters(pipeline, ctx, resp, &mut completion_body, true) {
         streaming_body.cancel().await;

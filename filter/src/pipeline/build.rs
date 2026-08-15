@@ -95,19 +95,24 @@ impl FilterPipeline {
         let body_capabilities = compute_body_capabilities(&filters);
         let compression = extract_compression_config(&filters);
         let may_select_streaming_subrequest_response = filters_may_select_streaming_subrequest_response(&filters);
-        Self {
+        let id_generator = Arc::new(IdGenerator::new());
+        let time_source: Arc<dyn praxis_core::time::TimeSource> = Arc::new(SystemTimeSource);
+        let mut pipeline = Self {
             body_capabilities,
             compression,
             filters,
             health_registry: None,
-            id_generator: Arc::new(IdGenerator::new()),
+            id_generator: Arc::clone(&id_generator),
             kv_stores: None,
             pipeline_extensions: Vec::new(),
             record_filter_duration_metrics: false,
             subrequest_client: None,
             may_select_streaming_subrequest_response,
-            time_source: Arc::new(SystemTimeSource),
-        }
+            time_source: Arc::clone(&time_source),
+        };
+        pipeline.set_id_generator(id_generator);
+        pipeline.set_time_source(time_source);
+        pipeline
     }
 
     /// Validate the pipeline for structural misconfigurations that

@@ -8,7 +8,7 @@ use std::fmt;
 use async_trait::async_trait;
 use bytes::Bytes;
 
-use crate::FilterError;
+use crate::{FilterError, RequestExtensions};
 
 // -----------------------------------------------------------------------------
 // Streaming terminal response
@@ -37,6 +37,15 @@ pub trait StreamingResponseBody: Send + 'static {
     ///
     /// This operation must be idempotent.
     async fn cancel(&mut self);
+
+    /// Exchange request extensions with the protocol lifecycle owner.
+    ///
+    /// Most streaming bodies do not own filter extensions and use this
+    /// default no-op. Iterative sessions override it so the same extension
+    /// set can move between step filters and parent response filters without
+    /// cloning type-erased values.
+    #[doc(hidden)]
+    fn swap_extensions(&mut self, _extensions: &mut RequestExtensions) {}
 }
 
 /// A terminal response whose body is delivered incrementally.

@@ -75,6 +75,11 @@ pub(crate) struct IterativeRequestRouterConfig {
     #[serde(default = "default_max_response_bytes")]
     pub(crate) max_response_bytes: usize,
 
+    /// Optional cumulative byte ceiling for one logical streamed response.
+    /// This is intentionally distinct from buffered per-step response limits.
+    #[serde(default)]
+    pub(crate) max_stream_response_bytes: Option<usize>,
+
     /// Maximum accumulated iteration state bytes.
     #[serde(default = "default_max_state_bytes")]
     pub(crate) max_state_bytes: usize,
@@ -92,7 +97,7 @@ pub(crate) struct IterativeRequestRouterConfig {
 }
 
 /// A named step within the iterative router.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StepConfig {
     /// Step name (must be unique within the router).
@@ -101,14 +106,14 @@ pub(crate) struct StepConfig {
     /// Filters to execute for this step's sub-request.
     pub(crate) filters: Vec<crate::FilterEntry>,
 
-    /// Transition rules evaluated after the sub-request
-    /// response. First match wins.
+    /// Transition rules evaluated in order. Streaming header-safe failovers
+    /// run before body exposure; remaining rules run after step completion.
     #[serde(default)]
     pub(crate) on_result: Vec<StepTransition>,
 }
 
 /// A transition rule evaluated after a step completes.
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct StepTransition {
     /// If true, this is the default (always-match) rule.
@@ -222,6 +227,14 @@ pub(crate) fn validate(cfg: &IterativeRequestRouterConfig) -> Result<(), FilterE
         return Err("iterative_request_router: max_state_bytes must be > 0"
             .to_owned()
             .into());
+    }
+
+    if cfg.max_stream_response_bytes == Some(0) {
+        return Err(
+            "iterative_request_router: max_stream_response_bytes must be > 0 when configured"
+                .to_owned()
+                .into(),
+        );
     }
 
     if cfg.steps.is_empty() {

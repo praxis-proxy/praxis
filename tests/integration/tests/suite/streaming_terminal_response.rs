@@ -11,7 +11,7 @@
 
 use std::{
     io::{Read as _, Write as _},
-    net::TcpStream,
+    net::{Shutdown, TcpStream},
     sync::{
         Arc,
         atomic::{AtomicUsize, Ordering},
@@ -333,6 +333,36 @@ fn streaming_h11_chunked_framing() {
     assert!(
         parse_header(&raw, "content-length").is_none(),
         "chunked responses must not have Content-Length"
+    );
+}
+
+#[test]
+fn streaming_h11_write_half_close_still_receives_response() {
+    let backend = start_echo_backend();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&custom_filter_yaml(proxy_port, backend.port(), "multi_chunk_streaming")).unwrap();
+    let registry = registry_with("multi_chunk_streaming", || Box::new(MultiChunkStreamingFilter));
+    let proxy = start_proxy_with_registry(&config, &registry);
+
+    let mut stream = TcpStream::connect(proxy.addr()).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+        .unwrap();
+    stream.shutdown(Shutdown::Write).unwrap();
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).unwrap();
+    let raw = String::from_utf8(raw).unwrap();
+
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "a valid write half-close must preserve the response"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "chunk1chunk2chunk3",
+        "the full stream should remain readable after the client half-closes writes"
     );
 }
 

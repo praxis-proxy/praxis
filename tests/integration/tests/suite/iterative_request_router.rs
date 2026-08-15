@@ -12,6 +12,7 @@ use bytes::Bytes;
 use praxis_core::config::Config;
 use praxis_filter::{
     BodyAccess, BodyMode, FilterAction, FilterError, FilterFactory, FilterRegistry, HttpFilter, HttpFilterContext,
+    StreamTerminationCause,
 };
 use praxis_test_utils::{
     Backend, free_port, http_get, http_post, http_send, json_post, parse_body, parse_header, parse_status,
@@ -1272,6 +1273,45 @@ steps:
 }
 
 #[test]
+fn terminal_response_rechecks_retained_state_limit() {
+    let backend = Backend::fixed(&"x".repeat(512)).start_with_shutdown();
+    let proxy_port = free_port();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: terminal
+max_state_bytes: 256
+steps:
+  - name: terminal
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            backend.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy(&config);
+
+    let (status, _) = http_get(proxy.addr(), "/", None);
+
+    assert_eq!(
+        status, 413,
+        "the retained terminal response must remain inside max_state_bytes"
+    );
+}
+
+#[test]
 fn combined_status_and_filter_result_transition() {
     let model = start_stateful_backend(vec![(200, "final-answer".to_owned())]);
     let model_port = model.port();
@@ -1637,6 +1677,95 @@ steps:
 }
 
 #[test]
+fn nested_response_filter_reserved_header_is_stripped() {
+    let backend = Backend::fixed("ok").start_with_shutdown();
+    let proxy_port = free_port();
+    let registry = nested_header_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: primary
+steps:
+  - name: primary
+    filters:
+      - filter: test_nested_response_headers
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            backend.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(proxy.addr(), &http_get_raw("/"));
+
+    assert_eq!(parse_status(&raw), 200, "buffered step should succeed");
+    assert!(
+        raw.contains("x-step-visible: true"),
+        "ordinary nested response-header mutations should reach the client"
+    );
+    assert!(
+        !raw.contains("x-praxis-step-private"),
+        "reserved nested response headers must be stripped after filters"
+    );
+}
+
+#[test]
+fn nested_response_filter_reserved_header_is_stripped_on_transport_error() {
+    let unavailable_port = free_port();
+    let proxy_port = free_port();
+    let registry = nested_header_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: primary
+steps:
+  - name: primary
+    filters:
+      - filter: test_nested_response_headers
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: unavailable
+      - filter: load_balancer
+        clusters:
+          - name: unavailable
+            endpoints: ["127.0.0.1:{unavailable_port}"]
+    on_result:
+      - default: true
+        done: true
+"#
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(proxy.addr(), &http_get_raw("/"));
+
+    assert_eq!(parse_status(&raw), 502, "transport failure should remain synthetic 502");
+    assert!(
+        raw.contains("x-step-visible: true"),
+        "ordinary synthetic-response mutations should reach the client"
+    );
+    assert!(
+        !raw.contains("x-praxis-step-private"),
+        "reserved synthetic-response headers must be stripped after filters"
+    );
+}
+
+#[test]
 fn response_hooks_execute_once() {
     let backend_port = start_backend("once");
     let proxy_port = free_port();
@@ -1929,6 +2058,195 @@ steps:
 }
 
 #[test]
+fn streaming_body_callback_emission_precedes_its_body_output() {
+    let backend = Backend::chunked(vec!["upstream".to_owned()]).start_with_shutdown();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: stream
+steps:
+  - name: stream
+    filters:
+      - filter: test_always_streaming
+      - filter: test_per_chunk_emission
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            backend.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+
+    assert_eq!(parse_status(&raw), 200, "streaming response should succeed");
+    assert_eq!(
+        parse_body(&raw),
+        "local|upstream",
+        "a callback's local emissions must not be delayed until stream completion"
+    );
+}
+
+#[test]
+fn streaming_completion_emission_precedes_completion_body() {
+    let backend = Backend::chunked(vec!["upstream|".to_owned()]).start_with_shutdown();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: stream
+steps:
+  - name: stream
+    filters:
+      - filter: test_always_streaming
+      - filter: test_completion_emission_and_body
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            backend.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+
+    assert_eq!(parse_status(&raw), 200, "streaming response should succeed");
+    assert_eq!(
+        parse_body(&raw),
+        "upstream|emitted|completion-body",
+        "completion emissions must precede the same callback's body output"
+    );
+}
+
+#[test]
+fn handled_initial_transport_completion_preserves_emission_order() {
+    let unavailable_port = free_port();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: unavailable
+steps:
+  - name: unavailable
+    filters:
+      - filter: test_always_streaming
+      - filter: test_handled_termination_order
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: unavailable
+      - filter: load_balancer
+        clusters:
+          - name: unavailable
+            endpoints: ["127.0.0.1:{unavailable_port}"]
+    on_result:
+      - default: true
+        done: true
+"#
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+
+    assert_eq!(
+        parse_status(&raw),
+        502,
+        "the handled connect failure should retain its status"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "emitted|completion-body",
+        "pre-commit abnormal completion must preserve callback emission order"
+    );
+}
+
+#[test]
+fn streaming_step_deadline_includes_header_time() {
+    let backend_port = start_split_delay_chunked_backend(
+        std::time::Duration::from_millis(450),
+        std::time::Duration::from_millis(450),
+    );
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: stream
+timeout_ms: 800
+steps:
+  - name: stream
+    filters:
+      - filter: test_always_streaming
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: slow
+      - filter: load_balancer
+        clusters:
+          - name: slow
+            endpoints: ["127.0.0.1:{backend_port}"]
+    on_result:
+      - default: true
+        done: true
+"#
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+
+    assert_eq!(parse_status(&raw), 200, "headers should arrive before the deadline");
+    assert_eq!(
+        parse_body(&raw),
+        "",
+        "body time must use only the deadline remaining after headers"
+    );
+}
+
+#[test]
 fn streaming_header_failover_cancels_unread_body() {
     let failing = Backend::status(503, "fail").start_with_shutdown();
     let fallback = Backend::fixed("fallback-ok").start_with_shutdown();
@@ -1943,6 +2261,7 @@ steps:
   - name: primary
     filters:
       - filter: test_streaming_selector
+      - filter: test_stream_completion
       - filter: router
         routes:
           - path_prefix: "/"
@@ -2027,6 +2346,813 @@ steps:
     );
 }
 
+#[test]
+fn streaming_completion_transition_resumes_second_step_in_same_response() {
+    let first = Backend::chunked(vec!["first-a|".to_owned(), "first-b|".to_owned()]).start_with_shutdown();
+    let second = Backend::chunked(vec!["second-a|".to_owned(), "second-b".to_owned()]).start_with_shutdown();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: first
+max_stream_response_bytes: 65536
+steps:
+  - name: first
+    filters:
+      - filter: test_always_streaming
+      - filter: test_stream_completion
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: first
+      - filter: load_balancer
+        clusters:
+          - name: first
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - filter: test_stream_completion
+        key: action
+        value: next
+        next: second
+      - default: true
+        done: true
+  - name: second
+    filters:
+      - filter: test_always_streaming
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: second
+      - filter: load_balancer
+        clusters:
+          - name: second
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            first.port(),
+            second.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "logical stream should retain initial status");
+    assert_eq!(
+        parse_body(&raw),
+        "first-a|first-b|between|second-a|second-b",
+        "both upstream streams and the local completion chunk should share one ordered response"
+    );
+}
+
+#[test]
+fn streaming_handoff_checks_pending_chunks_with_updated_state() {
+    let first = Backend::fixed("first").start_with_shutdown();
+    let second = Backend::chunked(vec!["second".to_owned()]).start_with_shutdown();
+    let proxy_port = free_port();
+    let mut registry = streaming_registry();
+    registry
+        .register(
+            "test_fill_iteration_state",
+            FilterFactory::Http(Arc::new(|_| Ok(Box::new(FillIterationStateFilter)))),
+        )
+        .unwrap();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: first
+max_state_bytes: 2048
+steps:
+  - name: first
+    filters:
+      - filter: test_stream_completion
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: first
+      - filter: load_balancer
+        clusters:
+          - name: first
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - filter: test_stream_completion
+        key: action
+        value: next
+        next: second
+  - name: second
+    filters:
+      - filter: test_always_streaming
+      - filter: test_fill_iteration_state
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: second
+      - filter: load_balancer
+        clusters:
+          - name: second
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            first.port(),
+            second.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+
+    assert_eq!(
+        parse_status(&raw),
+        413,
+        "updated state and carried completion chunks must share one retained-byte ceiling"
+    );
+}
+
+#[test]
+fn buffered_transition_pending_limit_returns_413() {
+    let first = Backend::fixed("first").start_with_shutdown();
+    let second = Backend::fixed("second").start_with_shutdown();
+    let proxy_port = free_port();
+    let mut registry = streaming_registry();
+    registry
+        .register(
+            "test_fill_iteration_state",
+            FilterFactory::Http(Arc::new(|_| Ok(Box::new(FillIterationStateFilter)))),
+        )
+        .unwrap();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: first
+max_state_bytes: 2048
+steps:
+  - name: first
+    filters:
+      - filter: test_stream_completion
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: first
+      - filter: load_balancer
+        clusters:
+          - name: first
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - filter: test_stream_completion
+        key: action
+        value: next
+        next: second
+  - name: second
+    filters:
+      - filter: test_fill_iteration_state
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: second
+      - filter: load_balancer
+        clusters:
+          - name: second
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        next: final
+  - name: final
+    filters:
+      - filter: static_response
+        status: 200
+        body: unreachable
+    on_result:
+      - default: true
+        done: true
+"#,
+            first.port(),
+            second.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+
+    assert_eq!(
+        parse_status(&raw),
+        413,
+        "pre-commit pending-output overflow must remain a bounded-request rejection"
+    );
+}
+
+#[test]
+fn streaming_head_suppression_still_runs_completion_transition() {
+    let first = Backend::chunked(vec!["first".to_owned()]).start_with_shutdown();
+    let second = Backend::chunked(vec!["second".to_owned()]).start_with_shutdown();
+    let second_step_calls = Arc::new(AtomicUsize::new(0));
+    let proxy_port = free_port();
+    let mut registry = streaming_registry();
+    let counter = Arc::clone(&second_step_calls);
+    registry
+        .register(
+            "test_request_counter",
+            FilterFactory::Http(Arc::new(move |_| {
+                Ok(Box::new(IntegrationRequestCounterFilter {
+                    count: Arc::clone(&counter),
+                }))
+            })),
+        )
+        .unwrap();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: first
+steps:
+  - name: first
+    filters:
+      - filter: test_always_streaming
+      - filter: test_stream_completion
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: first
+      - filter: load_balancer
+        clusters:
+          - name: first
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - filter: test_stream_completion
+        key: action
+        value: next
+        next: second
+      - default: true
+        done: true
+  - name: second
+    filters:
+      - filter: test_request_counter
+      - filter: test_always_streaming
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: second
+      - filter: load_balancer
+        clusters:
+          - name: second
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            first.port(),
+            second.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "HEAD / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "HEAD should retain the committed logical status"
+    );
+    assert_eq!(parse_body(&raw), "", "HEAD must not expose logical stream bytes");
+    assert_eq!(
+        second_step_calls.load(Ordering::SeqCst),
+        1,
+        "suppression must still evaluate completion transitions and execute the next step"
+    );
+}
+
+#[test]
+fn buffered_response_limit_does_not_cap_streaming_transport() {
+    let backend = Backend::chunked(vec!["12345".to_owned(), "67890".to_owned()]).start_with_shutdown();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: stream
+max_response_bytes: 5
+max_stream_response_bytes: 20
+steps:
+  - name: stream
+    filters:
+      - filter: test_always_streaming
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: stream
+      - filter: load_balancer
+        clusters:
+          - name: stream
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            backend.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "streaming response should commit normally");
+    assert_eq!(
+        parse_body(&raw),
+        "1234567890",
+        "the buffered per-step limit must not truncate a live stream"
+    );
+}
+
+#[test]
+fn streaming_logical_byte_limit_terminates_after_exact_boundary() {
+    let backend =
+        Backend::chunked(vec!["12345".to_owned(), "67890".to_owned(), "overflow".to_owned()]).start_with_shutdown();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: stream
+max_stream_response_bytes: 10
+steps:
+  - name: stream
+    filters:
+      - filter: test_always_streaming
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: stream
+      - filter: load_balancer
+        clusters:
+          - name: stream
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            backend.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "headers are committed before the late limit failure"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "1234567890",
+        "the chunk crossing the logical byte ceiling must not be exposed"
+    );
+}
+
+#[test]
+fn streaming_resumed_transport_failure_can_complete_with_typed_termination() {
+    let first = Backend::chunked(vec!["first|".to_owned()]).start_with_shutdown();
+    let unavailable_port = free_port();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: first
+steps:
+  - name: first
+    filters:
+      - filter: test_always_streaming
+      - filter: test_stream_completion
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: first
+      - filter: load_balancer
+        clusters:
+          - name: first
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - filter: test_stream_completion
+        key: action
+        value: next
+        next: unavailable
+      - default: true
+        done: true
+  - name: unavailable
+    filters:
+      - filter: test_always_streaming
+      - filter: test_stream_termination
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: unavailable
+      - filter: load_balancer
+        clusters:
+          - name: unavailable
+            endpoints: ["127.0.0.1:{unavailable_port}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            first.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "the first step should commit the logical response"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "first|between|handled-connect",
+        "the resumed step completion hook should classify and handle the connect failure"
+    );
+}
+
+#[test]
+fn streaming_resumed_transport_failure_can_fail_over() {
+    let first = Backend::chunked(vec!["first|".to_owned()]).start_with_shutdown();
+    let fallback = Backend::fixed("fallback-ok").start_with_shutdown();
+    let unavailable_port = free_port();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: first
+steps:
+  - name: first
+    filters:
+      - filter: test_always_streaming
+      - filter: test_stream_completion
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: first
+      - filter: load_balancer
+        clusters:
+          - name: first
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - filter: test_stream_completion
+        key: action
+        value: next
+        next: unavailable
+      - default: true
+        done: true
+  - name: unavailable
+    filters:
+      - filter: test_always_streaming
+      - filter: test_stream_completion
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: unavailable
+      - filter: load_balancer
+        clusters:
+          - name: unavailable
+            endpoints: ["127.0.0.1:{unavailable_port}"]
+    on_result:
+      - origin: transport
+        transport_error: connect
+        next: fallback
+      - default: true
+        done: true
+  - name: fallback
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: fallback
+      - filter: load_balancer
+        clusters:
+          - name: fallback
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            first.port(),
+            fallback.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "the first step should commit the response");
+    assert_eq!(
+        parse_body(&raw),
+        "first|between|fallback-ok",
+        "the failed resumed step should transition without leaking its completion output"
+    );
+}
+
+#[test]
+fn streaming_mid_body_failure_defers_completion_output_until_transition() {
+    let incomplete_port = start_incomplete_chunked_backend();
+    let fallback = Backend::fixed("fallback-ok").start_with_shutdown();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: incomplete
+steps:
+  - name: incomplete
+    filters:
+      - filter: test_always_streaming
+      - filter: test_stream_termination
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: incomplete
+      - filter: load_balancer
+        clusters:
+          - name: incomplete
+            endpoints: ["127.0.0.1:{incomplete_port}"]
+    on_result:
+      - filter: test_stream_termination
+        key: action
+        value: next
+        next: fallback
+      - default: true
+        done: true
+  - name: fallback
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: fallback
+      - filter: load_balancer
+        clusters:
+          - name: fallback
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            fallback.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "initial headers should commit the response");
+    assert_eq!(
+        parse_body(&raw),
+        "first|xfallback-ok",
+        "failure completion bytes must be suppressed when the transition selects a fallback"
+    );
+}
+
+#[test]
+fn streaming_resumed_header_failover_clears_previous_response() {
+    let first = Backend::chunked(vec!["first|".to_owned()]).start_with_shutdown();
+    let failing = Backend::status(503, "skip-me").start_with_shutdown();
+    let fallback = Backend::fixed("fallback-ok").start_with_shutdown();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: first
+steps:
+  - name: first
+    filters:
+      - filter: test_always_streaming
+      - filter: test_stream_completion
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: first
+      - filter: load_balancer
+        clusters:
+          - name: first
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - filter: test_stream_completion
+        key: action
+        value: next
+        next: failing
+      - default: true
+        done: true
+  - name: failing
+    filters:
+      - filter: test_always_streaming
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: failing
+      - filter: load_balancer
+        clusters:
+          - name: failing
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - status: [503]
+        next: fallback
+      - default: true
+        done: true
+  - name: fallback
+    filters:
+      - filter: test_previous_response_absent
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: fallback
+      - filter: load_balancer
+        clusters:
+          - name: fallback
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            first.port(),
+            failing.port(),
+            fallback.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "the first step should commit the response");
+    assert_eq!(
+        parse_body(&raw),
+        "first|between|fallback-ok",
+        "the header-failover target must not inherit the previous completed response"
+    );
+}
+
+#[test]
+fn streaming_unhandled_transport_failure_discards_completion_output() {
+    let first = Backend::chunked(vec!["first|".to_owned()]).start_with_shutdown();
+    let unavailable_port = free_port();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: first
+steps:
+  - name: first
+    filters:
+      - filter: test_always_streaming
+      - filter: test_stream_completion
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: first
+      - filter: load_balancer
+        clusters:
+          - name: first
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - filter: test_stream_completion
+        key: action
+        value: next
+        next: unavailable
+      - default: true
+        done: true
+  - name: unavailable
+    filters:
+      - filter: test_always_streaming
+      - filter: test_stream_completion
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: unavailable
+      - filter: load_balancer
+        clusters:
+          - name: unavailable
+            endpoints: ["127.0.0.1:{unavailable_port}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            first.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        200,
+        "the first step should commit the logical response"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "first|between|",
+        "an unhandled failure must not expose completion chunks from the failed step"
+    );
+}
+
+#[test]
+fn streaming_unhandled_initial_transport_failure_discards_completion_output() {
+    let unavailable_port = free_port();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: unavailable
+steps:
+  - name: unavailable
+    filters:
+      - filter: test_always_streaming
+      - filter: test_stream_completion
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: unavailable
+      - filter: load_balancer
+        clusters:
+          - name: unavailable
+            endpoints: ["127.0.0.1:{unavailable_port}"]
+    on_result:
+      - default: true
+        done: true
+"#
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_status(&raw),
+        502,
+        "an unhandled initial connect failure should remain a 502"
+    );
+    assert_eq!(
+        parse_body(&raw),
+        "",
+        "an unhandled pre-commit failure must not expose completion output"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Test-Only Streaming Selector Filter
 // ---------------------------------------------------------------------------
@@ -2056,8 +3182,276 @@ impl HttpFilter for IntegrationStreamingSelectorFilter {
     }
 }
 
+struct IntegrationAlwaysStreamingFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for IntegrationAlwaysStreamingFilter {
+    fn name(&self) -> &'static str {
+        "test_always_streaming"
+    }
+
+    fn may_select_streaming_subrequest_response(&self) -> bool {
+        true
+    }
+
+    async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        ctx.set_subrequest_response_mode(praxis_filter::SubRequestResponseMode::Streaming);
+        Ok(FilterAction::Continue)
+    }
+}
+
+struct IntegrationRequestCounterFilter {
+    count: Arc<AtomicUsize>,
+}
+
+struct FillIterationStateFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for FillIterationStateFilter {
+    fn name(&self) -> &'static str {
+        "test_fill_iteration_state"
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        const LIMIT: usize = 2_048;
+        const KEY: &str = "fill";
+        let state = ctx
+            .extensions
+            .get_mut::<praxis_filter::IterationState>()
+            .ok_or_else(|| -> FilterError { "iteration state missing in test filter".into() })?;
+        let fill_bytes = LIMIT
+            .checked_sub(state.retained_bytes().saturating_add(KEY.len()))
+            .ok_or_else(|| -> FilterError { "iteration state already exceeds test limit".into() })?;
+        state
+            .accumulator
+            .insert(KEY.to_owned(), Bytes::from(vec![b'x'; fill_bytes]));
+        Ok(FilterAction::Continue)
+    }
+}
+
+#[async_trait::async_trait]
+impl HttpFilter for IntegrationRequestCounterFilter {
+    fn name(&self) -> &'static str {
+        "test_request_counter"
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        self.count.fetch_add(1, Ordering::SeqCst);
+        Ok(FilterAction::Continue)
+    }
+}
+
+struct IntegrationStreamCompletionFilter;
+
+struct IntegrationPerChunkEmissionFilter;
+
+struct IntegrationCompletionEmissionAndBodyFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for IntegrationCompletionEmissionAndBodyFilter {
+    fn name(&self) -> &'static str {
+        "test_completion_emission_and_body"
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadWrite
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if end_of_stream {
+            ctx.emit_stream_chunk(Bytes::from_static(b"emitted|"))?;
+            *body = Some(Bytes::from_static(b"completion-body"));
+        }
+        Ok(FilterAction::Continue)
+    }
+}
+
+struct IntegrationHandledTerminationOrderFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for IntegrationHandledTerminationOrderFilter {
+    fn name(&self) -> &'static str {
+        "test_handled_termination_order"
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadWrite
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if end_of_stream && ctx.stream_termination().is_some() {
+            assert!(
+                ctx.mark_stream_termination_handled(),
+                "the termination should be available to the completion hook"
+            );
+            ctx.emit_stream_chunk(Bytes::from_static(b"emitted|"))?;
+            *body = Some(Bytes::from_static(b"completion-body"));
+        }
+        Ok(FilterAction::Continue)
+    }
+}
+
+#[async_trait::async_trait]
+impl HttpFilter for IntegrationPerChunkEmissionFilter {
+    fn name(&self) -> &'static str {
+        "test_per_chunk_emission"
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if !end_of_stream {
+            ctx.emit_stream_chunk(Bytes::from_static(b"local|"))?;
+        }
+        Ok(FilterAction::Continue)
+    }
+}
+
+#[async_trait::async_trait]
+impl HttpFilter for IntegrationStreamCompletionFilter {
+    fn name(&self) -> &'static str {
+        "test_stream_completion"
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if end_of_stream {
+            ctx.filter_results
+                .entry("test_stream_completion")
+                .or_default()
+                .set("action", "next")?;
+            ctx.emit_stream_chunk(Bytes::from_static(b"between|"))?;
+        }
+        Ok(FilterAction::Continue)
+    }
+}
+
+struct IntegrationStreamTerminationFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for IntegrationStreamTerminationFilter {
+    fn name(&self) -> &'static str {
+        "test_stream_termination"
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        if end_of_stream && let Some(cause) = ctx.stream_termination().map(|termination| termination.cause()) {
+            assert!(
+                ctx.mark_stream_termination_handled(),
+                "the abnormal completion should remain available while the hook runs"
+            );
+            ctx.filter_results
+                .entry("test_stream_termination")
+                .or_default()
+                .set("action", "next")?;
+            let output = match cause {
+                StreamTerminationCause::Connect => Bytes::from_static(b"handled-connect"),
+                _ => Bytes::from_static(b"handled-stream-error|"),
+            };
+            ctx.emit_stream_chunk(output)?;
+        }
+        Ok(FilterAction::Continue)
+    }
+}
+
+struct IntegrationPreviousResponseAbsentFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for IntegrationPreviousResponseAbsentFilter {
+    fn name(&self) -> &'static str {
+        "test_previous_response_absent"
+    }
+
+    async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let previous_response_present = ctx
+            .extensions
+            .get::<praxis_filter::IterationState>()
+            .is_some_and(|state| state.previous_response.is_some());
+        if previous_response_present {
+            return Ok(FilterAction::Reject(praxis_filter::Rejection::status(500)));
+        }
+        Ok(FilterAction::Continue)
+    }
+}
+
 fn streaming_registry() -> FilterRegistry {
     let mut registry = FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_completion_emission_and_body",
+            FilterFactory::Http(Arc::new(|_| Ok(Box::new(IntegrationCompletionEmissionAndBodyFilter)))),
+        )
+        .unwrap();
+    registry
+        .register(
+            "test_handled_termination_order",
+            FilterFactory::Http(Arc::new(|_| Ok(Box::new(IntegrationHandledTerminationOrderFilter)))),
+        )
+        .unwrap();
+    registry
+        .register(
+            "test_per_chunk_emission",
+            FilterFactory::Http(Arc::new(|_| Ok(Box::new(IntegrationPerChunkEmissionFilter)))),
+        )
+        .unwrap();
     registry
         .register(
             "test_streaming_selector",
@@ -2065,6 +3459,84 @@ fn streaming_registry() -> FilterRegistry {
         )
         .unwrap();
     registry
+        .register(
+            "test_always_streaming",
+            FilterFactory::Http(Arc::new(|_| Ok(Box::new(IntegrationAlwaysStreamingFilter)))),
+        )
+        .unwrap();
+    registry
+        .register(
+            "test_stream_completion",
+            FilterFactory::Http(Arc::new(|_| Ok(Box::new(IntegrationStreamCompletionFilter)))),
+        )
+        .unwrap();
+    registry
+        .register(
+            "test_stream_termination",
+            FilterFactory::Http(Arc::new(|_| Ok(Box::new(IntegrationStreamTerminationFilter)))),
+        )
+        .unwrap();
+    registry
+        .register(
+            "test_previous_response_absent",
+            FilterFactory::Http(Arc::new(|_| Ok(Box::new(IntegrationPreviousResponseAbsentFilter)))),
+        )
+        .unwrap();
+    registry
+}
+
+fn nested_header_registry() -> FilterRegistry {
+    let mut registry = FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_nested_response_headers",
+            FilterFactory::Http(Arc::new(|_| Ok(Box::new(NestedResponseHeadersFilter)))),
+        )
+        .unwrap();
+    registry
+}
+
+#[expect(
+    clippy::disallowed_methods,
+    reason = "blocking backend runs on a dedicated test thread"
+)]
+fn start_split_delay_chunked_backend(header_delay: std::time::Duration, body_delay: std::time::Duration) -> u16 {
+    use std::io::{Read as _, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut request = [0_u8; 4_096];
+        let _read = stream.read(&mut request);
+        std::thread::sleep(header_delay);
+        let _sent = stream.write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+        let _flushed = stream.flush();
+        std::thread::sleep(body_delay);
+        let _sent = stream.write_all(b"4\r\nlate\r\n0\r\n\r\n");
+    });
+    port
+}
+
+fn start_incomplete_chunked_backend() -> u16 {
+    use std::io::{Read as _, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut request = [0_u8; 4_096];
+        let _read = stream.read(&mut request);
+        let _sent = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n6\r\nfirst|\r\n5\r\nx",
+        );
+        let _flushed = stream.flush();
+    });
+    port
 }
 
 // ---------------------------------------------------------------------------
@@ -2120,6 +3592,33 @@ impl HttpFilter for ResponseProbeFilter {
 }
 
 struct ResponseTaggerFilter;
+
+struct NestedResponseHeadersFilter;
+
+#[async_trait::async_trait]
+impl HttpFilter for NestedResponseHeadersFilter {
+    fn name(&self) -> &'static str {
+        "test_nested_response_headers"
+    }
+
+    async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let response = ctx
+            .response_header
+            .as_mut()
+            .ok_or_else(|| -> FilterError { "response header missing in test filter".into() })?;
+        response
+            .headers
+            .insert("x-step-visible", http::HeaderValue::from_static("true"));
+        response
+            .headers
+            .insert("x-praxis-step-private", http::HeaderValue::from_static("secret"));
+        Ok(FilterAction::Continue)
+    }
+}
 
 #[async_trait::async_trait]
 impl HttpFilter for ResponseTaggerFilter {

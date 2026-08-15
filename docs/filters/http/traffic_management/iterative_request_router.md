@@ -9,6 +9,8 @@ Framework-level filter for iterative sub-request execution.
 
 Holds named steps, each backed by a pre-built sub-pipeline. During request processing, runs an iteration loop: execute each step's request filters, make the HTTP call via Pingora's `Connector`, execute its response filters, evaluate transition rules, and continue or return the final response.
 
+Streaming steps remain pull-based. Header-safe failover rules run before any bytes are exposed; all other `on_result` rules run after clean EOF and may resume another step inside the same committed downstream response.
+
 ## Configuration
 
 | Field | Type | Required | Description |
@@ -16,6 +18,7 @@ Holds named steps, each backed by a pre-built sub-pipeline. During request proce
 | `initial_step` | string | yes | Name of the first step to execute. |
 | `max_iterations` | integer | no | Maximum iterations before aborting (default 10, max 100). |
 | `max_response_bytes` | integer | no | Maximum response body bytes per sub-request. |
+| `max_stream_response_bytes` | integer | no | Optional cumulative byte ceiling for one logical streamed response. This is intentionally distinct from buffered per-step response limits. |
 | `max_state_bytes` | integer | no | Maximum accumulated iteration state bytes. |
 | `step_timeout_ms` | integer | no | Per-step timeout in milliseconds. Defaults to `timeout_ms`. |
 | `steps` | StepConfig[] | yes | Named steps, each with filters and transition rules. |
@@ -37,7 +40,7 @@ Holds named steps, each backed by a pre-built sub-pipeline. During request proce
 | `steps[].filters[].name` | string | no | Optional user-assigned name for this filter entry. Used as a rejoin target by branch chains. |
 | `steps[].filters[].response_conditions` | ResponseCondition[] | no | Ordered conditions that gate whether this filter runs on responses. Evaluated against the upstream response (status, headers). Empty means the filter always runs on responses. |
 | `steps[].filters[].failure_mode` | `closed` \| `open` | no | Per-filter failure behaviour (`open` or `closed`). |
-| `steps[].on_result` | StepTransition[] | no | Transition rules evaluated after the sub-request response. First match wins. |
+| `steps[].on_result` | StepTransition[] | no | Transition rules evaluated in order. Streaming header-safe failovers run before body exposure; remaining rules run after step completion. |
 | `steps[].on_result[].default` | bool | no | If true, this is the default (always-match) rule. |
 | `steps[].on_result[].filter` | string | no | Filter name whose results to check. |
 | `steps[].on_result[].key` | string | no | Result key to match. |

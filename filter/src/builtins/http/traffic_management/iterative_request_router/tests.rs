@@ -423,6 +423,28 @@ steps:
 }
 
 #[test]
+fn rejects_zero_max_stream_response_bytes() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+max_stream_response_bytes: 0
+steps:
+  - name: step1
+    filters:
+      - filter: static_response
+        status: 200
+",
+    )
+    .unwrap();
+    let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", &yaml).unwrap();
+    let error = config::validate(&cfg).unwrap_err();
+    assert!(
+        error.to_string().contains("max_stream_response_bytes"),
+        "zero logical stream limit should be rejected: {error}"
+    );
+}
+
+#[test]
 fn accepts_multi_step_config() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"
@@ -784,7 +806,7 @@ fn classify_invalid_request_falls_through_to_io() {
 
 #[test]
 #[expect(clippy::too_many_lines, reason = "YAML config literal")]
-fn rejects_filter_result_transition_on_streaming_capable_step() {
+fn accepts_completion_result_transition_on_streaming_capable_step() {
     let mut registry = crate::FilterRegistry::with_builtins();
     registry
         .register(
@@ -814,16 +836,48 @@ steps:
     .unwrap();
     let result = super::IterativeRequestRouterFilter::from_config_with_registry(&yaml, &registry);
     assert!(
-        result.is_err(),
-        "filter/key/value transition should be rejected for streaming step"
+        result.is_ok(),
+        "filter/key/value transition should be evaluated after streaming EOF"
     );
-    if let Err(err) = result {
-        let msg = err.to_string();
-        assert!(
-            msg.contains("streaming") && msg.contains("filter"),
-            "error should mention streaming and filter: {msg}"
-        );
-    }
+}
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "YAML transition-order fixture")]
+fn rejects_header_failover_after_stream_completion_rule() {
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_streaming_selector",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(StreamingSelectorFilter)))),
+        )
+        .unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_streaming_selector
+      - filter: static_response
+        status: 200
+    on_result:
+      - filter: test_streaming_selector
+        key: action
+        value: loop
+        next: s
+      - status: [503]
+        next: s
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    let result = super::IterativeRequestRouterFilter::from_config_with_registry(&yaml, &registry);
+    let error = result.err().expect("interleaved streaming transitions must fail");
+    assert!(
+        error.to_string().contains("must precede completion rules"),
+        "validation error should explain phase ordering: {error}"
+    );
 }
 
 #[test]
@@ -907,6 +961,27 @@ fn streaming_runtime_guard_accepts_default_transition() {
 
 struct StreamingSelectorFilter;
 
+struct UndeclaredStreamingSelectorFilter;
+
+#[derive(Debug, PartialEq, Eq)]
+struct ParentExtension(&'static str);
+
+struct StepErrorFilter;
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for StepErrorFilter {
+    fn name(&self) -> &'static str {
+        "test_step_error"
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Err("nested step failure".to_owned().into())
+    }
+}
+
 #[async_trait::async_trait]
 impl crate::HttpFilter for StreamingSelectorFilter {
     fn name(&self) -> &'static str {
@@ -915,6 +990,21 @@ impl crate::HttpFilter for StreamingSelectorFilter {
 
     fn may_select_streaming_subrequest_response(&self) -> bool {
         true
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        ctx.set_subrequest_response_mode(crate::SubRequestResponseMode::Streaming);
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for UndeclaredStreamingSelectorFilter {
+    fn name(&self) -> &'static str {
+        "test_undeclared_streaming_selector"
     }
 
     async fn on_request(
@@ -1598,6 +1688,134 @@ async fn on_request_no_connector() {
     assert!(result.is_err(), "no connector should return error");
 }
 
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "nested pipeline setup and ownership assertions")]
+async fn step_error_restores_parent_request_extensions() {
+    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_step_error",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(StepErrorFilter)))),
+        )
+        .unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: failing
+steps:
+  - name: failing
+    filters:
+      - filter: test_step_error
+    on_result:
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    let filter = super::IterativeRequestRouterFilter::from_config_with_registry(&yaml, &registry).unwrap();
+    let request = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.buffered_request_body = Some(bytes::Bytes::from_static(b"request"));
+    ctx.subrequest_client = Some(&client);
+    ctx.extensions.insert(ParentExtension("preserved"));
+
+    let result = filter.on_request(&mut ctx).await;
+
+    assert!(result.is_err(), "the nested step error should propagate");
+    assert_eq!(
+        ctx.extensions.get::<ParentExtension>(),
+        Some(&ParentExtension("preserved")),
+        "the outer request extension must survive a nested step error"
+    );
+    assert!(
+        ctx.extensions.get::<crate::IterationState>().is_none(),
+        "IRR-private iteration state must not escape into the parent context"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "runtime guard setup and ownership assertions")]
+async fn streaming_runtime_guard_restores_parent_request_extensions() {
+    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+
+    let backend_port = start_unit_stream_backend();
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_undeclared_streaming_selector",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(UndeclaredStreamingSelectorFilter)))),
+        )
+        .unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+initial_step: stream
+steps:
+  - name: stream
+    filters:
+      - filter: test_undeclared_streaming_selector
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{backend_port}"]
+    on_result:
+      - default: true
+        done: true
+      - status: [502]
+        next: stream
+"#
+    ))
+    .unwrap();
+    let filter = super::IterativeRequestRouterFilter::from_config_with_registry(&yaml, &registry).unwrap();
+    let request = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.buffered_request_body = Some(bytes::Bytes::from_static(b"request"));
+    ctx.subrequest_client = Some(&client);
+    ctx.extensions.insert(ParentExtension("preserved"));
+
+    let result = filter.on_request(&mut ctx).await;
+
+    assert!(
+        result
+            .as_ref()
+            .is_err_and(|error| error.to_string().contains("interleaved transition phases")),
+        "the runtime guard should reject a misdeclared streaming selector: {result:?}"
+    );
+    assert_eq!(
+        ctx.extensions.get::<ParentExtension>(),
+        Some(&ParentExtension("preserved")),
+        "the runtime guard must restore outer request extensions"
+    );
+    assert!(
+        ctx.extensions.get::<crate::IterationState>().is_none(),
+        "IRR-private iteration state must not escape into the parent context"
+    );
+}
+
+fn start_unit_stream_backend() -> u16 {
+    use std::io::{Read as _, Write as _};
+
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let mut request = [0_u8; 4_096];
+        let _read = stream.read(&mut request);
+        let _sent = stream.write_all(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\nx\r\n0\r\n\r\n",
+        );
+    });
+    port
+}
+
 // ---------------------------------------------------------------------------
 // on_request_body - not end_of_stream
 // ---------------------------------------------------------------------------
@@ -2071,6 +2289,15 @@ fn listener_response_limit_clamps_router_limit() {
         4
     );
     assert_eq!(super::effective_response_limit(4, crate::BodyMode::Stream), 4);
+}
+
+#[test]
+fn streaming_transport_uses_only_listener_limit() {
+    assert_eq!(
+        super::streaming_transport_limit(crate::BodyMode::SizeLimit { max_bytes: 4 }),
+        Some(4)
+    );
+    assert_eq!(super::streaming_transport_limit(crate::BodyMode::Stream), None);
 }
 
 #[test]

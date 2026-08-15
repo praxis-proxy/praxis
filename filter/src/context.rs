@@ -3,7 +3,14 @@
 
 //! Transport-agnostic HTTP request/response metadata and per-request filter context.
 
-use std::{any::Any, borrow::Cow, collections::HashMap, net::IpAddr, sync::Arc, time::Instant};
+use std::{
+    any::Any,
+    borrow::Cow,
+    collections::{HashMap, VecDeque},
+    net::IpAddr,
+    sync::Arc,
+    time::Instant,
+};
 
 use http::{HeaderMap, Method, StatusCode, Uri, header::HeaderName};
 use praxis_core::{
@@ -11,7 +18,42 @@ use praxis_core::{
 };
 use praxis_tls::TlsPeerIdentity;
 
-use crate::{body::BodyMode, extensions::RequestExtensions, pipeline::body::merge_body_mode, results::FilterResultSet};
+use crate::{
+    FilterError, IterationState, body::BodyMode, extensions::RequestExtensions, pipeline::body::merge_body_mode,
+    results::FilterResultSet,
+};
+
+/// Bounded opaque chunks emitted by filters while IRR owns a logical stream.
+pub(crate) struct PendingStreamChunks {
+    /// FIFO ordering of locally emitted opaque chunks.
+    chunks: VecDeque<bytes::Bytes>,
+    /// Combined iteration-state and pending-output ceiling.
+    max_retained_bytes: usize,
+    /// Bytes currently retained in `chunks`.
+    retained_bytes: usize,
+}
+
+impl PendingStreamChunks {
+    /// Create an empty bounded pending-output queue.
+    pub(crate) fn new(max_retained_bytes: usize) -> Self {
+        Self {
+            chunks: VecDeque::new(),
+            max_retained_bytes,
+            retained_bytes: 0,
+        }
+    }
+
+    /// Consume the accounting wrapper and return its FIFO queue.
+    pub(crate) fn into_chunks(self) -> VecDeque<bytes::Bytes> {
+        self.chunks
+    }
+
+    /// Drain queued chunks and reset their retained-byte accounting.
+    pub(crate) fn drain_chunks(&mut self) -> VecDeque<bytes::Bytes> {
+        self.retained_bytes = 0;
+        std::mem::take(&mut self.chunks)
+    }
+}
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -98,6 +140,53 @@ pub enum SubRequestResponseMode {
 
     /// Return response headers plus a pull-based streaming body.
     Streaming,
+}
+
+/// Provider-neutral reason an owned streaming source terminated abnormally.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StreamTerminationCause {
+    /// Admission capacity was not acquired in time.
+    AdmissionTimeout,
+    /// The peer circuit breaker rejected the exchange.
+    CircuitOpen,
+    /// Connection establishment failed.
+    Connect,
+    /// The overall or per-step deadline expired.
+    DeadlineExceeded,
+    /// The upstream produced no bytes within its idle budget.
+    IdleTimeout,
+    /// Transport I/O failed after connection establishment.
+    Io,
+    /// A response-body filter failed after commitment.
+    Filter,
+    /// A configured response byte ceiling was exceeded.
+    ResponseTooLarge,
+}
+
+/// Typed abnormal termination exposed to streaming completion filters.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct StreamTermination {
+    /// Framework-level failure classification.
+    cause: StreamTerminationCause,
+    /// Set by a completion filter that produced a valid terminal sequence.
+    handled: bool,
+}
+
+impl StreamTermination {
+    /// Create an unhandled termination value.
+    pub(crate) fn new(cause: StreamTerminationCause) -> Self {
+        Self { cause, handled: false }
+    }
+
+    /// The provider-neutral termination classification.
+    pub fn cause(&self) -> StreamTerminationCause {
+        self.cause
+    }
+
+    /// Whether a completion filter converted the failure into final bytes.
+    pub fn is_handled(&self) -> bool {
+        self.handled
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -356,6 +445,72 @@ impl HttpFilterContext<'_> {
     /// Filters own this decision; the transport layer only executes it.
     pub fn set_subrequest_response_mode(&mut self, mode: SubRequestResponseMode) {
         self.subrequest_response_mode = mode;
+    }
+
+    /// Emit an opaque response chunk into the IRR-owned logical stream.
+    ///
+    /// Emission is available only inside an iterative session. A buffered
+    /// intermediate step may retain chunks for a later streaming step; if the
+    /// iteration instead terminates with a buffered response, IRR rejects the
+    /// pending chunks. Chunks emitted by a streaming response-body callback are
+    /// delivered in FIFO order before that callback's body output. Pending
+    /// chunks are bounded together with retained [`IterationState`]; exceeding
+    /// that bound returns an error and enqueues nothing. Praxis does not inspect
+    /// or reinterpret the bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error outside an IRR step or when the retained-state limit
+    /// would be exceeded.
+    pub fn emit_stream_chunk(&mut self, bytes: bytes::Bytes) -> Result<(), FilterError> {
+        let state_bytes = self
+            .extensions
+            .get::<IterationState>()
+            .map_or(0, IterationState::retained_bytes);
+        let pending = self
+            .extensions
+            .get_mut::<PendingStreamChunks>()
+            .ok_or_else(|| -> FilterError {
+                "stream chunk emission is only available inside iterative_request_router"
+                    .to_owned()
+                    .into()
+            })?;
+        let retained = state_bytes
+            .checked_add(pending.retained_bytes)
+            .and_then(|value| value.checked_add(bytes.len()))
+            .ok_or_else(|| -> FilterError { "stream chunk retained-state size overflow".to_owned().into() })?;
+        if retained > pending.max_retained_bytes {
+            return Err(format!(
+                "stream chunk emission exceeds retained-state limit ({} > {})",
+                retained, pending.max_retained_bytes
+            )
+            .into());
+        }
+        pending.retained_bytes += bytes.len();
+        pending.chunks.push_back(bytes);
+        Ok(())
+    }
+
+    /// Abnormal source termination visible during a streaming completion hook.
+    pub fn stream_termination(&self) -> Option<&StreamTermination> {
+        self.extensions.get::<StreamTermination>()
+    }
+
+    /// Mark the current abnormal stream termination as converted to a valid
+    /// provider-specific terminal sequence by this filter.
+    ///
+    /// Returns `false` when the step is completing normally.
+    pub fn mark_stream_termination_handled(&mut self) -> bool {
+        let Some(termination) = self.extensions.get_mut::<StreamTermination>() else {
+            return false;
+        };
+        termination.handled = true;
+        true
+    }
+
+    /// Enable bounded local stream emission for an IRR step.
+    pub(crate) fn enable_stream_chunk_emission(&mut self, max_retained_bytes: usize) {
+        self.extensions.insert(PendingStreamChunks::new(max_retained_bytes));
     }
 
     /// Read a durable metadata value by key.
@@ -1654,6 +1809,53 @@ mod tests {
         assert!(
             ctx.get_structured_metadata("ns", "new-key").is_none(),
             "merge should drop new key past limit"
+        );
+    }
+
+    #[test]
+    fn stream_chunk_emission_is_bounded() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.enable_stream_chunk_emission(5);
+        ctx.emit_stream_chunk(bytes::Bytes::from_static(b"12345")).unwrap();
+        let error = ctx.emit_stream_chunk(bytes::Bytes::from_static(b"6")).unwrap_err();
+        assert!(
+            error.to_string().contains("retained-state limit"),
+            "overflow should report the retained-state limit: {error}"
+        );
+    }
+
+    #[test]
+    fn stream_chunk_emission_requires_irr_session() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let error = ctx.emit_stream_chunk(bytes::Bytes::from_static(b"event")).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("only available inside iterative_request_router"),
+            "out-of-session emission should be rejected: {error}"
+        );
+    }
+
+    #[test]
+    fn stream_termination_requires_explicit_handling() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.extensions
+            .insert(StreamTermination::new(StreamTerminationCause::IdleTimeout));
+        assert_eq!(
+            ctx.stream_termination().map(StreamTermination::cause),
+            Some(StreamTerminationCause::IdleTimeout),
+            "completion filters should see the typed cause"
+        );
+        assert!(
+            ctx.mark_stream_termination_handled(),
+            "an abnormal completion should be markable as handled"
+        );
+        assert!(
+            ctx.stream_termination().is_some_and(StreamTermination::is_handled),
+            "handled state should persist for the session"
         );
     }
 }

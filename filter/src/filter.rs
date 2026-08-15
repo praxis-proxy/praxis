@@ -14,6 +14,7 @@ use crate::{
     actions::FilterAction,
     body::{BodyAccess, BodyMode},
     builtins::http::payload_processing::compression_config::CompressionConfig,
+    pipeline::FilterPipeline,
 };
 
 // -----------------------------------------------------------------------------
@@ -117,6 +118,14 @@ pub trait HttpFilter: Send + Sync {
     fn may_select_streaming_subrequest_response(&self) -> bool {
         false
     }
+
+    /// Visit pipelines owned by this filter.
+    ///
+    /// Framework filters that embed nested pipelines override this hook so
+    /// server-provided runtime resources are propagated into those pipelines.
+    /// Ordinary filters should use the default no-op implementation.
+    #[doc(hidden)]
+    fn visit_nested_pipelines(&mut self, _visitor: &mut dyn FnMut(&mut FilterPipeline)) {}
 
     /// Called for each response, in reverse pipeline order.
     ///

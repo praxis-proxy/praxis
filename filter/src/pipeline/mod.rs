@@ -161,6 +161,8 @@ impl FilterPipeline {
         max_response: Option<usize>,
         allow_unbounded: bool,
     ) -> Result<(), FilterError> {
+        self.apply_nested_body_limits(max_request, max_response, allow_unbounded)?;
+
         if let Some(ceiling) = max_request {
             self.body_capabilities.request_body_mode = clamp_body_mode(
                 self.body_capabilities.request_body_mode,
@@ -193,6 +195,27 @@ impl FilterPipeline {
         Ok(())
     }
 
+    /// Apply the listener ceilings recursively to nested pipelines.
+    fn apply_nested_body_limits(
+        &mut self,
+        max_request: Option<usize>,
+        max_response: Option<usize>,
+        allow_unbounded: bool,
+    ) -> Result<(), FilterError> {
+        let mut nested_error = None;
+        self.visit_nested_pipelines(&mut |pipeline| {
+            if nested_error.is_none()
+                && let Err(error) = pipeline.apply_body_limits(max_request, max_response, allow_unbounded)
+            {
+                nested_error = Some(error);
+            }
+        });
+        if let Some(error) = nested_error {
+            return Err(error);
+        }
+        Ok(())
+    }
+
     /// Pre-computed body processing capabilities for this pipeline.
     pub fn body_capabilities(&self) -> &BodyCapabilities {
         &self.body_capabilities
@@ -220,11 +243,13 @@ impl FilterPipeline {
 
     /// Set the shared [`HealthRegistry`] for this pipeline.
     pub fn set_health_registry(&mut self, registry: HealthRegistry) {
+        self.visit_nested_pipelines(&mut |pipeline| pipeline.set_health_registry(Arc::clone(&registry)));
         self.health_registry = Some(registry);
     }
 
     /// Enable or disable recording of per-filter duration metrics.
     pub fn set_record_filter_duration_metrics(&mut self, enabled: bool) {
+        self.visit_nested_pipelines(&mut |pipeline| pipeline.set_record_filter_duration_metrics(enabled));
         self.record_filter_duration_metrics = enabled;
     }
 
@@ -245,6 +270,7 @@ impl FilterPipeline {
 
     /// Override the [`IdGenerator`] for this pipeline.
     pub fn set_id_generator(&mut self, generator: Arc<IdGenerator>) {
+        self.visit_nested_pipelines(&mut |pipeline| pipeline.set_id_generator(Arc::clone(&generator)));
         self.id_generator = generator;
     }
 
@@ -255,6 +281,7 @@ impl FilterPipeline {
 
     /// Set the shared [`KvStoreRegistry`] for this pipeline.
     pub fn set_kv_stores(&mut self, stores: KvStoreRegistry) {
+        self.visit_nested_pipelines(&mut |pipeline| pipeline.set_kv_stores(stores.clone()));
         self.kv_stores = Some(stores);
     }
 
@@ -273,6 +300,7 @@ impl FilterPipeline {
     ///
     /// [`SubRequestClient`]: praxis_core::subrequest::SubRequestClient
     pub fn set_subrequest_client(&mut self, client: praxis_core::subrequest::SubRequestClient) {
+        self.visit_nested_pipelines(&mut |pipeline| pipeline.set_subrequest_client(client.clone()));
         self.subrequest_client = Some(client);
     }
 
@@ -306,6 +334,7 @@ impl FilterPipeline {
 
     /// Override the [`TimeSource`] for this pipeline.
     pub fn set_time_source(&mut self, source: Arc<dyn TimeSource>) {
+        self.visit_nested_pipelines(&mut |pipeline| pipeline.set_time_source(Arc::clone(&source)));
         self.time_source = source;
     }
 
@@ -321,6 +350,15 @@ impl FilterPipeline {
         for pf in &self.filters {
             if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {
                 f.apply_insecure_options(options);
+            }
+        }
+    }
+
+    /// Apply a mutation to every pipeline directly embedded by a filter.
+    fn visit_nested_pipelines(&mut self, visitor: &mut dyn FnMut(&mut FilterPipeline)) {
+        for pf in &mut self.filters {
+            if let crate::any_filter::AnyFilter::Http(filter) = &mut pf.filter {
+                filter.visit_nested_pipelines(visitor);
             }
         }
     }
