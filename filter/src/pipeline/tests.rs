@@ -15,7 +15,7 @@ use praxis_core::config::{FailureMode, SkipPipelineChecks};
 
 use super::{FilterPipeline, body::compute_body_capabilities, filter::PipelineFilter};
 use crate::{
-    FilterAction, FilterEntry, FilterError, FilterRegistry,
+    FilterAction, FilterEntry, FilterError, FilterRegistry, StreamingResponseBody, StreamingTerminalResponse,
     any_filter::AnyFilter,
     body::{BodyAccess, BodyCapabilities, BodyMode},
     filter::HttpFilter,
@@ -697,6 +697,7 @@ fn apply_body_limits_no_limits_leaves_stream_mode() {
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -734,6 +735,7 @@ fn apply_body_limits_converts_default_stream_to_size_limit() {
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -780,6 +782,7 @@ fn apply_body_limits_preserves_filter_declared_stream() {
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1501,7 +1504,7 @@ fn no_warning_when_unconditional_router_exists() {
 }
 
 #[tokio::test]
-async fn response_header_swap_same_count_detected() {
+async fn response_header_swap_same_count_is_applied_to_the_map() {
     let pipeline = make_pipeline(vec![Box::new(SwapHeaderFilter)]);
     let req = crate::test_utils::make_request(Method::GET, "/");
     let mut resp = crate::context::Response {
@@ -1514,7 +1517,12 @@ async fn response_header_swap_same_count_detected() {
     let _result = pipeline.execute_http_response(&mut ctx).await.unwrap();
     assert!(
         !ctx.response_headers_modified,
-        "count-based detection does not catch same-count header swaps"
+        "the pipeline no longer infers modification; the flag is an explicit filter hint only"
+    );
+    assert!(resp.headers.get("x-old").is_none(), "swapped-out header should be gone");
+    assert!(
+        resp.headers.get("x-new").is_some(),
+        "swapped-in header should be present"
     );
 }
 
@@ -1530,6 +1538,7 @@ fn apply_body_limits_default_stream_becomes_size_limit() {
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1560,6 +1569,7 @@ fn apply_body_limits_filter_stricter_than_config() {
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1587,6 +1597,7 @@ fn apply_body_limits_config_stricter_than_filter() {
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1614,6 +1625,7 @@ fn apply_body_limits_rejects_unbounded_stream_buffer() {
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1640,6 +1652,7 @@ fn apply_body_limits_clamps_unbounded_stream_buffer_with_override() {
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1862,6 +1875,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1877,6 +1891,150 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         recorded,
         vec!["C", "A"],
         "response should skip B (skipped by SkipTo) and run C then A in reverse"
+    );
+}
+
+#[tokio::test]
+async fn skip_to_excludes_skipped_filters_from_body_hooks() {
+    let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let mut filter_a = PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(BodyLoggingFilter {
+            label: "A",
+            log: Arc::clone(&log),
+        })),
+        vec![],
+        vec![],
+    );
+    filter_a.branches = vec![super::branch::ResolvedBranch {
+        condition: None,
+        filters: vec![],
+        max_iterations: None,
+        name: Arc::from("skip_branch"),
+        rejoin: super::branch::RejoinTarget::SkipTo(2),
+    }];
+
+    let filter_b = PipelineFilter::new(
+        1,
+        AnyFilter::Http(Box::new(BodyLoggingFilter {
+            label: "B",
+            log: Arc::clone(&log),
+        })),
+        vec![],
+        vec![],
+    );
+    let filter_c = PipelineFilter::new(
+        2,
+        AnyFilter::Http(Box::new(BodyLoggingFilter {
+            label: "C",
+            log: Arc::clone(&log),
+        })),
+        vec![],
+        vec![],
+    );
+
+    let pipeline = FilterPipeline {
+        body_capabilities: BodyCapabilities::default(),
+        compression: None,
+        filters: vec![filter_a, filter_b, filter_c],
+        record_filter_duration_metrics: false,
+        health_registry: None,
+        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
+        kv_stores: None,
+        may_select_streaming_subrequest_response: false,
+        subrequest_client: None,
+        pipeline_extensions: Vec::new(),
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
+    };
+
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+    log.lock().unwrap().clear();
+
+    let mut body = Some(Bytes::from_static(b"payload"));
+    drop(
+        pipeline
+            .execute_http_request_body(&mut ctx, &mut body, true)
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        log.lock().unwrap().clone(),
+        vec!["A", "C"],
+        "request body should skip B, which SkipTo bypassed in the request phase"
+    );
+
+    log.lock().unwrap().clear();
+    let mut body = Some(Bytes::from_static(b"payload"));
+    drop(pipeline.execute_http_response_body(&mut ctx, &mut body, true).unwrap());
+    assert_eq!(
+        log.lock().unwrap().clone(),
+        vec!["C", "A"],
+        "response body should skip B and run in reverse order"
+    );
+}
+
+#[tokio::test]
+async fn body_hooks_run_for_every_filter_before_the_request_phase() {
+    // A StreamBuffer pre-read runs body hooks before execute_http_request
+    // has populated executed_filter_indices. Nothing is known to be
+    // skipped yet, so every eligible filter must still run.
+    let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+    let pipeline = FilterPipeline {
+        body_capabilities: BodyCapabilities::default(),
+        compression: None,
+        filters: vec![
+            PipelineFilter::new(
+                0,
+                AnyFilter::Http(Box::new(BodyLoggingFilter {
+                    label: "A",
+                    log: Arc::clone(&log),
+                })),
+                vec![],
+                vec![],
+            ),
+            PipelineFilter::new(
+                1,
+                AnyFilter::Http(Box::new(BodyLoggingFilter {
+                    label: "B",
+                    log: Arc::clone(&log),
+                })),
+                vec![],
+                vec![],
+            ),
+        ],
+        record_filter_duration_metrics: false,
+        health_registry: None,
+        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
+        kv_stores: None,
+        may_select_streaming_subrequest_response: false,
+        subrequest_client: None,
+        pipeline_extensions: Vec::new(),
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
+    };
+
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    assert!(
+        ctx.executed_filter_indices.is_empty(),
+        "precondition: request phase has not run"
+    );
+
+    let mut body = Some(Bytes::from_static(b"payload"));
+    drop(
+        pipeline
+            .execute_http_request_body(&mut ctx, &mut body, true)
+            .await
+            .unwrap(),
+    );
+
+    assert_eq!(
+        log.lock().unwrap().clone(),
+        vec!["A", "B"],
+        "pre-read must not gate on request-phase tracking that has not happened yet"
     );
 }
 
@@ -1912,6 +2070,7 @@ async fn all_executed_filters_run_on_response() {
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -1969,6 +2128,7 @@ async fn skipped_filter_skips_its_branches() {
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     };
@@ -2709,6 +2869,51 @@ impl HttpFilter for LoggingFilter {
     }
 }
 
+/// A filter that records which body hooks it was handed.
+struct BodyLoggingFilter {
+    label: &'static str,
+    log: Arc<std::sync::Mutex<Vec<&'static str>>>,
+}
+
+#[async_trait]
+impl HttpFilter for BodyLoggingFilter {
+    fn name(&self) -> &'static str {
+        self.label
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn response_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_request_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        self.log.lock().unwrap().push(self.label);
+        Ok(FilterAction::Continue)
+    }
+
+    fn on_response_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, FilterError> {
+        self.log.lock().unwrap().push(self.label);
+        Ok(FilterAction::Continue)
+    }
+}
+
 /// A filter that always returns an error.
 struct ErrorFilter;
 
@@ -3127,6 +3332,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }
@@ -3152,6 +3358,7 @@ fn make_pipeline_with_conditions(
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }
@@ -3177,6 +3384,7 @@ fn make_pipeline_with_response_conditions(
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
         subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
     }
@@ -3655,6 +3863,175 @@ fn multiple_pipeline_extensions_are_all_injected() {
 
     assert_eq!(ext.get::<ExtA>().unwrap().0, 1, "ExtA should be injected");
     assert_eq!(ext.get::<ExtB>().unwrap().0, "hello", "ExtB should be injected");
+}
+
+// -----------------------------------------------------------------------------
+// Streaming Terminal Response Pipeline Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn streaming_terminal_response_returned_from_request_pipeline() {
+    struct StreamingTerminalResponseFilter;
+
+    #[async_trait::async_trait]
+    impl HttpFilter for StreamingTerminalResponseFilter {
+        fn name(&self) -> &'static str {
+            "streaming_terminal_response"
+        }
+
+        async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            struct NullBody;
+            #[async_trait::async_trait]
+            impl StreamingResponseBody for NullBody {
+                async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
+                    Ok(None)
+                }
+
+                async fn suppress(&mut self) -> Result<(), FilterError> {
+                    Ok(())
+                }
+
+                async fn cancel(&mut self) {}
+            }
+            Ok(FilterAction::StreamingTerminalResponse(Box::new(
+                StreamingTerminalResponse::new(200, Box::new(NullBody)),
+            )))
+        }
+    }
+
+    let pipeline = make_pipeline(vec![Box::new(StreamingTerminalResponseFilter)]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let result = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(result, FilterAction::StreamingTerminalResponse(_)),
+        "pipeline should return StreamingTerminalResponse"
+    );
+}
+
+#[tokio::test]
+async fn streaming_terminal_response_marks_executed_index() {
+    struct StreamingFilter;
+
+    #[async_trait::async_trait]
+    impl HttpFilter for StreamingFilter {
+        fn name(&self) -> &'static str {
+            "streaming_marker"
+        }
+
+        async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            struct NullBody;
+            #[async_trait::async_trait]
+            impl StreamingResponseBody for NullBody {
+                async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
+                    Ok(None)
+                }
+
+                async fn suppress(&mut self) -> Result<(), FilterError> {
+                    Ok(())
+                }
+
+                async fn cancel(&mut self) {}
+            }
+            Ok(FilterAction::StreamingTerminalResponse(Box::new(
+                StreamingTerminalResponse::new(200, Box::new(NullBody)),
+            )))
+        }
+    }
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let pipeline = make_pipeline(vec![
+        Box::new(CountingFilter {
+            counter: Arc::clone(&counter),
+        }),
+        Box::new(StreamingFilter),
+    ]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+
+    assert!(ctx.executed_filter_indices[0], "first filter should be marked executed");
+    assert!(
+        ctx.executed_filter_indices[1],
+        "streaming filter should be marked executed"
+    );
+}
+
+#[tokio::test]
+async fn streaming_terminal_response_ignored_in_response_phase() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let pipeline = make_pipeline(vec![Box::new(CountingFilter { counter })]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+    let result = pipeline.execute_http_response(&mut ctx).await.unwrap();
+
+    assert!(
+        matches!(result, FilterAction::Continue),
+        "response phase should continue normally"
+    );
+}
+
+#[test]
+fn streaming_capability_not_detected_for_normal_filter() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let pipeline = make_pipeline(vec![Box::new(CountingFilter { counter })]);
+    assert!(
+        !pipeline.may_select_streaming_subrequest_response(),
+        "normal filter should not declare streaming capability"
+    );
+}
+
+#[test]
+fn streaming_capability_detected_when_filter_declares_it() {
+    let streaming_pf = super::test_filters::streaming_capable_filter();
+    let pipeline = FilterPipeline {
+        body_capabilities: BodyCapabilities::default(),
+        compression: None,
+        filters: vec![streaming_pf],
+        health_registry: None,
+        id_generator: Arc::new(praxis_core::id::IdGenerator::new()),
+        kv_stores: None,
+        pipeline_extensions: Vec::new(),
+        record_filter_duration_metrics: false,
+        subrequest_client: None,
+        may_select_streaming_subrequest_response: true,
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
+    };
+    assert!(
+        pipeline.may_select_streaming_subrequest_response(),
+        "pipeline with streaming-capable filter should detect capability"
+    );
+}
+
+#[test]
+fn streaming_with_stream_buffer_is_ordering_error() {
+    use praxis_core::config::SkipPipelineChecks;
+
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![FilterEntry {
+        branch_chains: None,
+        filter_type: "static_response".into(),
+        config: serde_yaml::from_str("status: 200").unwrap(),
+        conditions: vec![],
+        name: None,
+        response_conditions: vec![],
+        failure_mode: FailureMode::default(),
+    }];
+    let mut pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+    pipeline.body_capabilities.response_body_mode = BodyMode::StreamBuffer { max_bytes: Some(1024) };
+    pipeline.may_select_streaming_subrequest_response = true;
+
+    let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("streaming sub-request response") && e.contains("StreamBuffer")),
+        "should detect streaming + StreamBuffer incompatibility: {errors:?}"
+    );
 }
 
 // -----------------------------------------------------------------------------

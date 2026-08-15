@@ -181,7 +181,8 @@ Relevant file:
 Response filters execute in **reverse order** (last
 filter first). Only filters that actually executed
 during Step 4 run — filters skipped by conditions
-or `SkipTo` are also skipped in the response phase.
+or `SkipTo` are also skipped in the response phase,
+and in the request-body and response-body phases.
 
 Each filter's `on_response` receives the upstream
 response headers and can modify them or reject the

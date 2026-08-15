@@ -2336,7 +2336,7 @@ fn one_registration_serves_repeated_filter_construction() {
 /// Host factories are applied after the engine's, and the factory registry is
 /// last-writer-wins, so a deployment can swap a bundled implementation for its
 /// own without forking. The signal is that a config with no `config:` block
-/// loads: the bundled OAuth delegator rejects that, and the stub accepts it.
+/// loads: the bundled `OAuth` delegator rejects that, and the stub accepts it.
 ///
 /// The registration is process-global and outlives this test. `delegator/oauth`
 /// is used by no other test in this file, which is what makes hijacking it safe

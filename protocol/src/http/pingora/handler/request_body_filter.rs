@@ -100,7 +100,12 @@ pub(super) async fn execute(
     output.write_back(ctx);
 
     match result {
-        Ok(FilterAction::Continue | FilterAction::BodyDone | FilterAction::TerminalResponse(_)) => {
+        Ok(
+            FilterAction::Continue
+            | FilterAction::BodyDone
+            | FilterAction::TerminalResponse(_)
+            | FilterAction::StreamingTerminalResponse(_),
+        ) => {
             suppress_stream_buffer_chunk(body, is_stream_buffer, ctx.request_body_released, end_of_stream);
             Ok(())
         },

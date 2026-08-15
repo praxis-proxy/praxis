@@ -8,6 +8,9 @@ CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || command -v docker 2
 NIGHTLY_VERSION  := $(shell grep -m1 'rust-toolchain@' .github/actions/install-nightly-rust/action.yml | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}')
 V                ?=
 
+# Optional features that require separate test and lint passes.
+OPTIONAL_FEATURES := basic-auth-filter policy-engine otel
+
 UNAME_S := $(shell uname -s | tr A-Z a-z)
 UNAME_M := $(shell uname -m)
 
@@ -228,10 +231,15 @@ container-run: | require-container-engine
 
 test: $(H2SPEC)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo test --workspace $(_NOCAPTURE)
+	cargo test -p praxis-proxy-core --features otel $(_NOCAPTURE)
+	cargo test -p praxis-proxy-filter --features "basic-auth-filter policy-engine" $(_NOCAPTURE)
+	PATH="$(BINUTILS_PATH):$(PATH)" cargo test -p praxis-tests-integration --features "$(OPTIONAL_FEATURES)" $(_NOCAPTURE)
 
 test-unit:
 	cargo test -p praxis-proxy-core $(_NOCAPTURE)
+	cargo test -p praxis-proxy-core --features otel $(_NOCAPTURE)
 	cargo test -p praxis-proxy-filter $(_NOCAPTURE)
+	cargo test -p praxis-proxy-filter --features "basic-auth-filter policy-engine" $(_NOCAPTURE)
 	cargo test -p praxis-proxy-protocol $(_NOCAPTURE)
 	cargo test -p praxis-proxy $(_NOCAPTURE)
 
@@ -240,6 +248,7 @@ test-schema:
 
 test-integration:
 	cargo test -p praxis-tests-integration $(_NOCAPTURE)
+	cargo test -p praxis-tests-integration --features "$(OPTIONAL_FEATURES)" $(_NOCAPTURE)
 
 test-conformance: $(H2SPEC)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo test -p praxis-tests-conformance $(_NOCAPTURE)
@@ -280,6 +289,7 @@ bench: $(VEGETA) $(FORTIO_DEP)
 
 lint:
 	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets --features "$(OPTIONAL_FEATURES)" -- -D warnings
 	cargo +$(NIGHTLY_VERSION) fmt --all -- --check
 	cargo machete
 	cargo xtask lint-deps
@@ -368,7 +378,7 @@ help:
 	@echo "  clean                cargo clean"
 	@echo ""
 	@echo "Test:"
-	@echo "  test                 run all tests"
+	@echo "  test                 run all tests (default + optional features)"
 	@echo "  test-unit            unit tests (core, filter, protocol, praxis)"
 	@echo "  test-schema   config validation + example tests"
 	@echo "  test-integration     integration tests only"
@@ -383,7 +393,7 @@ help:
 	@echo "  bench                Criterion micro-benchmarks"
 	@echo ""
 	@echo "Quality:"
-	@echo "  lint                 clippy + rustfmt check + filter docs"
+	@echo "  lint                 clippy (default + optional features) + rustfmt check + filter docs"
 	@echo "  generate-filter-docs generate per-filter docs under docs/filters/"
 	@echo "  fmt                  format with nightly rustfmt"
 	@echo "  audit                cargo audit + cargo deny"

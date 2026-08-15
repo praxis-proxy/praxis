@@ -52,6 +52,7 @@ pub(crate) fn reload_pipelines(
     old_config: &Config,
     registry: &FilterRegistry,
     live: &ListenerPipelines,
+    listener_meta: &praxis_protocol::http::pingora::health::ListenerMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     subrequest_client: &praxis_core::subrequest::SubRequestClient,
@@ -98,6 +99,10 @@ pub(crate) fn reload_pipelines(
             }
         }
     }
+
+    listener_meta.store(Arc::new(
+        praxis_protocol::http::pingora::health::listener_meta_from_config(new_config),
+    ));
 
     respawn_health_checks(old_config, new_config, &health_registry, health_shutdown);
 
@@ -197,15 +202,34 @@ mod tests {
 
     #[test]
     fn valid_reload_swaps_pipeline() {
-        let (live, old_config, registry, shutdown) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta) = setup_live_pipelines();
         let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+        assert_eq!(
+            meta.load().get("web").unwrap().address,
+            "127.0.0.1:8080",
+            "initial meta should reflect setup listener address"
+        );
 
-        let new_config = valid_config();
+        let new_config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:9090"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 204
+"#,
+        )
+        .unwrap();
         let result = reload_pipelines(
             &new_config,
             &old_config,
             &registry,
             &live,
+            &meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_subrequest_client(),
@@ -214,11 +238,30 @@ mod tests {
         assert!(result.is_ok(), "valid reload should succeed");
         let new_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
         assert_ne!(old_ptr, new_ptr, "pipeline pointer should change after reload");
+
+        let loaded = meta.load();
+        let expected_names: std::collections::HashSet<&str> =
+            new_config.listeners.iter().map(|l| l.name.as_str()).collect();
+        let actual_names: std::collections::HashSet<&str> = loaded.keys().map(String::as_str).collect();
+        assert_eq!(
+            actual_names, expected_names,
+            "meta listener names should match reload config"
+        );
+        assert_eq!(
+            loaded.get("web").unwrap().address,
+            "127.0.0.1:9090",
+            "meta should reflect reloaded listener address"
+        );
+        assert_eq!(
+            loaded.get("web").unwrap().chain_names,
+            ["main"],
+            "meta should preserve chain names after reload"
+        );
     }
 
     #[test]
     fn invalid_filter_returns_err_old_pipeline_untouched() {
-        let (live, old_config, registry, shutdown) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta) = setup_live_pipelines();
         let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
 
         let bad_config = Config::from_yaml(
@@ -240,6 +283,7 @@ filter_chains:
             &old_config,
             &registry,
             &live,
+            &meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_subrequest_client(),
@@ -252,7 +296,7 @@ filter_chains:
 
     #[test]
     fn old_cancellation_token_cancelled_on_success() {
-        let (live, old_config, registry, shutdown) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta) = setup_live_pipelines();
         let old_token = shutdown.lock().unwrap().clone();
 
         let new_config = valid_config();
@@ -261,6 +305,7 @@ filter_chains:
             &old_config,
             &registry,
             &live,
+            &meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_subrequest_client(),
@@ -275,7 +320,7 @@ filter_chains:
 
     #[test]
     fn new_cancellation_token_created_on_success() {
-        let (live, old_config, registry, shutdown) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta) = setup_live_pipelines();
         let old_token = shutdown.lock().unwrap().clone();
 
         let new_config = valid_config();
@@ -284,6 +329,7 @@ filter_chains:
             &old_config,
             &registry,
             &live,
+            &meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_subrequest_client(),
@@ -300,7 +346,7 @@ filter_chains:
 
     #[test]
     fn health_checks_not_cancelled_on_failure() {
-        let (live, old_config, registry, shutdown) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta) = setup_live_pipelines();
         let old_token = shutdown.lock().unwrap().clone();
 
         let bad_config = Config::from_yaml(
@@ -322,6 +368,7 @@ filter_chains:
             &old_config,
             &registry,
             &live,
+            &meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_subrequest_client(),
@@ -334,7 +381,7 @@ filter_chains:
 
     #[test]
     fn new_listener_in_config_is_skipped() {
-        let (live, old_config, registry, shutdown) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta) = setup_live_pipelines();
 
         let new_config = Config::from_yaml(
             r#"
@@ -359,6 +406,7 @@ filter_chains:
             &old_config,
             &registry,
             &live,
+            &meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_subrequest_client(),
@@ -944,7 +992,13 @@ filter_chains:
     }
 
     /// Set up live pipelines, registry, and shutdown token for reload tests.
-    fn setup_live_pipelines() -> (ListenerPipelines, Config, FilterRegistry, Arc<Mutex<CancellationToken>>) {
+    fn setup_live_pipelines() -> (
+        ListenerPipelines,
+        Config,
+        FilterRegistry,
+        Arc<Mutex<CancellationToken>>,
+        praxis_protocol::http::pingora::health::ListenerMetaStore,
+    ) {
         let config = valid_config();
         let registry = FilterRegistry::with_builtins();
         let health_registry: HealthRegistry = Arc::new(HashMap::new());
@@ -957,7 +1011,10 @@ filter_chains:
         )
         .unwrap();
         let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
-        (pipelines, config, registry, shutdown)
+        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        );
+        (pipelines, config, registry, shutdown, meta)
     }
 
     /// Empty KV store registry for tests without KV stores.

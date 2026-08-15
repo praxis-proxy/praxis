@@ -107,8 +107,12 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
     register_admin_endpoints(
         &mut server,
         &config,
-        health_registry,
-        &state.kv_stores,
+        praxis_protocol::http::pingora::health::AdminEndpointOptions {
+            health_registry: Some(health_registry),
+            kv_registry: Some(state.kv_stores.clone()),
+            pipelines: Some((Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta))),
+            verbose: config.admin.verbose,
+        },
         prometheus_recorder,
     );
 
@@ -127,6 +131,8 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
 struct ServerState {
     /// Resolved filter pipelines per listener.
     pipelines: Arc<ListenerPipelines>,
+    /// Hot-swappable listener metadata for admin `/api/pipelines`.
+    listener_meta: praxis_protocol::http::pingora::health::ListenerMetaStore,
     /// KV store registry.
     kv_stores: praxis_core::kv::KvStoreRegistry,
     /// Shared sub-request client for iterative sub-requests.
@@ -168,6 +174,9 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
 
     let pipelines = resolve_pipelines(config, registry, health_registry, &kv_stores, &subrequest_client)
         .unwrap_or_else(|e| fatal(&e));
+    let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+        praxis_protocol::http::pingora::health::listener_meta_from_config(config),
+    );
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
     spawn_health_check_tasks(config, Arc::clone(health_registry), &health_shutdown);
@@ -189,6 +198,7 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
 
     ServerState {
         pipelines: Arc::new(pipelines),
+        listener_meta,
         kv_stores,
         subrequest_client,
         health_shutdown,
@@ -247,6 +257,7 @@ fn spawn_watcher(
         initial_content_hash,
         initial_config: config,
         kv_stores: state.kv_stores,
+        listener_meta: state.listener_meta,
         pipelines: state.pipelines,
         referenced_files,
         registry: Arc::new(registry),
@@ -264,17 +275,14 @@ fn spawn_watcher(
 fn register_admin_endpoints(
     server: &mut PingoraServerRuntime,
     config: &Config,
-    health_registry: HealthRegistry,
-    kv_stores: &praxis_core::kv::KvStoreRegistry,
+    options: praxis_protocol::http::pingora::health::AdminEndpointOptions,
     prometheus_recorder: Option<praxis_protocol::http::pingora::health::PrometheusAdminRecorder>,
 ) {
     if let (Some(admin_addr), Some(prometheus_recorder)) = (&config.admin.address, prometheus_recorder) {
         praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server_with_recorder(
             server.server_mut(),
             admin_addr,
-            Some(health_registry),
-            Some(kv_stores.clone()),
-            config.admin.verbose,
+            options,
             prometheus_recorder,
         );
     }

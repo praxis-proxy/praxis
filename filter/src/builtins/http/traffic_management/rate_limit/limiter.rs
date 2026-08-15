@@ -3,14 +3,14 @@
 
 //! Rate limiting logic: token acquisition, eviction, and header generation.
 
-use std::net::IpAddr;
+use std::{net::IpAddr, sync::atomic::Ordering};
 
-use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 
 use super::{
-    AGGRESSIVE_EVICTION_THRESHOLD, EVICTION_SCAN_LIMIT, HARD_CAP_PER_IP_ENTRIES, HEADER_RATELIMIT_LIMIT,
-    HEADER_RATELIMIT_REMAINING, HEADER_RATELIMIT_RESET, MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState,
+    HARD_CAP_PER_IP_ENTRIES, HEADER_RATELIMIT_LIMIT, HEADER_RATELIMIT_REMAINING, HEADER_RATELIMIT_RESET,
+    MAX_PER_IP_ENTRIES, PerIpState, RateLimitFilter, RateLimitState,
 };
 use crate::builtins::http::traffic_management::token_bucket::TokenBucket;
 
@@ -58,12 +58,29 @@ impl RateLimitFilter {
 
     /// Evict stale entries from a per-IP map when it exceeds [`MAX_PER_IP_ENTRIES`].
     ///
-    /// Scans up to [`EVICTION_SCAN_LIMIT`] entries and removes any whose
-    /// `last_refill` is older than `2 * burst / rate` seconds, meaning
-    /// the bucket would be fully refilled and idle.
-    #[expect(clippy::too_many_lines, reason = "atomic CAS loop with retain callback")]
-    pub(super) fn maybe_evict(&self, map: &DashMap<IpAddr, TokenBucket>, now_nanos: u64) {
-        if map.len() <= MAX_PER_IP_ENTRIES {
+    /// Removes buckets whose `last_refill` is older than
+    /// `2 * burst / rate` seconds, meaning the bucket would be fully
+    /// refilled and idle.
+    ///
+    /// Passes are claimed through [`PerIpState::claim_eviction_pass`],
+    /// so at most one caller per [`EVICTION_INTERVAL_NANOS`] performs
+    /// the scan and everyone else returns without touching the map.
+    /// This ordering matters: the interval is checked *before* the
+    /// entry count, because reading the count from the map itself
+    /// would already cost a read lock on every shard.
+    ///
+    /// A pass evicts every eligible entry rather than stopping after a
+    /// fixed number. [`DashMap::retain`] visits all entries regardless
+    /// of what the callback returns, so a partial scan reclaims less
+    /// for exactly the same cost.
+    ///
+    /// [`DashMap::retain`]: dashmap::DashMap::retain
+    /// [`EVICTION_INTERVAL_NANOS`]: super::EVICTION_INTERVAL_NANOS
+    pub(super) fn maybe_evict(&self, state: &PerIpState, now_nanos: u64) {
+        if !state.claim_eviction_pass(now_nanos) {
+            return;
+        }
+        if state.entries() <= MAX_PER_IP_ENTRIES {
             return;
         }
 
@@ -74,16 +91,8 @@ impl RateLimitFilter {
         )]
         let idle_threshold_nanos = (2.0 * self.burst / self.rate * 1_000_000_000.0) as u64;
 
-        let aggressive = map.len() > AGGRESSIVE_EVICTION_THRESHOLD;
-        let scan_limit = if aggressive { usize::MAX } else { EVICTION_SCAN_LIMIT };
-        let mut scanned = 0_usize;
         let mut evicted = 0_usize;
-
-        map.retain(|_ip, bucket| {
-            if scanned >= scan_limit {
-                return true;
-            }
-            scanned += 1;
+        state.buckets.retain(|_ip, bucket| {
             let last = bucket.last_refill_nanos();
             if now_nanos.saturating_sub(last) > idle_threshold_nanos {
                 evicted += 1;
@@ -93,13 +102,8 @@ impl RateLimitFilter {
         });
 
         if evicted > 0 {
-            tracing::debug!(
-                evicted,
-                scanned,
-                remaining = map.len(),
-                aggressive,
-                "rate_limit: evicted stale per-IP entries"
-            );
+            let remaining = state.entries.fetch_sub(evicted, Ordering::Relaxed) - evicted;
+            tracing::debug!(evicted, remaining, "rate_limit: evicted stale per-IP entries");
         }
     }
 
@@ -112,7 +116,7 @@ impl RateLimitFilter {
         let now = self.now_nanos();
         match &self.state {
             RateLimitState::Global(bucket) => Self::acquire_from_bucket(bucket, self.rate, self.burst, now),
-            RateLimitState::PerIp(map) => self.acquire_per_ip(map, client_addr, now),
+            RateLimitState::PerIp(state) => self.acquire_per_ip(state, client_addr, now),
         }
     }
 
@@ -120,35 +124,39 @@ impl RateLimitFilter {
     ///
     /// Rejects unknown IPs when the map exceeds [`HARD_CAP_PER_IP_ENTRIES`]
     /// to prevent unbounded memory growth via address rotation.
-    fn acquire_per_ip(
-        &self,
-        map: &DashMap<IpAddr, TokenBucket>,
-        client_addr: Option<IpAddr>,
-        now: u64,
-    ) -> Result<f64, f64> {
+    fn acquire_per_ip(&self, state: &PerIpState, client_addr: Option<IpAddr>, now: u64) -> Result<f64, f64> {
         let Some(ip) = client_addr.map(normalize_mapped_ipv4) else {
             tracing::info!("rate_limit: rejecting request with no client address");
             return Err(0.0);
         };
-        self.maybe_evict(map, now);
+        self.maybe_evict(state, now);
 
-        if let Some(bucket) = map.get(&ip) {
+        if let Some(bucket) = state.buckets.get(&ip) {
             return Self::acquire_from_bucket(&bucket, self.rate, self.burst, now);
         }
 
         // Reject unknown IPs when the map exceeds the hard cap to
         // prevent unbounded memory growth via address rotation.
-        if map.len() >= HARD_CAP_PER_IP_ENTRIES {
+        if state.entries() >= HARD_CAP_PER_IP_ENTRIES {
             tracing::warn!(
-                entries = map.len(),
+                entries = state.entries(),
                 hard_cap = HARD_CAP_PER_IP_ENTRIES,
                 "rate_limit: per-IP map hard cap reached, rejecting new IP"
             );
             return Err(0.0);
         }
 
-        let bucket = map.entry(ip).or_insert_with(|| TokenBucket::new(self.burst));
-        Self::acquire_from_bucket(&bucket, self.rate, self.burst, now)
+        // Insert through the entry API so a genuinely new address can be
+        // distinguished from one another thread inserted concurrently;
+        // only the former advances the entry count.
+        match state.buckets.entry(ip) {
+            Entry::Occupied(occupied) => Self::acquire_from_bucket(occupied.get(), self.rate, self.burst, now),
+            Entry::Vacant(vacant) => {
+                let bucket = vacant.insert(TokenBucket::new(self.burst));
+                state.entries.fetch_add(1, Ordering::Relaxed);
+                Self::acquire_from_bucket(&bucket, self.rate, self.burst, now)
+            },
+        }
     }
 
     /// Try to acquire one token from a single bucket.
@@ -167,11 +175,13 @@ impl RateLimitFilter {
         let now = self.now_nanos();
         match &self.state {
             RateLimitState::Global(bucket) => bucket.current_tokens(self.rate, self.burst, now),
-            RateLimitState::PerIp(map) => {
+            RateLimitState::PerIp(state) => {
                 let Some(ip) = client_addr.map(normalize_mapped_ipv4) else {
                     return 0.0;
                 };
-                map.get(&ip)
+                state
+                    .buckets
+                    .get(&ip)
                     .map_or(self.burst, |b| b.current_tokens(self.rate, self.burst, now))
             },
         }

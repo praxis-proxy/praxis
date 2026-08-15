@@ -82,6 +82,9 @@ pub(crate) struct WatcherParams {
     /// event filter, which belongs in its own change.
     pub(crate) referenced_files: Vec<PathBuf>,
 
+    /// Listener metadata for admin `/api/pipelines`, swapped on reload.
+    pub(crate) listener_meta: praxis_protocol::http::pingora::health::ListenerMetaStore,
+
     /// Filter registry for building new pipelines.
     pub(crate) registry: Arc<FilterRegistry>,
 
@@ -140,22 +143,39 @@ async fn watch_loop(params: WatcherParams) {
     run_event_loop(&mut rx, &params).await;
 }
 
+/// How long remains before another reload attempt is allowed.
+///
+/// Returns `None` when no attempt is being held back, either because
+/// nothing has failed yet or because the backoff window has elapsed.
+fn backoff_remaining(consecutive_failures: u32, last_failure: Option<Instant>) -> Option<Duration> {
+    let last = last_failure?;
+    let remaining = backoff_duration(consecutive_failures).checked_sub(last.elapsed())?;
+    if remaining.is_zero() { None } else { Some(remaining) }
+}
+
 /// Whether the backoff period has elapsed since the last failure.
 fn should_skip_for_backoff(consecutive_failures: u32, last_failure: Option<Instant>) -> bool {
-    let Some(last) = last_failure else { return false };
-    let backoff = backoff_duration(consecutive_failures);
-    let elapsed = last.elapsed();
-    if elapsed < backoff {
-        let remaining = backoff - elapsed;
-        warn!(
-            consecutive_failures,
-            backoff_secs = backoff.as_secs(),
-            remaining_secs = remaining.as_secs(),
-            "config reload skipped, backing off after repeated failures",
-        );
-        return true;
+    let Some(remaining) = backoff_remaining(consecutive_failures, last_failure) else {
+        return false;
+    };
+    warn!(
+        consecutive_failures,
+        backoff_secs = backoff_duration(consecutive_failures).as_secs(),
+        remaining_secs = remaining.as_secs(),
+        "config reload deferred, backing off after repeated failures",
+    );
+    true
+}
+
+/// Sleep for `delay`, or never resolve when there is nothing to wait for.
+///
+/// Lets the event loop keep one uniform `select!` arm whether or not a
+/// deferred reload is pending.
+async fn sleep_or_pending(delay: Option<Duration>) {
+    match delay {
+        Some(delay) => tokio::time::sleep(delay).await,
+        None => std::future::pending().await,
     }
-    false
 }
 
 /// Process filesystem events until shutdown is requested.
@@ -174,31 +194,59 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
         &mut content_hash,
         &params.registry,
         &params.pipelines,
+        &params.listener_meta,
         &params.health_shutdown,
         &params.kv_stores,
         &params.subrequest_client,
     );
 
+    // A change seen while backing off is remembered rather than dropped,
+    // and retried when the window expires. The filesystem will not
+    // re-notify us about an edit we already consumed.
+    let mut reload_pending = false;
+
     loop {
+        let retry_in = if reload_pending {
+            backoff_remaining(consecutive_failures, last_failure)
+        } else {
+            None
+        };
+
         tokio::select! {
             Some(()) = rx.recv() => {
                 tracing::debug!(debounce_ms = DEBOUNCE_MS, "config file change detected, debouncing");
                 drain_and_debounce(rx).await;
-                if should_skip_for_backoff(consecutive_failures, last_failure) {
-                    continue;
-                }
-                let ok = handle_reload(
-                    &params.config_path, &params.referenced_files, &mut current_config, &mut content_hash,
-                    &params.registry, &params.pipelines, &params.health_shutdown, &params.kv_stores,
-                    &params.subrequest_client,
-                );
-                update_reload_backoff(ok, &mut consecutive_failures, &mut last_failure);
+                reload_pending = true;
+            }
+            () = sleep_or_pending(retry_in) => {
+                tracing::debug!("backoff elapsed, retrying deferred config reload");
             }
             () = params.shutdown.cancelled() => {
                 info!("config file watcher shutting down");
                 return;
             }
         }
+
+        if !reload_pending || should_skip_for_backoff(consecutive_failures, last_failure) {
+            continue;
+        }
+
+        let ok = handle_reload(
+            &params.config_path,
+            &params.referenced_files,
+            &mut current_config,
+            &mut content_hash,
+            &params.registry,
+            &params.pipelines,
+            &params.listener_meta,
+            &params.health_shutdown,
+            &params.kv_stores,
+            &params.subrequest_client,
+        );
+        update_reload_backoff(ok, &mut consecutive_failures, &mut last_failure);
+        // Cleared on success; a failed attempt stays pending so the timer
+        // arm retries it once the (now longer) backoff window elapses.
+        reload_pending = !ok;
     }
 }
 
@@ -229,6 +277,7 @@ fn handle_reload(
     content_hash: &mut u64,
     registry: &FilterRegistry,
     pipelines: &ListenerPipelines,
+    listener_meta: &praxis_protocol::http::pingora::health::ListenerMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     subrequest_client: &praxis_core::subrequest::SubRequestClient,
@@ -279,6 +328,7 @@ fn handle_reload(
         current_config,
         registry,
         pipelines,
+        listener_meta,
         health_shutdown,
         kv_stores,
         subrequest_client,
@@ -847,6 +897,9 @@ mod tests {
             crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores, &subrequest_client)
                 .unwrap();
         let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        );
 
         let original_hash = composite_hash(VALID_YAML, &[]);
         let mut hash = original_hash;
@@ -860,6 +913,7 @@ mod tests {
             &mut hash,
             &registry,
             &pipelines,
+            &listener_meta,
             &health_shutdown,
             &kv_stores,
             &subrequest_client,
@@ -881,6 +935,7 @@ mod tests {
             &mut hash,
             &registry,
             &pipelines,
+            &listener_meta,
             &health_shutdown,
             &kv_stores,
             &subrequest_client,
@@ -911,10 +966,13 @@ mod tests {
             config_path,
             health_shutdown,
             initial_content_hash: composite_hash(VALID_YAML, &[]),
-            initial_config: config,
+            initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines,
             referenced_files: Vec::new(),
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
             registry,
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(
@@ -952,10 +1010,13 @@ mod tests {
             config_path: config_path.clone(),
             health_shutdown,
             initial_content_hash: composite_hash(VALID_YAML, &[]),
-            initial_config: config,
+            initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             referenced_files: Vec::new(),
             pipelines: Arc::clone(&pipelines),
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(
@@ -1001,10 +1062,13 @@ mod tests {
             config_path: config_path.clone(),
             health_shutdown,
             initial_content_hash: composite_hash(VALID_YAML, &[]),
-            initial_config: config,
+            initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             referenced_files: Vec::new(),
             pipelines: Arc::clone(&pipelines),
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(
@@ -1080,10 +1144,13 @@ mod tests {
             config_path: PathBuf::from("praxis.yaml"),
             health_shutdown,
             initial_content_hash: composite_hash(VALID_YAML, &[]),
-            initial_config: config,
+            initial_config: config.clone(),
             kv_stores,
             pipelines,
             referenced_files: Vec::new(),
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
             registry,
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(
@@ -1141,10 +1208,13 @@ mod tests {
             config_path: config_path.clone(),
             health_shutdown,
             initial_content_hash: composite_hash(VALID_YAML, &[]),
-            initial_config: config,
+            initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             referenced_files: Vec::new(),
             pipelines: Arc::clone(&pipelines),
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(
@@ -1204,10 +1274,13 @@ mod tests {
             config_path: config_path.clone(),
             health_shutdown,
             initial_content_hash: 0,
-            initial_config: config,
+            initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             referenced_files: Vec::new(),
             pipelines: Arc::clone(&pipelines),
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(
@@ -1266,10 +1339,13 @@ mod tests {
             config_path: link.clone(),
             health_shutdown,
             initial_content_hash: composite_hash(VALID_YAML, &[]),
-            initial_config: config,
+            initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             referenced_files: Vec::new(),
             pipelines: Arc::clone(&pipelines),
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
             registry: Arc::clone(&registry),
             shutdown: shutdown.clone(),
             subrequest_client: praxis_core::subrequest::SubRequestClient::new(
@@ -1348,6 +1424,95 @@ mod tests {
             Duration::from_secs(BACKOFF_BASE_SECS),
             "zero failures should still use base backoff"
         );
+    }
+
+    #[test]
+    fn backoff_remaining_is_none_without_a_failure() {
+        assert!(
+            backoff_remaining(0, None).is_none(),
+            "nothing is being held back before the first failure"
+        );
+    }
+
+    #[test]
+    fn backoff_remaining_is_none_once_the_window_elapses() {
+        let long_ago = Instant::now() - Duration::from_secs(BACKOFF_MAX_SECS * 2);
+        assert!(
+            backoff_remaining(10, Some(long_ago)).is_none(),
+            "an elapsed window should not hold back a retry"
+        );
+    }
+
+    #[test]
+    fn backoff_remaining_reports_time_left_inside_the_window() {
+        let remaining =
+            backoff_remaining(1, Some(Instant::now())).expect("a fresh failure should hold back the next attempt");
+        assert!(
+            remaining <= Duration::from_secs(BACKOFF_BASE_SECS),
+            "remaining must not exceed the window, got {remaining:?}"
+        );
+    }
+
+    /// A fix that lands while the watcher is backing off must still be
+    /// applied, even though it produces no further filesystem events.
+    #[test]
+    fn deferred_reload_is_retried_after_backoff_without_a_new_event() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("praxis.yaml");
+        std::fs::write(&config_path, VALID_YAML).unwrap();
+
+        let config = Config::from_yaml(VALID_YAML).unwrap();
+        let registry = Arc::new(FilterRegistry::with_builtins());
+        let health_registry = Arc::new(std::collections::HashMap::new());
+        let kv_stores = praxis_core::kv::KvStoreRegistry::new();
+        let subrequest_client =
+            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
+        let pipelines = Arc::new(
+            crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores, &subrequest_client)
+                .unwrap(),
+        );
+        let old_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
+        let shutdown = CancellationToken::new();
+
+        let _handle = spawn_config_watcher(WatcherParams {
+            config_path: config_path.clone(),
+            health_shutdown: Arc::new(Mutex::new(CancellationToken::new())),
+            initial_content_hash: composite_hash(VALID_YAML, &[]),
+            initial_config: config.clone(),
+            kv_stores: praxis_core::kv::KvStoreRegistry::new(),
+            pipelines: Arc::clone(&pipelines),
+            referenced_files: Vec::new(),
+            listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
+                praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+            ),
+            registry: Arc::clone(&registry),
+            shutdown: shutdown.clone(),
+            subrequest_client: praxis_core::subrequest::SubRequestClient::new(
+                praxis_core::subrequest::SubRequestConnector::new(8, None),
+            ),
+        });
+
+        std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
+
+        // Fail once to arm the backoff window.
+        std::fs::write(&config_path, "invalid: [[[yaml").unwrap();
+        std::thread::sleep(Duration::from_millis(DEBOUNCE_MS + 200));
+
+        // Write the fix inside the backoff window. The watcher consumes
+        // this event while still backing off, so the retry has to come
+        // from the timer rather than from another notification.
+        std::fs::write(&config_path, VALID_YAML_CHANGED).unwrap();
+        std::thread::sleep(Duration::from_millis(DEBOUNCE_MS + 200));
+
+        std::thread::sleep(Duration::from_secs(BACKOFF_BASE_SECS + 1));
+
+        let current_ptr = Arc::as_ptr(&pipelines.get("web").unwrap().load());
+        assert_ne!(
+            old_ptr, current_ptr,
+            "the corrected config should be applied once the backoff elapses, with no further file events"
+        );
+
+        shutdown.cancel();
     }
 
     // -------------------------------------------------------------------------

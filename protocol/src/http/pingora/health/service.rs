@@ -20,6 +20,7 @@ use praxis_core::{health::HealthRegistry, kv::KvStoreRegistry};
 use tokio::time::Duration;
 use tracing::{error, info};
 
+use super::{listener_meta::ListenerMetaStore, pipelines_admin};
 use crate::http::pingora::{json::json_response, kv::dispatch_kv_request, metrics};
 
 /// Recorder upkeep runs independently of Prometheus scrape traffic.
@@ -149,6 +150,9 @@ pub struct PingoraAdminService {
     /// Optional KV store registry for admin CRUD endpoints.
     kv_registry: Option<KvStoreRegistry>,
 
+    /// Optional live pipelines + metadata for `GET /api/pipelines`.
+    pipelines: Option<pipelines_admin::PipelinesAdminState>,
+
     /// When `true`, include per-cluster detail in `/ready` responses.
     verbose: bool,
 }
@@ -157,10 +161,17 @@ impl PingoraAdminService {
     /// Create a combined admin service.
     ///
     /// `kv_registry` enables `/api/kv/*` endpoints when `Some`.
-    pub fn new(health_registry: Option<HealthRegistry>, kv_registry: Option<KvStoreRegistry>, verbose: bool) -> Self {
+    /// `pipelines` enables `GET /api/pipelines` when `Some`.
+    pub fn new(
+        health_registry: Option<HealthRegistry>,
+        kv_registry: Option<KvStoreRegistry>,
+        pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
+        verbose: bool,
+    ) -> Self {
         Self {
             health_registry,
             kv_registry,
+            pipelines: pipelines.map(|(pipelines, meta)| pipelines_admin::PipelinesAdminState { pipelines, meta }),
             verbose,
         }
     }
@@ -174,13 +185,25 @@ impl PingoraAdminService {
 #[async_trait]
 impl ServeHttp for PingoraAdminService {
     async fn response(&self, http_session: &mut ServerSession) -> Response<Vec<u8>> {
-        let path = http_session.req_header().uri.path().to_owned();
+        let req = http_session.req_header();
+        let path = req.uri.path().to_owned();
+        let method = req.method.as_str().to_owned();
+        let query = req.uri.query().map(str::to_owned);
 
         if path.starts_with("/api/kv/") {
             if let Some(registry) = &self.kv_registry {
                 return dispatch_kv_request(registry, http_session).await;
             }
             return json_response(404, br#"{"error":"not found"}"#);
+        }
+
+        if path == "/api/pipelines" {
+            return match &self.pipelines {
+                Some(state) => {
+                    pipelines_admin::pipelines_response(&state.pipelines, &state.meta, &method, query.as_deref())
+                },
+                None => json_response(404, br#"{"error":"not found"}"#),
+            };
         }
 
         match path.as_str() {
@@ -213,6 +236,22 @@ fn prometheus_response() -> Response<Vec<u8>> {
             .body(b"metrics recorder not installed\n".to_vec())
             .expect("valid error response"),
     }
+}
+
+/// Optional registries and flags for [`add_admin_endpoints_to_pingora_server`].
+#[derive(Default)]
+pub struct AdminEndpointOptions {
+    /// Shared health registry for `/ready` cluster status.
+    pub health_registry: Option<HealthRegistry>,
+
+    /// Shared KV stores for `/api/kv/*`.
+    pub kv_registry: Option<KvStoreRegistry>,
+
+    /// Live pipelines + metadata for `GET /api/pipelines`.
+    pub pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
+
+    /// When `true`, include per-cluster detail in `/ready`.
+    pub verbose: bool,
 }
 
 /// Pingora-managed recorder maintenance service.
@@ -287,30 +326,29 @@ async fn run_prometheus_upkeep(
 ///
 /// Installs the global Prometheus metrics recorder and binds a
 /// [`PingoraAdminService`] to `admin_addr`, exposing `/ready`,
-/// `/healthy`, `/metrics`, and (when `kv_registry` is `Some`)
-/// `/api/kv/*` endpoints on a single port.
+/// `/healthy`, `/metrics`, (when `kv_registry` is `Some`)
+/// `/api/kv/*`, and (when `pipelines` is `Some`) `GET /api/pipelines`
+/// on a single port.
 ///
 /// ```ignore
 /// use pingora_core::server::Server;
-/// use praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server;
+/// use praxis_protocol::http::pingora::health::{
+///     AdminEndpointOptions, add_admin_endpoints_to_pingora_server,
+/// };
 ///
 /// let mut server = Server::new(None).unwrap();
 /// server.bootstrap();
-/// add_admin_endpoints_to_pingora_server(&mut server, "127.0.0.1:9090", None, None, false);
+/// add_admin_endpoints_to_pingora_server(
+///     &mut server,
+///     "127.0.0.1:9090",
+///     AdminEndpointOptions::default(),
+/// );
 /// ```
-pub fn add_admin_endpoints_to_pingora_server(
-    server: &mut Server,
-    admin_addr: &str,
-    health_registry: Option<HealthRegistry>,
-    kv_registry: Option<KvStoreRegistry>,
-    verbose: bool,
-) {
+pub fn add_admin_endpoints_to_pingora_server(server: &mut Server, admin_addr: &str, options: AdminEndpointOptions) {
     add_admin_endpoints_to_pingora_server_with_recorder(
         server,
         admin_addr,
-        health_registry,
-        kv_registry,
-        verbose,
+        options,
         install_prometheus_admin_recorder(),
     );
 }
@@ -320,25 +358,20 @@ pub fn add_admin_endpoints_to_pingora_server(
 /// This entry point lets applications install the recorder before
 /// startup instrumentation begins while keeping `/metrics` and upkeep on the
 /// same handle.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "preserve the existing admin endpoint argument shape while passing the recorder handle"
-)]
 pub fn add_admin_endpoints_to_pingora_server_with_recorder(
     server: &mut Server,
     admin_addr: &str,
-    health_registry: Option<HealthRegistry>,
-    kv_registry: Option<KvStoreRegistry>,
-    verbose: bool,
+    options: AdminEndpointOptions,
     recorder: PrometheusAdminRecorder,
 ) {
+    let verbose = options.verbose;
     let handle = recorder.handle;
     let upkeep = PrometheusUpkeepService { handle };
     server.add_service(background_service("Prometheus upkeep", upkeep));
-    let admin = PingoraAdminService::new(health_registry, kv_registry, verbose);
+    let admin = PingoraAdminService::new(options.health_registry, options.kv_registry, options.pipelines, verbose);
     let mut service = Service::new("admin".to_owned(), admin);
     service.add_tcp(admin_addr);
-    info!(address = %admin_addr, verbose, "admin endpoints enabled (health + metrics + kv)");
+    info!(address = %admin_addr, verbose, "admin endpoints enabled (health + metrics + kv + pipelines)");
     server.add_service(service);
 }
 
@@ -349,7 +382,15 @@ pub fn add_health_endpoint_to_pingora_server(
     registry: Option<HealthRegistry>,
     verbose: bool,
 ) {
-    add_admin_endpoints_to_pingora_server(server, admin_addr, registry, None, verbose);
+    add_admin_endpoints_to_pingora_server(
+        server,
+        admin_addr,
+        AdminEndpointOptions {
+            health_registry: registry,
+            verbose,
+            ..AdminEndpointOptions::default()
+        },
+    );
 }
 
 #[async_trait]

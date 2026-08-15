@@ -22,7 +22,11 @@ pub use self::config::RateLimitMode;
 )]
 mod tests;
 
-use std::{net::IpAddr, time::Instant};
+use std::{
+    net::IpAddr,
+    sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+    time::Instant,
+};
 
 use async_trait::async_trait;
 use dashmap::DashMap;
@@ -49,15 +53,19 @@ const MAX_PER_IP_ENTRIES: usize = 100_000;
 /// faster than the eviction scan can reclaim entries.
 const HARD_CAP_PER_IP_ENTRIES: usize = 200_000; // 2 * MAX_PER_IP_ENTRIES
 
-/// Maximum entries to scan during a single eviction pass.
+/// Minimum interval between eviction passes.
 ///
-/// When the map exceeds the aggressive eviction threshold
-/// ([`AGGRESSIVE_EVICTION_THRESHOLD`]), the scan limit is
-/// lifted entirely (see [`RateLimitFilter::maybe_evict`]).
-const EVICTION_SCAN_LIMIT: usize = 2_048;
-
-/// Entry count above which eviction scans the entire map.
-const AGGRESSIVE_EVICTION_THRESHOLD: usize = MAX_PER_IP_ENTRIES + MAX_PER_IP_ENTRIES / 2; // 150_000
+/// [`DashMap::retain`] takes a write lock on every shard and visits
+/// every entry, so an eviction pass is O(entries) and excludes all
+/// concurrent access for its duration. Running it per request would
+/// make the limiter collapse exactly when the map is largest. Passes
+/// are therefore rate-limited to at most one per interval, which
+/// bounds the amortised cost to O(entries) per second regardless of
+/// request rate. [`HARD_CAP_PER_IP_ENTRIES`] bounds growth between
+/// passes.
+///
+/// [`DashMap::retain`]: dashmap::DashMap::retain
+const EVICTION_INTERVAL_NANOS: u64 = 1_000_000_000; // 1 s
 
 /// Rate limit header: maximum bucket capacity.
 const HEADER_RATELIMIT_LIMIT: &str = "X-RateLimit-Limit";
@@ -78,7 +86,73 @@ enum RateLimitState {
     Global(TokenBucket),
 
     /// Independent bucket per source IP address.
-    PerIp(DashMap<IpAddr, TokenBucket>),
+    PerIp(PerIpState),
+}
+
+// -----------------------------------------------------------------------------
+// PerIpState
+// -----------------------------------------------------------------------------
+
+/// Per-IP buckets plus the bookkeeping that keeps eviction off the
+/// per-request path.
+struct PerIpState {
+    /// One token bucket per source address.
+    buckets: DashMap<IpAddr, TokenBucket>,
+
+    /// Approximate live entry count.
+    ///
+    /// Maintained alongside `buckets` so that cap checks are a single
+    /// atomic load. [`DashMap::len`] sums a read lock over every shard,
+    /// which is too costly to run per request on the new-address path —
+    /// precisely the path an address-rotation flood takes.
+    ///
+    /// Concurrent inserts racing an eviction pass can leave this off by
+    /// a small amount. It gates soft-cap and hard-cap heuristics, both
+    /// of which tolerate drift; it is never used as an exact size.
+    ///
+    /// [`DashMap::len`]: dashmap::DashMap::len
+    entries: AtomicUsize,
+
+    /// Filter-epoch nanos at which the last eviction pass was claimed.
+    last_eviction_nanos: AtomicU64,
+}
+
+impl PerIpState {
+    /// Create empty per-IP state.
+    fn new() -> Self {
+        Self::from_buckets(DashMap::new())
+    }
+
+    /// Wrap an existing bucket map, seeding the entry count from it.
+    fn from_buckets(buckets: DashMap<IpAddr, TokenBucket>) -> Self {
+        let entries = AtomicUsize::new(buckets.len());
+        Self {
+            buckets,
+            entries,
+            last_eviction_nanos: AtomicU64::new(0),
+        }
+    }
+
+    /// Approximate live entry count.
+    fn entries(&self) -> usize {
+        self.entries.load(Ordering::Relaxed)
+    }
+
+    /// Try to claim the right to run an eviction pass.
+    ///
+    /// Returns `true` for at most one caller per
+    /// [`EVICTION_INTERVAL_NANOS`]. Losers of the race return `false`
+    /// immediately rather than blocking, so a burst of concurrent
+    /// requests produces one pass, not one per request.
+    fn claim_eviction_pass(&self, now_nanos: u64) -> bool {
+        let last = self.last_eviction_nanos.load(Ordering::Relaxed);
+        if now_nanos.saturating_sub(last) < EVICTION_INTERVAL_NANOS {
+            return false;
+        }
+        self.last_eviction_nanos
+            .compare_exchange(last, now_nanos, Ordering::AcqRel, Ordering::Relaxed)
+            .is_ok()
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -186,7 +260,7 @@ impl RateLimitFilter {
         let burst = f64::from(cfg.burst);
         let state = match cfg.mode {
             RateLimitMode::Global => RateLimitState::Global(TokenBucket::new(burst)),
-            RateLimitMode::PerIp => RateLimitState::PerIp(DashMap::new()),
+            RateLimitMode::PerIp => RateLimitState::PerIp(PerIpState::new()),
         };
 
         #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "burst fits u64")]

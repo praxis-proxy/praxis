@@ -364,7 +364,11 @@ async fn resolve_connect_result(
 ) -> Option<String> {
     match pipeline.execute_tcp_connect(ctx).await {
         Ok(
-            FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone | FilterAction::TerminalResponse(_),
+            FilterAction::Continue
+            | FilterAction::Release
+            | FilterAction::BodyDone
+            | FilterAction::TerminalResponse(_)
+            | FilterAction::StreamingTerminalResponse(_),
         ) => {
             if let Some(addr) = &ctx.upstream_addr {
                 Some(addr.clone().into_owned())

@@ -536,7 +536,6 @@ fn route_matches_request_path_only_hit() {
     let route = prefix_route("/api/", "api");
     let resolved = ResolvedRoute {
         route,
-        json_aliases: None,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
     };
@@ -551,7 +550,6 @@ fn route_matches_request_path_miss() {
     let route = prefix_route("/api/", "api");
     let resolved = ResolvedRoute {
         route,
-        json_aliases: None,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
     };
@@ -573,7 +571,6 @@ fn route_matches_request_host_hit() {
     };
     let resolved = ResolvedRoute {
         route,
-        json_aliases: None,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
     };
@@ -595,7 +592,6 @@ fn route_matches_request_host_miss() {
     };
     let resolved = ResolvedRoute {
         route,
-        json_aliases: None,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
     };
@@ -617,7 +613,6 @@ fn route_matches_request_host_miss_when_no_host() {
     };
     let resolved = ResolvedRoute {
         route,
-        json_aliases: None,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
     };
@@ -639,7 +634,6 @@ fn route_matches_request_header_hit() {
     };
     let resolved = ResolvedRoute {
         route,
-        json_aliases: None,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
     };
@@ -663,7 +657,6 @@ fn route_matches_request_header_miss() {
     };
     let resolved = ResolvedRoute {
         route,
-        json_aliases: None,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
     };
@@ -687,7 +680,6 @@ fn route_matches_request_compound() {
     };
     let resolved = ResolvedRoute {
         route,
-        json_aliases: None,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
     };
@@ -812,7 +804,6 @@ fn route_matches_request_empty_headers_constraint() {
     };
     let resolved = ResolvedRoute {
         route,
-        json_aliases: None,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
     };
@@ -1538,8 +1529,8 @@ fn json_alias_validation_empty_target_rejected() {
 }
 
 #[test]
-fn json_alias_config_stores_header_and_max_bytes() {
-    let filter = RouterFilter::with_alias_options(
+fn json_aliases_are_rejected_at_construction() {
+    let err = RouterFilter::with_alias_options(
         vec![json_alias_route(
             "/",
             "test",
@@ -1548,54 +1539,46 @@ fn json_alias_config_stores_header_and_max_bytes() {
         "X-Tenant",
         4096,
     )
-    .unwrap();
+    .unwrap_err();
 
-    assert_eq!(
-        filter.json_alias_header.as_str(),
-        "x-tenant",
-        "custom json_alias_header"
+    assert!(
+        err.to_string().contains("not applied to routing decisions"),
+        "json_aliases must fail loudly rather than be stored and ignored: {err}"
     );
-    assert_eq!(filter.json_alias_max_body_bytes, 4096, "custom max body bytes");
+    assert!(
+        err.to_string().contains("test"),
+        "the error should name the offending cluster: {err}"
+    );
 }
 
 #[test]
-fn json_alias_config_preserves_route_count() {
-    let filter = make_alias_config_filter();
-    assert_eq!(filter.routes.len(), 3, "should have 3 routes");
+fn json_alias_rejection_names_the_first_offending_route() {
+    let err = RouterFilter::with_alias_options(
+        vec![
+            router_route("/plain", "no-aliases", None),
+            json_alias_route("/aliased", "has-aliases", vec![("model", "fast", None)]),
+        ],
+        super::config::DEFAULT_JSON_ALIAS_HEADER,
+        super::config::DEFAULT_JSON_ALIAS_MAX_BODY_BYTES,
+    )
+    .unwrap_err();
+
+    assert!(
+        err.to_string().contains("has-aliases"),
+        "the error should name the cluster that carries aliases: {err}"
+    );
 }
 
 #[test]
-fn json_alias_config_preserves_provider_b_alias() {
-    let filter = make_alias_config_filter();
-    let provider_b = find_resolved_route(&filter, "provider-b");
-    let aliases = provider_b.json_aliases.as_ref().unwrap();
+fn routes_without_aliases_are_unaffected() {
+    let filter = RouterFilter::with_alias_options(
+        vec![router_route("/", "test", None)],
+        super::config::DEFAULT_JSON_ALIAS_HEADER,
+        super::config::DEFAULT_JSON_ALIAS_MAX_BODY_BYTES,
+    )
+    .expect("routes without json_aliases should still build");
 
-    assert_eq!(aliases.len(), 1, "provider-b should have 1 alias");
-    assert_eq!(aliases[0].field, "model", "provider-b alias field");
-    assert_eq!(aliases[0].pattern, "model-a-*", "wildcard alias pattern");
-    assert!(aliases[0].target.is_none(), "wildcard alias should have no target");
-}
-
-#[test]
-fn json_alias_config_preserves_provider_a_aliases() {
-    let filter = make_alias_config_filter();
-    let provider_a = find_resolved_route(&filter, "provider-a");
-    let aliases = provider_a.json_aliases.as_ref().unwrap();
-
-    assert_eq!(aliases.len(), 2, "provider-a should have 2 aliases");
-    assert_eq!(aliases[0].field, "model", "first alias field");
-    assert_eq!(aliases[0].pattern, "fast", "first alias pattern");
-    assert_eq!(aliases[0].target.as_deref(), Some("model-fast"), "first alias target");
-    assert_eq!(aliases[1].field, "tenant_id", "second alias field");
-    assert_eq!(aliases[1].pattern, "cheap", "second alias pattern");
-}
-
-#[test]
-fn json_alias_config_preserves_fallback_without_aliases() {
-    let filter = make_alias_config_filter();
-    let fallback = find_resolved_route(&filter, "fallback");
-
-    assert!(fallback.json_aliases.is_none(), "fallback should have no aliases");
+    assert_eq!(filter.routes.len(), 1, "route table should be built as usual");
 }
 
 #[test]
@@ -1643,11 +1626,16 @@ fn json_alias_from_config_parses_fallback_without_aliases() {
 }
 
 #[test]
-fn json_alias_from_config_builds_filter() {
+fn json_alias_from_config_is_rejected() {
     let yaml = serde_yaml::from_str::<serde_yaml::Value>(json_alias_config_yaml()).unwrap();
-    let filter = RouterFilter::from_config(&yaml).unwrap();
+    let Err(err) = RouterFilter::from_config(&yaml) else {
+        panic!("a config carrying json_aliases must fail to build");
+    };
 
-    assert_eq!(filter.name(), "router", "from_config should produce a valid router");
+    assert!(
+        err.to_string().contains("not applied to routing decisions"),
+        "unexpected error for a config carrying json_aliases: {err}"
+    );
 }
 
 #[test]
@@ -1732,8 +1720,8 @@ fn json_alias_validate_max_bytes_above_upper_bound_rejected() {
 }
 
 #[test]
-fn json_alias_validate_max_bytes_at_upper_bound_accepted() {
-    let result = RouterFilter::with_alias_options(
+fn json_alias_max_bytes_at_upper_bound_passes_bounds_check() {
+    let err = RouterFilter::with_alias_options(
         vec![json_alias_route(
             "/",
             "test",
@@ -1741,8 +1729,15 @@ fn json_alias_validate_max_bytes_at_upper_bound_accepted() {
         )],
         super::config::DEFAULT_JSON_ALIAS_HEADER,
         super::config::MAX_JSON_ALIAS_BODY_BYTES,
+    )
+    .unwrap_err();
+
+    // Exactly at the upper bound clears the bounds check, so the only
+    // remaining objection is that the feature is not implemented.
+    assert!(
+        err.to_string().contains("not applied to routing decisions"),
+        "upper bound should clear the size check and fail only on the feature gate: {err}"
     );
-    assert!(result.is_ok(), "exactly at upper bound should be accepted");
 }
 
 // -----------------------------------------------------------------------------
@@ -1821,34 +1816,4 @@ fn json_alias_route(prefix: &str, cluster: &str, aliases: Vec<(&str, &str, Optio
                 .collect(),
         ),
     )
-}
-
-/// Build the standard three-route alias config used by multiple tests.
-fn make_alias_config_filter() -> RouterFilter {
-    RouterFilter::with_alias_options(
-        vec![
-            json_alias_route(
-                "/v1/chat/",
-                "provider-a",
-                vec![
-                    ("model", "fast", Some("model-fast")),
-                    ("tenant_id", "cheap", Some("tenant-cheap")),
-                ],
-            ),
-            json_alias_route("/v1/messages/", "provider-b", vec![("model", "model-a-*", None)]),
-            router_route("/", "fallback", None),
-        ],
-        "X-AI-Model",
-        4096,
-    )
-    .unwrap()
-}
-
-/// Find a route by cluster name (panics if not found).
-fn find_resolved_route<'a>(filter: &'a RouterFilter, cluster: &str) -> &'a ResolvedRoute {
-    filter
-        .routes
-        .iter()
-        .find(|r| &*r.route.cluster == cluster)
-        .unwrap_or_else(|| panic!("no route with cluster '{cluster}'"))
 }
