@@ -559,6 +559,11 @@ async fn run_streaming_terminal_response(
     session.as_downstream_mut().set_abort_on_close(false);
 
     loop {
+        // Cancellation contract: dropping an in-flight `next_chunk()` also
+        // drops any partially opened step resources. A constructed
+        // `SubResponseBody` schedules protocol-aware cleanup from `Drop`;
+        // earlier transport state releases its permit, circuit guard, and
+        // session through ordinary RAII ownership.
         let source_result = tokio::select! {
             result = streaming_body.next_chunk() => Some(result),
             downstream = session.as_downstream_mut().read_body_or_idle(true) => {

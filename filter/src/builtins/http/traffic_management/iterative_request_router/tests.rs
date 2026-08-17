@@ -968,6 +968,8 @@ struct ParentExtension(&'static str);
 
 struct StepErrorFilter;
 
+struct RemoveIterationStateFilter;
+
 #[async_trait::async_trait]
 impl crate::HttpFilter for StepErrorFilter {
     fn name(&self) -> &'static str {
@@ -979,6 +981,34 @@ impl crate::HttpFilter for StepErrorFilter {
         _ctx: &mut crate::HttpFilterContext<'_>,
     ) -> Result<crate::FilterAction, crate::FilterError> {
         Err("nested step failure".to_owned().into())
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for RemoveIterationStateFilter {
+    fn name(&self) -> &'static str {
+        "test_remove_iteration_state"
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+
+    fn response_body_access(&self) -> crate::BodyAccess {
+        crate::BodyAccess::ReadOnly
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<bytes::Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        ctx.extensions.remove::<crate::IterationState>();
+        Ok(crate::FilterAction::Continue)
     }
 }
 
@@ -1728,6 +1758,155 @@ steps:
         ctx.extensions.get::<ParentExtension>(),
         Some(&ParentExtension("preserved")),
         "the outer request extension must survive a nested step error"
+    );
+    assert!(
+        ctx.extensions.get::<crate::IterationState>().is_none(),
+        "IRR-private iteration state must not escape into the parent context"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "nested pipeline setup and ownership assertions")]
+async fn completion_error_restores_parent_request_extensions() {
+    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+
+    let backend_port = start_unit_stream_backend();
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_remove_iteration_state",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(RemoveIterationStateFilter)))),
+        )
+        .unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+initial_step: completion_error
+steps:
+  - name: completion_error
+    filters:
+      - filter: test_remove_iteration_state
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{backend_port}"]
+    on_result:
+      - default: true
+        done: true
+"#
+    ))
+    .unwrap();
+    let filter = super::IterativeRequestRouterFilter::from_config_with_registry(&yaml, &registry).unwrap();
+    let request = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.buffered_request_body = Some(bytes::Bytes::from_static(b"request"));
+    ctx.subrequest_client = Some(&client);
+    ctx.extensions.insert(ParentExtension("preserved"));
+
+    let result = filter.on_request(&mut ctx).await;
+
+    assert!(
+        result.as_ref().is_err_and(|error| error
+            .to_string()
+            .contains("iteration state missing after step completion")),
+        "missing completion state should propagate an invariant error: {result:?}"
+    );
+    assert_eq!(
+        ctx.extensions.get::<ParentExtension>(),
+        Some(&ParentExtension("preserved")),
+        "the outer request extension must survive a completion conversion error"
+    );
+    assert!(
+        ctx.extensions.get::<crate::IterationState>().is_none(),
+        "IRR-private iteration state must not escape into the parent context"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "streaming pipeline setup and ownership assertions")]
+async fn streaming_completion_error_restores_parent_request_extensions() {
+    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+
+    let backend_port = start_unit_stream_backend();
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_streaming_selector",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(StreamingSelectorFilter)))),
+        )
+        .unwrap();
+    registry
+        .register(
+            "test_remove_iteration_state",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(RemoveIterationStateFilter)))),
+        )
+        .unwrap();
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!(
+        r#"
+initial_step: completion_error
+steps:
+  - name: completion_error
+    filters:
+      - filter: test_streaming_selector
+      - filter: test_remove_iteration_state
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["127.0.0.1:{backend_port}"]
+    on_result:
+      - default: true
+        done: true
+"#
+    ))
+    .unwrap();
+    let filter = super::IterativeRequestRouterFilter::from_config_with_registry(&yaml, &registry).unwrap();
+    let request = crate::test_utils::make_request(http::Method::POST, "/v1/responses");
+    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let mut ctx = crate::test_utils::make_filter_context(&request);
+    ctx.buffered_request_body = Some(bytes::Bytes::from_static(b"request"));
+    ctx.subrequest_client = Some(&client);
+    ctx.extensions.insert(ParentExtension("preserved"));
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    let action_debug = format!("{action:?}");
+    let terminal = match action {
+        crate::FilterAction::StreamingTerminalResponse(terminal) => Some(terminal),
+        _ => None,
+    };
+    assert!(
+        terminal.is_some(),
+        "streaming selector should return a terminal stream: {action_debug}"
+    );
+    let Some(mut terminal) = terminal else {
+        return;
+    };
+    let first = terminal.body.next_chunk().await.unwrap();
+    assert_eq!(
+        first,
+        Some(bytes::Bytes::from_static(b"x")),
+        "upstream chunk should arrive first"
+    );
+    let result = terminal.body.next_chunk().await;
+    terminal.body.swap_extensions(&mut ctx.extensions);
+
+    assert!(
+        result.as_ref().is_err_and(|error| error
+            .to_string()
+            .contains("iteration state missing after step completion")),
+        "missing streaming completion state should propagate an invariant error: {result:?}"
+    );
+    assert_eq!(
+        ctx.extensions.get::<ParentExtension>(),
+        Some(&ParentExtension("preserved")),
+        "the outer request extension must survive a streaming completion error"
     );
     assert!(
         ctx.extensions.get::<crate::IterationState>().is_none(),

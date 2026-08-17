@@ -54,6 +54,21 @@ pub(super) struct StepCompletion {
     pub(super) termination: Option<StreamTermination>,
 }
 
+/// A completion conversion failure together with recoverable parent state.
+pub(super) struct StepCompletionError {
+    /// Underlying lifecycle error.
+    error: FilterError,
+    /// Parent-owned extensions recovered from the failed continuation.
+    extensions: RequestExtensions,
+}
+
+impl StepCompletionError {
+    /// Split the error from the extensions its caller must restore.
+    pub(super) fn into_parts(self) -> (FilterError, RequestExtensions) {
+        (self.error, self.extensions)
+    }
+}
+
 /// State continuation for streaming a step's response body.
 ///
 /// Owns the step pipeline, request/response snapshots, and all
@@ -147,15 +162,15 @@ impl StepResponseContinuation {
     }
 
     /// Consume the completed continuation into transition inputs.
-    pub(super) fn into_completion(mut self) -> Result<StepCompletion, FilterError> {
-        let state = self
-            .extensions
-            .remove::<IterationState>()
-            .ok_or_else(|| -> FilterError {
-                "iterative_request_router: iteration state missing after step completion"
+    pub(super) fn into_completion(mut self) -> Result<StepCompletion, StepCompletionError> {
+        let Some(state) = self.extensions.remove::<IterationState>() else {
+            return Err(StepCompletionError {
+                error: "iterative_request_router: iteration state missing after step completion"
                     .to_owned()
-                    .into()
-            })?;
+                    .into(),
+                extensions: self.into_parent_extensions(),
+            });
+        };
         let next_iteration_body = self.extensions.remove::<NextIterationBody>().map(|body| body.0);
         let pending_chunks = self
             .extensions
@@ -666,7 +681,14 @@ impl IrrStreamingSession {
             .take()
             .ok_or_else(|| -> FilterError { "iterative_request_router: current stream missing at EOF".into() })?;
         let (continuation, completion_output) = current.into_finished_parts();
-        let completion = continuation.into_completion()?;
+        let completion = match continuation.into_completion() {
+            Ok(completion) => completion,
+            Err(error) => {
+                let (error, restored_extensions) = error.into_parts();
+                self.extensions = Some(restored_extensions);
+                return Err(error);
+            },
+        };
         let outcome = self
             .current_outcome
             .take()
@@ -733,7 +755,15 @@ impl IrrStreamingSession {
                             self.state = Some(state);
                             return Err(error);
                         }
-                        let mut completion = skipped.into_continuation().into_completion()?;
+                        let mut completion = match skipped.into_continuation().into_completion() {
+                            Ok(completion) => completion,
+                            Err(error) => {
+                                let (error, restored_extensions) = error.into_parts();
+                                self.extensions = Some(restored_extensions);
+                                self.state = Some(state);
+                                return Err(error);
+                            },
+                        };
                         completion.state.previous_response = None;
                         completion.state.iteration += 1;
                         if let Err(error) = ensure_combined_retained_limit(
@@ -764,7 +794,15 @@ impl IrrStreamingSession {
                 }
             },
             super::runner::OpenedStepKind::Complete(outcome) => {
-                let completion = continuation.into_completion()?;
+                let completion = match continuation.into_completion() {
+                    Ok(completion) => completion,
+                    Err(error) => {
+                        let (error, restored_extensions) = error.into_parts();
+                        self.extensions = Some(restored_extensions);
+                        self.state = Some(state);
+                        return Err(error);
+                    },
+                };
                 let abnormal_completion = completion.termination.is_some();
                 let completion_output = abnormal_completion.then(|| outcome.response.body.clone());
                 let terminal_body = (!abnormal_completion).then(|| outcome.response.body.clone());

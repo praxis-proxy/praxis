@@ -482,7 +482,14 @@ impl IterativeRequestRouterFilter {
                                 ctx.extensions = skipped.into_continuation().into_parent_extensions();
                                 return Err(error);
                             }
-                            let mut completion = skipped.into_continuation().into_completion()?;
+                            let mut completion = match skipped.into_continuation().into_completion() {
+                                Ok(completion) => completion,
+                                Err(error) => {
+                                    let (error, restored_extensions) = error.into_parts();
+                                    ctx.extensions = restored_extensions;
+                                    return Err(error);
+                                },
+                            };
                             completion.state.previous_response = None;
                             completion.state.iteration += 1;
                             if completion.state.retained_bytes() > self.max_state_bytes {
@@ -520,7 +527,14 @@ impl IterativeRequestRouterFilter {
                             .is_err()
                             {
                                 (*body).cancel().await;
-                                let completion = continuation.into_completion()?;
+                                let completion = match continuation.into_completion() {
+                                    Ok(completion) => completion,
+                                    Err(error) => {
+                                        let (error, restored_extensions) = error.into_parts();
+                                        ctx.extensions = restored_extensions;
+                                        return Err(error);
+                                    },
+                                };
                                 ctx.extensions = completion.extensions;
                                 return Ok(FilterAction::Reject(Rejection::status(413)));
                             }
@@ -547,7 +561,14 @@ impl IterativeRequestRouterFilter {
                     }
                 },
                 OpenedStepKind::Complete(mut outcome) => {
-                    let completion = continuation.into_completion()?;
+                    let completion = match continuation.into_completion() {
+                        Ok(completion) => completion,
+                        Err(error) => {
+                            let (error, restored_extensions) = error.into_parts();
+                            ctx.extensions = restored_extensions;
+                            return Err(error);
+                        },
+                    };
                     let abnormal_stream_completion = completion.termination.is_some();
                     let handled_abnormal_stream_completion = completion
                         .termination

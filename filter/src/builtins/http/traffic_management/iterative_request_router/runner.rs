@@ -15,7 +15,7 @@ use std::{
 use bytes::Bytes;
 use http::HeaderMap;
 use praxis_core::subrequest::{FrameworkHeaders, StreamLimits};
-use tracing::warn;
+use tracing::{Instrument as _, warn};
 
 use super::{
     StepOutcome, SubPipelineRuntimeResources, apply_pre_read_header_mutations, apply_request_header_mutations,
@@ -220,6 +220,12 @@ impl IrrStepRunner {
             .unwrap_or_else(|| state.deadline());
         let in_transport = Arc::new(AtomicBool::new(false));
         let in_transport_inner = Arc::clone(&in_transport);
+
+        let step_span = tracing::info_span!(
+            "iterative_subrequest",
+            step = current_step.as_ref(),
+            iteration = state.iteration,
+        );
 
         let timed: Result<Result<RawStepKind, FilterError>, tokio::time::error::Elapsed> =
             tokio::time::timeout(step_budget, async {
@@ -465,7 +471,8 @@ impl IrrStepRunner {
                     Ok(RawStepKind::Complete(StepOutcome { response, origin, transport_error }))
                 },
             }
-            })
+            }
+            .instrument(step_span))
             .await;
 
         let mut raw = match timed {
