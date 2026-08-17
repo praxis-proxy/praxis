@@ -138,6 +138,10 @@ pub struct RuntimeConfig {
     #[serde(default)]
     pub log_overrides: HashMap<String, String>,
 
+    /// Process log destination, rotation, retention, and buffering.
+    #[serde(default)]
+    pub logging: super::logging::LoggingConfig,
+
     /// Process-wide maximum concurrent connections across all
     /// listeners (both HTTP and TCP).
     ///
@@ -299,6 +303,7 @@ impl Default for RuntimeConfig {
             work_stealing: default_work_stealing(),
             global_queue_interval: default_global_queue_interval(),
             log_overrides: HashMap::new(),
+            logging: super::logging::LoggingConfig::default(),
             upstream_ca_file: None,
             upstream_keepalive_pool_size: default_upstream_keepalive_pool_size(),
         }

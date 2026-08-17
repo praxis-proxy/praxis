@@ -64,6 +64,11 @@ pub(crate) fn reload_pipelines(
         return Err(e.into());
     }
 
+    if let Err(e) = praxis_core::logging::validate_logging(new_config) {
+        error!(error = %e, "config reload failed: invalid logging config");
+        return Err(e.into());
+    }
+
     let health_registry = build_health_registry(&new_config.clusters);
 
     let new_ceiling = new_config.body_limits.max_response_bytes.unwrap_or(usize::MAX);

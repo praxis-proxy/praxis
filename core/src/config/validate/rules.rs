@@ -91,6 +91,7 @@ impl Config {
         validate_subrequest_max_connections(self.runtime.subrequest_max_connections)?;
         validate_subrequest_circuit_breaker(self.runtime.subrequest_circuit_breaker.as_ref())?;
         validate_global_queue_interval(self.runtime.global_queue_interval)?;
+        validate_logging(&self.runtime.logging)?;
         validate_shutdown_timeout(self.shutdown_timeout_secs)?;
         validate_telemetry(&self.telemetry)?;
 
@@ -388,6 +389,11 @@ fn validate_global_queue_interval(interval: Option<u32>) -> Result<(), ProxyErro
         ));
     }
     Ok(())
+}
+
+/// Reject invalid `runtime.logging` settings.
+fn validate_logging(logging: &crate::config::LoggingConfig) -> Result<(), ProxyError> {
+    logging.validate().map_err(ProxyError::Config)
 }
 
 /// Reject `shutdown_timeout_secs` of zero or above the ceiling.

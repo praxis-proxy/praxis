@@ -25,6 +25,7 @@ mod condition;
 mod filters;
 mod insecure_options;
 mod listener;
+mod logging;
 mod metrics;
 mod parse;
 mod route;
@@ -45,6 +46,7 @@ pub use condition::{Condition, ConditionMatch, ResponseCondition, ResponseCondit
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
 pub use insecure_options::{InsecureOptions, SkipPipelineChecks};
 pub use listener::{Listener, ListenerTls, ProtocolKind};
+pub use logging::{DEFAULT_BUFFER_SIZE_LINES, DEFAULT_MAX_LOG_FILES, LogOutput, LogRotation, LoggingConfig};
 pub use metrics::MetricsConfig;
 use parse::check_yaml_safety;
 pub use praxis_tls::{CachedClusterTls, ClusterTls};

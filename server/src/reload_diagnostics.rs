@@ -20,6 +20,7 @@ pub(crate) fn log_restart_required_changes(old: &Config, new: &Config) {
     detect_tls_toggles(old, new);
     detect_subrequest_max_connections_change(old, new);
     detect_subrequest_circuit_breaker_change(old, new);
+    detect_logging_change(old, new);
 }
 
 /// Detect listener additions, removals, and address rebinds.
@@ -168,6 +169,13 @@ fn detect_subrequest_circuit_breaker_change(old: &Config, new: &Config) {
             "runtime.subrequest_circuit_breaker changed; requires restart \
              (circuit breaker registry is bound to the connector)"
         );
+    }
+}
+
+/// Detect `runtime.logging` changes that require a restart.
+fn detect_logging_change(old: &Config, new: &Config) {
+    if old.runtime.logging != new.runtime.logging {
+        warn!("runtime.logging changed; requires restart (subscriber init is once-per-process)");
     }
 }
 
@@ -518,5 +526,18 @@ mod tests {
         let config = config_with_circuit_breaker(None);
         let warnings = capture_warnings(|| detect_subrequest_circuit_breaker_change(&config, &config));
         assert!(warnings.is_empty(), "both-none should produce no warnings");
+    }
+
+    #[test]
+    fn logging_change_warns() {
+        let old = config_with_circuit_breaker(None);
+        let mut new = old.clone();
+        new.runtime.logging.output = praxis_core::config::LogOutput::Stderr;
+        let warnings = capture_warnings(|| detect_logging_change(&old, &new));
+        assert_eq!(warnings.len(), 1, "logging change should warn once");
+        assert!(
+            warnings[0].contains("runtime.logging"),
+            "warning should mention logging"
+        );
     }
 }

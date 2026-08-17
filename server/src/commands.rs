@@ -32,6 +32,7 @@ pub(crate) fn load_and_validate_for_cli(
 /// Validate a parsed configuration by building filter pipelines.
 pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     praxis_core::logging::validate_log_overrides(config)?;
+    praxis_core::logging::validate_logging(config)?;
     let registry = praxis::build_full_registry();
     let health_registry = praxis_core::health::build_health_registry(&config.clusters);
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();

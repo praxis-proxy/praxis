@@ -89,6 +89,7 @@ tokio = { version = "1.53.1", features = ["macros", "rt"] }
 tokio-stream = "0.1.19"
 tokio-util = "0.7.19"
 tracing = "0.1.44"
+tracing-appender = "0.2.5"
 tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "registry"] }
 zeroize = "1.9.0"

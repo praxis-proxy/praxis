@@ -47,6 +47,7 @@ mod pipeline;
 mod policy;
 #[cfg(feature = "cpex-policy-engine")]
 mod policy_http;
+mod process_logging;
 mod protocol_examples;
 mod protocols;
 mod random;

@@ -359,6 +359,45 @@ are additive - they set the level for specific
 modules without changing the base level. Valid
 levels: `error`, `warn`, `info`, `debug`, `trace`.
 
+### Process Logging Destination
+
+`runtime.logging` controls where Praxis writes process
+logs (the `tracing` subscriber backing access logs and
+startup messages). It is separate from
+`runtime.log_overrides`, which only adjusts per-module
+filter levels.
+
+```yaml
+runtime:
+  log_overrides:
+    praxis_filter::pipeline: debug
+  logging:
+    output: stdout        # stdout (default) | stderr | file
+    file_path: /var/log/praxis/proxy.log
+    rotation: daily       # omit for no rotation; or size:100mb
+    max_files: 7
+    non_blocking: true
+    buffer_size: 8192     # buffered lines; default 128000
+```
+
+Defaults keep today's behavior: non-blocking stdout,
+text or JSON via `PRAXIS_LOG_FORMAT`, lossy overflow
+when the buffer is full. File output supports:
+
+- **No rotation** — omit `rotation`; the file at
+  `file_path` grows in place.
+- **Daily rotation** — `rotation: daily`; files are
+  named `{prefix}.{YYYY-MM-DD}{suffix}` in the log
+  directory (for example `proxy.2026-08-17.log`).
+- **Size rotation** — `rotation: size:100mb`; the
+  active file is exactly `file_path`; rolled copies are
+  `proxy.log.1`, `proxy.log.2`, … with oldest archives
+  pruned to `max_files`.
+
+Changing `runtime.logging` requires a process restart;
+reload validates the block but does not re-init the
+subscriber.
+
 ## Full Example
 
 A complete config enabling all observability

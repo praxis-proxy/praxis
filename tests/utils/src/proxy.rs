@@ -35,6 +35,48 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// to debounce (500ms) and apply the reload.
 const RELOAD_SETTLE: Duration = Duration::from_millis(1500);
 
+/// Path to the `praxis` binary for subprocess integration tests.
+///
+/// Uses `CARGO_BIN_EXE_praxis` when set; otherwise resolves under
+/// `CARGO_TARGET_DIR` (including llvm-cov's alternate target dir) and
+/// builds the binary if it is not already present.
+///
+/// # Panics
+///
+/// Panics if `cargo build` for the `praxis` binary fails or the binary is
+/// still missing afterward.
+pub fn praxis_bin() -> PathBuf {
+    let path = resolve_praxis_bin_path();
+    if path.exists() {
+        return path;
+    }
+
+    let status = std::process::Command::new(env!("CARGO"))
+        .args(["build", "-p", "praxis-proxy", "--bin", "praxis", "-q"])
+        .status()
+        .expect("spawn cargo build for praxis binary");
+    assert!(status.success(), "cargo build -p praxis-proxy --bin praxis failed");
+
+    let path = resolve_praxis_bin_path();
+    assert!(path.exists(), "praxis binary missing at {} after build", path.display());
+    path
+}
+
+/// Resolve the expected `praxis` binary path without building.
+fn resolve_praxis_bin_path() -> PathBuf {
+    std::env::var_os("CARGO_BIN_EXE_praxis").map_or_else(
+        || {
+            let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+                || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+                PathBuf::from,
+            );
+            let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
+            target.join(profile).join("praxis")
+        },
+        PathBuf::from,
+    )
+}
+
 // -----------------------------------------------------------------------------
 // Pipeline Building
 // -----------------------------------------------------------------------------

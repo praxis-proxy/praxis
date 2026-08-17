@@ -11,6 +11,9 @@
 //! Set `PRAXIS_LOG_FORMAT=json` for structured JSON output.
 //! Per-module overrides come from `runtime.log_overrides` in the config YAML.
 
+mod size_rotation;
+
+use tracing_appender::non_blocking::WorkerGuard;
 use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
 
 use crate::{config::Config, errors::ProxyError};
@@ -21,29 +24,30 @@ use crate::{config::Config, errors::ProxyError};
 
 /// RAII guard that flushes and shuts down the `OTel` tracer provider on drop.
 ///
-/// Store this in `main()` to ensure pending spans are exported on graceful
-/// shutdown. Without the `otel` feature, this is a zero-size no-op.
-///
 /// ```no_run
 /// let config = praxis_core::config::Config::load(None, "listeners: []").unwrap();
 /// let _guard = praxis_core::logging::init_tracing(&config).unwrap();
 /// ```
 #[must_use = "dropping the guard immediately shuts down the tracer provider"]
 pub struct TracingGuard {
-    /// Tracer provider to shut down when the guard is dropped.
     #[cfg(feature = "otel")]
+    /// Optional OTLP tracer provider held until shutdown.
     provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    /// Optional non-blocking appender worker guard.
+    worker_guard: Option<WorkerGuard>,
 }
 
-#[cfg(feature = "otel")]
 impl Drop for TracingGuard {
-    #[expect(clippy::print_stderr, reason = "tracing subscriber is being torn down")]
     fn drop(&mut self) {
-        if let Some(provider) = self.provider.take()
-            && let Err(e) = provider.shutdown()
-        {
-            eprintln!("failed to shut down OTel tracer provider: {e}");
+        #[cfg(feature = "otel")]
+        if let Some(provider) = self.provider.take() {
+            #[expect(clippy::print_stderr, reason = "tracing subscriber is being torn down")]
+            if let Err(e) = provider.shutdown() {
+                eprintln!("failed to shut down OTel tracer provider: {e}");
+            }
         }
+
+        drop(self.worker_guard.take());
     }
 }
 
@@ -61,7 +65,7 @@ impl Drop for TracingGuard {
 ///
 /// # Errors
 ///
-/// Returns [`ProxyError::Config`] if any `log_overrides` entry is invalid
+/// Returns [`ProxyError::Config`] if logging or log override settings are invalid,
 /// or (with the `otel` feature) if the OTLP exporter cannot be built.
 ///
 /// ```no_run
@@ -72,19 +76,23 @@ impl Drop for TracingGuard {
 /// [`EnvFilter`]: tracing_subscriber::EnvFilter
 /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
 pub fn init_tracing(config: &Config) -> Result<TracingGuard, ProxyError> {
+    validate_logging(config)?;
     let env_filter = build_env_filter(config)?;
     let json = std::env::var("PRAXIS_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
     let telemetry = config.telemetry.resolve();
+    let writer_bundle = writer::build_log_writer(&config.runtime.logging)?;
 
     warn_if_otel_config_without_feature(telemetry.otlp_endpoint.is_some(), telemetry.sampling_rate.is_some());
 
     #[cfg(feature = "otel")]
-    return init_with_otel(env_filter, json, &telemetry);
+    return init_with_otel(env_filter, json, &telemetry, writer_bundle);
 
     #[cfg(not(feature = "otel"))]
     {
-        init_fmt_only(env_filter, json);
-        Ok(TracingGuard {})
+        init_fmt_only(env_filter, json, writer_bundle.writer);
+        Ok(TracingGuard {
+            worker_guard: writer_bundle.worker_guard,
+        })
     }
 }
 
@@ -118,6 +126,180 @@ pub fn validate_log_overrides(config: &Config) -> Result<(), ProxyError> {
     Ok(())
 }
 
+/// Validate `runtime.logging` without initializing the global subscriber.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] when logging settings are invalid.
+pub fn validate_logging(config: &Config) -> Result<(), ProxyError> {
+    config.runtime.logging.validate().map_err(ProxyError::Config)
+}
+
+// -----------------------------------------------------------------------------
+// Log Writer Construction
+// -----------------------------------------------------------------------------
+
+mod writer {
+    //! Builds tracing fmt-layer writers for `runtime.logging`.
+    use std::{
+        io::{self, Write},
+        path::{Path, PathBuf},
+        sync::{Arc, Mutex},
+    };
+
+    use tracing_appender::{
+        non_blocking::{NonBlocking, NonBlockingBuilder, WorkerGuard},
+        rolling::{RollingFileAppender, Rotation},
+    };
+    use tracing_subscriber::fmt::writer::BoxMakeWriter;
+
+    use super::size_rotation::{SizeRotatingWriter, ensure_parent_dir};
+    use crate::{
+        config::{LogOutput, LogRotation, LoggingConfig},
+        errors::ProxyError,
+    };
+
+    /// Non-blocking writer and optional background worker for shutdown flush.
+    pub(super) struct LogWriterBundle {
+        /// `MakeWriter` passed to the fmt layer.
+        pub writer: BoxMakeWriter,
+        /// Background worker guard; dropped after OTLP shutdown to flush queued lines.
+        pub worker_guard: Option<WorkerGuard>,
+    }
+
+    /// Build the fmt-layer writer bundle from `runtime.logging`.
+    pub(super) fn build_log_writer(cfg: &LoggingConfig) -> Result<LogWriterBundle, ProxyError> {
+        cfg.validate().map_err(ProxyError::Config)?;
+
+        match cfg.output {
+            LogOutput::Stdout => Ok(build_stream_writer(io::stdout, cfg)),
+            LogOutput::Stderr => Ok(build_stream_writer(io::stderr, cfg)),
+            LogOutput::File => build_file_writer(cfg),
+        }
+    }
+
+    /// Wrap stdout/stderr with optional non-blocking delivery.
+    fn build_stream_writer<F, W>(make_writer: F, cfg: &LoggingConfig) -> LogWriterBundle
+    where
+        F: Fn() -> W + Send + Sync + 'static,
+        W: Write + Send + 'static,
+    {
+        if cfg.non_blocking {
+            let (non_blocking, guard) = wrap_non_blocking(make_writer(), cfg);
+            LogWriterBundle {
+                writer: BoxMakeWriter::new(non_blocking),
+                worker_guard: Some(guard),
+            }
+        } else {
+            LogWriterBundle {
+                writer: BoxMakeWriter::new(make_writer),
+                worker_guard: None,
+            }
+        }
+    }
+
+    /// Build a file-backed writer with rotation and buffering options.
+    fn build_file_writer(cfg: &LoggingConfig) -> Result<LogWriterBundle, ProxyError> {
+        let path = cfg.file_path.as_ref().ok_or_else(|| {
+            ProxyError::Config("runtime.logging.file_path is required when output is file".to_owned())
+        })?;
+        let path = PathBuf::from(path);
+
+        let raw: Box<dyn Write + Send + Sync> =
+            match cfg.rotation {
+                None => {
+                    ensure_parent_dir(&path)?;
+                    Box::new(open_append_file(&path).map_err(|e| {
+                        ProxyError::Config(format!("failed to open log file '{}': {e}", path.display()))
+                    })?)
+                },
+                Some(LogRotation::Daily) => Box::new(open_daily_appender(&path, cfg.max_files)?),
+                Some(LogRotation::Size { max_bytes }) => {
+                    Box::new(SizeRotatingWriter::open(path, max_bytes, cfg.max_files)?)
+                },
+            };
+
+        if cfg.non_blocking {
+            let (non_blocking, guard) = wrap_non_blocking(raw, cfg);
+            Ok(LogWriterBundle {
+                writer: BoxMakeWriter::new(non_blocking),
+                worker_guard: Some(guard),
+            })
+        } else {
+            let writer = SyncFileWriter(Arc::new(Mutex::new(raw)));
+            Ok(LogWriterBundle {
+                writer: BoxMakeWriter::new(move || writer.clone()),
+                worker_guard: None,
+            })
+        }
+    }
+
+    /// Install a lossy non-blocking queue in front of `writer`.
+    fn wrap_non_blocking<W: Write + Send + 'static>(writer: W, cfg: &LoggingConfig) -> (NonBlocking, WorkerGuard) {
+        NonBlockingBuilder::default()
+            .buffered_lines_limit(cfg.effective_buffer_size_lines())
+            .lossy(true)
+            .finish(writer)
+    }
+
+    /// Open a log file for append-only writes.
+    fn open_append_file(path: &Path) -> io::Result<std::fs::File> {
+        std::fs::OpenOptions::new().create(true).append(true).open(path)
+    }
+
+    /// Build a daily-rotating appender matching `tracing-appender` semantics.
+    fn open_daily_appender(path: &Path, max_files: u32) -> Result<RollingFileAppender, ProxyError> {
+        let (dir, prefix, suffix) = split_log_path(path)?;
+        RollingFileAppender::builder()
+            .rotation(Rotation::DAILY)
+            .filename_prefix(prefix)
+            .filename_suffix(suffix)
+            .max_log_files(max_files as usize)
+            .build(dir)
+            .map_err(|e| ProxyError::Config(format!("failed to open daily log file: {e}")))
+    }
+
+    /// Split `path` into directory, stem prefix, and extension suffix.
+    fn split_log_path(path: &Path) -> Result<(PathBuf, String, String), ProxyError> {
+        ensure_parent_dir(path)?;
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map_or_else(|| PathBuf::from("."), Path::to_path_buf);
+
+        let stem = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let suffix = path
+            .extension()
+            .map(|ext| format!(".{}", ext.to_string_lossy()))
+            .unwrap_or_default();
+
+        Ok((parent, stem, suffix))
+    }
+
+    /// Mutex-backed synchronous writer used when `non_blocking: false`.
+    #[derive(Clone)]
+    struct SyncFileWriter(Arc<Mutex<Box<dyn Write + Send + Sync>>>);
+
+    impl Write for SyncFileWriter {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|_e| io::Error::other("sync log writer lock poisoned"))?
+                .write(buf)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            self.0
+                .lock()
+                .map_err(|_e| io::Error::other("sync log writer lock poisoned"))?
+                .flush()
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Subscriber Initialization
 // -----------------------------------------------------------------------------
@@ -126,19 +308,21 @@ pub fn validate_log_overrides(config: &Config) -> Result<(), ProxyError> {
 #[cfg(feature = "otel")]
 #[expect(
     clippy::large_stack_frames,
+    clippy::too_many_lines,
     reason = "tracing-subscriber layer composition creates deeply nested generic types; runs once at startup"
 )]
 fn init_with_otel(
     env_filter: tracing_subscriber::EnvFilter,
     json: bool,
     telemetry: &crate::config::TelemetryConfig,
+    writer_bundle: writer::LogWriterBundle,
 ) -> Result<TracingGuard, ProxyError> {
     use opentelemetry::trace::TracerProvider as _;
 
     let provider = build_otel_provider(telemetry)?;
+    let writer = writer_bundle.writer;
+    let worker_guard = writer_bundle.worker_guard;
 
-    // `OpenTelemetryLayer<S>` requires `S` to match the composed subscriber type.
-    // JSON and text fmt produce different types, preventing a shared binding.
     if json {
         let otel_layer = provider
             .as_ref()
@@ -148,6 +332,7 @@ fn init_with_otel(
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
+                    .with_writer(writer)
                     .with_current_span(true)
                     .with_span_list(true),
             )
@@ -159,23 +344,32 @@ fn init_with_otel(
             .map(|p| tracing_opentelemetry::layer().with_tracer(p.tracer("praxis")));
         tracing_subscriber::registry()
             .with(env_filter)
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().with_writer(writer))
             .with(otel_layer)
             .init();
     }
 
-    Ok(TracingGuard { provider })
+    Ok(TracingGuard {
+        #[cfg(feature = "otel")]
+        provider,
+        worker_guard,
+    })
 }
 
 /// Initialize the layered subscriber with fmt only (no `otel` feature).
 #[cfg(not(feature = "otel"))]
-fn init_fmt_only(env_filter: tracing_subscriber::EnvFilter, json: bool) {
+fn init_fmt_only(
+    env_filter: tracing_subscriber::EnvFilter,
+    json: bool,
+    writer: tracing_subscriber::fmt::writer::BoxMakeWriter,
+) {
     if json {
         tracing_subscriber::registry()
             .with(env_filter)
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
+                    .with_writer(writer)
                     .with_current_span(true)
                     .with_span_list(true),
             )
@@ -183,7 +377,7 @@ fn init_fmt_only(env_filter: tracing_subscriber::EnvFilter, json: bool) {
     } else {
         tracing_subscriber::registry()
             .with(env_filter)
-            .with(tracing_subscriber::fmt::layer())
+            .with(tracing_subscriber::fmt::layer().with_writer(writer))
             .init();
     }
 }
@@ -497,7 +691,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::config::Config;
+    use crate::config::{Config, LogOutput, LogRotation, LoggingConfig};
 
     #[test]
     fn empty_log_overrides_produces_valid_filter() {
@@ -739,6 +933,67 @@ telemetry:
             err.to_string().contains("bogus_field"),
             "unknown telemetry field should be rejected: {err}"
         );
+    }
+
+    #[test]
+    fn logging_config_parsed_from_runtime() {
+        let yaml = r#"
+runtime:
+  logging:
+    output: file
+    file_path: /tmp/praxis.log
+    rotation: size:1mb
+    max_files: 5
+listeners:
+  - name: test
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+"#;
+        let config = Config::from_yaml(yaml).expect("logging config should parse");
+        assert_eq!(config.runtime.logging.output, LogOutput::File);
+        assert_eq!(
+            config.runtime.logging.rotation,
+            Some(LogRotation::Size { max_bytes: 1_048_576 })
+        );
+        assert_eq!(config.runtime.logging.max_files, 5);
+    }
+
+    #[test]
+    fn daily_file_writer_opens_target_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proxy.log");
+        let cfg = LoggingConfig {
+            output: LogOutput::File,
+            file_path: Some(path.to_string_lossy().into_owned()),
+            rotation: Some(LogRotation::Daily),
+            max_files: 3,
+            ..LoggingConfig::default()
+        };
+        writer::build_log_writer(&cfg).expect("daily file writer should build");
+        assert!(dir.path().exists());
+    }
+
+    #[test]
+    fn build_file_writer_opens_active_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proxy.log");
+        let cfg = LoggingConfig {
+            output: LogOutput::File,
+            file_path: Some(path.to_string_lossy().into_owned()),
+            rotation: Some(LogRotation::Size { max_bytes: 32 }),
+            max_files: 3,
+            ..LoggingConfig::default()
+        };
+        let bundle = writer::build_log_writer(&cfg).expect("file writer should build");
+        assert!(
+            bundle.worker_guard.is_some(),
+            "default non_blocking should install a worker guard"
+        );
+        drop(bundle.worker_guard);
     }
 
     // -------------------------------------------------------------------------
