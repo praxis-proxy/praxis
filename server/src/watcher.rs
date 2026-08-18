@@ -68,6 +68,20 @@ pub(crate) struct WatcherParams {
     /// Live pipeline storage, swapped atomically on reload.
     pub(crate) pipelines: Arc<ListenerPipelines>,
 
+    /// Documents the configured filters read, beyond the main config.
+    ///
+    /// These are watched and hashed alongside it, so editing one triggers a
+    /// reload. Collected once at startup and not updated afterward.
+    ///
+    /// The set only changes when the main config does, and that edit reloads on
+    /// its own because the main config passes the hash gate. What the reload does
+    /// not do is start watching the result: a document a filter points to only
+    /// after a reload is neither in this vec nor in the watched directories, so
+    /// later edits to it go unnoticed until the proxy restarts. Refreshing the
+    /// set means re-registering watch directories mid-loop and updating the
+    /// event filter, which belongs in its own change.
+    pub(crate) referenced_files: Vec<PathBuf>,
+
     /// Listener metadata for admin `/api/pipelines`, swapped on reload.
     pub(crate) listener_meta: praxis_protocol::http::pingora::health::ListenerMetaStore,
 
@@ -110,9 +124,9 @@ pub(crate) fn spawn_config_watcher(params: WatcherParams) -> std::thread::JoinHa
 async fn watch_loop(params: WatcherParams) {
     let (tx, mut rx) = mpsc::channel::<()>(16);
 
-    let watch_dir = watch_dir_for_path(&params.config_path);
+    let watch_dirs = watch_dirs_for(&params.config_path, &params.referenced_files);
 
-    let _watcher = match setup_watcher(tx, &watch_dir, &params.config_path) {
+    let _watcher = match setup_watcher(tx, &watch_dirs, &params.config_path, &params.referenced_files) {
         Ok(w) => w,
         Err(e) => {
             error!(error = %e, "failed to start config file watcher");
@@ -120,7 +134,12 @@ async fn watch_loop(params: WatcherParams) {
         },
     };
 
-    info!(path = %params.config_path.display(), "config file watcher started");
+    info!(
+        path = %params.config_path.display(),
+        referenced_documents = params.referenced_files.len(),
+        watched_directories = watch_dirs.len(),
+        "config file watcher started",
+    );
     run_event_loop(&mut rx, &params).await;
 }
 
@@ -170,6 +189,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
     // Check for changes that may have occurred between config load and watcher startup
     handle_reload(
         &params.config_path,
+        &params.referenced_files,
         &mut current_config,
         &mut content_hash,
         &params.registry,
@@ -213,6 +233,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
 
         let ok = handle_reload(
             &params.config_path,
+            &params.referenced_files,
             &mut current_config,
             &mut content_hash,
             &params.registry,
@@ -251,6 +272,7 @@ fn update_reload_backoff(ok: bool, consecutive_failures: &mut u32, last_failure:
 )]
 fn handle_reload(
     config_path: &PathBuf,
+    referenced_files: &[PathBuf],
     current_config: &mut Config,
     content_hash: &mut u64,
     registry: &FilterRegistry,
@@ -273,12 +295,20 @@ fn handle_reload(
         },
     };
 
-    let new_hash = hash_content(&content);
+    let new_hash = composite_hash(&content, referenced_files);
     if new_hash == *content_hash {
         tracing::debug!("config file content unchanged, skipping reload");
         return true;
     }
-    *content_hash = new_hash;
+
+    // The hash is recorded only once the reload succeeds. Recording it up front
+    // would strand the operator's edit: a reload that fails for a transient
+    // reason, such as an identity provider being briefly unreachable while a
+    // policy document is validated, would leave the new content hashed as
+    // already-seen, so the unchanged-content check would skip every subsequent
+    // attempt and the edit would never take effect. Leaving the old hash in
+    // place lets the existing consecutive-failure backoff retry the same
+    // content until it succeeds.
 
     let new_config = match Config::from_yaml(&content) {
         Ok(c) => c,
@@ -305,6 +335,7 @@ fn handle_reload(
     ) {
         Ok(()) => {
             *current_config = new_config;
+            *content_hash = new_hash;
             praxis_protocol::http::pingora::metrics::record_config_reload_success();
             true
         },
@@ -344,11 +375,14 @@ struct PathFilter {
     canonical: PathBuf,
     /// Original config path as supplied by the caller.
     original: PathBuf,
+    /// Documents referenced by the config, in every spelling a platform might
+    /// report: as given, made absolute, and canonicalized.
+    referenced: Vec<PathBuf>,
 }
 
 impl PathFilter {
     /// Build a filter for the given config path.
-    fn new(config_path: &std::path::Path) -> Self {
+    fn new(config_path: &std::path::Path, referenced: &[PathBuf]) -> Self {
         let is_symlink = config_path.symlink_metadata().is_ok_and(|m| m.is_symlink());
 
         let canonical = std::fs::canonicalize(config_path).unwrap_or_else(|_| config_path.to_path_buf());
@@ -359,21 +393,44 @@ impl PathFilter {
             std::env::current_dir().map_or_else(|_| config_path.to_path_buf(), |cwd| cwd.join(config_path))
         };
 
+        // Each referenced document is matched in every spelling a platform might
+        // report, the same way the main config is: macOS reports canonical paths,
+        // Linux reports lexical ones.
+        let mut expanded = Vec::with_capacity(referenced.len() * 3);
+        for path in referenced {
+            expanded.push(path.clone());
+            if let Ok(c) = std::fs::canonicalize(path) {
+                expanded.push(c);
+            }
+            // An absolute path is already covered by the push above; only a
+            // relative one needs its cwd-joined spelling.
+            if !path.is_absolute()
+                && let Ok(cwd) = std::env::current_dir()
+            {
+                expanded.push(cwd.join(path));
+            }
+        }
+        expanded.sort();
+        expanded.dedup();
+
         Self {
             absolute,
             accept_all: is_symlink,
             canonical,
             original: config_path.to_path_buf(),
+            referenced: expanded,
         }
     }
 
     /// Whether a filesystem event should trigger a reload attempt.
     fn matches(&self, event: &notify::Event) -> bool {
         self.accept_all
-            || event
-                .paths
-                .iter()
-                .any(|p| p == &self.canonical || p == &self.absolute || p == &self.original)
+            || event.paths.iter().any(|p| {
+                p == &self.canonical
+                    || p == &self.absolute
+                    || p == &self.original
+                    || self.referenced.iter().any(|r| r == p)
+            })
     }
 }
 
@@ -386,10 +443,11 @@ impl PathFilter {
 /// [`RecommendedWatcher`]: notify::RecommendedWatcher
 fn setup_watcher(
     tx: mpsc::Sender<()>,
-    watch_dir: &std::path::Path,
+    watch_dirs: &[PathBuf],
     config_path: &std::path::Path,
+    referenced: &[PathBuf],
 ) -> Result<RecommendedWatcher, notify::Error> {
-    let filter = PathFilter::new(config_path);
+    let filter = PathFilter::new(config_path, referenced);
     let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, notify::Error>| match res {
         Ok(event) if is_relevant_event(event.kind) && filter.matches(&event) => {
             if tx.try_send(()).is_err() {
@@ -402,7 +460,12 @@ fn setup_watcher(
         _ => {},
     })?;
 
-    watcher.watch(watch_dir, RecursiveMode::NonRecursive)?;
+    // A referenced document commonly lives outside the main config's directory,
+    // so one watch is not enough. Each directory is registered separately and
+    // non-recursively, keeping the existing blast radius per directory.
+    for dir in watch_dirs {
+        watcher.watch(dir, RecursiveMode::NonRecursive)?;
+    }
     Ok(watcher)
 }
 
@@ -429,6 +492,21 @@ fn watch_dir_for_path(path: &std::path::Path) -> PathBuf {
         .to_path_buf()
 }
 
+/// Directories to watch: the main config's, plus one per referenced document.
+///
+/// A referenced document commonly lives outside the main config's directory, so
+/// one watch is not enough. Sorted and de-duplicated, since documents alongside
+/// the config need no second watch.
+fn watch_dirs_for(config_path: &std::path::Path, referenced: &[PathBuf]) -> Vec<PathBuf> {
+    let mut dirs = vec![watch_dir_for_path(config_path)];
+    for path in referenced {
+        dirs.push(watch_dir_for_path(path));
+    }
+    dirs.sort();
+    dirs.dedup();
+    dirs
+}
+
 /// Compute the backoff duration for a given consecutive failure count.
 ///
 /// Starts at [`BACKOFF_BASE_SECS`] and doubles with each subsequent
@@ -447,9 +525,29 @@ fn backoff_duration(consecutive_failures: u32) -> Duration {
 }
 
 /// Compute a hash of file content for change detection.
-pub(crate) fn hash_content(content: &str) -> u64 {
+/// Hash of the main config plus every document it references.
+///
+/// Referenced documents have to be included, not just the main config. A filter
+/// that loads an external document would otherwise never pick up edits to it: the
+/// main config stays byte-identical, the unchanged-content check suppresses the
+/// rebuild, and the filter keeps serving what it loaded at startup. The only trace
+/// is a debug line saying the config was unchanged, which is true and misleading.
+/// See praxis-proxy/praxis#900.
+///
+/// Paths are hashed in the order given, which the caller keeps stable, and the
+/// path itself is folded in alongside the content so that swapping two documents'
+/// contents still changes the hash. An unreadable document hashes as a distinct
+/// marker rather than as empty, so a document disappearing is a change.
+pub(crate) fn composite_hash(main: &str, referenced: &[PathBuf]) -> u64 {
     let mut hasher = DefaultHasher::new();
-    hasher.write(content.as_bytes());
+    hasher.write(main.as_bytes());
+    for path in referenced {
+        hasher.write(path.as_os_str().as_encoded_bytes());
+        match std::fs::read(path) {
+            Ok(bytes) => hasher.write(&bytes),
+            Err(_) => hasher.write(b"<unreadable>"),
+        }
+    }
     hasher.finish()
 }
 
@@ -514,7 +612,7 @@ mod tests {
         let config = dir.path().join("config.yaml");
         std::fs::write(&config, "test").unwrap();
 
-        let filter = PathFilter::new(&config);
+        let filter = PathFilter::new(&config, &[]);
         let event = make_event(vec![config.clone()]);
         assert!(filter.matches(&event), "should match original path");
     }
@@ -525,7 +623,7 @@ mod tests {
         let config = dir.path().join("config.yaml");
         std::fs::write(&config, "test").unwrap();
 
-        let filter = PathFilter::new(&config);
+        let filter = PathFilter::new(&config, &[]);
         let canonical = std::fs::canonicalize(&config).unwrap();
         let event = make_event(vec![canonical]);
         assert!(filter.matches(&event), "should match canonical path (macOS FSEvents)");
@@ -537,7 +635,7 @@ mod tests {
         let config = dir.path().join("config.yaml");
         std::fs::write(&config, "test").unwrap();
 
-        let filter = PathFilter::new(&config);
+        let filter = PathFilter::new(&config, &[]);
         let event = make_event(vec![dir.path().join("other.txt")]);
         assert!(!filter.matches(&event), "should reject unrelated path");
     }
@@ -550,7 +648,7 @@ mod tests {
         let link = dir.path().join("config.yaml");
         std::os::unix::fs::symlink(&target, &link).unwrap();
 
-        let filter = PathFilter::new(&link);
+        let filter = PathFilter::new(&link, &[]);
         assert!(filter.accept_all, "symlinked config should set accept_all");
 
         let event = make_event(vec![dir.path().join("..data")]);
@@ -571,7 +669,7 @@ mod tests {
         let config_rel = subdir_rel.join("config.yaml");
         std::fs::write(&config_rel, "test").unwrap();
 
-        let filter = PathFilter::new(&config_rel);
+        let filter = PathFilter::new(&config_rel, &[]);
 
         tracing::info!("simulating inotify-reported cwd-joined absolute path");
         let cwd = std::env::current_dir().unwrap();
@@ -595,7 +693,7 @@ mod tests {
         std::fs::write(&config_abs, "test").unwrap();
 
         let relative = PathBuf::from("..").join("config.yaml");
-        let filter = PathFilter::new(&relative);
+        let filter = PathFilter::new(&relative, &[]);
 
         tracing::info!("verifying canonical match: absolute field stores cwd + ../config.yaml with .. preserved");
         let canonical = std::fs::canonicalize(&config_abs).unwrap();
@@ -621,13 +719,229 @@ mod tests {
         let config = dir.path().join("config.yaml");
         std::fs::write(&config, "test").unwrap();
 
-        let filter = PathFilter::new(&config);
+        let filter = PathFilter::new(&config, &[]);
         assert!(!filter.accept_all, "regular file should not set accept_all");
     }
 
     // -------------------------------------------------------------------------
     // Integration tests
     // -------------------------------------------------------------------------
+
+    /// The gate must notice a referenced document changing while the main config
+    /// stays byte-identical. This is the core of praxis-proxy/praxis#900: hashing
+    /// the main config alone left a filter serving whatever document it loaded at
+    /// startup, with no signal that the file on disk had moved on.
+    #[test]
+    fn referenced_document_change_is_detected_with_main_config_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("policy.yaml");
+        std::fs::write(&doc, "plugins: []\n").unwrap();
+
+        let refs = vec![doc.clone()];
+        let before = composite_hash(VALID_YAML, &refs);
+
+        // Only the referenced document changes.
+        std::fs::write(&doc, "plugins: [{name: added}]\n").unwrap();
+        let after = composite_hash(VALID_YAML, &refs);
+
+        assert_ne!(
+            before, after,
+            "editing a referenced document must change the gate's hash, or the reload is suppressed",
+        );
+    }
+
+    /// A document that disappears is a change, not a no-op. Hashing a missing file
+    /// as empty would make deletion invisible.
+    #[test]
+    fn referenced_document_removal_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let doc = dir.path().join("policy.yaml");
+        std::fs::write(&doc, "plugins: []\n").unwrap();
+        let refs = vec![doc.clone()];
+        let present = composite_hash(VALID_YAML, &refs);
+
+        std::fs::remove_file(&doc).unwrap();
+        assert_ne!(
+            present,
+            composite_hash(VALID_YAML, &refs),
+            "a removed document is a change"
+        );
+    }
+
+    /// Two documents swapping contents must still register as a change, which is
+    /// why the path is folded into the hash alongside the content.
+    #[test]
+    fn swapping_two_referenced_documents_is_detected() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = dir.path().join("a.yaml");
+        let b = dir.path().join("b.yaml");
+        std::fs::write(&a, "one\n").unwrap();
+        std::fs::write(&b, "two\n").unwrap();
+        let refs = vec![a.clone(), b.clone()];
+        let before = composite_hash(VALID_YAML, &refs);
+
+        std::fs::write(&a, "two\n").unwrap();
+        std::fs::write(&b, "one\n").unwrap();
+        assert_ne!(
+            before,
+            composite_hash(VALID_YAML, &refs),
+            "swapped contents are a change"
+        );
+    }
+
+    /// A filesystem event for a referenced document must pass the path filter, even
+    /// though that document is not the main config.
+    #[test]
+    fn path_filter_matches_a_referenced_document() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("praxis.yaml");
+        let doc = dir.path().join("policy.yaml");
+        std::fs::write(&config, VALID_YAML).unwrap();
+        std::fs::write(&doc, "plugins: []\n").unwrap();
+
+        let filter = PathFilter::new(&config, std::slice::from_ref(&doc));
+        let event = notify::Event {
+            kind: EventKind::Modify(notify::event::ModifyKind::Data(notify::event::DataChange::Content)),
+            paths: vec![doc],
+            attrs: notify::event::EventAttributes::default(),
+        };
+        assert!(filter.matches(&event), "a referenced document's event must be accepted");
+    }
+
+    /// A referenced document configured as a relative path must match the
+    /// cwd-joined spelling inotify reports on Linux.
+    #[test]
+    fn path_filter_matches_a_relative_referenced_document_by_absolute_spelling() {
+        let _lock = CWD_MUTEX.get_or_init(Mutex::default).lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let _cwd = CwdGuard::new(dir.path());
+
+        let config = PathBuf::from("praxis.yaml");
+        let doc_rel = PathBuf::from("policy.yaml");
+        std::fs::write(&config, VALID_YAML).unwrap();
+        std::fs::write(&doc_rel, "plugins: []\n").unwrap();
+
+        let filter = PathFilter::new(&config, std::slice::from_ref(&doc_rel));
+
+        let abs_lexical = std::env::current_dir().unwrap().join(&doc_rel);
+        assert!(
+            filter.matches(&make_event(vec![abs_lexical])),
+            "a relative referenced document must match its cwd-joined spelling"
+        );
+    }
+
+    /// Adding referenced documents must not widen the filter: a sibling file
+    /// nothing references is still rejected.
+    #[test]
+    fn path_filter_rejects_a_document_that_is_not_referenced() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("praxis.yaml");
+        let doc = dir.path().join("policy.yaml");
+        std::fs::write(&config, VALID_YAML).unwrap();
+        std::fs::write(&doc, "plugins: []\n").unwrap();
+
+        let filter = PathFilter::new(&config, std::slice::from_ref(&doc));
+        let event = make_event(vec![dir.path().join("unrelated.yaml")]);
+        assert!(
+            !filter.matches(&event),
+            "a file nobody references must not trigger a reload"
+        );
+    }
+
+    /// A document outside the main config's directory needs its own watch.
+    #[test]
+    fn watch_dirs_include_a_referenced_documents_own_directory() {
+        let dirs = watch_dirs_for(
+            std::path::Path::new("/etc/praxis/praxis.yaml"),
+            &[PathBuf::from("/var/lib/praxis/policy.yaml")],
+        );
+        assert_eq!(
+            dirs,
+            vec![PathBuf::from("/etc/praxis"), PathBuf::from("/var/lib/praxis")],
+            "both directories must be watched"
+        );
+    }
+
+    /// Documents alongside the main config need no second watch.
+    #[test]
+    fn watch_dirs_collapse_documents_in_the_config_directory() {
+        let dirs = watch_dirs_for(
+            std::path::Path::new("/etc/praxis/praxis.yaml"),
+            &[
+                PathBuf::from("/etc/praxis/policy.yaml"),
+                PathBuf::from("/etc/praxis/other.yaml"),
+            ],
+        );
+        assert_eq!(dirs, vec![PathBuf::from("/etc/praxis")], "one directory, watched once");
+    }
+
+    /// A reload that fails must not advance the content hash.
+    ///
+    /// Advancing it would strand the operator's edit: the unchanged-content check
+    /// would then skip every retry, so a transient failure would become permanent
+    /// and the edit would never take effect no matter how long the provider took
+    /// to recover.
+    #[test]
+    fn failed_reload_leaves_hash_unchanged_so_the_edit_is_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("praxis.yaml");
+        std::fs::write(&config_path, VALID_YAML).unwrap();
+
+        let mut config = Config::from_yaml(VALID_YAML).unwrap();
+        let registry = FilterRegistry::with_builtins();
+        let health_registry = Arc::new(std::collections::HashMap::new());
+        let kv_stores = praxis_core::kv::KvStoreRegistry::new();
+        let subrequest_client =
+            praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None));
+        let pipelines =
+            crate::pipelines::resolve_pipelines(&config, &registry, &health_registry, &kv_stores, &subrequest_client)
+                .unwrap();
+        let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        );
+
+        let original_hash = composite_hash(VALID_YAML, &[]);
+        let mut hash = original_hash;
+
+        // An edit that cannot be parsed stands in for any failing reload.
+        std::fs::write(&config_path, "this: is: not: valid: praxis: config\n").unwrap();
+        let ok = handle_reload(
+            &config_path,
+            &[],
+            &mut config,
+            &mut hash,
+            &registry,
+            &pipelines,
+            &listener_meta,
+            &health_shutdown,
+            &kv_stores,
+            &subrequest_client,
+        );
+
+        assert!(!ok, "an unparseable config must report failure");
+        assert_eq!(
+            hash, original_hash,
+            "a failed reload must leave the hash untouched, or the retry is skipped forever",
+        );
+
+        // Recovery: the same path now holds something valid, and because the hash
+        // was never advanced the attempt is not short-circuited.
+        std::fs::write(&config_path, VALID_YAML).unwrap();
+        let recovered = handle_reload(
+            &config_path,
+            &[],
+            &mut config,
+            &mut hash,
+            &registry,
+            &pipelines,
+            &listener_meta,
+            &health_shutdown,
+            &kv_stores,
+            &subrequest_client,
+        );
+        assert!(recovered, "a subsequent valid config must reload");
+    }
 
     #[test]
     fn watcher_exits_on_cancellation() {
@@ -651,10 +965,11 @@ mod tests {
         let handle = spawn_config_watcher(WatcherParams {
             config_path,
             health_shutdown,
-            initial_content_hash: hash_content(VALID_YAML),
+            initial_content_hash: composite_hash(VALID_YAML, &[]),
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines,
+            referenced_files: Vec::new(),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
             ),
@@ -694,9 +1009,10 @@ mod tests {
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: config_path.clone(),
             health_shutdown,
-            initial_content_hash: hash_content(VALID_YAML),
+            initial_content_hash: composite_hash(VALID_YAML, &[]),
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
+            referenced_files: Vec::new(),
             pipelines: Arc::clone(&pipelines),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
@@ -745,9 +1061,10 @@ mod tests {
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: config_path.clone(),
             health_shutdown,
-            initial_content_hash: hash_content(VALID_YAML),
+            initial_content_hash: composite_hash(VALID_YAML, &[]),
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
+            referenced_files: Vec::new(),
             pipelines: Arc::clone(&pipelines),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
@@ -826,10 +1143,11 @@ mod tests {
         let handle = spawn_config_watcher(WatcherParams {
             config_path: PathBuf::from("praxis.yaml"),
             health_shutdown,
-            initial_content_hash: hash_content(VALID_YAML),
+            initial_content_hash: composite_hash(VALID_YAML, &[]),
             initial_config: config.clone(),
             kv_stores,
             pipelines,
+            referenced_files: Vec::new(),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
             ),
@@ -854,15 +1172,15 @@ mod tests {
 
     #[test]
     fn hash_content_deterministic() {
-        let a = hash_content("hello world");
-        let b = hash_content("hello world");
+        let a = composite_hash("hello world", &[]);
+        let b = composite_hash("hello world", &[]);
         assert_eq!(a, b, "same content should produce the same hash");
     }
 
     #[test]
     fn hash_content_differs_for_different_input() {
-        let a = hash_content("status: 200");
-        let b = hash_content("status: 201");
+        let a = composite_hash("status: 200", &[]);
+        let b = composite_hash("status: 201", &[]);
         assert_ne!(a, b, "different content should produce different hashes");
     }
 
@@ -889,9 +1207,10 @@ mod tests {
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: config_path.clone(),
             health_shutdown,
-            initial_content_hash: hash_content(VALID_YAML),
+            initial_content_hash: composite_hash(VALID_YAML, &[]),
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
+            referenced_files: Vec::new(),
             pipelines: Arc::clone(&pipelines),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
@@ -957,6 +1276,7 @@ mod tests {
             initial_content_hash: 0,
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
+            referenced_files: Vec::new(),
             pipelines: Arc::clone(&pipelines),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
@@ -1018,9 +1338,10 @@ mod tests {
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: link.clone(),
             health_shutdown,
-            initial_content_hash: hash_content(VALID_YAML),
+            initial_content_hash: composite_hash(VALID_YAML, &[]),
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
+            referenced_files: Vec::new(),
             pipelines: Arc::clone(&pipelines),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
@@ -1156,10 +1477,11 @@ mod tests {
         let _handle = spawn_config_watcher(WatcherParams {
             config_path: config_path.clone(),
             health_shutdown: Arc::new(Mutex::new(CancellationToken::new())),
-            initial_content_hash: hash_content(VALID_YAML),
+            initial_content_hash: composite_hash(VALID_YAML, &[]),
             initial_config: config.clone(),
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             pipelines: Arc::clone(&pipelines),
+            referenced_files: Vec::new(),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
             ),

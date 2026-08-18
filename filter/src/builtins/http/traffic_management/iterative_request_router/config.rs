@@ -26,7 +26,6 @@ const MAX_TIMEOUT_MS: u64 = 86_400_000;
 /// Maximum number of named steps.
 const MAX_STEPS: usize = 20;
 
-
 /// Default maximum iteration state accumulator bytes.
 const DEFAULT_MAX_STATE_BYTES: usize = 52_428_800; // 50 MiB
 

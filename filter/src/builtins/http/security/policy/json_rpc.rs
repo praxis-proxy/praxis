@@ -12,7 +12,7 @@
 //! JSON-RPC envelopes when `body_access: read_write` is on.
 
 use bytes::Bytes;
-use cpex::cpex_core::cmf::{
+use ppe::praxis_policy_core::cmf::{
     ContentPart, Message, PromptRequest, ResourceReference, ResourceType, ToolCall, ToolResult,
 };
 

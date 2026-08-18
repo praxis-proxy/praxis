@@ -37,7 +37,7 @@
 //! functions are the closed switch — anything not listed falls
 //! through to the identity-only path.
 
-use cpex::cpex_core::cmf::constants::{
+use ppe::praxis_policy_core::cmf::constants::{
     ENTITY_PROMPT, ENTITY_RESOURCE, ENTITY_TOOL, HOOK_CMF_PROMPT_POST_INVOKE, HOOK_CMF_PROMPT_PRE_INVOKE,
     HOOK_CMF_RESOURCE_POST_FETCH, HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_POST_INVOKE, HOOK_CMF_TOOL_PRE_INVOKE,
 };

@@ -242,7 +242,15 @@ fn spawn_watcher(
     state: ServerState,
 ) -> Option<std::thread::JoinHandle<()>> {
     let path = config_path?;
-    let initial_content_hash = std::fs::read_to_string(&path).map_or(0, |c| crate::watcher::hash_content(&c));
+    // Documents the configured filters read, asked of the pipelines that were just
+    // built rather than reconstructed here: building a filter to interrogate it
+    // would load its document and open network connections as a side effect.
+    let referenced_files = state.pipelines.referenced_files();
+    // The startup hash must cover the same set the reload gate covers, or the first
+    // event after startup would see a hash mismatch that is an artifact of the two
+    // being computed differently.
+    let initial_content_hash =
+        std::fs::read_to_string(&path).map_or(0, |c| crate::watcher::composite_hash(&c, &referenced_files));
     let handle = crate::watcher::spawn_config_watcher(crate::watcher::WatcherParams {
         config_path: path,
         health_shutdown: state.health_shutdown,
@@ -251,6 +259,7 @@ fn spawn_watcher(
         kv_stores: state.kv_stores,
         listener_meta: state.listener_meta,
         pipelines: state.pipelines,
+        referenced_files,
         registry: Arc::new(registry),
         shutdown: CancellationToken::new(),
         subrequest_client: state.subrequest_client,

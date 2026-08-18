@@ -28,12 +28,12 @@ use praxis_test_utils::{
     example_config_path, free_port, http_send, parse_status, patch_yaml, start_backend_with_shutdown, start_proxy,
 };
 
-// Identity parameters mirrored from `tests/integration/fixtures/cpex-policy.yaml`.
+// Identity parameters mirrored from `tests/integration/fixtures/policy.yaml`.
 // The happy-path JWT must match the fixture's trusted issuer, audience,
 // algorithm, and shared secret for the `jwt-user` identity plugin to
 // accept it.
 const FIXTURE_ISSUER: &str = "https://idp.example.com";
-const FIXTURE_AUDIENCE: &str = "praxis-cpex-example";
+const FIXTURE_AUDIENCE: &str = "praxis-policy-example";
 const FIXTURE_SECRET: &str = "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT";
 
 /// Mint an HS256 JWT accepted by the fixture's `jwt-user` plugin: the
@@ -68,14 +68,14 @@ fn mint_fixture_jwt(subject: &str) -> String {
 #[expect(clippy::needless_pass_by_value, reason = "callers construct the map inline")]
 fn load_policy_example(proxy_port: u16, port_map: HashMap<&str, u16>) -> Config {
     let praxis_yaml_path = example_config_path("security/policy.yaml");
-    let policy_yaml_path = format!("{}/fixtures/cpex-policy.yaml", env!("CARGO_MANIFEST_DIR"));
+    let policy_yaml_path = format!("{}/fixtures/policy.yaml", env!("CARGO_MANIFEST_DIR"));
 
     let raw = std::fs::read_to_string(&praxis_yaml_path).unwrap_or_else(|e| panic!("read {praxis_yaml_path}: {e}"));
     // The example points `config_path` at an operator-supplied
     // deployment path (the policy is not shipped under examples/). The
     // test rewrites it to the minimal in-repo fixture so the filter
     // constructs regardless of the test's working directory.
-    let with_policy = raw.replace("/etc/praxis/cpex-policy.yaml", &policy_yaml_path);
+    let with_policy = raw.replace("/etc/praxis/policy.yaml", &policy_yaml_path);
     let patched = patch_yaml(&with_policy, proxy_port, &port_map);
     Config::from_yaml(&patched).unwrap_or_else(|e| panic!("parse security/policy.yaml: {e}"))
 }

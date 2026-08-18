@@ -198,6 +198,21 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Filesystem paths this filter reads its configuration from, beyond the
+    /// main Praxis config.
+    ///
+    /// The config watcher uses this to decide which files should trigger a
+    /// reload. A filter whose configuration lives entirely inside the Praxis
+    /// config has nothing to declare, which is why the default is empty and why
+    /// adding this is additive for every existing filter.
+    ///
+    /// Paths are returned as configured, not canonicalized: the watcher does its
+    /// own resolution because it has to handle symlinks and relative paths
+    /// consistently with how it already treats the main config.
+    fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+
     /// Apply global [`InsecureOptions`] to this filter.
     ///
     /// Filters that support insecure overrides (e.g. CSRF
@@ -337,6 +352,17 @@ mod tests {
         assert!(
             !filter.needs_request_context(),
             "default needs_request_context should be false"
+        );
+    }
+
+    /// The empty default is what makes `referenced_files` additive: a filter that
+    /// predates it declares nothing.
+    #[test]
+    fn default_referenced_files_is_empty() {
+        let filter = MinimalFilter;
+        assert!(
+            filter.referenced_files().is_empty(),
+            "a filter with no external config must declare nothing"
         );
     }
 
