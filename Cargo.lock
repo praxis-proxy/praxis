@@ -167,52 +167,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
-name = "apl-cmf"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "685a1bffb26e794b393daa3727be034f3343fd946a60a89f02604ef1c72abecf"
-dependencies = [
- "apl-core",
- "cpex-core",
- "serde_json",
-]
-
-[[package]]
-name = "apl-core"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94b5847a0dd6ea9694862e899774c001e039b88df6e3113d5ee0736e2b4fc12d"
-dependencies = [
- "async-trait",
- "cpex-orchestration",
- "futures",
- "regex",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "apl-cpex"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dbf227ec0421e66496b039881391ac6aaa32bc340f7496dc74db78e51bb1f329"
-dependencies = [
- "apl-cmf",
- "apl-core",
- "async-trait",
- "chrono",
- "cpex-core",
- "serde_json",
- "serde_yaml",
- "sha2",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "ar_archive_writer"
 version = "0.5.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -765,6 +719,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chrono-tz"
+version = "0.10.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
+dependencies = [
+ "chrono",
+ "phf",
+]
+
+[[package]]
 name = "ciborium"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -841,6 +805,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cobs"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
+dependencies = [
+ "thiserror 2.0.20",
+]
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -911,198 +884,6 @@ name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "773648b94d0e5d620f64f280777445740e61fe701025087ec8b57f45c791888b"
-
-[[package]]
-name = "cpex"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "52e486736defb1437d0c65ea8dd3005bb5759ef9ed74e935a86bfc1a6e934a46"
-dependencies = [
- "apl-cmf",
- "apl-core",
- "apl-cpex",
- "cpex-builtins",
- "cpex-core",
-]
-
-[[package]]
-name = "cpex-builtins"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83d686240389c3fab8a1895415dabe1571c253bfb58b98374fb7f7302d157451"
-dependencies = [
- "apl-core",
- "apl-cpex",
- "cpex-core",
- "cpex-pdp-cedar-direct",
- "cpex-pdp-cel",
- "cpex-plugin-audit-logger",
- "cpex-plugin-delegator-oauth",
- "cpex-plugin-elicitation-ciba",
- "cpex-plugin-identity-jwt",
- "cpex-plugin-pii-scanner",
- "cpex-session-valkey",
-]
-
-[[package]]
-name = "cpex-core"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "696544a387bb5c51e8cde5287f3812ff0ae228b5041319964d64a57cb73f5cad"
-dependencies = [
- "arc-swap",
- "async-trait",
- "chrono",
- "cpex-orchestration",
- "hashbrown 0.17.1",
- "serde",
- "serde_json",
- "serde_yaml",
- "thiserror 2.0.20",
- "tokio",
- "tokio-util",
- "tracing",
- "uuid",
- "wildmatch",
- "zeroize",
-]
-
-[[package]]
-name = "cpex-orchestration"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "39bd3b81889995d239d711e4876b079dabf21288eca79eb3bb4ed3004def1bbb"
-dependencies = [
- "futures",
- "tokio",
-]
-
-[[package]]
-name = "cpex-pdp-cedar-direct"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c967821434d44a54ffb0430ba0dcbe08f8f419e5de43172f986589f4be7a51b"
-dependencies = [
- "apl-core",
- "async-trait",
- "cedar-policy",
- "serde_json",
- "serde_yaml",
- "stacker",
- "thiserror 2.0.20",
-]
-
-[[package]]
-name = "cpex-pdp-cel"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8b8b72ae4039b7ebb85c6a9aa5e5c3c90418c2cb879760fb21e0b20e6636172"
-dependencies = [
- "apl-core",
- "async-trait",
- "cel",
- "serde_yaml",
- "thiserror 2.0.20",
- "tracing",
-]
-
-[[package]]
-name = "cpex-plugin-audit-logger"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3c07da9c81faf07b00d24ff59ffc5ff1e53add80b5ef16f453337ceb1320ad98"
-dependencies = [
- "async-trait",
- "chrono",
- "cpex-core",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
-name = "cpex-plugin-delegator-oauth"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da8c0ce5ae33679beaeb582b6348b9f3ad4762a33dc503a7f872f269bf4804c7"
-dependencies = [
- "async-trait",
- "chrono",
- "cpex-core",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "zeroize",
-]
-
-[[package]]
-name = "cpex-plugin-elicitation-ciba"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d9f0d6fbd8a25ede8544c528184d317691a543b52df1962a6d92d79ba58c172d"
-dependencies = [
- "async-trait",
- "base64",
- "chrono",
- "cpex-core",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "zeroize",
-]
-
-[[package]]
-name = "cpex-plugin-identity-jwt"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "37f08a35f44b567c735571b1908881a8c714bc5b0d4f57d8a2939e2f33d26cc2"
-dependencies = [
- "async-trait",
- "base64",
- "chrono",
- "cpex-core",
- "futures",
- "jsonwebtoken",
- "reqwest",
- "serde",
- "serde_json",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "cpex-plugin-pii-scanner"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "473f3e498e702b841c04249e5099e2f657c78f25581e0626929eb5a12925ec77"
-dependencies = [
- "async-trait",
- "cpex-core",
- "regex",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "cpex-session-valkey"
-version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b96da40ceb5e4f8a646d065b88efb9968115cd0b615a97dae20ea787b96ac5d"
-dependencies = [
- "apl-cpex",
- "async-trait",
- "deadpool-redis",
- "redis",
- "serde",
- "serde_yaml",
- "sha2",
- "thiserror 2.0.20",
- "tokio",
- "tracing",
- "url",
-]
 
 [[package]]
 name = "cpufeatures"
@@ -1381,7 +1162,7 @@ dependencies = [
  "asn1-rs 0.6.2",
  "displaydoc",
  "nom",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "rusticata-macros",
 ]
@@ -1395,7 +1176,7 @@ dependencies = [
  "asn1-rs 0.7.2",
  "displaydoc",
  "nom",
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "rusticata-macros",
 ]
@@ -1482,6 +1263,18 @@ name = "either"
 version = "1.17.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9e5e8f6c15a24b9a3ee5efec809ccd006d3b30e8b3bb63c39af737c7f87daa1d"
+
+[[package]]
+name = "embedded-io"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ef1a6892d9eef45c8fa6b9e0086428a2cca8491aca8f787c534a3d6d0bcb3ced"
+
+[[package]]
+name = "embedded-io"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "edd0f118536f44f5ccd48bcb8b111bdc3de888b58c74639dfb034a357d0f206d"
 
 [[package]]
 name = "ena"
@@ -1786,6 +1579,18 @@ dependencies = [
  "r-efi 6.0.0",
  "rand_core 0.10.1",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "globset"
+version = "0.4.20"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "07c34a9410465b45bd9787443bc7370f37735bad04b0f0cd57ff1a3186c98988"
+dependencies = [
+ "aho-corasick",
+ "bstr",
+ "regex-automata",
+ "regex-syntax",
 ]
 
 [[package]]
@@ -2527,6 +2332,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "lru"
+version = "0.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d2f2f9b4ba7e6b24d95e7e899329d35be83bcded72c8540cdd5368932d1d90a"
+
+[[package]]
 name = "lru-slab"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2662,6 +2473,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "msvc_spectre_libs"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29e871a9861f3664f18b7e04e9301d4edd55090c2dadb4b1c602e26ab32b1f5b"
+dependencies = [
+ "cc",
+]
+
+[[package]]
 name = "murmur3"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2755,6 +2575,16 @@ name = "num-bigint"
 version = "0.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c89e69e7e0f03bea5ef08013795c25018e101932225a656383bd384495ecc367"
+dependencies = [
+ "num-integer",
+ "num-traits",
+]
+
+[[package]]
+name = "num-bigint"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "93e7820bc0a80a0238e650327316f929ba18d5be054b647490a3a6a339f3e7c0"
 dependencies = [
  "num-integer",
  "num-traits",
@@ -3008,10 +2838,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "phf"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "913273894cec178f401a31ec4b656318d95473527be05c0752cc41cdc32be8b7"
+dependencies = [
+ "phf_shared 0.12.1",
+]
+
+[[package]]
 name = "phf_shared"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
+dependencies = [
+ "siphasher",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06005508882fb681fd97892ecff4b7fd0fee13ef1aa569f8695dae7ab9099981"
 dependencies = [
  "siphasher",
 ]
@@ -3098,6 +2946,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "postcard"
+version = "1.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6764c3b5dd454e283a30e6dfe78e9b31096d9e32036b5d1eaac7a6119ccb9a24"
+dependencies = [
+ "cobs",
+ "embedded-io 0.4.0",
+ "embedded-io 0.6.1",
+ "serde",
+]
+
+[[package]]
 name = "potential_utf"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3119,6 +2979,222 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "85eae3c4ed2f50dcfe72643da4befc30deadb458a9b590d720cde2f2b1e97da9"
 dependencies = [
  "zerocopy",
+]
+
+[[package]]
+name = "praxis-policy"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f2aee539307927ff2bf99720d3c998c0e9a4ebf27abbe1ac862d6817ec92af2"
+dependencies = [
+ "praxis-policy-apl-cmf",
+ "praxis-policy-apl-core",
+ "praxis-policy-apl-runtime",
+ "praxis-policy-core",
+ "praxis-policy-pdp-cedar-direct",
+ "praxis-policy-pdp-cel",
+ "praxis-policy-pdp-opa",
+ "praxis-policy-plugin-delegator-oauth",
+ "praxis-policy-plugin-elicitation-ciba",
+ "praxis-policy-plugin-identity-jwt",
+ "praxis-policy-session-valkey",
+]
+
+[[package]]
+name = "praxis-policy-apl-cmf"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "278ebd1a349e2201705f46c0f63d5558b578508600c84fa958889979b184dda9"
+dependencies = [
+ "praxis-policy-apl-core",
+ "praxis-policy-core",
+ "serde_json",
+]
+
+[[package]]
+name = "praxis-policy-apl-core"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "56cbea9f50f318f58790f373d5ce2323f3e6d823390117f399924a5503e13181"
+dependencies = [
+ "async-trait",
+ "futures",
+ "praxis-policy-orchestration",
+ "regex",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "praxis-policy-apl-runtime"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e881265d0e1655ab764664d126d90ef9887da4c03c65037b4be1549a618dab75"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "praxis-policy-apl-cmf",
+ "praxis-policy-apl-core",
+ "praxis-policy-core",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "praxis-policy-core"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "53b9b82c7558797be9bcf048c7d359dded98ee7e9adb87391b8b98c19d7daff8"
+dependencies = [
+ "arc-swap",
+ "async-trait",
+ "chrono",
+ "hashbrown 0.17.1",
+ "praxis-policy-orchestration",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "uuid",
+ "wildmatch",
+ "zeroize",
+]
+
+[[package]]
+name = "praxis-policy-orchestration"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fb58ca9610a3244f2c9eaaea11c29e83ee60d5cd545e6e5e7c087b987185b86f"
+dependencies = [
+ "futures",
+ "tokio",
+]
+
+[[package]]
+name = "praxis-policy-pdp-cedar-direct"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d199493cefa1ecbf5712682416d89dc3c1602ea11e17421eec6d55dc76b41474"
+dependencies = [
+ "async-trait",
+ "cedar-policy",
+ "praxis-policy-apl-core",
+ "serde_json",
+ "serde_yaml",
+ "stacker",
+ "thiserror 2.0.20",
+]
+
+[[package]]
+name = "praxis-policy-pdp-cel"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a2139bfe25a50486b89d0e8e7de27ce868b7991c6c9d0f1576998f99d01ae201"
+dependencies = [
+ "async-trait",
+ "cel",
+ "praxis-policy-apl-core",
+ "serde_yaml",
+ "thiserror 2.0.20",
+ "tracing",
+]
+
+[[package]]
+name = "praxis-policy-pdp-opa"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3637f3957e9ca313ad81a35b093be2fd02c53dba96f294e4d793cf3eed36da6f"
+dependencies = [
+ "async-trait",
+ "praxis-policy-apl-core",
+ "regorus",
+ "serde_json",
+ "serde_yaml",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "praxis-policy-plugin-delegator-oauth"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1ecf96fbc6946f672f4bb8fbd1c6fd29a44a238e6af31d93c76ec07bf9cc6b7c"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "praxis-policy-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "zeroize",
+]
+
+[[package]]
+name = "praxis-policy-plugin-elicitation-ciba"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3e1dd821594ad409500ad633e9ea7ad4bc8c37374f6705d28580ec11e0d83374"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "praxis-policy-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "zeroize",
+]
+
+[[package]]
+name = "praxis-policy-plugin-identity-jwt"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2a319ad5e8934a00b657c87556c014e39ce4d28bfbf5e515d4c765f02e80d27f"
+dependencies = [
+ "async-trait",
+ "base64",
+ "chrono",
+ "futures",
+ "jsonwebtoken",
+ "praxis-policy-core",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "praxis-policy-session-valkey"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b4882ddf222b74ab023f0ce3b6fddf81fdee26a5c1c2920ec8f52df18fb40f62"
+dependencies = [
+ "async-trait",
+ "deadpool-redis",
+ "praxis-policy-apl-runtime",
+ "redis",
+ "serde",
+ "serde_yaml",
+ "sha2",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "url",
 ]
 
 [[package]]
@@ -3178,13 +3254,13 @@ dependencies = [
  "base64",
  "bytes",
  "chrono",
- "cpex",
  "dashmap 6.2.1",
  "http",
  "jsonwebtoken",
  "metrics",
  "metrics-exporter-prometheus",
  "percent-encoding",
+ "praxis-policy",
  "praxis-proxy-core",
  "praxis-proxy-tls",
  "quixotic-plecostomus-core",
@@ -3529,7 +3605,7 @@ dependencies = [
  "httpdate",
  "indexmap 1.9.3",
  "log",
- "lru",
+ "lru 0.16.4",
  "once_cell",
  "parking_lot",
  "quixotic-plecostomus-core",
@@ -3656,7 +3732,7 @@ dependencies = [
  "dashmap 5.5.3",
  "futures",
  "log",
- "lru",
+ "lru 0.16.4",
  "parking_lot",
  "quixotic-plecostomus-timeout",
  "tokio",
@@ -3982,6 +4058,37 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "regorus"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3cc4dc91481b1d4001ba7f2e81f7faf674142e0ac36d37d79e5f02764d06571e"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "chrono-tz",
+ "data-encoding",
+ "globset",
+ "indexmap 2.14.0",
+ "lazy_static",
+ "lru 0.18.2",
+ "msvc_spectre_libs",
+ "num-bigint 0.5.1",
+ "num-traits",
+ "parking_lot",
+ "postcard",
+ "rand 0.10.2",
+ "regex",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "spin",
+ "thiserror 2.0.20",
+ "url",
+ "uuid",
+]
 
 [[package]]
 name = "reqwest"
@@ -4489,7 +4596,7 @@ version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
 dependencies = [
- "num-bigint",
+ "num-bigint 0.4.8",
  "num-traits",
  "thiserror 2.0.20",
  "time",
@@ -4540,6 +4647,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "spin"
+version = "0.12.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8abadc99fd9c7bbb7d0ca2b31d72a067d0c0dcd7aad25ab8cac71ba91417694b"
+
+[[package]]
 name = "stable_deref_trait"
 version = "1.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4572,7 +4685,7 @@ checksum = "bf776ba3fa74f83bf4b63c3dcbbf82173db2632ed8452cb2d891d33f459de70f"
 dependencies = [
  "new_debug_unreachable",
  "parking_lot",
- "phf_shared",
+ "phf_shared 0.11.3",
  "precomputed-hash",
 ]
 
@@ -5243,6 +5356,7 @@ checksum = "bf3923a6f5c4c6382e0b653c4117f48d631ea17f38ed86e2a828e6f7412f5239"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "rand 0.10.2",
  "serde_core",
  "wasm-bindgen",
 ]
