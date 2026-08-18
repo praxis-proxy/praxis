@@ -17,7 +17,7 @@ use tracing::{debug, error, warn};
 
 use super::{
     super::{context::PingoraRequestCtx, convert::response_header_from_pingora},
-    hop_by_hop::RemoveHeader as _,
+    hop_by_hop::{self, RemoveHeader as _},
 };
 
 // -----------------------------------------------------------------------------
@@ -274,11 +274,7 @@ fn request_has_upgrade(ctx: &PingoraRequestCtx) -> bool {
 /// without proper `WebSocket` headers (e.g. from a buggy upstream)
 /// should not be treated as a successful upgrade.
 fn is_websocket_101(headers: &http::HeaderMap) -> bool {
-    headers
-        .get(http::header::UPGRADE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.trim().eq_ignore_ascii_case("websocket"))
-        && headers.get("sec-websocket-accept").is_some()
+    hop_by_hop::has_websocket_upgrade(headers) && headers.get("sec-websocket-accept").is_some()
 }
 
 // -----------------------------------------------------------------------------

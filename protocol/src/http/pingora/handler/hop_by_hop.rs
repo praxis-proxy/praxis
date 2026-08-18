@@ -74,6 +74,17 @@ pub(crate) fn is_websocket_upgrade(value: &str) -> bool {
     value.trim().eq_ignore_ascii_case("websocket")
 }
 
+/// Whether a header map's `Upgrade` header indicates a `WebSocket` upgrade.
+///
+/// Extracts the `Upgrade` header value and delegates to
+/// [`is_websocket_upgrade`].
+pub(crate) fn has_websocket_upgrade(headers: &HeaderMap) -> bool {
+    headers
+        .get(http::header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(is_websocket_upgrade)
+}
+
 /// Snapshot `Connection` header values before they are removed.
 ///
 /// Call this before stripping hop-by-hop headers, then pass the
@@ -188,6 +199,8 @@ impl RemoveHeader for pingora_http::ResponseHeader {
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
 
@@ -252,6 +265,35 @@ mod tests {
         assert!(
             !is_websocket_upgrade("SMTP"),
             "arbitrary protocol should not be recognized"
+        );
+    }
+
+    #[test]
+    fn has_websocket_upgrade_case_insensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert("upgrade", "WebSocket".parse().unwrap());
+        assert!(
+            has_websocket_upgrade(&headers),
+            "should detect mixed-case WebSocket in header map"
+        );
+    }
+
+    #[test]
+    fn has_websocket_upgrade_missing_header() {
+        let headers = HeaderMap::new();
+        assert!(
+            !has_websocket_upgrade(&headers),
+            "should return false when upgrade header is missing"
+        );
+    }
+
+    #[test]
+    fn has_websocket_upgrade_non_websocket() {
+        let mut headers = HeaderMap::new();
+        headers.insert("upgrade", "h2c".parse().unwrap());
+        assert!(
+            !has_websocket_upgrade(&headers),
+            "should return false for non-websocket upgrade"
         );
     }
 }
