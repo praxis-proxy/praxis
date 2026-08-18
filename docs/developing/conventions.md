@@ -24,6 +24,10 @@
 - **cargo-semver-checks**: Lint for SemVer violations
 - **rustdoc**: Generate the API documentation
 - **cargo xtask**: Developer task runner for benchmarks, flamegraphs, and debug utilities
+- **`cargo xtask lint-extended`**: Diff-scoped heuristic checks (leftover
+  TODO/commented-out code, narrating comments, repeated literals, weak names, new
+  suppressions) for patterns clippy can't catch structurally — see the module's own
+  doc comment for details
 - **benchmarks**: Criterion microbenchmarks and scenario-based load tests ([Fortio], [Vegeta])
 
 [Fortio]: https://github.com/fortio/fortio

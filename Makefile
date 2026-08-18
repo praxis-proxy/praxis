@@ -296,6 +296,7 @@ lint:
 	cargo xtask lint-example-tests
 	cargo xtask sync-example-readme
 	cargo xtask lint-filter-docs
+	cargo xtask lint-extended
 
 generate-filter-docs:
 	cargo xtask generate-filter-docs
@@ -393,7 +394,7 @@ help:
 	@echo "  bench                Criterion micro-benchmarks"
 	@echo ""
 	@echo "Quality:"
-	@echo "  lint                 clippy (default + optional features) + rustfmt check + filter docs"
+	@echo "  lint                 clippy (default + optional features) + rustfmt check + filter docs + extended lint"
 	@echo "  generate-filter-docs generate per-filter docs under docs/filters/"
 	@echo "  fmt                  format with nightly rustfmt"
 	@echo "  audit                cargo audit + cargo deny"

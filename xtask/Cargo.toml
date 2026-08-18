@@ -22,6 +22,7 @@ plotters = { workspace = true }
 praxis = { workspace = true }
 praxis-core = { workspace = true }
 quote = { workspace = true }
+regex = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 syn = { workspace = true }

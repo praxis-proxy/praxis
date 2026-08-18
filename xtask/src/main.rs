@@ -20,6 +20,7 @@ mod echo;
 mod filter_docs;
 mod lint_deps;
 mod lint_example_tests;
+mod lint_extended;
 mod port;
 mod sync_example_readme;
 
@@ -60,6 +61,10 @@ enum Command {
     /// integration test.
     LintExampleTests(lint_example_tests::Args),
 
+    /// Diff-scoped heuristic checks for low-quality-code patterns
+    /// clippy can't catch structurally.
+    LintExtended(lint_extended::Args),
+
     /// Verify or regenerate the `examples/README.md` table
     /// from YAML config header comments.
     SyncExampleReadme(sync_example_readme::Args),
@@ -84,6 +89,7 @@ fn main() {
         Command::Benchmark(args) => benchmark::run(*args),
         Command::LintDeps(args) => lint_deps::run(args),
         Command::LintExampleTests(args) => lint_example_tests::run(args),
+        Command::LintExtended(args) => lint_extended::run(&args),
         Command::SyncExampleReadme(args) => sync_example_readme::run(&args),
         Command::GenerateFilterDocs(args) => filter_docs::generate(args),
         Command::LintFilterDocs(args) => filter_docs::lint(args),

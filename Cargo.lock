@@ -5811,6 +5811,7 @@ dependencies = [
  "praxis-proxy",
  "praxis-proxy-core",
  "quote",
+ "regex",
  "serde_json",
  "syn 3.0.3",
  "tempfile",

@@ -36,6 +36,9 @@ jobs:
       - name: Install cargo-machete
         run: cargo install cargo-machete --locked
 
+      - name: Fetch base branch (for extended-lint diff)
+        run: git fetch --no-tags --depth=1 origin main
+
       - name: Lint
         run: make lint
 
