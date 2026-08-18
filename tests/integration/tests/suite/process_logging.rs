@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Praxis Contributors
+// Copyright (c) 2026 Praxis Contributors
 
 //! Integration tests for `runtime.logging` file output and rotation.
 
@@ -12,6 +12,10 @@ use std::{
 };
 
 use praxis_test_utils::{free_port, praxis_bin};
+
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
 
 fn terminate_gracefully(mut child: std::process::Child) {
     #[cfg(unix)]
@@ -41,6 +45,10 @@ fn ping_proxy(port: u16) {
     let mut buf = Vec::new();
     let _read = io::Read::read_to_end(&mut stream, &mut buf);
 }
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[test]
 fn process_log_size_rotation_respects_max_files() {

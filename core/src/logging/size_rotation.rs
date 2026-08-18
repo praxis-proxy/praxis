@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Praxis Contributors
+// Copyright (c) 2026 Praxis Contributors
 
 //! Size-based log file rotation.
 
@@ -11,6 +11,10 @@ use std::{
 };
 
 use crate::errors::ProxyError;
+
+// -----------------------------------------------------------------------------
+// Types
+// -----------------------------------------------------------------------------
 
 /// Size-based file rotator used for `rotation: size:*`.
 pub(crate) struct SizeRotatingWriter {
@@ -31,6 +35,10 @@ struct ActiveFile {
     /// Bytes written to the active file since the last roll.
     size: u64,
 }
+
+// -----------------------------------------------------------------------------
+// SizeRotatingWriter
+// -----------------------------------------------------------------------------
 
 impl SizeRotatingWriter {
     /// Open or create the log file and initialize rotation state.
@@ -114,6 +122,10 @@ impl SizeRotatingWriter {
     }
 }
 
+// -----------------------------------------------------------------------------
+// Write
+// -----------------------------------------------------------------------------
+
 impl Write for SizeRotatingWriter {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         let mut state = self
@@ -145,6 +157,10 @@ impl Write for SizeRotatingWriter {
         Ok(())
     }
 }
+
+// -----------------------------------------------------------------------------
+// Path helpers
+// -----------------------------------------------------------------------------
 
 /// Create parent directories for `path` when needed.
 pub(crate) fn ensure_parent_dir(path: &Path) -> Result<(), ProxyError> {
@@ -214,6 +230,10 @@ pub(crate) fn list_rotated_indices(path: &Path) -> Vec<u32> {
     }
     indices
 }
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]

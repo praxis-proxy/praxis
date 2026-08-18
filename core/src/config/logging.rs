@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Praxis Contributors
+// Copyright (c) 2026 Praxis Contributors
 
 //! `runtime.logging` configuration.
 
@@ -8,12 +8,20 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use tracing_appender::non_blocking::DEFAULT_BUFFERED_LINES_LIMIT;
 
+// -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
 /// Default total log files to retain (active plus archives), matching
 /// `tracing-appender`'s `max_log_files` convention.
 pub const DEFAULT_MAX_LOG_FILES: u32 = 7;
 
 /// Default non-blocking queue capacity in lines when `buffer_size` is omitted.
 pub const DEFAULT_BUFFER_SIZE_LINES: usize = DEFAULT_BUFFERED_LINES_LIMIT;
+
+// -----------------------------------------------------------------------------
+// LoggingConfig
+// -----------------------------------------------------------------------------
 
 /// Process log destination, rotation, retention, and buffering.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -115,6 +123,10 @@ impl LoggingConfig {
     }
 }
 
+// -----------------------------------------------------------------------------
+// LogOutput
+// -----------------------------------------------------------------------------
+
 /// Process log destination.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -127,6 +139,10 @@ pub enum LogOutput {
     /// File at `file_path`.
     File,
 }
+
+// -----------------------------------------------------------------------------
+// LogRotation
+// -----------------------------------------------------------------------------
 
 /// File rotation policy for process logs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -169,6 +185,10 @@ impl LogRotation {
         }
     }
 }
+
+// -----------------------------------------------------------------------------
+// Parsing
+// -----------------------------------------------------------------------------
 
 /// Parse a rotation token from config (`daily` or `size:100mb`).
 pub(crate) fn parse_log_rotation(value: &str) -> Result<LogRotation, String> {
@@ -238,6 +258,10 @@ fn format_size_token(bytes: u64) -> String {
     }
     format!("size:{bytes}b")
 }
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]

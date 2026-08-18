@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2024 Praxis Contributors
+// Copyright (c) 2026 Praxis Contributors
 
 //! Process logging example tests.
 
@@ -12,6 +12,10 @@ use std::{
 };
 
 use praxis_test_utils::{example_config_path, free_port, patch_yaml, praxis_bin};
+
+// -----------------------------------------------------------------------------
+// Helpers
+// -----------------------------------------------------------------------------
 
 fn stop_child(mut child: std::process::Child) {
     #[cfg(unix)]
@@ -30,6 +34,10 @@ fn stop_child(mut child: std::process::Child) {
         let _ = child.wait().expect("wait");
     }
 }
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
 
 #[test]
 fn process_logging_writes_rotated_file() {
