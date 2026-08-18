@@ -183,6 +183,62 @@ pub(crate) fn warn_insecure_key_permissions(config: &Config) {
 #[cfg(not(unix))]
 pub(crate) fn warn_insecure_key_permissions(_config: &Config) {}
 
+// -----------------------------------------------------------------------------
+// Log File Permission Checks
+// -----------------------------------------------------------------------------
+
+/// Warn when `path` (or its parent) is group/world accessible.
+#[cfg(unix)]
+fn warn_log_path_permissions(log_path: &str, check_path: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    if let Ok(meta) = std::fs::metadata(check_path) {
+        let mode = meta.permissions().mode();
+        if mode & 0o077 != 0 {
+            tracing::warn!(
+                path = log_path,
+                checked = %check_path.display(),
+                mode = format!("{:04o}", mode & 0o7777),
+                "log file path has overly permissive permissions; recommend owner-only access"
+            );
+        }
+    } else {
+        tracing::trace!(
+            path = log_path,
+            "skipped log file permission check: could not read path metadata"
+        );
+    }
+}
+
+/// Warn when `runtime.logging.file_path` (or its parent directory) is
+/// group/world accessible.
+///
+/// Advisory only — same rationale as [`warn_insecure_key_permissions`].
+#[cfg(unix)]
+pub(crate) fn warn_insecure_log_file_permissions(config: &Config) {
+    use praxis_core::config::LogOutput;
+
+    let logging = &config.runtime.logging;
+    if logging.output != LogOutput::File {
+        return;
+    }
+    let Some(path) = logging.file_path.as_deref() else {
+        return;
+    };
+
+    let file_path = std::path::Path::new(path);
+    let check_path = if file_path.exists() {
+        file_path
+    } else {
+        file_path.parent().unwrap_or(file_path)
+    };
+    warn_log_path_permissions(path, check_path);
+}
+
+/// No-op on non-Unix platforms.
+#[cfg(not(unix))]
+pub(crate) fn warn_insecure_log_file_permissions(_config: &Config) {}
+
 /// Logs a warning when the server includes any experimental features.
 #[cfg(feature = "experimental")]
 pub(crate) fn warn_experimental_features() {
@@ -368,6 +424,83 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn warn_log_file_permissions_permissive_emits_warning() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let log_path = dir.path().join("proxy.log");
+        std::fs::write(&log_path, "log").expect("write log");
+        std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+
+        let config = config_with_log_file(log_path.to_str().expect("log"));
+        let warnings = capture_warnings(|| super::warn_insecure_log_file_permissions(&config));
+        assert_eq!(warnings.len(), 1, "permissive log file should produce one warning");
+        assert!(
+            warnings[0].contains("overly permissive"),
+            "warning should mention permissive permissions: {:?}",
+            warnings[0]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn warn_log_file_permissions_restrictive_emits_no_warning() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let log_path = dir.path().join("proxy.log");
+        std::fs::write(&log_path, "log").expect("write log");
+        std::fs::set_permissions(&log_path, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+
+        let config = config_with_log_file(log_path.to_str().expect("log"));
+        let warnings = capture_warnings(|| super::warn_insecure_log_file_permissions(&config));
+        assert!(
+            warnings.is_empty(),
+            "restrictive log file should produce no warnings: {warnings:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn warn_log_file_permissions_checks_parent_when_file_missing() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).expect("chmod");
+        let log_path = dir.path().join("nested").join("proxy.log");
+        std::fs::create_dir_all(log_path.parent().expect("parent")).expect("mkdir");
+
+        let config = config_with_log_file(log_path.to_str().expect("log"));
+        let warnings = capture_warnings(|| super::warn_insecure_log_file_permissions(&config));
+        assert_eq!(
+            warnings.len(),
+            1,
+            "permissive parent directory should produce one warning: {warnings:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_file_symlink_warns_at_config_validate() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let target = dir.path().join("real.log");
+        std::fs::write(&target, "log").expect("write log");
+        let link = dir.path().join("proxy.log");
+        symlink(&target, &link).expect("symlink");
+
+        let warnings = capture_warnings(|| {
+            let _config = config_with_log_file(link.to_str().expect("log"));
+        });
+        assert!(
+            warnings.iter().any(|w| w.contains("symlink")),
+            "symlink log path should warn at validate: {warnings:?}"
+        );
+    }
+
     // -----------------------------------------------------------------------
     // Test Utilities
     // -----------------------------------------------------------------------
@@ -435,6 +568,28 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:3000"
+"#,
+        ))
+        .expect("test config should parse")
+    }
+
+    #[cfg(unix)]
+    fn config_with_log_file(log_path: &str) -> Config {
+        Config::from_yaml(&format!(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+runtime:
+  logging:
+    output: file
+    file_path: "{log_path}"
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
 "#,
         ))
         .expect("test config should parse")

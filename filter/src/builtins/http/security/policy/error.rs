@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Maps CPEX `PluginViolation`s to praxis `Rejection`s.
+//! Maps the engine's `PluginViolation`s to praxis `Rejection`s.
 
 use bytes::Bytes;
-use cpex::cpex_core::error::PluginViolation;
+use ppe::praxis_policy_core::error::PluginViolation;
 
 use crate::Rejection;
 
@@ -22,7 +22,7 @@ const GATEWAY_DENIED_CODE: i64 = -32001;
 
 /// **Public response-header contract.** Echoes the originating
 /// `PluginViolation.code` (e.g. `auth.invalid_token`, `apl.policy`,
-/// `pii.detected`) on every CPEX-emitted rejection so audit pipelines,
+/// `pii.detected`) on every policy-engine rejection so audit pipelines,
 /// access logs, and downstream proxies can classify denials without
 /// parsing the body. Sent on:
 ///
@@ -182,7 +182,7 @@ pub(super) fn json_rpc_error_envelope_bytes(
 /// HTTP status.
 ///
 /// Consumes the transpiled `denyWith` carried on the violation's `details`
-/// map (CPEX U2): `http.status` (default 403), `http.body` (default
+/// map: `http.status` (default 403), `http.body` (default
 /// `"<code>: <reason>"`), and `http.headers`. Header names/values
 /// containing control characters are dropped as defense-in-depth against
 /// response splitting (plan R21). Always stamps [`VIOLATION_HEADER`].

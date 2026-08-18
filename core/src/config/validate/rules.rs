@@ -17,7 +17,9 @@ use super::{
     listener::{validate_listener_names, validate_listeners},
 };
 use crate::{
-    config::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, Config, InsecureOptions, ProtocolKind, SkipPipelineChecks},
+    config::{
+        ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, Config, InsecureOptions, LogOutput, ProtocolKind, SkipPipelineChecks,
+    },
     connectivity::normalize_mapped_ipv4,
     errors::ProxyError,
 };
@@ -393,7 +395,13 @@ fn validate_global_queue_interval(interval: Option<u32>) -> Result<(), ProxyErro
 
 /// Reject invalid `runtime.logging` settings.
 fn validate_logging(logging: &crate::config::LoggingConfig) -> Result<(), ProxyError> {
-    logging.validate().map_err(ProxyError::Config)
+    logging.validate().map_err(ProxyError::Config)?;
+    if logging.output == LogOutput::File
+        && let Some(path) = logging.file_path.as_deref()
+    {
+        warn_if_symlink(path);
+    }
+    Ok(())
 }
 
 /// Reject `shutdown_timeout_secs` of zero or above the ceiling.

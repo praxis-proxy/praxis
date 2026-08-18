@@ -60,7 +60,14 @@ pub fn example_config_path(filename: &str) -> String {
 /// in a YAML string.
 ///
 /// Rewrites both `0.0.0.0:8080` and `127.0.0.1:8080` to the given
-/// `listener_port`, then applies every entry in `port_map`.
+/// `listener_port`, and applies every entry in `port_map`.
+///
+/// Substitution is a single left-to-right pass, and a match is rejected when a
+/// digit follows it. Sequential `str::replace` calls were not safe here: ports
+/// come from `free_port()`, so a listener patched to `127.0.0.1:30019` was then
+/// matched by the `127.0.0.1:3001` mapping and left the stranded trailing digit
+/// behind as `127.0.0.1:353059`. One pass also keeps a value this function just
+/// wrote from being rewritten by a later mapping.
 ///
 /// # Examples
 ///
@@ -72,13 +79,42 @@ pub fn example_config_path(filename: &str) -> String {
 /// assert_eq!(result, "address: \"127.0.0.1:9999\"");
 /// ```
 pub fn patch_yaml(yaml: &str, listener_port: u16, port_map: &HashMap<&str, u16>) -> String {
-    let mut result = yaml
-        .replace("0.0.0.0:8080", &format!("127.0.0.1:{listener_port}"))
-        .replace("127.0.0.1:8080", &format!("127.0.0.1:{listener_port}"));
-    for (original, port) in port_map {
-        result = result.replace(original, &format!("127.0.0.1:{port}"));
+    let listener = format!("127.0.0.1:{listener_port}");
+    let mut rules: Vec<(&str, String)> = vec![("0.0.0.0:8080", listener.clone()), ("127.0.0.1:8080", listener)];
+    rules.extend(
+        port_map
+            .iter()
+            .map(|(original, port)| (*original, format!("127.0.0.1:{port}"))),
+    );
+    // Longest first, so a key that prefixes another key cannot win the match.
+    rules.sort_by_key(|(original, _)| std::cmp::Reverse(original.len()));
+    substitute(yaml, &rules)
+}
+
+/// Apply `rules` in one left-to-right pass, so a replacement is never rescanned.
+fn substitute(yaml: &str, rules: &[(&str, String)]) -> String {
+    let mut out = String::with_capacity(yaml.len());
+    let mut rest = yaml;
+    while !rest.is_empty() {
+        let matched = rules.iter().find_map(|(original, replacement)| {
+            rest.strip_prefix(original)
+                // A digit here means the key only prefixed a longer port.
+                .filter(|tail| !tail.starts_with(|c: char| c.is_ascii_digit()))
+                .map(|tail| (replacement, tail))
+        });
+
+        if let Some((replacement, tail)) = matched {
+            out.push_str(replacement);
+            rest = tail;
+        } else {
+            let mut chars = rest.chars();
+            if let Some(c) = chars.next() {
+                out.push(c);
+            }
+            rest = chars.as_str();
+        }
     }
-    result
+    out
 }
 
 // -----------------------------------------------------------------------------
@@ -115,6 +151,56 @@ mod tests {
         assert!(
             result.contains("127.0.0.1:6666"),
             "second endpoint should be patched to port 6666"
+        );
+    }
+
+    /// The listener port comes from `free_port()`, so its digits can begin with
+    /// a mapped port's digits. That must not turn the listener into a 6-digit
+    /// port: `127.0.0.1:3001` prefixes `127.0.0.1:30019`, and a plain replace
+    /// left the trailing `9` behind as `127.0.0.1:353059`.
+    #[test]
+    fn patch_yaml_does_not_match_a_mapped_port_inside_a_longer_one() {
+        let map = HashMap::from([("127.0.0.1:3001", 35305_u16)]);
+        let yaml = "listener: \"127.0.0.1:8080\"\nendpoint: \"127.0.0.1:3001\"";
+        let result = patch_yaml(yaml, 30019, &map);
+        assert!(
+            result.contains("listener: \"127.0.0.1:30019\""),
+            "the listener port must survive intact, got: {result}"
+        );
+        assert!(
+            !result.contains("353059"),
+            "a mapped port must not match inside a longer port, got: {result}"
+        );
+        assert!(
+            result.contains("endpoint: \"127.0.0.1:35305\""),
+            "the endpoint must still be patched, got: {result}"
+        );
+    }
+
+    /// A port this function just wrote must not be rewritten by another mapping.
+    #[test]
+    fn patch_yaml_does_not_rewrite_its_own_substitutions() {
+        let map = HashMap::from([("127.0.0.1:3000", 4000_u16), ("127.0.0.1:4000", 5000_u16)]);
+        let yaml = "a: \"127.0.0.1:3000\"\nb: \"127.0.0.1:4000\"";
+        let result = patch_yaml(yaml, 8080, &map);
+        assert!(
+            result.contains("a: \"127.0.0.1:4000\""),
+            "the first mapping applies once, not twice, got: {result}"
+        );
+        assert!(
+            result.contains("b: \"127.0.0.1:5000\""),
+            "the second mapping still applies, got: {result}"
+        );
+    }
+
+    /// When one key prefixes another, the longer key wins.
+    #[test]
+    fn patch_yaml_prefers_the_longest_matching_key() {
+        let map = HashMap::from([("127.0.0.1:300", 1111_u16), ("127.0.0.1:3001", 2222_u16)]);
+        let result = patch_yaml("e: \"127.0.0.1:3001\"", 8080, &map);
+        assert!(
+            result.contains("127.0.0.1:2222"),
+            "the longer key must win, got: {result}"
         );
     }
 

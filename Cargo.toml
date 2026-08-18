@@ -38,7 +38,15 @@ base64 = "0.22.1"
 benchmarks = { path = "benchmarks" }
 bytes = "1.12.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-cpex = { version = "0.2.2", features = ["jwt", "oauth", "pii", "audit", "elicitation-ciba", "cedar", "cel", "valkey"] }
+# `builtins` is the engine's one umbrella for every bundled extension, session
+# store included. Naming it rather than enumerating the granular features keeps
+# this line from drifting each time the set changes, which is how the OPA
+# decision point had to be added by hand.
+#
+# The umbrella is bundled extensions only. Anything else a policy document names
+# comes from the host via `register_policy_plugin_factory`; see the policy
+# filter's `host_plugins` module.
+ppe = { version = "0.1.0", package = "praxis-policy", features = ["builtins"] }
 clap = { version = "4.6.6", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.2.1"

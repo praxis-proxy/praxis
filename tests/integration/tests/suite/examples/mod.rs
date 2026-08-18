@@ -43,9 +43,9 @@ mod payload_examples;
 mod payload_processing;
 mod peer_identity_trust;
 mod pipeline;
-#[cfg(feature = "cpex-policy-engine")]
+#[cfg(feature = "policy-engine")]
 mod policy;
-#[cfg(feature = "cpex-policy-engine")]
+#[cfg(feature = "policy-engine")]
 mod policy_http;
 mod process_logging;
 mod protocol_examples;

@@ -26,8 +26,21 @@ use crate::startup_checks::insecure_warn;
 use crate::startup_checks::warn_experimental_features;
 use crate::{
     pipelines::resolve_pipelines,
-    startup_checks::{enforce_root_check, warn_insecure_key_permissions, warn_insecure_options},
+    startup_checks::{
+        enforce_root_check, warn_insecure_key_permissions, warn_insecure_log_file_permissions, warn_insecure_options,
+    },
 };
+
+/// Root, insecure-option, and file-permission checks before the server starts.
+fn run_startup_security_checks(config: &Config) {
+    #[cfg(feature = "experimental")]
+    warn_experimental_features();
+    enforce_root_check(config);
+    warn_insecure_options(config);
+    init_runtime_limits(&config.runtime);
+    warn_insecure_key_permissions(config);
+    warn_insecure_log_file_permissions(config);
+}
 
 // -----------------------------------------------------------------------------
 // Config Path Resolution
@@ -83,12 +96,7 @@ pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
 #[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
 pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config_path: Option<PathBuf>) -> ! {
-    #[cfg(feature = "experimental")]
-    warn_experimental_features();
-    enforce_root_check(&config);
-    warn_insecure_options(&config);
-    init_runtime_limits(&config.runtime);
-    warn_insecure_key_permissions(&config);
+    run_startup_security_checks(&config);
 
     // Install before pipelines and health checks emit startup metrics. The same
     // handle is later shared by `/metrics` and the managed upkeep service.
@@ -242,7 +250,15 @@ fn spawn_watcher(
     state: ServerState,
 ) -> Option<std::thread::JoinHandle<()>> {
     let path = config_path?;
-    let initial_content_hash = std::fs::read_to_string(&path).map_or(0, |c| crate::watcher::hash_content(&c));
+    // Documents the configured filters read, asked of the pipelines that were just
+    // built rather than reconstructed here: building a filter to interrogate it
+    // would load its document and open network connections as a side effect.
+    let referenced_files = state.pipelines.referenced_files();
+    // The startup hash must cover the same set the reload gate covers, or the first
+    // event after startup would see a hash mismatch that is an artifact of the two
+    // being computed differently.
+    let initial_content_hash =
+        std::fs::read_to_string(&path).map_or(0, |c| crate::watcher::composite_hash(&c, &referenced_files));
     let handle = crate::watcher::spawn_config_watcher(crate::watcher::WatcherParams {
         config_path: path,
         health_shutdown: state.health_shutdown,
@@ -251,6 +267,7 @@ fn spawn_watcher(
         kv_stores: state.kv_stores,
         listener_meta: state.listener_meta,
         pipelines: state.pipelines,
+        referenced_files,
         registry: Arc::new(registry),
         shutdown: CancellationToken::new(),
         subrequest_client: state.subrequest_client,

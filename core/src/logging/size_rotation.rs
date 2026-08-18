@@ -49,17 +49,68 @@ impl SizeRotatingWriter {
     }
 
     /// Roll the active file when it exceeds `max_bytes`.
+    ///
+    /// On failure after the active handle is dropped, reopens the original path
+    /// so logging continues without rotation instead of leaving `file` unset.
     fn roll_locked(state: &mut ActiveFile, path: &Path, max_files: u32) -> io::Result<()> {
-        if let Some(mut file) = state.file.take() {
-            file.flush()?;
+        let previous_size = state.size;
+        if let Some(mut file) = state.file.take()
+            && let Err(e) = file.flush()
+        {
+            state.file = Some(file);
+            return Err(e);
         }
 
-        prune_and_shift(path, max_files)?;
+        if let Err(roll_err) = Self::perform_roll(path, max_files) {
+            Self::restore_active_after_failed_roll(state, path, previous_size, roll_err)
+        } else {
+            state.file = Some(open_append(path)?);
+            state.size = 0;
+            Ok(())
+        }
+    }
 
+    /// Shift archives and rename the active file to `.1`.
+    fn perform_roll(path: &Path, max_files: u32) -> io::Result<()> {
+        prune_and_shift(path, max_files)?;
         fs::rename(path, rotated_path(path, 1))?;
-        state.file = Some(open_append(path)?);
-        state.size = 0;
         Ok(())
+    }
+
+    /// Reopen the active log after a failed roll; prefer continued logging over rotation.
+    fn restore_active_after_failed_roll(
+        state: &mut ActiveFile,
+        path: &Path,
+        fallback_size: u64,
+        roll_err: io::Error,
+    ) -> io::Result<()> {
+        if path.exists()
+            && let Ok(file) = open_append(path)
+        {
+            state.size = file.metadata().map_or(fallback_size, |m| m.len());
+            state.file = Some(file);
+            return Ok(());
+        }
+
+        let rotated = rotated_path(path, 1);
+        if rotated.exists()
+            && !path.exists()
+            && fs::rename(&rotated, path).is_ok()
+            && let Ok(file) = open_append(path)
+        {
+            state.size = file.metadata().map_or(fallback_size, |m| m.len());
+            state.file = Some(file);
+            return Ok(());
+        }
+
+        if let Ok(file) = open_append(path) {
+            state.size = file.metadata().map_or(0, |m| m.len());
+            state.file = Some(file);
+            Ok(())
+        } else {
+            state.file = None;
+            Err(roll_err)
+        }
     }
 }
 
@@ -202,5 +253,35 @@ mod tests {
         writer.flush().unwrap();
         let contents = fs::read_to_string(&path).unwrap();
         assert!(contents.contains("hello"));
+    }
+
+    #[test]
+    fn continues_logging_when_roll_fails() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proxy.log");
+        let mut writer = SizeRotatingWriter::open(&path, 8, 3).unwrap();
+
+        writer.write_all(b"12345678").unwrap();
+        assert_eq!(list_rotated_indices(&path), vec![1], "first roll should succeed");
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+
+            let mut perms = fs::metadata(dir.path()).expect("dir metadata").permissions();
+            perms.set_mode(0o555);
+            fs::set_permissions(dir.path(), perms).expect("make log dir read-only");
+        }
+
+        writer
+            .write_all(b"abcdefgh")
+            .expect("should keep writing when roll fails");
+        writer.flush().expect("flush after failed roll");
+
+        let contents = fs::read_to_string(&path).expect("active log readable");
+        assert!(
+            contents.contains("abcdefgh"),
+            "failed roll should degrade to append-only, not stop logging"
+        );
     }
 }

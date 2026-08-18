@@ -9,7 +9,7 @@ NIGHTLY_VERSION  := $(shell grep -m1 'rust-toolchain@' .github/actions/install-n
 V                ?=
 
 # Optional features that require separate test and lint passes.
-OPTIONAL_FEATURES := basic-auth-filter cpex-policy-engine otel
+OPTIONAL_FEATURES := basic-auth-filter policy-engine otel
 
 UNAME_S := $(shell uname -s | tr A-Z a-z)
 UNAME_M := $(shell uname -m)
@@ -232,14 +232,14 @@ container-run: | require-container-engine
 test: $(H2SPEC)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo test --workspace $(_NOCAPTURE)
 	cargo test -p praxis-proxy-core --features otel $(_NOCAPTURE)
-	cargo test -p praxis-proxy-filter --features "basic-auth-filter cpex-policy-engine" $(_NOCAPTURE)
+	cargo test -p praxis-proxy-filter --features "basic-auth-filter policy-engine" $(_NOCAPTURE)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo test -p praxis-tests-integration --features "$(OPTIONAL_FEATURES)" $(_NOCAPTURE)
 
 test-unit:
 	cargo test -p praxis-proxy-core $(_NOCAPTURE)
 	cargo test -p praxis-proxy-core --features otel $(_NOCAPTURE)
 	cargo test -p praxis-proxy-filter $(_NOCAPTURE)
-	cargo test -p praxis-proxy-filter --features "basic-auth-filter cpex-policy-engine" $(_NOCAPTURE)
+	cargo test -p praxis-proxy-filter --features "basic-auth-filter policy-engine" $(_NOCAPTURE)
 	cargo test -p praxis-proxy-protocol $(_NOCAPTURE)
 	cargo test -p praxis-proxy $(_NOCAPTURE)
 
