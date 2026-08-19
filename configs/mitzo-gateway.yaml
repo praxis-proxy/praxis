@@ -1,0 +1,215 @@
+# Praxis Credential Gateway — Phase 1
+#
+# Credential-injecting reverse proxy for the local tool stack.
+# Services call localhost:9090/<prefix> with no auth headers.
+# Praxis strips the prefix, injects real credentials, proxies upstream over TLS.
+#
+# Credential sources (consolidated by start.sh):
+#   VERTEX_ACCESS_TOKEN      — GCP OAuth2 token (rotated by start.sh via gcloud)
+#   OPENAI_API_KEY           — OpenAI API
+#   GITHUB_TOKEN             — GitHub API (PAT)
+#   JIRA_API_TOKEN_B64       — Atlassian (base64 of email:token)
+#   ORG_PULSE_API_TOKEN      — Org Pulse team tracker
+#   NTFY_AUTH_TOKEN           — ntfy.sh push notifications
+#
+# Usage:
+#   ./scripts/start.sh                  # launchd entry point
+#   ./target/release/praxis -c configs/mitzo-gateway.yaml   # manual
+#
+# Test:
+#   curl http://127.0.0.1:9090/anthropic/v1/messages \
+#     -H "Content-Type: application/json" \
+#     -H "anthropic-version: 2023-06-01" \
+#     -d '{"model":"claude-sonnet-4-20250514","max_tokens":50,
+#          "messages":[{"role":"user","content":"Say hi"}]}'
+#
+#   curl http://127.0.0.1:9090/github/repos/dimakis/mgmt/pulls
+#   curl http://127.0.0.1:9090/jira/rest/api/3/myself
+
+listeners:
+  - name: credential-gateway
+    address: "127.0.0.1:9090"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      # ── Set Host headers for upstream TLS ──
+      # Must run before router (conditions check original path).
+      - filter: headers
+        request_set:
+          - name: Host
+            value: "us-east5-aiplatform.googleapis.com"
+        conditions:
+          - when:
+              path_prefix: "/anthropic/"
+
+      - filter: headers
+        request_set:
+          - name: Host
+            value: "api.openai.com"
+        conditions:
+          - when:
+              path_prefix: "/openai/"
+
+      - filter: headers
+        request_set:
+          - name: Host
+            value: "api.github.com"
+        conditions:
+          - when:
+              path_prefix: "/github/"
+
+      - filter: headers
+        request_set:
+          - name: Host
+            value: "redhat.atlassian.net"
+        conditions:
+          - when:
+              path_prefix: "/jira/"
+
+      # ── Routing (matches on original path, selects cluster) ──
+      - filter: router
+        routes:
+          - path_prefix: "/anthropic/"
+            cluster: anthropic
+          - path_prefix: "/openai/"
+            cluster: openai
+          - path_prefix: "/github/"
+            cluster: github
+          - path_prefix: "/jira/"
+            cluster: jira
+          - path_prefix: "/org-pulse/"
+            cluster: org-pulse
+          - path_prefix: "/ntfy/"
+            cluster: ntfy
+
+      # ── Strip routing prefix (after router, before upstream) ──
+      # Only one fires per request (conditions are mutually exclusive).
+      # allow_rewrite_override needed because pipeline has multiple path_rewrite instances.
+      - filter: path_rewrite
+        replace:
+          pattern: "^/anthropic/"
+          replacement: "/"
+        conditions:
+          - when:
+              path_prefix: "/anthropic/"
+
+      - filter: path_rewrite
+        allow_rewrite_override: true
+        replace:
+          pattern: "^/openai/"
+          replacement: "/"
+        conditions:
+          - when:
+              path_prefix: "/openai/"
+
+      - filter: path_rewrite
+        allow_rewrite_override: true
+        replace:
+          pattern: "^/github/"
+          replacement: "/"
+        conditions:
+          - when:
+              path_prefix: "/github/"
+
+      - filter: path_rewrite
+        allow_rewrite_override: true
+        replace:
+          pattern: "^/jira/"
+          replacement: "/"
+        conditions:
+          - when:
+              path_prefix: "/jira/"
+
+      - filter: path_rewrite
+        allow_rewrite_override: true
+        replace:
+          pattern: "^/org-pulse/"
+          replacement: "/"
+        conditions:
+          - when:
+              path_prefix: "/org-pulse/"
+
+      - filter: path_rewrite
+        allow_rewrite_override: true
+        replace:
+          pattern: "^/ntfy/"
+          replacement: "/"
+        conditions:
+          - when:
+              path_prefix: "/ntfy/"
+
+      # ── Upstreams ──
+      - filter: load_balancer
+        clusters:
+          - name: anthropic
+            endpoints:
+              - "us-east5-aiplatform.googleapis.com:443"
+            tls:
+              sni: "us-east5-aiplatform.googleapis.com"
+
+          - name: openai
+            endpoints:
+              - "api.openai.com:443"
+            tls:
+              sni: "api.openai.com"
+
+          - name: github
+            endpoints:
+              - "api.github.com:443"
+            tls:
+              sni: "api.github.com"
+
+          - name: jira
+            endpoints:
+              - "redhat.atlassian.net:443"
+            tls:
+              sni: "redhat.atlassian.net"
+
+          - name: org-pulse
+            endpoints:
+              - "api-team-tracker.apps.int.spoke.prod.us-west-2.aws.paas.redhat.com:443"
+            tls:
+              sni: "api-team-tracker.apps.int.spoke.prod.us-west-2.aws.paas.redhat.com"
+
+          - name: ntfy
+            endpoints:
+              - "ntfy.sh:443"
+            tls:
+              sni: "ntfy.sh"
+
+      # ── Credential injection ──
+      # Each cluster gets its credential injected server-side.
+      # Client-provided auth headers are stripped and replaced.
+      - filter: credential_injection
+        clusters:
+          - name: anthropic
+            header: Authorization
+            env_var: VERTEX_ACCESS_TOKEN
+            header_prefix: "Bearer "
+
+          - name: openai
+            header: Authorization
+            env_var: OPENAI_API_KEY
+            header_prefix: "Bearer "
+
+          - name: github
+            header: Authorization
+            env_var: GITHUB_TOKEN
+            header_prefix: "Bearer "
+
+          - name: jira
+            header: Authorization
+            env_var: JIRA_API_TOKEN_B64
+            header_prefix: "Basic "
+
+          - name: org-pulse
+            header: Authorization
+            env_var: ORG_PULSE_API_TOKEN
+            header_prefix: "Bearer "
+
+          - name: ntfy
+            header: Authorization
+            env_var: NTFY_AUTH_TOKEN
+            header_prefix: "Bearer "
