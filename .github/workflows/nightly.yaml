@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust (stable + nightly fmt)
-        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@465a493e9f18776294940c9912935eb7e68fb03b # v0.1.0
 
       - name: Install cargo-machete
         run: cargo install cargo-machete --locked
