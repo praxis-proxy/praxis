@@ -56,6 +56,7 @@ pub(crate) fn reload_pipelines(
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     subrequest_client: &praxis_core::subrequest::SubRequestClient,
+    log_level: Option<&Arc<praxis_core::logging::LogLevelState>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("building new pipelines from reloaded config");
 
@@ -105,6 +106,13 @@ pub(crate) fn reload_pipelines(
     ));
 
     respawn_health_checks(old_config, new_config, &health_registry, health_shutdown);
+
+    if let Some(log_level) = log_level
+        && let Err(error) = log_level.refresh_baseline(new_config)
+    {
+        error!(%error, "config reload failed: log level baseline refresh");
+        return Err(error.into());
+    }
 
     info!(
         swapped = ?swapped,
@@ -225,6 +233,7 @@ filter_chains:
             &shutdown,
             &empty_kv_stores(),
             &empty_subrequest_client(),
+            None,
         );
 
         assert!(result.is_ok(), "valid reload should succeed");
@@ -279,6 +288,7 @@ filter_chains:
             &shutdown,
             &empty_kv_stores(),
             &empty_subrequest_client(),
+            None,
         );
         assert!(result.is_err(), "invalid filter should return Err");
 
@@ -301,6 +311,7 @@ filter_chains:
             &shutdown,
             &empty_kv_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -325,6 +336,7 @@ filter_chains:
             &shutdown,
             &empty_kv_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -364,6 +376,7 @@ filter_chains:
             &shutdown,
             &empty_kv_stores(),
             &empty_subrequest_client(),
+            None,
         );
         assert!(
             !old_token.is_cancelled(),
@@ -402,6 +415,7 @@ filter_chains:
             &shutdown,
             &empty_kv_stores(),
             &empty_subrequest_client(),
+            None,
         );
         assert!(result.is_ok(), "reload with new listener should succeed");
         assert!(

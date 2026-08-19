@@ -3233,6 +3233,7 @@ name = "praxis-proxy-core"
 version = "0.5.2"
 dependencies = [
  "bytes",
+ "chrono",
  "dashmap 6.2.1",
  "h2",
  "http",
@@ -3247,6 +3248,7 @@ dependencies = [
  "rand 0.10.2",
  "regex",
  "serde",
+ "serde_json",
  "thiserror 2.0.20",
  "tokio",
  "tonic",

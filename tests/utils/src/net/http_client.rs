@@ -62,6 +62,36 @@ pub fn http_get_retry(addr: &str, path: &str, host: Option<&str>) -> (u16, Strin
     http_get(addr, path, host)
 }
 
+/// Send an HTTP PUT with a JSON body and return `(status, body)`.
+pub fn http_put_json(addr: &str, path: &str, body: &str) -> (u16, String) {
+    let raw = http_send(
+        addr,
+        &format!(
+            "PUT {path} HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {body}",
+            body.len()
+        ),
+    );
+    (parse_status(&raw), parse_body(&raw))
+}
+
+/// Send an HTTP DELETE and return `(status, body)`.
+pub fn http_delete(addr: &str, path: &str) -> (u16, String) {
+    let raw = http_send(
+        addr,
+        &format!(
+            "DELETE {path} HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Connection: close\r\n\r\n"
+        ),
+    );
+    (parse_status(&raw), parse_body(&raw))
+}
+
 /// Send an HTTP POST and return `(status, body)`.
 pub fn http_post(addr: &str, path: &str, body: &str) -> (u16, String) {
     let raw = http_send(

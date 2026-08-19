@@ -304,6 +304,7 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
                 health_registry: Some(Arc::clone(&health_registry)),
                 kv_registry: Some(kv_stores),
                 pipelines: Some((Arc::clone(&pipelines), listener_meta)),
+                log_level: None,
                 verbose: config.admin.verbose,
             },
         );
@@ -469,7 +470,7 @@ pub fn start_reloadable_proxy(yaml: &str) -> ReloadableProxyGuard {
 
     let path_for_server = config_path.clone();
     std::thread::spawn(move || {
-        praxis::run_server(config, Some(path_for_server));
+        praxis::run_server(config, Some(path_for_server), None);
     });
 
     crate::net::wait::wait_for_http(&addr);

@@ -11,7 +11,15 @@
 //! Set `PRAXIS_LOG_FORMAT=json` for structured JSON output.
 //! Per-module overrides come from `runtime.log_overrides` in the config YAML.
 
-use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
+mod log_level;
+
+use std::sync::Arc;
+
+pub use log_level::{
+    DEFAULT_OVERLAY_DURATION_SECS, GLOBAL_OVERLAY_KEY, LogLevelError, LogLevelOverlayView, LogLevelState,
+    LogLevelStateResponse, MAX_OVERLAY_DURATION_SECS, PutLogLevelRequest,
+};
+use tracing_subscriber::{layer::SubscriberExt as _, reload, util::SubscriberInitExt as _};
 
 use crate::{config::Config, errors::ProxyError};
 
@@ -33,6 +41,16 @@ pub struct TracingGuard {
     /// Tracer provider to shut down when the guard is dropped.
     #[cfg(feature = "otel")]
     provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    /// Runtime log-level overlay state for the admin API.
+    log_level: Arc<LogLevelState>,
+}
+
+impl TracingGuard {
+    /// Shared runtime log-level state for admin `/api/log-level`.
+    #[must_use]
+    pub fn log_level_state(&self) -> Arc<LogLevelState> {
+        Arc::clone(&self.log_level)
+    }
 }
 
 #[cfg(feature = "otel")]
@@ -72,19 +90,23 @@ impl Drop for TracingGuard {
 /// [`EnvFilter`]: tracing_subscriber::EnvFilter
 /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
 pub fn init_tracing(config: &Config) -> Result<TracingGuard, ProxyError> {
-    let env_filter = build_env_filter(config)?;
+    let baseline = build_baseline_directive(config)?;
+    let env_filter = tracing_subscriber::EnvFilter::new(&baseline);
+    let (filter_layer, reload_handle) = reload::Layer::new(env_filter);
+    let log_level = LogLevelState::new(baseline, reload_handle);
+
     let json = std::env::var("PRAXIS_LOG_FORMAT").is_ok_and(|v| v.eq_ignore_ascii_case("json"));
     let telemetry = config.telemetry.resolve();
 
     warn_if_otel_config_without_feature(telemetry.otlp_endpoint.is_some(), telemetry.sampling_rate.is_some());
 
     #[cfg(feature = "otel")]
-    return init_with_otel(env_filter, json, &telemetry);
+    return init_with_otel(filter_layer, json, &telemetry, Arc::clone(&log_level));
 
     #[cfg(not(feature = "otel"))]
     {
-        init_fmt_only(env_filter, json);
-        Ok(TracingGuard {})
+        init_fmt_only(filter_layer, json);
+        Ok(TracingGuard { log_level })
     }
 }
 
@@ -125,13 +147,14 @@ pub fn validate_log_overrides(config: &Config) -> Result<(), ProxyError> {
 /// Initialize the layered subscriber with an optional OTLP layer.
 #[cfg(feature = "otel")]
 #[expect(
-    clippy::large_stack_frames,
-    reason = "tracing-subscriber layer composition creates deeply nested generic types; runs once at startup"
+    clippy::too_many_lines,
+    reason = "JSON and text fmt branches require separate subscriber types"
 )]
 fn init_with_otel(
-    env_filter: tracing_subscriber::EnvFilter,
+    filter_layer: reload::Layer<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>,
     json: bool,
     telemetry: &crate::config::TelemetryConfig,
+    log_level: Arc<LogLevelState>,
 ) -> Result<TracingGuard, ProxyError> {
     use opentelemetry::trace::TracerProvider as _;
 
@@ -144,7 +167,7 @@ fn init_with_otel(
             .as_ref()
             .map(|p| tracing_opentelemetry::layer().with_tracer(p.tracer("praxis")));
         tracing_subscriber::registry()
-            .with(env_filter)
+            .with(filter_layer)
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
@@ -158,21 +181,25 @@ fn init_with_otel(
             .as_ref()
             .map(|p| tracing_opentelemetry::layer().with_tracer(p.tracer("praxis")));
         tracing_subscriber::registry()
-            .with(env_filter)
+            .with(filter_layer)
             .with(tracing_subscriber::fmt::layer())
             .with(otel_layer)
             .init();
     }
 
-    Ok(TracingGuard { provider })
+    Ok(TracingGuard {
+        #[cfg(feature = "otel")]
+        provider,
+        log_level,
+    })
 }
 
 /// Initialize the layered subscriber with fmt only (no `otel` feature).
 #[cfg(not(feature = "otel"))]
-fn init_fmt_only(env_filter: tracing_subscriber::EnvFilter, json: bool) {
+fn init_fmt_only(filter_layer: reload::Layer<tracing_subscriber::EnvFilter, tracing_subscriber::Registry>, json: bool) {
     if json {
         tracing_subscriber::registry()
-            .with(env_filter)
+            .with(filter_layer)
             .with(
                 tracing_subscriber::fmt::layer()
                     .json()
@@ -182,7 +209,7 @@ fn init_fmt_only(env_filter: tracing_subscriber::EnvFilter, json: bool) {
             .init();
     } else {
         tracing_subscriber::registry()
-            .with(env_filter)
+            .with(filter_layer)
             .with(tracing_subscriber::fmt::layer())
             .init();
     }
@@ -458,8 +485,17 @@ fn validate_and_build_directives(
 // Utility Functions
 // -----------------------------------------------------------------------------
 
+/// Build the baseline directive string from `RUST_LOG` and `runtime.log_overrides`.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] when overrides are invalid.
+pub fn build_baseline_directive(config: &Config) -> Result<String, ProxyError> {
+    Ok(build_env_filter(config)?.to_string())
+}
+
 /// Returns `true` if `s` is a valid Rust module path and is non-empty.
-fn is_valid_module_path(s: &str) -> bool {
+pub(super) fn is_valid_module_path(s: &str) -> bool {
     !s.is_empty()
         && s.split("::").all(|segment| {
             !segment.is_empty()
@@ -477,6 +513,11 @@ fn is_valid_log_level(s: &str) -> bool {
         s.to_ascii_lowercase().as_str(),
         "error" | "warn" | "info" | "debug" | "trace"
     )
+}
+
+/// Returns `true` for admin overlay levels, including temporary `off`.
+pub(super) fn is_valid_admin_log_level(s: &str) -> bool {
+    is_valid_log_level(s) || s.eq_ignore_ascii_case("off")
 }
 
 // -----------------------------------------------------------------------------
