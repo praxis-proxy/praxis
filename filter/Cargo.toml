@@ -35,6 +35,7 @@ ppe = { workspace = true, optional = true }
 dashmap = { workspace = true }
 http = { workspace = true }
 metrics = { workspace = true }
+opentelemetry = { workspace = true }
 percent-encoding = { workspace = true }
 pingora-core = { workspace = true }
 praxis-core = { workspace = true }
@@ -53,6 +54,7 @@ thiserror = { workspace = true }
 # construction and JWT identity plugins that fetch JWKS at init time.
 tokio = { workspace = true, features = ["rt", "sync", "time", "net"] }
 tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]

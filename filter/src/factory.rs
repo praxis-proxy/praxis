@@ -70,7 +70,15 @@ fn strip_structural_keys(config: &serde_yaml::Value) -> serde_yaml::Value {
 
     let filtered = mapping
         .iter()
-        .filter(|(k, _)| !k.as_str().is_some_and(|key| STRUCTURAL.contains(&key)))
+        .filter(|(k, v)| {
+            match k.as_str() {
+                // Pipeline conditions are never valid inside filter config; access_log
+                // emit-time conditions are a mapping and must be preserved.
+                Some("conditions") => v.is_mapping(),
+                Some(key) => !STRUCTURAL.contains(&key),
+                None => true,
+            }
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -230,6 +238,26 @@ mod tests {
             result.get("my_config_field").and_then(|v| v.as_str()),
             Some("value"),
             "non-structural key should be preserved"
+        );
+    }
+
+    #[test]
+    fn strip_structural_keys_preserves_access_log_conditions_mapping() {
+        let mut mapping = serde_yaml::Mapping::new();
+        mapping.insert(
+            "conditions".into(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::from_iter([(
+                serde_yaml::Value::from("status_classes"),
+                serde_yaml::Value::Sequence(vec!["5xx".into()]),
+            )])),
+        );
+        mapping.insert("sample_rate".into(), 1.0.into());
+
+        let cleaned = strip_structural_keys(&serde_yaml::Value::Mapping(mapping));
+        let result = cleaned.as_mapping().expect("should be mapping");
+        assert!(
+            result.get("conditions").is_some(),
+            "access_log emit conditions mapping should be preserved"
         );
     }
 

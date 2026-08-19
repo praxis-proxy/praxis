@@ -5,7 +5,7 @@
 //!
 //! Listeners reference chains by name, enabling per-listener pipelines.
 
-use serde::Deserialize;
+use serde::{Deserialize, de::DeserializeOwned};
 use tracing::warn;
 
 use super::{Condition, ResponseCondition};
@@ -78,6 +78,80 @@ pub struct FilterChainConfig {
 // FilterEntry
 // -----------------------------------------------------------------------------
 
+/// Remove an optional typed field from a YAML mapping.
+fn take_optional<T: DeserializeOwned>(map: &mut serde_yaml::Mapping, key: &str) -> Result<Option<T>, String> {
+    let Some(value) = map.remove(serde_yaml::Value::from(key)) else {
+        return Ok(None);
+    };
+    if value.is_null() {
+        return Ok(None);
+    }
+    serde_yaml::from_value(value).map(Some).map_err(|e| e.to_string())
+}
+
+/// Split pipeline `conditions` from `access_log` emit-time `conditions`.
+fn split_filter_conditions(
+    filter_type: &str,
+    conditions_val: Option<serde_yaml::Value>,
+) -> Result<(Vec<Condition>, Option<serde_yaml::Value>), String> {
+    match conditions_val {
+        None => Ok((Vec::new(), None)),
+        Some(v) if v.is_sequence() => Ok((serde_yaml::from_value(v).map_err(|e| e.to_string())?, None)),
+        Some(v) if filter_type == "access_log" && v.is_mapping() => Ok((Vec::new(), Some(v))),
+        Some(_) => Err("conditions must be a sequence of pipeline predicates; \
+             access_log emit conditions use a mapping with min_duration_ms, \
+             status_classes, and/or paths"
+            .to_owned()),
+    }
+}
+
+/// Deserialize a [`FilterEntry`], routing `access_log` emit-time `conditions`
+/// mappings into filter config instead of pipeline request conditions.
+#[expect(clippy::too_many_lines, reason = "serde field extraction is linear")]
+fn deserialize_filter_entry<'de, D>(deserializer: D) -> Result<FilterEntry, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+
+    let mut map = serde_yaml::Value::deserialize(deserializer)?
+        .as_mapping()
+        .ok_or_else(|| D::Error::custom("filter entry must be a mapping"))?
+        .clone();
+
+    let filter_type = map
+        .remove(serde_yaml::Value::from("filter"))
+        .and_then(|v| v.as_str().map(str::to_owned))
+        .ok_or_else(|| D::Error::missing_field("filter"))?;
+
+    let branch_chains = take_optional(&mut map, "branch_chains").map_err(D::Error::custom)?;
+    let name = take_optional(&mut map, "name").map_err(D::Error::custom)?;
+    let failure_mode = take_optional(&mut map, "failure_mode")
+        .map_err(D::Error::custom)?
+        .unwrap_or_default();
+    let response_conditions = take_optional(&mut map, "response_conditions")
+        .map_err(D::Error::custom)?
+        .unwrap_or_default();
+
+    let conditions_val = map.remove(serde_yaml::Value::from("conditions"));
+    let (conditions, access_log_conditions) =
+        split_filter_conditions(&filter_type, conditions_val).map_err(D::Error::custom)?;
+
+    if let Some(c) = access_log_conditions {
+        map.insert(serde_yaml::Value::from("conditions"), c);
+    }
+
+    Ok(FilterEntry {
+        filter_type,
+        branch_chains,
+        conditions,
+        name,
+        response_conditions,
+        failure_mode,
+        config: serde_yaml::Value::Mapping(map),
+    })
+}
+
 /// A single filter in the pipeline.
 ///
 /// ```
@@ -96,7 +170,7 @@ pub struct FilterChainConfig {
 /// assert!(entry.conditions.is_empty());
 /// assert!(entry.name.is_none());
 /// ```
-#[derive(Clone, Debug, Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, serde::Serialize)]
 pub struct FilterEntry {
     /// Filter type name (e.g. `"router"`, `"load_balancer"`, or a custom name).
     #[serde(rename = "filter")]
@@ -104,23 +178,23 @@ pub struct FilterEntry {
 
     /// Optional branch chains evaluated after this filter
     /// based on filter result conditions.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch_chains: Option<Vec<super::BranchChainConfig>>,
 
     /// Ordered conditions that gate whether this filter runs on requests.
     /// Empty means the filter always runs.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
 
     /// Optional user-assigned name for this filter entry.
     /// Used as a rejoin target by branch chains.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
 
     /// Ordered conditions that gate whether this filter runs on responses.
     /// Evaluated against the upstream response (status, headers).
     /// Empty means the filter always runs on responses.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub response_conditions: Vec<ResponseCondition>,
 
     /// Per-filter failure behaviour (`open` or `closed`).
@@ -138,6 +212,15 @@ pub struct FilterEntry {
     /// [`warn_config_typos`]: FilterEntry::warn_config_typos
     #[serde(flatten)]
     pub config: serde_yaml::Value,
+}
+
+impl<'de> Deserialize<'de> for FilterEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserialize_filter_entry(deserializer)
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -433,6 +516,34 @@ branch_chains:
         let branches = entry.branch_chains.unwrap();
         assert_eq!(branches.len(), 1, "should have 1 branch chain");
         assert_eq!(branches[0].name, "my_branch", "branch name mismatch");
+    }
+
+    #[test]
+    fn filter_entry_serialize_roundtrip() {
+        let yaml = r#"
+filter: static_response
+status: 200
+"#;
+        let entry: FilterEntry = serde_yaml::from_str(yaml).unwrap();
+        let serialized = serde_yaml::to_string(&entry).expect("serialize");
+        let roundtripped: FilterEntry = serde_yaml::from_str(&serialized).expect("deserialize roundtrip");
+        assert_eq!(roundtripped.filter_type, entry.filter_type);
+    }
+
+    #[test]
+    fn parse_filter_entry_access_log_emit_conditions() {
+        let yaml = r#"
+filter: access_log
+sample_rate: 1.0
+conditions:
+  status_classes: [5xx]
+fields: [method, status]
+"#;
+        let entry: FilterEntry = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(entry.filter_type, "access_log");
+        assert!(entry.conditions.is_empty(), "emit conditions belong in config");
+        let conditions = entry.config.get("conditions").expect("conditions in config");
+        assert!(conditions.is_mapping(), "emit conditions should be a mapping");
     }
 
     #[test]

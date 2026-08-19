@@ -7,6 +7,7 @@ mod test_utils;
 #[expect(unreachable_pub)]
 pub use test_utils::load_example_config;
 
+mod access_log_fields;
 mod access_logging;
 mod admin_interface;
 mod api_key_filter;
