@@ -3,12 +3,7 @@
 
 //! Shared utility functions for Criterion benchmarks.
 
-#![allow(
-    clippy::unwrap_used,
-    clippy::expect_used,
-    clippy::indexing_slicing,
-    reason = "benchmarks"
-)]
+#![expect(clippy::unwrap_used, clippy::expect_used, reason = "benchmarks")]
 
 use std::sync::LazyLock;
 

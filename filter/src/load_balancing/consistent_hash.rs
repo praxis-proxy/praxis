@@ -112,8 +112,6 @@ fn fnv1a(s: &str) -> u64 {
     reason = "tests"
 )]
 mod tests {
-    use std::sync::Arc;
-
     use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
     use super::*;

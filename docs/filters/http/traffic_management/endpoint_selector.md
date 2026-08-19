@@ -28,7 +28,7 @@ The resolved value must be a single `host:port` authority. If no trusted value i
 | `tls` | ClusterTls | no | Optional TLS settings for selected upstreams. Certificates and keys are loaded and parsed once when the filter is constructed, never on a request path. |
 | `tls.ca` | CaConfig | no | Custom CA. |
 | `tls.ca.ca_path` | string | yes | Path to the PEM CA certificate file. |
-| `tls.ca.crl_paths` | string[] | no | Paths to PEM-encoded certificate revocation list (CRL) files. When provided, the mTLS client verifier checks presented client certificates against these CRLs and rejects revoked certificates. |
+| `tls.ca.crl_paths` | string[] | no | Paths to PEM-encoded certificate revocation list (CRL) files. Applies only to **listener** client authentication: the client verifier checks presented client certificates against these CRLs and rejects revoked ones. Upstream (cluster) CRL checking is not implemented, so `crl_paths` under `clusters[].tls.ca` is rejected at config validation rather than being silently ignored. |
 | `tls.client_cert` | CertKeyPair | no | Client certificate for upstream mTLS. |
 | `tls.client_cert.cert_path` | string | yes | Path to the PEM certificate file. |
 | `tls.client_cert.default` | bool | no | Whether this certificate is the default fallback for unmatched SNI. At most one certificate in a multi-cert config may set this to `true`. The default entry does not need `server_names`. |

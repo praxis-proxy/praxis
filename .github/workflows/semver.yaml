@@ -1,14 +1,16 @@
-name: Publish Dry Run
+name: SemVer
 
 # ------------------------------------------------------------------------------
 # Workflow Settings
 # ------------------------------------------------------------------------------
 
 on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+# NOTE: manual only until v1.x.x
+#
+#  push:
+#    branches: [main]
+#  pull_request:
+#    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -22,10 +24,10 @@ env:
 
 jobs:
   # ----------------------------------------------------------------------------
-  # Verify crates can be packaged and published
+  # SemVer Compliance
   # ----------------------------------------------------------------------------
 
-  publish-dry-run:
+  semver:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -34,6 +36,19 @@ jobs:
 
       - name: Set up Rust
         uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        with:
+          cache-suffix: semver
 
-      - name: Publish dry run
-        run: make publish-dry-run
+      - name: Cache cargo-semver-checks
+        id: cache-semver
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-semver-checks
+          key: cargo-semver-checks-${{ runner.os }}
+
+      - name: Install cargo-semver-checks
+        if: steps.cache-semver.outputs.cache-hit != 'true'
+        run: cargo install cargo-semver-checks --locked
+
+      - name: Check SemVer compliance
+        run: make semver

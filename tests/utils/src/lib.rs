@@ -2,13 +2,19 @@
 // Copyright (c) 2024 Praxis Contributors
 
 #![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
     clippy::disallowed_methods,
     clippy::expect_used,
     clippy::indexing_slicing,
     clippy::let_underscore_must_use,
+    clippy::min_ident_chars,
     clippy::missing_assert_message,
     clippy::panic,
+    clippy::partial_pub_fields,
+    clippy::shadow_unrelated,
     clippy::unwrap_used,
+    clippy::wildcard_enum_match_arm,
     reason = "test utility code"
 )]
 #![allow(let_underscore_drop, reason = "test utility code")]

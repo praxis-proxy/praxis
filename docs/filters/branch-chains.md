@@ -132,7 +132,7 @@ resumes at the rejoin point:
 | Rejoin value | Behavior |
 |-------------|----------|
 | `next` (default) | Continue with the filter after the branch point |
-| `terminal` or `client` | Stop the pipeline; respond to client |
+| `terminal` or `client` | Stop the pipeline and respond to the client. The branch must produce the response (e.g. a `static_response` filter); a terminal branch that produces no response fails closed with a 500 rather than forwarding upstream. |
 | `<filter_name>` (forward) | Skip to the named filter (must be after the branch point) |
 | `<filter_name>` (backward) | Re-enter at the named filter; requires `max_iterations` |
 

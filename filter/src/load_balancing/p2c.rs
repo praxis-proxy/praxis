@@ -177,8 +177,6 @@ fn weight_index<'a>(endpoints: &[&'a WeightedEndpoint], slot: usize, total_weigh
     reason = "tests"
 )]
 mod tests {
-    use std::sync::{Arc, atomic::Ordering};
-
     use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
     use super::*;
@@ -302,15 +300,15 @@ mod tests {
             ep("10.0.0.2:80", 1, 1),
         ]));
 
-        let handles: Vec<_> = (0..50)
-            .map(|_| {
-                let p = Arc::clone(&p2c);
-                std::thread::spawn(move || {
-                    let addr = p.select(None).unwrap();
-                    p.release(&addr);
-                })
+        let handles: Vec<_> = std::iter::repeat_with(|| {
+            let p = Arc::clone(&p2c);
+            std::thread::spawn(move || {
+                let addr = p.select(None).unwrap();
+                p.release(&addr);
             })
-            .collect();
+        })
+        .take(50)
+        .collect();
         for h in handles {
             h.join().expect("thread should not panic");
         }
@@ -335,7 +333,7 @@ mod tests {
 
     /// Build a [`ClusterHealthState`] with `n` healthy endpoints.
     fn health_state(n: usize) -> ClusterHealthState {
-        let healths: Vec<_> = (0..n).map(|_| EndpointHealth::new()).collect();
+        let healths: Vec<_> = std::iter::repeat_with(EndpointHealth::new).take(n).collect();
         let addrs: Vec<_> = (0..n).map(|i| Arc::from(format!("10.0.0.{i}:80").as_str())).collect();
         Arc::new(ClusterHealthEntry::new(healths, addrs, None, None))
     }

@@ -43,6 +43,16 @@ fn run_startup_security_checks(config: &Config) {
 }
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// How often the sub-request circuit breaker eviction loop runs.
+const CIRCUIT_EVICTION_INTERVAL: Duration = Duration::from_secs(300); // 5 min
+
+/// How long a healthy breaker must sit idle before eviction.
+const CIRCUIT_IDLE_THRESHOLD: Duration = Duration::from_secs(600); // 10 min
+
+// -----------------------------------------------------------------------------
 // Config Path Resolution
 // -----------------------------------------------------------------------------
 
@@ -190,18 +200,7 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
     spawn_health_check_tasks(config, Arc::clone(health_registry), &health_shutdown);
 
     if config.runtime.subrequest_circuit_breaker.is_some() {
-        let client = subrequest_client.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(300)); // 5 min
-            interval.tick().await; // skip immediate first tick
-            loop {
-                interval.tick().await;
-                let evicted = client.evict_idle_circuits(Duration::from_secs(600)); // 10 min idle
-                if evicted > 0 {
-                    debug!(evicted, "circuit breaker: evicted idle entries");
-                }
-            }
-        });
+        spawn_circuit_eviction_task(subrequest_client.clone());
     }
 
     ServerState {
@@ -316,8 +315,29 @@ fn init_runtime_limits(runtime: &praxis_core::config::RuntimeConfig) {
 }
 
 // -----------------------------------------------------------------------------
-// Health Check Tasks
+// Background Tasks
 // -----------------------------------------------------------------------------
+
+/// Spawn `fut` on a dedicated thread running its own current-thread
+/// tokio runtime.
+///
+/// Server startup runs before [`PingoraServerRuntime::new`], so no
+/// reactor is registered on the calling thread and a bare
+/// `tokio::spawn` would panic; background loops get their own thread
+/// and runtime instead.
+#[expect(clippy::expect_used, reason = "fatal")]
+fn spawn_on_dedicated_runtime<F>(runtime_name: &'static str, fut: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect(runtime_name);
+        rt.block_on(fut);
+    });
+}
 
 /// Spawn background health check tasks on a dedicated tokio runtime.
 ///
@@ -344,15 +364,25 @@ fn spawn_health_check_tasks(
     let shutdown = health_shutdown.lock().expect("health shutdown lock").clone();
     let clusters = config.clusters.clone();
 
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("health check runtime");
-        rt.block_on(async {
-            praxis_protocol::http::pingora::health::runner::spawn_health_checks(&clusters, &registry, &shutdown);
-            shutdown.cancelled().await;
-        });
+    spawn_on_dedicated_runtime("health check runtime", async move {
+        praxis_protocol::http::pingora::health::runner::spawn_health_checks(&clusters, &registry, &shutdown);
+        shutdown.cancelled().await;
+    });
+}
+
+/// Spawn the sub-request circuit breaker idle-eviction loop on its own
+/// runtime (see [`spawn_on_dedicated_runtime`]).
+fn spawn_circuit_eviction_task(client: praxis_core::subrequest::SubRequestClient) {
+    spawn_on_dedicated_runtime("circuit breaker eviction runtime", async move {
+        let mut interval = tokio::time::interval(CIRCUIT_EVICTION_INTERVAL);
+        interval.tick().await; // skip immediate first tick
+        loop {
+            interval.tick().await;
+            let evicted = client.evict_idle_circuits(CIRCUIT_IDLE_THRESHOLD);
+            if evicted > 0 {
+                debug!(evicted, "circuit breaker: evicted idle entries");
+            }
+        }
     });
 }
 

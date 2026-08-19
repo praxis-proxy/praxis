@@ -161,6 +161,11 @@ impl CidrRange {
     /// IPv4-mapped IPv6 addresses (e.g. `::ffff:10.0.0.1`) are
     /// transparently matched against IPv4 CIDR ranges, and vice versa.
     ///
+    /// A `/0` range (`0.0.0.0/0` or `::/0`) matches **any** address of
+    /// either family. Without this, `0.0.0.0/0` would match no native
+    /// IPv6 address — so a `deny: ["0.0.0.0/0"]` ACL would silently
+    /// admit every IPv6 peer on a dual-stack listener (fail-open).
+    ///
     /// ```
     /// use praxis_core::connectivity::CidrRange;
     ///
@@ -171,8 +176,17 @@ impl CidrRange {
     /// // IPv4-mapped IPv6 matches IPv4 CIDR
     /// assert!(range.contains(&"::ffff:10.1.2.3".parse().unwrap()));
     /// assert!(!range.contains(&"::ffff:192.168.1.1".parse().unwrap()));
+    ///
+    /// // A /0 wildcard matches every address, both families
+    /// let all_v4 = CidrRange::parse("0.0.0.0/0").unwrap();
+    /// assert!(all_v4.contains(&"2001:db8::1".parse().unwrap()));
+    /// let all_v6 = CidrRange::parse("::/0").unwrap();
+    /// assert!(all_v6.contains(&"203.0.113.7".parse().unwrap()));
     /// ```
     pub fn contains(&self, ip: &IpAddr) -> bool {
+        if self.prefix_len == 0 {
+            return true;
+        }
         match (&self.addr, ip) {
             (IpAddr::V4(net), IpAddr::V4(candidate)) => v4_contains(*net, *candidate, self.prefix_len),
             (IpAddr::V6(net), IpAddr::V6(candidate)) => v6_contains(*net, *candidate, self.prefix_len),

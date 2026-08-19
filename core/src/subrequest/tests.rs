@@ -272,6 +272,7 @@ fn classify_timeout_io_when_configured_is_stricter() {
     let remaining = Duration::from_millis(500);
     let configured = Some(Duration::from_millis(10));
     let err = classify_timeout(remaining, configured, "read");
+    #[expect(clippy::wildcard_enum_match_arm, reason = "test catch-all panic")]
     match err {
         SubRequestError::Io(msg) => {
             assert!(msg.contains("read"), "should include phase: {msg}");
@@ -285,6 +286,7 @@ fn classify_timeout_io_includes_phase() {
     let remaining = Duration::from_secs(10);
     let configured = Some(Duration::from_millis(100));
     let err = classify_timeout(remaining, configured, "write");
+    #[expect(clippy::wildcard_enum_match_arm, reason = "test catch-all panic")]
     match err {
         SubRequestError::Io(msg) => {
             assert!(msg.contains("write"), "should include write phase: {msg}");
@@ -898,13 +900,10 @@ async fn send_streaming_receives_chunks_incrementally() {
         max_total_bytes: None,
     };
 
-    let StreamingSubResponse {
-        status,
-        headers: _,
-        mut body,
-    } = Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits, None))
-        .await
-        .unwrap();
+    let StreamingSubResponse { status, mut body, .. } =
+        Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits, None))
+            .await
+            .unwrap();
 
     assert_eq!(status, 200);
     let mut received = Vec::new();
@@ -1463,24 +1462,18 @@ async fn send_streaming_connection_reused_after_clean_eof() {
         max_total_bytes: None,
     };
 
-    let StreamingSubResponse {
-        status,
-        headers: _,
-        mut body,
-    } = Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits.clone(), None))
-        .await
-        .unwrap();
+    let StreamingSubResponse { status, mut body, .. } =
+        Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits.clone(), None))
+            .await
+            .unwrap();
     assert_eq!(status, 200);
     while body.next_chunk().await.unwrap().is_some() {}
     drop(body);
 
-    let StreamingSubResponse {
-        status,
-        headers: _,
-        mut body,
-    } = Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits, None))
-        .await
-        .unwrap();
+    let StreamingSubResponse { status, mut body, .. } =
+        Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits, None))
+            .await
+            .unwrap();
     assert_eq!(status, 200);
     while body.next_chunk().await.unwrap().is_some() {}
     drop(body);
@@ -1556,13 +1549,10 @@ async fn send_streaming_circuit_half_open_probe_recovers() {
 
     tokio::time::sleep(Duration::from_millis(100)).await;
 
-    let StreamingSubResponse {
-        status,
-        headers: _,
-        mut body,
-    } = Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits, None))
-        .await
-        .expect("half-open probe should succeed");
+    let StreamingSubResponse { status, mut body, .. } =
+        Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits, None))
+            .await
+            .expect("half-open probe should succeed");
     assert_eq!(status, 200);
 
     assert!(
@@ -1641,13 +1631,10 @@ async fn send_streaming_h2_cleartext_receives_chunks() {
         max_total_bytes: None,
     };
 
-    let StreamingSubResponse {
-        status,
-        headers: _,
-        mut body,
-    } = Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits, None))
-        .await
-        .unwrap();
+    let StreamingSubResponse { status, mut body, .. } =
+        Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits, None))
+            .await
+            .unwrap();
     assert_eq!(status, 200);
 
     let mut collected = Vec::new();
@@ -1806,13 +1793,10 @@ async fn send_streaming_h2_cleartext_connection_reused() {
     };
 
     for _ in 0..3 {
-        let StreamingSubResponse {
-            status,
-            headers: _,
-            mut body,
-        } = Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits.clone(), None))
-            .await
-            .unwrap();
+        let StreamingSubResponse { status, mut body, .. } =
+            Box::pin(client.send_streaming(&peer, &request, Duration::from_secs(5), limits.clone(), None))
+                .await
+                .unwrap();
         assert_eq!(status, 200);
         while body.next_chunk().await.unwrap().is_some() {}
         drop(body);

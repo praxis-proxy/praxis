@@ -1,13 +1,18 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! YAML input safety checks: size limits and alias expansion guards.
+//! YAML input safety checks: size limits and alias bomb guards.
 //!
 //! Prevents denial-of-service via crafted YAML by enforcing a raw
-//! file size ceiling (`MAX_YAML_BYTES`, 4 MiB) and a post-parse
-//! expansion threshold (`MAX_EXPANDED_BYTES`, 16 MiB). The expansion
-//! check catches "billion laughs" style alias bombs that are small
-//! on disk but expand to enormous in-memory structures.
+//! file size ceiling (`MAX_YAML_BYTES`, 4 MiB) and by rejecting YAML
+//! alias nodes (`*anchor`) before the document is parsed. Aliases are
+//! the mechanism behind "billion laughs" expansion, and a post-parse
+//! size check cannot help: the expansion happens *inside* the parser,
+//! so the memory blowup is already done by the time the result can be
+//! measured. Praxis configs do not use YAML anchors/aliases, so
+//! rejecting alias nodes up front removes the expansion vector entirely
+//! without affecting any real configuration. (Anchors without a
+//! matching alias expand nothing and are left alone.)
 
 use std::path::Path;
 
@@ -19,9 +24,6 @@ use crate::errors::ProxyError;
 
 /// Maximum raw YAML input size (4 MiB).
 const MAX_YAML_BYTES: usize = 4_194_304;
-
-/// Post-parse expansion threshold (16 MiB).
-const MAX_EXPANDED_BYTES: usize = 16_777_216;
 
 // -----------------------------------------------------------------------------
 // Safety Checks
@@ -70,7 +72,7 @@ pub(crate) fn check_file_size(path: &Path) -> Result<(), ProxyError> {
 /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
 pub(crate) fn check_yaml_safety(raw: &str) -> Result<(), ProxyError> {
     check_yaml_size(raw)?;
-    check_yaml_expansion(raw, MAX_EXPANDED_BYTES)
+    reject_yaml_aliases(raw)
 }
 
 /// Reject raw YAML that exceeds the size limit.
@@ -90,68 +92,73 @@ fn check_yaml_size(raw: &str) -> Result<(), ProxyError> {
     Ok(())
 }
 
-/// Reject YAML alias expansion that inflates the document beyond `threshold`.
+// -----------------------------------------------------------------------------
+// Alias Scanning
+// -----------------------------------------------------------------------------
+
+/// Reject YAML alias nodes (`*anchor`) before parsing.
+///
+/// Aliases drive "billion laughs" expansion, and the blowup happens
+/// during `from_str` — so this must run before any parse. Praxis
+/// configs never use aliases, so any alias node is rejected outright.
+///
+/// The scan is quote- and comment-aware so that a `*` inside a string
+/// scalar (e.g. `pattern: "a*"`) or a `#` comment is not mistaken for
+/// an alias. An alias node is a `*` at a value/node boundary followed
+/// by an anchor-name character.
 ///
 /// # Errors
 ///
-/// Returns [`ProxyError::Config`] when the expanded document exceeds the threshold.
+/// Returns [`ProxyError::Config`] when an alias node is present.
 ///
 /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
-fn check_yaml_expansion(raw: &str, threshold: usize) -> Result<(), ProxyError> {
-    let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(raw) else {
-        // Unparseable YAML cannot contain alias bombs; the real parse
-        // error is reported by the subsequent Config deserialization.
-        return Ok(());
-    };
-    let size = estimate_value_size(&value);
-    if size > threshold {
-        return Err(ProxyError::Config(format!(
-            "YAML alias expansion too large ({size} bytes estimated from {} bytes raw, \
-             max {threshold})",
-            raw.len()
-        )));
+fn reject_yaml_aliases(raw: &str) -> Result<(), ProxyError> {
+    match raw.lines().position(line_contains_alias) {
+        Some(idx) => Err(ProxyError::Config(format!(
+            "YAML alias nodes (`*anchor`) are not supported (line {}); \
+             they enable alias-expansion denial-of-service and are not used by any Praxis config",
+            idx + 1
+        ))),
+        None => Ok(()),
     }
-    Ok(())
 }
 
-/// Walk a [`serde_yaml::Value`] tree counting approximate byte size
-/// without re-serializing.
+/// Whether a single line contains an alias node outside strings/comments.
 ///
-/// Avoids the secondary allocation that `serde_yaml::to_string`
-/// would produce (up to 16 MiB for a near-threshold document).
-///
-/// [`serde_yaml::Value`]: serde_yaml::Value
-fn estimate_value_size(value: &serde_yaml::Value) -> usize {
-    match value {
-        serde_yaml::Value::Null => 4,
-        serde_yaml::Value::Bool(_) => 5,
-        serde_yaml::Value::Number(n) => {
-            if let Some(u) = n.as_u64() {
-                count_digits(u)
-            } else if let Some(i) = n.as_i64() {
-                count_digits(i.unsigned_abs()) + usize::from(i.is_negative())
-            } else {
-                16
+/// Single-line scan only: an alias node is always single-line, and a
+/// false positive from a `*` inside a multi-line block scalar would only
+/// reject an unusual config, never admit a bomb.
+fn line_contains_alias(line: &str) -> bool {
+    let (mut at_boundary, mut prev_ws) = (true, true);
+    let mut quote: Option<u8> = None;
+    let (mut prev_star, mut escaped) = (false, false);
+    for &c in line.as_bytes() {
+        // An alias node is `*` at a node boundary followed by an
+        // anchor-name character; check the char after a boundary `*`.
+        if prev_star && (c.is_ascii_alphanumeric() || c == b'_') {
+            return true;
+        }
+        prev_star = false;
+        if let Some(q) = quote {
+            let close = c == q && !escaped;
+            escaped = q == b'"' && c == b'\\' && !escaped;
+            quote = (!close).then_some(q);
+            at_boundary = false;
+        } else {
+            match c {
+                // A comment only starts after whitespace (or line start);
+                // a mid-scalar `#` (e.g. `a#b`) is scalar content.
+                b'#' if prev_ws => return false,
+                // A quoted scalar only starts at a node boundary; a
+                // mid-scalar quote (e.g. `don't`) is scalar content.
+                b'\'' | b'"' if at_boundary => (quote, at_boundary) = (Some(c), false),
+                b'*' if at_boundary => prev_star = true,
+                _ => at_boundary = matches!(c, b' ' | b'\t' | b'[' | b'{' | b',' | b':' | b'-'),
             }
-        },
-        serde_yaml::Value::String(s) => s.len() + 2,
-        serde_yaml::Value::Sequence(seq) => 2 + seq.iter().map(estimate_value_size).sum::<usize>(),
-        serde_yaml::Value::Mapping(map) => {
-            2 + map
-                .iter()
-                .map(|(k, v)| estimate_value_size(k) + estimate_value_size(v) + 2)
-                .sum::<usize>()
-        },
-        serde_yaml::Value::Tagged(t) => t.tag.to_string().len() + estimate_value_size(&t.value),
+        }
+        prev_ws = matches!(c, b' ' | b'\t');
     }
-}
-
-/// Count decimal digits in a `u64`.
-fn count_digits(n: u64) -> usize {
-    if n == 0 {
-        return 1;
-    }
-    (n.ilog10() as usize) + 1
+    false
 }
 
 // -----------------------------------------------------------------------------
@@ -185,18 +192,58 @@ mod tests {
 
     #[test]
     fn reject_yaml_alias_bomb() {
-        let err = check_yaml_expansion("a: &a x\nb: &b [*a,*a,*a]\nlisteners: []\n", 5);
-        assert!(err.is_err(), "should reject expansion exceeding threshold");
+        let err = reject_yaml_aliases("a: &a x\nb: &b [*a,*a,*a]\nlisteners: []\n");
+        assert!(err.is_err(), "should reject alias nodes before parsing");
         assert!(
-            err.unwrap_err().to_string().contains("alias expansion too large"),
-            "error message should mention alias expansion"
+            err.unwrap_err().to_string().contains("alias nodes"),
+            "error message should mention alias nodes"
         );
     }
 
     #[test]
-    fn accept_yaml_within_expansion_threshold() {
-        check_yaml_expansion("a: &a x\nb: *a\nlisteners: []\n", 1_000_000)
-            .expect("small expansion within threshold should pass");
+    fn reject_single_alias() {
+        let err = reject_yaml_aliases("a: &a x\nb: *a\nlisteners: []\n");
+        assert!(err.is_err(), "any alias node should be rejected");
+    }
+
+    #[test]
+    fn accept_anchor_without_alias() {
+        // An anchor with no matching alias expands nothing and is allowed.
+        reject_yaml_aliases("a: &a x\nlisteners: []\n").expect("unused anchor should pass");
+    }
+
+    #[test]
+    fn accept_asterisk_in_string_and_comment() {
+        reject_yaml_aliases("pattern: \"a*b\"\nglob: '*.txt'\nnote: ok # *not an alias\n")
+            .expect("asterisks in strings/comments are not alias nodes");
+    }
+
+    #[test]
+    fn accept_bare_asterisk_value() {
+        // `*` not followed by an anchor-name char is not an alias node.
+        reject_yaml_aliases("wildcard: /*\n").expect("glob-like value should pass");
+    }
+
+    #[test]
+    fn reject_alias_after_mid_scalar_apostrophe() {
+        // A plain-scalar apostrophe is not a quote opener; the alias
+        // after it must still be caught.
+        let err = reject_yaml_aliases("a: &a x\nb: [don't, *a]\n");
+        assert!(err.is_err(), "alias after mid-scalar apostrophe should be rejected");
+    }
+
+    #[test]
+    fn reject_alias_after_mid_scalar_hash() {
+        // `#` without preceding whitespace is scalar content, not a
+        // comment; the alias after it must still be caught.
+        let err = reject_yaml_aliases("a: &a x\nb: [a#b, *a]\n");
+        assert!(err.is_err(), "alias after mid-scalar hash should be rejected");
+    }
+
+    #[test]
+    fn accept_escaped_quote_in_double_quoted_scalar() {
+        // `\"` does not close the string, so the `*` stays inside it.
+        reject_yaml_aliases("k: \"a\\\" *not-an-alias b\"\n").expect("escaped quote should not end the string");
     }
 
     #[test]
@@ -225,48 +272,14 @@ mod tests {
     }
 
     #[test]
-    fn expansion_check_unparseable_yaml_passes() {
-        let result = check_yaml_expansion("{{{{invalid yaml", MAX_EXPANDED_BYTES);
-        assert!(
-            result.is_ok(),
-            "unparseable YAML should pass expansion check (deferred to real parse)"
-        );
+    fn alias_check_ignores_unparseable_non_alias_yaml() {
+        // No alias node present; the real parse error is reported later.
+        reject_yaml_aliases("{{{{invalid yaml").expect("non-alias garbage passes the alias check");
     }
 
     #[test]
-    fn count_digits_zero_returns_one() {
-        assert_eq!(count_digits(0), 1, "0 has one digit");
-    }
-
-    #[test]
-    fn count_digits_single() {
-        assert_eq!(count_digits(9), 1, "9 has one digit");
-    }
-
-    #[test]
-    fn count_digits_multi() {
-        assert_eq!(count_digits(100), 3, "100 has three digits");
-        assert_eq!(count_digits(999), 3, "999 has three digits");
-        assert_eq!(count_digits(1000), 4, "1000 has four digits");
-    }
-
-    #[test]
-    fn estimate_null_size() {
-        assert_eq!(estimate_value_size(&serde_yaml::Value::Null), 4, "null is 4 bytes");
-    }
-
-    #[test]
-    fn estimate_bool_size() {
-        assert_eq!(
-            estimate_value_size(&serde_yaml::Value::Bool(true)),
-            5,
-            "bool is 5 bytes"
-        );
-    }
-
-    #[test]
-    fn estimate_string_includes_quotes() {
-        let v = serde_yaml::Value::String("abc".to_owned());
-        assert_eq!(estimate_value_size(&v), 5, "3-char string + 2 quote bytes = 5");
+    fn alias_line_number_reported() {
+        let err = reject_yaml_aliases("listeners: []\nfoo: bar\nbomb: *a\n").unwrap_err();
+        assert!(err.to_string().contains("line 3"), "got: {err}");
     }
 }

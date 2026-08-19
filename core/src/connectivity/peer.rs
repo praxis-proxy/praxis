@@ -279,7 +279,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_address_rejects_missing_port() {
-        assert!(resolve_address("127.0.0.1").await.is_err());
+        resolve_address("127.0.0.1").await.unwrap_err();
     }
 
     #[test]

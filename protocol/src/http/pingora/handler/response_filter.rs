@@ -296,10 +296,9 @@ fn is_websocket_101(headers: &http::HeaderMap) -> bool {
     reason = "tests"
 )]
 mod tests {
-    use praxis_filter::{FilterPipeline, FilterRegistry, Request};
+    use praxis_filter::{FilterRegistry, Request};
 
     use super::*;
-    use crate::http::pingora::context::PingoraRequestCtx;
 
     #[tokio::test]
     async fn empty_pipeline_passes_through() {

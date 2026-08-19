@@ -3,9 +3,10 @@
 
 //! Criterion benchmarks for load balancer endpoint selection.
 
-#![allow(
+#![expect(
+    clippy::min_ident_chars,
+    clippy::single_char_lifetime_names,
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::too_many_lines,
     reason = "benchmarks"
 )]

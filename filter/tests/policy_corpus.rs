@@ -40,7 +40,7 @@ fn fingerprint(yaml: &str) -> (bool, Vec<(String, String)>, usize) {
     let plugins = cfg
         .plugins
         .iter()
-        .map(|p| (p.name.clone(), p.kind.clone()))
+        .map(|pl| (pl.name.clone(), pl.kind.clone()))
         .collect::<Vec<_>>();
     (cfg.routing_enabled(), plugins, cfg.routes.len())
 }
@@ -58,7 +58,7 @@ fn demo_plugins() -> Vec<(String, String)> {
         ("manager-approver", "elicitation/ciba"),
     ]
     .into_iter()
-    .map(|(n, k)| (n.to_owned(), k.to_owned()))
+    .map(|(name, kind)| (name.to_owned(), kind.to_owned()))
     .collect()
 }
 

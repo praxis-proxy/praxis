@@ -2,6 +2,20 @@
 // Copyright (c) 2024 Praxis Contributors
 
 #![deny(unreachable_pub)]
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::impl_trait_in_params,
+    clippy::iter_over_hash_type,
+    clippy::min_ident_chars,
+    clippy::mod_module_files,
+    clippy::partial_pub_fields,
+    clippy::pub_underscore_fields,
+    clippy::shadow_unrelated,
+    clippy::single_char_lifetime_names,
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(conventions-sync): fix violations and remove"
+)]
 
 //! Protocol adapters for Praxis.
 

@@ -265,8 +265,6 @@ pub(super) async fn pre_read_body(
 
 #[cfg(test)]
 mod tests {
-    use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
-
     use super::*;
 
     #[test]

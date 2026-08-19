@@ -3,9 +3,9 @@
 
 //! Criterion benchmarks for header manipulation filter.
 
-#![allow(
+#![expect(
+    clippy::min_ident_chars,
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::panic,
     clippy::too_many_lines,
     reason = "benchmarks"

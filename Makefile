@@ -18,7 +18,7 @@ UNAME_M := $(shell uname -m)
 # All
 # -------------------------------------------------------------------
 
-all: build fmt lint test audit container
+all: build fmt lint lint-extra test audit container
 
 # -------------------------------------------------------------------
 # Prerequisites
@@ -47,12 +47,17 @@ ifneq ($(V),)
   _NOCAPTURE := -- --nocapture
 endif
 
+# Meta-lint tools checked by lint-extra.
+LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
+
 .PHONY: all build release check clean \
 	test test-unit \
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience \
 	bench \
-	lint generate-filter-docs fmt doc audit semver publish-dry-run coverage coverage-check \
+	lint lint-extra generate-filter-docs fmt doc audit semver publish-dry-run \
+	mutants \
+	coverage coverage-check \
 	fuzz fuzz-build \
 	require-container-engine \
 	container container-run \
@@ -61,6 +66,7 @@ endif
 	tools clean-tools \
 	check-prereqs \
 	check-prereqs-cmake \
+	check-prereqs-extra \
 	check-prereqs-nightly \
 	check-prereqs-nightly-toolchain \
 	setup-hooks \
@@ -79,6 +85,14 @@ check-prereqs-cmake: check-prereqs
 		echo "\"cmake\" is not installed or broken — install/reinstall it before running make (see docs/developing/getting-started.md)" >&2; \
 		exit 1; \
 	}
+check-prereqs-extra:
+	@for cmd in $(LINT_EXTRA_CMDS); do \
+		command -v "$$cmd" >/dev/null 2>&1 || { \
+			echo "\"$$cmd\" is not installed — install it before running make lint-extra (see docs/developing/getting-started.md)" >&2; \
+			exit 1; \
+		}; \
+	done
+
 check-prereqs-nightly-toolchain: check-prereqs
 	@test -n "$(NIGHTLY_VERSION)" || { \
 		echo "Could not determine NIGHTLY_VERSION from .github/actions/install-nightly-rust/action.yml" >&2; \
@@ -297,8 +311,17 @@ lint:
 	cargo xtask sync-example-readme
 	cargo xtask lint-filter-docs
 
+lint-extra: check-prereqs-extra
+	typos
+	taplo fmt --check
+	shellcheck .hooks/pre-commit
+	actionlint
+
 generate-filter-docs:
 	cargo xtask generate-filter-docs
+
+mutants:
+	cargo mutants --workspace
 
 semver:
 	cargo semver-checks
@@ -394,9 +417,12 @@ help:
 	@echo ""
 	@echo "Quality:"
 	@echo "  lint                 clippy (default + optional features) + rustfmt check + filter docs"
+	@echo "  lint-extra           typos + taplo + shellcheck + actionlint"
 	@echo "  generate-filter-docs generate per-filter docs under docs/filters/"
 	@echo "  fmt                  format with nightly rustfmt"
 	@echo "  audit                cargo audit + cargo deny"
+	@echo "  semver               cargo semver-checks"
+	@echo "  mutants              mutation testing (cargo-mutants)"
 	@echo "  publish-dry-run      validate crate packaging for crates.io"
 	@echo "  coverage             HTML coverage report"
 	@echo "  coverage-check       fail if line coverage < 96%%"

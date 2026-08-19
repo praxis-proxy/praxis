@@ -22,13 +22,14 @@ use crate::{config::Config, errors::ProxyError};
 // TracingGuard
 // -----------------------------------------------------------------------------
 
-/// RAII guard that flushes and shuts down the `OTel` tracer provider on drop.
+/// RAII guard that flushes the non-blocking log writer and (with the `otel`
+/// feature) shuts down the tracer provider on drop.
 ///
 /// ```no_run
 /// let config = praxis_core::config::Config::load(None, "listeners: []").unwrap();
 /// let _guard = praxis_core::logging::init_tracing(&config).unwrap();
 /// ```
-#[must_use = "dropping the guard immediately shuts down the tracer provider"]
+#[must_use = "dropping the guard immediately flushes logs and shuts down tracing"]
 pub struct TracingGuard {
     #[cfg(feature = "otel")]
     /// Optional OTLP tracer provider held until shutdown.
@@ -61,7 +62,8 @@ impl Drop for TracingGuard {
 /// a fmt layer (text or JSON). When the `otel` feature is enabled and an
 /// OTLP endpoint is configured, adds an OTLP trace-export layer.
 ///
-/// Returns a [`TracingGuard`] that flushes pending spans on drop.
+/// Returns a [`TracingGuard`] that flushes the log writer and pending OTLP
+/// spans on drop.
 ///
 /// # Errors
 ///
@@ -411,7 +413,7 @@ fn build_otel_provider(
         )));
     }
 
-    let exporter = build_span_exporter(endpoint, &config.otlp_headers)?;
+    let exporter = build_span_exporter(endpoint, config.otlp_headers.as_ref())?;
     let batch_processor = build_batch_processor(exporter, config);
     let resource = build_otel_resource(config);
 
@@ -443,7 +445,7 @@ fn build_otel_provider(
 #[cfg(feature = "otel")]
 fn build_span_exporter(
     endpoint: &str,
-    headers: &Option<std::collections::HashMap<String, String>>,
+    headers: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<opentelemetry_otlp::SpanExporter, ProxyError> {
     use opentelemetry_otlp::{WithExportConfig as _, WithTonicConfig as _};
 
@@ -691,7 +693,7 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::config::{Config, LogOutput, LogRotation, LoggingConfig};
+    use crate::config::{LogOutput, LogRotation, LoggingConfig};
 
     #[test]
     fn empty_log_overrides_produces_valid_filter() {

@@ -228,8 +228,6 @@ fn publish_probe_metrics(params: &HealthCheckParams, addr: &str, success: bool, 
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
-    use std::sync::Arc;
-
     use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
     use tokio::net::TcpListener;
 

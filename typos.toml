@@ -1,0 +1,5 @@
+[files]
+extend-exclude = ["Cargo.lock", "target/"]
+
+[default.extend-words]
+# Add project-specific identifiers that typos flags incorrectly.

@@ -241,8 +241,6 @@ fn sanitize_for_log(s: &str) -> Cow<'_, str> {
     reason = "tests"
 )]
 mod tests {
-    use std::borrow::Cow;
-
     use super::*;
 
     #[test]

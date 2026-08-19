@@ -1,0 +1,9 @@
+include = ["**/*.toml"]
+exclude = ["target/**"]
+
+[formatting]
+# Keys stay in author order: the lint tables in Cargo.toml are grouped by
+# commented sections, and reordering would destroy them.
+reorder_keys = false
+reorder_arrays = false
+column_width = 100

@@ -56,7 +56,7 @@ mod via;
 /// HTTP handler with body filter hooks.
 mod with_body;
 
-pub use upstream_peer::{arm_upstream_retry_gate, lock_upstream_retry_gate_tests};
+pub use upstream_peer::{UpstreamRetryGateRelease, arm_upstream_retry_gate, lock_upstream_retry_gate_tests};
 pub use with_body::PingoraHttpHandler;
 
 // -----------------------------------------------------------------------------
@@ -513,7 +513,7 @@ fn h2_server_options() -> H2Options {
 
 /// Accumulate `chunk.len()` into `accumulated_bytes` and return `true` when
 /// the total exceeds `max_bytes`. Returns `false` when the body is `None`.
-fn check_body_size_limit(body: &Option<Bytes>, accumulated_bytes: &mut u64, max_bytes: usize) -> bool {
+fn check_body_size_limit(body: Option<&Bytes>, accumulated_bytes: &mut u64, max_bytes: usize) -> bool {
     if let Some(chunk) = body {
         #[expect(clippy::allow_attributes, reason = "cast lint is platform-dependent")]
         #[allow(clippy::cast_possible_truncation, reason = "chunk length fits u64")]
@@ -647,8 +647,6 @@ impl BodyFilterOutput {
     reason = "tests"
 )]
 mod tests {
-    use std::sync::Arc;
-
     use praxis_core::connectivity::ConnectionOptions;
 
     use super::*;
@@ -994,7 +992,7 @@ mod tests {
     #[test]
     fn size_limit_none_body_returns_false() {
         let mut bytes = 0_u64;
-        assert!(!check_body_size_limit(&None, &mut bytes, 100));
+        assert!(!check_body_size_limit(None, &mut bytes, 100));
         assert_eq!(bytes, 0, "accumulated bytes unchanged for None body");
     }
 
@@ -1002,7 +1000,7 @@ mod tests {
     fn size_limit_within_limit() {
         let mut bytes = 0_u64;
         let body = Some(Bytes::from_static(b"hello"));
-        assert!(!check_body_size_limit(&body, &mut bytes, 10));
+        assert!(!check_body_size_limit(body.as_ref(), &mut bytes, 10));
         assert_eq!(bytes, 5);
     }
 
@@ -1010,7 +1008,7 @@ mod tests {
     fn size_limit_at_exact_limit() {
         let mut bytes = 0_u64;
         let body = Some(Bytes::from_static(b"exact"));
-        assert!(!check_body_size_limit(&body, &mut bytes, 5));
+        assert!(!check_body_size_limit(body.as_ref(), &mut bytes, 5));
         assert_eq!(bytes, 5);
     }
 
@@ -1018,17 +1016,17 @@ mod tests {
     fn size_limit_exceeds_limit() {
         let mut bytes = 0_u64;
         let body = Some(Bytes::from_static(b"toolong"));
-        assert!(check_body_size_limit(&body, &mut bytes, 3));
+        assert!(check_body_size_limit(body.as_ref(), &mut bytes, 3));
     }
 
     #[test]
     fn size_limit_cumulative_overflow() {
         let mut bytes = 0_u64;
         let first = Some(Bytes::from_static(b"aaa"));
-        assert!(!check_body_size_limit(&first, &mut bytes, 5));
+        assert!(!check_body_size_limit(first.as_ref(), &mut bytes, 5));
 
         let second = Some(Bytes::from_static(b"bbb"));
-        assert!(check_body_size_limit(&second, &mut bytes, 5));
+        assert!(check_body_size_limit(second.as_ref(), &mut bytes, 5));
         assert_eq!(bytes, 6);
     }
 
@@ -1292,8 +1290,6 @@ mod tests {
         passive_unhealthy: Option<u32>,
         passive_healthy: Option<u32>,
     ) -> (FilterPipeline, PingoraRequestCtx) {
-        use std::collections::HashMap;
-
         use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
         let entry = ClusterHealthEntry::new(

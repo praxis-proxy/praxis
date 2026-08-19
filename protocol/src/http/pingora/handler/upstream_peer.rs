@@ -46,25 +46,14 @@ pub fn lock_upstream_retry_gate_tests() -> std::sync::MutexGuard<'static, ()> {
 }
 
 /// Releases an armed upstream-retry wait (see [`arm_upstream_retry_gate`]).
+///
+/// The gate clears automatically on drop.
 #[doc(hidden)]
-pub struct UpstreamRetryGateRelease {
-    /// Whether [`Self::release`] already ran.
-    released: bool,
-}
-
-impl UpstreamRetryGateRelease {
-    /// Unblock parked upstream retries.
-    pub fn release(mut self) {
-        clear_upstream_retry_gate_wait();
-        self.released = true;
-    }
-}
+pub struct UpstreamRetryGateRelease;
 
 impl Drop for UpstreamRetryGateRelease {
     fn drop(&mut self) {
-        if !self.released {
-            clear_upstream_retry_gate_wait();
-        }
+        clear_upstream_retry_gate_wait();
     }
 }
 
@@ -83,7 +72,7 @@ fn clear_upstream_retry_gate_wait() {
 pub fn arm_upstream_retry_gate() -> (std::sync::MutexGuard<'static, ()>, UpstreamRetryGateRelease) {
     let guard = lock_upstream_retry_gate_tests();
     UPSTREAM_RETRY_GATE_ARMED.store(true, Ordering::SeqCst);
-    (guard, UpstreamRetryGateRelease { released: false })
+    (guard, UpstreamRetryGateRelease)
 }
 
 // -----------------------------------------------------------------------------
@@ -200,7 +189,7 @@ async fn resolve_address(address: &str) -> Result<SocketAddr> {
 mod tests {
     use std::sync::Arc;
 
-    use praxis_core::connectivity::{ConnectionOptions, Upstream};
+    use praxis_core::connectivity::ConnectionOptions;
     use praxis_tls::{CachedClusterTls, ClusterTls};
 
     use super::*;

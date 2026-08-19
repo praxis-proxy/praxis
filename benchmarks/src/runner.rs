@@ -401,10 +401,7 @@ async fn run_ramp_steps(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
-
     use super::*;
-    use crate::scenario::{Scenario, Workload};
 
     #[test]
     fn runner_construction() {

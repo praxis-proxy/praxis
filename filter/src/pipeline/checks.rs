@@ -392,11 +392,11 @@ fn has_allow_rewrite_override(entries: &[FilterEntry], idx: usize) -> bool {
 mod tests {
     use std::sync::Arc;
 
-    use praxis_core::config::{Condition, ConditionMatch, FailureMode, FilterEntry};
+    use praxis_core::config::{Condition, ConditionMatch};
 
     use super::*;
     use crate::pipeline::{
-        branch::{RejoinTarget, ResolvedBranch},
+        branch::ResolvedBranch,
         test_filters::{lb_filter, noop_filter_with_conditions, selector_filter},
     };
 

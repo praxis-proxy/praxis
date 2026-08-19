@@ -25,7 +25,7 @@
 //! [`Continue`]: super::branch::BranchOutcome::Continue
 //! [`ReEnter`]: super::branch::RejoinTarget::ReEnter
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{pin::Pin, sync::Arc};
 
 use tracing::{debug, trace, warn};
 
@@ -233,10 +233,7 @@ async fn dispatch_nested_outcome(
     reason = "tests"
 )]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -245,8 +242,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        FilterError, Rejection, StreamingTerminalResponse, filter::HttpFilter,
-        pipeline::branch::ResolvedBranchCondition, results::FilterResultSet,
+        Rejection, StreamingTerminalResponse, filter::HttpFilter, pipeline::branch::ResolvedBranchCondition,
+        results::FilterResultSet,
     };
 
     #[tokio::test]

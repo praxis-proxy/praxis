@@ -122,7 +122,7 @@ impl PolicyFilter {
         clippy::too_many_lines,
         reason = "linear construction + init steps; splitting obscures the startup flow"
     )]
-    pub fn new(cfg: PolicyFilterConfig) -> Result<Self, FilterError> {
+    pub(crate) fn new(cfg: PolicyFilterConfig) -> Result<Self, FilterError> {
         let yaml = std::fs::read_to_string(&cfg.config_path).map_err(|e| -> FilterError {
             format!("policy: failed to read config_path {}: {e}", cfg.config_path).into()
         })?;

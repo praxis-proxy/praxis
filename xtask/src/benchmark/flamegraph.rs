@@ -127,7 +127,7 @@ async fn run_profiling(args: &Args, binary: PathBuf) {
     std::fs::write(&config_path, LOCAL_CONFIG).expect("failed to write config");
 
     let perf_data = tmpdir.path().join("perf.data");
-    let output_svg = resolve_flamegraph_output(&args.output);
+    let output_svg = resolve_flamegraph_output(args.output.as_ref());
 
     let mut backend = start_fortio_backend();
     wait_for_tcp(BACKEND_PORT).await;
@@ -158,8 +158,8 @@ async fn run_profiling(args: &Args, binary: PathBuf) {
 }
 
 /// Resolve output SVG path, generating a timestamped default.
-fn resolve_flamegraph_output(explicit: &Option<String>) -> String {
-    explicit.clone().unwrap_or_else(|| {
+fn resolve_flamegraph_output(explicit: Option<&String>) -> String {
+    explicit.cloned().unwrap_or_else(|| {
         let ts = chrono::Utc::now().format("%Y%m%d-%H%M%S");
         let dir = "target/criterion";
         std::fs::create_dir_all(dir).ok();

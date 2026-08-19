@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::min_ident_chars,
+    reason = "TODO(conventions-sync): fix violations and remove"
+)]
+
 //! Server bootstrap for the Praxis proxy.
 
 pub(crate) mod pipelines;

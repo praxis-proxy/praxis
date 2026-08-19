@@ -437,7 +437,7 @@ filter_chains:
               - "10.0.0.1:8080"
             health_check:
               type: http
-              interval_secs: 5
+              interval_ms: 5000
               path: /healthz
 ```
 

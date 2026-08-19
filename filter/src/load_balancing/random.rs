@@ -114,8 +114,6 @@ fn pick<E: Borrow<WeightedEndpoint>>(endpoints: &[E], random: u64, total_weight:
     reason = "tests"
 )]
 mod tests {
-    use std::sync::Arc;
-
     use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
     use super::*;
@@ -269,7 +267,7 @@ mod tests {
     }
 
     fn health_state(n: usize) -> ClusterHealthState {
-        let healths: Vec<_> = (0..n).map(|_| EndpointHealth::new()).collect();
+        let healths: Vec<_> = std::iter::repeat_with(EndpointHealth::new).take(n).collect();
         let addrs: Vec<_> = (0..n).map(|i| Arc::from(format!("10.0.0.{i}:80").as_str())).collect();
         Arc::new(ClusterHealthEntry::new(healths, addrs, None, None))
     }
