@@ -29,6 +29,7 @@ use tokio::sync::watch;
 /// [`build_server_config`]: praxis_tls::setup::build_server_config
 /// [`ReloadableCertResolver`]: praxis_tls::reload::ReloadableCertResolver
 /// [`CertWatcher`]: praxis_tls::watcher::CertWatcher
+#[cfg(feature = "rustls")]
 #[expect(clippy::too_many_lines, reason = "hot-reload vs static TLS branching")]
 pub(crate) fn build_tls_settings(
     tls: &ListenerTls,
@@ -74,4 +75,20 @@ pub(crate) fn build_tls_settings(
     let server_config = praxis_tls::setup::build_server_config(tls).map_err(|e| tls_err!(e))?;
     let settings = TlsSettings::with_server_config(server_config).map_err(|e| tls_err!(e))?;
     Ok((settings, None))
+}
+
+/// Listener-side TLS is not yet implemented for the openssl backend.
+///
+/// The inbound TLS path requires porting `praxis-tls` to use OpenSSL's
+/// `TlsSettings` API, which differs substantially from the rustls one.
+/// Tracked as follow-up work.
+#[cfg(feature = "openssl")]
+pub(crate) fn build_tls_settings(
+    _tls: &ListenerTls,
+    address: &str,
+    _context_label: &str,
+) -> Result<(TlsSettings, Option<watch::Sender<bool>>), ProxyError> {
+    Err(ProxyError::Config(format!(
+        "TLS for {address}: listener TLS is not yet supported with the openssl feature"
+    )))
 }

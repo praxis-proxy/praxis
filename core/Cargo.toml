@@ -17,6 +17,8 @@ name = "praxis_core"
 workspace = true
 
 [features]
+rustls = ["pingora-core/rustls"]
+openssl = ["pingora-core/openssl", "dep:openssl"]
 otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
@@ -33,6 +35,7 @@ metrics = { workspace = true }
 opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
+openssl = { version = "0.10", optional = true }
 pingora-core = { workspace = true }
 pingora-http = { workspace = true }
 praxis-tls = { workspace = true }

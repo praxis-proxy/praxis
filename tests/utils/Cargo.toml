@@ -34,3 +34,6 @@ tokio-rustls = { workspace = true }
 tokio-tungstenite = { workspace = true }
 
 [features]
+default = ["rustls"]
+rustls = ["praxis/rustls", "praxis-core/rustls", "praxis-filter/rustls", "praxis-protocol/rustls", "pingora-core/rustls"]
+openssl = ["praxis/openssl", "praxis-core/openssl", "praxis-filter/openssl", "praxis-protocol/openssl", "pingora-core/openssl"]

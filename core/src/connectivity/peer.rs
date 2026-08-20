@@ -199,17 +199,25 @@ pub fn apply_cached_tls(peer: &mut HttpPeer, tls: &praxis_tls::CachedClusterTls,
     }
 
     if let Some(ca) = tls.ca() {
-        peer.options.ca = Some(Arc::from(ca_from_cached(ca)));
+        #[cfg(feature = "rustls")]
+        {
+            peer.options.ca = Some(Arc::from(ca_from_cached(ca)));
+        }
+        #[cfg(feature = "openssl")]
+        {
+            peer.options.ca = Some(Arc::new(ca_from_cached(ca).into_boxed_slice()));
+        }
     }
 
     if let Some(client) = tls.client_cert() {
-        peer.client_cert_key = Some(Arc::new(client_cert_from_cached(client)));
+        if let Some(cert_key) = client_cert_from_cached(client) {
+            peer.client_cert_key = Some(Arc::new(cert_key));
+        }
     }
 }
 
-/// Convert cached CA DER bytes into [`WrappedX509`] values.
-///
-/// [`WrappedX509`]: pingora_core::utils::tls::WrappedX509
+/// Convert cached CA DER bytes into values for the active TLS backend.
+#[cfg(feature = "rustls")]
 pub fn ca_from_cached(cached: &praxis_tls::CachedCaCerts) -> Vec<pingora_core::utils::tls::WrappedX509> {
     cached
         .der_certs()
@@ -222,11 +230,55 @@ pub fn ca_from_cached(cached: &praxis_tls::CachedCaCerts) -> Vec<pingora_core::u
         .collect()
 }
 
+/// Convert cached CA DER bytes into values for the active TLS backend.
+#[cfg(feature = "openssl")]
+pub fn ca_from_cached(cached: &praxis_tls::CachedCaCerts) -> Vec<openssl::x509::X509> {
+    cached
+        .der_certs()
+        .iter()
+        .filter_map(|der| {
+            openssl::x509::X509::from_der(der)
+                .inspect_err(|e| tracing::warn!("failed to parse cached CA cert: {e}"))
+                .ok()
+        })
+        .collect()
+}
+
 /// Convert cached client cert/key DER bytes into a [`CertKey`].
 ///
+/// Returns `None` and logs a warning if the bytes cannot be parsed.
+///
 /// [`CertKey`]: pingora_core::utils::tls::CertKey
-pub fn client_cert_from_cached(cached: &praxis_tls::CachedClientCert) -> pingora_core::utils::tls::CertKey {
-    pingora_core::utils::tls::CertKey::new(cached.cert_der().to_vec(), cached.key_der().to_vec())
+#[cfg(feature = "rustls")]
+pub fn client_cert_from_cached(
+    cached: &praxis_tls::CachedClientCert,
+) -> Option<pingora_core::utils::tls::CertKey> {
+    Some(pingora_core::utils::tls::CertKey::new(
+        cached.cert_der().to_vec(),
+        cached.key_der().to_vec(),
+    ))
+}
+
+/// Convert cached client cert/key DER bytes into a [`CertKey`].
+///
+/// Returns `None` and logs a warning if the bytes cannot be parsed.
+///
+/// [`CertKey`]: pingora_core::utils::tls::CertKey
+#[cfg(feature = "openssl")]
+pub fn client_cert_from_cached(
+    cached: &praxis_tls::CachedClientCert,
+) -> Option<pingora_core::utils::tls::CertKey> {
+    let certs = cached
+        .cert_der()
+        .iter()
+        .map(|der| openssl::x509::X509::from_der(der))
+        .collect::<Result<Vec<_>, _>>()
+        .inspect_err(|e| tracing::warn!("failed to parse cached client cert: {e}"))
+        .ok()?;
+    let key = openssl::pkey::PKey::private_key_from_der(cached.key_der())
+        .inspect_err(|e| tracing::warn!("failed to parse cached client key: {e}"))
+        .ok()?;
+    Some(pingora_core::utils::tls::CertKey::new(certs, key))
 }
 
 // ---------------------------------------------------------------------------

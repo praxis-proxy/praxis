@@ -61,9 +61,11 @@ opentelemetry = { version = "0.32.0", default-features = false, features = ["tra
 opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace", "rt-tokio"] }
 opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "trace"] }
 # Temporary fork: https://github.com/praxis-proxy/pingora
-pingora-core = { version = "0.8.2", package = "quixotic-plecostomus-core", features = ["rustls"] }
+# TLS backend (rustls or openssl) is selected via feature flags so the two
+# remain mutually exclusive. Do not add features here; gate them in each crate.
+pingora-core = { version = "0.8.2", package = "quixotic-plecostomus-core" }
 pingora-http = { version = "0.8.2", package = "quixotic-plecostomus-http" }
-pingora-proxy = { version = "0.8.2", package = "quixotic-plecostomus-proxy", features = ["rustls"] }
+pingora-proxy = { version = "0.8.2", package = "quixotic-plecostomus-proxy" }
 percent-encoding = "2.3.2"
 rand = "0.10.2"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
