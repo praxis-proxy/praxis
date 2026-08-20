@@ -113,6 +113,10 @@ impl LoggingConfig {
             return Err("runtime.logging.rotation size limit must be > 0".to_owned());
         }
 
+        if matches!(self.rotation, Some(LogRotation::Size { .. })) && self.max_files < 2 {
+            return Err("runtime.logging.max_files must be >= 2 when size rotation is enabled".to_owned());
+        }
+
         Ok(())
     }
 
@@ -371,5 +375,30 @@ mod tests {
         };
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("rotation size limit must be > 0"), "{err}");
+    }
+
+    #[test]
+    fn max_files_one_rejected_for_size_rotation() {
+        let cfg = LoggingConfig {
+            output: LogOutput::File,
+            file_path: Some("/tmp/praxis.log".to_owned()),
+            rotation: Some(LogRotation::Size { max_bytes: 1_048_576 }),
+            max_files: 1,
+            ..LoggingConfig::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("max_files must be >= 2"), "{err}");
+    }
+
+    #[test]
+    fn max_files_one_allowed_for_daily_rotation() {
+        let cfg = LoggingConfig {
+            output: LogOutput::File,
+            file_path: Some("/tmp/praxis.log".to_owned()),
+            rotation: Some(LogRotation::Daily),
+            max_files: 1,
+            ..LoggingConfig::default()
+        };
+        cfg.validate().expect("daily rotation may retain a single file");
     }
 }
