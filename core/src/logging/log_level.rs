@@ -22,23 +22,15 @@ use crate::{config::Config, errors::ProxyError};
 // -----------------------------------------------------------------------------
 
 /// Admin log-level API errors mapped to HTTP status codes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum LogLevelError {
     /// Client error (400).
+    #[error("{0}")]
     BadRequest(String),
     /// Server error (500).
+    #[error("{0}")]
     Internal(String),
 }
-
-impl std::fmt::Display for LogLevelError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::BadRequest(message) | Self::Internal(message) => f.write_str(message),
-        }
-    }
-}
-
-impl std::error::Error for LogLevelError {}
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -222,19 +214,26 @@ impl LogLevelState {
 
         let mut guard = self.inner.lock().expect("log level state lock poisoned");
 
+        let mut changed = false;
         if all {
-            let keys: Vec<String> = guard.overlays.keys().cloned().collect();
-            for key in keys {
-                remove_overlay_locked(&mut guard, &key);
+            if !guard.overlays.is_empty() {
+                let keys: Vec<String> = guard.overlays.keys().cloned().collect();
+                for key in keys {
+                    remove_overlay_locked(&mut guard, &key);
+                }
+                changed = true;
             }
         } else {
             let target = overlay_target_key(module);
             if guard.overlays.contains_key(&target) {
                 remove_overlay_locked(&mut guard, &target);
+                changed = true;
             }
         }
 
-        reload_locked(&guard)?;
+        if changed {
+            reload_locked(&guard)?;
+        }
         Ok(snapshot_locked(&guard))
     }
 
@@ -265,9 +264,7 @@ impl LogLevelState {
 
     /// Remove one overlay after its revert timer fires (internal).
     fn revert_target(self: &Arc<Self>, target: &str) {
-        let Ok(mut guard) = self.inner.lock() else {
-            return;
-        };
+        let mut guard = self.inner.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if guard.overlays.contains_key(target) {
             remove_overlay_locked(&mut guard, target);
             if let Err(error) = reload_locked(&guard) {
@@ -465,6 +462,19 @@ mod tests {
     #[test]
     fn validate_put_accepts_off_level() {
         validate_put_request(None, "off", 60).expect("off should be valid for admin overlays");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn delete_without_active_overlay_skips_reload() {
+        let _lock = OVERLAY_TEST_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let state = shared_test_state();
+        reset_overlays(&state);
+
+        let snap = state.delete_overlays(None, false).expect("noop delete");
+        assert!(snap.overlays.is_empty());
+        assert_eq!(snap.effective_directive, "info");
     }
 
     #[tokio::test(start_paused = true)]

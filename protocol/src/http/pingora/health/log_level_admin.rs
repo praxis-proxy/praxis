@@ -199,10 +199,10 @@ fn serialization_failed_response(context: &str, error: &serde_json::Error) -> Re
     internal_error()
 }
 
-/// Strip the body for `HEAD` responses.
+/// Strip the body for `HEAD` while preserving `Content-Length` from the GET body
+/// (RFC 9110 §9.3.2).
 fn as_head_response(mut resp: Response<Vec<u8>>) -> Response<Vec<u8>> {
     *resp.body_mut() = Vec::new();
-    resp.headers_mut().remove(http::header::CONTENT_LENGTH);
     resp
 }
 
@@ -268,6 +268,21 @@ mod tests {
     fn parse_delete_query_rejects_empty_module() {
         let err = parse_delete_query(Some("module=")).unwrap_err();
         assert!(err.contains("must not be empty"));
+    }
+
+    #[test]
+    fn head_response_keeps_content_length() {
+        let body = br#"{"baseline_directive":"info","overlays":[]}"#;
+        let resp = json_response(200, body);
+        let head = as_head_response(resp);
+        assert!(head.body().is_empty(), "HEAD must not include a body");
+        assert_eq!(
+            head.headers()
+                .get(http::header::CONTENT_LENGTH)
+                .map(http::HeaderValue::as_bytes),
+            Some(body.len().to_string().as_bytes()),
+            "HEAD should advertise the GET body size"
+        );
     }
 
     #[test]

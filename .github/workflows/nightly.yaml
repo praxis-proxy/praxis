@@ -172,8 +172,13 @@ jobs:
         with:
           toolchain: ${{ matrix.toolchain }}
 
+      - name: Install h2spec
+        run: make target/praxis-binutils/h2spec
+
       - name: Check workspace
         run: cargo check --workspace --all-targets
 
       - name: Run tests
-        run: cargo test --workspace
+        run: |
+          export PATH="$(pwd)/target/praxis-binutils:$PATH"
+          cargo test --workspace
