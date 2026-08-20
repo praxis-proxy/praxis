@@ -17,6 +17,7 @@ use tracing::{debug, trace};
 use super::path_sanitize::normalize_rewritten_path;
 use crate::{
     FilterAction, FilterError,
+    builtins::http::compile_user_regex::compile_user_regex,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -347,10 +348,7 @@ fn compile_regex_replace(value: &serde_yaml::Value) -> Result<Operation, FilterE
     let rr: RegexReplace =
         serde_yaml::from_value(value.clone()).map_err(|e| format!("url_rewrite: regex_replace config: {e}"))?;
 
-    let pattern = regex::RegexBuilder::new(&rr.pattern)
-        .size_limit(1 << 20)
-        .build()
-        .map_err(|e| format!("url_rewrite: invalid regex '{pat}': {e}", pat = rr.pattern))?;
+    let pattern = compile_user_regex(&rr.pattern, "url_rewrite")?;
 
     Ok(Operation::RegexReplace {
         pattern,

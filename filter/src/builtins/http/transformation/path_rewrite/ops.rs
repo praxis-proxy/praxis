@@ -5,10 +5,10 @@
 
 use std::borrow::Cow;
 
-use regex::{Regex, RegexBuilder};
+use regex::Regex;
 
 use super::config::PathRewriteOperation;
-use crate::FilterError;
+use crate::{FilterError, builtins::http::compile_user_regex::compile_user_regex};
 
 // -----------------------------------------------------------------------------
 // PathRewriteOp
@@ -43,10 +43,7 @@ pub(super) fn build_op(operation: PathRewriteOperation) -> Result<PathRewriteOp,
         PathRewriteOperation::StripPrefix(prefix) => Ok(PathRewriteOp::StripPrefix(prefix)),
         PathRewriteOperation::AddPrefix(prefix) => Ok(PathRewriteOp::AddPrefix(prefix)),
         PathRewriteOperation::Replace { pattern, replacement } => {
-            let compiled = RegexBuilder::new(&pattern)
-                .size_limit(1 << 20)
-                .build()
-                .map_err(|e| -> FilterError { format!("path_rewrite: invalid regex: {e}").into() })?;
+            let compiled = compile_user_regex(&pattern, "path_rewrite")?;
             Ok(PathRewriteOp::Replace {
                 pattern: compiled,
                 replacement,
