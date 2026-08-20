@@ -14,13 +14,15 @@
 //! TLS configuration types for the Praxis proxy.
 
 mod cached;
+#[cfg(feature = "rustls")]
 mod client_auth;
 mod config;
 pub mod dns;
 mod error;
 mod identity;
-#[cfg(feature = "hot-reload")]
+#[cfg(all(feature = "hot-reload", feature = "rustls"))]
 pub mod reload;
+#[cfg(feature = "rustls")]
 pub mod setup;
 pub mod sni;
 pub mod sni_name;
@@ -28,7 +30,7 @@ pub mod sni_name;
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "test utilities")]
 mod test_utils;
-#[cfg(feature = "hot-reload")]
+#[cfg(all(feature = "hot-reload", feature = "rustls"))]
 pub mod watcher;
 
 pub use cached::{CachedCaCerts, CachedClientCert, CachedClusterTls};

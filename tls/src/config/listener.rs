@@ -819,6 +819,7 @@ certificates:
     }
 
     #[test]
+    #[cfg(feature = "rustls")]
     fn cipher_suite_id_to_rustls_all_variants() {
         let expected = [
             (CipherSuiteId::Tls13Aes128GcmSha256, "TLS13_AES_128_GCM_SHA256"),

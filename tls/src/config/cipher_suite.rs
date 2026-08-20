@@ -3,6 +3,7 @@
 
 //! Cipher suite identifiers for restricting accepted TLS cipher suites.
 
+#[cfg(feature = "rustls")]
 use rustls::{SupportedCipherSuite, crypto::aws_lc_rs::cipher_suite};
 use serde::{Deserialize, Serialize};
 
@@ -72,20 +73,10 @@ pub enum CipherSuiteId {
 }
 
 impl CipherSuiteId {
-    /// Convert to the corresponding rustls [`SupportedCipherSuite`].
+    /// Convert to the corresponding rustls `SupportedCipherSuite`.
     ///
-    /// ```
-    /// use praxis_tls::CipherSuiteId;
-    ///
-    /// let suite = CipherSuiteId::Tls13Aes256GcmSha384;
-    /// let rustls_suite = suite.to_rustls();
-    /// assert_eq!(
-    ///     format!("{:?}", rustls_suite.suite()),
-    ///     "TLS13_AES_256_GCM_SHA384"
-    /// );
-    /// ```
-    ///
-    /// [`SupportedCipherSuite`]: rustls::SupportedCipherSuite
+    /// Only available when the `rustls` feature is enabled.
+    #[cfg(feature = "rustls")]
     pub fn to_rustls(&self) -> SupportedCipherSuite {
         match self {
             Self::Tls13Aes128GcmSha256 => cipher_suite::TLS13_AES_128_GCM_SHA256,

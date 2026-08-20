@@ -15,8 +15,8 @@ name = "praxis_protocol"
 
 [features]
 default = []
-rustls = ["pingora-core/rustls", "pingora-proxy/rustls"]
-openssl = ["pingora-core/openssl", "pingora-proxy/openssl"]
+rustls = ["pingora-core/rustls", "pingora-proxy/rustls", "praxis-tls/rustls"]
+openssl = ["pingora-core/openssl", "pingora-proxy/openssl", "praxis-tls/openssl"]
 
 [lints]
 workspace = true

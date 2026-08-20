@@ -17,13 +17,16 @@ name = "praxis_tls"
 workspace = true
 
 [features]
+rustls = ["dep:rustls", "dep:rustls-pemfile"]
+openssl = ["dep:openssl"]
 hot-reload = ["dep:arc-swap", "dep:notify", "dep:tokio"]
 
 [dependencies]
 arc-swap = { workspace = true, optional = true }
 notify = { workspace = true, optional = true }
-rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
+openssl = { version = "0.10", optional = true }
+rustls = { workspace = true, optional = true }
+rustls-pemfile = { workspace = true, optional = true }
 serde = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["sync", "time", "rt"], optional = true }

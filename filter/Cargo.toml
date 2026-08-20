@@ -15,8 +15,8 @@ name = "praxis_filter"
 
 [features]
 default = []
-rustls = ["pingora-core/rustls"]
-openssl = ["pingora-core/openssl"]
+rustls = ["pingora-core/rustls", "praxis-tls/rustls"]
+openssl = ["pingora-core/openssl", "praxis-tls/openssl"]
 policy-engine = [
     "dep:ppe",
 ]

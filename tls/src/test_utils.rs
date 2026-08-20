@@ -17,8 +17,7 @@ use rcgen::{CertificateParams, DnType, IsCa, Issuer, KeyPair};
 /// features, rustls cannot auto-detect a provider. This function
 /// installs one explicitly. It is idempotent: if a provider is
 /// already installed the call is a no-op.
-///
-/// [`CryptoProvider`]: rustls::crypto::CryptoProvider
+#[cfg(feature = "rustls")]
 pub(crate) fn ensure_crypto_provider() {
     drop(rustls::crypto::aws_lc_rs::default_provider().install_default());
 }

@@ -272,6 +272,7 @@ fn load_and_validate_certs(path: &str, context: &str) -> Result<Vec<Vec<u8>>, Tl
 }
 
 /// Read a PEM certificate file and return DER-encoded certificate bytes.
+#[cfg(feature = "rustls")]
 fn parse_cert_pem(cert_path: &str) -> Result<Vec<Vec<u8>>, TlsError> {
     let pem = read_pem_file(cert_path)?;
     rustls_pemfile::certs(&mut &pem[..])
@@ -283,7 +284,27 @@ fn parse_cert_pem(cert_path: &str) -> Result<Vec<Vec<u8>>, TlsError> {
         .map(|certs| certs.into_iter().map(|c| c.to_vec()).collect())
 }
 
+/// Read a PEM certificate file and return DER-encoded certificate bytes.
+#[cfg(feature = "openssl")]
+fn parse_cert_pem(cert_path: &str) -> Result<Vec<Vec<u8>>, TlsError> {
+    let pem = read_pem_file(cert_path)?;
+    openssl::x509::X509::stack_from_pem(&pem)
+        .map_err(|e| TlsError::FileLoadError {
+            path: cert_path.to_owned(),
+            detail: e.to_string(),
+        })?
+        .iter()
+        .map(|cert| {
+            cert.to_der().map_err(|e| TlsError::FileLoadError {
+                path: cert_path.to_owned(),
+                detail: e.to_string(),
+            })
+        })
+        .collect()
+}
+
 /// Read a PEM private key file and return the DER-encoded key bytes.
+#[cfg(feature = "rustls")]
 fn parse_key_pem(key_path: &str) -> Result<Zeroizing<Vec<u8>>, TlsError> {
     let pem = read_pem_file(key_path)?;
     rustls_pemfile::private_key(&mut &pem[..])
@@ -296,6 +317,24 @@ fn parse_key_pem(key_path: &str) -> Result<Zeroizing<Vec<u8>>, TlsError> {
             detail: "no private key found".to_owned(),
         })
         .map(|k| Zeroizing::new(k.secret_der().to_vec()))
+}
+
+/// Read a PEM private key file and return the DER-encoded key bytes.
+#[cfg(feature = "openssl")]
+fn parse_key_pem(key_path: &str) -> Result<Zeroizing<Vec<u8>>, TlsError> {
+    let pem = read_pem_file(key_path)?;
+    openssl::pkey::PKey::private_key_from_pem(&pem)
+        .map_err(|e| TlsError::FileLoadError {
+            path: key_path.to_owned(),
+            detail: e.to_string(),
+        })
+        .and_then(|key| {
+            key.private_key_to_der().map_err(|e| TlsError::FileLoadError {
+                path: key_path.to_owned(),
+                detail: e.to_string(),
+            })
+        })
+        .map(Zeroizing::new)
 }
 
 /// Read a file into a zeroizing byte vector, mapping I/O errors

@@ -17,8 +17,8 @@ name = "praxis_core"
 workspace = true
 
 [features]
-rustls = ["pingora-core/rustls"]
-openssl = ["pingora-core/openssl", "dep:openssl"]
+rustls = ["pingora-core/rustls", "praxis-tls/rustls"]
+openssl = ["pingora-core/openssl", "dep:openssl", "praxis-tls/openssl"]
 otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
