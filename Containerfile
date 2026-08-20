@@ -6,9 +6,7 @@
 
 FROM rust:1.96-alpine AS builder
 
-ENV OPENSSL_STATIC=1
-
-RUN apk add --no-cache musl-dev openssl-dev openssl-libs-static pkgconf cmake make g++
+RUN apk add --no-cache musl-dev pkgconf cmake make g++
 
 WORKDIR /src
 
