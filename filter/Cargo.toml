@@ -57,7 +57,7 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 chrono = { workspace = true }
-jsonwebtoken = "10.4.0"
+jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
 metrics-exporter-prometheus = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

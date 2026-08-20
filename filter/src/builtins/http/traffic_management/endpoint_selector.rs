@@ -791,17 +791,17 @@ mod tests {
 
     #[test]
     fn validates_valid_dns_host_port() {
-        assert!(validate_host_port("backend.local:8080").is_ok());
+        validate_host_port("backend.local:8080").unwrap();
     }
 
     #[test]
     fn validates_valid_ipv4_host_port() {
-        assert!(validate_host_port("10.0.0.1:9090").is_ok());
+        validate_host_port("10.0.0.1:9090").unwrap();
     }
 
     #[test]
     fn validates_valid_ipv6_host_port() {
-        assert!(validate_host_port("[::1]:8080").is_ok());
+        validate_host_port("[::1]:8080").unwrap();
     }
 
     #[test]

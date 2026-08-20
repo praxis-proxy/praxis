@@ -527,10 +527,7 @@ fn format_ready_body(status_str: &str, agg: &HealthAggregate) -> String {
 mod tests {
     use std::{
         collections::HashMap,
-        sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        },
+        sync::atomic::{AtomicUsize, Ordering},
     };
 
     use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
@@ -837,7 +834,7 @@ mod tests {
 
     /// Build a [`ClusterHealthState`] with `n` healthy endpoints for tests.
     fn make_health_entry(n: usize) -> praxis_core::health::ClusterHealthState {
-        let eps: Vec<EndpointHealth> = (0..n).map(|_| EndpointHealth::new()).collect();
+        let eps: Vec<EndpointHealth> = std::iter::repeat_with(EndpointHealth::new).take(n).collect();
         let addrs: Vec<Arc<str>> = (0..n).map(|i| Arc::from(format!("10.0.0.{i}:80"))).collect();
         Arc::new(ClusterHealthEntry::new(eps, addrs, None, None))
     }

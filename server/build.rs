@@ -120,11 +120,15 @@ fn packages_by_id(packages: &[Package]) -> HashMap<&PackageId, &Package> {
 }
 
 /// Collect dependency edges of the server crate.
-fn collect_server_deps<'a>(packages: &'a [Package], resolve: &'a Resolve) -> Vec<&'a NodeDep> {
+fn collect_server_deps<'meta>(packages: &'meta [Package], resolve: &'meta Resolve) -> Vec<&'meta NodeDep> {
     resolve
         .nodes
         .iter()
-        .find(|node| packages.iter().any(|p| p.id == node.id && p.name == "praxis-proxy"))
+        .find(|node| {
+            packages
+                .iter()
+                .any(|pkg| pkg.id == node.id && pkg.name == "praxis-proxy")
+        })
         .map(|node| node.deps.iter().collect())
         .unwrap_or_default()
 }
@@ -213,15 +217,15 @@ fn git_version_suffix() -> Option<String> {
         .args(["rev-parse", "--short", "HEAD"])
         .output()
         .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())?;
+        .filter(|out| out.status.success())
+        .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())?;
 
     let dirty = std::process::Command::new("git")
         .args(["status", "--porcelain"])
         .output()
         .ok()
-        .filter(|o| o.status.success())
-        .is_some_and(|o| !o.stdout.is_empty());
+        .filter(|out| out.status.success())
+        .is_some_and(|out| !out.stdout.is_empty());
 
     Some(if dirty { format!("{sha}-dirty") } else { sha })
 }

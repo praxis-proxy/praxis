@@ -179,8 +179,7 @@ fn validate_pipeline(
     reason = "tests"
 )]
 mod tests {
-    use praxis_core::{config::Config, health::HealthRegistry};
-    use praxis_filter::FilterRegistry;
+    use praxis_core::health::HealthRegistry;
 
     use super::*;
 

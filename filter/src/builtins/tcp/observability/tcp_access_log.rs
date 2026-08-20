@@ -102,7 +102,6 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
-    use crate::tcp_filter::TcpFilterContext;
 
     #[test]
     fn from_config_succeeds() {

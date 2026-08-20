@@ -135,9 +135,11 @@ tls:
       key_path: /etc/praxis/tls/key.pem
 ```
 
-CRL checking is also available for upstream
-connections via `tls.ca.crl_paths` on a cluster
-definition. See [Cluster TLS](#cluster-tls).
+CRL checking applies only to listener client
+authentication. Upstream (cluster) CRL checking is
+not implemented, so `tls.ca.crl_paths` on a cluster
+definition is rejected at config validation rather
+than silently ignored.
 
 ### Local dev with mkcert
 

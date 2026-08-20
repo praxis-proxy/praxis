@@ -116,10 +116,7 @@ impl LeastConnections {
     reason = "tests"
 )]
 mod tests {
-    use std::{
-        sync::{Arc, atomic::Ordering},
-        thread,
-    };
+    use std::thread;
 
     use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
@@ -287,12 +284,12 @@ mod tests {
         ]));
         let total = 100;
 
-        let handles: Vec<_> = (0..total)
-            .map(|_| {
-                let lc = Arc::clone(&lc);
-                thread::spawn(move || lc.select(None))
-            })
-            .collect();
+        let handles: Vec<_> = std::iter::repeat_with(|| {
+            let lc = Arc::clone(&lc);
+            thread::spawn(move || lc.select(None))
+        })
+        .take(total)
+        .collect();
 
         for h in handles {
             h.join().unwrap();
@@ -318,15 +315,15 @@ mod tests {
             },
         ]));
 
-        let handles: Vec<_> = (0..50)
-            .map(|_| {
-                let lc = Arc::clone(&lc);
-                thread::spawn(move || {
-                    let addr = lc.select(None).unwrap();
-                    lc.release(&addr);
-                })
+        let handles: Vec<_> = std::iter::repeat_with(|| {
+            let lc = Arc::clone(&lc);
+            thread::spawn(move || {
+                let addr = lc.select(None).unwrap();
+                lc.release(&addr);
             })
-            .collect();
+        })
+        .take(50)
+        .collect();
 
         for h in handles {
             h.join().unwrap();

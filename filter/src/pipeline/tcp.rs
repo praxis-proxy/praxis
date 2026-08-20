@@ -104,7 +104,7 @@ mod tests {
     use praxis_core::config::FailureMode;
 
     use super::*;
-    use crate::{FilterError, FilterRegistry, Rejection, body::BodyCapabilities, tcp_filter::TcpFilter};
+    use crate::{FilterRegistry, Rejection, body::BodyCapabilities, tcp_filter::TcpFilter};
     #[tokio::test]
     async fn empty_pipeline_connect_continues() {
         let registry = FilterRegistry::with_builtins();

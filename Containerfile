@@ -105,7 +105,7 @@ USER praxis:praxis
 
 WORKDIR /etc/praxis
 
-EXPOSE 8080 9901
+EXPOSE 8080
 
 HEALTHCHECK --interval=5s --timeout=3s --start-period=2s \
     CMD wget -qO- http://127.0.0.1:9901/healthy || exit 1

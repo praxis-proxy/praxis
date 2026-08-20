@@ -702,7 +702,7 @@ fn streaming_size_limit_exceeded(ctx: &PingoraRequestCtx) -> bool {
 /// reflect what GET would return.
 fn build_terminal_header(
     resp: &praxis_filter::Response,
-    body: &Option<bytes::Bytes>,
+    body: Option<&bytes::Bytes>,
     body_prohibited: bool,
     is_head: bool,
 ) -> Option<pingora_http::ResponseHeader> {
@@ -726,7 +726,7 @@ fn build_terminal_header(
         let _append = header.append_header(name.clone(), value.clone());
     }
     if !body_prohibited && !is_head {
-        let content_length = body.as_ref().map_or(0, bytes::Bytes::len);
+        let content_length = body.map_or(0, bytes::Bytes::len);
         let _insert = header.insert_header("content-length", content_length.to_string());
     }
     Some(header)
@@ -742,7 +742,7 @@ async fn send_terminal_to_session(session: &mut Session, resp: &praxis_filter::R
     let status = resp.status;
     let body_prohibited = status == http::StatusCode::NO_CONTENT || status == http::StatusCode::NOT_MODIFIED;
 
-    let Some(header) = build_terminal_header(resp, &body, body_prohibited, is_head) else {
+    let Some(header) = build_terminal_header(resp, body.as_ref(), body_prohibited, is_head) else {
         send_rejection(session, Rejection::status(500)).await;
         return;
     };
@@ -958,10 +958,9 @@ mod tests {
 
     use http::{HeaderMap, Method, Uri};
     use praxis_core::config::FailureMode;
-    use praxis_filter::{BodyMode, FilterAction, FilterPipeline, FilterRegistry, Request};
+    use praxis_filter::FilterRegistry;
 
     use super::*;
-    use crate::http::pingora::context::PingoraRequestCtx;
 
     #[tokio::test]
     async fn empty_pipeline_continues() {

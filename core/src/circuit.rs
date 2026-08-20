@@ -99,8 +99,13 @@ struct CircuitInner {
     half_opened_at: Option<Instant>,
     /// When the circuit transitioned to `Open`.
     opened_at: Option<Instant>,
-    /// When the last outcome was recorded (success or failure).
+    /// When activity last touched the breaker: a token issued, or an
+    /// outcome recorded. Used for idle eviction.
     last_activity: Instant,
+    /// Outstanding tokens (requests in flight). A breaker with any
+    /// in-flight request is never idle-evicted, so its outcome is not
+    /// dropped by a generation mismatch against a recreated breaker.
+    in_flight: u32,
     /// Current state machine position.
     state: CircuitState,
     /// Monotonic generation counter; incremented on state transitions.
@@ -108,11 +113,22 @@ struct CircuitInner {
 }
 
 impl CircuitInner {
-    /// Issue a token at the current generation.
-    fn issue_token(&self) -> CircuitCheck {
+    /// Issue a token at the current generation, marking a request in
+    /// flight and refreshing the idle clock.
+    fn issue_token(&mut self) -> CircuitCheck {
+        self.in_flight = self.in_flight.saturating_add(1);
+        self.last_activity = Instant::now();
         CircuitCheck::Allowed(CircuitToken {
             generation: self.generation,
         })
+    }
+
+    /// Release a token's in-flight slot. Every issued token records
+    /// exactly one outcome, so this runs regardless of generation —
+    /// the generation check in the callers only gates the stats
+    /// update, not the in-flight bookkeeping.
+    fn release_token(&mut self) {
+        self.in_flight = self.in_flight.saturating_sub(1);
     }
 
     /// Bump the generation and transition to `HalfOpen`, issuing a
@@ -160,6 +176,7 @@ impl CircuitBreaker {
                 half_opened_at: None,
                 opened_at: None,
                 last_activity: Instant::now(),
+                in_flight: 0,
                 state: CircuitState::Closed,
                 generation: 0,
             }),
@@ -213,7 +230,8 @@ impl CircuitBreaker {
 
     /// Record a successful exchange for the given token.
     ///
-    /// Stale tokens (generation mismatch) are silently ignored.
+    /// Stale tokens (generation mismatch) do not update stats; their
+    /// in-flight slot is still released.
     ///
     /// # Panics
     ///
@@ -222,6 +240,7 @@ impl CircuitBreaker {
     #[expect(clippy::needless_pass_by_value, reason = "consumed to prevent double-recording")]
     pub fn record_success(&self, token: CircuitToken) {
         let mut inner = self.inner.lock().expect("circuit breaker lock poisoned");
+        inner.release_token();
         if token.generation != inner.generation {
             return;
         }
@@ -242,7 +261,8 @@ impl CircuitBreaker {
 
     /// Record a failed exchange for the given token.
     ///
-    /// Stale tokens (generation mismatch) are silently ignored.
+    /// Stale tokens (generation mismatch) do not update stats; their
+    /// in-flight slot is still released.
     ///
     /// # Panics
     ///
@@ -251,6 +271,7 @@ impl CircuitBreaker {
     #[expect(clippy::needless_pass_by_value, reason = "consumed to prevent double-recording")]
     pub fn record_failure(&self, token: CircuitToken) {
         let mut inner = self.inner.lock().expect("circuit breaker lock poisoned");
+        inner.release_token();
         if token.generation != inner.generation {
             return;
         }
@@ -272,8 +293,8 @@ impl CircuitBreaker {
         }
     }
 
-    /// Whether the breaker is `Closed` with no failures and idle
-    /// for at least `idle_threshold`.
+    /// Whether the breaker is `Closed` with no failures, no request
+    /// in flight, and idle for at least `idle_threshold`.
     ///
     /// # Panics
     ///
@@ -283,6 +304,7 @@ impl CircuitBreaker {
         let inner = self.inner.lock().expect("circuit breaker lock poisoned");
         inner.state == CircuitState::Closed
             && inner.consecutive_failures == 0
+            && inner.in_flight == 0
             && inner.last_activity.elapsed() >= idle_threshold
     }
 
@@ -749,6 +771,38 @@ mod tests {
         assert_eq!(evicted, 1, "only the healthy idle peer should be evicted");
         assert_eq!(registry.len(), 1);
         assert!(!registry.precheck(&a), "open circuit should survive eviction");
+    }
+
+    #[test]
+    fn evict_idle_preserves_in_flight_entries() {
+        // A request is in flight (token acquired, outcome not yet
+        // recorded). The breaker must not be evicted even past the idle
+        // threshold, or its later failure would be dropped by the
+        // generation mismatch against a recreated breaker.
+        let registry = CircuitBreakerRegistry::new(config(3, 30_000, 9_999_000));
+        let a = peer("127.0.0.1:8080");
+        let ta = registry.try_acquire(a.clone());
+        assert!(matches!(ta, CircuitCheck::Allowed(_)), "should allow");
+
+        let evicted = registry.evict_idle(Duration::ZERO);
+        assert_eq!(evicted, 0, "an in-flight breaker must not be evicted");
+        assert_eq!(registry.len(), 1);
+
+        record_registry_failure(&registry, &a, ta);
+        assert_eq!(registry.evict_idle(Duration::ZERO), 0, "open breaker survives");
+    }
+
+    // --- In-flight tracking ---
+
+    #[test]
+    fn in_flight_failure_counts_toward_threshold() {
+        // Regression: a slow request whose breaker would previously be
+        // evicted mid-flight must still have its failure recorded.
+        let cb = CircuitBreaker::new(config(1, 9_999_000, 9_999_000));
+        let check = cb.try_acquire();
+        assert!(!cb.is_idle(Duration::ZERO), "in-flight breaker is not idle");
+        record_failure_from_check(&cb, check);
+        assert_eq!(cb.state(), CircuitState::Open, "the failure must trip the circuit");
     }
 
     // --- PeerKey ---

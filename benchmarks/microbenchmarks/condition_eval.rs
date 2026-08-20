@@ -3,8 +3,8 @@
 
 //! Criterion benchmarks for condition evaluation.
 
-#![allow(
-    clippy::unwrap_used,
+#![expect(
+    clippy::min_ident_chars,
     clippy::expect_used,
     clippy::too_many_lines,
     reason = "benchmarks"

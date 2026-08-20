@@ -238,7 +238,7 @@ fn named_or_index(idx: usize, siblings: &[PipelineFilter]) -> String {
 #[expect(clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
-    use crate::{FilterRegistry, body::BodyAccess};
+    use crate::FilterRegistry;
 
     #[test]
     fn empty_pipeline_introspection() {

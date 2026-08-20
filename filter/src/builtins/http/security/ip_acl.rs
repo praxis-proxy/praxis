@@ -187,6 +187,22 @@ mod tests {
     }
 
     #[test]
+    fn deny_all_ipv4_wildcard_also_blocks_native_ipv6() {
+        // `0.0.0.0/0` means "deny everything"; a native IPv6 peer must not
+        // slip through on a dual-stack listener (previously fail-open).
+        let f = make_filter(&[], &["0.0.0.0/0"]);
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(!f.is_allowed(&v6), "deny 0.0.0.0/0 should also block native IPv6");
+    }
+
+    #[test]
+    fn allow_all_ipv4_wildcard_also_permits_native_ipv6() {
+        let f = make_filter(&["0.0.0.0/0"], &[]);
+        let v6: IpAddr = "2001:db8::1".parse().unwrap();
+        assert!(f.is_allowed(&v6), "allow 0.0.0.0/0 should also permit native IPv6");
+    }
+
+    #[test]
     fn allow_overrides_deny() {
         let f = make_filter(&["10.0.0.0/8"], &["0.0.0.0/0"]);
         let allowed: IpAddr = "10.1.2.3".parse().unwrap();

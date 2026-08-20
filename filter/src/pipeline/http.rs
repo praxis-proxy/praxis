@@ -16,7 +16,7 @@
 //! [`http_utils`]: super::http_utils
 
 use bytes::Bytes;
-use tracing::trace;
+use tracing::{trace, warn};
 
 use super::{
     FilterPipeline,
@@ -28,7 +28,11 @@ use super::{
     },
 };
 use crate::{
-    FilterError, actions::FilterAction, any_filter::AnyFilter, condition::should_execute, context::HttpFilterContext,
+    FilterError,
+    actions::{FilterAction, Rejection},
+    any_filter::AnyFilter,
+    condition::should_execute,
+    context::HttpFilterContext,
 };
 
 // -----------------------------------------------------------------------------
@@ -45,6 +49,10 @@ impl FilterPipeline {
     /// Tracks which filter indices actually executed so the
     /// response phase can skip filters that were bypassed
     /// (e.g. by `SkipTo`).
+    ///
+    /// A `terminal`/`client` branch rejoin whose sub-chain produced no
+    /// response fails closed with a 500 rather than forwarding
+    /// upstream.
     ///
     /// # Errors
     ///
@@ -90,7 +98,20 @@ impl FilterPipeline {
             ctx.executed_filter_indices[idx] = true;
             match super::evaluate::evaluate_branches(&pf.branches, ctx).await? {
                 BranchOutcome::Continue => idx += 1,
-                BranchOutcome::Terminal => return Ok(FilterAction::Continue),
+                BranchOutcome::Terminal => {
+                    // A `terminal`/`client` rejoin whose sub-chain produced no
+                    // response (a filter that responds returns via the
+                    // TerminalResponse arm above). The documented behaviour is
+                    // "stop the pipeline; respond to client", so fail closed
+                    // with a 500 rather than proxying upstream with the
+                    // remaining filters (cors, csrf, auth, ...) skipped.
+                    warn!(
+                        filter = http_filter.name(),
+                        "terminal branch produced no response; stopping the pipeline with 500 \
+                         instead of forwarding upstream"
+                    );
+                    return Ok(FilterAction::Reject(Rejection::status(500)));
+                },
                 BranchOutcome::SkipTo(t) => idx = t,
                 BranchOutcome::ReEnter(t) => {
                     ctx.executed_filter_indices[t..=idx].fill(false);
@@ -167,7 +188,7 @@ impl FilterPipeline {
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         ensure_body_done_indices(ctx, self.filters.len());
-        accumulate_body_bytes(&mut ctx.request_body_bytes, body);
+        accumulate_body_bytes(&mut ctx.request_body_bytes, body.as_ref());
         let request_phase_tracked = request_phase_tracked(ctx, self.filters.len());
         let mut released = false;
         for (idx, pf) in self.filters.iter().enumerate() {
@@ -247,7 +268,7 @@ impl FilterPipeline {
         response_header: Option<&crate::context::Response>,
     ) -> Result<FilterAction, FilterError> {
         ensure_body_done_indices(ctx, self.filters.len());
-        accumulate_body_bytes(&mut ctx.response_body_bytes, body);
+        accumulate_body_bytes(&mut ctx.response_body_bytes, body.as_ref());
         let request_phase_tracked = request_phase_tracked(ctx, self.filters.len());
         let mut released = false;
         for (idx, pf) in self.filters.iter().enumerate().rev() {

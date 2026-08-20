@@ -36,7 +36,7 @@ Supported strategies: - `round_robin` (default): cycles through endpoints in ord
 | `clusters[].tls` | ClusterTls | no | TLS settings for upstream connections. Presence implies TLS is enabled. Omit for plaintext HTTP. |
 | `clusters[].tls.ca` | CaConfig | no | Custom CA. |
 | `clusters[].tls.ca.ca_path` | string | yes | Path to the PEM CA certificate file. |
-| `clusters[].tls.ca.crl_paths` | string[] | no | Paths to PEM-encoded certificate revocation list (CRL) files. When provided, the mTLS client verifier checks presented client certificates against these CRLs and rejects revoked certificates. |
+| `clusters[].tls.ca.crl_paths` | string[] | no | Paths to PEM-encoded certificate revocation list (CRL) files. Applies only to **listener** client authentication: the client verifier checks presented client certificates against these CRLs and rejects revoked ones. Upstream (cluster) CRL checking is not implemented, so `crl_paths` under `clusters[].tls.ca` is rejected at config validation rather than being silently ignored. |
 | `clusters[].tls.client_cert` | CertKeyPair | no | Client certificate for upstream mTLS. |
 | `clusters[].tls.client_cert.cert_path` | string | yes | Path to the PEM certificate file. |
 | `clusters[].tls.client_cert.default` | bool | no | Whether this certificate is the default fallback for unmatched SNI. At most one certificate in a multi-cert config may set this to `true`. The default entry does not need `server_names`. |

@@ -47,7 +47,7 @@ with the following documentation first:
 - [Benchmarks](docs/benchmarks.md)
 
 For larger changes, open a [discussion] and follow the
-[proposal process](docs/proposals.md).
+[proposal process].
 
 We have a Slack channel for the project on [CNCF Slack],
 plase join us in the [#praxis] channel there.
@@ -60,3 +60,4 @@ All participants are expected to follow the
 [discussion]:https://github.com/praxis-proxy/praxis/discussions
 [CNCF Slack]:https://slack.cncf.io
 [#praxis]:https://cloud-native.slack.com/archives/C0BK0RSP5RC
+[proposal process]:https://github.com/praxis-proxy/enhancements

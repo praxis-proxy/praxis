@@ -524,16 +524,10 @@ impl Default for PingoraRequestCtx {
     reason = "tests"
 )]
 mod tests {
-    use std::{
-        collections::VecDeque,
-        net::{IpAddr, Ipv4Addr},
-        sync::Arc,
-    };
+    use std::net::Ipv4Addr;
 
-    use bytes::Bytes;
     use http::{HeaderMap, Method, Uri};
-    use praxis_core::connectivity::Upstream;
-    use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, FilterRegistry};
+    use praxis_filter::FilterRegistry;
 
     use super::*;
 

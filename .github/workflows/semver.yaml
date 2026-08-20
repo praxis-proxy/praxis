@@ -1,0 +1,54 @@
+name: SemVer
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+
+on:
+# NOTE: manual only until v1.x.x
+#
+#  push:
+#    branches: [main]
+#  pull_request:
+#    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # SemVer Compliance
+  # ----------------------------------------------------------------------------
+
+  semver:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        with:
+          cache-suffix: semver
+
+      - name: Cache cargo-semver-checks
+        id: cache-semver
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-semver-checks
+          key: cargo-semver-checks-${{ runner.os }}
+
+      - name: Install cargo-semver-checks
+        if: steps.cache-semver.outputs.cache-hit != 'true'
+        run: cargo install cargo-semver-checks --locked
+
+      - name: Check SemVer compliance
+        run: make semver

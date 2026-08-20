@@ -310,7 +310,6 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::{FilterAction, FilterError};
 
     #[tokio::test]
     async fn default_on_response_returns_continue() {

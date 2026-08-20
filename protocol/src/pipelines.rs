@@ -134,10 +134,7 @@ impl ListenerPipelines {
     reason = "tests"
 )]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
-
-    use arc_swap::ArcSwap;
-    use praxis_filter::{FilterPipeline, FilterRegistry};
+    use praxis_filter::FilterRegistry;
 
     use super::*;
 

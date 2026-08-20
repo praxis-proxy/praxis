@@ -31,7 +31,7 @@ use crate::{
 // -----------------------------------------------------------------------------
 
 /// Add chunk size to accumulator.
-pub(super) fn accumulate_body_bytes(counter: &mut u64, body: &Option<Bytes>) {
+pub(super) fn accumulate_body_bytes(counter: &mut u64, body: Option<&Bytes>) {
     if let Some(b) = body {
         *counter += b.len() as u64;
     }
@@ -371,8 +371,6 @@ pub(super) async fn run_response_filter(
     reason = "tests"
 )]
 mod tests {
-    use bytes::Bytes;
-
     use super::*;
     use crate::HttpFilter;
 
@@ -380,24 +378,24 @@ mod tests {
     fn accumulate_body_bytes_some_adds_to_counter() {
         let mut counter = 0_u64;
         let body = Some(Bytes::from_static(b"hello"));
-        accumulate_body_bytes(&mut counter, &body);
+        accumulate_body_bytes(&mut counter, body.as_ref());
         assert_eq!(counter, 5, "counter should equal byte length of body");
     }
 
     #[test]
     fn accumulate_body_bytes_none_does_not_change_counter() {
         let mut counter = 42_u64;
-        accumulate_body_bytes(&mut counter, &None);
+        accumulate_body_bytes(&mut counter, None);
         assert_eq!(counter, 42, "counter should remain unchanged for None body");
     }
 
     #[test]
     fn accumulate_body_bytes_multiple_sums_correctly() {
         let mut counter = 0_u64;
-        accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"abc")));
-        accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"defgh")));
-        accumulate_body_bytes(&mut counter, &None);
-        accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"ij")));
+        accumulate_body_bytes(&mut counter, Some(&Bytes::from_static(b"abc")));
+        accumulate_body_bytes(&mut counter, Some(&Bytes::from_static(b"defgh")));
+        accumulate_body_bytes(&mut counter, None);
+        accumulate_body_bytes(&mut counter, Some(&Bytes::from_static(b"ij")));
         assert_eq!(counter, 10, "counter should be sum of all Some chunk lengths");
     }
 

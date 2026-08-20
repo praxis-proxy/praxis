@@ -1,0 +1,15 @@
+# Link checker configuration (lychee).
+
+# GitHub rate-limits anonymous checks; treat 429 as success.
+accept = ["200..=299", "429"]
+max_retries = 2
+timeout = 20
+
+exclude = [
+  # Local and placeholder hosts
+  "^https?://localhost",
+  "^https?://127\\.0\\.0\\.1",
+]
+
+# The proposal template contains intentional placeholder links.
+exclude_path = ["docs/proposals/template.md"]

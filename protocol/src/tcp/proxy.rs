@@ -3,7 +3,7 @@
 
 //! Pingora-backed bidirectional TCP proxy application.
 
-use std::{borrow::Cow, collections::HashMap, future::Future, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{borrow::Cow, collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;

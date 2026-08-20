@@ -706,9 +706,9 @@ mod tests {
         tracing::info!("verifying cwd-joined form matches");
         let cwd = std::env::current_dir().unwrap();
         let abs_with_dotdot = cwd.join(&relative);
-        let event = make_event(vec![abs_with_dotdot]);
+        let dotdot_event = make_event(vec![abs_with_dotdot]);
         assert!(
-            filter.matches(&event),
+            filter.matches(&dotdot_event),
             "should match cwd-joined path retaining .. components"
         );
     }

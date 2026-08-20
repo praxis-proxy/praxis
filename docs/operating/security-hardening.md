@@ -9,8 +9,11 @@ and operational hardening for production deployments.
 Praxis ships secure by default and fails closed on
 ambiguous configuration:
 
-- Listeners bind to `127.0.0.1` unless explicitly
-  configured otherwise.
+- A listener `address` is required; there is no
+  implicit default, so a listener never binds to an
+  interface you did not name. Bind to `127.0.0.1`
+  rather than `0.0.0.0` when a listener should not be
+  externally reachable.
 - TLS certificate verification is enabled by default
   for upstream connections.
 - Admin endpoints are restricted to loopback; non-loopback
@@ -55,7 +58,7 @@ ambiguous configuration:
 
 - Set certificate and key file permissions to `0600`,
   owned by the Praxis process user.
-- Use `min_version: "1.3"` in TLS configuration.
+- Use `min_version: tls13` in TLS configuration.
   TLS 1.2 can be used if required, but TLS 1.0 and 1.1
   are deprecated and Praxis will not negotiate them.
 - Rotate certificates before expiration. Single-cert

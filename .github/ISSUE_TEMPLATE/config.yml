@@ -3,3 +3,6 @@ contact_links:
   - name: Discussions
     url: https://github.com/praxis-proxy/praxis/discussions
     about: Ask questions or start a discussion
+  - name: Feature Request
+    url: https://github.com/orgs/praxis-proxy/discussions
+    about: Feature requests start as a Discussion, then move to a proposal and issue when accepted

@@ -277,7 +277,7 @@ filter_chains:
     bound_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("backend should bind");
-    release_retry.release();
+    drop(release_retry);
 
     let (status, body) = rx.recv_timeout(Duration::from_secs(10)).expect("request should finish");
     assert_eq!(status, 200, "request should succeed after backend comes up");

@@ -122,8 +122,6 @@ fn is_traversal_segment(seg: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::borrow::Cow;
-
     use super::*;
 
     #[test]

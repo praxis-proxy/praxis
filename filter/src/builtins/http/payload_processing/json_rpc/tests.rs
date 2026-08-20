@@ -508,6 +508,28 @@ async fn extracts_method_from_request() {
 }
 
 #[tokio::test]
+async fn promotes_once_across_chunk_and_eos() {
+    // A body delivered as a pre-EOS chunk then the full body at EOS must
+    // promote exactly one set of headers, not one per invocation.
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/rpc");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let json = br#"{"jsonrpc":"2.0","method":"service/invoke","id":"req-123"}"#;
+
+    // Pre-EOS pass: buffering, no promotion.
+    let mut partial = Some(Bytes::from_static(json));
+    let a1 = filter.on_request_body(&mut ctx, &mut partial, false).await.unwrap();
+    assert!(matches!(a1, FilterAction::Continue), "pre-EOS should continue");
+    assert!(ctx.extra_request_headers.is_empty(), "no promotion before EOS");
+
+    // EOS pass with the full buffer: promote exactly once.
+    let mut full = Some(Bytes::from_static(json));
+    let a2 = filter.on_request_body(&mut ctx, &mut full, true).await.unwrap();
+    assert!(matches!(a2, FilterAction::Release), "EOS should release");
+    assert_eq!(ctx.extra_request_headers.len(), 3, "exactly 3 headers, no duplicates");
+}
+
+#[tokio::test]
 async fn extracts_notification() {
     let filter = make_filter();
     let req = crate::test_utils::make_request(http::Method::POST, "/rpc");

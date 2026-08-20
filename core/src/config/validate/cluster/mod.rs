@@ -25,6 +25,15 @@ pub(crate) const MAX_TIMEOUT_MS: u64 = 3_600_000;
 /// Maximum number of endpoints allowed per cluster.
 pub(crate) const MAX_ENDPOINTS: usize = 10_000;
 
+/// Maximum relative weight for a single endpoint.
+///
+/// Weighted load balancers (Maglev, consistent hashing) expand each
+/// endpoint into `weight` replicas at build time, so an unbounded weight
+/// is an out-of-memory vector — a `weight` typo would allocate billions
+/// of replicas during a live reload. A ratio of 1000:1 is far beyond any
+/// real hardware-capacity spread.
+pub(crate) const MAX_ENDPOINT_WEIGHT: u32 = 1_000;
+
 // -----------------------------------------------------------------------------
 // Cluster Validation
 // -----------------------------------------------------------------------------

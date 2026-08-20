@@ -199,7 +199,7 @@ fn fnv1a_seeded(s: &str, seed: u64) -> u64 {
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
+    use praxis_core::health::ClusterHealthEntry;
 
     use super::*;
 

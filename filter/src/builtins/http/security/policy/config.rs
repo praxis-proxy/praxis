@@ -32,7 +32,7 @@ use serde::Deserialize;
 /// (fail-fast rather than at first request).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PolicyFilterConfig {
+pub(crate) struct PolicyFilterConfig {
     /// Body-access tier. `ReadOnly` (default) lets APL inspect request
     /// and response bodies for routing / policy decisions but discards
     /// any mutations. `ReadWrite` enables the CMF → JSON-RPC
@@ -119,7 +119,7 @@ fn default_max_buffer_bytes() -> usize {
 /// cost), so a per-filter knob is the right granularity.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum BodyAccessMode {
+pub(crate) enum BodyAccessMode {
     /// Body is buffered for inspection / routing; mutations are
     /// discarded. APL `require()` predicates over body content
     /// (`args.amount > 1000`) work; `redact()` / `assign()` are

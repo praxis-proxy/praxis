@@ -127,15 +127,32 @@ impl ResolvesServerCert for ReloadableCertResolver {
 // ReloadableClientVerifier
 // -----------------------------------------------------------------------------
 
-/// Inner state holding the current client certificate verifier.
+/// Inner state holding the current client certificate verifier and
+/// its client-auth mode.
 ///
 /// Wrapped in [`ArcSwap`] so verification delegates to the latest
 /// verifier after a CRL or CA reload.
 ///
 /// [`ArcSwap`]: arc_swap::ArcSwap
 pub struct VerifierState {
+    /// Whether client auth is mandatory, per the mode this state was
+    /// built with. Held here so `reload` swaps it atomically with the
+    /// verifier — a plain field on the outer type could not be updated
+    /// through `&self`.
+    pub(crate) mandatory: bool,
+
     /// The active verifier built from the current CA and CRL files.
     pub(crate) verifier: Arc<dyn ClientCertVerifier>,
+}
+
+impl VerifierState {
+    /// Build a state from a verifier and the mode it was built with.
+    pub(crate) fn new(verifier: Arc<dyn ClientCertVerifier>, mode: ClientCertMode) -> Self {
+        Self {
+            mandatory: mode == ClientCertMode::Require,
+            verifier,
+        }
+    }
 }
 
 /// Atomically swappable client certificate verifier for CRL/CA
@@ -171,13 +188,12 @@ pub struct VerifierState {
 /// [`ClientCertVerifier`]: rustls::server::danger::ClientCertVerifier
 /// [`ArcSwap`]: arc_swap::ArcSwap
 pub struct ReloadableClientVerifier {
-    /// Swappable verifier state.
+    /// Swappable verifier state (verifier + mandatory flag).
     inner: Arc<ArcSwap<VerifierState>>,
 
-    /// Whether client auth is mandatory (cached from initial mode).
-    mandatory: bool,
-
-    /// Cached root hint subjects from initial CA load.
+    /// Cached root hint subjects from initial CA load. Deliberately
+    /// not part of the swapped [`VerifierState`] — see the type-level
+    /// doc for why stale hints after a CA reload are acceptable.
     root_hints: Vec<DistinguishedName>,
 }
 
@@ -193,8 +209,7 @@ impl ReloadableClientVerifier {
         let verifier = client_auth::build_client_verifier(ca_path, mode, crl_paths)?;
         let root_hints = verifier.root_hint_subjects().to_vec();
         Ok(Self {
-            inner: Arc::new(ArcSwap::from_pointee(VerifierState { verifier })),
-            mandatory: mode == ClientCertMode::Require,
+            inner: Arc::new(ArcSwap::from_pointee(VerifierState::new(verifier, mode))),
             root_hints,
         })
     }
@@ -211,7 +226,7 @@ impl ReloadableClientVerifier {
     /// [`TlsError`]: crate::TlsError
     pub fn reload(&self, ca_path: &str, mode: ClientCertMode, crl_paths: &[String]) -> Result<(), TlsError> {
         let verifier = client_auth::build_client_verifier(ca_path, mode, crl_paths)?;
-        self.inner.store(Arc::new(VerifierState { verifier }));
+        self.inner.store(Arc::new(VerifierState::new(verifier, mode)));
         tracing::info!(ca_path, "client verifier hot-reloaded successfully");
         Ok(())
     }
@@ -229,7 +244,7 @@ impl ReloadableClientVerifier {
 impl std::fmt::Debug for ReloadableClientVerifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ReloadableClientVerifier")
-            .field("mandatory", &self.mandatory)
+            .field("mandatory", &self.inner.load().mandatory)
             .finish()
     }
 }
@@ -240,7 +255,7 @@ impl ClientCertVerifier for ReloadableClientVerifier {
     }
 
     fn client_auth_mandatory(&self) -> bool {
-        self.mandatory
+        self.inner.load().mandatory
     }
 
     fn root_hint_subjects(&self) -> &[DistinguishedName] {
@@ -409,8 +424,8 @@ mod tests {
             resolver_clone.reload(&pair2).expect("reload should succeed");
         });
 
-        let observed: Vec<_> = (0..100)
-            .map(|_| resolver.current.load_full().cert[0].as_ref().to_vec())
+        let observed: Vec<_> = std::iter::repeat_with(|| resolver.current.load_full().cert[0].as_ref().to_vec())
+            .take(100)
             .collect();
         handle.join().expect("reload thread should not panic");
         let cert2_der = resolver.current.load_full().cert[0].as_ref().to_vec();
@@ -475,6 +490,32 @@ mod tests {
         assert!(
             !verifier.client_auth_mandatory(),
             "Request mode should not make auth mandatory"
+        );
+    }
+
+    #[test]
+    fn reloadable_verifier_reload_updates_mandatory() {
+        ensure_crypto_provider();
+        let ca = gen_ca_file();
+        let ca_path = ca.ca_path.to_str().expect("ca path");
+
+        let verifier = ReloadableClientVerifier::new(ca_path, ClientCertMode::Request, &[]).expect("initial verifier");
+        assert!(!verifier.client_auth_mandatory(), "request mode starts non-mandatory");
+
+        verifier
+            .reload(ca_path, ClientCertMode::Require, &[])
+            .expect("reload to require should succeed");
+        assert!(
+            verifier.client_auth_mandatory(),
+            "reload to require must engage mandatory client auth"
+        );
+
+        verifier
+            .reload(ca_path, ClientCertMode::Request, &[])
+            .expect("reload back to request should succeed");
+        assert!(
+            !verifier.client_auth_mandatory(),
+            "reload back to request must disengage mandatory client auth"
         );
     }
 

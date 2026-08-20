@@ -217,7 +217,7 @@ fn build_otel_provider(
         )));
     }
 
-    let exporter = build_span_exporter(endpoint, &config.otlp_headers)?;
+    let exporter = build_span_exporter(endpoint, config.otlp_headers.as_ref())?;
     let batch_processor = build_batch_processor(exporter, config);
     let resource = build_otel_resource(config);
 
@@ -249,7 +249,7 @@ fn build_otel_provider(
 #[cfg(feature = "otel")]
 fn build_span_exporter(
     endpoint: &str,
-    headers: &Option<std::collections::HashMap<String, String>>,
+    headers: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<opentelemetry_otlp::SpanExporter, ProxyError> {
     use opentelemetry_otlp::{WithExportConfig as _, WithTonicConfig as _};
 
@@ -497,7 +497,6 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::config::Config;
 
     #[test]
     fn empty_log_overrides_produces_valid_filter() {

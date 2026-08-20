@@ -3,6 +3,7 @@
 
 //! HTTP protocol filters, organized by category.
 
+pub(crate) mod compile_user_regex;
 mod observability;
 pub mod payload_processing;
 mod security;

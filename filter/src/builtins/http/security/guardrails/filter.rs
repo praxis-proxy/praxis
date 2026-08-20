@@ -307,7 +307,17 @@ impl HttpFilter for GuardrailsFilter {
 // -----------------------------------------------------------------------------
 
 /// Write a guardrails status result to the filter context.
+///
+/// `blocked` is sticky: a later `passed` (e.g. from the body phase when
+/// no body rule matched) must not downgrade a `blocked` written by the
+/// header phase, or a request the header rule flagged would be recorded
+/// as passed and any branch chain keyed on the result would admit it.
 fn write_result(ctx: &mut HttpFilterContext<'_>, status: &'static str) {
+    let already_blocked = ctx.filter_results.get("guardrails").and_then(|rs| rs.get("status")) == Some("blocked");
+    if status == "passed" && already_blocked {
+        tracing::debug!("guardrails already blocked; not downgrading to passed");
+        return;
+    }
     let mut rs = FilterResultSet::new();
     if let Err(e) = rs.set("status", status) {
         tracing::warn!(error = %e, "failed to write guardrails result");

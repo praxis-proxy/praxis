@@ -91,7 +91,7 @@ fn default_strip() -> bool {
 #[cfg(test)]
 #[expect(clippy::expect_used, reason = "tests use expect for parse setup")]
 mod tests {
-    use secrecy::{ExposeSecret as _, SecretString};
+    use secrecy::ExposeSecret as _;
 
     use super::*;
 
