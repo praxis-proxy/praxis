@@ -1,0 +1,54 @@
+name: Mutation Testing
+
+# ------------------------------------------------------------------------------
+# Workflow Settings
+# ------------------------------------------------------------------------------
+#
+# Coverage proves code executed; mutation testing proves the assertions
+# would notice if the code were wrong. Weekly because it rebuilds the
+# workspace once per mutant.
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+permissions: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # ----------------------------------------------------------------------------
+  # Mutants
+  # ----------------------------------------------------------------------------
+
+  mutants:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        with:
+          cache-suffix: mutants
+
+      - name: Cache cargo-mutants
+        id: cache-mutants
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-mutants
+          key: cargo-mutants-${{ runner.os }}
+
+      - name: Install cargo-mutants
+        if: steps.cache-mutants.outputs.cache-hit != 'true'
+        run: cargo install cargo-mutants --locked
+
+      - name: Run mutation testing
+        run: make mutants

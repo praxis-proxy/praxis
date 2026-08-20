@@ -115,7 +115,7 @@ deployment guidance.
 
 **Configuration-level protections:**
 
-- Listeners default to localhost binding
+- Listener `address` is required. No implicit default, so a listener binds only where you name it
 - Admin endpoints must bind to loopback unless `allow_public_admin` is set
 - TLS paths reject directory traversal (`..`)
 - Health check targets validated against SSRF
@@ -143,7 +143,7 @@ deployment guidance.
   into upstream request headers with environment variable
   or inline values; client credential stripping
 - **Policy engine** (`policy`, experimental, feature
-  `cpex-policy-engine`): JWT identity, route policy, PII
+  `policy-engine`): JWT identity, route policy, PII
   scanning, audit
 
 ## Observability

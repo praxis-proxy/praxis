@@ -185,11 +185,11 @@ impl TcpFilter for TcpLoadBalancerFilter {
     reason = "tests"
 )]
 mod tests {
-    use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Instant};
+    use std::time::Instant;
 
     use praxis_core::{
-        config::{Cluster, ConsistentHashOpts, Endpoint, LoadBalancerStrategy, ParameterisedStrategy, SimpleStrategy},
-        health::{ClusterHealthEntry, ClusterHealthState, EndpointHealth},
+        config::{ConsistentHashOpts, Endpoint, LoadBalancerStrategy, ParameterisedStrategy, SimpleStrategy},
+        health::{ClusterHealthEntry, EndpointHealth},
     };
 
     use super::*;

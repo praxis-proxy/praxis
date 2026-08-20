@@ -21,6 +21,7 @@ otel = [
     "dep:opentelemetry",
     "dep:opentelemetry_sdk",
     "dep:opentelemetry-otlp",
+    "dep:tonic",
     "dep:tracing-opentelemetry",
 ]
 
@@ -28,6 +29,7 @@ otel = [
 bytes = { workspace = true }
 dashmap = { workspace = true }
 http = { workspace = true }
+metrics = { workspace = true }
 opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
@@ -39,10 +41,14 @@ regex = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
+
 tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tonic = { workspace = true, optional = true }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
+h2 = { workspace = true }
+metrics-exporter-prometheus = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net"] }

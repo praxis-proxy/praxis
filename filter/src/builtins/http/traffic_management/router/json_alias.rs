@@ -2,13 +2,20 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! JSON alias pattern matching and resolution helpers.
+//!
+//! Groundwork for body-field routing. Nothing in the request path calls
+//! into this module yet, and `json_aliases` is rejected at startup for
+//! that reason — see `reject_unimplemented_json_aliases`. These helpers
+//! operate on the raw [`RouterRouteConfig`] rather than the resolved
+//! route table, so wiring the feature up does not require the routing
+//! table to carry alias state it never reads.
 
 #![allow(
     dead_code,
     reason = "all items are validated via tests; callers wired in body-aliasing follow-up"
 )]
 
-use super::{ResolvedRoute, config::JsonAlias};
+use super::config::{JsonAlias, RouterRouteConfig};
 
 /// Alias patterns intentionally support a single `*` so matching stays
 /// predictable and validation can reject ambiguous patterns.
@@ -41,7 +48,7 @@ pub(super) struct AliasMatch<'a> {
     pub alias: &'a JsonAlias,
     /// The route that owns the matching alias.
     #[expect(dead_code, reason = "cluster selection is validated before body aliasing is wired")]
-    pub route: &'a ResolvedRoute,
+    pub route: &'a RouterRouteConfig,
     /// Alias specificity within the owning route.
     pub specificity: u32,
 }
@@ -51,7 +58,7 @@ pub(super) struct AliasMatch<'a> {
 pub(super) fn resolve_json_alias<'a>(
     field: &str,
     value: &str,
-    routes: impl Iterator<Item = &'a ResolvedRoute>,
+    routes: impl Iterator<Item = &'a RouterRouteConfig>,
 ) -> Option<AliasMatch<'a>> {
     for route in routes {
         let Some(aliases) = &route.json_aliases else {
@@ -71,7 +78,7 @@ fn best_alias_in_route<'a>(
     field: &str,
     value: &str,
     aliases: &'a [JsonAlias],
-    route: &'a ResolvedRoute,
+    route: &'a RouterRouteConfig,
 ) -> Option<AliasMatch<'a>> {
     let mut best: Option<AliasMatch<'a>> = None;
     for alias in aliases {
@@ -265,15 +272,15 @@ mod tests {
     // Test Utilities
     // -------------------------------------------------------------------------
 
-    fn test_route_with_alias(pattern: &str, target: Option<&str>) -> ResolvedRoute {
+    fn test_route_with_alias(pattern: &str, target: Option<&str>) -> RouterRouteConfig {
         test_route_with_aliases(vec![(pattern, target)])
     }
 
-    fn test_route_with_field_alias(field: &str, pattern: &str, target: Option<&str>) -> ResolvedRoute {
+    fn test_route_with_field_alias(field: &str, pattern: &str, target: Option<&str>) -> RouterRouteConfig {
         test_route_with_json_aliases(vec![(field, pattern, target)])
     }
 
-    fn test_route_with_aliases(aliases: Vec<(&str, Option<&str>)>) -> ResolvedRoute {
+    fn test_route_with_aliases(aliases: Vec<(&str, Option<&str>)>) -> RouterRouteConfig {
         test_route_with_json_aliases(
             aliases
                 .into_iter()
@@ -282,8 +289,8 @@ mod tests {
         )
     }
 
-    fn test_route_with_json_aliases(aliases: Vec<(&str, &str, Option<&str>)>) -> ResolvedRoute {
-        ResolvedRoute {
+    fn test_route_with_json_aliases(aliases: Vec<(&str, &str, Option<&str>)>) -> RouterRouteConfig {
+        RouterRouteConfig {
             route: Route {
                 path_match: PathMatch::Prefix {
                     path_prefix: "/".to_owned(),
@@ -302,8 +309,6 @@ mod tests {
                     })
                     .collect(),
             ),
-            metrics_label: ::metrics::SharedString::const_str("/"),
-            wildcard_suffix: None,
         }
     }
 }

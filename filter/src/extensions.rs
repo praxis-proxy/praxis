@@ -57,7 +57,7 @@ impl AuthenticatedIdentity {
     /// Construct a raw-credential-free identity from trusted, normalized parts.
     ///
     /// Returns `None` when authentication did not produce a subject ID.
-    #[cfg(any(feature = "cpex-policy-engine", test))]
+    #[cfg(any(feature = "policy-engine", test))]
     pub(crate) fn new(
         subject_id: String,
         roles: impl IntoIterator<Item = String>,

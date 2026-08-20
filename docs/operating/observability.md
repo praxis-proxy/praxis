@@ -90,6 +90,11 @@ Praxis records two categories of Prometheus metrics:
 HTTP request metrics (always on when admin is
 enabled) and per-filter duration histograms (opt-in).
 
+Recorder upkeep runs every five seconds whenever the
+admin endpoint is enabled. It is independent of
+Prometheus scrape traffic, so histogram buffers are
+drained even when `/metrics` is not being scraped.
+
 ### HTTP Request Metrics
 
 These are recorded automatically for every proxied
@@ -393,7 +398,7 @@ filter_chains:
               - "10.0.0.1:8080"
             health_check:
               type: http
-              interval_secs: 5
+              interval_ms: 5000
               path: /healthz
 ```
 

@@ -31,7 +31,7 @@ use crate::{
 // -----------------------------------------------------------------------------
 
 /// Add chunk size to accumulator.
-pub(super) fn accumulate_body_bytes(counter: &mut u64, body: &Option<Bytes>) {
+pub(super) fn accumulate_body_bytes(counter: &mut u64, body: Option<&Bytes>) {
     if let Some(b) = body {
         *counter += b.len() as u64;
     }
@@ -116,7 +116,9 @@ pub(super) fn dispatch_body_result(
     failure_mode: FailureMode,
 ) -> Result<BodyFilterOutcome, FilterError> {
     match result {
-        Ok(FilterAction::Continue | FilterAction::TerminalResponse(_)) => Ok(BodyFilterOutcome::Continue),
+        Ok(FilterAction::Continue | FilterAction::TerminalResponse(_) | FilterAction::StreamingTerminalResponse(_)) => {
+            Ok(BodyFilterOutcome::Continue)
+        },
         Ok(FilterAction::Release) => {
             debug!(filter = filter_name, "filter released body");
             Ok(BodyFilterOutcome::Released)
@@ -181,6 +183,9 @@ pub(super) enum HeaderFilterOutcome {
 
     /// Filter produced a complete terminal response (request phase only).
     TerminalResponse(crate::actions::TerminalResponse),
+
+    /// Filter produced a streaming terminal response (request phase only).
+    StreamingTerminalResponse(Box<crate::actions::StreamingTerminalResponse>),
 }
 
 /// Run a single request header filter hook with tracing and metrics.
@@ -224,6 +229,14 @@ pub(super) async fn run_request_filter(
                 "filter produced terminal response"
             );
             Ok(HeaderFilterOutcome::TerminalResponse(*terminal))
+        },
+        Ok(FilterAction::StreamingTerminalResponse(terminal)) => {
+            debug!(
+                filter = http_filter.name(),
+                status = terminal.status,
+                "filter produced streaming terminal response"
+            );
+            Ok(HeaderFilterOutcome::StreamingTerminalResponse(terminal))
         },
         Err(e) => {
             check_failure_mode(http_filter.name(), e, "request", failure_mode)?;
@@ -286,10 +299,20 @@ pub(super) fn run_response_body_filter(
     dispatch_body_result(body_result, http_filter.name(), "response body", failure_mode)
 }
 
-/// Run a single response header filter and track header modification.
+/// Run a single response header filter.
 ///
 /// When `failure_mode` is [`FailureMode::Open`], errors are logged as
 /// warnings and the filter is treated as if it returned `Continue`.
+///
+/// This hook does **not** infer header modification. Comparing the header
+/// count before and after the filter misses same-count edits (a removal
+/// paired with an addition), and the protocol layer relies on that signal
+/// to pick a write-back strategy. Detection therefore lives at the
+/// write-back site, which compares the actual header name sequence.
+/// [`response_headers_modified`] remains available for filters to set as
+/// an explicit hint.
+///
+/// [`response_headers_modified`]: HttpFilterContext::response_headers_modified
 #[expect(clippy::too_many_lines, reason = "metrics instrumentation adds branches per hook")]
 pub(super) async fn run_response_filter(
     http_filter: &dyn crate::filter::HttpFilter,
@@ -298,7 +321,6 @@ pub(super) async fn run_response_filter(
     metrics_enabled: bool,
 ) -> Result<HeaderFilterOutcome, FilterError> {
     trace!(filter = http_filter.name(), "on_response");
-    let pre_len = ctx.response_header.as_ref().map_or(0, |r| r.headers.len());
     let response_result = if metrics_enabled {
         let start = std::time::Instant::now();
         let result = http_filter.on_response(ctx).await;
@@ -314,16 +336,12 @@ pub(super) async fn run_response_filter(
     };
     match response_result {
         Ok(
-            FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone | FilterAction::TerminalResponse(_),
-        ) => {
-            if !ctx.response_headers_modified {
-                let post_len = ctx.response_header.as_ref().map_or(0, |r| r.headers.len());
-                if pre_len != post_len {
-                    ctx.response_headers_modified = true;
-                }
-            }
-            Ok(HeaderFilterOutcome::Continue)
-        },
+            FilterAction::Continue
+            | FilterAction::Release
+            | FilterAction::BodyDone
+            | FilterAction::TerminalResponse(_)
+            | FilterAction::StreamingTerminalResponse(_),
+        ) => Ok(HeaderFilterOutcome::Continue),
         Ok(FilterAction::Reject(rejection)) => {
             warn!(
                 filter = http_filter.name(),
@@ -353,8 +371,6 @@ pub(super) async fn run_response_filter(
     reason = "tests"
 )]
 mod tests {
-    use bytes::Bytes;
-
     use super::*;
     use crate::HttpFilter;
 
@@ -362,24 +378,24 @@ mod tests {
     fn accumulate_body_bytes_some_adds_to_counter() {
         let mut counter = 0_u64;
         let body = Some(Bytes::from_static(b"hello"));
-        accumulate_body_bytes(&mut counter, &body);
+        accumulate_body_bytes(&mut counter, body.as_ref());
         assert_eq!(counter, 5, "counter should equal byte length of body");
     }
 
     #[test]
     fn accumulate_body_bytes_none_does_not_change_counter() {
         let mut counter = 42_u64;
-        accumulate_body_bytes(&mut counter, &None);
+        accumulate_body_bytes(&mut counter, None);
         assert_eq!(counter, 42, "counter should remain unchanged for None body");
     }
 
     #[test]
     fn accumulate_body_bytes_multiple_sums_correctly() {
         let mut counter = 0_u64;
-        accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"abc")));
-        accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"defgh")));
-        accumulate_body_bytes(&mut counter, &None);
-        accumulate_body_bytes(&mut counter, &Some(Bytes::from_static(b"ij")));
+        accumulate_body_bytes(&mut counter, Some(&Bytes::from_static(b"abc")));
+        accumulate_body_bytes(&mut counter, Some(&Bytes::from_static(b"defgh")));
+        accumulate_body_bytes(&mut counter, None);
+        accumulate_body_bytes(&mut counter, Some(&Bytes::from_static(b"ij")));
         assert_eq!(counter, 10, "counter should be sum of all Some chunk lengths");
     }
 

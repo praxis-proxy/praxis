@@ -3,7 +3,7 @@
 
 //! Pingora-backed bidirectional TCP proxy application.
 
-use std::{borrow::Cow, collections::HashMap, future::Future, io, net::SocketAddr, sync::Arc, time::Duration};
+use std::{borrow::Cow, collections::HashMap, io, net::SocketAddr, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -364,7 +364,11 @@ async fn resolve_connect_result(
 ) -> Option<String> {
     match pipeline.execute_tcp_connect(ctx).await {
         Ok(
-            FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone | FilterAction::TerminalResponse(_),
+            FilterAction::Continue
+            | FilterAction::Release
+            | FilterAction::BodyDone
+            | FilterAction::TerminalResponse(_)
+            | FilterAction::StreamingTerminalResponse(_),
         ) => {
             if let Some(addr) = &ctx.upstream_addr {
                 Some(addr.clone().into_owned())

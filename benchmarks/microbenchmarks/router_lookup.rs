@@ -3,7 +3,8 @@
 
 //! Criterion benchmarks for router path-prefix matching.
 
-#![allow(
+#![expect(
+    clippy::min_ident_chars,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::too_many_lines,

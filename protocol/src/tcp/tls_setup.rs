@@ -153,7 +153,7 @@ fn build_tcp_tls_settings(
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
-    use praxis_core::config::{AdminConfig, BodyLimitsConfig, Config, InsecureOptions, RuntimeConfig};
+    use praxis_core::config::{AdminConfig, BodyLimitsConfig, InsecureOptions, RuntimeConfig};
 
     use super::*;
 
@@ -399,7 +399,7 @@ filter_chains:
     /// This bypasses `Config::from_yaml` validation which rejects TCP
     /// listeners without an upstream.
     fn config_with_tcp_no_upstream() -> Config {
-        use praxis_core::config::{Listener, MetricsConfig, ProtocolKind, TelemetryConfig};
+        use praxis_core::config::{Listener, MetricsConfig, TelemetryConfig};
         Config {
             admin: AdminConfig::default(),
             body_limits: BodyLimitsConfig::default(),
@@ -453,7 +453,7 @@ filter_chains:
 
     /// Build a TCP listener with the given name and address.
     fn make_tcp_listener(name: &str, address: &str) -> praxis_core::config::Listener {
-        use praxis_core::config::{Listener, ProtocolKind};
+        use praxis_core::config::Listener;
         Listener {
             name: name.to_owned(),
             address: address.to_owned(),

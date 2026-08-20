@@ -1,0 +1,31 @@
+# Enforces the markdown rules documented in docs/developing/conventions.md:
+# 80-column prose, fenced code blocks must declare a language.
+
+# MD013: 80-column prose; code blocks follow the 120-char code limit
+MD013:
+  line_length: 80
+  code_block_line_length: 120
+  tables: false
+
+# MD040: fenced code blocks must declare a language (never bare backticks)
+MD040: true
+
+# MD034: no bare URLs
+MD034: true
+
+# MD024: repeated headings are fine across proposal sections
+MD024:
+  siblings_only: true
+
+# MD049: consistent emphasis marker
+MD049:
+  style: asterisk
+
+# MD028: stacked "> **Note**" blockquotes are intentional style
+MD028: false
+
+# MD041: GitHub templates render inside a page and start at h2
+MD041: false
+
+# MD033: YAML frontmatter and tables sometimes need inline HTML in proposals
+MD033: false

@@ -31,6 +31,7 @@ use self::{
 use crate::{
     FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
+    builtins::http::value_safety::contains_control_chars,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -156,6 +157,16 @@ impl HttpFilter for JsonRpcFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
+        // StreamBuffer accumulates the whole body; inspect only the
+        // complete request at end-of-stream. Promoting on each chunk (and
+        // again on the final EOS pass) pushed duplicate X-Json-Rpc-*
+        // headers onto every request with a body, and acting on a partial
+        // prefix let a client desync the promoted metadata from the body
+        // the upstream receives.
+        if !end_of_stream {
+            return Ok(FilterAction::Continue);
+        }
+
         let Some(chunk) = body.as_ref() else {
             return Ok(FilterAction::Continue);
         };
@@ -163,10 +174,6 @@ impl HttpFilter for JsonRpcFilter {
         let envelope = match parse_json_rpc_envelope(chunk, &self.config) {
             Ok(Some(envelope)) => envelope,
             Ok(None) => return Ok(FilterAction::Continue),
-            Err(_) if !end_of_stream => {
-                trace!("JSON-RPC parse failed on partial body; waiting for EOS");
-                return Ok(FilterAction::Continue);
-            },
             Err(e) => return handle_parse_error(e, &self.config),
         };
 
@@ -210,44 +217,42 @@ fn promote_to_headers(
     config: &JsonRpcConfig,
     headers: &mut Vec<(std::borrow::Cow<'static, str>, String)>,
 ) {
-    if let (Some(method), Some(header_name)) = (&envelope.method, &config.headers.method) {
-        if contains_control_chars(method) || method.len() > super::MAX_DYNAMIC_VALUE_LEN {
-            warn!(
-                header = %header_name,
-                method_len = method.len(),
-                "skipping header injection: method contains control characters or exceeds length limit"
-            );
-        } else {
-            headers.push((std::borrow::Cow::Owned(header_name.clone()), method.clone()));
-        }
-    }
+    promote_checked(
+        headers,
+        config.headers.method.as_ref(),
+        envelope.method.as_ref(),
+        "method",
+    );
+    promote_checked(headers, config.headers.id.as_ref(), envelope.id.as_ref(), "id");
 
-    if let (Some(id), Some(header_name)) = (&envelope.id, &config.headers.id) {
-        if contains_control_chars(id) || id.len() > super::MAX_DYNAMIC_VALUE_LEN {
-            warn!(
-                header = %header_name,
-                id_len = id.len(),
-                "skipping header injection: id contains control characters or exceeds length limit"
-            );
-        } else {
-            headers.push((std::borrow::Cow::Owned(header_name.clone()), id.clone()));
-        }
-    }
-
-    promote_kind_header(envelope, config, headers);
-}
-
-/// Promote the kind header if configured.
-fn promote_kind_header(
-    envelope: &JsonRpcEnvelope,
-    config: &JsonRpcConfig,
-    headers: &mut Vec<(std::borrow::Cow<'static, str>, String)>,
-) {
     if let Some(header_name) = &config.headers.kind {
         headers.push((
             std::borrow::Cow::Owned(header_name.clone()),
             envelope.kind.as_str().to_owned(),
         ));
+    }
+}
+
+/// Promote one envelope value to a configured header, skipping (with a
+/// warning) values containing control characters or exceeding the
+/// dynamic-value length limit.
+fn promote_checked(
+    headers: &mut Vec<(std::borrow::Cow<'static, str>, String)>,
+    header_name: Option<&String>,
+    value: Option<&String>,
+    what: &'static str,
+) {
+    let (Some(header_name), Some(value)) = (header_name, value) else {
+        return;
+    };
+    if contains_control_chars(value) || value.len() > super::MAX_DYNAMIC_VALUE_LEN {
+        warn!(
+            header = %header_name,
+            value_len = value.len(),
+            "skipping {what} header injection: value contains control characters or exceeds length limit"
+        );
+    } else {
+        headers.push((std::borrow::Cow::Owned(header_name.clone()), value.clone()));
     }
 }
 
@@ -263,7 +268,12 @@ fn promote_to_filter_results(envelope: &JsonRpcEnvelope, ctx: &mut HttpFilterCon
         results.set("method", method.clone())?;
     }
 
-    set_id_results(envelope, results)?;
+    if let Some(id) = &envelope.id
+        && !contains_control_chars(id)
+    {
+        results.set("id", id.clone())?;
+    }
+    results.set("id_kind", envelope.id_kind.as_str())?;
 
     if let Some(batch_len) = envelope.batch_len {
         results.set("batch_len", batch_len.to_string())?;
@@ -271,21 +281,3 @@ fn promote_to_filter_results(envelope: &JsonRpcEnvelope, ctx: &mut HttpFilterCon
 
     Ok(())
 }
-
-/// Set id and `id_kind` in filter results.
-fn set_id_results(
-    envelope: &JsonRpcEnvelope,
-    results: &mut crate::results::FilterResultSet,
-) -> Result<(), FilterError> {
-    if let Some(id) = &envelope.id {
-        if !contains_control_chars(id) {
-            results.set("id", id.clone())?;
-        }
-        results.set("id_kind", envelope.id_kind.as_str())?;
-    } else {
-        results.set("id_kind", envelope.id_kind.as_str())?;
-    }
-    Ok(())
-}
-
-use crate::builtins::http::value_safety::contains_control_chars;

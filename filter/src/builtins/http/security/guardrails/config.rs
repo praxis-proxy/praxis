@@ -17,9 +17,6 @@ pub(super) const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576;
 /// Maximum allowed regex pattern length (characters).
 pub(super) const MAX_REGEX_PATTERN_LEN: usize = 1024;
 
-/// Maximum compiled regex automaton size (bytes, 1 MiB).
-pub(super) const MAX_REGEX_SIZE: usize = 1_048_576;
-
 // -----------------------------------------------------------------------------
 // ContainsValue
 // -----------------------------------------------------------------------------

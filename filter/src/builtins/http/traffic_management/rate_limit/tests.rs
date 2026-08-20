@@ -8,7 +8,9 @@ use std::{net::IpAddr, time::Instant};
 use dashmap::DashMap;
 use praxis_core::connectivity::normalize_mapped_ipv4;
 
-use super::{HARD_CAP_PER_IP_ENTRIES, MAX_PER_IP_ENTRIES, RateLimitFilter, RateLimitState};
+use super::{
+    EVICTION_INTERVAL_NANOS, HARD_CAP_PER_IP_ENTRIES, MAX_PER_IP_ENTRIES, PerIpState, RateLimitFilter, RateLimitState,
+};
 use crate::{FilterAction, builtins::http::traffic_management::token_bucket::TokenBucket, filter::HttpFilter as _};
 
 // -----------------------------------------------------------------------------
@@ -268,20 +270,25 @@ fn per_ip_eviction_removes_stale_entries() {
     let burst = 20.0;
     let count = MAX_PER_IP_ENTRIES + 50;
     let idle_nanos = (2.0 * burst / rate * 1_000_000_000.0) as u64 + 1;
-    let map = populate_stale_map(count, rate, burst);
+    let state = populate_stale_state(count, rate, burst);
 
     assert!(
-        map.len() > MAX_PER_IP_ENTRIES,
+        state.buckets.len() > MAX_PER_IP_ENTRIES,
         "map should exceed soft cap before eviction"
     );
 
     let filter = make_eviction_filter(rate, burst);
-    filter.maybe_evict(&map, idle_nanos);
+    filter.maybe_evict(&state, idle_nanos);
 
     assert!(
-        map.len() < count,
+        state.buckets.len() < count,
         "eviction should have removed stale entries, got {}",
-        map.len()
+        state.buckets.len()
+    );
+    assert_eq!(
+        state.entries(),
+        state.buckets.len(),
+        "entry counter should track the map after eviction"
     );
 }
 
@@ -298,16 +305,69 @@ fn per_ip_eviction_skips_when_below_threshold() {
         map.insert(ip, bucket);
     }
 
+    let state = PerIpState::from_buckets(map);
     let filter = RateLimitFilter {
-        state: RateLimitState::PerIp(DashMap::new()),
+        state: RateLimitState::PerIp(PerIpState::new()),
         rate,
         burst,
         burst_string: (burst as u64).to_string(),
         epoch: Instant::now(),
     };
-    filter.maybe_evict(&map, 999_999_999_999);
+    filter.maybe_evict(&state, 999_999_999_999);
 
-    assert_eq!(map.len(), 10, "eviction should not run when below threshold");
+    assert_eq!(state.buckets.len(), 10, "eviction should not run when below threshold");
+}
+
+#[test]
+fn eviction_pass_is_claimed_at_most_once_per_interval() {
+    let state = PerIpState::new();
+    let first = EVICTION_INTERVAL_NANOS;
+
+    assert!(
+        state.claim_eviction_pass(first),
+        "first eligible pass should be claimed"
+    );
+    assert!(
+        !state.claim_eviction_pass(first),
+        "a second claim at the same instant must be refused"
+    );
+    assert!(
+        !state.claim_eviction_pass(first + EVICTION_INTERVAL_NANOS - 1),
+        "a claim inside the interval must be refused"
+    );
+    assert!(
+        state.claim_eviction_pass(first + EVICTION_INTERVAL_NANOS),
+        "a claim after the interval should be granted"
+    );
+}
+
+#[test]
+fn eviction_does_not_rescan_within_the_interval() {
+    let rate = 10.0;
+    let burst = 20.0;
+    let count = MAX_PER_IP_ENTRIES + 50;
+    let idle_nanos = (2.0 * burst / rate * 1_000_000_000.0) as u64 + 1;
+    let state = populate_stale_state(count, rate, burst);
+    let filter = make_eviction_filter(rate, burst);
+
+    filter.maybe_evict(&state, idle_nanos);
+    let after_first = state.buckets.len();
+    assert!(after_first < count, "first pass should reclaim");
+
+    // Refill so a second pass would have something to do, then confirm
+    // the interval gate keeps it from running.
+    for i in 0..100 {
+        let ip: IpAddr = format!("172.16.{}.{}", i / 256, i % 256).parse().unwrap();
+        state.buckets.insert(ip, TokenBucket::new(burst));
+    }
+    let before_second = state.buckets.len();
+    filter.maybe_evict(&state, idle_nanos);
+
+    assert_eq!(
+        state.buckets.len(),
+        before_second,
+        "a second pass inside the interval must not touch the map"
+    );
 }
 
 #[tokio::test]
@@ -387,7 +447,7 @@ fn hard_cap_rejects_new_ips() {
     assert_eq!(map.len(), HARD_CAP_PER_IP_ENTRIES, "map should be exactly at hard cap");
 
     let filter = RateLimitFilter {
-        state: RateLimitState::PerIp(map),
+        state: RateLimitState::PerIp(PerIpState::from_buckets(map)),
         rate,
         burst,
         burst_string: (burst as u64).to_string(),
@@ -418,7 +478,7 @@ fn hard_cap_allows_known_ips() {
     assert_eq!(map.len(), HARD_CAP_PER_IP_ENTRIES, "map should be exactly at hard cap");
 
     let filter = RateLimitFilter {
-        state: RateLimitState::PerIp(map),
+        state: RateLimitState::PerIp(PerIpState::from_buckets(map)),
         rate,
         burst,
         burst_string: (burst as u64).to_string(),
@@ -435,23 +495,17 @@ fn eviction_reclaims_below_soft_cap() {
     let burst = 20.0;
     let count = MAX_PER_IP_ENTRIES + 100;
     let idle_nanos = (2.0 * burst / rate * 1_000_000_000.0) as u64 + 1;
-    let map = populate_stale_map(count, rate, burst);
+    let state = populate_stale_state(count, rate, burst);
     let filter = make_eviction_filter(rate, burst);
 
-    filter.maybe_evict(&map, idle_nanos);
-    let after_first = map.len();
-    assert!(
-        after_first < count,
-        "first eviction pass should remove stale entries, got {after_first}"
-    );
+    filter.maybe_evict(&state, idle_nanos);
 
-    while map.len() > MAX_PER_IP_ENTRIES {
-        filter.maybe_evict(&map, idle_nanos);
-    }
+    // A pass evicts everything eligible, so one pass is enough. The
+    // entries here are uniformly stale, so the map drains completely.
     assert!(
-        map.len() <= MAX_PER_IP_ENTRIES,
-        "repeated eviction should bring map to or below soft cap, got {}",
-        map.len()
+        state.buckets.len() <= MAX_PER_IP_ENTRIES,
+        "a single eviction pass should bring the map to or below the soft cap, got {}",
+        state.buckets.len()
     );
 }
 
@@ -520,6 +574,11 @@ fn from_config_rejects_negative_infinity_rate() {
 // -----------------------------------------------------------------------------
 
 /// Populate a [`DashMap`] with `count` stale entries (last activity at t=0).
+fn populate_stale_state(count: usize, rate: f64, burst: f64) -> PerIpState {
+    PerIpState::from_buckets(populate_stale_map(count, rate, burst))
+}
+
+/// Build a per-IP map of `count` fully idle buckets.
 fn populate_stale_map(count: usize, rate: f64, burst: f64) -> DashMap<IpAddr, TokenBucket> {
     let map = DashMap::new();
     for i in 0..count {
@@ -537,7 +596,7 @@ fn populate_stale_map(count: usize, rate: f64, burst: f64) -> DashMap<IpAddr, To
 /// Build a [`RateLimitFilter`] with a throwaway per-IP map for eviction tests.
 fn make_eviction_filter(rate: f64, burst: f64) -> RateLimitFilter {
     RateLimitFilter {
-        state: RateLimitState::PerIp(DashMap::new()),
+        state: RateLimitState::PerIp(PerIpState::new()),
         rate,
         burst,
         burst_string: (burst as u64).to_string(),
@@ -550,7 +609,7 @@ fn make_filter(mode: &str, rate: f64, burst: u32) -> RateLimitFilter {
     let burst_f = f64::from(burst);
     let state = match mode {
         "global" => RateLimitState::Global(TokenBucket::new(burst_f)),
-        "per_ip" => RateLimitState::PerIp(DashMap::new()),
+        "per_ip" => RateLimitState::PerIp(PerIpState::new()),
         _ => panic!("invalid mode in test utility"),
     };
     RateLimitFilter {

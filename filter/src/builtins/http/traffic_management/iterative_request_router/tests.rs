@@ -779,8 +779,152 @@ fn classify_invalid_request_falls_through_to_io() {
 }
 
 // ---------------------------------------------------------------------------
+// Streaming Validation
+// ---------------------------------------------------------------------------
+
+#[test]
+#[expect(clippy::too_many_lines, reason = "YAML config literal")]
+fn rejects_filter_result_transition_on_streaming_capable_step() {
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_streaming_selector",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(StreamingSelectorFilter)))),
+        )
+        .unwrap();
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_streaming_selector
+      - filter: static_response
+        status: 200
+    on_result:
+      - filter: test_streaming_selector
+        key: action
+        value: loop
+        next: s
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    let result = super::IterativeRequestRouterFilter::from_config_with_registry(&yaml, &registry);
+    assert!(
+        result.is_err(),
+        "filter/key/value transition should be rejected for streaming step"
+    );
+    if let Err(err) = result {
+        let msg = err.to_string();
+        assert!(
+            msg.contains("streaming") && msg.contains("filter"),
+            "error should mention streaming and filter: {msg}"
+        );
+    }
+}
+
+#[test]
+fn accepts_status_only_transition_on_streaming_capable_step() {
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_streaming_selector",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(StreamingSelectorFilter)))),
+        )
+        .unwrap();
+
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_streaming_selector
+      - filter: static_response
+        status: 200
+    on_result:
+      - status: [502, 503]
+        next: s
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    let result = super::IterativeRequestRouterFilter::from_config_with_registry(&yaml, &registry);
+    assert!(result.is_ok(), "status-only transition should be accepted");
+}
+
+#[test]
+fn streaming_runtime_guard_rejects_body_dependent_transitions() {
+    assert!(
+        super::has_body_dependent_transitions(&[config::StepTransition {
+            default: false,
+            done: false,
+            filter: Some("f".to_owned()),
+            key: Some("k".to_owned()),
+            next: Some("n".to_owned()),
+            origin: None,
+            status: None,
+            transport_error: None,
+            value: Some("v".to_owned()),
+        }]),
+        "filter/key/value transition should be body-dependent"
+    );
+}
+
+#[test]
+fn streaming_runtime_guard_accepts_status_transition() {
+    assert!(
+        !super::has_body_dependent_transitions(&[config::StepTransition {
+            default: false,
+            done: false,
+            filter: None,
+            key: None,
+            next: Some("n".to_owned()),
+            origin: None,
+            status: Some(vec![502]),
+            transport_error: None,
+            value: None,
+        }]),
+        "status-only transition should not be body-dependent"
+    );
+}
+
+#[test]
+fn streaming_runtime_guard_accepts_default_transition() {
+    assert!(
+        !super::has_body_dependent_transitions(&[make_default_done()]),
+        "default transition should not be body-dependent"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Test Utilities
 // ---------------------------------------------------------------------------
+
+struct StreamingSelectorFilter;
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for StreamingSelectorFilter {
+    fn name(&self) -> &'static str {
+        "test_streaming_selector"
+    }
+
+    fn may_select_streaming_subrequest_response(&self) -> bool {
+        true
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        ctx.set_subrequest_response_mode(crate::SubRequestResponseMode::Streaming);
+        Ok(crate::FilterAction::Continue)
+    }
+}
 
 /// Build a default-done transition.
 fn make_default_done() -> config::StepTransition {
@@ -976,7 +1120,6 @@ fn strip_reserved_no_dash_not_removed() {
 fn max_depth_is_three() {
     assert_eq!(config::max_depth(), 3, "max_depth should be 3");
 }
-
 
 // ---------------------------------------------------------------------------
 // Config Validation - Boundaries

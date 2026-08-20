@@ -1,0 +1,296 @@
+# Corpus copy of the HR demo's CEL policy document
+# (`demos/cpex/policy-cel.yaml` in praxis-demos).
+#
+# Identical to policy.yaml EXCEPT the PDP backend for the search_repos
+# route: this config uses CEL (Common Expression Language) instead of
+# Cedar. Both express the same decision ("engineers read internal repos;
+# security reads any") — see policy.yaml for the Cedar form. Run this
+# variant with:  GATEWAY_CONFIG=praxis-cel.yaml ./restart.sh
+#
+# Hot path:
+#   1. jwt-user      validates X-User-Token against Keycloak (cpex-demo realm)
+#                    → security.subject + raw_credentials.inbound_tokens[User]
+#   2. jwt-client    validates Authorization against Keycloak (same realm)
+#                    → security.client
+#   3. APL gate      require(role.hr) on the get_compensation tool
+#   4. APL delegate  workday-oauth exchanges the user's IdP token for an
+#                    audience=workday-api token via Keycloak (RFC 8693)
+#   5. APL args      ssn arg gets redacted unless caller has perm.view_ssn
+#
+# Keycloak runs locally at http://localhost:8081. JWTs are RS256-signed
+# by the realm's automatically-generated signing key. We point at the
+# realm's JWKS URL so the resolver fetches the active public key at
+# init time (no manual PEM paste).
+
+plugin_settings:
+  routing_enabled: true
+
+plugins:
+  # User identity. Carries the human's roles + permissions claims.
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    mode: sequential
+    priority: 10
+    on_error: fail
+    config:
+      role: user
+      header: X-User-Token
+      trusted_issuers:
+        - issuer: "http://localhost:8081/realms/cpex-demo"
+          audiences: ["praxis-gateway"]
+          algorithms: ["RS256"]
+          decoding_key:
+            kind: jwks_url
+            url: "http://localhost:8081/realms/cpex-demo/protocol/openid-connect/certs"
+            insecure_http: true   # localhost dev — never production
+          leeway_seconds: 60
+      claim_mapper: standard
+
+  # Client identity. Carries the agent's client_id / azp.
+  - name: jwt-client
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    mode: sequential
+    priority: 20
+    on_error: fail
+    config:
+      role: client
+      header: Authorization
+      trusted_issuers:
+        - issuer: "http://localhost:8081/realms/cpex-demo"
+          audiences: ["praxis-gateway", "account"]
+          algorithms: ["RS256"]
+          decoding_key:
+            kind: jwks_url
+            url: "http://localhost:8081/realms/cpex-demo/protocol/openid-connect/certs"
+            insecure_http: true   # localhost dev — never production
+          leeway_seconds: 60
+      claim_mapper: standard
+
+  # RFC 8693 token-exchange delegator. Trades the user's hr-copilot
+  # token for a workday-api-audience-scoped access token.
+  #
+  # Pattern 1 (workday flow): the user already carries view_ssn etc.
+  # as a Keycloak user attribute → claim. The exchange just changes
+  # the audience; the perms come along for the ride.
+  - name: workday-oauth
+    kind: delegator/oauth
+    hooks: [token.delegate]
+    mode: sequential
+    priority: 30
+    on_error: fail
+    capabilities:
+      - read_inbound_credentials
+      - write_delegated_tokens
+    config:
+      token_endpoint: "http://localhost:8081/realms/cpex-demo/protocol/openid-connect/token"
+      insecure_http: true   # localhost dev — never production
+      client_id: "praxis-gateway"
+      # Secret source. `kind: literal` is an inline secret (dev only).
+      # Other kinds: `kind: env_var` with `name:` (read from the
+      # environment at startup) and `kind: file` with `path:` (read from
+      # a file). Prefer env_var or file in production; do not commit
+      # secrets to YAML.
+      client_secret_source:
+        kind: literal
+        secret: "praxis-gateway-secret"
+      timeout_seconds: 5
+      default_outbound_header: "Authorization"
+
+  # ----------------------------------------------------------------
+  # Field-level validator: PII scanner.
+  # ----------------------------------------------------------------
+  # Walks tool/prompt arguments looking for SSN / credit-card / email
+  # patterns. If found in `deny` mode, refuses the request. Wired on
+  # `cmf.tool_pre_invoke` so it fires before every tool call.
+  - name: pii-scan
+    kind: validator/pii-scan
+    hooks: [cmf.tool_pre_invoke]
+    mode: sequential
+    priority: 25
+    on_error: fail
+    config:
+      detect:
+        - { kind: ssn }
+        - { kind: credit_card }
+      mode: deny
+
+  # ----------------------------------------------------------------
+  # Observation: structured audit logger.
+  # ----------------------------------------------------------------
+  # Emits one JSON line per dispatched request capturing subject,
+  # client, entity, tool args, and any delegation outcomes. Never
+  # blocks — observation only. Wired on every CMF entity hook so
+  # the audit trail covers all tool / prompt / resource traffic.
+  - name: audit-log
+    kind: audit/logger
+    hooks:
+      - cmf.tool_pre_invoke
+      - cmf.prompt_pre_invoke
+      - cmf.resource_pre_fetch
+    mode: sequential
+    priority: 90    # fires AFTER policy / delegate so the record
+                    # reflects the final decision + minted tokens
+    on_error: ignore  # observation failures don't halt traffic
+    capabilities:
+      - read_subject
+      - read_client
+      - read_meta
+      - read_delegated_tokens
+    config:
+      destination: stderr
+      source: cpex-demo-gateway
+
+  # Second delegator — same plugin kind, different audience.
+  #
+  # Pattern 3 (github flow): the user's inbound token does NOT
+  # carry github perms. The github-api client in Keycloak has a
+  # per-audience claim mapper (`gh-permissions-as-scope`) that
+  # injects `gh_permissions` from the user attribute as the
+  # minted token's `permissions` claim. The IdP is the source of
+  # system-specific perm truth; the gateway just asks.
+  - name: github-oauth
+    kind: delegator/oauth
+    hooks: [token.delegate]
+    mode: sequential
+    priority: 31
+    on_error: fail
+    capabilities:
+      - read_inbound_credentials
+      - write_delegated_tokens
+    config:
+      token_endpoint: "http://localhost:8081/realms/cpex-demo/protocol/openid-connect/token"
+      insecure_http: true
+      client_id: "praxis-gateway"
+      client_secret_source:
+        kind: literal
+        secret: "praxis-gateway-secret"
+      timeout_seconds: 5
+      default_outbound_header: "Authorization"
+
+  # ----------------------------------------------------------------
+  # Human-in-the-loop: CIBA manager approval.
+  # ----------------------------------------------------------------
+  # Drives an out-of-band approval through OIDC CIBA: the gateway POSTs
+  # a backchannel auth request to Keycloak (login_hint = the approver),
+  # Keycloak pushes a decoupled prompt to the approver's device (the
+  # demo's web approval UI), and the gateway polls until it resolves.
+  # While pending, the gateway emits JSON-RPC -32120 so the agent can
+  # tell the user "awaiting sign-off" and retry — it never blocks.
+  # Registered under the name `manager-approver`; the route names it.
+  - name: manager-approver
+    kind: elicitation/ciba
+    hooks: [elicit]
+    mode: sequential
+    priority: 40
+    on_error: fail
+    config:
+      backchannel_endpoint: "http://localhost:8081/realms/cpex-demo/protocol/openid-connect/ext/ciba/auth"
+      token_endpoint: "http://localhost:8081/realms/cpex-demo/protocol/openid-connect/token"
+      insecure_http: true   # localhost dev — never production
+      client_id: "praxis-gateway"
+      client_secret_source:
+        kind: literal
+        secret: "praxis-gateway-secret"
+      scope: openid
+      approver_claim: preferred_username
+      default_requested_expiry_seconds: 120
+
+global:
+  authentication:
+    - jwt-user
+    - jwt-client
+
+  # ----------------------------------------------------------------
+  # CEL PDP — inline boolean predicates as the decision backend.
+  # APL routes call into CEL via `cel:` steps; the expression
+  # evaluates against the common attribute vocabulary (subject.*,
+  # role.*, args.*, delegation.*, session.*) and returns a boolean:
+  # true → allow, false (or any eval error) → fail-closed deny.
+  #
+  # CEL vs Cedar (see policy.yaml for the Cedar form): reach for CEL
+  # when the decision is a self-contained boolean predicate authored
+  # inline in the route — no external policy store, zero glue. Reach
+  # for Cedar when policy lives outside the route (versioned/signed
+  # policy sets) or needs the full entity/relationship model. Here
+  # both express the SAME decision so the two are directly comparable.
+  #
+  # NOTE: this config omits the `apl:` wrapper — APL terms (`pdp:` here,
+  # `policy:`/`args:`/`result:` on the routes below) sit directly on the
+  # section. Both forms are accepted; see policy.yaml for the wrapped style.
+  # ----------------------------------------------------------------
+  pdp:
+    - kind: cel
+      on_error: deny   # fail-closed; the default, spelled out
+
+  # ----------------------------------------------------------------
+  # Session store — where the engine persists taint labels.
+  # ----------------------------------------------------------------
+  # `taint(secret, session)` on get_compensation writes a `secret`
+  # label keyed by H(subject : X-Session-Id); send_email reads it back
+  # via `security.labels contains "secret"`. With this Valkey backend
+  # the label survives a gateway restart and can be shared across
+  # gateway instances (the default is an in-process store that resets
+  # on restart). Valkey runs as the `valkey` compose service; the
+  # gateway reaches it on localhost:6379. See scenarios 08 / 09.
+  #
+  # This is a flat APL key (like `pdp:` above): no `apl:` wrapper. See
+  # the NOTE above on the flat form.
+  #
+  # Optional keys (read by the valkey factory):
+  #   key_prefix: "taint:v1"   # default key namespace
+  #   tls: true                # required for non-localhost endpoints
+  #   username: / password:    # Valkey 6+ ACL auth (pair them)
+  #   ttl_seconds: 86400       # sliding label expiry (default: none)
+  #   connect_timeout_ms / command_timeout_ms  # defaults 250 / 500
+  session_store:
+    kind: valkey
+    endpoint: localhost:6379
+
+routes:
+
+  - tool: get_compensation
+    pre_invocation:
+      - "require(role.hr)"
+      - "delegate(workday-oauth, target: workday-api, audience: workday-api, permissions: [read_compensation])"
+      - "taint(secret, session)"
+      - "run(audit-log)"
+    args:
+      ssn: "str | redact(!perm.view_ssn)"
+    result:
+      ssn: "str | redact(!perm.view_ssn)"
+
+  - tool: search_repos
+    pre_invocation:
+      - "require(team.engineering | team.security)"
+      - cel:
+          expr: |
+            (has(role.engineer) && role.engineer && args.visibility == "internal")
+            || (has(role.security) && role.security)
+          on_deny:
+            - "deny('engineering may read internal repos only; security may read any', 'cel.policy_denied')"
+      - "delegate(github-oauth, target: github-api, audience: github-api, permissions: [repo:read:internal])"
+      - "!(delegation.granted.permissions contains 'repo:read:internal'): deny"
+      - "run(audit-log)"
+
+  - tool: send_email
+    pre_invocation:
+      - "require(perm.email_send)"
+      - "run(audit-log)"
+      - "run(pii-scan)"
+      - "security.labels contains \"secret\": deny('external email blocked: this session accessed secret data', 'session_tainted_secret')"
+
+  # Sensitive mutating action. Small changes go straight through; an
+  # adjustment over $10K requires the requester's manager to approve
+  # out-of-band (CIBA), and the approval is bound to the live amount
+  # (`scope`) so it can't be replayed against a larger change. This
+  # route is PDP-independent (no cedar:/cel: step), so it behaves
+  # identically under policy.yaml and policy-cel.yaml.
+  - tool: adjust_compensation
+    pre_invocation:
+      - "require(role.hr)"
+      - when: "args.amount > 10000"
+        do:
+          - "require_approval(manager-approver, from: claim.manager, channel: \"ciba\", scope: \"args.amount <= 25000\", purpose: \"Approve a compensation adjustment\", timeout: 24h)"
+      - "run(audit-log)"

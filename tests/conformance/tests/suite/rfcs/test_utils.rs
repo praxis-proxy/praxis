@@ -21,42 +21,46 @@ pub(super) fn h2c_get(addr: &str, path: &str) -> (http::Response<()>, String) {
         .build()
         .expect("tokio runtime");
 
-    rt.block_on(async {
-        let tcp = tokio::net::TcpStream::connect(addr).await.expect("TCP connect for h2c");
+    rt.block_on(h2c_get_async(addr, path))
+}
 
-        let (mut client, h2_conn) = h2::client::handshake(tcp).await.expect("h2c handshake");
-        tokio::spawn(async move {
-            if let Err(e) = h2_conn.await {
-                eprintln!("h2c connection closed: {e}");
-            }
-        });
+/// Perform the h2c GET request asynchronously.
+#[expect(clippy::large_stack_frames, reason = "test helper with H2 handshake structs")]
+async fn h2c_get_async(addr: &str, path: &str) -> (http::Response<()>, String) {
+    let tcp = tokio::net::TcpStream::connect(addr).await.expect("TCP connect for h2c");
 
-        let request = http::Request::get(path)
-            .header("host", "localhost")
-            .body(())
-            .expect("build h2c request");
-
-        let (response_fut, _) = client.send_request(request, true).expect("send h2c request");
-        let response = response_fut.await.expect("h2c response");
-        let status = response.status();
-        let headers = response.headers().clone();
-        let mut body_stream = response.into_body();
-
-        let mut body = Vec::new();
-        while let Some(chunk) = body_stream.data().await {
-            let data = chunk.expect("h2c body chunk");
-            body.extend_from_slice(&data);
-            drop(body_stream.flow_control().release_capacity(data.len()));
+    let (mut client, h2_conn) = h2::client::handshake(tcp).await.expect("h2c handshake");
+    tokio::spawn(async move {
+        if let Err(e) = h2_conn.await {
+            eprintln!("h2c connection closed: {e}");
         }
+    });
 
-        let mut resp_builder = http::Response::builder().status(status);
-        for (key, value) in &headers {
-            resp_builder = resp_builder.header(key, value);
-        }
-        let resp = resp_builder.body(()).expect("rebuild response");
+    let request = http::Request::get(path)
+        .header("host", "localhost")
+        .body(())
+        .expect("build h2c request");
 
-        (resp, String::from_utf8_lossy(&body).into_owned())
-    })
+    let (response_fut, _) = client.send_request(request, true).expect("send h2c request");
+    let response = response_fut.await.expect("h2c response");
+    let status = response.status();
+    let headers = response.headers().clone();
+    let mut body_stream = response.into_body();
+
+    let mut body = Vec::new();
+    while let Some(chunk) = body_stream.data().await {
+        let data = chunk.expect("h2c body chunk");
+        body.extend_from_slice(&data);
+        drop(body_stream.flow_control().release_capacity(data.len()));
+    }
+
+    let mut resp_builder = http::Response::builder().status(status);
+    for (key, value) in &headers {
+        resp_builder = resp_builder.header(key, value);
+    }
+    let resp = resp_builder.body(()).expect("rebuild response");
+
+    (resp, String::from_utf8_lossy(&body).into_owned())
 }
 
 // -----------------------------------------------------------------------------

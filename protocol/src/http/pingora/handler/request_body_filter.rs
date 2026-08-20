@@ -62,7 +62,7 @@ pub(super) async fn execute(
 
     match ctx.request_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
-            if check_body_size_limit(body, &mut ctx.request_body_bytes, max_bytes) {
+            if check_body_size_limit(body.as_ref(), &mut ctx.request_body_bytes, max_bytes) {
                 send_rejection(session, Rejection::status(413)).await;
                 return Err(pingora_core::Error::explain(
                     pingora_core::ErrorType::HTTPStatus(413),
@@ -100,7 +100,12 @@ pub(super) async fn execute(
     output.write_back(ctx);
 
     match result {
-        Ok(FilterAction::Continue | FilterAction::BodyDone | FilterAction::TerminalResponse(_)) => {
+        Ok(
+            FilterAction::Continue
+            | FilterAction::BodyDone
+            | FilterAction::TerminalResponse(_)
+            | FilterAction::StreamingTerminalResponse(_),
+        ) => {
             suppress_stream_buffer_chunk(body, is_stream_buffer, ctx.request_body_released, end_of_stream);
             Ok(())
         },

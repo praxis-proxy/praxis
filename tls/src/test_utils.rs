@@ -114,6 +114,10 @@ pub(crate) fn gen_test_certs_with_sans(sans: Vec<String>) -> TestCerts {
 // -----------------------------------------------------------------------------
 
 /// Internal result from cert generation (no temp dir ownership).
+#[expect(
+    clippy::struct_field_names,
+    reason = "_path suffix distinguishes PathBuf from cert contents"
+)]
 struct GeneratedCerts {
     /// Path to the CA certificate PEM.
     ca_cert_path: PathBuf,

@@ -257,7 +257,7 @@ fn register_http_builtins(filters: &mut HashMap<String, FilterRegistration>) {
     register_http(filters, "circuit_breaker", CircuitBreakerFilter::from_config);
     register_http(filters, "compression", CompressionFilter::from_config);
     register_http_security(filters, "cors", CorsFilter::from_config);
-    #[cfg(feature = "cpex-policy-engine")]
+    #[cfg(feature = "policy-engine")]
     register_http_security(filters, "policy", crate::PolicyFilter::from_config);
     register_http_security(filters, "csrf", CsrfFilter::from_config);
     register_http_security(filters, "credential_injection", CredentialInjectionFilter::from_config);
@@ -451,7 +451,7 @@ mod tests {
             names.contains(&"peer_identity_trust"),
             "peer_identity_trust should be registered"
         );
-        #[cfg(feature = "cpex-policy-engine")]
+        #[cfg(feature = "policy-engine")]
         assert!(names.contains(&"policy"), "policy should be registered");
     }
 

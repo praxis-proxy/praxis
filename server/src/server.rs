@@ -30,6 +30,16 @@ use crate::{
 };
 
 // -----------------------------------------------------------------------------
+// Constants
+// -----------------------------------------------------------------------------
+
+/// How often the sub-request circuit breaker eviction loop runs.
+const CIRCUIT_EVICTION_INTERVAL: Duration = Duration::from_secs(300); // 5 min
+
+/// How long a healthy breaker must sit idle before eviction.
+const CIRCUIT_IDLE_THRESHOLD: Duration = Duration::from_secs(600); // 10 min
+
+// -----------------------------------------------------------------------------
 // Config Path Resolution
 // -----------------------------------------------------------------------------
 
@@ -90,12 +100,13 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
     init_runtime_limits(&config.runtime);
     warn_insecure_key_permissions(&config);
 
-    // Install the Prometheus recorder before health checks (or any other
-    // instrumentation) start emitting, so the first probe transitions are not
-    // dropped by `is_recorder_installed()` gates.
-    if config.admin.address.is_some() {
-        let _handle = praxis_protocol::http::pingora::metrics::install_prometheus_recorder();
-    }
+    // Install before pipelines and health checks emit startup metrics. The same
+    // handle is later shared by `/metrics` and the managed upkeep service.
+    let prometheus_recorder = config
+        .admin
+        .address
+        .as_ref()
+        .map(|_| praxis_protocol::http::pingora::health::install_prometheus_admin_recorder());
 
     let health_registry = build_health_registry(&config.clusters);
     let state = build_server_state(&config, &registry, &health_registry);
@@ -103,7 +114,17 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
     info!("initializing server");
     let mut server = PingoraServerRuntime::new(&config);
     let _cert_shutdowns = register_protocols(&mut server, &config, &state.pipelines);
-    register_admin_endpoints(&mut server, &config, health_registry, &state.kv_stores);
+    register_admin_endpoints(
+        &mut server,
+        &config,
+        praxis_protocol::http::pingora::health::AdminEndpointOptions {
+            health_registry: Some(health_registry),
+            kv_registry: Some(state.kv_stores.clone()),
+            pipelines: Some((Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta))),
+            verbose: config.admin.verbose,
+        },
+        prometheus_recorder,
+    );
 
     let _watcher = spawn_watcher(config_path, config, registry, state);
 
@@ -120,6 +141,8 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
 struct ServerState {
     /// Resolved filter pipelines per listener.
     pipelines: Arc<ListenerPipelines>,
+    /// Hot-swappable listener metadata for admin `/api/pipelines`.
+    listener_meta: praxis_protocol::http::pingora::health::ListenerMetaStore,
     /// KV store registry.
     kv_stores: praxis_core::kv::KvStoreRegistry,
     /// Shared sub-request client for iterative sub-requests.
@@ -161,27 +184,20 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
 
     let pipelines = resolve_pipelines(config, registry, health_registry, &kv_stores, &subrequest_client)
         .unwrap_or_else(|e| fatal(&e));
+    let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+        praxis_protocol::http::pingora::health::listener_meta_from_config(config),
+    );
 
     let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
     spawn_health_check_tasks(config, Arc::clone(health_registry), &health_shutdown);
 
     if config.runtime.subrequest_circuit_breaker.is_some() {
-        let client = subrequest_client.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(300)); // 5 min
-            interval.tick().await; // skip immediate first tick
-            loop {
-                interval.tick().await;
-                let evicted = client.evict_idle_circuits(Duration::from_secs(600)); // 10 min idle
-                if evicted > 0 {
-                    debug!(evicted, "circuit breaker: evicted idle entries");
-                }
-            }
-        });
+        spawn_circuit_eviction_task(subrequest_client.clone());
     }
 
     ServerState {
         pipelines: Arc::new(pipelines),
+        listener_meta,
         kv_stores,
         subrequest_client,
         health_shutdown,
@@ -225,14 +241,24 @@ fn spawn_watcher(
     state: ServerState,
 ) -> Option<std::thread::JoinHandle<()>> {
     let path = config_path?;
-    let initial_content_hash = std::fs::read_to_string(&path).map_or(0, |c| crate::watcher::hash_content(&c));
+    // Documents the configured filters read, asked of the pipelines that were just
+    // built rather than reconstructed here: building a filter to interrogate it
+    // would load its document and open network connections as a side effect.
+    let referenced_files = state.pipelines.referenced_files();
+    // The startup hash must cover the same set the reload gate covers, or the first
+    // event after startup would see a hash mismatch that is an artifact of the two
+    // being computed differently.
+    let initial_content_hash =
+        std::fs::read_to_string(&path).map_or(0, |c| crate::watcher::composite_hash(&c, &referenced_files));
     let handle = crate::watcher::spawn_config_watcher(crate::watcher::WatcherParams {
         config_path: path,
         health_shutdown: state.health_shutdown,
         initial_content_hash,
         initial_config: config,
         kv_stores: state.kv_stores,
+        listener_meta: state.listener_meta,
         pipelines: state.pipelines,
+        referenced_files,
         registry: Arc::new(registry),
         shutdown: CancellationToken::new(),
         subrequest_client: state.subrequest_client,
@@ -248,16 +274,15 @@ fn spawn_watcher(
 fn register_admin_endpoints(
     server: &mut PingoraServerRuntime,
     config: &Config,
-    health_registry: HealthRegistry,
-    kv_stores: &praxis_core::kv::KvStoreRegistry,
+    options: praxis_protocol::http::pingora::health::AdminEndpointOptions,
+    prometheus_recorder: Option<praxis_protocol::http::pingora::health::PrometheusAdminRecorder>,
 ) {
-    if let Some(admin_addr) = &config.admin.address {
-        praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server(
+    if let (Some(admin_addr), Some(prometheus_recorder)) = (&config.admin.address, prometheus_recorder) {
+        praxis_protocol::http::pingora::health::add_admin_endpoints_to_pingora_server_with_recorder(
             server.server_mut(),
             admin_addr,
-            Some(health_registry),
-            Some(kv_stores.clone()),
-            config.admin.verbose,
+            options,
+            prometheus_recorder,
         );
     }
 }
@@ -282,8 +307,29 @@ fn init_runtime_limits(runtime: &praxis_core::config::RuntimeConfig) {
 }
 
 // -----------------------------------------------------------------------------
-// Health Check Tasks
+// Background Tasks
 // -----------------------------------------------------------------------------
+
+/// Spawn `fut` on a dedicated thread running its own current-thread
+/// tokio runtime.
+///
+/// Server startup runs before [`PingoraServerRuntime::new`], so no
+/// reactor is registered on the calling thread and a bare
+/// `tokio::spawn` would panic; background loops get their own thread
+/// and runtime instead.
+#[expect(clippy::expect_used, reason = "fatal")]
+fn spawn_on_dedicated_runtime<F>(runtime_name: &'static str, fut: F)
+where
+    F: Future<Output = ()> + Send + 'static,
+{
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect(runtime_name);
+        rt.block_on(fut);
+    });
+}
 
 /// Spawn background health check tasks on a dedicated tokio runtime.
 ///
@@ -310,15 +356,25 @@ fn spawn_health_check_tasks(
     let shutdown = health_shutdown.lock().expect("health shutdown lock").clone();
     let clusters = config.clusters.clone();
 
-    std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("health check runtime");
-        rt.block_on(async {
-            praxis_protocol::http::pingora::health::runner::spawn_health_checks(&clusters, &registry, &shutdown);
-            shutdown.cancelled().await;
-        });
+    spawn_on_dedicated_runtime("health check runtime", async move {
+        praxis_protocol::http::pingora::health::runner::spawn_health_checks(&clusters, &registry, &shutdown);
+        shutdown.cancelled().await;
+    });
+}
+
+/// Spawn the sub-request circuit breaker idle-eviction loop on its own
+/// runtime (see [`spawn_on_dedicated_runtime`]).
+fn spawn_circuit_eviction_task(client: praxis_core::subrequest::SubRequestClient) {
+    spawn_on_dedicated_runtime("circuit breaker eviction runtime", async move {
+        let mut interval = tokio::time::interval(CIRCUIT_EVICTION_INTERVAL);
+        interval.tick().await; // skip immediate first tick
+        loop {
+            interval.tick().await;
+            let evicted = client.evict_idle_circuits(CIRCUIT_IDLE_THRESHOLD);
+            if evicted > 0 {
+                debug!(evicted, "circuit breaker: evicted idle entries");
+            }
+        }
     });
 }
 

@@ -9,6 +9,8 @@
 //! runs, then diffs the header map to sync additions, removals,
 //! and modifications back into Pingora's response object.
 
+use std::{collections::hash_map::DefaultHasher, hash::Hasher as _};
+
 use pingora_core::Result;
 use praxis_filter::{FilterAction, FilterPipeline};
 use tracing::{debug, error, warn};
@@ -51,18 +53,26 @@ pub(super) async fn execute(
     super::upstream_response::strip_hop_by_hop_response(upstream_response, is_upgrade_response);
     upstream_response.strip_reserved_internal();
     let mut resp = response_header_from_pingora(upstream_response);
+    let name_fingerprint_before = header_name_fingerprint(&resp.headers);
     ctx.connection_upgraded = is_upgrade_response;
     ctx.response_phase_done = true;
     ctx.upstream_response_status = Some(upstream_response.status.as_u16());
 
-    let (result, headers_modified) = run_response_pipeline(pipeline, ctx, &mut resp).await?;
+    let (result, filter_flagged_modification) = run_response_pipeline(pipeline, ctx, &mut resp).await?;
+    // A filter may rearrange the header name sequence without changing the
+    // header count, so the count alone cannot decide whether the direct
+    // write-back is safe. Re-fingerprint and treat any change to the name
+    // sequence as a modification, independent of what filters self-reported.
+    let headers_modified =
+        filter_flagged_modification || header_name_fingerprint(&resp.headers) != name_fingerprint_before;
     let should_snapshot_response_header = pipeline.body_capabilities().any_response_body_condition
         && matches!(
             &result,
             Ok(FilterAction::Continue
                 | FilterAction::Release
                 | FilterAction::BodyDone
-                | FilterAction::TerminalResponse(_))
+                | FilterAction::TerminalResponse(_)
+                | FilterAction::StreamingTerminalResponse(_))
         );
     if should_snapshot_response_header {
         ctx.response_header_snapshot = Some(praxis_filter::Response {
@@ -124,10 +134,17 @@ async fn run_response_pipeline(
 /// Map the filter pipeline result to a Pingora Result, restoring headers on success.
 ///
 /// Headers were taken from the Pingora response via [`std::mem::take`] earlier,
-/// so they must always be restored. When no filter modified them, a direct swap
-/// is safe because the internal `header_name_map` was never invalidated. When
-/// filters did modify headers, we rebuild through Pingora's API to keep the
-/// name map consistent.
+/// so they must always be restored. When the header name sequence is unchanged,
+/// a direct swap is safe because the internal `header_name_map` still lines up
+/// positionally with the restored [`HeaderMap`]. When the name sequence changed,
+/// we rebuild through Pingora's API to keep the two structures consistent.
+///
+/// The status is written back unconditionally: it lives in the plain
+/// [`RespParts`] and has no coupling to the name map, so a filter that adjusts
+/// only the status must not depend on a header change to have its edit applied.
+///
+/// [`HeaderMap`]: http::HeaderMap
+/// [`RespParts`]: http::response::Parts
 fn handle_response_result(
     result: std::result::Result<FilterAction, praxis_filter::FilterError>,
     upstream_response: &mut pingora_http::ResponseHeader,
@@ -136,13 +153,13 @@ fn handle_response_result(
 ) -> Result<()> {
     match result {
         Ok(
-            FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone | FilterAction::TerminalResponse(_),
+            FilterAction::Continue
+            | FilterAction::Release
+            | FilterAction::BodyDone
+            | FilterAction::TerminalResponse(_)
+            | FilterAction::StreamingTerminalResponse(_),
         ) => {
-            if headers_modified {
-                write_headers_to_pingora(&resp.headers, resp.status, upstream_response);
-            } else {
-                upstream_response.headers = std::mem::take(&mut resp.headers);
-            }
+            write_back_response(upstream_response, &mut resp, headers_modified);
             Ok(())
         },
         Ok(FilterAction::Reject(rejection)) => {
@@ -162,23 +179,78 @@ fn handle_response_result(
     }
 }
 
-/// Restore headers into a Pingora response via its insert API.
+/// Restore the filtered headers and status onto the Pingora response.
 ///
-/// Pingora's [`ResponseHeader`] maintains an internal name map alongside
-/// the [`HeaderMap`]. Direct field assignment desynchronises the two,
-/// causing iteration panics. Re-inserting through [`insert_header`]
-/// keeps both structures consistent.
+/// The header map was moved out with [`std::mem::take`] before the
+/// pipeline ran, so it must always be put back. `headers_modified`
+/// selects how: an unchanged name sequence can be swapped straight in,
+/// while a changed one has to be rebuilt through Pingora's API so the
+/// `header_name_map` stays in step (see [`write_headers_to_pingora`]).
+///
+/// The status is assigned on both paths — it lives in the plain
+/// [`RespParts`] with no coupling to the name map, so it must not
+/// depend on whether headers happened to change.
+///
+/// [`RespParts`]: http::response::Parts
+fn write_back_response(
+    upstream_response: &mut pingora_http::ResponseHeader,
+    resp: &mut praxis_filter::Response,
+    headers_modified: bool,
+) {
+    if headers_modified {
+        write_headers_to_pingora(&resp.headers, resp.status, upstream_response);
+    } else {
+        upstream_response.headers = std::mem::take(&mut resp.headers);
+        upstream_response.status = resp.status;
+    }
+}
+
+/// Restore headers into a Pingora response via its append API.
+///
+/// Pingora's [`ResponseHeader`] maintains an internal `header_name_map`
+/// (original header casing) alongside the [`HeaderMap`], and serialises
+/// HTTP/1.1 responses by zipping the two together. That zip asserts the
+/// two sequences agree, so a [`HeaderMap`] whose name sequence no longer
+/// matches the name map aborts the worker. Re-appending through
+/// [`append_header`] rebuilds both structures in lockstep.
+///
+/// The upstream reason phrase is carried across the rebuild; it is not
+/// derived from the status line and would otherwise be reset to the
+/// canonical phrase for the status code.
 ///
 /// [`ResponseHeader`]: pingora_http::ResponseHeader
 /// [`HeaderMap`]: http::HeaderMap
-/// [`insert_header`]: pingora_http::ResponseHeader::insert_header
+/// [`append_header`]: pingora_http::ResponseHeader::append_header
 fn write_headers_to_pingora(src: &http::HeaderMap, status: http::StatusCode, dst: &mut pingora_http::ResponseHeader) {
     #[expect(clippy::expect_used, reason = "valid upstream status")]
     let mut rebuilt = pingora_http::ResponseHeader::build(status, Some(src.len())).expect("valid status");
     for (name, value) in src {
-        let _insert = rebuilt.append_header(name.clone(), value.clone());
+        let _append = rebuilt.append_header(name.clone(), value.clone());
+    }
+    let reason = dst.get_reason_phrase().map(str::to_owned);
+    if let Some(reason) = reason {
+        let _set = rebuilt.set_reason_phrase(Some(&reason));
     }
     *dst = rebuilt;
+}
+
+/// Order-sensitive fingerprint of a header map's name sequence.
+///
+/// Hashes the names in iteration order, including repeats for
+/// multi-valued headers, because that is exactly the sequence Pingora
+/// zips against its `header_name_map` when serialising. A change in this
+/// fingerprint means the direct write-back would desynchronise the two.
+///
+/// Header *values* are deliberately excluded: they are not part of the
+/// name map, so a value-only edit stays safe on the direct path and does
+/// not need to pay for a rebuild.
+fn header_name_fingerprint(headers: &http::HeaderMap) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    for (name, _value) in headers {
+        hasher.write(name.as_str().as_bytes());
+        hasher.write_u8(0xFF);
+    }
+    hasher.finish()
 }
 
 // -----------------------------------------------------------------------------
@@ -224,10 +296,9 @@ fn is_websocket_101(headers: &http::HeaderMap) -> bool {
     reason = "tests"
 )]
 mod tests {
-    use praxis_filter::{FilterPipeline, FilterRegistry, Request};
+    use praxis_filter::{FilterRegistry, Request};
 
     use super::*;
-    use crate::http::pingora::context::PingoraRequestCtx;
 
     #[tokio::test]
     async fn empty_pipeline_passes_through() {
@@ -446,6 +517,115 @@ mod tests {
             "x".parse().unwrap(),
         );
         assert!(!is_websocket_101(&headers), "h2c should not be treated as websocket");
+    }
+
+    // -------------------------------------------------------------------------
+    // Header Write-Back
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn fingerprint_changes_when_a_header_name_is_swapped() {
+        let mut before = http::HeaderMap::new();
+        before.insert("x-old", "v".parse().unwrap());
+        let mut after = http::HeaderMap::new();
+        after.insert("x-new", "v".parse().unwrap());
+
+        assert_eq!(before.len(), after.len(), "precondition: the counts match");
+        assert_ne!(
+            header_name_fingerprint(&before),
+            header_name_fingerprint(&after),
+            "a same-count name swap must change the fingerprint"
+        );
+    }
+
+    #[test]
+    fn fingerprint_is_stable_when_only_a_value_changes() {
+        let mut before = http::HeaderMap::new();
+        before.insert("x-same", "old".parse().unwrap());
+        let mut after = http::HeaderMap::new();
+        after.insert("x-same", "new".parse().unwrap());
+
+        assert_eq!(
+            header_name_fingerprint(&before),
+            header_name_fingerprint(&after),
+            "value-only edits leave the name sequence intact and stay on the direct path"
+        );
+    }
+
+    #[test]
+    fn fingerprint_accounts_for_repeated_names() {
+        let mut single = http::HeaderMap::new();
+        single.append("x-multi", "a".parse().unwrap());
+        let mut double = http::HeaderMap::new();
+        double.append("x-multi", "a".parse().unwrap());
+        double.append("x-multi", "b".parse().unwrap());
+
+        assert_ne!(
+            header_name_fingerprint(&single),
+            header_name_fingerprint(&double),
+            "multi-valued headers occupy multiple slots in the zipped sequence"
+        );
+    }
+
+    #[test]
+    fn status_change_is_written_back_without_header_changes() {
+        let mut upstream = pingora_http::ResponseHeader::build(200, None).unwrap();
+        let resp = praxis_filter::Response {
+            headers: http::HeaderMap::new(),
+            status: http::StatusCode::IM_A_TEAPOT,
+        };
+
+        handle_response_result(Ok(FilterAction::Continue), &mut upstream, resp, false).unwrap();
+
+        assert_eq!(
+            upstream.status, 418,
+            "a status-only edit must reach the response even on the direct write-back path"
+        );
+    }
+
+    #[test]
+    fn rebuilt_response_serialises_after_a_name_swap() {
+        let mut upstream = pingora_http::ResponseHeader::build(200, Some(1)).unwrap();
+        drop(upstream.insert_header("x-old", "v"));
+
+        // Mirror what the response phase does: take the map, let a filter
+        // swap one name for another, then write back through the rebuild.
+        let mut taken = std::mem::take(&mut upstream.headers);
+        taken.remove("x-old");
+        taken.insert("x-new", "v".parse().unwrap());
+        let resp = praxis_filter::Response {
+            headers: taken,
+            status: http::StatusCode::OK,
+        };
+
+        handle_response_result(Ok(FilterAction::Continue), &mut upstream, resp, true).unwrap();
+
+        // Serialising exercises the name-map zip that aborts on desync.
+        let mut buf = bytes::BytesMut::new();
+        upstream.header_to_h1_wire(&mut buf);
+        let wire = String::from_utf8_lossy(&buf);
+        assert!(wire.contains("x-new"), "swapped-in header should serialise: {wire}");
+        assert!(!wire.contains("x-old"), "swapped-out header should be gone: {wire}");
+    }
+
+    #[test]
+    fn rebuild_preserves_the_upstream_reason_phrase() {
+        let mut upstream = pingora_http::ResponseHeader::build(200, None).unwrap();
+        upstream.set_reason_phrase(Some("Totally Fine")).unwrap();
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-added", "1".parse().unwrap());
+        let resp = praxis_filter::Response {
+            headers,
+            status: http::StatusCode::OK,
+        };
+
+        handle_response_result(Ok(FilterAction::Continue), &mut upstream, resp, true).unwrap();
+
+        assert_eq!(
+            upstream.get_reason_phrase(),
+            Some("Totally Fine"),
+            "the rebuild must not reset a custom reason phrase"
+        );
     }
 
     // -------------------------------------------------------------------------

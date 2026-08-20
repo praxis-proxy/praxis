@@ -102,6 +102,22 @@ pub trait HttpFilter: Send + Sync {
         Vec::new()
     }
 
+    /// Whether this filter may select a streaming sub-request response.
+    ///
+    /// Pipeline validation uses this declaration to reject response
+    /// pipelines that require [`BodyMode::StreamBuffer`], which is
+    /// incompatible with incremental terminal delivery. Filters that can
+    /// call [`HttpFilterContext::set_subrequest_response_mode`] with
+    /// `Streaming` must override this method.
+    ///
+    /// A runtime guard still validates an actual streaming terminal action,
+    /// protecting dynamically registered or incorrectly declared filters.
+    ///
+    /// [`HttpFilterContext::set_subrequest_response_mode`]: crate::HttpFilterContext::set_subrequest_response_mode
+    fn may_select_streaming_subrequest_response(&self) -> bool {
+        false
+    }
+
     /// Called for each response, in reverse pipeline order.
     ///
     /// Default: [`FilterAction::Continue`]
@@ -180,6 +196,21 @@ pub trait HttpFilter: Send + Sync {
     /// [`on_response_body`]: HttpFilter::on_response_body
     fn needs_request_context(&self) -> bool {
         false
+    }
+
+    /// Filesystem paths this filter reads its configuration from, beyond the
+    /// main Praxis config.
+    ///
+    /// The config watcher uses this to decide which files should trigger a
+    /// reload. A filter whose configuration lives entirely inside the Praxis
+    /// config has nothing to declare, which is why the default is empty and why
+    /// adding this is additive for every existing filter.
+    ///
+    /// Paths are returned as configured, not canonicalized: the watcher does its
+    /// own resolution because it has to handle symlinks and relative paths
+    /// consistently with how it already treats the main config.
+    fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
     }
 
     /// Apply global [`InsecureOptions`] to this filter.
@@ -279,7 +310,6 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::{FilterAction, FilterError};
 
     #[tokio::test]
     async fn default_on_response_returns_continue() {
@@ -321,6 +351,17 @@ mod tests {
         assert!(
             !filter.needs_request_context(),
             "default needs_request_context should be false"
+        );
+    }
+
+    /// The empty default is what makes `referenced_files` additive: a filter that
+    /// predates it declares nothing.
+    #[test]
+    fn default_referenced_files_is_empty() {
+        let filter = MinimalFilter;
+        assert!(
+            filter.referenced_files().is_empty(),
+            "a filter with no external config must declare nothing"
         );
     }
 

@@ -2,6 +2,20 @@
 // Copyright (c) 2024 Praxis Contributors
 
 #![deny(unreachable_pub)]
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::impl_trait_in_params,
+    clippy::iter_over_hash_type,
+    clippy::min_ident_chars,
+    clippy::mod_module_files,
+    clippy::partial_pub_fields,
+    clippy::shadow_unrelated,
+    clippy::single_char_lifetime_names,
+    clippy::struct_field_names,
+    clippy::wildcard_enum_match_arm,
+    reason = "TODO(conventions-sync): fix violations and remove"
+)]
 
 //! Filter pipeline engine for Praxis.
 
@@ -23,21 +37,23 @@ mod registry;
 mod results;
 mod tcp_filter;
 
-pub use actions::{FilterAction, Rejection, TerminalResponse};
+pub use actions::{FilterAction, Rejection, StreamingResponseBody, StreamingTerminalResponse, TerminalResponse};
 pub use any_filter::AnyFilter;
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
 #[cfg(feature = "basic-auth-filter")]
 pub use builtins::BasicAuthFilter;
-#[cfg(feature = "cpex-policy-engine")]
-pub use builtins::PolicyFilter;
 pub use builtins::{
     CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, EndpointSelectorFilter,
     GuardrailsAction, GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode, RedirectStatus, RouterFilter,
     RuleTargetKind, has_dot_dot_traversal, http::payload_processing::compression_config::CompressionConfig,
     normalize_rewritten_path,
 };
+#[cfg(feature = "policy-engine")]
+pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
-pub use context::{HttpFilterContext, PendingHeaderResult, Request, Response, TrustedHeaderMutation};
+pub use context::{
+    HttpFilterContext, PendingHeaderResult, Request, Response, SubRequestResponseMode, TrustedHeaderMutation,
+};
 pub use error_response::{
     ErrorResponseContext, ErrorResponseFormatter, ErrorResponseFormatterHandle, FormattedErrorResponse,
 };
@@ -49,11 +65,12 @@ pub use factory::{
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
 pub use pipeline::{
     FilterPipeline, PipelineExtension,
+    introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},
     subrequest::{IterationState, NextIterationBody},
 };
 pub use praxis_core::{
     config::{FailureMode, FilterEntry},
-    subrequest::{SubRequest, SubResponse},
+    subrequest::{StreamLimits, StreamingSubResponse, SubRequest, SubResponse, SubResponseBody},
 };
 pub use praxis_tls::TlsPeerIdentity;
 pub use registry::{FilterRegistry, SecurityClass};
@@ -433,6 +450,7 @@ pub(crate) mod test_utils {
             metrics_route: None,
             peer_identity: None,
             subrequest_client: None,
+            subrequest_response_mode: crate::SubRequestResponseMode::Buffered,
             request: req,
             request_body_bytes: 0,
             request_body_mode: crate::body::BodyMode::Stream,

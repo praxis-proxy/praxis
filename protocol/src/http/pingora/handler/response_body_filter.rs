@@ -49,7 +49,7 @@ pub(super) fn execute(
 
     match ctx.response_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
-            if check_body_size_limit(body, &mut ctx.response_body_bytes, max_bytes) {
+            if check_body_size_limit(body.as_ref(), &mut ctx.response_body_bytes, max_bytes) {
                 return Err(pingora_core::Error::explain(
                     pingora_core::ErrorType::InternalError,
                     "response body exceeds maximum size",
@@ -86,7 +86,12 @@ pub(super) fn execute(
     output.write_back(ctx);
 
     match result {
-        Ok(FilterAction::Continue | FilterAction::BodyDone | FilterAction::TerminalResponse(_)) => {
+        Ok(
+            FilterAction::Continue
+            | FilterAction::BodyDone
+            | FilterAction::TerminalResponse(_)
+            | FilterAction::StreamingTerminalResponse(_),
+        ) => {
             suppress_stream_buffer_chunk(body, is_stream_buffer, ctx.response_body_released, end_of_stream);
             Ok(None)
         },
@@ -137,11 +142,9 @@ pub(super) fn execute(
     reason = "tests"
 )]
 mod tests {
-    use bytes::Bytes;
-    use praxis_filter::{FilterPipeline, FilterRegistry};
+    use praxis_filter::FilterRegistry;
 
     use super::*;
-    use crate::http::pingora::context::PingoraRequestCtx;
 
     #[test]
     fn no_body_capabilities_returns_none() {

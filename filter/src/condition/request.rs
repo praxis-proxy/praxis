@@ -118,7 +118,6 @@ mod tests {
     use std::collections::HashMap;
 
     use http::{HeaderMap, HeaderValue, Method, Uri};
-    use praxis_core::config::ConditionMatch;
 
     use super::*;
 

@@ -150,7 +150,6 @@ mod tests {
     use std::collections::HashMap;
 
     use http::{HeaderMap, HeaderValue};
-    use praxis_core::config::ResponseConditionMatch;
 
     use super::*;
 

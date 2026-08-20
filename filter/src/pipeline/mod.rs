@@ -41,6 +41,8 @@ mod extension;
 pub(crate) mod filter;
 mod http;
 mod http_utils;
+/// Public pipeline introspection snapshots for admin surfaces.
+pub(crate) mod introspection;
 /// Sub-request execution for iterative request routing.
 pub(crate) mod subrequest;
 mod tcp;
@@ -121,6 +123,10 @@ pub struct FilterPipeline {
 
     /// Shared sub-request client for iterative sub-requests.
     subrequest_client: Option<praxis_core::subrequest::SubRequestClient>,
+
+    /// Whether any filter, including branch filters, may select a streaming
+    /// sub-request response.
+    may_select_streaming_subrequest_response: bool,
 
     /// External pipeline extensions injected after construction.
     pipeline_extensions: Vec<Box<dyn PipelineExtension>>,
@@ -257,6 +263,12 @@ impl FilterPipeline {
         self.subrequest_client.as_ref()
     }
 
+    /// Whether any filter in this pipeline or its branches may select a
+    /// streaming sub-request response.
+    pub fn may_select_streaming_subrequest_response(&self) -> bool {
+        self.may_select_streaming_subrequest_response
+    }
+
     /// Set the shared [`SubRequestClient`] for this pipeline.
     ///
     /// [`SubRequestClient`]: praxis_core::subrequest::SubRequestClient
@@ -295,6 +307,29 @@ impl FilterPipeline {
     /// Override the [`TimeSource`] for this pipeline.
     pub fn set_time_source(&mut self, source: Arc<dyn TimeSource>) {
         self.time_source = source;
+    }
+
+    /// Filesystem paths the filters in this pipeline read configuration from,
+    /// beyond the main Praxis config.
+    ///
+    /// Used by the config watcher to decide which files should trigger a reload.
+    /// Without this, a filter that loads an external document never picks up edits
+    /// to it, because the reload gate only ever sees the main config's bytes.
+    ///
+    /// Mirrors [`Self::apply_insecure_options`], including its limitation: only
+    /// top-level filters are walked, not filters nested inside branch chains. A
+    /// document referenced solely from a branch is therefore not observed. That is
+    /// the same blind spot the insecure-options walk already has, and widening both
+    /// belongs in one change rather than half of one here.
+    pub fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        self.filters
+            .iter()
+            .filter_map(|pf| match &pf.filter {
+                crate::any_filter::AnyFilter::Http(f) => Some(f.referenced_files()),
+                crate::any_filter::AnyFilter::Tcp(_) => None,
+            })
+            .flatten()
+            .collect()
     }
 
     /// Apply [`InsecureOptions`] to all filters in the pipeline.

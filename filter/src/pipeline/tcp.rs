@@ -47,7 +47,8 @@ impl FilterPipeline {
                     FilterAction::Continue
                     | FilterAction::Release
                     | FilterAction::BodyDone
-                    | FilterAction::TerminalResponse(_),
+                    | FilterAction::TerminalResponse(_)
+                    | FilterAction::StreamingTerminalResponse(_),
                 ) => {},
                 Ok(FilterAction::Reject(r)) => return Ok(FilterAction::Reject(r)),
                 Err(e) => {
@@ -103,7 +104,7 @@ mod tests {
     use praxis_core::config::FailureMode;
 
     use super::*;
-    use crate::{FilterError, FilterRegistry, Rejection, body::BodyCapabilities, tcp_filter::TcpFilter};
+    use crate::{FilterRegistry, Rejection, body::BodyCapabilities, tcp_filter::TcpFilter};
     #[tokio::test]
     async fn empty_pipeline_connect_continues() {
         let registry = FilterRegistry::with_builtins();
@@ -468,6 +469,7 @@ mod tests {
             id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
             kv_stores: None,
             subrequest_client: None,
+            may_select_streaming_subrequest_response: false,
             pipeline_extensions: Vec::new(),
             time_source: Arc::new(praxis_core::time::SystemTimeSource),
         }

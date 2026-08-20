@@ -1,34 +1,34 @@
 # Policy Security Filter (experimental)
 #
-# Embeds the CPEX policy engine in-process to enforce multi-source JWT
+# Embeds the Praxis Policy Engine in-process to enforce multi-source JWT
 # identity, APL route policy, RFC 8693 OAuth 2.0 token exchange, PII
 # scanning, audit emission, and (under `body_access: read_write`)
 # request / response body rewriting.
 #
-# Experimental: requires the `cpex-policy-engine` cargo feature, which
+# Experimental: requires the `policy-engine` cargo feature, which
 # is off by default.
 #
 # The policy filter consumes `mcp.method` / `mcp.name` metadata from
 # an upstream protocol classifier filter (available in the `praxis-ai` package), which
 # MUST be ordered before it in the chain.
 #
-# `config_path` points at the CPEX policy YAML (plugins + routes) that
+# `config_path` points at the policy document (plugins + routes) that
 # the filter loads once at construction. It is operator-supplied, not
 # shipped here: a real policy carries your own issuers, secrets, routes,
 # PDPs, and delegators. See the praxis-demos repo
-# (`demos/cpex/cpex.yaml`) for a fully-featured policy, and
-# `tests/integration/fixtures/cpex-policy.yaml` for the minimal
+# (`demos/cpex/policy.yaml`) for a fully-featured policy, and
+# `tests/integration/fixtures/policy.yaml` for the minimal
 # single-HS256-identity-plugin policy the integration test loads.
 #
 # `require_protocol_metadata: true` (the default) fail-closes when the
 # protocol classifier filter is missing or ordered after `policy` — this guards
 # against a misconfigured chain silently bypassing policy.
 #
-# This example builds only when the `cpex-policy-engine` cargo feature
+# This example builds only when the `policy-engine` cargo feature
 # is enabled.
 #
 # Usage:
-#   cargo run --features cpex-policy-engine -p praxis-proxy -- \
+#   cargo run --features policy-engine -p praxis-proxy -- \
 #     -c examples/configs/security/policy.yaml
 #
 # Exercise (assumes the backend at :3000 echoes 200):
@@ -65,7 +65,7 @@ filter_chains:
       # See the praxis-ai documentation for setup instructions.
 
       - filter: policy
-        config_path: /etc/praxis/cpex-policy.yaml
+        config_path: /etc/praxis/policy.yaml
         # Fail-closed when mcp.method metadata is missing. Set to
         # `false` only when intentionally fronting non-classified traffic
         # through the policy filter for identity-only enforcement.

@@ -115,8 +115,8 @@ fn redact_filter_entry(entry: &mut FilterEntry) {
     for branch in branches {
         for chain in &mut branch.chains {
             if let ChainRef::Inline { filters, .. } = chain {
-                for entry in filters {
-                    redact_filter_entry(entry);
+                for filter_entry in filters {
+                    redact_filter_entry(filter_entry);
                 }
             }
         }
@@ -140,12 +140,12 @@ fn redact_credential_values(config: &mut serde_yaml::Value) {
     let env_var_key = serde_yaml::Value::String("env_var".to_owned());
     let redacted = serde_yaml::Value::String("[REDACTED]".to_owned());
     for entry in seq {
-        if let Some(m) = entry.as_mapping_mut() {
-            if m.contains_key(&value_key) {
-                m.insert(value_key.clone(), redacted.clone());
+        if let Some(entry_map) = entry.as_mapping_mut() {
+            if entry_map.contains_key(&value_key) {
+                entry_map.insert(value_key.clone(), redacted.clone());
             }
-            if m.contains_key(&env_var_key) {
-                m.insert(env_var_key.clone(), redacted.clone());
+            if entry_map.contains_key(&env_var_key) {
+                entry_map.insert(env_var_key.clone(), redacted.clone());
             }
         }
     }
@@ -163,15 +163,19 @@ fn redact_sensitive_keys(value: &mut serde_yaml::Value) {
             mapping.insert(key, redacted.clone());
         }
     }
-    for (_, v) in mapping.iter_mut() {
-        match v {
-            serde_yaml::Value::Mapping(_) => redact_sensitive_keys(v),
+    for (_, val) in mapping.iter_mut() {
+        match val {
+            serde_yaml::Value::Mapping(_) => redact_sensitive_keys(val),
             serde_yaml::Value::Sequence(seq) => {
                 for item in seq {
                     redact_sensitive_keys(item);
                 }
             },
-            _ => {},
+            serde_yaml::Value::Null
+            | serde_yaml::Value::Bool(_)
+            | serde_yaml::Value::Number(_)
+            | serde_yaml::Value::String(_)
+            | serde_yaml::Value::Tagged(_) => {},
         }
     }
 }
@@ -224,7 +228,7 @@ fn build_resolved_filters(
                 filter: entry.filter_type.clone(),
                 pipeline_index,
             });
-            pipeline_index += 1;
+            pipeline_index = pipeline_index.saturating_add(1);
         }
     }
 
@@ -253,8 +257,6 @@ pub(crate) fn write_dump(
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
-    use praxis_core::config::{Config, FailureMode};
-
     use super::*;
 
     const ORDERED_CHAINS_YAML: &str = r#"

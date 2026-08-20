@@ -8,6 +8,9 @@ CONTAINER_ENGINE ?= $(shell command -v podman 2>/dev/null || command -v docker 2
 NIGHTLY_VERSION  := $(shell grep -m1 'rust-toolchain@' .github/actions/install-nightly-rust/action.yml | grep -oE 'nightly-[0-9]{4}-[0-9]{2}-[0-9]{2}')
 V                ?=
 
+# Optional features that require separate test and lint passes.
+OPTIONAL_FEATURES := basic-auth-filter policy-engine otel
+
 UNAME_S := $(shell uname -s | tr A-Z a-z)
 UNAME_M := $(shell uname -m)
 
@@ -15,7 +18,7 @@ UNAME_M := $(shell uname -m)
 # All
 # -------------------------------------------------------------------
 
-all: build fmt lint test audit container
+all: build fmt lint lint-extra test audit container
 
 # -------------------------------------------------------------------
 # Prerequisites
@@ -44,12 +47,17 @@ ifneq ($(V),)
   _NOCAPTURE := -- --nocapture
 endif
 
+# Meta-lint tools checked by lint-extra.
+LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
+
 .PHONY: all build release check clean \
 	test test-unit \
 	test-schema test-integration test-conformance \
 	test-security test-security-suite test-resilience \
 	bench \
-	lint generate-filter-docs fmt doc audit semver publish-dry-run coverage coverage-check \
+	lint lint-extra generate-filter-docs fmt doc audit semver publish-dry-run \
+	mutants \
+	coverage coverage-check \
 	fuzz fuzz-build \
 	require-container-engine \
 	container container-run \
@@ -58,6 +66,7 @@ endif
 	tools clean-tools \
 	check-prereqs \
 	check-prereqs-cmake \
+	check-prereqs-extra \
 	check-prereqs-nightly \
 	check-prereqs-nightly-toolchain \
 	setup-hooks \
@@ -76,6 +85,14 @@ check-prereqs-cmake: check-prereqs
 		echo "\"cmake\" is not installed or broken — install/reinstall it before running make (see docs/developing/getting-started.md)" >&2; \
 		exit 1; \
 	}
+check-prereqs-extra:
+	@for cmd in $(LINT_EXTRA_CMDS); do \
+		command -v "$$cmd" >/dev/null 2>&1 || { \
+			echo "\"$$cmd\" is not installed — install it before running make lint-extra (see docs/developing/getting-started.md)" >&2; \
+			exit 1; \
+		}; \
+	done
+
 check-prereqs-nightly-toolchain: check-prereqs
 	@test -n "$(NIGHTLY_VERSION)" || { \
 		echo "Could not determine NIGHTLY_VERSION from .github/actions/install-nightly-rust/action.yml" >&2; \
@@ -228,10 +245,15 @@ container-run: | require-container-engine
 
 test: $(H2SPEC)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo test --workspace $(_NOCAPTURE)
+	cargo test -p praxis-proxy-core --features otel $(_NOCAPTURE)
+	cargo test -p praxis-proxy-filter --features "basic-auth-filter policy-engine" $(_NOCAPTURE)
+	PATH="$(BINUTILS_PATH):$(PATH)" cargo test -p praxis-tests-integration --features "$(OPTIONAL_FEATURES)" $(_NOCAPTURE)
 
 test-unit:
 	cargo test -p praxis-proxy-core $(_NOCAPTURE)
+	cargo test -p praxis-proxy-core --features otel $(_NOCAPTURE)
 	cargo test -p praxis-proxy-filter $(_NOCAPTURE)
+	cargo test -p praxis-proxy-filter --features "basic-auth-filter policy-engine" $(_NOCAPTURE)
 	cargo test -p praxis-proxy-protocol $(_NOCAPTURE)
 	cargo test -p praxis-proxy $(_NOCAPTURE)
 
@@ -240,6 +262,7 @@ test-schema:
 
 test-integration:
 	cargo test -p praxis-tests-integration $(_NOCAPTURE)
+	cargo test -p praxis-tests-integration --features "$(OPTIONAL_FEATURES)" $(_NOCAPTURE)
 
 test-conformance: $(H2SPEC)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo test -p praxis-tests-conformance $(_NOCAPTURE)
@@ -280,6 +303,7 @@ bench: $(VEGETA) $(FORTIO_DEP)
 
 lint:
 	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets --features "$(OPTIONAL_FEATURES)" -- -D warnings
 	cargo +$(NIGHTLY_VERSION) fmt --all -- --check
 	cargo machete
 	cargo xtask lint-deps
@@ -287,8 +311,17 @@ lint:
 	cargo xtask sync-example-readme
 	cargo xtask lint-filter-docs
 
+lint-extra: check-prereqs-extra
+	typos
+	taplo fmt --check
+	shellcheck .hooks/pre-commit
+	actionlint
+
 generate-filter-docs:
 	cargo xtask generate-filter-docs
+
+mutants:
+	cargo mutants --workspace
 
 semver:
 	cargo semver-checks
@@ -368,7 +401,7 @@ help:
 	@echo "  clean                cargo clean"
 	@echo ""
 	@echo "Test:"
-	@echo "  test                 run all tests"
+	@echo "  test                 run all tests (default + optional features)"
 	@echo "  test-unit            unit tests (core, filter, protocol, praxis)"
 	@echo "  test-schema   config validation + example tests"
 	@echo "  test-integration     integration tests only"
@@ -383,10 +416,13 @@ help:
 	@echo "  bench                Criterion micro-benchmarks"
 	@echo ""
 	@echo "Quality:"
-	@echo "  lint                 clippy + rustfmt check + filter docs"
+	@echo "  lint                 clippy (default + optional features) + rustfmt check + filter docs"
+	@echo "  lint-extra           typos + taplo + shellcheck + actionlint"
 	@echo "  generate-filter-docs generate per-filter docs under docs/filters/"
 	@echo "  fmt                  format with nightly rustfmt"
 	@echo "  audit                cargo audit + cargo deny"
+	@echo "  semver               cargo semver-checks"
+	@echo "  mutants              mutation testing (cargo-mutants)"
 	@echo "  publish-dry-run      validate crate packaging for crates.io"
 	@echo "  coverage             HTML coverage report"
 	@echo "  coverage-check       fail if line coverage < 96%%"

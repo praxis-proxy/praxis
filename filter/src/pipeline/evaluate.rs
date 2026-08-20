@@ -25,7 +25,7 @@
 //! [`Continue`]: super::branch::BranchOutcome::Continue
 //! [`ReEnter`]: super::branch::RejoinTarget::ReEnter
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{pin::Pin, sync::Arc};
 
 use tracing::{debug, trace, warn};
 
@@ -76,6 +76,9 @@ async fn evaluate_branches_inner(
         match action {
             FilterAction::Reject(r) => return Ok(BranchOutcome::Reject(r)),
             FilterAction::TerminalResponse(t) => return Ok(BranchOutcome::TerminalResponse(t)),
+            FilterAction::StreamingTerminalResponse(t) => {
+                return Ok(BranchOutcome::StreamingTerminalResponse(t));
+            },
             _ => {},
         }
 
@@ -163,6 +166,9 @@ async fn execute_branch_filters(
             Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {},
             Ok(FilterAction::Reject(r)) => return Ok(FilterAction::Reject(r)),
             Ok(FilterAction::TerminalResponse(t)) => return Ok(FilterAction::TerminalResponse(t)),
+            Ok(FilterAction::StreamingTerminalResponse(t)) => {
+                return Ok(FilterAction::StreamingTerminalResponse(t));
+            },
             Err(e) => {
                 check_failure_mode(http_filter.name(), e, "branch request", pf.failure_mode)?;
             },
@@ -207,6 +213,7 @@ async fn dispatch_nested_outcome(
         BranchOutcome::Terminal => Ok(Some(FilterAction::Continue)),
         BranchOutcome::Reject(r) => Ok(Some(FilterAction::Reject(r))),
         BranchOutcome::TerminalResponse(t) => Ok(Some(FilterAction::TerminalResponse(t))),
+        BranchOutcome::StreamingTerminalResponse(t) => Ok(Some(FilterAction::StreamingTerminalResponse(t))),
     }
 }
 
@@ -226,18 +233,17 @@ async fn dispatch_nested_outcome(
     reason = "tests"
 )]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
+    use bytes::Bytes;
     use http::Method;
     use praxis_core::config::FailureMode;
 
     use super::*;
     use crate::{
-        FilterError, Rejection, filter::HttpFilter, pipeline::branch::ResolvedBranchCondition, results::FilterResultSet,
+        Rejection, StreamingTerminalResponse, filter::HttpFilter, pipeline::branch::ResolvedBranchCondition,
+        results::FilterResultSet,
     };
 
     #[tokio::test]
@@ -986,6 +992,65 @@ mod tests {
             name: None,
             response_conditions: vec![],
         }
+    }
+
+    #[tokio::test]
+    async fn streaming_terminal_response_propagates_from_branch() {
+        use crate::StreamingResponseBody;
+
+        struct NullStreamBody;
+
+        #[async_trait::async_trait]
+        impl StreamingResponseBody for NullStreamBody {
+            async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
+                Ok(None)
+            }
+
+            async fn suppress(&mut self) -> Result<(), FilterError> {
+                Ok(())
+            }
+
+            async fn cancel(&mut self) {}
+        }
+
+        struct StreamingTerminalFilter;
+
+        #[async_trait::async_trait]
+        impl HttpFilter for StreamingTerminalFilter {
+            fn name(&self) -> &'static str {
+                "streaming_terminal_test"
+            }
+
+            async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+                Ok(FilterAction::StreamingTerminalResponse(Box::new(
+                    StreamingTerminalResponse::new(200, Box::new(NullStreamBody)),
+                )))
+            }
+        }
+
+        let streaming_pf = PipelineFilter {
+            filter_id: 99,
+            branches: vec![],
+            conditions: vec![],
+            failure_mode: FailureMode::default(),
+            filter: AnyFilter::Http(Box::new(StreamingTerminalFilter)),
+            name: None,
+            response_conditions: vec![],
+        };
+        let branches = vec![make_branch(
+            "stream_branch",
+            None,
+            RejoinTarget::Next,
+            None,
+            vec![streaming_pf],
+        )];
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
+        assert!(
+            matches!(outcome, BranchOutcome::StreamingTerminalResponse(_)),
+            "streaming terminal response should propagate from branch"
+        );
     }
 
     /// Build a [`ResolvedBranch`] for testing.

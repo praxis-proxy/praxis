@@ -10,8 +10,8 @@ use serde::Deserialize;
 // -----------------------------------------------------------------------------
 
 /// Configuration block for the experimental `policy` filter, which
-/// embeds the CPEX policy engine in-process (gated behind the
-/// `cpex-policy-engine` feature, off by default).
+/// embeds the Praxis Policy Engine in-process (gated behind the
+/// `policy-engine` feature, off by default).
 ///
 /// Praxis filter configs are flat: the filter's typed fields sit
 /// directly under the `- filter:` entry alongside the structural keys
@@ -21,18 +21,18 @@ use serde::Deserialize;
 /// ```yaml
 /// filters:
 ///   - filter: policy
-///     config_path: /etc/praxis/cpex-policy.yaml
+///     config_path: /etc/praxis/policy.yaml
 ///     body_access: read_write   # optional; default read_only
 ///     require_protocol_metadata: true
 /// ```
 ///
-/// The referenced YAML is the CPEX policy document — plugins, routes,
+/// The referenced YAML is the policy document — plugins, routes,
 /// and identity-source declarations. The filter loads it once at
 /// construction and rejects misconfigured policy at server startup
 /// (fail-fast rather than at first request).
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct PolicyFilterConfig {
+pub(crate) struct PolicyFilterConfig {
     /// Body-access tier. `ReadOnly` (default) lets APL inspect request
     /// and response bodies for routing / policy decisions but discards
     /// any mutations. `ReadWrite` enables the CMF → JSON-RPC
@@ -42,10 +42,10 @@ pub struct PolicyFilterConfig {
     #[serde(default)]
     pub body_access: BodyAccessMode,
 
-    /// Filesystem path to the CPEX YAML policy document.
+    /// Filesystem path to the policy document.
     pub config_path: String,
 
-    /// Maximum time, in seconds, to wait for `PluginManager::initialize`
+    /// Maximum time, in seconds, to wait for `PolicyEngine::initialize`
     /// at filter construction. Identity plugins fetch JWKS over HTTPS
     /// during init; a reachable-but-unresponsive identity provider
     /// would otherwise hang startup or hot-reload indefinitely. On
@@ -99,7 +99,7 @@ fn default_true() -> bool {
     true
 }
 
-/// Default upper bound on `PluginManager::initialize` (seconds).
+/// Default upper bound on `PolicyEngine::initialize` (seconds).
 fn default_init_timeout_secs() -> u64 {
     30
 }
@@ -119,7 +119,7 @@ fn default_max_buffer_bytes() -> usize {
 /// cost), so a per-filter knob is the right granularity.
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
-pub enum BodyAccessMode {
+pub(crate) enum BodyAccessMode {
     /// Body is buffered for inspection / routing; mutations are
     /// discarded. APL `require()` predicates over body content
     /// (`args.amount > 1000`) work; `redact()` / `assign()` are

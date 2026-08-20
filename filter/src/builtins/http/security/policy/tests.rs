@@ -1,13 +1,15 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Tests for the CPEX security filter.
+//! Tests for the `policy` security filter.
 //!
 //! Uses HMAC (HS256) JWTs throughout for setup simplicity — the
 //! identity validation pipeline is symmetric across signing
 //! algorithms, and HS256 lets us skip RSA keypair generation. Real
 //! deployments use RS256 with JWKS endpoints; the YAML schema
 //! supports both via the `decoding_key.kind` discriminant.
+
+use std::sync::{Arc, Mutex};
 
 use http::{HeaderValue, Method};
 use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
@@ -65,7 +67,7 @@ fn agent_claims(client_id: &str) -> serde_json::Value {
     })
 }
 
-/// Write a single-plugin CPEX YAML referencing the HS256 test secret.
+/// Write a single-plugin policy document referencing the HS256 test secret.
 fn write_single_plugin_config() -> (TempDir, String) {
     let dir = TempDir::new().expect("create tempdir");
     let cfg_path = dir.path().join("cpex.yaml");
@@ -98,7 +100,7 @@ fn write_single_plugin_config() -> (TempDir, String) {
     (dir, path_str)
 }
 
-/// Write a CPEX YAML with a single entity route (`echo` tool) gated by a
+/// Write a policy document with a single entity route (`echo` tool) gated by a
 /// native `require(authenticated)` and no global HTTP policy. The filter
 /// derives `entity_routes = true`, so it authorizes at the body phase and
 /// requires classifier metadata.
@@ -140,7 +142,7 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Write a CPEX YAML whose `echo` tool route rule references BOTH `http.*`
+/// Write a policy document whose `echo` tool route rule references BOTH `http.*`
 /// and identity attributes in one CEL step. Proves the body-phase entity
 /// evaluation sees the HTTP request line alongside entity/identity
 /// attributes (the enrichment). `entity_routes = true`.
@@ -186,7 +188,7 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Write a CPEX YAML with only a `global` HTTP policy and no entity routes —
+/// Write a policy document with only a `global` HTTP policy and no entity routes —
 /// the pure L7 shape. The filter derives `http_global = true`,
 /// `entity_routes = false`, and authorizes at `on_request` with no
 /// classifier.
@@ -230,7 +232,7 @@ global:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Write a CPEX YAML that declares BOTH a `global` HTTP policy (canonical
+/// Write a policy document that declares BOTH a `global` HTTP policy (canonical
 /// `authentication:`/`authorization:` form, admitting only GET) AND an entity
 /// route (the `echo` tool). Derives the combined shape
 /// `(http_global = true, entity_routes = true)`.
@@ -281,7 +283,7 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// Write a CPEX YAML that gates the `echo` tool through a CEL PDP step.
+/// Write a policy document that gates the `echo` tool through a CEL PDP step.
 /// Single HS256 identity plugin (so `subject.id` resolves from the JWT
 /// `sub`), a `kind: cel` PDP declared globally, and a route whose `cel:`
 /// expression allows only `alice`. Exercises the `apl-pdp-cel` backend
@@ -360,7 +362,7 @@ async fn dispatch_echo_method(filter: &PolicyFilter, subject: &str, method: Meth
         .expect("filter ran")
 }
 
-/// Write a CPEX YAML demonstrating session tainting: a `read-secret`
+/// Write a policy document demonstrating session tainting: a `read-secret`
 /// tool taints the session, and a `send-out` tool denies when the
 /// session carries that taint. Identity is the HS256 jwt plugin so
 /// `subject.id` resolves; the taint persists in the in-process session
@@ -412,7 +414,7 @@ routes:
 
 /// Dispatch a `tools/call` for `tool` as `subject` with the given
 /// `X-Session-Id`. Returns the filter's body-phase action. Threads the
-/// session header so cpex's session-scoped taint store can persist /
+/// session header so the engine's session-scoped taint store can persist /
 /// hydrate labels across calls.
 async fn dispatch_tool_session(filter: &PolicyFilter, subject: &str, tool: &str, session_id: &str) -> FilterAction {
     let token = mint_jwt(&standard_claims(subject));
@@ -437,7 +439,7 @@ async fn dispatch_tool_session(filter: &PolicyFilter, subject: &str, tool: &str,
         .expect("filter ran")
 }
 
-/// Write a CPEX YAML with two identity plugins, each reading its own
+/// Write a policy document with two identity plugins, each reading its own
 /// header. Demonstrates the multi-source agentic identity story PR1
 /// targets — one request can carry user + agent JWTs simultaneously,
 /// both validated, both contributing to a typed `Extensions` context.
@@ -495,7 +497,7 @@ fn write_multi_source_config() -> (TempDir, String) {
     (dir, path_str)
 }
 
-/// Write a CPEX YAML that exercises ROUTE-SCOPED identity. A global
+/// Write a policy document that exercises ROUTE-SCOPED identity. A global
 /// resolver (`id-global`, reads `Authorization`) is listed in
 /// `global.authentication`; a second resolver (`id-route`, reads
 /// `X-Route-Token`) is bound ONLY to the `scoped-tool` route via a
@@ -730,7 +732,7 @@ async fn route_scoped_identity_is_published_only_after_authoritative_resolution(
     );
 }
 
-/// Write a CPEX YAML selecting the Valkey-backed session store via a
+/// Write a policy document selecting the Valkey-backed session store via a
 /// flat `global.session_store` block. The `valkey` factory connects
 /// lazily (the pool dials on first request), so this config loads
 /// without a running Valkey — it pins that the factory is registered
@@ -798,7 +800,7 @@ fn build_filter(config_path: String) -> PolicyFilter {
 /// Body filter that records the authenticated subject visible at its position
 /// in the pipeline. Its `StreamBuffer` mode forces body-first pre-read.
 struct IdentityBodyObserver {
-    observed_subjects: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    observed_subjects: Arc<Mutex<Vec<String>>>,
 }
 
 #[async_trait::async_trait]
@@ -837,18 +839,15 @@ impl crate::HttpFilter for IdentityBodyObserver {
 
 /// Build a real two-filter pipeline so lifecycle state is keyed by the policy
 /// filter's runtime ID exactly as it is in production.
-fn build_policy_observer_pipeline(
-    config_path: &str,
-    observed_subjects: &std::sync::Arc<std::sync::Mutex<Vec<String>>>,
-) -> FilterPipeline {
+fn build_policy_observer_pipeline(config_path: &str, observed_subjects: &Arc<Mutex<Vec<String>>>) -> FilterPipeline {
     let mut registry = FilterRegistry::with_builtins();
-    let observer_state = std::sync::Arc::clone(observed_subjects);
+    let observer_state = Arc::clone(observed_subjects);
     registry
         .register(
             "identity_body_observer",
-            FilterFactory::Http(std::sync::Arc::new(move |_| {
+            FilterFactory::Http(Arc::new(move |_| {
                 let filter: Box<dyn crate::HttpFilter> = Box::new(IdentityBodyObserver {
-                    observed_subjects: std::sync::Arc::clone(&observer_state),
+                    observed_subjects: Arc::clone(&observer_state),
                 });
                 Ok(filter)
             })),
@@ -871,7 +870,7 @@ fn build_policy_observer_pipeline(
     reason = "linear body-first and header-second lifecycle regression"
 )]
 async fn assert_pre_read_admission(config_path: &str, method: Method) {
-    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = Arc::new(Mutex::new(Vec::new()));
     let pipeline = build_policy_observer_pipeline(config_path, &observed);
     assert!(
         matches!(
@@ -941,15 +940,15 @@ async fn pre_read_authorizes_before_pure_l7_body_consumer() {
 async fn gated_identity_is_isolated_between_policy_instances() {
     let (_first_dir, first_path) = write_tool_route_config_for_header("Authorization");
     let (_second_dir, second_path) = write_tool_route_config_for_header("X-Second-Token");
-    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-    let observer_state = std::sync::Arc::clone(&observed);
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let observer_state = Arc::clone(&observed);
     let mut registry = FilterRegistry::with_builtins();
     registry
         .register(
             "identity_body_observer",
-            FilterFactory::Http(std::sync::Arc::new(move |_| {
+            FilterFactory::Http(Arc::new(move |_| {
                 Ok(Box::new(IdentityBodyObserver {
-                    observed_subjects: std::sync::Arc::clone(&observer_state),
+                    observed_subjects: Arc::clone(&observer_state),
                 }))
             })),
         )
@@ -1014,23 +1013,36 @@ async fn gated_identity_is_isolated_between_policy_instances() {
 /// `max_buffer_bytes`) take their documented defaults.
 #[test]
 fn config_parses_minimal_yaml() {
-    let yaml = "config_path: /etc/praxis/cpex.yaml";
+    let yaml = "config_path: /etc/praxis/policy.yaml";
     let cfg: PolicyFilterConfig = serde_yaml::from_str(yaml).expect("parse");
-    assert_eq!(cfg.config_path, "/etc/praxis/cpex.yaml", "config_path round-trips",);
+    assert_eq!(cfg.config_path, "/etc/praxis/policy.yaml", "config_path round-trips",);
     assert_eq!(cfg.max_buffer_bytes, 10_485_760, "max_buffer_bytes defaults to 10 MiB",);
+}
+
+/// The filter declares its policy document, which is what lets the config
+/// watcher reload when an operator edits policy. See praxis-proxy/praxis#900.
+#[test]
+fn referenced_files_declares_the_policy_document() {
+    let (_dir, path) = write_single_plugin_config();
+    let filter = build_filter(path.clone());
+    assert_eq!(
+        filter.referenced_files(),
+        vec![std::path::PathBuf::from(&path)],
+        "the policy document must be declared so edits to it trigger a reload"
+    );
 }
 
 /// `max_buffer_bytes` is operator-tunable; an explicit value overrides
 /// the 10 MiB default so deployments can bound `ReadWrite` buffering.
 #[test]
 fn config_max_buffer_bytes_override() {
-    let yaml = "config_path: /etc/praxis/cpex.yaml\nmax_buffer_bytes: 1048576";
+    let yaml = "config_path: /etc/praxis/policy.yaml\nmax_buffer_bytes: 1048576";
     let cfg: PolicyFilterConfig = serde_yaml::from_str(yaml).expect("parse");
     assert_eq!(cfg.max_buffer_bytes, 1_048_576, "explicit max_buffer_bytes wins");
 }
 
 /// `config_path:` is mandatory — there's no default that would let
-/// the filter load a CPEX policy document, so an empty config block
+/// the filter load a policy document, so an empty config block
 /// must fail at deserialize time rather than at first request.
 #[test]
 fn config_requires_config_path() {
@@ -1091,7 +1103,7 @@ async fn request_without_auth_header_rejects_401() {
 /// resolved and enforced identity leaves behind.
 #[tokio::test(flavor = "multi_thread")]
 async fn identity_gate_skips_when_body_phase_already_resolved() {
-    use cpex::cpex_core::identity::{IdentityPayload, TokenSource};
+    use ppe::praxis_policy_core::identity::{IdentityPayload, TokenSource};
 
     use super::filter::ResolvedIdentity;
 
@@ -1395,7 +1407,7 @@ async fn current_thread_runtime_allows_pure_l7() {
 #[test]
 fn config_rejects_unknown_fields() {
     let yaml = "
-config_path: /etc/praxis/cpex.yaml
+config_path: /etc/praxis/policy.yaml
 body_acces: read_write
 ";
     let res: Result<PolicyFilterConfig, _> = serde_yaml::from_str(yaml);
@@ -1412,7 +1424,7 @@ body_acces: read_write
 /// pass-through for non-classified traffic.
 #[test]
 fn config_require_protocol_metadata_defaults_to_true() {
-    let yaml = "config_path: /etc/praxis/cpex.yaml";
+    let yaml = "config_path: /etc/praxis/policy.yaml";
     let cfg: PolicyFilterConfig = serde_yaml::from_str(yaml).expect("parse");
     assert!(cfg.require_protocol_metadata, "default must be fail-closed");
 }
@@ -1421,7 +1433,7 @@ fn config_require_protocol_metadata_defaults_to_true() {
 /// have to think about it; the bound is just present.
 #[test]
 fn config_init_timeout_defaults_to_30s() {
-    let yaml = "config_path: /etc/praxis/cpex.yaml";
+    let yaml = "config_path: /etc/praxis/policy.yaml";
     let cfg: PolicyFilterConfig = serde_yaml::from_str(yaml).expect("parse");
     assert_eq!(cfg.init_timeout_secs, 30);
 }
@@ -1430,7 +1442,7 @@ fn config_init_timeout_defaults_to_30s() {
 /// knob exists at the YAML surface, not just in the struct.
 #[test]
 fn config_init_timeout_honors_override() {
-    let yaml = "config_path: /etc/praxis/cpex.yaml\ninit_timeout_secs: 5";
+    let yaml = "config_path: /etc/praxis/policy.yaml\ninit_timeout_secs: 5";
     let cfg: PolicyFilterConfig = serde_yaml::from_str(yaml).expect("parse");
     assert_eq!(cfg.init_timeout_secs, 5);
 }
@@ -1439,7 +1451,7 @@ fn config_init_timeout_honors_override() {
 // path is intentionally NOT a unit test: the bundled identity-jwt
 // plugin has its own JWKS connect/request timeouts plus soft-fail-at-
 // boot, so a hung JWKS endpoint never propagates a hang through
-// `PluginManager::initialize` in the first place. The wrap-timeout in
+// `PolicyEngine::initialize` in the first place. The wrap-timeout in
 // `PolicyFilter::new` is defense-in-depth for OTHER init paths (custom
 // plugins, future hooks) where a future could legitimately stall.
 // The unit tests above pin the surface; the timeout's behavior is
@@ -1579,7 +1591,7 @@ async fn missing_protocol_metadata_passes_when_not_required() {
 /// same way they parse upstream errors.
 #[test]
 fn json_rpc_error_envelope_has_expected_shape() {
-    use cpex::cpex_core::error::PluginViolation;
+    use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::json_rpc_error_envelope_bytes;
 
@@ -1630,7 +1642,7 @@ fn json_rpc_error_envelope_handles_missing_violation() {
 /// short `code: reason` diagnostic.
 #[test]
 fn auth_rejection_shape_when_violation_present() {
-    use cpex::cpex_core::error::PluginViolation;
+    use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::auth_rejection;
 
@@ -1680,7 +1692,7 @@ fn auth_rejection_falls_back_to_sentinel_when_no_violation() {
 /// `"<code>: <reason>"` body, always stamping `X-Policy-Violation`.
 #[test]
 fn http_authz_rejection_defaults_without_details() {
-    use cpex::cpex_core::error::PluginViolation;
+    use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::http_authz_rejection;
 
@@ -1701,13 +1713,13 @@ fn http_authz_rejection_defaults_without_details() {
     );
 }
 
-/// A `denyWith` (CPEX `response:`) block sets a custom status, body, and
+/// A `denyWith` (the policy's `response:`) block sets a custom status, body, and
 /// safe headers on the L7 deny.
 #[test]
 fn http_authz_rejection_applies_custom_denywith() {
     use std::collections::HashMap;
 
-    use cpex::cpex_core::error::PluginViolation;
+    use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::http_authz_rejection;
 
@@ -1737,7 +1749,7 @@ fn http_authz_rejection_applies_custom_denywith() {
 fn http_authz_rejection_clamps_out_of_range_status() {
     use std::collections::HashMap;
 
-    use cpex::cpex_core::error::PluginViolation;
+    use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::http_authz_rejection;
 
@@ -1754,7 +1766,7 @@ fn http_authz_rejection_clamps_out_of_range_status() {
 fn http_authz_rejection_drops_control_char_headers() {
     use std::collections::HashMap;
 
-    use cpex::cpex_core::error::PluginViolation;
+    use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::error::http_authz_rejection;
 
@@ -1910,7 +1922,7 @@ fn json_rpc_id_value_preserves_json_type() {
 /// part so APL `args.<field>` predicates have something to read.
 #[test]
 fn build_content_for_method_tools_call() {
-    use cpex::cpex_core::cmf::ContentPart;
+    use ppe::praxis_policy_core::cmf::ContentPart;
 
     use super::json_rpc::build_content_for_method;
 
@@ -1935,7 +1947,7 @@ fn build_content_for_method_tools_call() {
 /// so route resolution and APL `resource.*` predicates work.
 #[test]
 fn build_content_for_method_resources_read() {
-    use cpex::cpex_core::cmf::ContentPart;
+    use ppe::praxis_policy_core::cmf::ContentPart;
 
     use super::json_rpc::build_content_for_method;
 
@@ -1971,7 +1983,7 @@ fn build_content_for_method_unknown_method_yields_empty() {
 /// APL actually mutated.
 #[test]
 fn reserialize_tools_call_round_trips_with_mutated_args() {
-    use cpex::cpex_core::cmf::{ContentPart, Message, Role, ToolCall};
+    use ppe::praxis_policy_core::cmf::{ContentPart, Message, Role, ToolCall};
 
     use super::json_rpc::reserialize_json_rpc_body;
 
@@ -2007,7 +2019,7 @@ fn reserialize_tools_call_round_trips_with_mutated_args() {
 /// `isError` flag round-trips.
 #[test]
 fn build_response_content_for_method_text_fallback() {
-    use cpex::cpex_core::cmf::ContentPart;
+    use ppe::praxis_policy_core::cmf::ContentPart;
 
     use super::json_rpc::build_response_content_for_method;
 
@@ -2031,7 +2043,7 @@ fn build_response_content_for_method_text_fallback() {
 /// when present.
 #[test]
 fn build_response_content_for_method_prefers_structured_content() {
-    use cpex::cpex_core::cmf::ContentPart;
+    use ppe::praxis_policy_core::cmf::ContentPart;
 
     use super::json_rpc::build_response_content_for_method;
 
@@ -2059,7 +2071,7 @@ fn build_response_content_for_method_prefers_structured_content() {
 /// folded view exposes all blocks under `text`.
 #[test]
 fn build_response_content_for_method_folds_all_text_blocks() {
-    use cpex::cpex_core::cmf::ContentPart;
+    use ppe::praxis_policy_core::cmf::ContentPart;
 
     use super::json_rpc::build_response_content_for_method;
 
@@ -2092,7 +2104,7 @@ fn build_response_content_for_method_folds_all_text_blocks() {
 /// `structuredContent` is mirrored when the original had it.
 #[test]
 fn reserialize_response_collapses_to_single_vetted_block() {
-    use cpex::cpex_core::cmf::{ContentPart, Message, Role, ToolResult};
+    use ppe::praxis_policy_core::cmf::{ContentPart, Message, Role, ToolResult};
 
     use super::json_rpc::reserialize_json_rpc_response_body;
 
@@ -2131,7 +2143,7 @@ fn reserialize_response_collapses_to_single_vetted_block() {
 /// desync.
 #[test]
 fn deny_envelope_fits_committed_length() {
-    use cpex::cpex_core::error::PluginViolation;
+    use ppe::praxis_policy_core::error::PluginViolation;
 
     use super::{error::json_rpc_error_envelope_bytes, filter::fit_to_original_length};
 
@@ -2210,7 +2222,7 @@ async fn cel_route_allows_matching_subject_and_denies_others() {
 /// A single entity-route rule can combine `http.*` with entity/identity
 /// attributes: the `echo` tool is gated by `http.method == "POST" &&
 /// subject.id == "alice"`. Proves the body-phase evaluation is enriched with
-/// the HTTP request line (via CPEX's `read_headers` grant to entity routes),
+/// the HTTP request line (via the engine's `read_headers` grant to entity routes),
 /// so the same policy sees both dimensions. `alice` over POST passes; the
 /// same caller over GET is denied by the `http.method` half of the predicate.
 #[tokio::test(flavor = "multi_thread")]
@@ -2293,7 +2305,7 @@ async fn combined_shape_on_request_uses_identity_gate_not_http_authz() {
 /// taints the session (`taint(secret, session)`), and a later call in
 /// the SAME session is denied (`security.labels contains "secret"`). A
 /// DIFFERENT session id is unaffected — taint is session-scoped. Proves
-/// the `X-Session-Id` → `agent.session_id` wiring + the cpex session
+/// the `X-Session-Id` → `agent.session_id` wiring + the engine session
 /// store's hydrate/persist round-trip across requests.
 #[tokio::test(flavor = "multi_thread")]
 async fn session_taint_persists_and_denies_within_the_same_session() {
@@ -2348,7 +2360,7 @@ async fn session_taint_is_isolated_across_principals() {
 /// consumer could run before authentication.
 #[tokio::test(flavor = "multi_thread")]
 async fn pre_read_rejects_unauthenticated_before_downstream_body_consumer() {
-    let observed = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = Arc::new(Mutex::new(Vec::new()));
     let (_dir, path) = write_single_plugin_config();
     let pipeline = build_policy_observer_pipeline(&path, &observed);
 
@@ -2505,10 +2517,8 @@ async fn response_phase_without_request_identity_fails_closed() {
 #[test]
 #[expect(clippy::too_many_lines, reason = "test fixture construction")]
 fn attach_delegated_tokens_first_writer_wins_per_outbound_header() {
-    use std::sync::Arc;
-
     use chrono::{Duration, Utc};
-    use cpex::cpex_core::extensions::{
+    use ppe::praxis_policy_core::extensions::{
         container::Extensions,
         raw_credentials::{DelegationKey, DelegationMode, RawCredentialsExtension, RawDelegatedToken},
     };
@@ -2518,16 +2528,10 @@ fn attach_delegated_tokens_first_writer_wins_per_outbound_header() {
     let expires = Utc::now() + Duration::hours(1);
     let tok_a = RawDelegatedToken::new("token-a", "Authorization", "aud-a", Vec::<String>::new(), expires);
     let tok_b = RawDelegatedToken::new("token-b", "Authorization", "aud-b", Vec::<String>::new(), expires);
-    let key_a = DelegationKey {
-        subject_id: "alice".to_owned(),
-        audience: "aud-a".to_owned(),
-        scopes: Vec::new(),
-        mode: DelegationMode::OnBehalfOfUser,
-    };
-    let key_b = DelegationKey {
-        audience: "aud-b".to_owned(),
-        ..key_a.clone()
-    };
+    // Built through the constructor rather than a struct expression: the key is
+    // non-exhaustive so a future principal slot does not break callers.
+    let key_a = DelegationKey::new(DelegationMode::OnBehalfOfUser, "aud-a", Vec::new()).with_subject_id("alice");
+    let key_b = DelegationKey::new(DelegationMode::OnBehalfOfUser, "aud-b", Vec::new()).with_subject_id("alice");
     let mut creds = RawCredentialsExtension::default();
     creds.delegated_tokens.insert(key_a, tok_a);
     creds.delegated_tokens.insert(key_b, tok_b);
@@ -2556,12 +2560,9 @@ fn attach_delegated_tokens_first_writer_wins_per_outbound_header() {
 /// multi-audience flows (the common case for routes that delegate
 /// to multiple upstream APIs simultaneously).
 #[test]
-#[expect(clippy::too_many_lines, reason = "test fixture construction")]
 fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
-    use std::sync::Arc;
-
     use chrono::{Duration, Utc};
-    use cpex::cpex_core::extensions::{
+    use ppe::praxis_policy_core::extensions::{
         container::Extensions,
         raw_credentials::{DelegationKey, DelegationMode, RawCredentialsExtension, RawDelegatedToken},
     };
@@ -2571,16 +2572,8 @@ fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
     let expires = Utc::now() + Duration::hours(1);
     let tok_auth = RawDelegatedToken::new("token-auth", "Authorization", "aud-auth", Vec::<String>::new(), expires);
     let tok_x = RawDelegatedToken::new("token-x", "X-Upstream-Token", "aud-x", Vec::<String>::new(), expires);
-    let key_auth = DelegationKey {
-        subject_id: "alice".to_owned(),
-        audience: "aud-auth".to_owned(),
-        scopes: Vec::new(),
-        mode: DelegationMode::OnBehalfOfUser,
-    };
-    let key_x = DelegationKey {
-        audience: "aud-x".to_owned(),
-        ..key_auth.clone()
-    };
+    let key_auth = DelegationKey::new(DelegationMode::OnBehalfOfUser, "aud-auth", Vec::new()).with_subject_id("alice");
+    let key_x = DelegationKey::new(DelegationMode::OnBehalfOfUser, "aud-x", Vec::new()).with_subject_id("alice");
     let mut creds = RawCredentialsExtension::default();
     creds.delegated_tokens.insert(key_auth, tok_auth);
     creds.delegated_tokens.insert(key_x, tok_x);
@@ -2608,8 +2601,6 @@ fn attach_delegated_tokens_distinct_outbound_headers_all_attach() {
 /// all must complete without deadlocking or failing.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_cmf_dispatch_completes_without_blocking() {
-    use std::sync::Arc;
-
     let (_dir, path) = write_cel_policy_config();
     let filter = Arc::new(build_filter(path));
 
@@ -2626,4 +2617,176 @@ async fn concurrent_cmf_dispatch_completes_without_blocking() {
             "alice satisfies the CEL predicate; expected BodyDone, got {action:?}",
         );
     }
+}
+
+// -----------------------------------------------------------------------------
+// Host-supplied plugin factories
+// -----------------------------------------------------------------------------
+
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+use ppe::prelude::{
+    AnyHookHandler, CmfHook, Extensions, HookHandler, MessagePayload, Plugin, PluginConfig, PluginContext, PluginError,
+    PluginFactory, PluginInstance, PluginResult, TypedHandlerAdapter,
+};
+
+use super::register_policy_plugin_factory;
+
+/// A plugin that does nothing, to stand in for one a host would supply.
+struct StubPlugin {
+    cfg: PluginConfig,
+}
+
+impl Plugin for StubPlugin {
+    fn config(&self) -> &PluginConfig {
+        &self.cfg
+    }
+}
+
+impl HookHandler<CmfHook> for StubPlugin {
+    async fn handle(
+        &self,
+        _payload: &MessagePayload,
+        _ext: &Extensions,
+        _ctx: &mut PluginContext,
+    ) -> PluginResult<MessagePayload> {
+        PluginResult::allow()
+    }
+}
+
+/// Counts how many times it built a plugin, so a test can tell one construction
+/// from two. Deliberately accepts any config, including one a bundled factory
+/// would reject — that difference is what the override test keys on.
+struct StubFactory {
+    builds: Arc<AtomicUsize>,
+}
+
+impl PluginFactory for StubFactory {
+    fn create(&self, config: &PluginConfig) -> Result<PluginInstance, Box<PluginError>> {
+        self.builds.fetch_add(1, Ordering::SeqCst);
+        let plugin = Arc::new(StubPlugin { cfg: config.clone() });
+        let adapter: Arc<dyn AnyHookHandler> = Arc::new(TypedHandlerAdapter::<CmfHook, _>::new(Arc::clone(&plugin)));
+        Ok(PluginInstance {
+            plugin,
+            handlers: vec![("cmf.tool_pre_invoke", adapter)],
+        })
+    }
+}
+
+/// Register a stub under `kind` and hand back its build counter.
+fn register_stub(kind: &'static str) -> Arc<AtomicUsize> {
+    let builds = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&builds);
+    register_policy_plugin_factory(
+        kind,
+        Arc::new(move || {
+            Box::new(StubFactory {
+                builds: Arc::clone(&counter),
+            })
+        }),
+    );
+    builds
+}
+
+/// A policy document whose only plugin is of `kind`, with no `config:` block.
+/// Every bundled plugin requires one, so a bundled factory rejects this and the
+/// permissive stub accepts it.
+fn write_config_naming_kind(kind: &str) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        "plugins:\n  - name: host-plugin\n    kind: {kind}\n    hooks:\n      - cmf.tool_pre_invoke\n    mode: sequential\n    priority: 50\n    on_error: fail\n"
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
+    (dir, path_str)
+}
+
+fn try_build_filter(config_path: String) -> Result<PolicyFilter, crate::FilterError> {
+    PolicyFilter::new(PolicyFilterConfig {
+        config_path,
+        body_access: super::config::BodyAccessMode::ReadOnly,
+        require_protocol_metadata: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+    })
+}
+
+/// The control for everything below. A `kind:` nobody registered must fail the
+/// load, naming the kind, so a forgotten registration is a startup error rather
+/// than a plugin that silently never runs.
+#[test]
+fn a_kind_with_no_registration_fails_the_load() {
+    let (_dir, path) = write_config_naming_kind("test/never-registered");
+    let err = try_build_filter(path).err().expect("must not construct");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("no factory registered"),
+        "expected the engine's unresolved-kind error, got: {msg}"
+    );
+    assert!(
+        msg.contains("test/never-registered"),
+        "the message must name the kind so an operator knows what to register: {msg}"
+    );
+}
+
+/// The same document loads once a host registers the kind, and the host's
+/// factory is what built the plugin.
+#[test]
+fn a_host_registered_kind_loads_and_its_factory_is_used() {
+    let builds = register_stub("test/host-supplied");
+    let (_dir, path) = write_config_naming_kind("test/host-supplied");
+    try_build_filter(path).expect("a registered kind must construct");
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        1,
+        "the host's factory must be the one that built the plugin"
+    );
+}
+
+/// One registration has to serve repeated construction.
+///
+/// This is the regression test for the tempting design: a registry that hands
+/// its entries out once and empties itself. `PolicyFilter::new` runs again on
+/// every hot reload, so draining would give a gateway that starts clean and then
+/// fails its first reload with "no factory registered" for a config that had
+/// been serving traffic. Two constructions, two builds.
+#[test]
+fn one_registration_serves_repeated_filter_construction() {
+    let builds = register_stub("test/reload-survivor");
+
+    let (_dir_a, path_a) = write_config_naming_kind("test/reload-survivor");
+    try_build_filter(path_a).expect("first construction must succeed");
+
+    let (_dir_b, path_b) = write_config_naming_kind("test/reload-survivor");
+    try_build_filter(path_b).expect("a reload must construct too, from the same registration");
+
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        2,
+        "each construction must build its own plugin from the surviving registration"
+    );
+}
+
+/// A host registration replaces a bundled `kind` of the same name.
+///
+/// Host factories are applied after the engine's, and the factory registry is
+/// last-writer-wins, so a deployment can swap a bundled implementation for its
+/// own without forking. The signal is that a config with no `config:` block
+/// loads: the bundled `OAuth` delegator rejects that, and the stub accepts it.
+///
+/// The registration is process-global and outlives this test. `delegator/oauth`
+/// is used by no other test in this file, which is what makes hijacking it safe
+/// here; a test that needs the real delegator must not rely on the global
+/// registry.
+#[test]
+fn a_host_registration_replaces_a_bundled_kind() {
+    let builds = register_stub("delegator/oauth");
+    let (_dir, path) = write_config_naming_kind("delegator/oauth");
+    try_build_filter(path).expect("the stub accepts a config the bundled delegator would reject, so it must win");
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        1,
+        "the host's factory must have replaced the bundled one"
+    );
 }

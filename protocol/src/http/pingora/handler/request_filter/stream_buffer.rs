@@ -211,7 +211,12 @@ pub(super) async fn pre_read_body(
         }
 
         match action {
-            Ok(FilterAction::Continue | FilterAction::BodyDone | FilterAction::TerminalResponse(_)) => {},
+            Ok(
+                FilterAction::Continue
+                | FilterAction::BodyDone
+                | FilterAction::TerminalResponse(_)
+                | FilterAction::StreamingTerminalResponse(_),
+            ) => {},
             Ok(FilterAction::Release) => {
                 if !released {
                     debug!("StreamBuffer released during pre-read");
@@ -260,8 +265,6 @@ pub(super) async fn pre_read_body(
 
 #[cfg(test)]
 mod tests {
-    use praxis_core::config::ABSOLUTE_MAX_BODY_BYTES;
-
     use super::*;
 
     #[test]

@@ -362,12 +362,9 @@ fn resolve_named_rejoin(
     reason = "tests"
 )]
 mod tests {
-    use std::collections::HashMap;
-
-    use praxis_core::config::{BranchChainConfig, BranchCondition, ChainRef, FailureMode, FilterEntry};
+    use praxis_core::config::FailureMode;
 
     use super::*;
-    use crate::FilterRegistry;
 
     #[test]
     fn build_name_index_empty() {

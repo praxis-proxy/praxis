@@ -35,23 +35,8 @@ jobs:
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          MAX_ADDITIONS: "750"
+          MAX_ADDITIONS: "500"
         run: |
-          labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
-          if echo "$labels" | grep -q '^skip/pr-conventions$'; then
-            echo "skip/pr-conventions label present — skipping size check"
-            exit 0
-          fi
-
-          if [ "${{ github.event.action }}" = "reopened" ]; then
-            perm=$(gh api repos/${{ github.repository }}/collaborators/${{ github.event.sender.login }}/permission -q .permission)
-            if [ "$perm" = "admin" ] || [ "$perm" = "maintain" ]; then
-              gh pr edit "$PR_NUMBER" --repo "${{ github.repository }}" --add-label "skip/pr-conventions"
-              echo "Maintainer reopened — added skip/pr-conventions label"
-              exit 0
-            fi
-          fi
-
           added=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/files" --paginate \
             --jq '[.[] | select(.filename | test("Cargo\\.(lock|toml)$|^(examples/|tests/|benchmarks/|docs/)") | not) | select(.filename | test("\\.md$") | not) | .additions] | add // 0')
 
@@ -62,7 +47,7 @@ jobs:
             if [ "$already" -eq 0 ]; then
               gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
                 --body "${marker}
-          **PR too large**: ${added} lines added (limit: ${MAX_ADDITIONS}, excludes Cargo files, tests, docs, examples, and benchmarks). Please split into smaller PRs. Add \`skip/pr-conventions\` label to override."
+          **PR too large**: ${added} lines added (limit: ${MAX_ADDITIONS}, excludes Cargo files, tests, docs, examples, and benchmarks). Please split into smaller PRs."
             fi
             echo "::error::PR has ${added} lines added (limit: ${MAX_ADDITIONS})"
             exit 1
@@ -89,12 +74,6 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_BODY: ${{ github.event.pull_request.body }}
         run: |
-          labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
-          if echo "$labels" | grep -q '^skip/pr-conventions$'; then
-            echo "skip/pr-conventions label present — skipping description check"
-            exit 0
-          fi
-
           word_count=$(echo "$PR_BODY" | wc -w)
           if [ "$word_count" -lt 2 ]; then
             marker="<!-- praxis:pr-description-check -->"
@@ -128,12 +107,6 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
-          if echo "$labels" | grep -q '^skip/dep-versioning$'; then
-            echo "skip/dep-versioning label present — skipping version check"
-            exit 0
-          fi
-
           gh api "repos/${{ github.repository }}/contents/Cargo.toml?ref=$HEAD_SHA" \
             --jq '.content' | base64 -d > /tmp/cargo.toml
 
@@ -208,12 +181,6 @@ jobs:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
-          if echo "$labels" | grep -q '^skip/commit-signing$'; then
-            echo "skip/commit-signing label present — skipping signing check"
-            exit 0
-          fi
-
           unsigned=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" \
             --paginate --jq '[.[] | select(.parents | length == 1) | select(.commit.verification.verified == false) | .sha[:7]] | join(", ")')
 
@@ -227,6 +194,52 @@ jobs:
           **Unsigned commits**: ${unsigned}. Please [sign your commits](https://docs.github.com/en/authentication/managing-commit-signature-verification)."
             fi
             echo "::error::Unsigned commits found: ${unsigned}"
+            exit 1
+          fi
+
+  # ----------------------------------------------------------------------------
+  # Commit Message Check
+  # ----------------------------------------------------------------------------
+
+  commit-message-check:
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Generate token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
+          private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
+
+      - name: Check conventional commit format
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          commits=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/commits" --paginate)
+
+          bad=$(echo "$commits" | jq -r '
+            [.[] | select(.parents | length == 1) |
+              .sha[:7] as $sha |
+              .commit.message | split("\n")[0] |
+              select(test("^(build|chore|ci|docs|feat|fix|perf|refactor|test)(\\(.+\\))?!?: .{1,72}$") | not) |
+              "- `\($sha)`: \(.)"] | join("\n")')
+
+          if [ -n "$bad" ]; then
+            marker="<!-- praxis:commit-message-check -->"
+            already=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
+              --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
+            if [ "$already" -eq 0 ]; then
+              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
+                --body "${marker}
+          **Commit message format**: the following commits do not follow [conventional commits](https://www.conventionalcommits.org/):
+
+          ${bad}
+
+          Expected format: \`type(scope): summary\` (max 72 chars). Types: build, chore, ci, docs, feat, fix, perf, refactor, test."
+            fi
+            echo "::error::Non-conventional commit messages found"
             exit 1
           fi
 
@@ -340,12 +353,6 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
-          labels=$(gh pr view "$PR_NUMBER" --repo "${{ github.repository }}" --json labels -q '.labels[].name')
-          if echo "$labels" | grep -q '^skip/proposals$'; then
-            echo "skip/proposals label present — skipping proposal check"
-            exit 0
-          fi
-
           proposal_files=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/files" --paginate \
             --jq '[.[] | select(.filename | startswith("docs/proposals/")) | select(.filename | endswith(".md")) | select(.filename != "docs/proposals/template.md")]')
 

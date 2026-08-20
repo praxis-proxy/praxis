@@ -132,7 +132,8 @@ fn metrics_overload_rejects_listener_connections() {
     held.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     held.write_all(b"GET /api/ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+
+    wait_for_metric(&admin, "praxis_connections_active", Duration::from_secs(2));
 
     let raw = http_send(
         proxy.addr(),
@@ -276,7 +277,7 @@ filter_chains:
     bound_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("backend should bind");
-    release_retry.release();
+    drop(release_retry);
 
     let (status, body) = rx.recv_timeout(Duration::from_secs(10)).expect("request should finish");
     assert_eq!(status, 200, "request should succeed after backend comes up");

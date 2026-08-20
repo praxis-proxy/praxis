@@ -27,12 +27,17 @@ pub(super) const MAX_JSON_ALIAS_BODY_BYTES: usize = 67_108_864; // 64 MiB
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct RouterConfig {
-    /// Header name for the promoted JSON field value during alias
-    /// resolution.
+    /// Reserved for the unimplemented JSON alias feature; has no effect.
+    ///
+    /// Kept so existing configs continue to parse. Any route that
+    /// actually sets `json_aliases` is rejected at startup.
     #[serde(default = "default_json_alias_header")]
     pub json_alias_header: String,
 
-    /// Maximum body bytes to buffer when resolving JSON aliases.
+    /// Reserved for the unimplemented JSON alias feature; has no effect.
+    ///
+    /// Kept so existing configs continue to parse. Any route that
+    /// actually sets `json_aliases` is rejected at startup.
     #[serde(default = "default_json_alias_max_body_bytes")]
     pub json_alias_max_body_bytes: usize,
 
@@ -66,7 +71,11 @@ pub(super) struct RouterRouteConfig {
     #[serde(flatten)]
     pub route: Route,
 
-    /// Optional JSON field aliases evaluated for this route.
+    /// Not implemented. Setting this is rejected at startup.
+    ///
+    /// Body-field routing is not wired into the request path. Promote
+    /// the value to a header with a classifier filter and match it via
+    /// the route's `headers` field instead.
     #[serde(default)]
     pub json_aliases: Option<Vec<JsonAlias>>,
 }
@@ -81,6 +90,11 @@ impl From<Route> for RouterRouteConfig {
 }
 
 /// JSON field alias rule scoped to a router route.
+///
+/// Parsed and shape-checked, but not applied: see
+/// [`reject_unimplemented_json_aliases`].
+///
+/// [`reject_unimplemented_json_aliases`]: super::reject_unimplemented_json_aliases
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct JsonAlias {

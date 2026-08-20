@@ -14,12 +14,19 @@
 //! inject its own credentials and required representation headers
 //! (e.g. via a `headers` or `credential_injection` filter).
 //!
-//! # Streaming limitations
+//! # Streaming support
 //!
-//! Intermediate and terminal responses are fully buffered in memory
-//! (bounded by `max_response_bytes`). SSE and long-lived streaming
-//! responses are not supported. The iterative request router is
-//! designed for bounded, buffered workflows.
+//! When a step's filters select [`SubRequestResponseMode::Streaming`],
+//! IRR dispatches via `send_streaming()` instead of the buffered
+//! `execute()` path. Response-header filters run before transition
+//! evaluation; only status, origin, transport error, and default
+//! predicates are available. Once a streaming response is committed
+//! downstream, no failover or replacement response can occur.
+//!
+//! Transitions that depend on filter results (filter/key/value
+//! predicates) or `BodyMode::StreamBuffer` response mode are
+//! rejected at config validation time for streaming-capable pipelines,
+//! with a runtime guard for dynamically registered filters.
 //!
 //! # Position requirement
 //!
@@ -31,6 +38,7 @@
 //! See proposal 00786 for the full design rationale.
 
 mod config;
+mod streaming;
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
@@ -49,19 +57,41 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use http::HeaderMap;
 use pingora_core::upstreams::peer::HttpPeer;
-use praxis_core::subrequest::FrameworkHeaders;
+use praxis_core::subrequest::{FrameworkHeaders, StreamLimits};
 use tracing::{debug, info, warn};
 
-use self::config::IterativeRequestRouterConfig;
+use self::{
+    config::IterativeRequestRouterConfig,
+    streaming::{IrrStreamingBody, StepResponseContinuation},
+};
 use crate::{
     FilterEntry, FilterError, FilterPipeline, FilterRegistry, IterationState, NextIterationBody, SubRequest,
-    SubResponse,
-    actions::{FilterAction, Rejection, TerminalResponse},
+    SubRequestResponseMode, SubResponse,
+    actions::{FilterAction, Rejection, StreamingTerminalResponse, TerminalResponse},
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
     pipeline::subrequest::DEPTH_HEADER,
     results::RetainedFilterResults,
 };
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Streaming idle timeout (max time between chunks).
+const STREAMING_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
+
+// ---------------------------------------------------------------------------
+// Utilities
+// ---------------------------------------------------------------------------
+
+/// Whether transitions depend on response body content (filter result
+/// predicates or body-dependent metadata).
+pub(super) fn has_body_dependent_transitions(transitions: &[config::StepTransition]) -> bool {
+    transitions
+        .iter()
+        .any(|t| t.filter.is_some() || t.key.is_some() || t.value.is_some())
+}
 
 // ---------------------------------------------------------------------------
 // IterativeRequestRouterFilter
@@ -111,7 +141,7 @@ pub struct IterativeRequestRouterFilter {
     step_timeout: Duration,
 
     /// Pre-built sub-pipelines keyed by step name.
-    step_pipelines: HashMap<Arc<str>, FilterPipeline>,
+    step_pipelines: HashMap<Arc<str>, Arc<FilterPipeline>>,
 
     /// Transition rules keyed by step name.
     step_transitions: HashMap<Arc<str>, Vec<config::StepTransition>>,
@@ -177,8 +207,39 @@ impl IterativeRequestRouterFilter {
                 .into());
             }
 
-            step_pipelines.insert(Arc::clone(&name), pipeline);
+            step_pipelines.insert(Arc::clone(&name), Arc::new(pipeline));
             step_transitions.insert(Arc::clone(&name), step.on_result);
+        }
+
+        for (name, pipeline) in &step_pipelines {
+            if !pipeline.may_select_streaming_subrequest_response() {
+                continue;
+            }
+            if let Some(transitions) = step_transitions.get(name) {
+                for (i, t) in transitions.iter().enumerate() {
+                    if t.filter.is_some() || t.key.is_some() || t.value.is_some() {
+                        return Err(format!(
+                            "iterative_request_router: step '{name}' transition {i}: \
+                             filter/key/value predicates are incompatible with \
+                             streaming-capable pipelines (response body is not \
+                             available during transition evaluation)"
+                        )
+                        .into());
+                    }
+                }
+            }
+
+            if matches!(
+                pipeline.body_capabilities().response_body_mode,
+                crate::body::BodyMode::StreamBuffer { .. }
+            ) {
+                return Err(format!(
+                    "iterative_request_router: step '{name}': StreamBuffer \
+                     response body mode is incompatible with streaming-capable \
+                     pipelines"
+                )
+                .into());
+            }
         }
 
         let step_timeout = cfg.step_timeout_ms.map_or(timeout, Duration::from_millis);
@@ -250,6 +311,11 @@ impl IterativeRequestRouterFilter {
     /// Run the complete iterative subrequest lifecycle.
     #[expect(clippy::too_many_lines, reason = "iteration loop is inherently sequential")]
     #[expect(clippy::large_stack_frames, reason = "sub-pipeline execution needs stack space")]
+    #[expect(clippy::large_futures, reason = "streaming and buffered paths require large future")]
+    #[expect(
+        clippy::significant_drop_tightening,
+        reason = "step execution temporaries span iteration loop"
+    )]
     async fn run_iterations(
         &self,
         ctx: &mut HttpFilterContext<'_>,
@@ -452,112 +518,252 @@ impl IterativeRequestRouterFilter {
                 if per_request_timeout.is_zero() {
                     return Ok(StepExecution::Rejected(Rejection::status(504)));
                 }
-                let mut step_origin = config::ResponseOrigin::Upstream;
-                let mut step_transport_error = None;
-                let mut response = match peer {
-                    Ok(peer) => match client
-                        .execute(
-                            &peer,
-                            &sub_request_for_exec,
-                            max_response_bytes,
-                            per_request_timeout,
-                            Some(&fw_headers),
-                        )
-                        .await
-                    {
-                        Ok(response) => response,
-                        Err(error) => {
-                            let (status, kind) = classify_transport_failure(&error);
-                            step_origin = config::ResponseOrigin::Transport;
-                            step_transport_error = Some(kind);
-                            warn!(
-                                step = current_step.as_ref(),
-                                %error,
-                                status,
-                                "iterative_request_router: sub-request transport failure"
-                            );
-                            SubResponse {
-                                status,
-                                headers: HeaderMap::new(),
-                                body: Bytes::new(),
-                            }
-                        },
-                    },
-                    Err(error) => {
-                        step_origin = config::ResponseOrigin::Transport;
-                        step_transport_error = Some(config::TransportErrorKind::Connect);
-                        let status = 502;
-                        warn!(
-                            step = current_step.as_ref(),
-                            %error,
-                            status,
-                            "iterative_request_router: sub-request transport failure"
-                        );
-                        SubResponse {
-                            status,
-                            headers: HeaderMap::new(),
-                            body: Bytes::new(),
+
+                match filter_ctx.subrequest_response_mode {
+                    SubRequestResponseMode::Streaming => {
+                        // Runtime guard: reject if transitions depend on response body
+                        let transitions = self
+                            .step_transitions
+                            .get(&current_step)
+                            .map_or(&[][..], |v| v.as_slice());
+                        if has_body_dependent_transitions(transitions) {
+                            return Err(format!(
+                                "iterative_request_router: step '{current_step}' selected \
+                                     streaming but has body-dependent transitions"
+                            )
+                            .into());
+                        }
+                        if matches!(
+                            pipeline.body_capabilities().response_body_mode,
+                            crate::body::BodyMode::StreamBuffer { .. }
+                        ) {
+                            return Err(format!(
+                                "iterative_request_router: step '{current_step}' selected \
+                                     streaming but has StreamBuffer response body mode"
+                            )
+                            .into());
+                        }
+
+                        let mut step_origin = config::ResponseOrigin::Upstream;
+                        let mut step_transport_error = None;
+
+                        let streaming_result = match peer {
+                            Ok(peer) => {
+                                let limits = StreamLimits {
+                                    idle_timeout: STREAMING_IDLE_TIMEOUT,
+                                    max_stream_duration: None,
+                                    max_total_bytes: None,
+                                };
+                                Box::pin(client.send_streaming(
+                                    &peer,
+                                    &sub_request_for_exec,
+                                    per_request_timeout,
+                                    limits,
+                                    Some(&fw_headers),
+                                ))
+                                .await
+                            },
+                            Err(error) => Err(praxis_core::subrequest::SubRequestError::Connect(error.to_string())),
+                        };
+                        in_transport_inner.store(false, Ordering::Release);
+
+                        match streaming_result {
+                            Ok(streaming_response) => {
+                                let status = streaming_response.status;
+                                let mut response_headers = streaming_response.headers;
+                                sanitize_subresponse_headers(&mut response_headers);
+
+                                response_header.status =
+                                    http::StatusCode::from_u16(status).map_err(|e| -> FilterError {
+                                        format!("iterative_request_router: invalid upstream status: {e}").into()
+                                    })?;
+                                response_header.headers.clone_from(&response_headers);
+                                filter_ctx.response_header = Some(&mut response_header);
+
+                                let action = pipeline.execute_http_response(&mut filter_ctx).await?;
+                                if let FilterAction::Reject(rejection) = action {
+                                    streaming_response.body.cancel().await;
+                                    return Ok(StepExecution::Rejected(rejection));
+                                }
+
+                                // Extract final response metadata from filter context
+                                let (final_status, mut final_headers) =
+                                    if let Some(meta) = filter_ctx.response_header.as_deref() {
+                                        (meta.status, meta.headers.clone())
+                                    } else {
+                                        (
+                                            http::StatusCode::from_u16(status).unwrap_or(http::StatusCode::BAD_GATEWAY),
+                                            response_headers,
+                                        )
+                                    };
+                                sanitize_subresponse_headers(&mut final_headers);
+
+                                let outcome = StepOutcome {
+                                    response: SubResponse {
+                                        status: final_status.as_u16(),
+                                        headers: final_headers.clone(),
+                                        body: Bytes::new(),
+                                    },
+                                    origin: step_origin,
+                                    transport_error: step_transport_error,
+                                };
+
+                                Ok(StepExecution::Streaming {
+                                    outcome,
+                                    body: Box::new(streaming_response.body),
+                                    response_snapshot: crate::Response {
+                                        status: final_status,
+                                        headers: final_headers,
+                                    },
+                                })
+                            },
+                            Err(error) => {
+                                let (status, kind) = classify_transport_failure(&error);
+                                step_origin = config::ResponseOrigin::Transport;
+                                step_transport_error = Some(kind);
+                                warn!(
+                                    step = current_step.as_ref(),
+                                    %error,
+                                    status,
+                                    "iterative_request_router: streaming sub-request transport failure"
+                                );
+                                let response = SubResponse {
+                                    status,
+                                    headers: HeaderMap::new(),
+                                    body: Bytes::new(),
+                                };
+                                // Fall through to buffered transition path with synthetic response
+                                // (transport failures don't have a body to stream)
+
+                                response_header.status =
+                                    http::StatusCode::from_u16(status).map_err(|e| -> FilterError {
+                                        format!("iterative_request_router: invalid status: {e}").into()
+                                    })?;
+                                response_header.headers.clone_from(&response.headers);
+                                filter_ctx.response_header = Some(&mut response_header);
+
+                                let action = pipeline.execute_http_response(&mut filter_ctx).await?;
+                                if let FilterAction::Reject(rejection) = action {
+                                    return Ok(StepExecution::Rejected(rejection));
+                                }
+
+                                Ok(StepExecution::Complete {
+                                    response,
+                                    origin: step_origin,
+                                    transport_error: step_transport_error,
+                                })
+                            },
                         }
                     },
-                };
-                in_transport_inner.store(false, Ordering::Release);
-                sanitize_subresponse_headers(&mut response.headers);
+                    SubRequestResponseMode::Buffered => {
+                        let mut step_origin = config::ResponseOrigin::Upstream;
+                        let mut step_transport_error = None;
+                        let mut response = match peer {
+                            Ok(peer) => match Box::pin(client.execute(
+                                &peer,
+                                &sub_request_for_exec,
+                                max_response_bytes,
+                                per_request_timeout,
+                                Some(&fw_headers),
+                            ))
+                            .await
+                            {
+                                Ok(response) => response,
+                                Err(error) => {
+                                    let (status, kind) = classify_transport_failure(&error);
+                                    step_origin = config::ResponseOrigin::Transport;
+                                    step_transport_error = Some(kind);
+                                    warn!(
+                                        step = current_step.as_ref(),
+                                        %error,
+                                        status,
+                                        "iterative_request_router: sub-request transport failure"
+                                    );
+                                    SubResponse {
+                                        status,
+                                        headers: HeaderMap::new(),
+                                        body: Bytes::new(),
+                                    }
+                                },
+                            },
+                            Err(error) => {
+                                step_origin = config::ResponseOrigin::Transport;
+                                step_transport_error = Some(config::TransportErrorKind::Connect);
+                                let status = 502;
+                                warn!(
+                                    step = current_step.as_ref(),
+                                    %error,
+                                    status,
+                                    "iterative_request_router: sub-request transport failure"
+                                );
+                                SubResponse {
+                                    status,
+                                    headers: HeaderMap::new(),
+                                    body: Bytes::new(),
+                                }
+                            },
+                        };
+                        in_transport_inner.store(false, Ordering::Release);
+                        sanitize_subresponse_headers(&mut response.headers);
 
-                response_header.status = http::StatusCode::from_u16(response.status).map_err(|e| -> FilterError {
-                    format!("iterative_request_router: invalid upstream status: {e}").into()
-                })?;
-                response_header.headers.clone_from(&response.headers);
-                filter_ctx.response_header = Some(&mut response_header);
+                        response_header.status =
+                            http::StatusCode::from_u16(response.status).map_err(|e| -> FilterError {
+                                format!("iterative_request_router: invalid upstream status: {e}").into()
+                            })?;
+                        response_header.headers.clone_from(&response.headers);
+                        filter_ctx.response_header = Some(&mut response_header);
 
-                let action = pipeline.execute_http_response(&mut filter_ctx).await?;
-                if let FilterAction::Reject(rejection) = action {
-                    return Ok(StepExecution::Rejected(rejection));
-                }
-                if iteration_state_exceeds_limit(&filter_ctx, self.max_state_bytes) {
-                    return Ok(StepExecution::Rejected(Rejection::status(413)));
-                }
+                        let action = pipeline.execute_http_response(&mut filter_ctx).await?;
+                        if let FilterAction::Reject(rejection) = action {
+                            return Ok(StepExecution::Rejected(rejection));
+                        }
+                        if iteration_state_exceeds_limit(&filter_ctx, self.max_state_bytes) {
+                            return Ok(StepExecution::Rejected(Rejection::status(413)));
+                        }
 
-                let mut response_body = Some(std::mem::take(&mut response.body));
-                if response_body_exceeds_limits(
-                    pipeline.body_capabilities().response_body_mode,
-                    max_response_bytes,
-                    response_body.as_ref().map_or(0, Bytes::len),
-                ) {
-                    return Err("iterative_request_router: step response exceeds configured body limit"
-                        .to_owned()
-                        .into());
-                }
-                let action = pipeline.execute_http_response_body(&mut filter_ctx, &mut response_body, true)?;
-                if let FilterAction::Reject(rejection) = action {
-                    return Ok(StepExecution::Rejected(rejection));
-                }
-                if iteration_state_exceeds_limit(&filter_ctx, self.max_state_bytes) {
-                    return Ok(StepExecution::Rejected(Rejection::status(413)));
-                }
-                if response_body_exceeds_limits(
-                    pipeline.body_capabilities().response_body_mode,
-                    max_response_bytes,
-                    response_body.as_ref().map_or(0, Bytes::len),
-                ) {
-                    return Err(
-                        "iterative_request_router: transformed step response exceeds configured body limit"
-                            .to_owned()
-                            .into(),
-                    );
-                }
+                        let mut response_body = Some(std::mem::take(&mut response.body));
+                        if response_body_exceeds_limits(
+                            pipeline.body_capabilities().response_body_mode,
+                            max_response_bytes,
+                            response_body.as_ref().map_or(0, Bytes::len),
+                        ) {
+                            return Err("iterative_request_router: step response exceeds configured body limit"
+                                .to_owned()
+                                .into());
+                        }
+                        let action = pipeline.execute_http_response_body(&mut filter_ctx, &mut response_body, true)?;
+                        if let FilterAction::Reject(rejection) = action {
+                            return Ok(StepExecution::Rejected(rejection));
+                        }
+                        if iteration_state_exceeds_limit(&filter_ctx, self.max_state_bytes) {
+                            return Ok(StepExecution::Rejected(Rejection::status(413)));
+                        }
+                        if response_body_exceeds_limits(
+                            pipeline.body_capabilities().response_body_mode,
+                            max_response_bytes,
+                            response_body.as_ref().map_or(0, Bytes::len),
+                        ) {
+                            return Err(
+                                "iterative_request_router: transformed step response exceeds configured body limit"
+                                    .to_owned()
+                                    .into(),
+                            );
+                        }
 
-                if let Some(meta) = filter_ctx.response_header.as_deref() {
-                    response.status = meta.status.as_u16();
-                    response.headers.clone_from(&meta.headers);
-                }
-                response.body = response_body.unwrap_or_default();
-                sanitize_subresponse_headers(&mut response.headers);
+                        if let Some(meta) = filter_ctx.response_header.as_deref() {
+                            response.status = meta.status.as_u16();
+                            response.headers.clone_from(&meta.headers);
+                        }
+                        response.body = response_body.unwrap_or_default();
+                        sanitize_subresponse_headers(&mut response.headers);
 
-                Ok(StepExecution::Complete {
-                    response,
-                    origin: step_origin,
-                    transport_error: step_transport_error,
-                })
+                        Ok(StepExecution::Complete {
+                            response,
+                            origin: step_origin,
+                            transport_error: step_transport_error,
+                        })
+                    },
+                }
             })
             .await
             {
@@ -579,6 +785,100 @@ impl IterativeRequestRouterFilter {
                 },
             };
 
+            // Handle streaming step results before normal post-step processing.
+            // The streaming terminal path takes ownership of filter_ctx.extensions
+            // (which include the parent's extensions swapped in at step start).
+            if let Ok(StepExecution::Streaming {
+                outcome,
+                body: upstream_body,
+                response_snapshot,
+            }) = step_result
+            {
+                // Extract iteration state and filter results for transition evaluation
+                if let Some(updated_state) = filter_ctx.extensions.remove::<IterationState>() {
+                    state = updated_state;
+                }
+                let next_iteration_body = filter_ctx.extensions.remove::<NextIterationBody>();
+                let mut step_filter_results = filter_ctx
+                    .extensions
+                    .remove::<RetainedFilterResults>()
+                    .unwrap_or_default()
+                    .0;
+                step_filter_results.extend(
+                    filter_ctx
+                        .filter_results
+                        .iter()
+                        .map(|(name, results)| (*name, results.clone())),
+                );
+
+                let transitions = self
+                    .step_transitions
+                    .get(&current_step)
+                    .map_or(&[][..], |v| v.as_slice());
+                match evaluate_transitions(transitions, &outcome, &step_filter_results) {
+                    TransitionResult::Done | TransitionResult::NoMatch => {
+                        std::mem::swap(&mut filter_ctx.extensions, &mut ctx.extensions);
+                        let continuation = StepResponseContinuation {
+                            pipeline: Arc::clone(self.step_pipelines.get(&current_step).ok_or_else(
+                                || -> FilterError {
+                                    format!("iterative_request_router: step '{current_step}' not found").into()
+                                },
+                            )?),
+                            request_snapshot: crate::Request {
+                                method: filter_ctx.request.method.clone(),
+                                uri: filter_ctx.request.uri.clone(),
+                                headers: filter_ctx.request.headers.clone(),
+                            },
+                            response_snapshot,
+                            extensions: std::mem::take(&mut filter_ctx.extensions),
+                            filter_state: std::mem::take(&mut filter_ctx.filter_state),
+                            filter_results: std::mem::take(&mut filter_ctx.filter_results),
+                            filter_metadata: std::mem::take(&mut filter_ctx.filter_metadata),
+                            structured_metadata: std::mem::take(&mut filter_ctx.structured_metadata),
+                            executed_filter_indices: std::mem::take(&mut filter_ctx.executed_filter_indices),
+                            body_done_indices: std::mem::take(&mut filter_ctx.body_done_indices),
+                            response_body_bytes: filter_ctx.response_body_bytes,
+                            response_body_mode: filter_ctx.response_body_mode,
+                            completed: false,
+                            client_addr: filter_ctx.client_addr,
+                            downstream_tls: filter_ctx.downstream_tls,
+                            request_start: filter_ctx.request_start,
+                            peer_identity: filter_ctx.peer_identity.clone(),
+                        };
+                        let status = normalize_response_status(outcome.response.status);
+                        let terminal = StreamingTerminalResponse::new(
+                            status,
+                            Box::new(IrrStreamingBody::new(*upstream_body, continuation)),
+                        )
+                        .with_headers(outcome.response.headers);
+                        return Ok(FilterAction::StreamingTerminalResponse(Box::new(terminal)));
+                    },
+                    TransitionResult::Next(next_step) => {
+                        debug!(
+                            from = current_step.as_ref(),
+                            to = next_step.as_ref(),
+                            "streaming failover: cancelling unread body"
+                        );
+                        (*upstream_body).cancel().await;
+                        // Swap extensions back to parent and continue the loop
+                        std::mem::swap(&mut filter_ctx.extensions, &mut ctx.extensions);
+                        state.previous_response = None;
+                        state.iteration += 1;
+                        let next_body = next_iteration_body.map_or_else(|| current_request.body.clone(), |b| b.0);
+                        current_request = SubRequest {
+                            method: current_request.method.clone(),
+                            uri: current_request.uri.clone(),
+                            headers: HeaderMap::new(),
+                            body: next_body,
+                        };
+                        current_step = next_step;
+                        continue;
+                    },
+                }
+            }
+
+            // Existing post-step processing continues unchanged for
+            // Complete/Rejected variants...
             if let Some(updated_state) = filter_ctx.extensions.remove::<IterationState>() {
                 state = updated_state;
             }
@@ -599,7 +899,8 @@ impl IterativeRequestRouterFilter {
             );
             std::mem::swap(&mut filter_ctx.extensions, &mut ctx.extensions);
 
-            let (mut response, origin, transport_error) = match step_result? {
+            let step_result_value = step_result?;
+            let (mut response, origin, transport_error) = match step_result_value {
                 StepExecution::Complete {
                     response,
                     origin,
@@ -616,6 +917,9 @@ impl IterativeRequestRouterFilter {
                         config::ResponseOrigin::Local,
                         None,
                     )
+                },
+                StepExecution::Streaming { .. } => {
+                    unreachable!("streaming step results are handled before this point")
                 },
             };
             sanitize_subresponse_headers(&mut response.headers);
@@ -700,6 +1004,16 @@ enum StepExecution {
         origin: config::ResponseOrigin,
         /// Transport error classification, if any.
         transport_error: Option<config::TransportErrorKind>,
+    },
+
+    /// The step uses streaming mode; response-header filters ran.
+    Streaming {
+        /// Step outcome with header-only response snapshot.
+        outcome: StepOutcome,
+        /// Upstream streaming body handle.
+        body: Box<praxis_core::subrequest::SubResponseBody>,
+        /// Snapshot of response headers for continuation.
+        response_snapshot: crate::Response,
     },
 }
 
@@ -1079,6 +1393,7 @@ fn build_sub_filter_context<'a>(
         selected_endpoint_index: None,
         structured_metadata: HashMap::new(),
         subrequest_client: runtime.subrequest_client,
+        subrequest_response_mode: SubRequestResponseMode::Buffered,
         time_source: runtime.time_source,
         upstream: None,
     }

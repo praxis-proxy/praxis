@@ -118,8 +118,6 @@ fn select_by_weight(endpoints: &[WeightedEndpoint], tick: usize, total_weight: u
     reason = "tests"
 )]
 mod tests {
-    use std::sync::Arc;
-
     use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
 
     use super::*;

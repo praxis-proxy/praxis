@@ -67,6 +67,13 @@ pub struct RequestIdFilter {
     header_name: Arc<str>,
 }
 
+/// Per-request marker recording that the client supplied the ID itself.
+///
+/// Present only when the incoming request already carried the header.
+/// Its absence means the proxy generated the ID, which must not be
+/// echoed to the client.
+struct ClientSuppliedId(String);
+
 impl RequestIdFilter {
     /// Create a request ID filter from parsed YAML config.
     ///
@@ -85,25 +92,27 @@ impl RequestIdFilter {
 
     /// Resolve the request ID to echo on the response.
     ///
-    /// Prefers the original client-supplied header value; falls back
-    /// to the ID injected during the request phase.
+    /// Only a **client-supplied** ID is echoed. Returning the value the
+    /// client sent is not a disclosure — they already have it — and it
+    /// lets a caller correlate its own request with the response.
+    ///
+    /// A proxy-*generated* ID is deliberately not echoed. It is
+    /// request-phase state injected for the benefit of the upstream, and
+    /// the leakage suite treats it the same as `X-Forwarded-For` or an
+    /// internal debug header: request-injected values must not appear on
+    /// the client response
+    /// (`tests/security/tests/suite/filter_leakage.rs`). A backend that
+    /// wants the ID visible to clients can echo it itself, which the
+    /// proxy passes through untouched.
+    ///
+    /// Provenance comes from [`ClientSuppliedId`] recorded during
+    /// `on_request`, not from `ctx.request`. The request snapshot
+    /// reflects the headers as sent upstream, injected ones included, so
+    /// it cannot distinguish "the client sent this" from "we added it".
     fn resolve_response_id(&self, ctx: &HttpFilterContext<'_>) -> Option<String> {
-        if let Some(client_id) = ctx
-            .request
-            .headers
-            .get(&*self.header_name)
-            .and_then(|v| v.to_str().ok())
-        {
-            tracing::trace!(header = %self.header_name, "using client-supplied request ID for response header");
-            return Some(client_id.to_owned());
-        }
-        ctx.extra_request_headers
-            .iter()
-            .find(|(name, _)| name.eq_ignore_ascii_case(&self.header_name))
-            .map(|(_, value)| {
-                tracing::trace!(header = %self.header_name, "using injected request ID for response header");
-                value.clone()
-            })
+        let ClientSuppliedId(id) = ctx.get_filter_state::<ClientSuppliedId>()?;
+        tracing::trace!(header = %self.header_name, "using client-supplied request ID for response header");
+        Some(id.clone())
     }
 
     /// Insert the request ID header into the response.
@@ -134,12 +143,22 @@ impl HttpFilter for RequestIdFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let id = ctx
+        let client_id = ctx
             .request
             .headers
             .get(&*self.header_name)
             .and_then(|v| v.to_str().ok())
-            .map_or_else(|| ctx.id_generator.generate(ctx.time_source), str::to_owned);
+            .map(str::to_owned);
+
+        // Record provenance now, while the request headers are still
+        // exactly what the client sent. By `on_response` the snapshot
+        // also carries proxy-injected headers and cannot be used to tell
+        // the two apart.
+        if let Some(client_id) = client_id.clone() {
+            ctx.insert_filter_state(ClientSuppliedId(client_id));
+        }
+
+        let id = client_id.unwrap_or_else(|| ctx.id_generator.generate(ctx.time_source));
 
         debug!(request_id = %id, header = %self.header_name, "forwarding request ID");
         tracing::Span::current().record("request_id", &*id);
@@ -218,21 +237,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn echoes_generated_id_on_response() {
+    async fn does_not_echo_generated_id_on_response() {
         let filter = make_filter("");
         let req = crate::test_utils::make_request(http::Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.current_filter_id = Some(0);
         drop(filter.on_request(&mut ctx).await.unwrap());
 
-        let generated_id = ctx.extra_request_headers[0].1.clone();
+        assert_eq!(
+            ctx.extra_request_headers.len(),
+            1,
+            "an ID was injected for the upstream"
+        );
 
         let mut resp = crate::test_utils::make_response();
         ctx.response_header = Some(&mut resp);
         drop(filter.on_response(&mut ctx).await.unwrap());
 
-        assert_eq!(
-            resp.headers["x-request-id"], generated_id,
-            "response should echo generated ID"
+        assert!(
+            !resp.headers.contains_key("x-request-id"),
+            "a proxy-generated ID is request-phase state and must not reach the client; \
+             see filter_leakage::request_id_not_leaked_to_client"
         );
     }
 
@@ -245,6 +270,9 @@ mod tests {
             http::header::HeaderValue::from_static("from-client"),
         );
         let mut ctx = crate::test_utils::make_filter_context(&req);
+        // Filter state is keyed by the executing filter's id, which the
+        // pipeline sets around each hook.
+        ctx.current_filter_id = Some(0);
         drop(filter.on_request(&mut ctx).await.unwrap());
 
         let mut resp = crate::test_utils::make_response();
