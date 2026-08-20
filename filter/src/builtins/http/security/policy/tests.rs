@@ -2515,7 +2515,6 @@ async fn response_phase_without_request_identity_fails_closed() {
 /// audience attaches, the other is logged and skipped, and the
 /// returned count reflects what actually went on the wire.
 #[test]
-#[expect(clippy::too_many_lines, reason = "test fixture construction")]
 fn attach_delegated_tokens_first_writer_wins_per_outbound_header() {
     use chrono::{Duration, Utc};
     use ppe::praxis_policy_core::extensions::{
