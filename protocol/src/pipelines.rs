@@ -97,6 +97,23 @@ impl ListenerPipelines {
         }
     }
 
+    /// Every filesystem path any filter in any listener's pipeline reads
+    /// configuration from, de-duplicated.
+    ///
+    /// Two listeners can share a filter chain, so the same document would
+    /// otherwise appear more than once and be watched and hashed repeatedly.
+    pub fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        let mut seen = std::collections::BTreeSet::new();
+        for name in self.listener_names() {
+            if let Some(slot) = self.get(name) {
+                for path in slot.load().referenced_files() {
+                    seen.insert(path);
+                }
+            }
+        }
+        seen.into_iter().collect()
+    }
+
     /// Returns an iterator over listener names.
     pub fn listener_names(&self) -> impl Iterator<Item = &str> {
         self.pipelines.keys().map(String::as_str)
@@ -117,10 +134,7 @@ impl ListenerPipelines {
     reason = "tests"
 )]
 mod tests {
-    use std::{collections::HashMap, sync::Arc};
-
-    use arc_swap::ArcSwap;
-    use praxis_filter::{FilterPipeline, FilterRegistry};
+    use praxis_filter::FilterRegistry;
 
     use super::*;
 
@@ -182,9 +196,107 @@ mod tests {
         let _loaded: arc_swap::Guard<Arc<FilterPipeline>> = slot.load();
     }
 
+    #[test]
+    fn referenced_files_empty_without_listeners() {
+        let pipelines = make_pipelines(&[]);
+        assert!(
+            pipelines.referenced_files().is_empty(),
+            "no listeners means no referenced documents"
+        );
+    }
+
+    #[test]
+    fn referenced_files_empty_when_no_filter_declares_one() {
+        let pipelines = make_pipelines(&["web"]);
+        assert!(
+            pipelines.referenced_files().is_empty(),
+            "a pipeline of non-declaring filters contributes nothing"
+        );
+    }
+
+    #[test]
+    fn referenced_files_collects_across_listeners() {
+        let pipelines =
+            make_pipelines_with_documents(&[("web", "/etc/praxis/web.yaml"), ("api", "/etc/praxis/api.yaml")]);
+        assert_eq!(
+            pipelines.referenced_files(),
+            vec![
+                std::path::PathBuf::from("/etc/praxis/api.yaml"),
+                std::path::PathBuf::from("/etc/praxis/web.yaml"),
+            ],
+            "every listener's documents must be collected, sorted by the BTreeSet"
+        );
+    }
+
+    /// Two listeners can share a filter chain. The document must be reported once
+    /// so the watcher does not hash and watch it twice.
+    #[test]
+    fn referenced_files_dedupes_a_document_shared_by_two_listeners() {
+        let shared = "/etc/praxis/shared.yaml";
+        let pipelines = make_pipelines_with_documents(&[("web", shared), ("api", shared)]);
+        assert_eq!(
+            pipelines.referenced_files(),
+            vec![std::path::PathBuf::from(shared)],
+            "a shared document must appear once"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// A filter that declares the document named by its `document:` config key.
+    struct DocumentReaderFilter {
+        document: std::path::PathBuf,
+    }
+
+    #[async_trait::async_trait]
+    impl praxis_filter::HttpFilter for DocumentReaderFilter {
+        fn name(&self) -> &'static str {
+            "document_reader"
+        }
+
+        fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+            vec![self.document.clone()]
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut praxis_filter::HttpFilterContext<'_>,
+        ) -> Result<praxis_filter::FilterAction, praxis_filter::FilterError> {
+            Ok(praxis_filter::FilterAction::Continue)
+        }
+    }
+
+    /// Build [`ListenerPipelines`] where each named listener runs a single filter
+    /// declaring the given document.
+    fn make_pipelines_with_documents(listeners: &[(&str, &str)]) -> ListenerPipelines {
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(
+                "document_reader",
+                praxis_filter::FilterFactory::Http(Arc::new(|cfg: &serde_yaml::Value| {
+                    let document = cfg
+                        .get("document")
+                        .and_then(serde_yaml::Value::as_str)
+                        .ok_or_else(|| praxis_filter::FilterError::from("document_reader: missing document"))?;
+                    let filter: Box<dyn praxis_filter::HttpFilter> = Box::new(DocumentReaderFilter {
+                        document: std::path::PathBuf::from(document),
+                    });
+                    Ok(filter)
+                })),
+            )
+            .unwrap();
+
+        let mut map = HashMap::new();
+        for (listener, document) in listeners {
+            let yaml = format!("- filter: document_reader\n  document: {document}\n");
+            let mut entries: Vec<praxis_core::config::FilterEntry> = serde_yaml::from_str(&yaml).unwrap();
+            let pipeline = Arc::new(FilterPipeline::build(&mut entries, &registry).unwrap());
+            map.insert((*listener).to_owned(), pipeline);
+        }
+        ListenerPipelines::new(map)
+    }
 
     /// Build [`ListenerPipelines`] with empty pipelines for the given names.
     fn make_pipelines(names: &[&str]) -> ListenerPipelines {

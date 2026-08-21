@@ -24,7 +24,7 @@ Built-in filters organized by protocol and category.
 
 | Filter | Feature | Description |
 |--------|---------|-------------|
-| [`basic_auth`](http/security/basic_auth.md) | - | HTTP Basic Authentication filter (RFC 7617). |
+| [`basic_auth`](http/security/basic_auth.md) | `basic-auth-filter` | HTTP Basic Authentication filter (RFC 7617). |
 | [`cors`](http/security/cors.md) | - | Spec-compliant CORS filter implementing origin validation, preflight handling, and response header injection. |
 | [`credential_injection`](http/security/credential_injection.md) | - | Injects per-cluster API credentials into upstream requests. |
 | [`csrf`](http/security/csrf.md) | - | CSRF protection filter that validates request origins against a trusted allowlist. |
@@ -32,7 +32,7 @@ Built-in filters organized by protocol and category.
 | [`guardrails`](http/security/guardrails.md) | - | Rejects requests matching string, regex, or PII rules against headers and/or body content. |
 | [`ip_acl`](http/security/ip_acl.md) | - | IP-based access control filter. |
 | [`peer_identity_trust`](http/security/peer_identity_trust.md) | - | Validates that the downstream mTLS peer identity matches a configured trusted peer before allowing the request to continue. |
-| [`policy`](http/security/policy.md) | - | Embeds the CPEX policy engine in-process to enforce multi-source JWT identity, APL route policy, RFC 8693 token exchange, PII scanning, audit emission, and (under `body_access: read_write`) request / response body rewriting. |
+| [`policy`](http/security/policy.md) | `policy-engine` | Embeds the Praxis Policy Engine in-process to enforce multi-source JWT identity, APL route policy, RFC 8693 token exchange, PII scanning, audit emission, and (under `body_access: read_write`) request / response body rewriting. |
 
 ## HTTP / Traffic Management
 

@@ -505,14 +505,14 @@ mod tests {
     #[test]
     fn concurrent_record_failure_transitions_exactly_once() {
         let ep = Arc::new(EndpointHealth::new());
-        let threshold = 10;
+        let threshold: u32 = 10;
 
-        let handles: Vec<_> = (0..threshold)
-            .map(|_| {
-                let ep = Arc::clone(&ep);
-                thread::spawn(move || ep.record_failure(threshold))
-            })
-            .collect();
+        let handles: Vec<_> = std::iter::repeat_with(|| {
+            let ep = Arc::clone(&ep);
+            thread::spawn(move || ep.record_failure(threshold))
+        })
+        .take(threshold as usize)
+        .collect();
 
         let transitions: u32 = handles.into_iter().map(|h| u32::from(h.join().unwrap())).sum();
 
@@ -530,14 +530,14 @@ mod tests {
     fn concurrent_record_success_transitions_exactly_once() {
         let ep = Arc::new(EndpointHealth::new());
         ep.mark_unhealthy();
-        let threshold = 10;
+        let threshold: u32 = 10;
 
-        let handles: Vec<_> = (0..threshold)
-            .map(|_| {
-                let ep = Arc::clone(&ep);
-                thread::spawn(move || ep.record_success(threshold))
-            })
-            .collect();
+        let handles: Vec<_> = std::iter::repeat_with(|| {
+            let ep = Arc::clone(&ep);
+            thread::spawn(move || ep.record_success(threshold))
+        })
+        .take(threshold as usize)
+        .collect();
 
         let transitions: u32 = handles.into_iter().map(|h| u32::from(h.join().unwrap())).sum();
 

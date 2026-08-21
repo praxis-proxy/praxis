@@ -65,9 +65,14 @@ impl Maglev {
 
     /// Hash the key and return the corresponding healthy endpoint.
     ///
-    /// Skips unhealthy endpoints by probing adjacent table slots, falling
-    /// back to the original selection if all are unhealthy.
-    pub(crate) fn select(&self, hash_key: Option<&str>, health: Option<&ClusterHealthState>) -> Option<Arc<str>> {
+    /// Skips unhealthy and excluded endpoints by probing adjacent table slots,
+    /// falling back to the original selection if all are unhealthy.
+    pub(crate) fn select(
+        &self,
+        hash_key: Option<&str>,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+    ) -> Option<Arc<str>> {
         let len = self.table.len();
         if len == 0 {
             return None;
@@ -79,13 +84,22 @@ impl Maglev {
         if let Some(state) = health {
             for offset in 0..len {
                 let ep = self.endpoint_at((start + offset) % len);
+                if is_excluded(&ep.address, exclude) {
+                    continue;
+                }
                 if state.endpoints().get(ep.index).is_some_and(EndpointHealth::is_healthy) {
                     return Some(Arc::clone(&ep.address));
                 }
             }
         }
 
-        Some(Arc::clone(&self.endpoint_at(start).address))
+        for offset in 0..len {
+            let ep = self.endpoint_at((start + offset) % len);
+            if !is_excluded(&ep.address, exclude) {
+                return Some(Arc::clone(&ep.address));
+            }
+        }
+        None
     }
 
     /// The endpoint owning table `slot`. The slot is `< table.len()` and the
@@ -97,6 +111,11 @@ impl Maglev {
     fn endpoint_at(&self, slot: usize) -> &WeightedEndpoint {
         &self.endpoints[self.table[slot] as usize]
     }
+}
+
+/// Check if an address is in the exclusion set.
+fn is_excluded(addr: &str, exclude: &[Arc<str>]) -> bool {
+    exclude.iter().any(|e| e.as_ref() == addr)
 }
 
 /// A weighted replica's Maglev permutation over the lookup table.
@@ -199,15 +218,15 @@ fn fnv1a_seeded(s: &str, seed: u64) -> u64 {
 mod tests {
     use std::collections::{HashMap, HashSet};
 
-    use praxis_core::health::{ClusterHealthEntry, EndpointHealth};
+    use praxis_core::health::ClusterHealthEntry;
 
     use super::*;
 
     #[test]
     fn same_key_same_endpoint() {
         let mg = Maglev::new(endpoints(3), None);
-        let first = mg.select(Some("/stable"), None).unwrap();
-        let second = mg.select(Some("/stable"), None).unwrap();
+        let first = mg.select(Some("/stable"), None, &[]).unwrap();
+        let second = mg.select(Some("/stable"), None, &[]).unwrap();
         assert_eq!(first, second, "same key should always select same endpoint");
     }
 
@@ -215,7 +234,7 @@ mod tests {
     fn different_keys_reach_all_endpoints() {
         let mg = Maglev::new(endpoints(2), None);
         let selections: HashSet<Arc<str>> = (0..100)
-            .map(|i| mg.select(Some(&format!("/k{i}")), None).unwrap())
+            .map(|i| mg.select(Some(&format!("/k{i}")), None, &[]).unwrap())
             .collect();
         assert_eq!(
             selections.len(),
@@ -231,7 +250,7 @@ mod tests {
         let mut counts: HashMap<Arc<str>, usize> = HashMap::new();
         let total = 10_000;
         for i in 0..total {
-            let sel = mg.select(Some(&format!("/key-{i}")), None).unwrap();
+            let sel = mg.select(Some(&format!("/key-{i}")), None, &[]).unwrap();
             *counts.entry(sel).or_default() += 1;
         }
         let expected = total as f64 / n as f64;
@@ -252,7 +271,7 @@ mod tests {
         state.endpoints()[1].mark_unhealthy();
 
         for i in 0..100 {
-            let sel = mg.select(Some(&format!("/k{i}")), Some(&state)).unwrap();
+            let sel = mg.select(Some(&format!("/k{i}")), Some(&state), &[]).unwrap();
             assert_ne!(&*sel, "10.0.0.2:80", "unhealthy endpoint must never be selected");
         }
     }
@@ -264,7 +283,7 @@ mod tests {
         state.endpoints()[0].mark_unhealthy();
         state.endpoints()[1].mark_unhealthy();
 
-        let sel = mg.select(Some("/panic"), Some(&state)).unwrap();
+        let sel = mg.select(Some("/panic"), Some(&state), &[]).unwrap();
         assert!(
             &*sel == "10.0.0.1:80" || &*sel == "10.0.0.2:80",
             "panic mode should still return an endpoint, got: {sel}"
@@ -274,9 +293,13 @@ mod tests {
     #[test]
     fn select_with_none_hash_key_uses_fallback() {
         let mg = Maglev::new(endpoints(3), None);
-        let first = mg.select(None, None).unwrap();
+        let first = mg.select(None, None, &[]).unwrap();
         for _ in 0..10 {
-            assert_eq!(first, mg.select(None, None).unwrap(), "None key must be deterministic");
+            assert_eq!(
+                first,
+                mg.select(None, None, &[]).unwrap(),
+                "None key must be deterministic"
+            );
         }
     }
 
@@ -300,8 +323,8 @@ mod tests {
         let mut ep1 = 0_usize;
         for i in 0..total {
             let key = format!("/w-{i}");
-            let sel = mg.select(Some(&key), None).unwrap();
-            assert_eq!(sel, mg.select(Some(&key), None).unwrap(), "must be deterministic");
+            let sel = mg.select(Some(&key), None, &[]).unwrap();
+            assert_eq!(sel, mg.select(Some(&key), None, &[]).unwrap(), "must be deterministic");
             if &*sel == "10.0.0.1:80" {
                 ep1 += 1;
             }
@@ -317,7 +340,7 @@ mod tests {
     fn minimal_disruption_on_backend_removal() {
         let four = Maglev::new(endpoints(4), None);
         let keys: Vec<String> = (0..10_000).map(|i| format!("/k-{i}")).collect();
-        let before: Vec<Arc<str>> = keys.iter().map(|k| four.select(Some(k), None).unwrap()).collect();
+        let before: Vec<Arc<str>> = keys.iter().map(|k| four.select(Some(k), None, &[]).unwrap()).collect();
 
         // Drop the 4th backend (10.0.0.4:80).
         let three = Maglev::new(endpoints(3), None);
@@ -330,7 +353,7 @@ mod tests {
                 continue; // These must move; not counted.
             }
             survivors += 1;
-            if four.select(Some(k), None).unwrap() != three.select(Some(k), None).unwrap() {
+            if four.select(Some(k), None, &[]).unwrap() != three.select(Some(k), None, &[]).unwrap() {
                 reassigned += 1;
             }
         }
@@ -345,7 +368,7 @@ mod tests {
     fn single_endpoint_owns_every_key() {
         let mg = Maglev::new(endpoints(1), None);
         for i in 0..50 {
-            let sel = mg.select(Some(&format!("/k{i}")), None).unwrap();
+            let sel = mg.select(Some(&format!("/k{i}")), None, &[]).unwrap();
             assert_eq!(&*sel, "10.0.0.1:80", "a single endpoint must own every key");
         }
         assert!(
@@ -367,8 +390,8 @@ mod tests {
         let mut reassigned = 0_usize;
         for i in 0..10_000 {
             let k = format!("/k-{i}");
-            let before = three.select(Some(&k), None).unwrap();
-            let after = four.select(Some(&k), None).unwrap();
+            let before = three.select(Some(&k), None, &[]).unwrap();
+            let after = four.select(Some(&k), None, &[]).unwrap();
             if after == added {
                 continue; // Expected to move onto the new backend.
             }
@@ -387,7 +410,10 @@ mod tests {
     #[test]
     fn empty_endpoints_returns_none() {
         let mg = Maglev::new(Vec::new(), None);
-        assert!(mg.select(Some("/x"), None).is_none(), "no endpoints should yield None");
+        assert!(
+            mg.select(Some("/x"), None, &[]).is_none(),
+            "no endpoints should yield None"
+        );
     }
 
     #[test]

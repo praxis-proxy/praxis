@@ -3,29 +3,31 @@
 
 # `policy`
 
-Embeds the CPEX policy engine in-process to enforce multi-source JWT identity, APL route policy, RFC 8693 token exchange, PII scanning, audit emission, and (under `body_access: read_write`) request / response body rewriting.
+Embeds the Praxis Policy Engine in-process to enforce multi-source JWT identity, APL route policy, RFC 8693 token exchange, PII scanning, audit emission, and (under `body_access: read_write`) request / response body rewriting.
+
+Requires Cargo feature: `policy-engine`.
 
 ## Configuration Notes
 
-Experimental: requires the `cpex-policy-engine` cargo feature, which is off by default. Registered under the YAML filter name `policy`.
+Experimental: requires the `policy-engine` cargo feature, which is off by default. Registered under the YAML filter name `policy`.
 
 A single request can carry multiple identity sources — user JWT in `Authorization`, agent JWT in `X-Agent-Token`, workload JWT in `X-Workload-Token`, etc. Each registered identity plugin reads its own configured header and contributes to a typed `Extensions` context.
 
-On the body phase, the filter consumes protocol classifier filter metadata (from the `praxis-ai` package) to dispatch the matching CMF hook chain. APL routes (declared in the CPEX YAML) gate the tool/prompt/resource call by role, attribute, or Cedar PDP decision. `delegate(...)` steps mint audience-scoped tokens (RFC 8693) that the allow path attaches as upstream headers.
+On the body phase, the filter consumes protocol classifier filter metadata (from the `praxis-ai` package) to dispatch the matching CMF hook chain. APL routes (declared in the policy document) gate the tool/prompt/resource call by role, attribute, or Cedar PDP decision. `delegate(...)` steps mint audience-scoped tokens (RFC 8693) that the allow path attaches as upstream headers.
 
 `body_access: read_write` enables the JSON-RPC re-serialization round-trip so APL field mutators (`redact()`, `assign()`) rewrite the upstream request body and the downstream response.
 
 Praxis filter configs are flat: the filter's typed fields sit directly under the `- filter:` entry alongside the structural keys (`name`, `conditions`), not nested under a `config:` wrapper. See `examples/configs/security/policy.yaml` for a runnable example.
 
-The referenced YAML is the CPEX policy document — plugins, routes, and identity-source declarations. The filter loads it once at construction and rejects misconfigured policy at server startup (fail-fast rather than at first request).
+The referenced YAML is the policy document — plugins, routes, and identity-source declarations. The filter loads it once at construction and rejects misconfigured policy at server startup (fail-fast rather than at first request).
 
 ## Configuration
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
 | `body_access` | `read_only` \| `read_write` | no | Body-access tier. `ReadOnly` (default) lets APL inspect request and response bodies for routing / policy decisions but discards any mutations. `ReadWrite` enables the CMF → JSON-RPC re-serialization round-trip so APL field mutators (e.g. `args.ssn: redact(!perm.view_ssn)`) rewrite the upstream body and response. Pay the round-trip cost only when needed. |
-| `config_path` | string | yes | Filesystem path to the CPEX YAML policy document. |
-| `init_timeout_secs` | integer | no | Maximum time, in seconds, to wait for `PluginManager::initialize` at filter construction. Identity plugins fetch JWKS over HTTPS during init; a reachable-but-unresponsive identity provider would otherwise hang startup or hot-reload indefinitely. On expiry, filter construction returns an error and the server fails fast. 30s is generous for legitimate cold-cache JWKS fetches over the public internet, while short enough that misbehavior is noticed during the deploy. |
+| `config_path` | string | yes | Filesystem path to the policy document. |
+| `init_timeout_secs` | integer | no | Maximum time, in seconds, to wait for `PolicyEngine::initialize` at filter construction. Identity plugins fetch JWKS over HTTPS during init; a reachable-but-unresponsive identity provider would otherwise hang startup or hot-reload indefinitely. On expiry, filter construction returns an error and the server fails fast. 30s is generous for legitimate cold-cache JWKS fetches over the public internet, while short enough that misbehavior is noticed during the deploy. |
 | `max_buffer_bytes` | integer | no | Maximum request/response body bytes buffered in `ReadWrite` mode. `ReadWrite` uses `StreamBuffer` to accumulate the whole body before APL field mutators run; without a cap an oversized payload could exhaust memory. Ignored in `ReadOnly` mode, which streams. The pipeline rejects an unbounded buffer at config load, so this always carries a concrete ceiling. |
 | `require_protocol_metadata` | bool | no | Fail-closed policy gate for misconfigured chains. When `true` (default), `on_request_body` rejects any request that reaches it without `mcp.method` filter-metadata. The metadata is set by the protocol classifier filter (available in the `praxis-ai` package), so its absence means either (a) the protocol classifier filter is missing from the chain, or (b) it is ordered AFTER `policy` instead of before. Either is a misconfiguration that would silently bypass CMF/APL policy. Set to `false` only when intentionally fronting non-classified traffic through the `policy` filter for identity-only enforcement (legacy behavior). Only consulted when the loaded policy declares entity routes (tool/prompt/resource). A pure-L7 (`global`-only) or identity-only policy never reaches this gate — `on_request_body` returns `BodyDone` before it, so the flag has no effect there. Note: JSON-RPC methods that legitimately carry no entity (e.g. `tools/list`, `initialize`, `prompts/list`) still pass — `require_protocol_metadata` only rejects when the metadata is missing entirely. |
 
@@ -33,7 +35,7 @@ The referenced YAML is the CPEX policy document — plugins, routes, and identit
 
 ```yaml
 filter: policy
-config_path: /etc/praxis/cpex-policy.yaml
+config_path: /etc/praxis/policy.yaml
 body_access: read_write       # optional; default read_only
 require_protocol_metadata: true    # optional; default true
 init_timeout_secs: 30         # optional; default 30

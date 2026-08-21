@@ -6,7 +6,8 @@
 use std::collections::HashMap;
 
 use praxis_test_utils::{
-    free_port, http_get, http_send, parse_header, start_backend_with_shutdown, start_proxy, wait_for_tcp,
+    free_port, http_get, http_send, parse_header, start_backend_with_shutdown, start_header_echo_backend, start_proxy,
+    wait_for_tcp,
 };
 
 // -----------------------------------------------------------------------------
@@ -87,4 +88,50 @@ fn failure_mode() {
     let (status, body) = http_get(proxy.addr(), "/", None);
     assert_eq!(status, 200, "failure mode should return 200");
     assert_eq!(body, "ok", "response should come from backend");
+}
+
+#[test]
+fn branch_chains_example_runs_branches_and_proxies() {
+    let backend = start_header_echo_backend();
+    let proxy_port = free_port();
+    let config = super::load_example_config(
+        "pipeline/branch-chains.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3000", backend.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    let (status, body) = http_get(proxy.addr(), "/", None);
+    assert_eq!(status, 200, "branch-chains example should proxy to the backend");
+    let received = body.to_ascii_lowercase();
+
+    // Headers added along the flat pipeline prove both chains ran.
+    for header in [
+        "x-preprocess: true",
+        "x-pipeline: main",
+        "x-tag: checked",
+        "x-pre: done",
+    ] {
+        assert!(
+            received.contains(header),
+            "backend should receive {header}, got: {received}"
+        );
+    }
+
+    // The unconditional branch must run its referenced utility chain
+    // and rejoin the parent pipeline (scenario 1 + 5).
+    assert!(
+        received.contains("x-utility: applied"),
+        "the unconditional branch should apply the utility chain, got: {received}"
+    );
+
+    // Conditional branches never fire for a plain request: their
+    // on_result conditions do not match, so the fast-path, api, and
+    // retry preparation headers must be absent.
+    for header in ["x-fast-path", "x-api", "x-retry"] {
+        assert!(
+            !received.contains(header),
+            "conditional branch header {header} must not fire, got: {received}"
+        );
+    }
 }

@@ -50,7 +50,7 @@ fn maglev() {
 
     // Distribution: distinct header values reach all backends.
     let mut backends_seen = HashSet::new();
-    for i in 0..30 {
+    for i in 0..100 {
         let raw = http_send(
             proxy.addr(),
             &format!(
@@ -65,7 +65,7 @@ fn maglev() {
     assert_eq!(
         backends_seen.len(),
         3,
-        "30 distinct user IDs should reach all 3 backends, got {}: {:?}",
+        "100 distinct user IDs should reach all 3 backends, got {}: {:?}",
         backends_seen.len(),
         backends_seen
     );

@@ -139,7 +139,7 @@ async fn watch_loop(
     let cert_dir = parent_dir(&pair.cert_path);
     let key_dir = parent_dir(&pair.key_path);
 
-    let extra_dirs = verifier_extra_dirs(&verifier_reload);
+    let extra_dirs = verifier_extra_dirs(verifier_reload.as_ref());
     let _watcher = match setup_watcher(tx, &cert_dir, &key_dir, &extra_dirs) {
         Ok(w) => w,
         Err(e) => {
@@ -174,7 +174,7 @@ async fn watch_loop(
                 }
 
                 let cert_ok = reload_cert(&current, &pair);
-                let verifier_ok = reload_client_verifier(&verifier_reload);
+                let verifier_ok = reload_client_verifier(verifier_reload.as_ref());
 
                 if cert_ok && verifier_ok {
                     backoff_ms = MIN_SUCCESS_COOLDOWN_MS;
@@ -297,7 +297,7 @@ fn reload_cert(current: &Arc<ArcSwap<CertifiedKey>>, pair: &CertKeyPair) -> bool
 ///
 /// Returns `true` on success (or when no verifier reload is
 /// configured), `false` on failure.
-fn reload_client_verifier(reload: &Option<ClientVerifierReload>) -> bool {
+fn reload_client_verifier(reload: Option<&ClientVerifierReload>) -> bool {
     let Some(cfg) = reload else {
         return true;
     };
@@ -305,7 +305,7 @@ fn reload_client_verifier(reload: &Option<ClientVerifierReload>) -> bool {
     match crate::client_auth::build_client_verifier(&cfg.ca_path, cfg.mode, &cfg.crl_paths) {
         Ok(verifier) => {
             cfg.swap_handle
-                .store(Arc::new(crate::reload::VerifierState { verifier }));
+                .store(Arc::new(crate::reload::VerifierState::new(verifier, cfg.mode)));
             tracing::info!(
                 ca_path = %cfg.ca_path,
                 crl_count = cfg.crl_paths.len(),
@@ -325,7 +325,7 @@ fn reload_client_verifier(reload: &Option<ClientVerifierReload>) -> bool {
 }
 
 /// Collect the extra directories to watch for CRL/CA file changes.
-fn verifier_extra_dirs(reload: &Option<ClientVerifierReload>) -> Vec<PathBuf> {
+fn verifier_extra_dirs(reload: Option<&ClientVerifierReload>) -> Vec<PathBuf> {
     let Some(cfg) = reload else {
         return Vec::new();
     };
@@ -576,14 +576,14 @@ mod tests {
     #[test]
     fn reload_client_verifier_returns_true_when_none() {
         assert!(
-            reload_client_verifier(&None),
+            reload_client_verifier(None),
             "no verifier reload config should return true"
         );
     }
 
     #[test]
     fn verifier_extra_dirs_empty_when_none() {
-        let dirs = verifier_extra_dirs(&None);
+        let dirs = verifier_extra_dirs(None);
         assert!(dirs.is_empty(), "no verifier config should yield empty dirs");
     }
 
@@ -606,7 +606,7 @@ mod tests {
             swap_handle: verifier.arc(),
         });
 
-        let dirs = verifier_extra_dirs(&reload);
+        let dirs = verifier_extra_dirs(reload.as_ref());
         assert_eq!(dirs.len(), 2, "should include CA dir and CRL dir");
         assert_eq!(dirs[0], ca_dir, "first dir should be CA parent");
         assert_eq!(dirs[1], PathBuf::from("/etc/ssl"), "second dir should be CRL parent");

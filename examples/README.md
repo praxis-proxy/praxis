@@ -117,8 +117,8 @@ page.
 | [guardrails.yaml](configs/security/guardrails.yaml) | Reject requests that match header or body inspection rules |
 | [ip-acl.yaml](configs/security/ip-acl.yaml) | Allow or deny requests by source IP/CIDR |
 | [peer-identity-trust.yaml](configs/security/peer-identity-trust.yaml) | Validates downstream mTLS peer identity against a set of trusted peers |
-| [policy-http.yaml](configs/security/policy-http.yaml) | Generic-HTTP authorization for non-MCP traffic using the CPEX policy engine |
-| [policy.yaml](configs/security/policy.yaml) | Embeds the CPEX policy engine in-process to enforce multi-source JWT identity, APL route policy, RFC 8693 OAuth 2.0 token exchange, PII scanning, audit emission, and (under `body_access: read_write`) request / response body rewriting |
+| [policy-http.yaml](configs/security/policy-http.yaml) | Generic-HTTP authorization for non-MCP traffic using the Praxis Policy Engine |
+| [policy.yaml](configs/security/policy.yaml) | Embeds the Praxis Policy Engine in-process to enforce multi-source JWT identity, APL route policy, RFC 8693 OAuth 2.0 token exchange, PII scanning, audit emission, and (under `body_access: read_write`) request / response body rewriting |
 
 ### Traffic Management
 
@@ -141,6 +141,7 @@ page.
 | [random.yaml](configs/traffic-management/random.yaml) | Selects an upstream endpoint at random, weighted by endpoint weight |
 | [rate-limiting.yaml](configs/traffic-management/rate-limiting.yaml) | Token bucket rate limiter with per-IP or global modes |
 | [redirect.yaml](configs/traffic-management/redirect.yaml) | Returns a 3xx redirect without contacting any upstream |
+| [retry-policy.yaml](configs/traffic-management/retry-policy.yaml) | Automatically retries failed upstream requests with exponential backoff and a token-bucket budget to prevent retry storms |
 | [round-robin.yaml](configs/traffic-management/round-robin.yaml) | Default strategy |
 | [session-affinity.yaml](configs/traffic-management/session-affinity.yaml) | Hashes a request header to pin a user's requests to one backend |
 | [static-response.yaml](configs/traffic-management/static-response.yaml) | Returns a fixed response without contacting any upstream |

@@ -687,9 +687,9 @@ mod tests {
 
     #[test]
     fn dns_validation_accepts_valid_hostname() {
-        assert!(crate::dns::validate_dns_hostname("example.com").is_ok());
-        assert!(crate::dns::validate_dns_hostname("a-b.example.com").is_ok());
-        assert!(crate::dns::validate_dns_hostname("sub.domain.example.com").is_ok());
+        crate::dns::validate_dns_hostname("example.com").expect("bare domain should be valid");
+        crate::dns::validate_dns_hostname("a-b.example.com").expect("hyphenated subdomain should be valid");
+        crate::dns::validate_dns_hostname("sub.domain.example.com").expect("nested subdomain should be valid");
     }
 
     #[test]

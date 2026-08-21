@@ -1,19 +1,17 @@
 # Container Default Configuration
 #
-# Default config for containerized deployments. Binds
-# to all interfaces so health checks and traffic are
-# reachable from outside the container's network
-# namespace.
+# Default config for containerized deployments. The proxy
+# listener binds to all interfaces so traffic reaches it
+# from outside the container's network namespace; the
+# admin endpoint stays on loopback, where the image's
+# HEALTHCHECK reaches it.
 #
 # Usage:
 #   docker run -p 8080:8080 praxis:0.1.0
 #   curl http://localhost:8080/
 
 admin:
-  address: "0.0.0.0:9901"
-
-insecure_options:
-  allow_public_admin: true
+  address: "127.0.0.1:9901"
 
 listeners:
   - name: default

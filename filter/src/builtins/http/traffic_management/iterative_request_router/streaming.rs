@@ -112,7 +112,7 @@ pub(super) struct StepResponseContinuation {
     /// Absolute deadline shared by header and body processing for this step.
     pub(super) step_deadline: std::time::Instant,
     /// Verified downstream mTLS identity.
-    pub(super) peer_identity: Option<praxis_tls::TlsPeerIdentity>,
+    pub(super) peer_identity: Option<Arc<praxis_tls::TlsPeerIdentity>>,
 }
 
 impl StepResponseContinuation {
@@ -281,6 +281,12 @@ impl IrrStreamingBody {
             response_headers_modified: false,
             rewritten_path: None,
             selected_endpoint_index: None,
+            attempted_endpoints: Vec::new(),
+            retry_policy: None,
+            route_retry_policy: None,
+            cluster_retry_state: None,
+            cluster_retry_state_released: false,
+            endpoint_reselector: None,
             structured_metadata: std::mem::take(&mut cont.structured_metadata),
             subrequest_client: cont.pipeline.subrequest_client(),
             subrequest_response_mode: crate::context::SubRequestResponseMode::Streaming,

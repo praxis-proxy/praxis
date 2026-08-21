@@ -49,6 +49,10 @@ struct TcpLoadBalancerConfig {
 /// If all endpoints are unhealthy, the filter enters panic mode and
 /// routes to all endpoints.
 ///
+/// **Note:** `retry_policy` is an HTTP-only feature and is ignored for TCP
+/// listeners. The field appears in the cluster schema because the same
+/// `Cluster` type is shared across protocols.
+///
 /// # YAML configuration
 ///
 /// ```yaml
@@ -109,6 +113,9 @@ impl TcpLoadBalancerFilter {
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn TcpFilter>, FilterError> {
         let cfg: TcpLoadBalancerConfig = crate::factory::parse_filter_config("tcp_load_balancer", config)?;
+        if cfg.clusters.is_empty() {
+            return Err("tcp_load_balancer: 'clusters' is empty; every connection would fail".into());
+        }
         Ok(Box::new(Self::new(&cfg.clusters)))
     }
 
@@ -148,9 +155,11 @@ impl TcpFilter for TcpLoadBalancerFilter {
         }
 
         let client_ip = ctx.remote_addr.rsplit_once(':').map_or(ctx.remote_addr, |(ip, _)| ip);
-        let addr = strategy.select(Some(client_ip), health).ok_or_else(|| -> FilterError {
-            format!("tcp_load_balancer: cluster '{cluster_name}' has no available endpoints").into()
-        })?;
+        let addr = strategy
+            .select(Some(client_ip), health, &[])
+            .ok_or_else(|| -> FilterError {
+                format!("tcp_load_balancer: cluster '{cluster_name}' has no available endpoints").into()
+            })?;
         debug!(cluster = %cluster_name, upstream = %addr, "TCP upstream selected");
 
         ctx.upstream_addr = Some(Cow::Owned(addr.to_string()));
@@ -185,11 +194,11 @@ impl TcpFilter for TcpLoadBalancerFilter {
     reason = "tests"
 )]
 mod tests {
-    use std::{borrow::Cow, collections::HashMap, sync::Arc, time::Instant};
+    use std::time::Instant;
 
     use praxis_core::{
-        config::{Cluster, ConsistentHashOpts, Endpoint, LoadBalancerStrategy, ParameterisedStrategy, SimpleStrategy},
-        health::{ClusterHealthEntry, ClusterHealthState, EndpointHealth},
+        config::{ConsistentHashOpts, Endpoint, LoadBalancerStrategy, ParameterisedStrategy, SimpleStrategy},
+        health::{ClusterHealthEntry, EndpointHealth},
     };
 
     use super::*;
@@ -441,13 +450,14 @@ clusters:
     }
 
     #[test]
-    fn from_config_empty_clusters() {
+    fn from_config_empty_clusters_rejected() {
         let yaml = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-        let filter = TcpLoadBalancerFilter::from_config(&yaml).unwrap();
-        assert_eq!(
-            filter.name(),
-            "tcp_load_balancer",
-            "empty clusters should still create filter"
+        let Err(err) = TcpLoadBalancerFilter::from_config(&yaml) else {
+            panic!("empty clusters must be rejected");
+        };
+        assert!(
+            err.to_string().contains("empty"),
+            "an empty cluster table can serve nothing and must be rejected, got: {err}"
         );
     }
 

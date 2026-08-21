@@ -31,7 +31,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Rust (stable + nightly fmt)
-        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@465a493e9f18776294940c9912935eb7e68fb03b # v0.1.0
 
       - name: Install cargo-machete
         run: cargo install cargo-machete --locked
@@ -135,7 +135,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Supply chain audit
-        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@465a493e9f18776294940c9912935eb7e68fb03b # v0.1.0
 
   # ----------------------------------------------------------------------------
   # Coverage gate
@@ -149,4 +149,36 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Check coverage
-        uses: praxis-proxy/conventions/.github/actions/coverage-check@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/coverage-check@465a493e9f18776294940c9912935eb7e68fb03b # v0.1.0
+
+  # ----------------------------------------------------------------------------
+  # Beta/Nightly canary
+  # ----------------------------------------------------------------------------
+
+  canary:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        toolchain: [beta, nightly]
+    continue-on-error: ${{ matrix.toolchain == 'nightly' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install ${{ matrix.toolchain }} toolchain
+        uses: dtolnay/rust-toolchain@56f84321dbccf38fb67ce29ab63e4754056677e0 # master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+
+      - name: Install h2spec
+        run: make target/praxis-binutils/h2spec
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+
+      - name: Run tests
+        run: |
+          export PATH="$(pwd)/target/praxis-binutils:$PATH"
+          cargo test --workspace

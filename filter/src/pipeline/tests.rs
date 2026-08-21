@@ -13,7 +13,12 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use praxis_core::config::{FailureMode, SkipPipelineChecks};
 
-use super::{FilterPipeline, body::compute_body_capabilities, filter::PipelineFilter};
+use super::{
+    FilterPipeline,
+    body::compute_body_capabilities,
+    branch::{RejoinTarget, ResolvedBranch},
+    filter::PipelineFilter,
+};
 use crate::{
     FilterAction, FilterEntry, FilterError, FilterRegistry, StreamingResponseBody, StreamingTerminalResponse,
     any_filter::AnyFilter,
@@ -57,11 +62,11 @@ fn build_unknown_filter_errors() {
 #[test]
 fn build_with_valid_filters() {
     let registry = FilterRegistry::with_builtins();
-    let mut router_config = serde_yaml::Mapping::new();
-    router_config.insert(
-        serde_yaml::Value::String("routes".into()),
-        serde_yaml::Value::Sequence(vec![]),
-    );
+    let router_config: serde_yaml::Value =
+        serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap();
+    let serde_yaml::Value::Mapping(router_config) = router_config else {
+        panic!("router config should be a mapping");
+    };
     let mut entries = vec![FilterEntry {
         branch_chains: None,
         conditions: vec![],
@@ -84,7 +89,7 @@ fn build_stops_on_first_error() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
-            config: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
+            config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -106,6 +111,103 @@ fn build_stops_on_first_error() {
         ),
         Ok(_) => panic!("expected error for unknown filter"),
     }
+}
+
+#[tokio::test]
+async fn terminal_branch_without_response_fails_closed() {
+    // A `terminal`/`client` rejoin whose sub-chain produces no response must
+    // stop the pipeline with a 500, not proxy upstream while skipping the
+    // filters after the branch point (the historical bypass).
+    let after_ran = Arc::new(AtomicUsize::new(0));
+    let mut branching = PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(CountingFilter {
+            counter: Arc::new(AtomicUsize::new(0)),
+        })),
+        vec![],
+        vec![],
+    );
+    branching.branches = vec![ResolvedBranch {
+        name: Arc::from("term"),
+        condition: None,
+        filters: vec![],
+        max_iterations: None,
+        rejoin: RejoinTarget::Terminal,
+    }];
+    let after = PipelineFilter::new(
+        1,
+        AnyFilter::Http(Box::new(CountingFilter {
+            counter: Arc::clone(&after_ran),
+        })),
+        vec![],
+        vec![],
+    );
+
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![branching, after]);
+
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Reject(r) if r.status == 500),
+        "terminal branch with no response should fail closed with 500"
+    );
+    assert_eq!(
+        after_ran.load(Ordering::SeqCst),
+        0,
+        "filters after a terminal branch point must not run"
+    );
+}
+
+#[tokio::test]
+async fn terminal_branch_with_cluster_selection_forwards_upstream() {
+    use super::branch::{RejoinTarget, ResolvedBranch};
+
+    let after_ran = Arc::new(AtomicUsize::new(0));
+    let mut branching = PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(CountingFilter {
+            counter: Arc::new(AtomicUsize::new(0)),
+        })),
+        vec![],
+        vec![],
+    );
+    branching.branches = vec![ResolvedBranch {
+        name: Arc::from("routing_branch"),
+        condition: None,
+        filters: vec![PipelineFilter::new(
+            10,
+            AnyFilter::Http(Box::new(ClusterSelectFilter("backend"))),
+            vec![],
+            vec![],
+        )],
+        max_iterations: None,
+        rejoin: RejoinTarget::Terminal,
+    }];
+    let after = PipelineFilter::new(
+        1,
+        AnyFilter::Http(Box::new(CountingFilter {
+            counter: Arc::clone(&after_ran),
+        })),
+        vec![],
+        vec![],
+    );
+
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![branching, after]);
+
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "terminal branch that selected a cluster should continue to upstream forwarding"
+    );
+    assert!(ctx.cluster.is_some(), "cluster should be set by the branch filter");
+    assert_eq!(
+        after_ran.load(Ordering::SeqCst),
+        0,
+        "filters after a terminal branch point must not run"
+    );
 }
 
 #[tokio::test]
@@ -386,6 +488,21 @@ async fn no_conditions_always_executes() {
         counter.load(Ordering::SeqCst),
         1,
         "unconditional filter should always execute"
+    );
+}
+
+#[tokio::test]
+async fn rejecting_filter_is_marked_executed() {
+    let pipeline = make_pipeline(vec![Box::new(PassthroughFilter), Box::new(RejectFilter)]);
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = pipeline.execute_http_request(&mut ctx).await.unwrap();
+
+    assert!(matches!(action, FilterAction::Reject(_)), "pipeline should reject");
+    assert!(
+        ctx.executed_filter_indices[1],
+        "the rejecting filter ran and must participate in response-phase cleanup"
     );
 }
 
@@ -688,19 +805,7 @@ async fn execute_request_body_continue_without_marker() {
 #[test]
 fn apply_body_limits_no_limits_leaves_stream_mode() {
     let caps = BodyCapabilities::default();
-    let mut pipeline = FilterPipeline {
-        body_capabilities: caps,
-        compression: None,
-        filters: vec![],
-        record_filter_duration_metrics: false,
-        health_registry: None,
-        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
-        kv_stores: None,
-        subrequest_client: None,
-        may_select_streaming_subrequest_response: false,
-        pipeline_extensions: Vec::new(),
-        time_source: Arc::new(praxis_core::time::SystemTimeSource),
-    };
+    let mut pipeline = test_pipeline(caps, vec![]);
     pipeline.apply_body_limits(None, None, false).unwrap();
 
     assert!(
@@ -726,19 +831,7 @@ fn apply_body_limits_no_limits_leaves_stream_mode() {
 #[test]
 fn apply_body_limits_converts_default_stream_to_size_limit() {
     let caps = BodyCapabilities::default();
-    let mut pipeline = FilterPipeline {
-        body_capabilities: caps,
-        compression: None,
-        filters: vec![],
-        record_filter_duration_metrics: false,
-        health_registry: None,
-        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
-        kv_stores: None,
-        subrequest_client: None,
-        may_select_streaming_subrequest_response: false,
-        pipeline_extensions: Vec::new(),
-        time_source: Arc::new(praxis_core::time::SystemTimeSource),
-    };
+    let mut pipeline = test_pipeline(caps, vec![]);
     pipeline
         .apply_body_limits(Some(1_048_576), Some(524_288), false)
         .unwrap();
@@ -773,19 +866,7 @@ fn apply_body_limits_preserves_filter_declared_stream() {
         response_body_mode: BodyMode::Stream,
         ..BodyCapabilities::default()
     };
-    let mut pipeline = FilterPipeline {
-        body_capabilities: caps,
-        compression: None,
-        filters: vec![],
-        record_filter_duration_metrics: false,
-        health_registry: None,
-        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
-        kv_stores: None,
-        subrequest_client: None,
-        may_select_streaming_subrequest_response: false,
-        pipeline_extensions: Vec::new(),
-        time_source: Arc::new(praxis_core::time::SystemTimeSource),
-    };
+    let mut pipeline = test_pipeline(caps, vec![]);
     pipeline
         .apply_body_limits(Some(1_048_576), Some(524_288), false)
         .unwrap();
@@ -835,7 +916,7 @@ fn errors_load_balancer_without_router() {
         branch_chains: None,
         conditions: vec![],
         filter_type: "load_balancer".into(),
-        config: serde_yaml::from_str("clusters: []").unwrap(),
+        config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
         name: None,
         response_conditions: vec![],
         failure_mode: FailureMode::default(),
@@ -898,7 +979,7 @@ fn errors_unconditional_static_response_followed_by_filters() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
-            config: serde_yaml::from_str("routes: []").unwrap(),
+            config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -960,7 +1041,7 @@ fn errors_duplicate_router() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
-            config: serde_yaml::from_str("routes: []").unwrap(),
+            config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -969,7 +1050,7 @@ fn errors_duplicate_router() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
-            config: serde_yaml::from_str("routes: []").unwrap(),
+            config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -978,7 +1059,7 @@ fn errors_duplicate_router() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "load_balancer".into(),
-            config: serde_yaml::from_str("clusters: []").unwrap(),
+            config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -1184,7 +1265,7 @@ fn skip_lb_without_router_suppresses_error() {
         branch_chains: None,
         conditions: vec![],
         filter_type: "load_balancer".into(),
-        config: serde_yaml::from_str("clusters: []").unwrap(),
+        config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
         name: None,
         response_conditions: vec![],
         failure_mode: FailureMode::default(),
@@ -1209,7 +1290,7 @@ fn skip_duplicate_routers_suppresses_error() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
-            config: serde_yaml::from_str("routes: []").unwrap(),
+            config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -1218,7 +1299,7 @@ fn skip_duplicate_routers_suppresses_error() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
-            config: serde_yaml::from_str("routes: []").unwrap(),
+            config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -1227,7 +1308,7 @@ fn skip_duplicate_routers_suppresses_error() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "load_balancer".into(),
-            config: serde_yaml::from_str("clusters: []").unwrap(),
+            config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -1286,7 +1367,7 @@ fn skip_all_suppresses_all_errors() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
-            config: serde_yaml::from_str("routes: []").unwrap(),
+            config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -1295,7 +1376,7 @@ fn skip_all_suppresses_all_errors() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
-            config: serde_yaml::from_str("routes: []").unwrap(),
+            config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -1314,7 +1395,7 @@ fn granular_skip_only_affects_targeted_check() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
-            config: serde_yaml::from_str("routes: []").unwrap(),
+            config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -1323,7 +1404,7 @@ fn granular_skip_only_affects_targeted_check() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
-            config: serde_yaml::from_str("routes: []").unwrap(),
+            config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -1332,7 +1413,7 @@ fn granular_skip_only_affects_targeted_check() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "load_balancer".into(),
-            config: serde_yaml::from_str("clusters: []").unwrap(),
+            config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -1357,7 +1438,7 @@ fn warns_router_without_lb() {
         branch_chains: None,
         conditions: vec![],
         filter_type: "router".into(),
-        config: serde_yaml::from_str("routes: []").unwrap(),
+        config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
         name: None,
         response_conditions: vec![],
         failure_mode: FailureMode::default(),
@@ -1445,7 +1526,7 @@ fn warns_all_routers_conditional() {
             branch_chains: None,
             conditions: vec![when_path("/api")],
             filter_type: "router".into(),
-            config: serde_yaml::from_str("routes: []").unwrap(),
+            config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -1454,7 +1535,7 @@ fn warns_all_routers_conditional() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "load_balancer".into(),
-            config: serde_yaml::from_str("clusters: []").unwrap(),
+            config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -1478,7 +1559,7 @@ fn no_warning_when_unconditional_router_exists() {
             branch_chains: None,
             conditions: vec![when_path("/api")],
             filter_type: "router".into(),
-            config: serde_yaml::from_str("routes: []").unwrap(),
+            config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -1487,7 +1568,7 @@ fn no_warning_when_unconditional_router_exists() {
             branch_chains: None,
             conditions: vec![],
             filter_type: "router".into(),
-            config: serde_yaml::from_str("routes: []").unwrap(),
+            config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             name: None,
             response_conditions: vec![],
             failure_mode: FailureMode::default(),
@@ -1529,19 +1610,7 @@ async fn response_header_swap_same_count_is_applied_to_the_map() {
 #[test]
 fn apply_body_limits_default_stream_becomes_size_limit() {
     let caps = BodyCapabilities::default();
-    let mut pipeline = FilterPipeline {
-        body_capabilities: caps,
-        compression: None,
-        filters: vec![],
-        record_filter_duration_metrics: false,
-        health_registry: None,
-        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
-        kv_stores: None,
-        subrequest_client: None,
-        may_select_streaming_subrequest_response: false,
-        pipeline_extensions: Vec::new(),
-        time_source: Arc::new(praxis_core::time::SystemTimeSource),
-    };
+    let mut pipeline = test_pipeline(caps, vec![]);
     pipeline.apply_body_limits(Some(4096), Some(8192), false).unwrap();
     assert_eq!(
         pipeline.body_capabilities().request_body_mode,
@@ -1560,19 +1629,7 @@ fn apply_body_limits_filter_stricter_than_config() {
     let mut caps = BodyCapabilities::default();
     caps.request_body_mode = BodyMode::StreamBuffer { max_bytes: Some(500) };
     caps.needs_request_body = true;
-    let mut pipeline = FilterPipeline {
-        body_capabilities: caps,
-        compression: None,
-        filters: vec![],
-        record_filter_duration_metrics: false,
-        health_registry: None,
-        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
-        kv_stores: None,
-        subrequest_client: None,
-        may_select_streaming_subrequest_response: false,
-        pipeline_extensions: Vec::new(),
-        time_source: Arc::new(praxis_core::time::SystemTimeSource),
-    };
+    let mut pipeline = test_pipeline(caps, vec![]);
     pipeline.apply_body_limits(Some(1000), None, false).unwrap();
     assert_eq!(
         pipeline.body_capabilities().request_body_mode,
@@ -1588,19 +1645,7 @@ fn apply_body_limits_config_stricter_than_filter() {
         needs_request_body: true,
         ..BodyCapabilities::default()
     };
-    let mut pipeline = FilterPipeline {
-        body_capabilities: caps,
-        compression: None,
-        filters: vec![],
-        record_filter_duration_metrics: false,
-        health_registry: None,
-        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
-        kv_stores: None,
-        subrequest_client: None,
-        may_select_streaming_subrequest_response: false,
-        pipeline_extensions: Vec::new(),
-        time_source: Arc::new(praxis_core::time::SystemTimeSource),
-    };
+    let mut pipeline = test_pipeline(caps, vec![]);
     pipeline.apply_body_limits(Some(1000), None, false).unwrap();
     assert_eq!(
         pipeline.body_capabilities().request_body_mode,
@@ -1616,19 +1661,7 @@ fn apply_body_limits_rejects_unbounded_stream_buffer() {
         needs_request_body: true,
         ..BodyCapabilities::default()
     };
-    let mut pipeline = FilterPipeline {
-        body_capabilities: caps,
-        compression: None,
-        filters: vec![],
-        record_filter_duration_metrics: false,
-        health_registry: None,
-        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
-        kv_stores: None,
-        subrequest_client: None,
-        may_select_streaming_subrequest_response: false,
-        pipeline_extensions: Vec::new(),
-        time_source: Arc::new(praxis_core::time::SystemTimeSource),
-    };
+    let mut pipeline = test_pipeline(caps, vec![]);
     let err = pipeline.apply_body_limits(None, None, false).unwrap_err();
     assert!(
         err.to_string().contains("no size limit"),
@@ -1643,19 +1676,7 @@ fn apply_body_limits_clamps_unbounded_stream_buffer_with_override() {
         needs_request_body: true,
         ..BodyCapabilities::default()
     };
-    let mut pipeline = FilterPipeline {
-        body_capabilities: caps,
-        compression: None,
-        filters: vec![],
-        record_filter_duration_metrics: false,
-        health_registry: None,
-        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
-        kv_stores: None,
-        subrequest_client: None,
-        may_select_streaming_subrequest_response: false,
-        pipeline_extensions: Vec::new(),
-        time_source: Arc::new(praxis_core::time::SystemTimeSource),
-    };
+    let mut pipeline = test_pipeline(caps, vec![]);
     pipeline
         .apply_body_limits(None, None, true)
         .expect("allow_unbounded_body should demote error to warning");
@@ -1838,12 +1859,12 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         vec![],
         vec![],
     );
-    filter_a.branches = vec![super::branch::ResolvedBranch {
+    filter_a.branches = vec![ResolvedBranch {
         condition: None,
         filters: vec![],
         max_iterations: None,
         name: Arc::from("skip_branch"),
-        rejoin: super::branch::RejoinTarget::SkipTo(2),
+        rejoin: RejoinTarget::SkipTo(2),
     }];
 
     let filter_b = PipelineFilter::new(
@@ -1878,6 +1899,10 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        request_body_ceiling: None,
+        response_body_ceiling: None,
+        request_body_access_by_idx: Vec::new(),
+        response_body_access_by_idx: Vec::new(),
     };
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -1907,12 +1932,12 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
         vec![],
         vec![],
     );
-    filter_a.branches = vec![super::branch::ResolvedBranch {
+    filter_a.branches = vec![ResolvedBranch {
         condition: None,
         filters: vec![],
         max_iterations: None,
         name: Arc::from("skip_branch"),
-        rejoin: super::branch::RejoinTarget::SkipTo(2),
+        rejoin: RejoinTarget::SkipTo(2),
     }];
 
     let filter_b = PipelineFilter::new(
@@ -1946,6 +1971,10 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
         subrequest_client: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        request_body_ceiling: None,
+        response_body_ceiling: None,
+        request_body_access_by_idx: Vec::new(),
+        response_body_access_by_idx: Vec::new(),
     };
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -2014,6 +2043,10 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
         subrequest_client: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        request_body_ceiling: None,
+        response_body_ceiling: None,
+        request_body_access_by_idx: Vec::new(),
+        response_body_access_by_idx: Vec::new(),
     };
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -2073,6 +2106,10 @@ async fn all_executed_filters_run_on_response() {
         may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        request_body_ceiling: None,
+        response_body_ceiling: None,
+        request_body_access_by_idx: Vec::new(),
+        response_body_access_by_idx: Vec::new(),
     };
 
     let req = crate::test_utils::make_request(Method::GET, "/");
@@ -2101,12 +2138,12 @@ async fn skipped_filter_skips_its_branches() {
         vec![],
         vec![],
     );
-    let branch = super::branch::ResolvedBranch {
+    let branch = ResolvedBranch {
         condition: None,
         filters: vec![branch_filter],
         max_iterations: None,
         name: Arc::from("should_not_fire"),
-        rejoin: super::branch::RejoinTarget::Next,
+        rejoin: RejoinTarget::Next,
     };
 
     let mut parent = PipelineFilter::new(
@@ -2131,6 +2168,10 @@ async fn skipped_filter_skips_its_branches() {
         may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        request_body_ceiling: None,
+        response_body_ceiling: None,
+        request_body_access_by_idx: Vec::new(),
+        response_body_access_by_idx: Vec::new(),
     };
 
     let req = crate::test_utils::make_request(Method::GET, "/other");
@@ -2704,8 +2745,112 @@ async fn body_done_with_stream_buffer_mode() {
 }
 
 // -----------------------------------------------------------------------------
+// Referenced files
+// -----------------------------------------------------------------------------
+
+#[test]
+fn referenced_files_empty_for_pipeline_with_no_filters() {
+    let pipeline = make_pipeline(vec![]);
+    assert!(
+        pipeline.referenced_files().is_empty(),
+        "a pipeline with no filters declares nothing"
+    );
+}
+
+#[test]
+fn referenced_files_collects_from_every_declaring_filter() {
+    let pipeline = make_pipeline(vec![
+        Box::new(ReferencingFilter::new(&["/etc/praxis/a.yaml"])),
+        Box::new(ReferencingFilter::new(&["/etc/praxis/b.yaml"])),
+    ]);
+    assert_eq!(
+        pipeline.referenced_files(),
+        vec![
+            std::path::PathBuf::from("/etc/praxis/a.yaml"),
+            std::path::PathBuf::from("/etc/praxis/b.yaml"),
+        ],
+        "both filters' documents must be collected"
+    );
+}
+
+/// A filter with no external config must not contribute, so the watcher does not
+/// hash or watch files nothing reads.
+#[test]
+fn referenced_files_skips_filters_that_declare_nothing() {
+    let pipeline = make_pipeline(vec![
+        Box::new(PassthroughFilter),
+        Box::new(ReferencingFilter::new(&["/etc/praxis/only.yaml"])),
+        Box::new(PassthroughFilter),
+    ]);
+    assert_eq!(
+        pipeline.referenced_files(),
+        vec![std::path::PathBuf::from("/etc/praxis/only.yaml")],
+        "only the declaring filter contributes"
+    );
+}
+
+/// Duplicates survive at this level on purpose: de-duplication belongs to
+/// `ListenerPipelines::referenced_files`, which sees every listener. Collapsing
+/// here would hide a shared document from that caller.
+#[test]
+fn referenced_files_keeps_duplicates_for_the_caller_to_dedupe() {
+    let shared = "/etc/praxis/shared.yaml";
+    let pipeline = make_pipeline(vec![
+        Box::new(ReferencingFilter::new(&[shared])),
+        Box::new(ReferencingFilter::new(&[shared])),
+    ]);
+    assert_eq!(
+        pipeline.referenced_files().len(),
+        2,
+        "the pipeline reports what its filters declared, without deduping"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// A filter that reads config from external documents.
+struct ReferencingFilter {
+    referenced_files: Vec<std::path::PathBuf>,
+}
+
+impl ReferencingFilter {
+    fn new(paths: &[&str]) -> Self {
+        Self {
+            referenced_files: paths.iter().map(std::path::PathBuf::from).collect(),
+        }
+    }
+}
+
+#[async_trait]
+impl HttpFilter for ReferencingFilter {
+    fn name(&self) -> &'static str {
+        "referencing"
+    }
+
+    fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        self.referenced_files.clone()
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+}
+
+/// A filter that does nothing and declares no external config.
+struct PassthroughFilter;
+
+#[async_trait]
+impl HttpFilter for PassthroughFilter {
+    fn name(&self) -> &'static str {
+        "passthrough"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+}
 
 /// A filter that immediately rejects all requests.
 struct RejectFilter;
@@ -2718,6 +2863,21 @@ impl HttpFilter for RejectFilter {
 
     async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         Ok(FilterAction::Reject(crate::Rejection::status(403)))
+    }
+}
+
+/// A filter that sets `ctx.cluster` to a fixed name.
+struct ClusterSelectFilter(&'static str);
+
+#[async_trait]
+impl HttpFilter for ClusterSelectFilter {
+    fn name(&self) -> &'static str {
+        "cluster_select"
+    }
+
+    async fn on_request(&self, ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        ctx.cluster = Some(Arc::from(self.0));
+        Ok(FilterAction::Continue)
     }
 }
 
@@ -3210,6 +3370,28 @@ impl HttpFilter for StreamBufferBodyDoneFilter {
     }
 }
 
+/// Build a [`FilterPipeline`] from pre-built [`PipelineFilter`]s and
+/// explicit body capabilities (defaults everywhere else).
+fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilter>) -> FilterPipeline {
+    FilterPipeline {
+        body_capabilities,
+        compression: None,
+        filters,
+        record_filter_duration_metrics: false,
+        health_registry: None,
+        id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
+        kv_stores: None,
+        subrequest_client: None,
+        may_select_streaming_subrequest_response: false,
+        pipeline_extensions: Vec::new(),
+        time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        request_body_ceiling: None,
+        response_body_ceiling: None,
+        request_body_access_by_idx: Vec::new(),
+        response_body_access_by_idx: Vec::new(),
+    }
+}
+
 /// Build a [`FilterPipeline`] from the given HTTP filters (no conditions).
 fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
     let filters: Vec<_> = filters
@@ -3231,6 +3413,10 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        request_body_ceiling: None,
+        response_body_ceiling: None,
+        request_body_access_by_idx: Vec::new(),
+        response_body_access_by_idx: Vec::new(),
     }
 }
 
@@ -3257,6 +3443,10 @@ fn make_pipeline_with_conditions(
         may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        request_body_ceiling: None,
+        response_body_ceiling: None,
+        request_body_access_by_idx: Vec::new(),
+        response_body_access_by_idx: Vec::new(),
     }
 }
 
@@ -3283,6 +3473,10 @@ fn make_pipeline_with_response_conditions(
         may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        request_body_ceiling: None,
+        response_body_ceiling: None,
+        request_body_access_by_idx: Vec::new(),
+        response_body_access_by_idx: Vec::new(),
     }
 }
 
@@ -3896,6 +4090,10 @@ fn streaming_capability_detected_when_filter_declares_it() {
         subrequest_client: None,
         may_select_streaming_subrequest_response: true,
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
+        request_body_ceiling: None,
+        response_body_ceiling: None,
+        request_body_access_by_idx: Vec::new(),
+        response_body_access_by_idx: Vec::new(),
     };
     assert!(
         pipeline.may_select_streaming_subrequest_response(),
@@ -3935,8 +4133,6 @@ fn streaming_with_stream_buffer_is_ordering_error() {
 // -----------------------------------------------------------------------------
 
 mod filter_duration_metrics_tests {
-    use bytes::Bytes;
-
     use super::*;
 
     fn assert_filter_metric(metrics: &str, filter: &str, phase: &str, stream: &str) {
@@ -4145,5 +4341,26 @@ mod filter_duration_metrics_tests {
             !metrics.contains("filter=\"disabled_only\""),
             "disabled filter metrics should not record this filter: {metrics}"
         );
+    }
+
+    #[test]
+    fn empty_pipeline_accessors_reflect_defaults() {
+        let registry = FilterRegistry::with_builtins();
+        let mut pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+
+        assert!(!pipeline.needs_body_filters(), "an empty pipeline needs no body hooks");
+        assert_eq!(pipeline.len(), 0, "an empty pipeline has no filters");
+        assert!(
+            pipeline.referenced_files().is_empty(),
+            "an empty pipeline references no external files"
+        );
+
+        let generator = Arc::new(praxis_core::id::IdGenerator::with_seed(9));
+        pipeline.set_id_generator(Arc::clone(&generator));
+        let _id_generator = pipeline.id_generator();
+
+        let source: Arc<dyn praxis_core::time::TimeSource> = Arc::new(praxis_core::time::SystemTimeSource);
+        pipeline.set_time_source(source);
+        let _time_source = pipeline.time_source();
     }
 }

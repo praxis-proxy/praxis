@@ -3,9 +3,10 @@
 
 //! Criterion benchmarks for load balancer endpoint selection.
 
-#![allow(
+#![expect(
+    clippy::min_ident_chars,
+    clippy::single_char_lifetime_names,
     clippy::unwrap_used,
-    clippy::expect_used,
     clippy::too_many_lines,
     reason = "benchmarks"
 )]
@@ -49,7 +50,7 @@ fn bench_load_balancer(c: &mut Criterion) {
     for (label, strategy) in &strategies {
         for &pool_size in &[3, 10, 50] {
             let cluster = make_cluster(strategy.clone(), pool_size);
-            let lb = LoadBalancerFilter::new(&[cluster]);
+            let lb = LoadBalancerFilter::new(&[cluster]).unwrap();
 
             group.bench_with_input(BenchmarkId::new(*label, pool_size), &lb, |b, lb| {
                 b.to_async(&rt).iter_batched(
@@ -90,6 +91,7 @@ fn make_cluster(strategy: LoadBalancerStrategy, n: usize) -> Cluster {
         max_connections: None,
         name: "bench".into(),
         read_timeout_ms: None,
+        retry_policy: None,
         tls: None,
         total_connection_timeout_ms: None,
         write_timeout_ms: None,

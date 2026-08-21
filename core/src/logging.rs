@@ -217,7 +217,7 @@ fn build_otel_provider(
         )));
     }
 
-    let exporter = build_span_exporter(endpoint, &config.otlp_headers)?;
+    let exporter = build_span_exporter(endpoint, config.otlp_headers.as_ref())?;
     let batch_processor = build_batch_processor(exporter, config);
     let resource = build_otel_resource(config);
 
@@ -249,7 +249,7 @@ fn build_otel_provider(
 #[cfg(feature = "otel")]
 fn build_span_exporter(
     endpoint: &str,
-    headers: &Option<std::collections::HashMap<String, String>>,
+    headers: Option<&std::collections::HashMap<String, String>>,
 ) -> Result<opentelemetry_otlp::SpanExporter, ProxyError> {
     use opentelemetry_otlp::{WithExportConfig as _, WithTonicConfig as _};
 
@@ -497,7 +497,6 @@ mod tests {
     use std::collections::HashMap;
 
     use super::*;
-    use crate::config::Config;
 
     #[test]
     fn empty_log_overrides_produces_valid_filter() {
@@ -775,5 +774,26 @@ filter_chains:
         let mut config = Config::from_yaml(yaml).expect("test config should parse");
         config.runtime.log_overrides = overrides;
         config
+    }
+
+    #[test]
+    fn otel_warning_fires_for_endpoint_without_feature() {
+        warn_if_otel_config_without_feature(true, false);
+        warn_if_otel_config_without_feature(false, true);
+        warn_if_otel_config_without_feature(true, true);
+    }
+
+    #[test]
+    fn otel_warning_silent_without_otel_settings() {
+        warn_if_otel_config_without_feature(false, false);
+    }
+
+    #[test]
+    fn init_tracing_installs_global_subscriber() {
+        // Global subscriber installation is once-per-process, so this is
+        // the only test allowed to call init_tracing.
+        let config = config_with_overrides(HashMap::new());
+        let guard = init_tracing(&config).expect("tracing initialization should succeed");
+        drop(guard);
     }
 }

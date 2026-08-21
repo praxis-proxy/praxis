@@ -59,6 +59,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     )
 }
@@ -132,7 +134,8 @@ fn metrics_overload_rejects_listener_connections() {
     held.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
     held.write_all(b"GET /api/ HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
         .unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+
+    wait_for_metric(&admin, "praxis_connections_active", Duration::from_secs(2));
 
     let raw = http_send(
         proxy.addr(),
@@ -252,6 +255,8 @@ filter_chains:
           - name: {CLUSTER}
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config = Config::from_yaml(&yaml).unwrap();
@@ -276,7 +281,7 @@ filter_chains:
     bound_rx
         .recv_timeout(Duration::from_secs(2))
         .expect("backend should bind");
-    release_retry.release();
+    drop(release_retry);
 
     let (status, body) = rx.recv_timeout(Duration::from_secs(10)).expect("request should finish");
     assert_eq!(status, 200, "request should succeed after backend comes up");
@@ -324,6 +329,8 @@ filter_chains:
           - name: {CLUSTER}
             endpoints:
               - "127.0.0.1:{}"
+insecure_options:
+  allow_private_endpoints: true
 "#,
         failing.port()
     );
@@ -410,6 +417,8 @@ filter_chains:
           - name: {CLUSTER}
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config = Config::from_yaml(&yaml).unwrap();
@@ -457,6 +466,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 insecure_options:
+  allow_private_endpoints: true
   allow_root: true
 filter_chains:
   - name: main
@@ -487,6 +497,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 insecure_options:
+  allow_private_endpoints: true
   allow_root: true
 filter_chains:
   - name: main
@@ -539,6 +550,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 insecure_options:
+  allow_private_endpoints: true
   allow_private_health_checks: true
 clusters:
   - name: backend
@@ -599,6 +611,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 insecure_options:
+  allow_private_endpoints: true
   allow_private_health_checks: true
 clusters:
   - name: backend
@@ -732,6 +745,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 insecure_options:
+  allow_private_endpoints: true
   allow_root: true
 filter_chains:
   - name: main
@@ -763,6 +777,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 insecure_options:
+  allow_private_endpoints: true
   allow_root: true
 filter_chains:
   - name: main

@@ -38,8 +38,10 @@ pub use bootstrap::{DEFAULT_CONFIG, load_config};
 pub use branch_chain::{BranchChainConfig, BranchCondition};
 pub use chain_ref::ChainRef;
 pub use cluster::{
-    Cluster, ConsistentHashOpts, Endpoint, HealthCheckConfig, HealthCheckType, LoadBalancerStrategy, MaglevOpts,
-    ParameterisedStrategy, SimpleStrategy,
+    BackoffConfig, BudgetPercent, Cluster, ConsistentHashOpts, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BODY_LIMIT_BYTES,
+    Endpoint, HealthCheckConfig, HealthCheckType, HttpStatusCode, LoadBalancerStrategy, MAX_RETRY_BODY_LIMIT_BYTES,
+    MaglevOpts, ParameterisedStrategy, RetriableCondition, RetryBodyLimit, RetryBudgetConfig, RetryPolicy,
+    SimpleStrategy,
 };
 pub use condition::{Condition, ConditionMatch, ResponseCondition, ResponseConditionMatch};
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
@@ -700,7 +702,7 @@ filter_chains:
         clusters:
           - name: "backend"
             endpoints:
-              - "127.0.0.1:3000"
+              - "192.0.2.10:3000"
 "#;
 
     /// Recursively collect all `.yaml` files under `root`.

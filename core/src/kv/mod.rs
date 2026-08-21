@@ -574,12 +574,12 @@ mod tests {
     fn concurrent_get_or_create_same_name() {
         let registry = Arc::new(KvStoreRegistry::new());
 
-        let handles: Vec<_> = (0..10)
-            .map(|_| {
-                let reg = Arc::clone(&registry);
-                std::thread::spawn(move || reg.get_or_create("race"))
-            })
-            .collect();
+        let handles: Vec<_> = std::iter::repeat_with(|| {
+            let reg = Arc::clone(&registry);
+            std::thread::spawn(move || reg.get_or_create("race"))
+        })
+        .take(10)
+        .collect();
 
         let stores: Vec<_> = handles.into_iter().map(|h| h.join().unwrap()).collect();
 

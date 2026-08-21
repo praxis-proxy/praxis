@@ -292,8 +292,10 @@ impl SubRequestClient {
     /// response headers, and returns a [`StreamingSubResponse`] with
     /// an opaque body handle for incremental chunk reads.
     ///
-    /// Circuit breaker success is finalized when valid headers are
-    /// received. Late body failures only affect stream metrics.
+    /// Circuit breaker success is finalized only when the header
+    /// exchange completes cleanly (header-only response or a streaming
+    /// body); a header-incomplete or H2-error termination records a
+    /// failure. Late body failures only affect stream metrics.
     ///
     /// **Timeout semantics:** `timeout` bounds only the header phase
     /// (connect + send + receive headers). Body reads are governed by
@@ -322,51 +324,47 @@ impl SubRequestClient {
     ) -> Result<StreamingSubResponse, SubRequestError> {
         let mut exchange = self.open_exchange(peer, request, timeout, framework_headers).await?;
 
-        // Finalize circuit guard as success — valid headers received.
-        if let Some(guard) = exchange.circuit_guard.take() {
-            guard.finalize_success();
-        }
+        // Hold the circuit guard until the header-time outcome is known.
+        // Finalizing success here (before the completion check below) would
+        // record a header-incomplete or H2-error termination as a circuit
+        // success, masking a real upstream failure. On the failure paths the
+        // guard is dropped, which records a failure via its Drop impl.
+        let circuit_guard = exchange.circuit_guard.take();
 
         // Check for header-time completion (HEAD, 204, 304, zero-length).
         if exchange.session.response_done() {
-            let termination = match check_clean_completion(&mut exchange.session) {
-                Ok(true) => {
-                    exchange
-                        .connector
-                        .connector()
-                        .release_http_session(exchange.session, &exchange.peer, None)
-                        .await;
-                    "header_only"
-                },
+            match check_clean_completion(&mut exchange.session) {
+                Ok(true) => {},
                 Ok(false) => {
-                    dispose_session_abnormal(
-                        exchange.session,
-                        Some(&exchange.peer),
-                        Some(exchange.connector.connector()),
-                    )
-                    .await;
-                    record_header_termination("header_incomplete");
-                    return Err(SubRequestError::Io(
+                    let e = SubRequestError::Io(
                         "upstream indicated response done but stream is not cleanly terminated".to_owned(),
-                    ));
+                    );
+                    return Err(Box::pin(fail_header_exchange(exchange, circuit_guard, "header_incomplete", e)).await);
                 },
-                Err(e) => {
-                    dispose_session_abnormal(
-                        exchange.session,
-                        Some(&exchange.peer),
-                        Some(exchange.connector.connector()),
-                    )
-                    .await;
-                    record_header_termination("h2_error");
-                    return Err(e);
-                },
-            };
-            record_header_termination(termination);
+                Err(e) => return Err(Box::pin(fail_header_exchange(exchange, circuit_guard, "h2_error", e)).await),
+            }
+            if let Some(guard) = circuit_guard {
+                guard.finalize_success();
+            }
+            exchange
+                .connector
+                .connector()
+                .release_http_session(exchange.session, &exchange.peer, None)
+                .await;
+            record_header_termination("header_only");
             return Ok(StreamingSubResponse {
                 status: exchange.status,
                 headers: exchange.headers,
                 body: SubResponseBody::new_done(),
             });
+        }
+
+        // Valid headers received and the response is streaming: the header
+        // exchange succeeded, so finalize the circuit guard as success. The
+        // body may still fail later, but the guard is scoped to the header
+        // exchange.
+        if let Some(guard) = circuit_guard {
+            guard.finalize_success();
         }
 
         // Capture the operator-configured read timeout before clearing
@@ -523,4 +521,28 @@ impl SubRequestClient {
         }
         result
     }
+}
+
+// ---------------------------------------------------------------------------
+// Private Utilities
+// ---------------------------------------------------------------------------
+
+/// Tear down an abnormally terminated header exchange: drop the circuit
+/// guard (recording a failure via its `Drop` impl), discard the session,
+/// record the termination metric, and hand back the error to return.
+async fn fail_header_exchange(
+    exchange: RawExchange<'_>,
+    circuit_guard: Option<CircuitGuard<'_>>,
+    termination: &str,
+    error: SubRequestError,
+) -> SubRequestError {
+    drop(circuit_guard);
+    dispose_session_abnormal(
+        exchange.session,
+        Some(&exchange.peer),
+        Some(exchange.connector.connector()),
+    )
+    .await;
+    record_header_termination(termination);
+    error
 }

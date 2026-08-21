@@ -4,12 +4,21 @@
 //! Development tasks for the Praxis proxy.
 
 #![allow(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
     clippy::exit,
+    clippy::indexing_slicing,
+    clippy::min_ident_chars,
+    clippy::mod_module_files,
     clippy::print_stdout,
     clippy::print_stderr,
+    clippy::shadow_unrelated,
+    clippy::single_char_lifetime_names,
+    clippy::struct_field_names,
     clippy::unused_result_ok,
     clippy::unwrap_used,
     clippy::expect_used,
+    clippy::wildcard_enum_match_arm,
     reason = "development tooling"
 )]
 #![allow(let_underscore_drop, reason = "development tooling")]

@@ -42,7 +42,7 @@ pub(super) fn route_matches_request(
         }),
         None => true,
     };
-    host_ok && headers_match(&route.headers, req_headers)
+    host_ok && headers_match(route.headers.as_ref(), req_headers)
 }
 
 /// Update the best match if the current route has more constraints.
@@ -118,7 +118,7 @@ fn host_matches(pattern: &str, wildcard_suffix: Option<&str>, host: &str, multi_
 // -----------------------------------------------------------------------------
 
 /// Returns `true` if the request headers satisfy all route header constraints.
-fn headers_match(required: &Option<HashMap<String, String>>, actual: &HeaderMap) -> bool {
+fn headers_match(required: Option<&HashMap<String, String>>, actual: &HeaderMap) -> bool {
     let Some(required) = required else {
         return true;
     };

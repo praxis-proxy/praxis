@@ -41,6 +41,8 @@ filter_chains:
           - name: "web"
             endpoints:
               - "127.0.0.1:{web_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -80,6 +82,8 @@ filter_chains:
           - name: "api"
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 

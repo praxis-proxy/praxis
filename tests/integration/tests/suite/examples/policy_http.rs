@@ -5,7 +5,7 @@
 //! authorization example (`examples/configs/security/policy-http.yaml`).
 //!
 //! Exercises the `policy` filter in its pure-L7 (`http_global`) shape
-//! end-to-end against the CPEX `global` policy (admit only GET). Three cases
+//! end-to-end against the policy's `global` block (admit only GET). Three cases
 //! prove the full chain:
 //!
 //! * **Allow** — GET with a valid HS256 JWT resolves identity, the global policy admits GET, and the request reaches
@@ -15,7 +15,7 @@
 //! * **Deny (identity)** — a request with no `Authorization` header is rejected at the identity gate (HTTP 401).
 //!
 //! Together these exercise the request-line attributes, the structured
-//! denyWith carrier, the CPEX non-entity authz path, and the pure-L7
+//! denyWith carrier, the non-entity authz path, and the pure-L7
 //! (`http_global`) deny mapping.
 
 use std::{
@@ -30,9 +30,9 @@ use praxis_test_utils::{
 };
 
 // Identity parameters mirrored from
-// `tests/integration/fixtures/policy-http-cpex-policy.yaml`.
+// `tests/integration/fixtures/http-policy.yaml`.
 const FIXTURE_ISSUER: &str = "https://idp.example.com";
-const FIXTURE_AUDIENCE: &str = "praxis-cpex-example";
+const FIXTURE_AUDIENCE: &str = "praxis-policy-example";
 const FIXTURE_SECRET: &str = "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT";
 
 /// Mint an HS256 JWT accepted by the fixture's `jwt-user` plugin.
@@ -61,10 +61,10 @@ fn mint_fixture_jwt(subject: &str) -> String {
 #[expect(clippy::needless_pass_by_value, reason = "callers construct the map inline")]
 fn load_example(proxy_port: u16, port_map: HashMap<&str, u16>) -> Config {
     let praxis_yaml_path = example_config_path("security/policy-http.yaml");
-    let policy_yaml_path = format!("{}/fixtures/policy-http-cpex-policy.yaml", env!("CARGO_MANIFEST_DIR"));
+    let policy_yaml_path = format!("{}/fixtures/http-policy.yaml", env!("CARGO_MANIFEST_DIR"));
 
     let raw = std::fs::read_to_string(&praxis_yaml_path).unwrap_or_else(|e| panic!("read {praxis_yaml_path}: {e}"));
-    let with_policy = raw.replace("/etc/praxis/policy-http-cpex-policy.yaml", &policy_yaml_path);
+    let with_policy = raw.replace("/etc/praxis/http-policy.yaml", &policy_yaml_path);
     let patched = patch_yaml(&with_policy, proxy_port, &port_map);
     Config::from_yaml(&patched).unwrap_or_else(|e| panic!("parse security/policy-http.yaml: {e}"))
 }

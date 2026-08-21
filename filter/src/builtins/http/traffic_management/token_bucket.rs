@@ -280,19 +280,19 @@ mod tests {
         let bucket = Arc::new(TokenBucket::new(100.0));
         let acquired = Arc::new(AtomicUsize::new(0));
 
-        let handles: Vec<_> = (0..8)
-            .map(|_| {
-                let bucket = Arc::clone(&bucket);
-                let acquired = Arc::clone(&acquired);
-                thread::spawn(move || {
-                    for _ in 0..50 {
-                        if bucket.try_acquire(0.0, 100.0, 0).is_some() {
-                            acquired.fetch_add(1, Ordering::Relaxed);
-                        }
+        let handles: Vec<_> = std::iter::repeat_with(|| {
+            let bucket = Arc::clone(&bucket);
+            let acquired = Arc::clone(&acquired);
+            thread::spawn(move || {
+                for _ in 0..50 {
+                    if bucket.try_acquire(0.0, 100.0, 0).is_some() {
+                        acquired.fetch_add(1, Ordering::Relaxed);
                     }
-                })
+                }
             })
-            .collect();
+        })
+        .take(8)
+        .collect();
 
         for h in handles {
             h.join().unwrap();

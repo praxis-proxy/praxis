@@ -46,6 +46,8 @@ filter_chains:
           - name: web
             endpoints:
               - "127.0.0.1:{web_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config = Config::from_yaml(&yaml).unwrap();

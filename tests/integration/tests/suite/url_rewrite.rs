@@ -58,6 +58,8 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -104,6 +106,8 @@ filter_chains:
           - name: "fallback"
             endpoints:
               - "127.0.0.1:{fallback_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -149,6 +153,8 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 

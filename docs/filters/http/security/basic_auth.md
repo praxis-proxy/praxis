@@ -5,11 +5,25 @@
 
 HTTP Basic Authentication filter (RFC 7617).
 
+Requires Cargo feature: `basic-auth-filter`.
+
 ## Configuration Notes
 
 Experimental: requires the `basic-auth-filter` cargo feature, which is off by default. Credentials are stored in plaintext; this filter is intended for development and testing only.
 
 Extracts credentials from the `Authorization: Basic` header, validates against a configurable credential source (inline list or runtime KV store), and returns 401 with `WWW-Authenticate: Basic realm="..."` on failure.
+
+## Configuration
+
+| Field | Type | Required | Description |
+|-------|------|---------|-------------|
+| `realm` | string | no | Realm string for the `WWW-Authenticate` challenge. |
+| `strip_authorization` | bool | no | Whether to strip the `Authorization` header before forwarding. |
+| `credentials` | InlineCredential[] | no | Inline credential list. |
+| `credentials[].username` | string | yes | Username for authentication. |
+| `credentials[].password` | string | no | Literal password value. |
+| `credentials[].env_var` | string | no | Environment variable containing the password. |
+| `kv_store` | string | no | KV store name for credential lookup. |
 
 ## Example
 

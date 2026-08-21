@@ -3,13 +3,13 @@
 
 //! Compiled rule types and config-to-rule parsing.
 
-use regex::{Regex, RegexBuilder};
+use regex::Regex;
 
 use super::{
-    config::{ContainsValue, MAX_REGEX_PATTERN_LEN, MAX_REGEX_SIZE, RuleConfig, RuleTargetKind},
+    config::{ContainsValue, MAX_REGEX_PATTERN_LEN, RuleConfig, RuleTargetKind},
     pii::{self, PiiKind},
 };
-use crate::FilterError;
+use crate::{FilterError, builtins::http::compile_user_regex::compile_user_regex};
 
 // -----------------------------------------------------------------------------
 // Rule Types
@@ -163,11 +163,8 @@ fn compile_pattern(p: &str) -> Result<RuleMatcher, FilterError> {
         )
         .into());
     }
-    RegexBuilder::new(p)
-        .size_limit(MAX_REGEX_SIZE)
-        .build()
-        .map(RuleMatcher::Pattern)
-        .map_err(|e| format!("guardrails: invalid regex '{p}': {e}").into())
+    let re = compile_user_regex(p, "guardrails")?;
+    Ok(RuleMatcher::Pattern(re))
 }
 
 // -----------------------------------------------------------------------------

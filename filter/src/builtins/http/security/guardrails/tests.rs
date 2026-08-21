@@ -391,6 +391,25 @@ async fn flag_action_body_continues_on_match() {
 }
 
 #[tokio::test]
+async fn flag_header_block_not_downgraded_by_body_pass() {
+    // Header rule flags the request; body rule does not match. The body
+    // phase must not overwrite the header phase's "blocked" with "passed".
+    let f = make_flag_filter(vec![header_contains("x-bad", "yes"), body_contains("DROP TABLE")]);
+    let mut req = crate::test_utils::make_request(http::Method::POST, "/api");
+    req.headers.insert("x-bad", "yes".parse().unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let a1 = f.on_request(&mut ctx).await.unwrap();
+    assert!(matches!(a1, FilterAction::Continue), "flag continues");
+    assert_result(&ctx.filter_results, "blocked");
+
+    let mut body = Some(Bytes::from_static(b"a harmless payload"));
+    let a2 = f.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(matches!(a2, FilterAction::Continue), "flag continues on body");
+    assert_result(&ctx.filter_results, "blocked");
+}
+
+#[tokio::test]
 async fn body_filter_defers_result_to_body_phase() {
     let f = make_filter(vec![body_contains("evil")]);
     let req = crate::test_utils::make_request(http::Method::POST, "/api");

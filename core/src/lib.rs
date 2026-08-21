@@ -2,6 +2,18 @@
 // Copyright (c) 2024 Praxis Contributors
 
 #![deny(unreachable_pub)]
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::as_conversions,
+    clippy::impl_trait_in_params,
+    clippy::iter_over_hash_type,
+    clippy::min_ident_chars,
+    clippy::mod_module_files,
+    clippy::shadow_unrelated,
+    clippy::single_char_lifetime_names,
+    clippy::struct_field_names,
+    reason = "TODO(conventions-sync): fix violations and remove"
+)]
 
 //! Core configuration, error types, and server factory for Praxis.
 
@@ -25,6 +37,8 @@ pub mod logging;
 pub mod memory;
 /// Reserved internal header prefixes for proxy-internal metadata.
 pub mod reserved_headers;
+/// Shared retry budget and per-cluster active-request tracking.
+pub mod retry;
 /// Server factory and runtime options.
 pub mod server;
 /// Shared HTTP connector for sub-request execution.

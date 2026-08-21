@@ -109,32 +109,69 @@ impl AccessLogFilter {
             .is_multiple_of(self.sample_every)
     }
 
-    /// Returns `true` for responses that Pingora delivers without a body phase.
-    fn is_bodyless(status: http::StatusCode, req_method: &http::Method) -> bool {
-        status.as_u16() < 200
-            || status == http::StatusCode::NO_CONTENT
-            || status == http::StatusCode::NOT_MODIFIED
-            || req_method == http::Method::HEAD
+    /// Emit a structured access log entry for the current request and mark
+    /// it so the protocol-layer fallback does not duplicate it.
+    fn emit_access_log(ctx: &mut HttpFilterContext<'_>, status: u16) {
+        emit_access_record(ctx, status);
+        mark_access_record_emitted(ctx);
     }
+}
 
-    /// Emit a structured access log entry for the current request.
-    fn emit_access_log(ctx: &HttpFilterContext<'_>, status: u16) {
-        let path = sanitize_for_log(ctx.request.uri.path());
-        let client_ip = ctx.client_addr.map(|a| a.to_string()).unwrap_or_default();
-        info!(
-            method = %ctx.request.method,
-            path = %path,
-            client_ip = %client_ip,
-            status,
-            duration_ms = truncate_u128(ctx.request_start.elapsed().as_millis()),
-            cluster = ctx.cluster_name().unwrap_or("-"),
-            upstream = ctx.upstream_addr().unwrap_or("-"),
-            request_id = ctx.request_id().unwrap_or("-"),
-            request_body_bytes = ctx.request_body_bytes,
-            response_body_bytes = ctx.response_body_bytes,
-            "access"
-        );
-    }
+/// Returns `true` for responses that Pingora delivers without a body phase.
+///
+/// Shared by [`AccessLogFilter`] and the protocol layer's delivery
+/// completion tracking: bodyless responses finish at the response
+/// phase, everything else finishes at body end-of-stream.
+pub fn bodyless_response(status: http::StatusCode, req_method: &http::Method) -> bool {
+    status.as_u16() < 200
+        || status == http::StatusCode::NO_CONTENT
+        || status == http::StatusCode::NOT_MODIFIED
+        || req_method == http::Method::HEAD
+}
+
+/// Marker inserted into request extensions once an access record has been
+/// emitted for this request.
+///
+/// The protocol-layer fallback checks for it via
+/// [`access_record_already_emitted`] so a request the filter already logged
+/// (e.g. a bodyless response whose `on_response` emitted before a later
+/// response filter rejected) does not gain a duplicate fallback record.
+struct AccessRecordEmitted;
+
+/// Whether an access record has already been emitted for this request.
+#[must_use]
+pub fn access_record_already_emitted(ctx: &HttpFilterContext<'_>) -> bool {
+    ctx.extensions.get::<AccessRecordEmitted>().is_some()
+}
+
+/// Record that an access record has been emitted for this request.
+pub fn mark_access_record_emitted(ctx: &mut HttpFilterContext<'_>) {
+    ctx.extensions.insert(AccessRecordEmitted);
+}
+
+/// Emit a structured access log record for the current request.
+///
+/// Shared by [`AccessLogFilter`]'s completion hooks and the protocol
+/// layer's fallback for requests whose lifecycle ended before those
+/// hooks could run (pre-upstream rejections, upstream failures, and
+/// streamed responses aborted mid-body). Fallback records bypass the
+/// filter's sampling: incomplete requests are always worth a record.
+pub fn emit_access_record(ctx: &HttpFilterContext<'_>, status: u16) {
+    let path = sanitize_for_log(ctx.request.uri.path());
+    let client_ip = ctx.client_addr.map(|a| a.to_string()).unwrap_or_default();
+    info!(
+        method = %ctx.request.method,
+        path = %path,
+        client_ip = %client_ip,
+        status,
+        duration_ms = truncate_u128(ctx.request_start.elapsed().as_millis()),
+        cluster = ctx.cluster_name().unwrap_or("-"),
+        upstream = ctx.upstream_addr().unwrap_or("-"),
+        request_id = ctx.request_id().unwrap_or("-"),
+        request_body_bytes = ctx.request_body_bytes,
+        response_body_bytes = ctx.response_body_bytes,
+        "access"
+    );
 }
 
 #[async_trait]
@@ -150,7 +187,7 @@ impl HttpFilter for AccessLogFilter {
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if let Some(resp) = &ctx.response_header {
             let status = resp.status.as_u16();
-            let bodyless = Self::is_bodyless(resp.status, &ctx.request.method);
+            let bodyless = bodyless_response(resp.status, &ctx.request.method);
 
             // response_header is None during on_response_body, so capture the status here
             ctx.insert_filter_state(status);
@@ -241,8 +278,6 @@ fn sanitize_for_log(s: &str) -> Cow<'_, str> {
     reason = "tests"
 )]
 mod tests {
-    use std::borrow::Cow;
-
     use super::*;
 
     #[test]
@@ -516,7 +551,7 @@ mod tests {
     #[test]
     fn is_bodyless_detects_1xx() {
         assert!(
-            AccessLogFilter::is_bodyless(http::StatusCode::CONTINUE, &http::Method::GET),
+            bodyless_response(http::StatusCode::CONTINUE, &http::Method::GET),
             "100 Continue should be bodyless"
         );
     }
@@ -524,7 +559,7 @@ mod tests {
     #[test]
     fn is_bodyless_detects_204() {
         assert!(
-            AccessLogFilter::is_bodyless(http::StatusCode::NO_CONTENT, &http::Method::DELETE),
+            bodyless_response(http::StatusCode::NO_CONTENT, &http::Method::DELETE),
             "204 No Content should be bodyless"
         );
     }
@@ -532,7 +567,7 @@ mod tests {
     #[test]
     fn is_bodyless_detects_304() {
         assert!(
-            AccessLogFilter::is_bodyless(http::StatusCode::NOT_MODIFIED, &http::Method::GET),
+            bodyless_response(http::StatusCode::NOT_MODIFIED, &http::Method::GET),
             "304 Not Modified should be bodyless"
         );
     }
@@ -540,7 +575,7 @@ mod tests {
     #[test]
     fn is_bodyless_detects_head() {
         assert!(
-            AccessLogFilter::is_bodyless(http::StatusCode::OK, &http::Method::HEAD),
+            bodyless_response(http::StatusCode::OK, &http::Method::HEAD),
             "HEAD request should be bodyless regardless of status"
         );
     }
@@ -548,7 +583,7 @@ mod tests {
     #[test]
     fn is_bodyless_returns_false_for_normal_response() {
         assert!(
-            !AccessLogFilter::is_bodyless(http::StatusCode::OK, &http::Method::GET),
+            !bodyless_response(http::StatusCode::OK, &http::Method::GET),
             "normal 200 GET should not be bodyless"
         );
     }

@@ -3,7 +3,8 @@
 
 //! Criterion benchmarks for router path-prefix matching.
 
-#![allow(
+#![expect(
+    clippy::min_ident_chars,
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::too_many_lines,
@@ -91,6 +92,7 @@ fn make_routes(n: usize) -> Vec<Route> {
             host: None,
             headers: None,
             cluster: format!("cluster-{i}").into(),
+            retry_policy: None,
         })
         .collect();
 
@@ -101,6 +103,7 @@ fn make_routes(n: usize) -> Vec<Route> {
         host: None,
         headers: None,
         cluster: "fallback".into(),
+        retry_policy: None,
     });
 
     routes

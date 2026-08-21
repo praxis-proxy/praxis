@@ -46,8 +46,9 @@ use super::hop_by_hop::{self, RESPONSE_HOP_BY_HOP};
 ///
 /// [RFC 6455]: https://datatracker.ietf.org/doc/html/rfc6455
 pub(crate) fn strip_hop_by_hop_response(resp: &mut ResponseHeader, is_upgrade_response: bool) {
-    let is_ws = is_upgrade_response && is_websocket_response(&resp.headers);
+    let is_ws = is_upgrade_response && hop_by_hop::has_websocket_upgrade(&resp.headers);
     let conn_values = hop_by_hop::snapshot_connection_values(&resp.headers);
+    let was_chunked = hop_by_hop::declares_chunked_framing(&resp.headers);
 
     for name in RESPONSE_HOP_BY_HOP {
         if hop_by_hop::preserve_for_upgrade(name, is_ws) {
@@ -56,18 +57,13 @@ pub(crate) fn strip_hop_by_hop_response(resp: &mut ResponseHeader, is_upgrade_re
         let _remove = resp.remove_header(*name);
     }
     hop_by_hop::strip_connection_tokens(resp, &conn_values, RESPONSE_HOP_BY_HOP);
+    if !is_ws && hop_by_hop::should_restore_chunked_framing(&resp.headers, was_chunked) {
+        let _insert = resp.insert_header(http::header::TRANSFER_ENCODING, "chunked");
+    }
 
     if is_upgrade_response && !is_ws {
         debug!("stripping non-WebSocket upgrade headers from 101 response");
     }
-}
-
-/// Check whether the response's `Upgrade` header is `WebSocket`.
-fn is_websocket_response(headers: &http::HeaderMap) -> bool {
-    headers
-        .get("upgrade")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(hop_by_hop::is_websocket_upgrade)
 }
 
 // -----------------------------------------------------------------------------
@@ -111,9 +107,10 @@ mod tests {
             resp.headers.get("keep-alive").is_none(),
             "keep-alive header should be stripped from response"
         );
-        assert!(
-            resp.headers.get("transfer-encoding").is_none(),
-            "transfer-encoding header should be stripped from response"
+        assert_eq!(
+            resp.headers.get("transfer-encoding").unwrap(),
+            "chunked",
+            "chunked framing must survive so the downstream writer keeps keep-alive"
         );
         assert!(
             resp.headers.get("upgrade").is_none(),
@@ -613,6 +610,35 @@ mod tests {
     fn empty_response_reserved_strip_no_panic() {
         let mut resp = ResponseHeader::build(200, None).unwrap();
         resp.strip_reserved_internal();
+    }
+
+    #[test]
+    fn response_chunked_framing_not_restored_over_content_length() {
+        let mut resp = make_response(&[("content-length", "12")]);
+
+        strip_hop_by_hop_response(&mut resp, false);
+
+        assert!(
+            resp.headers.get("transfer-encoding").is_none(),
+            "content-length responses must not gain a transfer-encoding header"
+        );
+        assert_eq!(
+            resp.headers.get("content-length").unwrap(),
+            "12",
+            "content-length must survive"
+        );
+    }
+
+    #[test]
+    fn websocket_101_does_not_gain_chunked_framing() {
+        let mut resp = make_response(&[("upgrade", "websocket"), ("connection", "Upgrade")]);
+
+        strip_hop_by_hop_response(&mut resp, true);
+
+        assert!(
+            resp.headers.get("transfer-encoding").is_none(),
+            "upgrade responses are tunneled, not chunk-framed"
+        );
     }
 
     // -------------------------------------------------------------------------

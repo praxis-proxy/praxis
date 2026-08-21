@@ -16,7 +16,7 @@
 //! [`http_utils`]: super::http_utils
 
 use bytes::Bytes;
-use tracing::trace;
+use tracing::{trace, warn};
 
 use super::{
     FilterPipeline,
@@ -28,7 +28,11 @@ use super::{
     },
 };
 use crate::{
-    FilterError, actions::FilterAction, any_filter::AnyFilter, condition::should_execute, context::HttpFilterContext,
+    FilterError,
+    actions::{FilterAction, Rejection},
+    any_filter::AnyFilter,
+    condition::should_execute,
+    context::HttpFilterContext,
 };
 
 // -----------------------------------------------------------------------------
@@ -45,6 +49,10 @@ impl FilterPipeline {
     /// Tracks which filter indices actually executed so the
     /// response phase can skip filters that were bypassed
     /// (e.g. by `SkipTo`).
+    ///
+    /// A `terminal`/`client` branch rejoin whose sub-chain produced no
+    /// response fails closed with a 500 rather than forwarding
+    /// upstream.
     ///
     /// # Errors
     ///
@@ -76,7 +84,10 @@ impl FilterPipeline {
                 run_request_filter(http_filter, ctx, pf.failure_mode, self.record_filter_duration_metrics).await;
             ctx.current_filter_id = None;
             match outcome? {
-                HeaderFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
+                HeaderFilterOutcome::Rejected(r) => {
+                    ctx.executed_filter_indices[idx] = true;
+                    return Ok(FilterAction::Reject(r));
+                },
                 HeaderFilterOutcome::TerminalResponse(terminal) => {
                     ctx.executed_filter_indices[idx] = true;
                     return Ok(FilterAction::TerminalResponse(Box::new(terminal)));
@@ -90,7 +101,24 @@ impl FilterPipeline {
             ctx.executed_filter_indices[idx] = true;
             match super::evaluate::evaluate_branches(&pf.branches, ctx).await? {
                 BranchOutcome::Continue => idx += 1,
-                BranchOutcome::Terminal => return Ok(FilterAction::Continue),
+                BranchOutcome::Terminal => {
+                    if ctx.cluster.is_some() {
+                        // The branch set a cluster via `router` + `load_balancer`,
+                        // so upstream forwarding is intended. Stop the pipeline
+                        // and let the proxy forward to the selected cluster.
+                        return Ok(FilterAction::Continue);
+                    }
+                    // A `terminal`/`client` rejoin whose sub-chain produced no
+                    // response and selected no cluster. Fail closed with a 500
+                    // rather than proxying upstream with the remaining filters
+                    // (cors, csrf, auth, ...) skipped.
+                    warn!(
+                        filter = http_filter.name(),
+                        "terminal branch produced no response and selected no cluster; \
+                         stopping the pipeline with 500 instead of forwarding upstream"
+                    );
+                    return Ok(FilterAction::Reject(Rejection::status(500)));
+                },
                 BranchOutcome::SkipTo(t) => idx = t,
                 BranchOutcome::ReEnter(t) => {
                     ctx.executed_filter_indices[t..=idx].fill(false);
@@ -167,7 +195,7 @@ impl FilterPipeline {
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         ensure_body_done_indices(ctx, self.filters.len());
-        accumulate_body_bytes(&mut ctx.request_body_bytes, body);
+        accumulate_body_bytes(&mut ctx.request_body_bytes, body.as_ref());
         let request_phase_tracked = request_phase_tracked(ctx, self.filters.len());
         let mut released = false;
         for (idx, pf) in self.filters.iter().enumerate() {
@@ -180,6 +208,11 @@ impl FilterPipeline {
                     filter = pf.filter.name(),
                     "skipped request body (not executed in request phase)"
                 );
+                continue;
+            }
+            // Declared body access is a per-filter constant; the pre-computed
+            // flag skips non-body filters without a per-chunk virtual call.
+            if !self.request_body_access_by_idx.get(idx).copied().unwrap_or(true) {
                 continue;
             }
             let Some(http_filter) = as_request_body_filter(&pf.filter, &pf.conditions, ctx.request) else {
@@ -223,11 +256,17 @@ impl FilterPipeline {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        let response_header = ctx.response_header.as_ref().map(|resp| crate::context::Response {
-            headers: resp.headers.clone(),
-            status: resp.status,
-        });
-        self.execute_http_response_body_with_response_header(ctx, body, end_of_stream, response_header.as_ref())
+        if !self.body_capabilities.any_response_body_condition {
+            return self.execute_http_response_body_with_response_header(ctx, body, end_of_stream, None);
+        }
+        // Temporarily move the exclusive header borrow out of the context
+        // so a shared view can be passed alongside `&mut ctx` — no header
+        // map clone per body chunk.
+        let response_header = ctx.response_header.take();
+        let result =
+            self.execute_http_response_body_with_response_header(ctx, body, end_of_stream, response_header.as_deref());
+        ctx.response_header = response_header;
+        result
     }
 
     /// Run all HTTP response body filters in reverse order, using `response_header`
@@ -247,7 +286,7 @@ impl FilterPipeline {
         response_header: Option<&crate::context::Response>,
     ) -> Result<FilterAction, FilterError> {
         ensure_body_done_indices(ctx, self.filters.len());
-        accumulate_body_bytes(&mut ctx.response_body_bytes, body);
+        accumulate_body_bytes(&mut ctx.response_body_bytes, body.as_ref());
         let request_phase_tracked = request_phase_tracked(ctx, self.filters.len());
         let mut released = false;
         for (idx, pf) in self.filters.iter().enumerate().rev() {
@@ -260,6 +299,11 @@ impl FilterPipeline {
                     filter = pf.filter.name(),
                     "skipped response body (not executed in request phase)"
                 );
+                continue;
+            }
+            // Declared body access is a per-filter constant; the pre-computed
+            // flag skips non-body filters without a per-chunk virtual call.
+            if !self.response_body_access_by_idx.get(idx).copied().unwrap_or(true) {
                 continue;
             }
             let Some(http_filter) = as_response_body_filter(&pf.filter, &pf.response_conditions, response_header)

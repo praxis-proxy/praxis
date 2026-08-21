@@ -101,9 +101,11 @@ pub struct CaConfig {
 
     /// Paths to PEM-encoded certificate revocation list (CRL) files.
     ///
-    /// When provided, the mTLS client verifier checks presented
-    /// client certificates against these CRLs and rejects revoked
-    /// certificates.
+    /// Applies only to **listener** client authentication: the client
+    /// verifier checks presented client certificates against these CRLs
+    /// and rejects revoked ones. Upstream (cluster) CRL checking is not
+    /// implemented, so `crl_paths` under `clusters[].tls.ca` is rejected
+    /// at config validation rather than being silently ignored.
     #[serde(default)]
     pub crl_paths: Vec<String>,
 }

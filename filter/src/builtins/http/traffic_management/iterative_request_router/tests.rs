@@ -1241,7 +1241,6 @@ fn max_depth_is_three() {
     assert_eq!(config::max_depth(), 3, "max_depth should be 3");
 }
 
-
 // ---------------------------------------------------------------------------
 // Config Validation - Boundaries
 // ---------------------------------------------------------------------------
@@ -2689,4 +2688,1240 @@ steps:
     )
     .unwrap();
     super::IterativeRequestRouterFilter::from_config(&yaml).unwrap()
+}
+
+// ---------------------------------------------------------------------------
+// Runtime Iteration Tests
+//
+// These exercise `run_iterations` end-to-end against raw in-process
+// TCP backends, covering the buffered and streaming dispatch paths,
+// transport failure classification, timeout handling, and header
+// mutation plumbing.
+// ---------------------------------------------------------------------------
+
+/// Spawn a raw HTTP/1.1 backend that serves `response` verbatim to
+/// every accepted connection until aborted.
+async fn spawn_raw_backend(response: &'static str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0_u8; 8192];
+            let _bytes_read = socket.read(&mut buf).await;
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+        }
+    });
+    (addr, handle)
+}
+
+/// Spawn a backend that accepts connections but never responds.
+async fn spawn_stalling_backend() -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    use tokio::io::AsyncReadExt as _;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0_u8; 8192];
+                let _bytes_read = socket.read(&mut buf).await;
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            });
+        }
+    });
+    (addr, handle)
+}
+
+/// Reserve a port with no listener behind it so connects are refused.
+async fn closed_port_addr() -> std::net::SocketAddr {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    drop(listener);
+    addr
+}
+
+/// Build a `SubRequestClient` over a fresh single-connection connector.
+fn make_client() -> praxis_core::subrequest::SubRequestClient {
+    praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(4, None))
+}
+
+/// Build a filter context wired with a sub-request client and a
+/// pre-buffered request body, as the pipeline provides at runtime.
+fn make_iteration_context<'a>(
+    req: &'a crate::Request,
+    client: &'a praxis_core::subrequest::SubRequestClient,
+    body: &'static [u8],
+) -> crate::HttpFilterContext<'a> {
+    let mut ctx = crate::test_utils::make_filter_context(req);
+    ctx.subrequest_client = Some(client);
+    ctx.buffered_request_body = Some(bytes::Bytes::from_static(body));
+    ctx
+}
+
+/// Build an IRR filter from YAML using the builtin registry.
+fn irr_from_yaml(yaml: &str) -> Box<dyn crate::HttpFilter> {
+    let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+    super::IterativeRequestRouterFilter::from_config(&value).unwrap()
+}
+
+/// Build an IRR filter from YAML with the test-augmented registry
+/// (streaming selector plus body-mode probe filters).
+fn irr_from_yaml_with_test_registry(yaml: &str) -> Result<Box<dyn crate::HttpFilter>, crate::FilterError> {
+    let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+    super::IterativeRequestRouterFilter::from_config_with_registry(&value, &test_registry())
+}
+
+/// Registry with builtins plus the custom test filters.
+fn test_registry() -> crate::FilterRegistry {
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_streaming_selector",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(StreamingSelectorFilter)))),
+        )
+        .unwrap();
+    registry
+        .register(
+            "test_slow_request",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(SlowRequestFilter)))),
+        )
+        .unwrap();
+    registry
+        .register(
+            "test_stream_buffer_response",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(StreamBufferResponseFilter)))),
+        )
+        .unwrap();
+    registry
+        .register(
+            "test_stream_buffer_request",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(StreamBufferRequestFilter)))),
+        )
+        .unwrap();
+    registry
+}
+
+/// Filter that stalls in `on_request` longer than any test step timeout.
+struct SlowRequestFilter;
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for SlowRequestFilter {
+    fn name(&self) -> &'static str {
+        "test_slow_request"
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+/// Streaming-capable filter whose response body mode is `StreamBuffer`,
+/// which the IRR config validation must reject.
+struct StreamBufferResponseFilter;
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for StreamBufferResponseFilter {
+    fn name(&self) -> &'static str {
+        "test_stream_buffer_response"
+    }
+
+    fn may_select_streaming_subrequest_response(&self) -> bool {
+        true
+    }
+
+    fn response_body_access(&self) -> crate::BodyAccess {
+        crate::BodyAccess::ReadOnly
+    }
+
+    fn response_body_mode(&self) -> crate::BodyMode {
+        crate::BodyMode::StreamBuffer { max_bytes: Some(1024) }
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+/// Filter with a `StreamBuffer` request body mode so step execution
+/// takes the pre-read body path.
+struct StreamBufferRequestFilter;
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for StreamBufferRequestFilter {
+    fn name(&self) -> &'static str {
+        "test_stream_buffer_request"
+    }
+
+    fn request_body_access(&self) -> crate::BodyAccess {
+        crate::BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> crate::BodyMode {
+        crate::BodyMode::StreamBuffer { max_bytes: Some(65536) }
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+/// Step YAML routing every request to `addr` through router + lb.
+fn routed_step_yaml(addr: std::net::SocketAddr) -> String {
+    format!(
+        "
+      - filter: router
+        routes:
+          - path_prefix: \"/\"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - \"{addr}\"
+"
+    )
+}
+
+#[tokio::test]
+async fn iteration_buffered_success_applies_header_mutations_and_rewrite() {
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    let yaml = format!(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: headers
+        request_add:
+          - name: \"x-test-injected\"
+            value: \"yes\"
+      - filter: path_rewrite
+        replace:
+          pattern: \"^/orig\"
+          replacement: \"/rewritten\"
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let filter = irr_from_yaml(&yaml);
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::POST, "/orig");
+    let mut ctx = make_iteration_context(&req, &client, b"payload");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    backend.abort();
+
+    match action {
+        crate::FilterAction::TerminalResponse(terminal) => {
+            assert_eq!(terminal.status, 200, "backend status must be preserved");
+            assert_eq!(
+                terminal.body.as_deref(),
+                Some(b"ok".as_slice()),
+                "backend body must be preserved"
+            );
+        },
+        other => panic!("expected TerminalResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn iteration_connect_failure_is_classified_as_transport_502() {
+    let addr = closed_port_addr().await;
+    let yaml = format!(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let filter = irr_from_yaml(&yaml);
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/x");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+
+    match action {
+        crate::FilterAction::TerminalResponse(terminal) => {
+            assert_eq!(terminal.status, 502, "refused connect must map to 502");
+        },
+        other => panic!("expected TerminalResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn iteration_step_without_upstream_errors() {
+    let yaml = "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: headers
+        request_add:
+          - name: \"x-only\"
+            value: \"header\"
+    on_result:
+      - default: true
+        done: true
+";
+    let filter = irr_from_yaml(yaml);
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/x");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let err = filter.on_request(&mut ctx).await.unwrap_err();
+    assert!(
+        err.to_string().contains("did not resolve an upstream"),
+        "step without router/lb must error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn iteration_rejects_oversized_initial_state_with_413() {
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let yaml = format!(
+        "
+initial_step: s
+max_state_bytes: 8
+steps:
+  - name: s
+    filters:
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let filter = irr_from_yaml(&yaml);
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::POST, "/x");
+    let mut ctx = make_iteration_context(&req, &client, b"this body is far larger than eight bytes");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    backend.abort();
+
+    let is_413 = matches!(&action, crate::FilterAction::Reject(rej) if rej.status == 413);
+    assert!(is_413, "state over max_state_bytes must reject with 413: {action:?}");
+}
+
+#[tokio::test]
+async fn on_request_errors_without_buffered_body() {
+    let filter = build_filter();
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::POST, "/x");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.subrequest_client = Some(&client);
+
+    let err = filter.on_request(&mut ctx).await.unwrap_err();
+    assert!(
+        err.to_string().contains("buffered request body unavailable"),
+        "missing buffered body must error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn iteration_streaming_success_returns_streaming_terminal() {
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let yaml = format!(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_streaming_selector
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let filter = irr_from_yaml_with_test_registry(&yaml).unwrap();
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/stream");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    backend.abort();
+
+    match action {
+        crate::FilterAction::StreamingTerminalResponse(mut terminal) => {
+            assert_eq!(terminal.status, 200, "streaming status must be preserved");
+            let mut received = Vec::new();
+            while let Some(chunk) = terminal.body.next_chunk().await.unwrap() {
+                received.extend_from_slice(&chunk);
+            }
+            assert_eq!(received, b"hello", "the streamed body must pass through");
+            assert!(
+                terminal.body.next_chunk().await.unwrap().is_none(),
+                "a finished stream must keep returning None"
+            );
+        },
+        other => panic!("expected StreamingTerminalResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn iteration_streaming_body_suppress_completes_step() {
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let yaml = format!(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_streaming_selector
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let filter = irr_from_yaml_with_test_registry(&yaml).unwrap();
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/suppress");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    backend.abort();
+
+    match action {
+        crate::FilterAction::StreamingTerminalResponse(mut terminal) => {
+            terminal.body.suppress().await.unwrap();
+            assert!(
+                terminal.body.next_chunk().await.unwrap().is_none(),
+                "a suppressed stream must yield no further chunks"
+            );
+        },
+        other => panic!("expected StreamingTerminalResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn iteration_streaming_body_cancel_discards_upstream() {
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let yaml = format!(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_streaming_selector
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let filter = irr_from_yaml_with_test_registry(&yaml).unwrap();
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/cancel");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    backend.abort();
+
+    match action {
+        crate::FilterAction::StreamingTerminalResponse(mut terminal) => {
+            terminal.body.cancel().await;
+            assert!(
+                terminal.body.next_chunk().await.unwrap().is_none(),
+                "a cancelled stream must yield no further chunks"
+            );
+        },
+        other => panic!("expected StreamingTerminalResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn iteration_streaming_body_surfaces_upstream_error() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let backend = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0_u8; 8192];
+        let _bytes_read = socket.read(&mut buf).await;
+        // Chunked framing promising more data, then a hard close mid-chunk.
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nff\r\npartial")
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        drop(socket);
+    });
+    let yaml = format!(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_streaming_selector
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let filter = irr_from_yaml_with_test_registry(&yaml).unwrap();
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/broken");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    backend.abort();
+
+    match action {
+        crate::FilterAction::StreamingTerminalResponse(mut terminal) => {
+            let mut errored = false;
+            loop {
+                match terminal.body.next_chunk().await {
+                    Ok(Some(_)) => {},
+                    Ok(None) => break,
+                    Err(_) => {
+                        errored = true;
+                        break;
+                    },
+                }
+            }
+            assert!(errored, "a mid-stream upstream failure must surface as an error");
+        },
+        other => panic!("expected StreamingTerminalResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn iteration_streaming_transport_failure_uses_synthetic_response() {
+    let addr = closed_port_addr().await;
+    let yaml = format!(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_streaming_selector
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let filter = irr_from_yaml_with_test_registry(&yaml).unwrap();
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/stream");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+
+    match action {
+        crate::FilterAction::TerminalResponse(terminal) => {
+            assert_eq!(terminal.status, 502, "streaming connect failure must map to 502");
+        },
+        other => panic!("expected TerminalResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn iteration_streaming_failover_cancels_body_and_continues() {
+    let (bad_addr, bad_backend) = spawn_raw_backend(
+        "HTTP/1.1 500 Internal Server Error\r\nTransfer-Encoding: chunked\r\n\r\n4\r\noops\r\n0\r\n\r\n",
+    )
+    .await;
+    let (good_addr, good_backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\ngood").await;
+    let yaml = format!(
+        "
+initial_step: first
+steps:
+  - name: first
+    filters:
+      - filter: test_streaming_selector
+{}
+    on_result:
+      - status: [500]
+        next: second
+      - default: true
+        done: true
+  - name: second
+    filters:
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(bad_addr),
+        routed_step_yaml(good_addr)
+    );
+    let filter = irr_from_yaml_with_test_registry(&yaml).unwrap();
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/failover");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    bad_backend.abort();
+    good_backend.abort();
+
+    match action {
+        crate::FilterAction::TerminalResponse(terminal) => {
+            assert_eq!(terminal.status, 200, "failover must reach the second step");
+            assert_eq!(
+                terminal.body.as_deref(),
+                Some(b"good".as_slice()),
+                "failover response must come from the second step"
+            );
+        },
+        other => panic!("expected TerminalResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn iteration_max_iterations_exhausted_rejects_508() {
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let yaml = format!(
+        "
+initial_step: s
+max_iterations: 2
+steps:
+  - name: s
+    filters:
+{}
+    on_result:
+      - status: [200]
+        next: s
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let filter = irr_from_yaml(&yaml);
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/loop");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    backend.abort();
+
+    let is_508 = matches!(&action, crate::FilterAction::Reject(rej) if rej.status == 508);
+    assert!(is_508, "exhausted iterations must reject with 508: {action:?}");
+}
+
+#[tokio::test]
+async fn iteration_overall_deadline_exhaustion_rejects_504() {
+    let (addr, backend) = spawn_stalling_backend().await;
+    let yaml = format!(
+        "
+initial_step: s
+timeout_ms: 60
+max_iterations: 50
+steps:
+  - name: s
+    filters:
+{}
+    on_result:
+      - default: true
+        next: s
+",
+        routed_step_yaml(addr)
+    );
+    let filter = irr_from_yaml(&yaml);
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/slow");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    backend.abort();
+
+    let is_504 = matches!(&action, crate::FilterAction::Reject(rej) if rej.status == 504);
+    assert!(is_504, "deadline exhaustion must reject with 504: {action:?}");
+}
+
+#[tokio::test]
+async fn iteration_slow_step_filter_times_out_before_transport() {
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let yaml = format!(
+        "
+initial_step: s
+timeout_ms: 5000
+step_timeout_ms: 50
+steps:
+  - name: s
+    filters:
+      - filter: test_slow_request
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let filter = irr_from_yaml_with_test_registry(&yaml).unwrap();
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/slow-filter");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    backend.abort();
+
+    match action {
+        crate::FilterAction::TerminalResponse(terminal) => {
+            assert_eq!(terminal.status, 504, "pre-transport step timeout must produce 504");
+        },
+        other => panic!("expected TerminalResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn iteration_pre_read_body_path_executes_body_filters_first() {
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\npre").await;
+    let yaml = format!(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_stream_buffer_request
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let filter = irr_from_yaml_with_test_registry(&yaml).unwrap();
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::POST, "/pre-read");
+    let mut ctx = make_iteration_context(&req, &client, b"body");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    backend.abort();
+
+    match action {
+        crate::FilterAction::TerminalResponse(terminal) => {
+            assert_eq!(terminal.status, 200, "pre-read body path must complete the step");
+        },
+        other => panic!("expected TerminalResponse, got {other:?}"),
+    }
+}
+
+#[test]
+fn config_rejects_streaming_step_with_stream_buffer_response_mode() {
+    let yaml = "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_stream_buffer_response
+    on_result:
+      - default: true
+        done: true
+";
+    let Err(err) = irr_from_yaml_with_test_registry(yaml) else {
+        panic!("streaming + StreamBuffer response mode must be rejected");
+    };
+    assert!(
+        err.to_string().contains("StreamBuffer"),
+        "error must mention StreamBuffer: {err}"
+    );
+}
+
+#[test]
+fn config_rejects_step_with_ordering_errors() {
+    let yaml = "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - \"127.0.0.1:9\"
+    on_result:
+      - default: true
+        done: true
+";
+    let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+    let Err(err) = super::IterativeRequestRouterFilter::from_config(&value) else {
+        panic!("step ordering errors must be surfaced");
+    };
+    assert!(
+        err.to_string().contains("invalid step"),
+        "error must mention the invalid step: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Header Mutation Helpers
+// ---------------------------------------------------------------------------
+
+#[test]
+fn request_header_mutations_remove_set_and_add() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.request_headers_to_remove.push("x-old".parse().unwrap());
+    ctx.request_headers_to_set
+        .push(("x-set".parse().unwrap(), http::HeaderValue::from_static("set")));
+    ctx.extra_request_headers
+        .push((std::borrow::Cow::Borrowed("x-extra"), "extra".to_owned()));
+    ctx.extra_request_headers
+        .push((std::borrow::Cow::Borrowed("bad name"), "dropped".to_owned()));
+
+    let mut headers = HeaderMap::new();
+    headers.insert("x-old", http::HeaderValue::from_static("stale"));
+    super::apply_request_header_mutations(&mut headers, &ctx);
+
+    assert!(headers.get("x-old").is_none(), "removed headers must be gone");
+    assert_eq!(
+        headers.get("x-set").map(http::HeaderValue::as_bytes),
+        Some(b"set".as_slice()),
+        "set headers must be applied"
+    );
+    assert_eq!(
+        headers.get("x-extra").map(http::HeaderValue::as_bytes),
+        Some(b"extra".as_slice()),
+        "extra headers must be applied"
+    );
+    assert!(
+        headers.get("bad name").is_none(),
+        "invalid extra header names must be dropped"
+    );
+}
+
+#[test]
+fn pre_read_mutations_apply_remove_set_and_add() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.pre_read_mutations = vec![
+        crate::TrustedHeaderMutation::Remove("x-gone".parse().unwrap()),
+        crate::TrustedHeaderMutation::Set("x-set".parse().unwrap(), http::HeaderValue::from_static("set")),
+        crate::TrustedHeaderMutation::Add("x-add".parse().unwrap(), "added".to_owned()),
+        crate::TrustedHeaderMutation::Add("x-bad".parse().unwrap(), "bad\nvalue".to_owned()),
+    ];
+
+    let mut headers = HeaderMap::new();
+    headers.insert("x-gone", http::HeaderValue::from_static("stale"));
+    super::apply_pre_read_header_mutations(&mut headers, &ctx);
+
+    assert!(headers.get("x-gone").is_none(), "Remove mutations must apply");
+    assert_eq!(
+        headers.get("x-set").map(http::HeaderValue::as_bytes),
+        Some(b"set".as_slice()),
+        "Set mutations must apply"
+    );
+    assert_eq!(
+        headers.get("x-add").map(http::HeaderValue::as_bytes),
+        Some(b"added".as_slice()),
+        "Add mutations must apply"
+    );
+    assert!(
+        headers.get("x-bad").is_none(),
+        "Add mutations with invalid values must be dropped"
+    );
+}
+
+#[test]
+fn destination_host_rejects_unencodable_address() {
+    let mut headers = HeaderMap::new();
+    let result = super::ensure_destination_host(&mut headers, "bad\nhost:80");
+    assert!(result.is_err(), "control characters in the Host value must error");
+}
+
+// ---------------------------------------------------------------------------
+// Peer Construction
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn build_peer_applies_tls_with_explicit_sni() {
+    let tls: praxis_tls::ClusterTls = serde_yaml::from_str("sni: backend.example\nverify: true").unwrap();
+    let cached = praxis_tls::CachedClusterTls::try_from_config(&tls).unwrap();
+    let upstream = praxis_core::connectivity::Upstream {
+        address: std::sync::Arc::from("127.0.0.1:9443"),
+        connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: Some(cached),
+    };
+
+    let peer = super::build_peer(&upstream).await.unwrap();
+    assert_eq!(peer.sni, "backend.example", "the configured SNI must be applied");
+}
+
+#[tokio::test]
+async fn build_peer_derives_sni_from_hostname_address() {
+    let tls: praxis_tls::ClusterTls = serde_yaml::from_str("verify: false").unwrap();
+    let cached = praxis_tls::CachedClusterTls::try_from_config(&tls).unwrap();
+    let upstream = praxis_core::connectivity::Upstream {
+        address: std::sync::Arc::from("localhost:9443"),
+        connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: Some(cached),
+    };
+
+    let peer = super::build_peer(&upstream).await.unwrap();
+    assert_eq!(peer.sni, "localhost", "the SNI must derive from the address hostname");
+}
+
+// ---------------------------------------------------------------------------
+// Response Body Mode Limits
+// ---------------------------------------------------------------------------
+
+/// Filter whose response body mode is a small `StreamBuffer` ceiling,
+/// without streaming selection.
+struct SmallBufferResponseFilter;
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for SmallBufferResponseFilter {
+    fn name(&self) -> &'static str {
+        "test_small_buffer_response"
+    }
+
+    fn response_body_access(&self) -> crate::BodyAccess {
+        crate::BodyAccess::ReadOnly
+    }
+
+    fn response_body_mode(&self) -> crate::BodyMode {
+        crate::BodyMode::StreamBuffer { max_bytes: Some(4) }
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+#[tokio::test]
+async fn iteration_step_response_over_pipeline_body_ceiling_errors() {
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\ntwelve bytes").await;
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_small_buffer_response",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(SmallBufferResponseFilter)))),
+        )
+        .unwrap();
+    let yaml = format!(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_small_buffer_response
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    let filter = super::IterativeRequestRouterFilter::from_config_with_registry(&value, &registry).unwrap();
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/big");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let err = filter.on_request(&mut ctx).await.unwrap_err();
+    backend.abort();
+
+    assert!(
+        err.to_string().contains("exceeds configured body limit"),
+        "a response over the pipeline body ceiling must error: {err}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Runtime Streaming Guards
+// ---------------------------------------------------------------------------
+
+/// Filter that selects streaming at runtime WITHOUT declaring the
+/// capability, bypassing config-time validation the way a dynamically
+/// registered filter could.
+struct SneakyStreamingFilter;
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for SneakyStreamingFilter {
+    fn name(&self) -> &'static str {
+        "test_sneaky_streaming"
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        ctx.set_subrequest_response_mode(crate::SubRequestResponseMode::Streaming);
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+/// Response filter that rejects every response with 429.
+struct RejectResponseFilter;
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for RejectResponseFilter {
+    fn name(&self) -> &'static str {
+        "test_reject_response"
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+
+    async fn on_response(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Reject(crate::Rejection::status(429)))
+    }
+}
+
+/// Registry with the sneaky-streaming and response-rejecting filters.
+fn sneaky_registry() -> crate::FilterRegistry {
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_sneaky_streaming",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(SneakyStreamingFilter)))),
+        )
+        .unwrap();
+    registry
+        .register(
+            "test_reject_response",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(RejectResponseFilter)))),
+        )
+        .unwrap();
+    registry
+        .register(
+            "test_small_buffer_response",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(SmallBufferResponseFilter)))),
+        )
+        .unwrap();
+    registry
+}
+
+#[tokio::test]
+async fn runtime_guard_rejects_streaming_with_body_dependent_transitions() {
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let yaml = format!(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_sneaky_streaming
+{}
+    on_result:
+      - filter: router
+        key: matched
+        value: \"true\"
+        done: true
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    let filter = super::IterativeRequestRouterFilter::from_config_with_registry(&value, &sneaky_registry()).unwrap();
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/sneak");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let err = filter.on_request(&mut ctx).await.unwrap_err();
+    backend.abort();
+
+    assert!(
+        err.to_string().contains("body-dependent transitions"),
+        "runtime streaming with body-dependent transitions must error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn runtime_guard_rejects_streaming_with_stream_buffer_response_mode() {
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let yaml = format!(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_sneaky_streaming
+      - filter: test_small_buffer_response
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    let filter = super::IterativeRequestRouterFilter::from_config_with_registry(&value, &sneaky_registry()).unwrap();
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/sneak-buffer");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let err = filter.on_request(&mut ctx).await.unwrap_err();
+    backend.abort();
+
+    assert!(
+        err.to_string().contains("StreamBuffer response body mode"),
+        "runtime streaming with StreamBuffer response mode must error: {err}"
+    );
+}
+
+#[tokio::test]
+async fn streaming_response_filter_rejection_cancels_stream() {
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let mut registry = sneaky_registry();
+    registry
+        .register(
+            "test_streaming_selector",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(StreamingSelectorFilter)))),
+        )
+        .unwrap();
+    let yaml = format!(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_streaming_selector
+      - filter: test_reject_response
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    let filter = super::IterativeRequestRouterFilter::from_config_with_registry(&value, &registry).unwrap();
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/reject-stream");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    backend.abort();
+
+    match action {
+        crate::FilterAction::TerminalResponse(terminal) => {
+            assert_eq!(terminal.status, 429, "the response filter rejection must be terminal");
+        },
+        other => panic!("expected TerminalResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn streaming_transport_failure_response_filter_rejection_is_terminal() {
+    let addr = closed_port_addr().await;
+    let mut registry = sneaky_registry();
+    registry
+        .register(
+            "test_streaming_selector",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(StreamingSelectorFilter)))),
+        )
+        .unwrap();
+    let yaml = format!(
+        "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: test_streaming_selector
+      - filter: test_reject_response
+{}
+    on_result:
+      - default: true
+        done: true
+",
+        routed_step_yaml(addr)
+    );
+    let value: serde_yaml::Value = serde_yaml::from_str(&yaml).unwrap();
+    let filter = super::IterativeRequestRouterFilter::from_config_with_registry(&value, &registry).unwrap();
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/reject-transport");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+
+    match action {
+        crate::FilterAction::TerminalResponse(terminal) => {
+            assert_eq!(
+                terminal.status, 429,
+                "the response filter rejection must override the transport failure"
+            );
+        },
+        other => panic!("expected TerminalResponse, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn iteration_unresolvable_upstream_hostname_maps_to_502() {
+    let yaml = "
+initial_step: s
+steps:
+  - name: s
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: \"/\"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - \"praxis-invalid.invalid:80\"
+    on_result:
+      - default: true
+        done: true
+";
+    let filter = irr_from_yaml(yaml);
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/no-dns");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+
+    match action {
+        crate::FilterAction::TerminalResponse(terminal) => {
+            assert_eq!(terminal.status, 502, "an unresolvable upstream must map to 502");
+        },
+        other => panic!("expected TerminalResponse, got {other:?}"),
+    }
 }

@@ -120,7 +120,7 @@ impl HttpFilter for TimeoutFilter {
     reason = "tests"
 )]
 mod tests {
-    use std::time::{Duration, Instant};
+    use std::time::Instant;
 
     use super::*;
 

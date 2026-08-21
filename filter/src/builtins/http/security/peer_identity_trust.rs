@@ -169,9 +169,9 @@ impl HttpFilter for PeerIdentityTrustFilter {
 fn validate_peers(raw: Vec<TrustedPeerConfig>) -> Result<Vec<TrustedPeer>, FilterError> {
     let mut peers = Vec::with_capacity(raw.len());
     for (i, p) in raw.into_iter().enumerate() {
-        validate_cert_digest_field(&format!("trusted_peers[{i}].cert_digest"), &p.cert_digest)?;
-        validate_optional_field(&format!("trusted_peers[{i}].organization"), &p.organization)?;
-        validate_optional_field(&format!("trusted_peers[{i}].serial_number"), &p.serial_number)?;
+        validate_cert_digest_field(&format!("trusted_peers[{i}].cert_digest"), p.cert_digest.as_ref())?;
+        validate_optional_field(&format!("trusted_peers[{i}].organization"), p.organization.as_ref())?;
+        validate_optional_field(&format!("trusted_peers[{i}].serial_number"), p.serial_number.as_ref())?;
 
         if p.cert_digest.is_none() && p.organization.is_none() && p.serial_number.is_none() {
             return Err(
@@ -189,7 +189,7 @@ fn validate_peers(raw: Vec<TrustedPeerConfig>) -> Result<Vec<TrustedPeer>, Filte
 }
 
 /// Reject missing, malformed, or mixed-case SHA-256 digest strings.
-fn validate_cert_digest_field(name: &str, value: &Option<String>) -> Result<(), FilterError> {
+fn validate_cert_digest_field(name: &str, value: Option<&String>) -> Result<(), FilterError> {
     let Some(v) = value else {
         return Ok(());
     };
@@ -202,7 +202,7 @@ fn validate_cert_digest_field(name: &str, value: &Option<String>) -> Result<(), 
 }
 
 /// Reject empty or oversized optional string fields.
-fn validate_optional_field(name: &str, value: &Option<String>) -> Result<(), FilterError> {
+fn validate_optional_field(name: &str, value: Option<&String>) -> Result<(), FilterError> {
     if let Some(v) = value
         && (v.trim().is_empty() || v.len() > MAX_FIELD_LEN)
     {
@@ -347,23 +347,21 @@ mod tests {
 
     #[test]
     fn valid_digest_only_config() {
-        assert!(parse(&format!("trusted_peers:\n  - cert_digest: {}", digest_hex(0xAB))).is_ok());
+        parse(&format!("trusted_peers:\n  - cert_digest: {}", digest_hex(0xAB))).unwrap();
     }
 
     #[test]
     fn valid_org_only_config() {
-        assert!(parse("trusted_peers:\n  - organization: test-org").is_ok());
+        parse("trusted_peers:\n  - organization: test-org").unwrap();
     }
 
     #[test]
     fn valid_combined_config() {
-        assert!(
-            parse(&format!(
-                "trusted_peers:\n  - cert_digest: {}\n    organization: test-org\n    serial_number: '42'",
-                digest_hex(0xAB)
-            ))
-            .is_ok()
-        );
+        parse(&format!(
+            "trusted_peers:\n  - cert_digest: {}\n    organization: test-org\n    serial_number: '42'",
+            digest_hex(0xAB)
+        ))
+        .unwrap();
     }
 
     // ---- Trust decisions ----
@@ -479,11 +477,11 @@ mod tests {
         let f = make_org_filter("test-org");
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.peer_identity = Some(TlsPeerIdentity {
+        ctx.peer_identity = Some(std::sync::Arc::new(TlsPeerIdentity {
             cert_digest: vec![1],
             organization: None,
             serial_number: None,
-        });
+        }));
 
         let action = f.on_request(&mut ctx).await.unwrap();
         assert!(
@@ -511,11 +509,11 @@ mod tests {
         format!("{byte:02x}").repeat(32)
     }
 
-    fn make_identity(digest: Vec<u8>, org: &str, serial: &str) -> TlsPeerIdentity {
-        TlsPeerIdentity {
+    fn make_identity(digest: Vec<u8>, org: &str, serial: &str) -> std::sync::Arc<TlsPeerIdentity> {
+        std::sync::Arc::new(TlsPeerIdentity {
             cert_digest: digest,
             organization: Some(org.to_owned()),
             serial_number: Some(serial.to_owned()),
-        }
+        })
     }
 }

@@ -5,7 +5,11 @@
 
 use std::sync::Arc;
 
-use rustls::{crypto::CryptoProvider, sign::CertifiedKey};
+use rustls::{
+    crypto::CryptoProvider,
+    pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject as _},
+    sign::CertifiedKey,
+};
 use zeroize::Zeroizing;
 
 use crate::{CertKeyPair, TlsError};
@@ -58,13 +62,7 @@ pub(crate) fn load_certified_key(pair: &CertKeyPair) -> Result<CertifiedKey, Tls
 /// Load certificate chain and private key from PEM files.
 pub(super) fn load_cert_and_key(
     pair: &CertKeyPair,
-) -> Result<
-    (
-        Vec<rustls::pki_types::CertificateDer<'static>>,
-        rustls::pki_types::PrivateKeyDer<'static>,
-    ),
-    TlsError,
-> {
+) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), TlsError> {
     let cert_pem = Zeroizing::new(std::fs::read(&pair.cert_path).map_err(|e| TlsError::FileLoadError {
         path: pair.cert_path.clone(),
         detail: format!("failed to read cert: {e}"),
@@ -75,7 +73,7 @@ pub(super) fn load_cert_and_key(
         detail: format!("failed to read key: {e}"),
     })?);
 
-    let certs = rustls_pemfile::certs(&mut &cert_pem[..])
+    let certs = CertificateDer::pem_slice_iter(&cert_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| TlsError::FileLoadError {
             path: pair.cert_path.clone(),
@@ -89,15 +87,14 @@ pub(super) fn load_cert_and_key(
         });
     }
 
-    let key = rustls_pemfile::private_key(&mut &key_pem[..])
-        .map_err(|e| TlsError::FileLoadError {
-            path: pair.key_path.clone(),
-            detail: format!("failed to parse key PEM: {e}"),
-        })?
-        .ok_or_else(|| TlsError::FileLoadError {
-            path: pair.key_path.clone(),
-            detail: "no private key found in PEM file".to_owned(),
-        })?;
+    let key = PrivateKeyDer::from_pem_slice(&key_pem).map_err(|e| TlsError::FileLoadError {
+        path: pair.key_path.clone(),
+        detail: if matches!(e, rustls::pki_types::pem::Error::NoItemsFound) {
+            "no private key found in PEM file".to_owned()
+        } else {
+            format!("failed to parse key PEM: {e}")
+        },
+    })?;
 
     Ok((certs, key))
 }

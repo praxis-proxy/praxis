@@ -62,7 +62,7 @@ pub(super) async fn execute(
 
     match ctx.request_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
-            if check_body_size_limit(body, &mut ctx.request_body_bytes, max_bytes) {
+            if check_body_size_limit(body.as_ref(), &mut ctx.request_body_bytes, max_bytes) {
                 send_rejection(session, Rejection::status(413)).await;
                 return Err(pingora_core::Error::explain(
                     pingora_core::ErrorType::HTTPStatus(413),
@@ -80,9 +80,33 @@ pub(super) async fn execute(
                     "request body exceeds stream_buffer size limit",
                 ));
             }
+            if end_of_stream {
+                // Mid-stream chunks were counted incrementally; `body` now
+                // holds the frozen full buffer the pipeline counts again.
+                // Reset so the final total is the buffer size, not double it.
+                ctx.request_body_bytes = 0;
+            }
         },
 
-        BodyMode::StreamBuffer { .. } | BodyMode::Stream => {},
+        BodyMode::Stream => {
+            // The global body_limits ceiling applies to streamed bodies too;
+            // Stream mode just counts instead of buffering. The projection
+            // does not mutate the counter — the filter pipeline below is
+            // the accumulator. `None` is only reachable with
+            // allow_unbounded_body.
+            let chunk_len = body.as_ref().map_or(0, Bytes::len) as u64;
+            if let Some(max) = pipeline.request_body_ceiling()
+                && ctx.request_body_bytes.saturating_add(chunk_len) > max as u64
+            {
+                send_rejection(session, Rejection::status(413)).await;
+                return Err(pingora_core::Error::explain(
+                    pingora_core::ErrorType::HTTPStatus(413),
+                    "streamed request body exceeds global body limit",
+                ));
+            }
+        },
+
+        BodyMode::StreamBuffer { .. } => {},
         _ => tracing::error!("unhandled BodyMode variant in request body filter"),
     }
 

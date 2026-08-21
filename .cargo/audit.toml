@@ -7,6 +7,6 @@
 ignore = [
     # derivative 2.2.0: unmaintained
     "RUSTSEC-2024-0388",
-    # rustls-pemfile 2.2.0: unmaintained (via pingora-rustls)
+    # rustls-pemfile 2.2.0: unmaintained (transitive via pingora fork)
     "RUSTSEC-2025-0134",
 ]

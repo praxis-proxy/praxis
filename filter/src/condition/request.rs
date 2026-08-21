@@ -118,7 +118,6 @@ mod tests {
     use std::collections::HashMap;
 
     use http::{HeaderMap, HeaderValue, Method, Uri};
-    use praxis_core::config::ConditionMatch;
 
     use super::*;
 
@@ -468,6 +467,75 @@ mod tests {
             path_prefix: None,
             methods: None,
             headers: Some(headers),
+        }
+    }
+
+    mod properties {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        /// Strategy for an absolute request path of 1..=3 segments.
+        fn path() -> impl Strategy<Value = String> {
+            proptest::collection::vec("[a-z0-9]{1,6}", 1..=3).prop_map(|segs| format!("/{}", segs.join("/")))
+        }
+
+        /// Strategy for an arbitrary single-field predicate.
+        fn predicate() -> impl Strategy<Value = ConditionMatch> {
+            prop_oneof![
+                path().prop_map(|p| ConditionMatch {
+                    path: Some(p),
+                    path_prefix: None,
+                    methods: None,
+                    headers: None,
+                }),
+                path().prop_map(|p| ConditionMatch {
+                    path: None,
+                    path_prefix: Some(p),
+                    methods: None,
+                    headers: None,
+                }),
+                proptest::collection::vec("(GET|POST|PUT|DELETE|PATCH)", 1..=3).prop_map(|ms| ConditionMatch {
+                    path: None,
+                    path_prefix: None,
+                    methods: Some(ms),
+                    headers: None,
+                }),
+            ]
+        }
+
+        proptest! {
+            /// `when` and `unless` with the same predicate are exact
+            /// complements for any request.
+            #[test]
+            fn when_unless_duality(m in predicate(), p in path()) {
+                let req = make_request(Method::GET, &p, HeaderMap::new());
+                prop_assert_eq!(
+                    should_execute(&[when(m.clone())], &req),
+                    !should_execute(&[unless(m)], &req)
+                );
+            }
+
+            /// A `path_prefix`-only predicate agrees with the shared
+            /// segment-boundary matcher.
+            #[test]
+            fn path_prefix_agrees_with_path_match(prefix in path(), p in path()) {
+                let req = make_request(Method::GET, &p, HeaderMap::new());
+                prop_assert_eq!(
+                    should_execute(&[when(path_match(&prefix))], &req),
+                    crate::path_match::path_prefix_matches(&p, &prefix)
+                );
+            }
+
+            /// An exact-path predicate matches exactly its own path.
+            #[test]
+            fn exact_path_matches_only_itself(a in path(), b in path()) {
+                let req = make_request(Method::GET, &a, HeaderMap::new());
+                prop_assert_eq!(
+                    should_execute(&[when(exact_path_match(&b))], &req),
+                    a == b
+                );
+            }
         }
     }
 }

@@ -101,10 +101,16 @@ a filter entry:
               status: 403
 ```
 
-**`on_result.filter`** must match a filter **type
-name** — the return value of `HttpFilter::name()`
-(e.g., `"guardrails"`), not the user-assigned
-`name:` on the filter entry. See
+**`on_result.filter`** must name the **host filter**
+the branch is attached to — its filter **type name**
+(the return value of `HttpFilter::name()`, e.g.
+`"guardrails"`), not the user-assigned `name:` on the
+entry, and not some other filter in the chain. A
+branch only ever sees its own host filter's results:
+the pipeline clears `filter_results` after each
+filter's branch evaluation, so a condition naming a
+different filter could never match and is rejected at
+startup. See
 [Pipeline Concepts: Two Meanings of "Name"][names].
 
 [names]: ../architecture/pipeline-concepts.md#the-two-meanings-of-name
@@ -132,7 +138,7 @@ resumes at the rejoin point:
 | Rejoin value | Behavior |
 |-------------|----------|
 | `next` (default) | Continue with the filter after the branch point |
-| `terminal` or `client` | Stop the pipeline; respond to client |
+| `terminal` or `client` | Stop the pipeline. If the branch selected a cluster (via `router` + `load_balancer`), the request is forwarded upstream. Otherwise the branch must produce the response (e.g. a `static_response` filter); a terminal branch that neither selects a cluster nor produces a response fails closed with a 500. |
 | `<filter_name>` (forward) | Skip to the named filter (must be after the branch point) |
 | `<filter_name>` (backward) | Re-enter at the named filter; requires `max_iterations` |
 
@@ -327,7 +333,11 @@ See `examples/configs/branching/cross-chain-flat.yaml`.
 **Body hooks** (`on_request_body`, `on_response_body`)
 do **not** run for filters inside branch chains.
 Body-transforming filters must be in the main
-pipeline path.
+pipeline path. This is enforced at build time: a
+filter that declares body access inside a branch
+chain is rejected as a pipeline ordering error, and
+body access declared by branch filters never enables
+pipeline-wide body buffering.
 
 **Nested control flow**: `SkipTo` and `ReEnter` from
 nested branches (branches within branches) are

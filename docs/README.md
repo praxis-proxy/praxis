@@ -35,8 +35,13 @@ and security. AI Gateway docs live in
   build, test, dev setup
 - [Conventions](developing/conventions.md):
   coding style, testing, lints
+- [Deep Review Criteria](developing/review-criteria.md):
+  criteria for codebase analysis and audit passes
 - [Type Design](developing/type-design.md):
   serde patterns, enums, validation
+- [Dependencies](developing/dependencies.md):
+  dependency policy, supply-chain checks, provenance
+  review
 - [Adding Filters](developing/adding-filters.md):
   new filter checklist
 - [Adding Protocols](developing/adding-protocols.md)

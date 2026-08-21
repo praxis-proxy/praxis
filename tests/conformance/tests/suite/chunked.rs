@@ -35,13 +35,19 @@ fn single_chunk_body_proxied() {
          \r\n",
     );
     let status = parse_status(&raw);
+    let body = parse_body(&raw);
 
     assert_eq!(status, 200, "single-chunk POST should be proxied successfully");
+    assert_eq!(
+        body, "hello",
+        "the chunked request body must reach the backend intact, not be dropped by re-framing"
+    );
 }
 
 #[test]
 fn multiple_chunks_proxied() {
-    let backend_port = start_backend("ok");
+    let _backend = start_echo_backend();
+    let backend_port = _backend.port();
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
     let config = Config::from_yaml(&yaml).unwrap();
@@ -68,8 +74,8 @@ fn multiple_chunks_proxied() {
 
     assert_eq!(status, 200, "multi-chunk POST should be proxied successfully");
     assert_eq!(
-        body, "ok",
-        "backend should respond normally after receiving multi-chunk body"
+        body, "hello,world!",
+        "all chunks of the request body must reach the backend intact"
     );
 }
 

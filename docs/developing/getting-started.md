@@ -86,11 +86,14 @@ insecure_options:
   allow_open_security_filters: false
   allow_private_endpoints: false
   allow_private_health_checks: false
+  allow_private_upstreams: false
   allow_public_admin: false
   allow_root: false
+  allow_tls_no_verify: false
   allow_tls_without_sni: false
   allow_unbounded_body: false
   csrf_log_only: false
+  skip_pipeline_checks: {}
   skip_pipeline_validation: false
 ```
 
@@ -99,12 +102,15 @@ insecure_options:
 | `allow_open_security_filters` | Allow security-critical filters (`ip_acl`, `forwarded_headers`) to use `failure_mode: open`. Without this flag, open security filters are rejected because a runtime error would bypass security enforcement. With this flag enabled, the error is demoted to a warning. |
 | `allow_private_endpoints` | Allow cluster endpoints to resolve to loopback, link-local, or cloud metadata addresses. Blocked by default as SSRF protection for upstream targets. |
 | `allow_private_health_checks` | Allow health check endpoints that resolve to loopback (`127.0.0.0/8`), link-local (`169.254.0.0/16`), or cloud metadata addresses. Blocked by default as SSRF protection. |
+| `allow_private_upstreams` | Allow upstream connections that resolve to private or reserved IP addresses at runtime. Without this flag, DNS-resolved upstream addresses in RFC 1918, loopback, link-local, CGNAT, and IPv6 unique-local ranges are rejected to prevent DNS rebinding and SSRF attacks. |
 | `allow_public_admin` | Allow the admin health endpoint to bind to a non-loopback address (`0.0.0.0`, a LAN IP, etc.). By default admin must bind to loopback (`127.0.0.1` or `[::1]`). |
 | `allow_root` | Allow starting as root (UID 0). Praxis refuses to run as root by default. |
+| `allow_tls_no_verify` | Allow disabling upstream TLS certificate verification (`tls.verify: false` on a cluster). Without this flag, `verify: false` is a hard validation error. |
 | `allow_tls_without_sni` | Allow upstream TLS connections without an explicit SNI hostname. Most TLS servers require SNI; without this flag, missing SNI is a validation error. |
 | `allow_unbounded_body` | Allow unbounded body processing. This covers two checks: (1) `body_limits.max_request_bytes` or `max_response_bytes` set to `null`, and (2) `StreamBuffer` body mode without a `max_bytes` limit. Without this flag, both are rejected at startup. |
 | `csrf_log_only` | Run the CSRF filter in log-only mode: evaluate all rules but log violations as warnings instead of rejecting requests. Useful for initial rollout monitoring. |
-| `skip_pipeline_validation` | Demote pipeline ordering errors (e.g. filter placement issues) to warnings instead of failing startup. |
+| `skip_pipeline_checks` | Granular per-check pipeline validation bypass flags (`conditional_security`, `conflicting_cluster_selectors`, `duplicate_load_balancers`, `duplicate_rewrite_filters`, `duplicate_routers`, `lb_without_router`, `misaligned_clusters`, `unreachable_filters`). Prefer these over the blanket `skip_pipeline_validation` flag. |
+| `skip_pipeline_validation` | **Deprecated.** Demote ALL pipeline ordering errors (e.g. filter placement issues) to warnings instead of failing startup. Prefer the granular `skip_pipeline_checks` flags. |
 
 Example overriding two flags for local development:
 

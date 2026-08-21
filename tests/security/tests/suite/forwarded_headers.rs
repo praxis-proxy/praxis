@@ -466,6 +466,92 @@ fn trusted_proxy_host_reflects_actual_host_header() {
     );
 }
 
+#[test]
+fn untrusted_cannot_spoof_forwarded_header() {
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
+    let proxy_port = free_port();
+    let yaml = fwd_yaml(proxy_port, backend_port, &[]);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Forwarded: for=6.6.6.6;proto=https\r\n\
+         Connection: close\r\n\r\n",
+    );
+    let body = parse_body(&raw);
+
+    let fwd = body_header(&body, "forwarded");
+    assert!(
+        fwd.is_none(),
+        "client-supplied Forwarded must be removed when the proxy \
+         does not inject its own; got: {fwd:?}"
+    );
+}
+
+#[test]
+fn untrusted_forwarded_overwritten_when_standard_header_enabled() {
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
+    let proxy_port = free_port();
+    let yaml = fwd_yaml_standard(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Forwarded: for=6.6.6.6;proto=https\r\n\
+         Connection: close\r\n\r\n",
+    );
+    let body = parse_body(&raw);
+
+    let fwd = body_header(&body, "forwarded");
+    assert!(fwd.is_some(), "Forwarded must be present; body: {body}");
+    let fwd = fwd.unwrap();
+    assert!(
+        !fwd.contains("6.6.6.6"),
+        "spoofed Forwarded value must be overwritten; got: {fwd}"
+    );
+    assert!(
+        fwd.contains("for=127.0.0.1"),
+        "real client IP must appear in Forwarded; got: {fwd}"
+    );
+}
+
+#[test]
+fn untrusted_cannot_strip_forwarded_via_connection_token() {
+    let _backend = start_header_echo_backend();
+    let backend_port = _backend.port();
+    let proxy_port = free_port();
+    let yaml = fwd_yaml_standard(proxy_port, backend_port);
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\n\
+         Host: localhost\r\n\
+         Connection: forwarded, close\r\n\r\n",
+    );
+    let body = parse_body(&raw);
+
+    let fwd = body_header(&body, "forwarded");
+    assert!(
+        fwd.is_some(),
+        "proxy-injected Forwarded must not be strippable via a \
+         Connection token; body: {body}"
+    );
+    assert!(
+        fwd.unwrap().contains("for=127.0.0.1"),
+        "Forwarded must carry the real client IP"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
@@ -500,6 +586,37 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
+"#
+    )
+}
+
+/// Build proxy YAML with `use_standard_header: true` and no trusted proxies.
+fn fwd_yaml_standard(proxy_port: u16, backend_port: u16) -> String {
+    format!(
+        r#"
+listeners:
+  - name: proxy
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains:
+      - main
+filter_chains:
+  - name: main
+    filters:
+      - filter: forwarded_headers
+        use_standard_header: true
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "backend"
+      - filter: load_balancer
+        clusters:
+          - name: "backend"
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     )
 }

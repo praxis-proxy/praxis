@@ -2058,6 +2058,55 @@ steps:
 }
 
 #[test]
+fn streaming_head_request_suppresses_body() {
+    let chunks = vec!["data: chunk1\n\n".to_owned(), "data: chunk2\n\n".to_owned()];
+    let backend = Backend::chunked(chunks)
+        .header("content-type", "text/event-stream")
+        .start_with_shutdown();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: stream
+steps:
+  - name: stream
+    filters:
+      - filter: test_streaming_selector
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: sse
+      - filter: load_balancer
+        clusters:
+          - name: sse
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            backend.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let raw = http_send(
+        proxy.addr(),
+        "HEAD / HTTP/1.1\r\nHost: localhost\r\nx-stream-response: true\r\nConnection: close\r\n\r\n",
+    );
+
+    let status = parse_status(&raw);
+    assert_eq!(status, 200, "a HEAD request to a streaming route should return 200");
+    let body = parse_body(&raw);
+    assert!(
+        body.is_empty(),
+        "a HEAD response must not carry a streamed body, got: {body:?}"
+    );
+}
+
+#[test]
 fn streaming_body_callback_emission_precedes_its_body_output() {
     let backend = Backend::chunked(vec!["upstream".to_owned()]).start_with_shutdown();
     let proxy_port = free_port();
@@ -3926,7 +3975,9 @@ fn irr_yaml(proxy_port: u16, irr_config: &str) -> String {
         .join("\n");
 
     format!(
-        "listeners:\n\
+        "insecure_options:\n\
+         \x20 allow_private_endpoints: true\n\
+         listeners:\n\
          \x20 - name: default\n\
          \x20   address: \"127.0.0.1:{proxy_port}\"\n\
          \x20   filter_chains: [main]\n\

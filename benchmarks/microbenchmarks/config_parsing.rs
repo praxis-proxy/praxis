@@ -3,7 +3,12 @@
 
 //! Criterion benchmarks for YAML config deserialization.
 
-#![allow(clippy::unwrap_used, clippy::expect_used, reason = "benchmarks")]
+#![expect(
+    clippy::arithmetic_side_effects,
+    clippy::min_ident_chars,
+    clippy::unwrap_used,
+    reason = "benchmarks"
+)]
 
 use std::hint::black_box;
 

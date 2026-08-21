@@ -133,6 +133,18 @@ pub struct FilterPipeline {
 
     /// Wall-clock time source for filters that need timestamps.
     time_source: Arc<dyn TimeSource>,
+
+    /// Global request body ceiling, enforced by counting in Stream mode.
+    request_body_ceiling: Option<usize>,
+
+    /// Global response body ceiling, enforced by counting in Stream mode.
+    response_body_ceiling: Option<usize>,
+
+    /// Per-filter request-body access flags, index-aligned with `filters`.
+    request_body_access_by_idx: Vec<bool>,
+
+    /// Per-filter response-body access flags, index-aligned with `filters`.
+    response_body_access_by_idx: Vec<bool>,
 }
 
 #[expect(
@@ -192,6 +204,9 @@ impl FilterPipeline {
             allow_unbounded,
         )?;
 
+        self.request_body_ceiling = max_request;
+        self.response_body_ceiling = max_response;
+
         Ok(())
     }
 
@@ -216,6 +231,18 @@ impl FilterPipeline {
         Ok(())
     }
 
+    /// Global request body ceiling; `None` means unbounded was allowed.
+    #[must_use]
+    pub fn request_body_ceiling(&self) -> Option<usize> {
+        self.request_body_ceiling
+    }
+
+    /// Global response body ceiling; `None` means unbounded was allowed.
+    #[must_use]
+    pub fn response_body_ceiling(&self) -> Option<usize> {
+        self.response_body_ceiling
+    }
+
     /// Pre-computed body processing capabilities for this pipeline.
     pub fn body_capabilities(&self) -> &BodyCapabilities {
         &self.body_capabilities
@@ -234,6 +261,32 @@ impl FilterPipeline {
     /// Whether the pipeline has no filters.
     pub fn is_empty(&self) -> bool {
         self.filters.is_empty()
+    }
+
+    /// Whether any top-level filter has the given type name.
+    ///
+    /// ```
+    /// use praxis_filter::{FilterPipeline, FilterRegistry};
+    ///
+    /// let registry = FilterRegistry::with_builtins();
+    /// let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+    /// assert!(!pipeline.contains_filter("access_log"));
+    /// ```
+    pub fn contains_filter(&self, type_name: &str) -> bool {
+        self.filters.iter().any(|pf| pf.filter.name() == type_name)
+    }
+
+    /// Whether any filter of `type_name` has request conditions matching
+    /// `request` (an unconditional entry always matches).
+    ///
+    /// Used by protocol-level fallbacks that emit on a filter's behalf, so
+    /// an operator's `when`/`unless` scoping is honored outside the normal
+    /// request phase.
+    pub fn filter_request_conditions_match(&self, type_name: &str, request: &crate::Request) -> bool {
+        self.filters
+            .iter()
+            .filter(|pf| pf.filter.name() == type_name)
+            .any(|pf| crate::condition::should_execute(&pf.conditions, request))
     }
 
     /// Compression configuration, if a compression filter is present.
@@ -336,6 +389,29 @@ impl FilterPipeline {
     pub fn set_time_source(&mut self, source: Arc<dyn TimeSource>) {
         self.visit_nested_pipelines(&mut |pipeline| pipeline.set_time_source(Arc::clone(&source)));
         self.time_source = source;
+    }
+
+    /// Filesystem paths the filters in this pipeline read configuration from,
+    /// beyond the main Praxis config.
+    ///
+    /// Used by the config watcher to decide which files should trigger a reload.
+    /// Without this, a filter that loads an external document never picks up edits
+    /// to it, because the reload gate only ever sees the main config's bytes.
+    ///
+    /// Mirrors [`Self::apply_insecure_options`], including its limitation: only
+    /// top-level filters are walked, not filters nested inside branch chains. A
+    /// document referenced solely from a branch is therefore not observed. That is
+    /// the same blind spot the insecure-options walk already has, and widening both
+    /// belongs in one change rather than half of one here.
+    pub fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        self.filters
+            .iter()
+            .filter_map(|pf| match &pf.filter {
+                crate::any_filter::AnyFilter::Http(f) => Some(f.referenced_files()),
+                crate::any_filter::AnyFilter::Tcp(_) => None,
+            })
+            .flatten()
+            .collect()
     }
 
     /// Apply [`InsecureOptions`] to all filters in the pipeline.

@@ -25,7 +25,7 @@
 //! [`Continue`]: super::branch::BranchOutcome::Continue
 //! [`ReEnter`]: super::branch::RejoinTarget::ReEnter
 
-use std::{future::Future, pin::Pin, sync::Arc};
+use std::{pin::Pin, sync::Arc};
 
 use tracing::{debug, trace, warn};
 
@@ -43,7 +43,25 @@ use crate::{
 // -----------------------------------------------------------------------------
 
 /// Evaluate all branches on a filter, executing matching ones.
-pub(crate) fn evaluate_branches<'a>(
+///
+/// The branch-free case — the overwhelmingly common one — takes a
+/// synchronous fast path with no boxed future: only nested branch
+/// recursion (via [`evaluate_branches_boxed`]) pays a heap allocation.
+pub(crate) async fn evaluate_branches(
+    branches: &[ResolvedBranch],
+    ctx: &mut HttpFilterContext<'_>,
+) -> Result<BranchOutcome, FilterError> {
+    if branches.is_empty() {
+        retain_filter_results(ctx);
+        ctx.filter_results.clear();
+        return Ok(BranchOutcome::Continue);
+    }
+    evaluate_branches_inner(branches, ctx).await
+}
+
+/// Boxed entry point breaking the async recursion cycle for nested
+/// branches (branches within branches).
+fn evaluate_branches_boxed<'a>(
     branches: &'a [ResolvedBranch],
     ctx: &'a mut HttpFilterContext<'_>,
 ) -> Pin<Box<dyn Future<Output = Result<BranchOutcome, FilterError>> + Send + 'a>> {
@@ -56,8 +74,14 @@ async fn evaluate_branches_inner(
     branches: &[ResolvedBranch],
     ctx: &mut HttpFilterContext<'_>,
 ) -> Result<BranchOutcome, FilterError> {
+    // Branch conditions read the host filter's results. Snapshot them:
+    // executing a branch chain clears `ctx.filter_results` after each branch
+    // filter's own branch evaluation, and without the snapshot a fired branch
+    // would wipe the results mid-loop, silently disabling every later
+    // sibling branch's condition.
+    let host_results = ctx.filter_results.clone();
     for branch in branches {
-        if !should_branch_fire(branch, ctx) {
+        if !should_branch_fire(branch, &host_results) {
             trace!(branch = %branch.name, "branch condition not met");
             continue;
         }
@@ -85,7 +109,11 @@ async fn evaluate_branches_inner(
         match &branch.rejoin {
             RejoinTarget::Next => {},
             RejoinTarget::Terminal => return Ok(BranchOutcome::Terminal),
-            RejoinTarget::SkipTo(target) => return Ok(BranchOutcome::SkipTo(*target)),
+            RejoinTarget::SkipTo(target) => {
+                retain_filter_results(ctx);
+                ctx.filter_results.clear();
+                return Ok(BranchOutcome::SkipTo(*target));
+            },
             RejoinTarget::ReEnter(target) => {
                 retain_filter_results(ctx);
                 ctx.filter_results.clear();
@@ -114,12 +142,16 @@ fn retain_filter_results(ctx: &mut HttpFilterContext<'_>) {
     }
 }
 
-/// Check whether a branch's condition is met.
-fn should_branch_fire(branch: &ResolvedBranch, ctx: &HttpFilterContext<'_>) -> bool {
+/// Check whether a branch's condition is met against the host filter's
+/// results (snapshotted before any sibling branch chain executes).
+fn should_branch_fire(
+    branch: &ResolvedBranch,
+    host_results: &std::collections::HashMap<&'static str, crate::FilterResultSet>,
+) -> bool {
     match &branch.condition {
         None => true,
         Some(cond) => crate::matches_filter_result(
-            &ctx.filter_results,
+            host_results,
             cond.filter_name.as_ref(),
             cond.key.as_ref(),
             cond.value.as_ref(),
@@ -189,31 +221,50 @@ async fn execute_branch_filters(
 /// discarded** because they reference indices in the parent
 /// pipeline, which the nested branch has no authority to control.
 /// Only `Terminal` and `Reject` propagate upward.
+///
+/// A nested `terminal`/`client` rejoin whose sub-chain produced no
+/// response fails closed with a 500, matching the top-level pipeline:
+/// "stop; respond to client" must never degrade into continuing the
+/// pipeline with the remaining filters skipped.
 async fn dispatch_nested_outcome(
     branches: &[ResolvedBranch],
     ctx: &mut HttpFilterContext<'_>,
 ) -> Result<Option<FilterAction>, FilterError> {
-    let outcome = evaluate_branches(branches, ctx).await?;
+    let outcome = if branches.is_empty() {
+        retain_filter_results(ctx);
+        ctx.filter_results.clear();
+        BranchOutcome::Continue
+    } else {
+        evaluate_branches_boxed(branches, ctx).await?
+    };
+    Ok(map_nested_outcome(outcome))
+}
+
+/// Convert a nested branch outcome into the parent's stopping action.
+fn map_nested_outcome(outcome: BranchOutcome) -> Option<FilterAction> {
     match outcome {
-        BranchOutcome::Continue => Ok(None),
+        BranchOutcome::Continue => None,
         BranchOutcome::SkipTo(target) => {
             warn!(
                 target,
                 "discarding SkipTo from nested branch; nested control flow does not propagate"
             );
-            Ok(None)
+            None
         },
         BranchOutcome::ReEnter(target) => {
             warn!(
                 target,
                 "discarding ReEnter from nested branch; nested control flow does not propagate"
             );
-            Ok(None)
+            None
         },
-        BranchOutcome::Terminal => Ok(Some(FilterAction::Continue)),
-        BranchOutcome::Reject(r) => Ok(Some(FilterAction::Reject(r))),
-        BranchOutcome::TerminalResponse(t) => Ok(Some(FilterAction::TerminalResponse(t))),
-        BranchOutcome::StreamingTerminalResponse(t) => Ok(Some(FilterAction::StreamingTerminalResponse(t))),
+        BranchOutcome::Terminal => {
+            warn!("nested terminal branch produced no response; failing closed with 500");
+            Some(FilterAction::Reject(crate::actions::Rejection::status(500)))
+        },
+        BranchOutcome::Reject(r) => Some(FilterAction::Reject(r)),
+        BranchOutcome::TerminalResponse(t) => Some(FilterAction::TerminalResponse(t)),
+        BranchOutcome::StreamingTerminalResponse(t) => Some(FilterAction::StreamingTerminalResponse(t)),
     }
 }
 
@@ -233,10 +284,7 @@ async fn dispatch_nested_outcome(
     reason = "tests"
 )]
 mod tests {
-    use std::sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering},
-    };
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
     use bytes::Bytes;
@@ -245,8 +293,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        FilterError, Rejection, StreamingTerminalResponse, filter::HttpFilter,
-        pipeline::branch::ResolvedBranchCondition, results::FilterResultSet,
+        Rejection, StreamingTerminalResponse, filter::HttpFilter, pipeline::branch::ResolvedBranchCondition,
+        results::FilterResultSet,
     };
 
     #[tokio::test]
@@ -373,6 +421,24 @@ mod tests {
         assert!(
             matches!(outcome, BranchOutcome::SkipTo(5)),
             "SkipTo branch should advance to target index 5"
+        );
+    }
+
+    #[tokio::test]
+    async fn skip_to_clears_filter_results() {
+        let branches = vec![make_branch("skip", None, RejoinTarget::SkipTo(5), None, vec![])];
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut rs = FilterResultSet::new();
+        rs.set("status", "hit").unwrap();
+        ctx.filter_results.insert("cache", rs);
+
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
+
+        assert!(matches!(outcome, BranchOutcome::SkipTo(5)), "branch should skip");
+        assert!(
+            ctx.filter_results.is_empty(),
+            "SkipTo must clear ephemeral results like every other outcome"
         );
     }
 
@@ -537,6 +603,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sibling_branch_condition_survives_earlier_branch_execution() {
+        let counter_a = Arc::new(AtomicUsize::new(0));
+        let counter_b = Arc::new(AtomicUsize::new(0));
+        // Two conditional branches on the same host result, both rejoining
+        // at `next`. Executing the first branch's chain clears
+        // ctx.filter_results after its filter runs; the second branch's
+        // condition must still see the host filter's snapshot.
+        let branches = vec![
+            make_branch(
+                "first",
+                Some(("cache", "status", "hit")),
+                RejoinTarget::Next,
+                None,
+                vec![counting_pf(Arc::clone(&counter_a))],
+            ),
+            make_branch(
+                "second",
+                Some(("cache", "status", "hit")),
+                RejoinTarget::Next,
+                None,
+                vec![counting_pf(Arc::clone(&counter_b))],
+            ),
+        ];
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut rs = FilterResultSet::new();
+        rs.set("status", "hit").unwrap();
+        ctx.filter_results.insert("cache", rs);
+        let outcome = evaluate_branches(&branches, &mut ctx).await.unwrap();
+        assert!(
+            matches!(outcome, BranchOutcome::Continue),
+            "next-rejoining branches should continue"
+        );
+        assert_eq!(counter_a.load(Ordering::SeqCst), 1, "first branch should execute");
+        assert_eq!(
+            counter_b.load(Ordering::SeqCst),
+            1,
+            "second branch's condition must not be wiped by the first branch's execution"
+        );
+    }
+
+    #[tokio::test]
     async fn empty_branches_is_noop() {
         let branches: Vec<ResolvedBranch> = vec![];
         let req = crate::test_utils::make_request(Method::GET, "/");
@@ -565,8 +673,8 @@ mod tests {
         let mut ctx = crate::test_utils::make_filter_context(&req);
         let outcome = evaluate_branches(&outer_branches, &mut ctx).await.unwrap();
         assert!(
-            matches!(outcome, BranchOutcome::Continue),
-            "nested terminal should stop the branch but outer continues with Next rejoin"
+            matches!(&outcome, BranchOutcome::Reject(r) if r.status == 500),
+            "nested terminal with no response must fail closed, not continue the pipeline"
         );
     }
 

@@ -288,6 +288,41 @@ fn parse_otlp_headers_from_env() -> Option<HashMap<String, String>> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn debug_redacts_otlp_headers() {
+        let mut headers = HashMap::new();
+        headers.insert("authorization".to_owned(), "secret-token".to_owned());
+        let config = TelemetryConfig {
+            batch_interval_secs: Some(5),
+            batch_size: Some(64),
+            environment: Some("prod".to_owned()),
+            otlp_endpoint: Some("http://collector:4317".to_owned()),
+            otlp_headers: Some(headers),
+            sampling_rate: Some(0.5),
+            service_name: Some("svc".to_owned()),
+            service_version: Some("1.2.3".to_owned()),
+        };
+        let rendered = format!("{config:?}");
+        assert!(
+            rendered.contains("<1 header(s) redacted>"),
+            "OTLP header values must be redacted: {rendered}"
+        );
+        assert!(
+            !rendered.contains("secret-token"),
+            "OTLP header values must never appear in Debug output: {rendered}"
+        );
+    }
+
+    #[test]
+    fn debug_shows_absent_headers_as_none() {
+        let config = TelemetryConfig::default();
+        let rendered = format!("{config:?}");
+        assert!(
+            rendered.contains("otlp_headers: None"),
+            "absent headers must render as None: {rendered}"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Default & Parse Tests
     // -------------------------------------------------------------------------

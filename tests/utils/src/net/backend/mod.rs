@@ -13,7 +13,7 @@ pub use simple::{
     Backend, ChunkedBackend, RoutedBackend, start_backend, start_backend_v6, start_backend_with_shutdown,
 };
 pub use specialized::{
-    BackendGuard, start_hop_by_hop_response_backend, start_reserved_header_response_backend, start_slow_backend,
-    start_stateful_backend,
+    BackendGuard, ReusedConnectionLog, start_hop_by_hop_response_backend, start_reserved_header_response_backend,
+    start_reused_connection_kill_backend, start_slow_backend, start_stateful_backend,
 };
 pub use websocket::{WsBackendGuard, start_websocket_echo_backend};

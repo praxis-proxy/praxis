@@ -3,15 +3,14 @@
 
 //! The `policy` security filter — Praxis's in-process policy engine.
 //!
-//! Embeds the [CPEX](https://github.com/contextforge-org/cpex) policy
-//! engine in-process to enforce multi-source JWT identity, APL
-//! (Authorization Policy Logic) route policy, RFC 8693 token
+//! Embeds the Praxis Policy Engine in-process to enforce multi-source JWT
+//! identity, APL (Authorization Policy Logic) route policy, RFC 8693 token
 //! exchange, PII scanning, audit emission, and (under
 //! `body_access: read_write`) request / response body rewriting.
 //! Everything runs as linked Rust crates — no sidecar, no FFI.
 //!
-//! **Experimental.** Feature-gated behind `cpex-policy-engine`, which is
-//! off by default. Build with `--features cpex-policy-engine` to compile
+//! **Experimental.** Feature-gated behind `policy-engine`, which is
+//! off by default. Build with `--features policy-engine` to compile
 //! and register the filter (registered under the YAML name `policy`).
 //!
 //! # Why this filter
@@ -21,7 +20,7 @@
 //! wired into something. Real authorization resolves identity first,
 //! often consults more than one engine, mints a token for the downstream
 //! call, strips sensitive fields from the payload, and writes an audit
-//! record — in the right order with the right short-circuits. CPEX makes
+//! record — in the right order with the right short-circuits. The policy engine makes
 //! that orchestration declarative: a policy is a per-entity chain of APL
 //! steps, the PDP is one step, and the steps around it express the rest.
 //!
@@ -54,7 +53,7 @@
 //!
 //! # The policy document
 //!
-//! `config_path` points at the CPEX policy document (operator-supplied):
+//! `config_path` points at the policy document (operator-supplied):
 //! a `plugins` toolbox, a `global` block, and `routes`. Each route's
 //! `policy` is an ordered list of APL steps that short-circuit on the
 //! first deny:
@@ -89,7 +88,7 @@
 //! `security.labels contains "label"` and acts on it — a cross-tool,
 //! cross-request data-flow control. The session is identified by the
 //! `X-Session-Id` header, which the filter maps to `agent.session_id`;
-//! CPEX binds it to the resolved subject as `H(subject : session_id)`, so
+//! the engine binds it to the resolved subject as `H(subject : session_id)`, so
 //! the same id under a different subject is a different bucket and taint
 //! never crosses principals.
 //!
@@ -126,16 +125,18 @@
 //!
 //! - `examples/configs/security/policy.yaml` for a runnable filter config.
 //! - `examples/configs/security/policy-http.yaml` for a pure-L7 (generic-HTTP) authorization config.
-//! - The CPEX HR demo in the praxis-demos repository for an end-to-end walkthrough (identity, Cedar and CEL PDPs,
+//! - The HR demo in the praxis-demos repository for an end-to-end walkthrough (identity, Cedar and CEL PDPs,
 //!   delegation, redaction, PII scanning, session taint).
 
 mod common_message_format;
 mod config;
 mod error;
 mod filter;
+mod host_plugins;
 mod json_rpc;
 
 pub use filter::PolicyFilter;
+pub use host_plugins::{PolicyPluginFactoryFn, register_policy_plugin_factory};
 
 #[cfg(test)]
 #[expect(

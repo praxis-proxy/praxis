@@ -238,7 +238,7 @@ fn named_or_index(idx: usize, siblings: &[PipelineFilter]) -> String {
 #[expect(clippy::expect_used, reason = "tests")]
 mod tests {
     use super::*;
-    use crate::{FilterRegistry, body::BodyAccess};
+    use crate::FilterRegistry;
 
     #[test]
     fn empty_pipeline_introspection() {
@@ -296,5 +296,55 @@ mod tests {
             "terminal",
             "Terminal stays terminal"
         );
+    }
+
+    #[test]
+    fn http_phases_reflect_body_access() {
+        assert_eq!(
+            http_phases(BodyAccess::None, BodyAccess::None, &[]),
+            vec!["request"],
+            "no body access means request phase only"
+        );
+        assert_eq!(
+            http_phases(BodyAccess::ReadOnly, BodyAccess::None, &[]),
+            vec!["request", "request_body"],
+            "request body access adds the request_body phase"
+        );
+        assert_eq!(
+            http_phases(BodyAccess::None, BodyAccess::ReadWrite, &[]),
+            vec!["request", "response", "response_body"],
+            "response body access adds response phases"
+        );
+    }
+
+    #[test]
+    fn body_info_maps_modes_and_access() {
+        let stream = body_info(BodyAccess::None, BodyMode::Stream);
+        assert_eq!(stream.mode, "stream", "Stream maps to its label");
+        assert_eq!(stream.access, "none", "None access maps to its label");
+        assert_eq!(stream.max_bytes, None, "Stream has no byte ceiling");
+
+        let buffered = body_info(BodyAccess::ReadOnly, BodyMode::StreamBuffer { max_bytes: Some(42) });
+        assert_eq!(buffered.mode, "stream_buffer", "StreamBuffer maps to its label");
+        assert_eq!(buffered.access, "read_only", "ReadOnly access maps to its label");
+        assert_eq!(buffered.max_bytes, Some(42), "the configured ceiling is exposed");
+
+        let limited = body_info(BodyAccess::ReadWrite, BodyMode::SizeLimit { max_bytes: 7 });
+        assert_eq!(limited.mode, "size_limit", "SizeLimit maps to its label");
+        assert_eq!(limited.access, "read_write", "ReadWrite access maps to its label");
+        assert_eq!(limited.max_bytes, Some(7), "the configured limit is exposed");
+    }
+
+    #[test]
+    fn branch_condition_info_copies_fields() {
+        let cond = ResolvedBranchCondition {
+            filter_name: "router".into(),
+            key: "matched".into(),
+            value: "true".into(),
+        };
+        let info = branch_condition_info(&cond);
+        assert_eq!(info.filter, "router", "the filter name is copied");
+        assert_eq!(info.key, "matched", "the key is copied");
+        assert_eq!(info.result, "true", "the value is copied");
     }
 }

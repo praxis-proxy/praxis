@@ -520,4 +520,38 @@ mod tests {
         let result = probe.await.unwrap();
         assert!(!result, "should fail when status code does not match");
     }
+
+    #[tokio::test]
+    async fn http_probe_times_out_on_silent_backend() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let probe_addr = addr.clone();
+        let probe =
+            tokio::spawn(async move { http_probe(&probe_addr, "/healthz", 200, Duration::from_millis(200)).await });
+
+        let (_socket, _peer) = listener.accept().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        let result = probe.await.unwrap();
+        assert!(!result, "a silent backend must fail the probe via timeout");
+    }
+
+    #[tokio::test]
+    async fn http_probe_fails_on_empty_response() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let probe_addr = addr.clone();
+        let probe = tokio::spawn(async move { http_probe(&probe_addr, "/healthz", 200, Duration::from_secs(2)).await });
+
+        let (mut socket, _peer) = listener.accept().await.unwrap();
+        let mut buf = [0_u8; 512];
+        let _bytes_read = socket.read(&mut buf).await.unwrap();
+        socket.shutdown().await.unwrap();
+
+        let result = probe.await.unwrap();
+        assert!(!result, "an empty response must fail the probe");
+        drop(socket);
+    }
 }

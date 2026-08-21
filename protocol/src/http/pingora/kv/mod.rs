@@ -242,10 +242,6 @@ pub fn add_kv_endpoint_to_pingora_server(server: &mut Server, admin_addr: &str, 
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
-    use std::sync::Arc;
-
-    use praxis_core::kv::KvStoreRegistry;
-
     use super::*;
 
     #[test]
@@ -474,5 +470,118 @@ mod tests {
     /// Build an empty registry.
     fn make_empty_registry() -> KvStoreRegistry {
         KvStoreRegistry::new()
+    }
+
+    // -------------------------------------------------------------------------
+    // Dispatch (real HTTP/1.1 sessions over in-memory duplex streams)
+    // -------------------------------------------------------------------------
+
+    /// Build a `ServerSession` that has already read the given raw request.
+    async fn session_for(raw: Vec<u8>) -> ServerSession {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut client, server) = tokio::io::duplex(4 * 1_048_576); // 4 MiB
+        client.write_all(&raw).await.unwrap();
+        client.shutdown().await.unwrap();
+        drop(client);
+        let mut session = ServerSession::new_http1(Box::new(server));
+        let read = session.read_request().await.unwrap();
+        assert!(read, "the session must parse the request header");
+        session
+    }
+
+    #[tokio::test]
+    async fn dispatch_lists_store_entries() {
+        let registry = make_registry_with("test", &[("color", "blue")]);
+        let mut session = session_for(b"GET /api/kv/test HTTP/1.1\r\nHost: x\r\n\r\n".to_vec()).await;
+        let resp = dispatch_kv_request(&registry, &mut session).await;
+        assert_eq!(resp.status().as_u16(), 200, "list must return 200");
+        let body = String::from_utf8_lossy(resp.body());
+        assert!(body.contains(r#""color":"blue""#), "list must include entries: {body}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_put_sets_value_from_body() {
+        let registry = make_registry_with("test", &[]);
+        let mut session =
+            session_for(b"PUT /api/kv/test/color HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\n\r\nred".to_vec()).await;
+        let resp = dispatch_kv_request(&registry, &mut session).await;
+        assert_eq!(resp.status().as_u16(), 200, "set must return 200");
+        let store = registry.get("test").unwrap();
+        assert_eq!(
+            store.get("color").as_deref(),
+            Some("red"),
+            "PUT body must become the value"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_delete_removes_key() {
+        let registry = make_registry_with("test", &[("temp", "v")]);
+        let mut session = session_for(b"DELETE /api/kv/test/temp HTTP/1.1\r\nHost: x\r\n\r\n".to_vec()).await;
+        let resp = dispatch_kv_request(&registry, &mut session).await;
+        assert_eq!(resp.status().as_u16(), 200, "delete must return 200");
+        let store = registry.get("test").unwrap();
+        assert!(store.get("temp").is_none(), "key must be gone after DELETE");
+    }
+
+    #[tokio::test]
+    async fn dispatch_unknown_route_returns_404() {
+        let registry = make_empty_registry();
+        let mut session = session_for(b"POST /api/kv/test/x HTTP/1.1\r\nHost: x\r\n\r\n".to_vec()).await;
+        let resp = dispatch_kv_request(&registry, &mut session).await;
+        assert_eq!(resp.status().as_u16(), 404, "unroutable requests must return 404");
+    }
+
+    #[tokio::test]
+    async fn dispatch_put_rejects_invalid_utf8_body() {
+        let registry = make_registry_with("test", &[]);
+        let mut raw = b"PUT /api/kv/test/bin HTTP/1.1\r\nHost: x\r\nContent-Length: 2\r\n\r\n".to_vec();
+        raw.extend_from_slice(&[0xC3, 0x28]); // invalid UTF-8 sequence
+        let mut session = session_for(raw).await;
+        let resp = dispatch_kv_request(&registry, &mut session).await;
+        assert_eq!(resp.status().as_u16(), 400, "invalid UTF-8 body must return 400");
+    }
+
+    #[tokio::test]
+    async fn dispatch_put_rejects_oversized_body() {
+        let registry = make_registry_with("test", &[]);
+        let oversized = MAX_BODY_BYTES + 1;
+        let mut raw =
+            format!("PUT /api/kv/test/big HTTP/1.1\r\nHost: x\r\nContent-Length: {oversized}\r\n\r\n").into_bytes();
+        raw.resize(raw.len() + oversized, b'x');
+        let mut session = session_for(raw).await;
+        let resp = dispatch_kv_request(&registry, &mut session).await;
+        assert_eq!(resp.status().as_u16(), 413, "oversized body must return 413");
+    }
+
+    #[tokio::test]
+    async fn dispatch_put_maps_truncated_body_to_502() {
+        let registry = make_registry_with("test", &[]);
+        // Content-Length promises 10 bytes but the connection closes after 3.
+        let mut session =
+            session_for(b"PUT /api/kv/test/cut HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nabc".to_vec()).await;
+        let resp = dispatch_kv_request(&registry, &mut session).await;
+        assert_eq!(resp.status().as_u16(), 502, "a truncated body read must return 502");
+    }
+
+    #[tokio::test]
+    async fn serve_http_delegates_to_dispatch() {
+        let registry = make_registry_with("test", &[("k", "v")]);
+        let service = PingoraKvService::new(registry);
+        let mut session = session_for(b"GET /api/kv/test/k HTTP/1.1\r\nHost: x\r\n\r\n".to_vec()).await;
+        let resp = service.response(&mut session).await;
+        assert_eq!(resp.status().as_u16(), 200, "the service must serve KV routes");
+    }
+
+    #[test]
+    fn handle_set_at_capacity_returns_507() {
+        let registry = make_registry_with("full", &[]);
+        let store = registry.get("full").unwrap();
+        for entry in 0..100_000_u32 {
+            assert!(store.set(&format!("k{entry}"), Arc::from("v")), "fill must succeed");
+        }
+        let resp = handle_set(&registry, "full", "overflow", "v");
+        assert_eq!(resp.status().as_u16(), 507, "inserts past capacity must return 507");
     }
 }

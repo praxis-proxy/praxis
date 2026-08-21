@@ -62,6 +62,54 @@ pub(crate) fn preserve_for_upgrade(name: &str, is_websocket_upgrade: bool) -> bo
     is_websocket_upgrade && (name == "upgrade" || name == "connection")
 }
 
+/// Whether a message's headers declare chunked transfer framing.
+///
+/// Mirrors Pingora's framing detection (`is_chunked_encoding_from_headers`):
+/// the last `Transfer-Encoding` header value's last comma-separated token
+/// must be `chunked` ([RFC 9112 Section 6.1]).
+///
+/// [RFC 9112 Section 6.1]: https://datatracker.ietf.org/doc/html/rfc9112#section-6.1
+pub(crate) fn declares_chunked_framing(headers: &HeaderMap) -> bool {
+    // Operate on raw bytes, not to_str(): Pingora's detection accepts
+    // obs-text (0x80-0xFF) header bytes, and a value it frames as chunked
+    // must not read as non-chunked here, or the body would be dropped.
+    headers
+        .get_all(http::header::TRANSFER_ENCODING)
+        .iter()
+        .next_back()
+        .and_then(|value| value.as_bytes().rsplit(|&b| b == b',').next())
+        .is_some_and(|token| trim_ascii(token).eq_ignore_ascii_case(b"chunked"))
+}
+
+/// Trim ASCII whitespace from both ends of a byte slice.
+fn trim_ascii(bytes: &[u8]) -> &[u8] {
+    let start = bytes
+        .iter()
+        .position(|b| !b.is_ascii_whitespace())
+        .unwrap_or(bytes.len());
+    let end = bytes
+        .iter()
+        .rposition(|b| !b.is_ascii_whitespace())
+        .map_or(start, |i| i + 1);
+    bytes.get(start..end).unwrap_or(&[])
+}
+
+/// Whether chunked framing must be re-established after hop-by-hop stripping.
+///
+/// `Transfer-Encoding` is nominally hop-by-hop, but it is also the header
+/// Pingora's body writers key on to frame the next hop's body
+/// (`init_body_writer_comm`: chunked beats `Content-Length`; with neither,
+/// requests are framed as zero-length and responses fall back to
+/// close-delimited). Stripping it without re-framing silently drops chunked
+/// request bodies and breaks response keep-alive, so callers re-insert a
+/// normalized `chunked` value whenever the original message declared chunked
+/// framing and no `Content-Length` replaced it. The next hop's writer
+/// re-frames the already-dechunked stream; H2 legs remove the header again
+/// before sending.
+pub(crate) fn should_restore_chunked_framing(headers: &HeaderMap, was_chunked: bool) -> bool {
+    was_chunked && !headers.contains_key(http::header::CONTENT_LENGTH)
+}
+
 /// Whether the `Upgrade` header value indicates a `WebSocket` upgrade.
 ///
 /// Returns `true` only when the value is exactly `websocket`
@@ -72,6 +120,17 @@ pub(crate) fn preserve_for_upgrade(name: &str, is_websocket_upgrade: bool) -> bo
 /// [RFC 6455 Section 4.1]: https://datatracker.ietf.org/doc/html/rfc6455#section-4.1
 pub(crate) fn is_websocket_upgrade(value: &str) -> bool {
     value.trim().eq_ignore_ascii_case("websocket")
+}
+
+/// Whether a header map's `Upgrade` header indicates a `WebSocket` upgrade.
+///
+/// Extracts the `Upgrade` header value and delegates to
+/// [`is_websocket_upgrade`].
+pub(crate) fn has_websocket_upgrade(headers: &HeaderMap) -> bool {
+    headers
+        .get(http::header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(is_websocket_upgrade)
 }
 
 /// Snapshot `Connection` header values before they are removed.
@@ -85,7 +144,8 @@ pub(crate) fn snapshot_connection_values(headers: &HeaderMap) -> Vec<http::Heade
 }
 
 /// Remove headers declared in `Connection` tokens that are not in
-/// the static hop-by-hop list (those are already removed by the caller).
+/// the static hop-by-hop list (those are already removed by the caller)
+/// and are not proxy-owned headers (see [`is_proxy_owned`]).
 ///
 /// [RFC 9110 Section 7.6.1]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.1
 pub(crate) fn strip_connection_tokens<R: RemoveHeader>(
@@ -97,9 +157,24 @@ pub(crate) fn strip_connection_tokens<R: RemoveHeader>(
         let Ok(s) = val.to_str() else { continue };
         for token in s.split(',') {
             let trimmed = token.trim();
-            if !trimmed.is_empty() && !static_list.iter().any(|h| trimmed.eq_ignore_ascii_case(h)) {
-                msg.remove_header_by_name(trimmed);
+            if trimmed.is_empty() || static_list.iter().any(|h| trimmed.eq_ignore_ascii_case(h)) {
+                continue;
             }
+            if is_proxy_owned(trimmed) {
+                debug!(
+                    header = trimmed,
+                    "refusing to strip proxy-owned header named in Connection token"
+                );
+                continue;
+            }
+            if is_essential(trimmed) {
+                debug!(
+                    header = trimmed,
+                    "refusing to strip essential header named in Connection token"
+                );
+                continue;
+            }
+            msg.remove_header_by_name(trimmed);
         }
     }
 }
@@ -117,7 +192,10 @@ pub(crate) fn strip_hop_by_hop_header_map(headers: &mut HeaderMap, static_list: 
     for value in connection_values {
         let Ok(value) = value.to_str() else { continue };
         for token in value.split(',').map(str::trim).filter(|token| !token.is_empty()) {
-            if !static_list.iter().any(|name| token.eq_ignore_ascii_case(name)) {
+            if !static_list.iter().any(|name| token.eq_ignore_ascii_case(name))
+                && !is_proxy_owned(token)
+                && !is_essential(token)
+            {
                 headers.remove(token);
             }
         }
@@ -184,12 +262,89 @@ impl RemoveHeader for pingora_http::ResponseHeader {
 }
 
 // -----------------------------------------------------------------------------
+// Private Utilities
+// -----------------------------------------------------------------------------
+
+/// Whether a header name is owned by Praxis and must never be removed
+/// on the say-so of a client `Connection` token.
+///
+/// Covers the `x-forwarded-*` family and the RFC 7239 `Forwarded`
+/// header (both injected by the forwarded-headers filter) plus the
+/// reserved internal namespaces. Without this, a client sending
+/// `Connection: x-forwarded-for` or `Connection: forwarded` would make
+/// Praxis delete its own trust header before forwarding upstream —
+/// erasing the client address any upstream relies on for rate limiting,
+/// audit logging, or IP allow-listing.
+fn is_proxy_owned(name: &str) -> bool {
+    name.get(..12).is_some_and(|p| p.eq_ignore_ascii_case("x-forwarded-"))
+        || name.eq_ignore_ascii_case("forwarded")
+        || praxis_core::reserved_headers::is_reserved(&name.to_ascii_lowercase())
+}
+
+/// Whether a header is essential to message routing or framing and must
+/// never be removed on the say-so of a `Connection` token.
+///
+/// A client sending `Connection: host` would otherwise make Praxis forward
+/// an HTTP/1.1 request with no `Host` header (malformed per [RFC 9112], and
+/// a vhost-selection bypass at the backend); `Connection: content-length`
+/// would erase the framing header, making Pingora forward a zero-length
+/// body. Mainstream proxies ignore Connection tokens naming these headers.
+///
+/// [RFC 9112]: https://datatracker.ietf.org/doc/html/rfc9112#section-3.2
+fn is_essential(name: &str) -> bool {
+    name.eq_ignore_ascii_case("host") || name.eq_ignore_ascii_case("content-length")
+}
+
+// -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
 
 #[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declares_chunked_framing_matches_plain_and_compound() {
+        let mut plain = HeaderMap::new();
+        plain.insert(
+            http::header::TRANSFER_ENCODING,
+            http::HeaderValue::from_static("chunked"),
+        );
+        assert!(declares_chunked_framing(&plain));
+
+        let mut compound = HeaderMap::new();
+        compound.insert(
+            http::header::TRANSFER_ENCODING,
+            http::HeaderValue::from_static("gzip, chunked"),
+        );
+        assert!(declares_chunked_framing(&compound));
+    }
+
+    #[test]
+    fn declares_chunked_framing_rejects_non_chunked() {
+        let mut gzip = HeaderMap::new();
+        gzip.insert(http::header::TRANSFER_ENCODING, http::HeaderValue::from_static("gzip"));
+        assert!(!declares_chunked_framing(&gzip));
+
+        assert!(!declares_chunked_framing(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn declares_chunked_framing_handles_obs_text_bytes() {
+        // A value with an obs-text byte in an earlier token must still be
+        // detected as chunked, matching Pingora's byte-level framing.
+        let mut obs = HeaderMap::new();
+        obs.insert(
+            http::header::TRANSFER_ENCODING,
+            http::HeaderValue::from_bytes(b"\xa0x, chunked").unwrap(),
+        );
+        assert!(
+            declares_chunked_framing(&obs),
+            "obs-text in an earlier token must not hide the trailing chunked token"
+        );
+    }
 
     #[test]
     fn websocket_lowercase_is_upgrade() {
@@ -253,5 +408,99 @@ mod tests {
             !is_websocket_upgrade("SMTP"),
             "arbitrary protocol should not be recognized"
         );
+    }
+
+    #[test]
+    fn has_websocket_upgrade_case_insensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert("upgrade", "WebSocket".parse().unwrap());
+        assert!(
+            has_websocket_upgrade(&headers),
+            "should detect mixed-case WebSocket in header map"
+        );
+    }
+
+    #[test]
+    fn has_websocket_upgrade_missing_header() {
+        let headers = HeaderMap::new();
+        assert!(
+            !has_websocket_upgrade(&headers),
+            "should return false when upgrade header is missing"
+        );
+    }
+
+    #[test]
+    fn has_websocket_upgrade_non_websocket() {
+        let mut headers = HeaderMap::new();
+        headers.insert("upgrade", "h2c".parse().unwrap());
+        assert!(
+            !has_websocket_upgrade(&headers),
+            "should return false for non-websocket upgrade"
+        );
+    }
+
+    #[test]
+    fn proxy_owned_headers_are_recognized() {
+        assert!(is_proxy_owned("x-forwarded-for"), "x-forwarded-* is proxy-owned");
+        assert!(is_proxy_owned("X-Forwarded-Proto"), "matching is case-insensitive");
+        assert!(is_proxy_owned("forwarded"), "RFC 7239 Forwarded is proxy-owned");
+        assert!(is_proxy_owned("Forwarded"), "Forwarded matching is case-insensitive");
+        assert!(is_proxy_owned("x-praxis-route"), "reserved x-praxis-* is proxy-owned");
+        assert!(
+            !is_proxy_owned("x-request-id"),
+            "ordinary x-* headers are not proxy-owned"
+        );
+        assert!(!is_proxy_owned("cache-control"), "standard headers are not proxy-owned");
+    }
+
+    #[test]
+    fn strip_removes_custom_but_keeps_proxy_owned() {
+        let mut rec = Recorder {
+            removed: vec![],
+            headers: HeaderMap::new(),
+        };
+        // A client asks to strip its own X-App-State and Praxis's X-Forwarded-For.
+        let values = vec![http::HeaderValue::from_static(
+            "x-app-state, x-forwarded-for, forwarded, x-praxis-route",
+        )];
+        strip_connection_tokens(&mut rec, &values, REQUEST_HOP_BY_HOP);
+        assert!(
+            rec.removed.contains(&"x-app-state".to_owned()),
+            "custom header should be stripped"
+        );
+        assert!(
+            !rec.removed.iter().any(|h| h == "x-forwarded-for"),
+            "x-forwarded-for must not be strippable via a Connection token"
+        );
+        assert!(
+            !rec.removed.iter().any(|h| h == "forwarded"),
+            "Forwarded must not be strippable via a Connection token"
+        );
+        assert!(
+            !rec.removed.iter().any(|h| h == "x-praxis-route"),
+            "reserved x-praxis-* must not be strippable via a Connection token"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    /// Minimal [`RemoveHeader`] double recording removals.
+    struct Recorder {
+        removed: Vec<String>,
+        headers: HeaderMap,
+    }
+
+    impl RemoveHeader for Recorder {
+        const DIRECTION: &'static str = "request";
+
+        fn headers(&self) -> &HeaderMap {
+            &self.headers
+        }
+
+        fn remove_header_by_name(&mut self, name: &str) {
+            self.removed.push(name.to_ascii_lowercase());
+        }
     }
 }

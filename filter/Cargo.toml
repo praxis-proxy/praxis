@@ -15,8 +15,8 @@ name = "praxis_filter"
 
 [features]
 default = []
-cpex-policy-engine = [
-    "dep:cpex",
+policy-engine = [
+    "dep:ppe",
 ]
 basic-auth-filter = [
     "dep:base64",
@@ -31,7 +31,7 @@ workspace = true
 async-trait = { workspace = true }
 base64 = { workspace = true, optional = true }
 bytes = { workspace = true }
-cpex = { workspace = true, optional = true }
+ppe = { workspace = true, optional = true }
 dashmap = { workspace = true }
 http = { workspace = true }
 metrics = { workspace = true }
@@ -41,7 +41,7 @@ praxis-core = { workspace = true }
 praxis-tls = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
-secrecy = { version = "0.10.3", features = ["serde"] }
+secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 smallvec = { workspace = true }
@@ -49,7 +49,7 @@ serde_yaml = { workspace = true }
 sha2 = { workspace = true, optional = true }
 subtle = { workspace = true, optional = true }
 thiserror = { workspace = true }
-# Used by `cpex-policy-engine` for plugin `initialize()` at filter
+# Used by `policy-engine` for plugin `initialize()` at filter
 # construction and JWT identity plugins that fetch JWKS at init time.
 tokio = { workspace = true, features = ["rt", "sync", "time", "net"] }
 tracing = { workspace = true }
@@ -57,7 +57,8 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 chrono = { workspace = true }
-jsonwebtoken = "10.4.0"
+jsonwebtoken = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }

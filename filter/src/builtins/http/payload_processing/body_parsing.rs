@@ -55,12 +55,12 @@ pub struct ParsedJsonRpcBody {
 ///
 /// Returns `Err(Err(e))` for genuine filter errors.
 pub fn parse_json_rpc_body(
-    body: &Option<Bytes>,
+    body: Option<&Bytes>,
     end_of_stream: bool,
     json_rpc_config: &JsonRpcConfig,
     on_invalid: OnInvalidBehavior,
 ) -> Result<Option<ParsedJsonRpcBody>, Result<FilterAction, FilterError>> {
-    let Some(chunk) = body.as_ref() else {
+    let Some(chunk) = body else {
         return Ok(None);
     };
 
@@ -184,21 +184,21 @@ mod tests {
 
     #[test]
     fn parse_body_none_returns_ok_none() {
-        let result = parse_json_rpc_body(&None, true, &default_config(), OnInvalidBehavior::Continue);
+        let result = parse_json_rpc_body(None, true, &default_config(), OnInvalidBehavior::Continue);
         assert!(matches!(result, Ok(None)), "None body should return Ok(None)");
     }
 
     #[test]
     fn parse_body_not_end_of_stream_returns_ok_none() {
         let body = Some(Bytes::from(r#"{"jsonrpc":"2.0","method":"test"}"#));
-        let result = parse_json_rpc_body(&body, false, &default_config(), OnInvalidBehavior::Continue);
+        let result = parse_json_rpc_body(body.as_ref(), false, &default_config(), OnInvalidBehavior::Continue);
         assert!(matches!(result, Ok(None)), "partial body should return Ok(None)");
     }
 
     #[test]
     fn parse_body_valid_json_rpc_returns_envelope() {
         let body = Some(Bytes::from(r#"{"jsonrpc":"2.0","method":"eth_call","id":1}"#));
-        let result = parse_json_rpc_body(&body, true, &default_config(), OnInvalidBehavior::Continue);
+        let result = parse_json_rpc_body(body.as_ref(), true, &default_config(), OnInvalidBehavior::Continue);
         assert!(result.is_ok(), "valid JSON-RPC should return Ok");
         let parsed = result.unwrap();
         assert!(parsed.is_some(), "valid JSON-RPC should return Some");
@@ -208,7 +208,7 @@ mod tests {
     #[test]
     fn parse_body_invalid_json_with_continue() {
         let body = Some(Bytes::from("not json"));
-        let result = parse_json_rpc_body(&body, true, &default_config(), OnInvalidBehavior::Continue);
+        let result = parse_json_rpc_body(body.as_ref(), true, &default_config(), OnInvalidBehavior::Continue);
         assert!(
             matches!(result, Err(Ok(FilterAction::Continue))),
             "invalid JSON + Continue should continue"
@@ -218,7 +218,7 @@ mod tests {
     #[test]
     fn parse_body_invalid_json_with_reject() {
         let body = Some(Bytes::from("not json"));
-        let result = parse_json_rpc_body(&body, true, &default_config(), OnInvalidBehavior::Reject);
+        let result = parse_json_rpc_body(body.as_ref(), true, &default_config(), OnInvalidBehavior::Reject);
         assert!(
             matches!(result, Err(Ok(FilterAction::Reject(_)))),
             "invalid JSON + Reject should reject"
@@ -228,7 +228,7 @@ mod tests {
     #[test]
     fn parse_body_missing_method_dispatches() {
         let body = Some(Bytes::from(r#"{"jsonrpc":"2.0","id":1}"#));
-        let result = parse_json_rpc_body(&body, true, &default_config(), OnInvalidBehavior::Continue);
+        let result = parse_json_rpc_body(body.as_ref(), true, &default_config(), OnInvalidBehavior::Continue);
         assert!(
             matches!(result, Err(Ok(FilterAction::Continue))),
             "missing method + Continue should continue"
@@ -240,7 +240,7 @@ mod tests {
         let body = Some(Bytes::from(
             r#"[{"jsonrpc":"2.0","method":"a","id":1},{"jsonrpc":"2.0","method":"b","id":2}]"#,
         ));
-        let result = parse_json_rpc_body(&body, true, &default_config(), OnInvalidBehavior::Continue);
+        let result = parse_json_rpc_body(body.as_ref(), true, &default_config(), OnInvalidBehavior::Continue);
         assert!(
             matches!(result, Err(Ok(FilterAction::Reject(_)))),
             "batch with Reject policy should reject"

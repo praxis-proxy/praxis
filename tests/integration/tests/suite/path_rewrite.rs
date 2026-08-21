@@ -39,6 +39,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config = praxis_core::config::Config::from_yaml(&yaml).unwrap();
@@ -79,6 +81,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config = praxis_core::config::Config::from_yaml(&yaml).unwrap();
@@ -119,6 +123,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config = praxis_core::config::Config::from_yaml(&yaml).unwrap();
@@ -161,6 +167,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config = praxis_core::config::Config::from_yaml(&yaml).unwrap();
@@ -208,6 +216,8 @@ filter_chains:
           - name: default_backend
             endpoints:
               - "127.0.0.1:{backend_b_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config = praxis_core::config::Config::from_yaml(&yaml).unwrap();
@@ -251,6 +261,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config = praxis_core::config::Config::from_yaml(&yaml).unwrap();

@@ -14,6 +14,7 @@ use super::{
     branch_chain::validate_branch_chains,
     cluster::validate_clusters,
     filter_chain::validate_filter_chains,
+    inline_clusters::validate_inline_clusters,
     listener::{validate_listener_names, validate_listeners},
 };
 use crate::{
@@ -83,6 +84,7 @@ impl Config {
         validate_body_limits(&self.body_limits, self.insecure_options.allow_unbounded_body)?;
         validate_cluster_names(&self.clusters)?;
         validate_clusters(&self.clusters, &self.insecure_options)?;
+        validate_inline_clusters(&self.filter_chains, &self.insecure_options)?;
         validate_upstream_ca_file(self.runtime.upstream_ca_file.as_deref())?;
         validate_runtime_threads(self.runtime.threads)?;
         validate_runtime_max_connections(self.runtime.max_connections)?;

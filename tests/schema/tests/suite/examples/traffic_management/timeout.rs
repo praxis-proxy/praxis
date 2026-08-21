@@ -36,6 +36,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{fast_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config = Config::from_yaml(&yaml).unwrap();
@@ -66,6 +68,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{slow_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config2 = Config::from_yaml(&yaml2).unwrap();

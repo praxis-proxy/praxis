@@ -40,8 +40,6 @@ pub(crate) fn resolve_available(address: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::net::TcpListener;
-
     use super::*;
 
     #[test]

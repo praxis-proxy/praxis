@@ -13,8 +13,8 @@ use std::{
 use praxis_core::config::Config;
 use praxis_test_utils::{
     ProxyGuard, TestCertificates, example_config_path, free_port, http_get, https_get, patch_yaml,
-    start_backend_with_shutdown, start_full_proxy, start_proxy, start_tcp_tagged_backend, tls_send_recv, wait_for_tcp,
-    wait_for_tls,
+    start_backend_with_shutdown, start_full_proxy, start_proxy, start_tcp_tagged_backend, tls_connection_rejected,
+    tls_send_recv, wait_for_tcp, wait_for_tls,
 };
 
 // ---------------------------------------------------------------------------
@@ -160,15 +160,40 @@ fn tcp_tls_termination_example_forwards_over_tls() {
 }
 
 #[test]
-fn tcp_tls_mtls_example_parses() {
+fn tcp_tls_mtls_example_requires_client_cert() {
     let certs = TestCertificates::generate();
+    let backend_port = start_tcp_tagged_backend("secure-db");
     let proxy_port = free_port();
-    let backend_port = free_port();
     let config = load_mtls_example("protocols/tcp-tls-mtls.yaml", proxy_port, backend_port, &certs);
-    assert_eq!(config.listeners.len(), 1, "tcp-tls-mtls should have 1 listener");
     assert_eq!(
         &*config.listeners[0].name, "secure-db",
         "tcp-tls-mtls listener name should be secure-db"
+    );
+
+    let _proxy = start_full_proxy(&config);
+    let addr = format!("127.0.0.1:{proxy_port}");
+
+    // A client presenting a certificate signed by the trusted CA
+    // completes the handshake and reaches the upstream.
+    let client_cert = certs.generate_client_cert();
+    let with_cert = certs.raw_tls_client_config_with_cert(&client_cert);
+    wait_for_tls(&addr, &with_cert);
+    let resp = tls_send_recv(&addr, b"query", &with_cert);
+    let text = String::from_utf8_lossy(&resp);
+    assert!(
+        text.contains("secure-db"),
+        "mTLS client should reach the tagged backend, got: {text}"
+    );
+    assert!(
+        text.contains("query"),
+        "mTLS client payload should be echoed, got: {text}"
+    );
+
+    // A client without a certificate is rejected at the TLS layer.
+    let without_cert = certs.raw_tls_client_config();
+    assert!(
+        tls_connection_rejected(&addr, b"query", &without_cert),
+        "a client without a certificate must be rejected"
     );
 }
 

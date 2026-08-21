@@ -3,7 +3,7 @@
 
 //! HTTP security filters: CORS, CSRF, IP access control, credential injection,
 //! forwarded-header injection, guardrails, mTLS ingress trust enforcement,
-//! and the (feature-gated) CPEX policy filter.
+//! and the (feature-gated) `policy` filter.
 
 #[cfg(feature = "basic-auth-filter")]
 mod basic_auth;
@@ -16,7 +16,7 @@ mod ip_acl;
 pub(crate) mod origin_matcher;
 pub(crate) mod origin_normalize;
 mod peer_identity_trust;
-#[cfg(feature = "cpex-policy-engine")]
+#[cfg(feature = "policy-engine")]
 mod policy;
 
 #[cfg(feature = "basic-auth-filter")]
@@ -28,5 +28,5 @@ pub use forwarded_headers::ForwardedHeadersFilter;
 pub use guardrails::{ContainsValue, GuardrailsAction, GuardrailsFilter, PiiKind, RuleTargetKind};
 pub use ip_acl::IpAclFilter;
 pub use peer_identity_trust::PeerIdentityTrustFilter;
-#[cfg(feature = "cpex-policy-engine")]
-pub use policy::PolicyFilter;
+#[cfg(feature = "policy-engine")]
+pub use policy::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};

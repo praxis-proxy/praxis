@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! `PolicyFilter` — embeds the CPEX runtime in-process to resolve and
+//! `PolicyFilter` — embeds the policy engine in-process to resolve and
 //! validate identity, evaluate APL routes, optionally mint delegated
 //! credentials, scan for PII, emit audit records, and optionally
 //! rewrite request/response bodies.
@@ -10,18 +10,18 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use cpex::cpex_core::{
+use ppe::praxis_policy_core::{
     cmf::{
         CmfHook, Message, MessagePayload, Role,
         constants::{
             HOOK_CMF_HTTP_REQUEST, HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_PRE_INVOKE,
         },
     },
+    engine::PolicyEngine,
     error::{PluginError, PluginViolation},
     extensions::MetaExtension,
     hooks::Extensions,
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
-    manager::PluginManager,
 };
 
 use super::{
@@ -44,12 +44,12 @@ use crate::{
 // PolicyFilter
 // -----------------------------------------------------------------------------
 
-/// Embeds the CPEX policy engine in-process to enforce multi-source JWT
+/// Embeds the Praxis Policy Engine in-process to enforce multi-source JWT
 /// identity, APL route policy, RFC 8693 token exchange, PII
 /// scanning, audit emission, and (under `body_access: read_write`)
 /// request / response body rewriting.
 ///
-/// Experimental: requires the `cpex-policy-engine` cargo feature, which
+/// Experimental: requires the `policy-engine` cargo feature, which
 /// is off by default. Registered under the YAML filter name `policy`.
 ///
 /// A single request can carry multiple identity sources — user JWT in
@@ -61,7 +61,7 @@ use crate::{
 /// On the body phase, the filter consumes protocol classifier filter metadata
 /// (from the `praxis-ai` package) to dispatch the matching CMF
 /// hook chain. APL routes
-/// (declared in the CPEX YAML) gate the tool/prompt/resource call by
+/// (declared in the policy document) gate the tool/prompt/resource call by
 /// role, attribute, or Cedar PDP decision. `delegate(...)` steps mint
 /// audience-scoped tokens (RFC 8693) that the allow path attaches as
 /// upstream headers.
@@ -78,7 +78,7 @@ use crate::{
 ///
 /// ```yaml
 /// filter: policy
-/// config_path: /etc/praxis/cpex-policy.yaml
+/// config_path: /etc/praxis/policy.yaml
 /// body_access: read_write       # optional; default read_only
 /// require_protocol_metadata: true    # optional; default true
 /// init_timeout_secs: 30         # optional; default 30
@@ -89,11 +89,11 @@ pub struct PolicyFilter {
     /// `request_body_access` / `request_body_mode` / their response
     /// counterparts can branch on `body_access` per request.
     cfg: PolicyFilterConfig,
-    /// CPEX plugin manager — owns the loaded plugin instances and
+    /// Policy engine plugin manager — owns the loaded plugin instances and
     /// dispatches hook chains. Wrapped in `Arc` so the response-phase
     /// `spawn_blocking` closure can hold its own handle without
     /// borrowing `&self`.
-    mgr: Arc<PluginManager>,
+    mgr: Arc<PolicyEngine>,
     /// Derived from the loaded policy at construction: the `global` policy
     /// wired the entity-less HTTP path (`cmf.http_request`). When true and
     /// `entity_routes` is false, the filter is a pure L7 policy evaluated at
@@ -107,7 +107,7 @@ pub struct PolicyFilter {
 }
 
 impl PolicyFilter {
-    /// Construct a filter from a parsed config. Loads the CPEX YAML
+    /// Construct a filter from a parsed config. Loads the policy document
     /// referenced by `cfg.config_path`, registers bundled plugin
     /// factories, wires the APL visitor, and initializes the manager.
     /// Errors abort filter chain construction at server startup —
@@ -122,13 +122,33 @@ impl PolicyFilter {
         clippy::too_many_lines,
         reason = "linear construction + init steps; splitting obscures the startup flow"
     )]
-    pub fn new(cfg: PolicyFilterConfig) -> Result<Self, FilterError> {
+    pub(crate) fn new(cfg: PolicyFilterConfig) -> Result<Self, FilterError> {
         let yaml = std::fs::read_to_string(&cfg.config_path).map_err(|e| -> FilterError {
             format!("policy: failed to read config_path {}: {e}", cfg.config_path).into()
         })?;
 
-        let mgr = Arc::new(PluginManager::default());
-        cpex::install_builtins(&mgr);
+        let mgr = Arc::new(PolicyEngine::default());
+        ppe::install_builtins(&mgr);
+
+        // Host-supplied factories, for `kind:` values the engine does not
+        // bundle. After the builtins on purpose: the factory registry is
+        // last-writer-wins, so a host registering a bundled `kind` replaces it,
+        // which is how a deployment swaps an implementation without forking.
+        //
+        // Re-read on every construction, not drained. `PolicyFilter::new` runs
+        // again on each hot reload, and a registry emptied by the first read
+        // would fail the reload with "no factory registered" for a config that
+        // had been serving traffic.
+        let host_factories = super::host_plugins::host_plugin_factories();
+        if !host_factories.is_empty() {
+            tracing::info!(
+                count = super::host_plugins::host_plugin_count(),
+                "policy: registering host-supplied plugin factories"
+            );
+        }
+        for (kind, factory) in host_factories {
+            mgr.register_factory(kind, factory);
+        }
 
         mgr.load_config_yaml(&yaml)
             .map_err(|e: Box<PluginError>| -> FilterError {
@@ -160,9 +180,9 @@ impl PolicyFilter {
             rt.block_on(async move {
                 match tokio::time::timeout(init_timeout, mgr_for_init.initialize()).await {
                     Ok(Ok(())) => Ok(()),
-                    Ok(Err(e)) => Err(format!("policy: PluginManager::initialize failed: {e}")),
+                    Ok(Err(e)) => Err(format!("policy: PolicyEngine::initialize failed: {e}")),
                     Err(_) => Err(format!(
-                        "policy: PluginManager::initialize timed out after {}s \
+                        "policy: PolicyEngine::initialize timed out after {}s \
                          (init_timeout_secs); likely a JWKS / OAuth endpoint is unreachable",
                         init_timeout.as_secs(),
                     )),
@@ -176,7 +196,7 @@ impl PolicyFilter {
                 .map(|s| (*s).to_owned())
                 .or_else(|| panic.downcast_ref::<String>().cloned())
                 .unwrap_or_else(|| "<no panic message>".to_owned());
-            format!("policy: PluginManager::initialize panicked in init thread: {msg}")
+            format!("policy: PolicyEngine::initialize panicked in init thread: {msg}")
         })?;
         init.map_err(|s: String| -> FilterError { s.into() })?;
 
@@ -368,7 +388,7 @@ impl PolicyFilter {
     }
 
     /// Generic-HTTP (L7) authorization: resolve identity, populate the
-    /// HTTP request line + headers into the CPEX bag, and evaluate the CPEX
+    /// HTTP request line + headers into the attribute bag, and evaluate the
     /// `global` policy via the `cmf.http_request` hook. A deny maps to a
     /// plain HTTP response ([`super::error::http_authz_rejection`]); an
     /// identity failure is the usual 401. Authorization runs here (not the
@@ -379,7 +399,7 @@ impl PolicyFilter {
         reason = "async handler over large CMF types; linear resolve/authz/delegate flow"
     )]
     async fn on_request_http_authz(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        use cpex::cpex_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL};
+        use ppe::praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL};
 
         let headers = Self::snapshot_headers(ctx);
         let identity = match self
@@ -443,7 +463,7 @@ impl PolicyFilter {
         ext: &mut Extensions,
         request_headers: std::collections::HashMap<String, String>,
     ) {
-        use cpex::cpex_core::extensions::HttpExtension;
+        use ppe::praxis_policy_core::extensions::HttpExtension;
 
         let req = ctx.request;
         let host = req.uri.authority().map(|a| a.host().to_owned()).or_else(|| {
@@ -473,6 +493,12 @@ pub(super) struct ResolvedIdentity(pub(super) IdentityPayload);
 
 #[async_trait]
 impl HttpFilter for PolicyFilter {
+    fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        // The policy document. Declaring it is what lets an operator edit policy
+        // and have it take effect without a restart.
+        vec![std::path::PathBuf::from(&self.cfg.config_path)]
+    }
+
     fn name(&self) -> &'static str {
         "policy"
     }
@@ -483,7 +509,7 @@ impl HttpFilter for PolicyFilter {
         // the protocol classifier filter populates its metadata). Operators opt into
         // `ReadWrite` via `body_access: read_write` when they want APL
         // field mutators (`redact()` / `assign()` on `args.<field>`) to
-        // rewrite the upstream body. Chain-level scoping keeps non-CPEX
+        // rewrite the upstream body. Chain-level scoping keeps non-policy
         // traffic out of this filter so the buffering cost is bounded
         // either way.
         match self.cfg.body_access {
@@ -562,7 +588,7 @@ impl HttpFilter for PolicyFilter {
 
         // No entity routes means there is nothing to authorize at the body
         // phase: a pure L7 policy already ran (and allowed) in `on_request`
-        // over the CPEX `global` policy, and an identity-only policy has no
+        // over the policy's `global` block, and an identity-only policy has no
         // per-entity step. Skip rather than trip the classifier-metadata gate.
         if !self.entity_routes {
             return Ok(FilterAction::BodyDone);
@@ -620,7 +646,7 @@ impl HttpFilter for PolicyFilter {
         let mut extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &entity_name);
         // Attach the HTTP request line + headers so a single policy can combine
         // entity/`args.*` checks with `http.*` predicates in one evaluation.
-        // CPEX grants entity route handlers the `read_headers` capability, so
+        // The engine grants entity route handlers the `read_headers` capability, so
         // these `http.*` attributes reach the CEL/APL bag at the entity phase.
         Self::attach_http_attributes(ctx, &mut extensions, headers);
         ctx.extensions.insert(ResolvedIdentity(identity));

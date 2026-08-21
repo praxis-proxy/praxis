@@ -20,6 +20,7 @@ use praxis_core::config::{FailureMode, FilterEntry};
 use tracing::warn;
 
 use super::{branch::RejoinTarget, filter::PipelineFilter};
+use crate::{any_filter::AnyFilter, body::BodyAccess};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -36,7 +37,7 @@ const SECURITY_FILTERS: &[&str] = &[
     "guardrails",
     "ip_acl",
     "peer_identity_trust",
-    #[cfg(feature = "cpex-policy-engine")]
+    #[cfg(feature = "policy-engine")]
     "policy",
     "rate_limit",
 ];
@@ -291,6 +292,41 @@ pub(super) fn check_skip_to_bypasses_security(filters: &[PipelineFilter], errors
     }
 }
 
+/// Body-access filters inside branch chains.
+///
+/// Branch sub-chains only run `on_request`: `on_request_body` and
+/// `on_response_body` never execute for filters inside branches, yet
+/// their declared body access would silently enable pipeline-wide
+/// buffering for hooks that never run. Body-processing filters must be
+/// in the main pipeline path or gated with normal filter conditions.
+pub(super) fn check_branch_body_filters(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for pf in filters {
+        for branch in &pf.branches {
+            collect_branch_body_errors(&branch.name, &branch.filters, errors);
+        }
+    }
+}
+
+/// Recursively collect body-access violations inside one branch sub-chain.
+fn collect_branch_body_errors(branch_name: &str, filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for pf in filters {
+        if let AnyFilter::Http(filter) = &pf.filter
+            && (filter.request_body_access() != BodyAccess::None || filter.response_body_access() != BodyAccess::None)
+        {
+            errors.push(format!(
+                "filter '{name}' in branch '{branch_name}' declares body \
+                 access, but branch filters only run on_request and body \
+                 hooks never execute; move it to the main pipeline or gate \
+                 it with filter conditions",
+                name = filter.name(),
+            ));
+        }
+        for branch in &pf.branches {
+            collect_branch_body_errors(&branch.name, &branch.filters, errors);
+        }
+    }
+}
+
 /// `iterative_request_router` coexisting with `router` or `load_balancer`.
 ///
 /// The IRR owns the full sub-request lifecycle including routing.
@@ -392,11 +428,11 @@ fn has_allow_rewrite_override(entries: &[FilterEntry], idx: usize) -> bool {
 mod tests {
     use std::sync::Arc;
 
-    use praxis_core::config::{Condition, ConditionMatch, FailureMode, FilterEntry};
+    use praxis_core::config::{Condition, ConditionMatch};
 
     use super::*;
     use crate::pipeline::{
-        branch::{RejoinTarget, ResolvedBranch},
+        branch::ResolvedBranch,
         test_filters::{lb_filter, noop_filter_with_conditions, selector_filter},
     };
 
@@ -956,6 +992,59 @@ mod tests {
     }
 
     #[test]
+    fn branch_body_filter_errors() {
+        let mut parent = named_noop_filter("headers", vec![]);
+        parent.branches = vec![make_branch_with_filters("body_branch", vec![body_filter()])];
+        let filters = vec![parent];
+        let mut errors = Vec::new();
+        check_branch_body_filters(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "body filter in branch should error");
+        assert!(
+            errors[0].contains("body_branch") && errors[0].contains("branch_body"),
+            "error should name the branch and the filter: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn nested_branch_body_filter_errors() {
+        let mut inner_parent = named_noop_filter("classifier", vec![]);
+        inner_parent.branches = vec![make_branch_with_filters("inner", vec![body_filter()])];
+        let mut parent = named_noop_filter("headers", vec![]);
+        parent.branches = vec![make_branch_with_filters("outer", vec![inner_parent])];
+        let filters = vec![parent];
+        let mut errors = Vec::new();
+        check_branch_body_filters(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "nested branch body filter should error");
+        assert!(
+            errors[0].contains("inner"),
+            "error should name the innermost branch: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn branch_without_body_filters_no_error() {
+        let mut parent = named_noop_filter("headers", vec![]);
+        parent.branches = vec![make_branch_with_filters(
+            "noop_branch",
+            vec![named_noop_filter("request_id", vec![])],
+        )];
+        let filters = vec![parent];
+        let mut errors = Vec::new();
+        check_branch_body_filters(&filters, &mut errors);
+        assert!(errors.is_empty(), "branch without body filters should not error");
+    }
+
+    #[test]
+    fn top_level_body_filter_no_branch_error() {
+        let filters = vec![body_filter()];
+        let mut errors = Vec::new();
+        check_branch_body_filters(&filters, &mut errors);
+        assert!(errors.is_empty(), "top-level body filters are legitimate");
+    }
+
+    #[test]
     fn irr_with_router_errors() {
         let names = vec!["iterative_request_router", "router"];
         let mut errors = Vec::new();
@@ -1052,5 +1141,42 @@ mod tests {
             name: Arc::from(name),
             rejoin: RejoinTarget::SkipTo(target),
         }
+    }
+
+    /// Build a [`ResolvedBranch`] containing the given filters.
+    fn make_branch_with_filters(name: &str, filters: Vec<PipelineFilter>) -> ResolvedBranch {
+        ResolvedBranch {
+            condition: None,
+            filters,
+            max_iterations: None,
+            name: Arc::from(name),
+            rejoin: RejoinTarget::Next,
+        }
+    }
+
+    /// Build a [`PipelineFilter`] whose filter declares request body access.
+    fn body_filter() -> PipelineFilter {
+        /// Minimal filter declaring request body access.
+        struct BranchBodyFilter;
+
+        #[async_trait::async_trait]
+        impl crate::filter::HttpFilter for BranchBodyFilter {
+            fn name(&self) -> &'static str {
+                "branch_body"
+            }
+
+            async fn on_request(
+                &self,
+                _ctx: &mut crate::HttpFilterContext<'_>,
+            ) -> Result<crate::FilterAction, crate::FilterError> {
+                Ok(crate::FilterAction::Continue)
+            }
+
+            fn request_body_access(&self) -> BodyAccess {
+                BodyAccess::ReadOnly
+            }
+        }
+
+        PipelineFilter::new(0, AnyFilter::Http(Box::new(BranchBodyFilter)), vec![], vec![])
     }
 }

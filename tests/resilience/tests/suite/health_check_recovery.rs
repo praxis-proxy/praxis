@@ -36,6 +36,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 insecure_options:
+  allow_private_endpoints: true
   allow_private_health_checks: true
 clusters:
   - name: backend

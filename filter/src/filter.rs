@@ -207,6 +207,21 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Filesystem paths this filter reads its configuration from, beyond the
+    /// main Praxis config.
+    ///
+    /// The config watcher uses this to decide which files should trigger a
+    /// reload. A filter whose configuration lives entirely inside the Praxis
+    /// config has nothing to declare, which is why the default is empty and why
+    /// adding this is additive for every existing filter.
+    ///
+    /// Paths are returned as configured, not canonicalized: the watcher does its
+    /// own resolution because it has to handle symlinks and relative paths
+    /// consistently with how it already treats the main config.
+    fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+        Vec::new()
+    }
+
     /// Apply global [`InsecureOptions`] to this filter.
     ///
     /// Filters that support insecure overrides (e.g. CSRF
@@ -304,7 +319,6 @@ mod tests {
     use async_trait::async_trait;
 
     use super::*;
-    use crate::{FilterAction, FilterError};
 
     #[tokio::test]
     async fn default_on_response_returns_continue() {
@@ -349,6 +363,17 @@ mod tests {
         );
     }
 
+    /// The empty default is what makes `referenced_files` additive: a filter that
+    /// predates it declares nothing.
+    #[test]
+    fn default_referenced_files_is_empty() {
+        let filter = MinimalFilter;
+        assert!(
+            filter.referenced_files().is_empty(),
+            "a filter with no external config must declare nothing"
+        );
+    }
+
     #[test]
     fn default_cluster_capabilities_are_empty() {
         let filter = MinimalFilter;
@@ -366,6 +391,40 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn default_body_hooks_return_continue() {
+        let filter = MinimalFilter;
+        let req = crate::test_utils::make_request(http::Method::POST, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let mut body = Some(Bytes::from_static(b"chunk"));
+
+        let request_action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+        assert!(
+            matches!(request_action, FilterAction::Continue),
+            "default on_request_body should return Continue"
+        );
+
+        let response_action = filter.on_response_body(&mut ctx, &mut body, true).unwrap();
+        assert!(
+            matches!(response_action, FilterAction::Continue),
+            "default on_response_body should return Continue"
+        );
+        assert_eq!(
+            body.as_deref(),
+            Some(b"chunk".as_slice()),
+            "defaults must not touch the body"
+        );
+    }
+
+    #[test]
+    fn default_streaming_selection_is_disabled() {
+        let filter = MinimalFilter;
+        assert!(
+            !filter.may_select_streaming_subrequest_response(),
+            "filters must opt in to streaming selection"
+        );
+    }
 
     /// Minimal filter for verifying trait defaults.
     struct MinimalFilter;

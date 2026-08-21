@@ -132,7 +132,6 @@ fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader
     header
 }
 
-
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -233,5 +232,20 @@ mod tests {
         let header = build_rejection_header(&rejection);
 
         assert_eq!(header.headers["x-opaque"].as_bytes(), &[b'a', 0x80, b'z']);
+    }
+
+    #[test]
+    fn invalid_rejection_status_falls_back_to_500() {
+        // Bypass the validating constructor to model a hostile custom
+        // filter handing the converter an out-of-range status.
+        let rejection = Rejection {
+            body: None,
+            headers: Vec::new(),
+            header_map: None,
+            preserve_keepalive: false,
+            status: 99,
+        };
+        let header = build_rejection_header(&rejection);
+        assert_eq!(header.status.as_u16(), 500, "invalid status codes must map to 500");
     }
 }

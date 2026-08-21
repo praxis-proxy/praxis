@@ -30,11 +30,14 @@ use crate::{
 /// variant to filter metadata and results for downstream routing.
 ///
 /// Detection values: `grpc` (bare `application/grpc`), `grpc+proto`,
-/// `grpc+json`, `grpc+other` (unrecognized sub-protocol), `none`
-/// (non-gRPC request).
+/// `grpc+json`, `grpc+other` (unrecognized sub-protocol).
 ///
 /// Writes `grpc.kind` to filter metadata and `kind` to the
 /// `grpc_detection` filter results for branch chain conditions.
+///
+/// A non-gRPC request writes neither, so a branch condition cannot
+/// match on the absence of gRPC. Branch on a gRPC value and use the
+/// fall-through path for everything else.
 ///
 /// # YAML
 ///

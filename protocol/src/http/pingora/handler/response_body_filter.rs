@@ -42,6 +42,7 @@ pub(super) fn execute(
     let caps = pipeline.body_capabilities();
 
     if !caps.needs_response_body {
+        mark_delivered_at_eos(ctx, end_of_stream);
         return Ok(None);
     }
 
@@ -49,13 +50,31 @@ pub(super) fn execute(
 
     match ctx.response_body_mode {
         BodyMode::SizeLimit { max_bytes } => {
-            if check_body_size_limit(body, &mut ctx.response_body_bytes, max_bytes) {
+            if check_body_size_limit(body.as_ref(), &mut ctx.response_body_bytes, max_bytes) {
                 return Err(pingora_core::Error::explain(
                     pingora_core::ErrorType::InternalError,
                     "response body exceeds maximum size",
                 ));
             }
+            mark_delivered_at_eos(ctx, end_of_stream);
             return Ok(None);
+        },
+
+        BodyMode::Stream => {
+            // The global body_limits ceiling applies to streamed bodies too;
+            // Stream mode just counts instead of buffering. The projection
+            // does not mutate the counter — the filter pipeline below is
+            // the accumulator. `None` is only reachable with
+            // allow_unbounded_body.
+            let chunk_len = body.as_ref().map_or(0, Bytes::len) as u64;
+            if let Some(max) = pipeline.response_body_ceiling()
+                && ctx.response_body_bytes.saturating_add(chunk_len) > max as u64
+            {
+                return Err(pingora_core::Error::explain(
+                    pingora_core::ErrorType::InternalError,
+                    "streamed response body exceeds global body limit",
+                ));
+            }
         },
 
         BodyMode::StreamBuffer { max_bytes } if !ctx.response_body_released => {
@@ -65,9 +84,28 @@ pub(super) fn execute(
                     "response body exceeds stream_buffer size limit",
                 ));
             }
+            if end_of_stream {
+                // The mid-stream chunks were already counted incrementally,
+                // and `body` now holds the frozen full buffer the pipeline
+                // will count again below. Reset so the final total is the
+                // buffer size, not double it.
+                ctx.response_body_bytes = 0;
+            }
         },
 
-        BodyMode::StreamBuffer { .. } | BodyMode::Stream => {},
+        // After Release the body streams unbuffered; the global ceiling
+        // still applies (StreamBuffer's own cap no longer runs).
+        BodyMode::StreamBuffer { .. } => {
+            let chunk_len = body.as_ref().map_or(0, Bytes::len) as u64;
+            if let Some(max) = pipeline.response_body_ceiling()
+                && ctx.response_body_bytes.saturating_add(chunk_len) > max as u64
+            {
+                return Err(pingora_core::Error::explain(
+                    pingora_core::ErrorType::InternalError,
+                    "released response body exceeds global body limit",
+                ));
+            }
+        },
         _ => tracing::error!("unhandled BodyMode variant in response body filter"),
     }
 
@@ -93,6 +131,7 @@ pub(super) fn execute(
             | FilterAction::StreamingTerminalResponse(_),
         ) => {
             suppress_stream_buffer_chunk(body, is_stream_buffer, ctx.response_body_released, end_of_stream);
+            mark_delivered_at_eos(ctx, end_of_stream);
             Ok(None)
         },
         Ok(FilterAction::Release) => {
@@ -103,6 +142,7 @@ pub(super) fn execute(
                 &mut ctx.response_body_buffer,
                 end_of_stream,
             );
+            mark_delivered_at_eos(ctx, end_of_stream);
             Ok(None)
         },
         Ok(FilterAction::Reject(rejection)) => {
@@ -128,6 +168,17 @@ pub(super) fn execute(
     }
 }
 
+/// Record that the response was delivered to completion.
+///
+/// Called only on success exits: setting the flag before the size checks
+/// and filter runs in the same invocation would mark responses aborted at
+/// end-of-stream as delivered, suppressing the fallback access record.
+fn mark_delivered_at_eos(ctx: &mut PingoraRequestCtx, end_of_stream: bool) {
+    if end_of_stream {
+        ctx.response_delivery_complete = true;
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -142,11 +193,9 @@ pub(super) fn execute(
     reason = "tests"
 )]
 mod tests {
-    use bytes::Bytes;
-    use praxis_filter::{FilterPipeline, FilterRegistry};
+    use praxis_filter::FilterRegistry;
 
     use super::*;
-    use crate::http::pingora::context::PingoraRequestCtx;
 
     #[test]
     fn no_body_capabilities_returns_none() {

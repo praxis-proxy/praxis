@@ -317,7 +317,7 @@ fn find_weak_before_strong(suites: &[CipherSuiteId]) -> Option<(&CipherSuiteId, 
 mod tests {
     use super::*;
     use crate::{
-        CaConfig, CertKeyPair, ClientCertMode, TlsVersion,
+        CaConfig, CertKeyPair,
         test_utils::{ensure_crypto_provider, gen_test_certs},
     };
 

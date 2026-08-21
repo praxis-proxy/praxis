@@ -38,7 +38,7 @@ pub(super) struct StepRuntime {
     /// Whether the original downstream uses TLS.
     pub(super) downstream_tls: bool,
     /// Verified downstream peer identity.
-    pub(super) peer_identity: Option<praxis_tls::TlsPeerIdentity>,
+    pub(super) peer_identity: Option<Arc<praxis_tls::TlsPeerIdentity>>,
     /// Start time of the logical client request.
     pub(super) request_start: Instant,
 }
