@@ -411,6 +411,7 @@ impl IrrStepRunner {
                             Ok(response) => (response, config::ResponseOrigin::Upstream, None),
                             Err(error) => {
                                 let (status, kind) = classify_transport_failure(&error);
+                                warn!(step = current_step.as_ref(), %error, status, "IRR buffered transport failure");
                                 (
                                     SubResponse { status, headers: HeaderMap::new(), body: Bytes::new() },
                                     config::ResponseOrigin::Transport,
@@ -418,11 +419,14 @@ impl IrrStepRunner {
                                 )
                             },
                         },
-                        Err(_) => (
-                            SubResponse { status: 502, headers: HeaderMap::new(), body: Bytes::new() },
-                            config::ResponseOrigin::Transport,
-                            Some(config::TransportErrorKind::Connect),
-                        ),
+                        Err(error) => {
+                            warn!(step = current_step.as_ref(), %error, status = 502_u16, "IRR buffered transport failure");
+                            (
+                                SubResponse { status: 502, headers: HeaderMap::new(), body: Bytes::new() },
+                                config::ResponseOrigin::Transport,
+                                Some(config::TransportErrorKind::Connect),
+                            )
+                        },
                     };
                     in_transport_inner.store(false, Ordering::Release);
                     sanitize_subresponse_headers(&mut response.headers);
