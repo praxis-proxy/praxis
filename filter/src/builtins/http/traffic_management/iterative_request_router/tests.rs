@@ -3736,7 +3736,7 @@ fn sneaky_registry() -> crate::FilterRegistry {
 }
 
 #[tokio::test]
-async fn runtime_guard_rejects_streaming_with_body_dependent_transitions() {
+async fn runtime_guard_rejects_streaming_with_interleaved_transition_phases() {
     let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
     let yaml = format!(
         "
@@ -3747,12 +3747,10 @@ steps:
       - filter: test_sneaky_streaming
 {}
     on_result:
-      - filter: router
-        key: matched
-        value: \"true\"
-        done: true
       - default: true
         done: true
+      - status: [502]
+        next: s
 ",
         routed_step_yaml(addr)
     );
@@ -3766,8 +3764,8 @@ steps:
     backend.abort();
 
     assert!(
-        err.to_string().contains("body-dependent transitions"),
-        "runtime streaming with body-dependent transitions must error: {err}"
+        err.to_string().contains("interleaved transition phases"),
+        "runtime streaming with interleaved transitions must error: {err}"
     );
 }
 
@@ -3799,7 +3797,7 @@ steps:
     backend.abort();
 
     assert!(
-        err.to_string().contains("StreamBuffer response body mode"),
+        err.to_string().contains("StreamBuffer response mode"),
         "runtime streaming with StreamBuffer response mode must error: {err}"
     );
 }
