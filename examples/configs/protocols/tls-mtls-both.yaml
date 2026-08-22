@@ -11,6 +11,7 @@
 #   curl --cert client.pem --key client-key.pem --cacert ca.pem https://localhost:8443/
 
 insecure_options:
+  allow_private_endpoints: true # example proxies to local backends
   allow_tls_no_verify: true
 
 listeners:

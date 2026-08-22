@@ -47,6 +47,8 @@ filter_chains:
           - name: "web"
             endpoints:
               - "127.0.0.1:{port_b}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -93,6 +95,8 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -139,6 +143,8 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -195,6 +201,8 @@ filter_chains:
       - filter: ip_acl
         deny:
           - "127.0.0.0/8"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -238,6 +246,8 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -279,6 +289,8 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -327,6 +339,8 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 

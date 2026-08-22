@@ -8,7 +8,7 @@
 use std::{
     net::SocketAddr,
     sync::{
-        Condvar, Mutex,
+        Arc, Condvar, Mutex,
         atomic::{AtomicBool, Ordering},
     },
     time::Instant,
@@ -16,6 +16,7 @@ use std::{
 
 use pingora_core::{Result, upstreams::peer::HttpPeer};
 use praxis_core::connectivity::{Upstream, peer as peer_utils};
+use tracing::debug;
 
 use super::super::context::PingoraRequestCtx;
 
@@ -82,8 +83,10 @@ pub fn arm_upstream_retry_gate() -> (std::sync::MutexGuard<'static, ()>, Upstrea
 /// Convert the pipeline's upstream selection into a Pingora `HttpPeer`.
 ///
 /// On the first call, moves the upstream from `ctx.upstream` into
-/// `ctx.upstream_for_retry` and borrows it. On retries, borrows the
-/// saved copy directly. No clone is performed.
+/// `ctx.upstream_for_retry` and borrows it. On retries with
+/// `reselect_on_retry`, asks the `EndpointReselector` for an
+/// alternate host (after applying any pending backoff).
+#[expect(clippy::too_many_lines, reason = "retry orchestration reads clearer as one function")]
 pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>> {
     if ctx.retries > 0 && UPSTREAM_RETRY_GATE_ARMED.load(Ordering::SeqCst) {
         #[expect(clippy::expect_used, reason = "poisoned mutex/condvar is unrecoverable")]
@@ -95,10 +98,47 @@ pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>
             drop(park);
         }
     }
+
+    if let Some(backoff) = ctx.pending_backoff.take()
+        && !backoff.is_zero()
+    {
+        debug!(?backoff, "applying retry backoff");
+        tokio::time::sleep(backoff).await;
+    }
+
+    if ctx.reselect_on_retry {
+        ctx.reselect_on_retry = false;
+        if let Some(reselector) = ctx.endpoint_reselector.clone() {
+            let health = ctx
+                .pinned_pipeline
+                .as_ref()
+                .and_then(|p| p.health_registry())
+                .and_then(|reg| ctx.cluster.as_deref().and_then(|c| reg.get(c)));
+            if let Some(addr) = reselector.select_address(health, &ctx.attempted_endpoints) {
+                debug!(upstream = %addr, "selected alternate host for retry");
+                if let Some(prev) = ctx.upstream_for_retry.as_ref() {
+                    reselector.release(&prev.address);
+                }
+                if !ctx.attempted_endpoints.iter().any(|e| e.as_ref() == addr.as_ref()) {
+                    ctx.attempted_endpoints.push(Arc::clone(&addr));
+                }
+                let mut upstream = reselector.build_upstream(addr);
+                apply_per_try_timeout(ctx, &mut upstream);
+                ctx.upstream_for_retry = Some(upstream);
+            } else {
+                debug!("no alternate host available; reusing previous upstream if present");
+            }
+        }
+    }
+
     ctx.upstream_connect_start = Some(Instant::now());
 
     if ctx.upstream_for_retry.is_none() {
-        ctx.upstream_for_retry = ctx.upstream.take();
+        let mut upstream = ctx.upstream.take();
+        if let Some(ref mut u) = upstream {
+            apply_per_try_timeout(ctx, u);
+        }
+        ctx.upstream_for_retry = upstream;
     }
 
     let upstream = ctx.upstream_for_retry.as_ref().ok_or_else(|| {
@@ -110,6 +150,22 @@ pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>
     })?;
 
     build_peer(upstream).await
+}
+
+/// Override connection/read timeouts with the policy's per-try timeout when set.
+fn apply_per_try_timeout(ctx: &PingoraRequestCtx, upstream: &mut Upstream) {
+    let Some(policy) = ctx.retry_policy.as_ref() else {
+        return;
+    };
+    let Some(per_try_ms) = policy.per_try_timeout_ms else {
+        return;
+    };
+    let opts = Arc::make_mut(&mut upstream.connection);
+    let timeout = std::time::Duration::from_millis(per_try_ms);
+    opts.connection_timeout = Some(timeout);
+    opts.total_connection_timeout = Some(timeout);
+    opts.read_timeout = Some(timeout);
+    opts.write_timeout = Some(timeout);
 }
 
 /// Parse the upstream address and build an [`HttpPeer`] with TLS/SNI config.
@@ -187,8 +243,6 @@ async fn resolve_address(address: &str) -> Result<SocketAddr> {
     reason = "tests"
 )]
 mod tests {
-    use std::sync::Arc;
-
     use praxis_core::connectivity::ConnectionOptions;
     use praxis_tls::{CachedClusterTls, ClusterTls};
 

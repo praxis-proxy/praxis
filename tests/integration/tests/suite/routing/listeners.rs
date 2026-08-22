@@ -53,6 +53,8 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -121,6 +123,8 @@ filter_chains:
         response_add:
           - name: X-Listener
             value: "beta"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 

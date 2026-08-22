@@ -84,7 +84,19 @@ continues serving with the old config.
 - Listener add, remove, or address rebind
 - Protocol changes (HTTP to TCP)
 - Compression module addition
-- TLS enable/disable
+- TLS enable/disable, and any change inside a
+  listener's `tls` block (certificate *file contents*
+  are hot-reloaded by the certificate watcher;
+  config-level TLS changes are not)
+- Startup-only `runtime` settings (`threads`,
+  `work_stealing`, `global_queue_interval`,
+  `log_overrides`, `max_connections`,
+  `max_memory_bytes`, `subrequest_pool_size`,
+  `subrequest_max_connections`,
+  `subrequest_circuit_breaker`, `upstream_ca_file`,
+  `upstream_keepalive_pool_size`)
+- The `admin` section (the admin endpoint binds at
+  startup)
 
 Stateful filters (rate limiter, circuit breaker) reset
 their state on reload. Operators should expect a brief
@@ -98,7 +110,8 @@ See [hot-reload.yaml] for an example.
 ## Admin
 
 `admin.address` binds a separate HTTP listener that serves
-`/healthy`, `/ready`, and `/metrics`.
+`/healthy`, `/ready`, `/metrics`, `/api/kv/*`, and
+`/api/pipelines`.
 
 - `/healthy` returns `200 OK` with `{"status":"ok"}`
   once the server is accepting connections (liveness).
@@ -115,9 +128,20 @@ See [hot-reload.yaml] for an example.
   (`praxis_filter_duration_seconds`, labels: `filter`,
   `phase`, `stream`).
 
+- `/api/kv/{store}/{key}` reads and writes entries in
+  configured key-value stores (when any are configured).
+- `/api/pipelines` (GET) returns a JSON snapshot of every
+  listener's resolved filter pipeline, including branch
+  chains and rejoin targets — the runtime introspection
+  view of the pipeline configuration. Filter it with
+  `?listener=NAME`.
+
 Any other path returns `404 NOT FOUND`. Useful for orchestrator
 health checks and monitoring without exposing them on
-the main listeners.
+the main listeners. The admin listener has no
+authentication; keep it on loopback or a management
+network (non-loopback binds require
+`insecure_options.allow_public_admin`).
 
 ```yaml
 admin:
@@ -178,10 +202,11 @@ filter_chains:
 ## Listeners
 
 Each listener has a required `name`, an `address`, optional
-`tls`, optional `protocol` (defaults to `http`), and an
-optional list of `filter_chains` to apply. When
-`filter_chains` is omitted it defaults to empty (no filters
-applied).
+`tls`, optional `protocol` (defaults to `http`), and a list
+of `filter_chains` to apply. HTTP listeners require at least
+one filter chain; `filter_chains` may only be omitted on
+`protocol: tcp` listeners that route via `upstream` or
+`cluster` instead.
 
 ```yaml
 listeners:

@@ -42,6 +42,7 @@ const OBS_FOLD_REJECT_HEADERS: &[http::header::HeaderName] = &[http::header::HOS
 ///
 /// Returns `Some(rejection)` if the request is invalid:
 /// - Conflicting duplicate `Content-Length` or `Content-Type` values
+/// - Both `Content-Length` and `Transfer-Encoding` present ([RFC 9112 Section 6.2])
 /// - Obs-fold on `Host` or `Content-Length` headers
 ///
 /// On success, obs-fold sequences in non-sensitive headers are replaced
@@ -56,8 +57,12 @@ const OBS_FOLD_REJECT_HEADERS: &[http::header::HeaderName] = &[http::header::HOS
 /// ```
 ///
 /// [RFC 9112 Section 5.2]: https://datatracker.ietf.org/doc/html/rfc9112#section-5.2
+/// [RFC 9112 Section 6.2]: https://datatracker.ietf.org/doc/html/rfc9112#section-6.2
 pub(in crate::http) fn normalize_request_headers(session: &mut Session) -> Option<Rejection> {
     if let Some(r) = reject_conflicting_single_value_headers(session) {
+        return Some(r);
+    }
+    if let Some(r) = reject_dual_content_length_transfer_encoding(session) {
         return Some(r);
     }
     if let Some(r) = handle_obs_fold(session) {
@@ -95,6 +100,29 @@ fn reject_conflicting_single_value_headers(session: &mut Session) -> Option<Reje
         let _insert = session.req_header_mut().insert_header(header_name.clone(), canonical);
     }
 
+    None
+}
+
+// -----------------------------------------------------------------------------
+// Dual Content-Length / Transfer-Encoding (RFC 9112 Section 6.2)
+// -----------------------------------------------------------------------------
+
+/// Reject requests that carry both `Content-Length` and
+/// `Transfer-Encoding`.
+///
+/// [RFC 9112 Section 6.2] requires a proxy to reject such messages
+/// or strip `Content-Length` before forwarding. The combination is
+/// the canonical request-smuggling ambiguity: the proxy reads the
+/// body per `Transfer-Encoding` while a backend may read per
+/// `Content-Length`, enabling CL/TE desync attacks.
+///
+/// [RFC 9112 Section 6.2]: https://datatracker.ietf.org/doc/html/rfc9112#section-6.2
+fn reject_dual_content_length_transfer_encoding(session: &Session) -> Option<Rejection> {
+    let headers = &session.req_header().headers;
+    if headers.contains_key(http::header::CONTENT_LENGTH) && headers.contains_key(http::header::TRANSFER_ENCODING) {
+        debug!("rejecting request with both Content-Length and Transfer-Encoding");
+        return Some(Rejection::status(400));
+    }
     None
 }
 
@@ -338,5 +366,88 @@ mod tests {
     fn unfold_single_byte_values() {
         assert_eq!(unfold_obs_fold(b"x"), b"x", "single byte input unchanged");
         assert_eq!(unfold_obs_fold(b"ab"), b"ab", "two byte input unchanged");
+    }
+
+    /// Build a proxy session that has read the given raw HTTP/1.1
+    /// request. The client half must stay alive for response writes.
+    async fn session_for(raw: &str) -> (Session, tokio::io::DuplexStream) {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut client, server) = tokio::io::duplex(1_048_576);
+        client.write_all(raw.as_bytes()).await.unwrap();
+        let mut session = Session::new_h1(Box::new(server));
+        let read = session.read_request().await.unwrap();
+        assert!(read, "the session must parse the request header");
+        (session, client)
+    }
+
+    #[tokio::test]
+    async fn identical_duplicate_content_type_is_canonicalized() {
+        let (mut session, _client) = session_for("GET / HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        session
+            .req_header_mut()
+            .append_header("content-type", "text/plain")
+            .unwrap();
+        session
+            .req_header_mut()
+            .append_header("content-type", "text/plain")
+            .unwrap();
+
+        let rejection = normalize_request_headers(&mut session);
+        assert!(rejection.is_none(), "identical duplicates must not reject");
+        let count = session
+            .req_header()
+            .headers
+            .get_all(http::header::CONTENT_TYPE)
+            .iter()
+            .count();
+        assert_eq!(count, 1, "identical duplicates must collapse to one value");
+    }
+
+    #[tokio::test]
+    async fn conflicting_duplicate_content_type_is_rejected() {
+        let (mut session, _client) = session_for("GET / HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        session
+            .req_header_mut()
+            .append_header("content-type", "text/plain")
+            .unwrap();
+        session
+            .req_header_mut()
+            .append_header("content-type", "application/json")
+            .unwrap();
+
+        let rejection = normalize_request_headers(&mut session);
+        assert!(
+            rejection.is_some_and(|r| r.status == 400),
+            "conflicting duplicates must reject with 400"
+        );
+    }
+
+    #[tokio::test]
+    async fn dual_content_length_and_transfer_encoding_is_rejected() {
+        let (mut session, _client) = session_for("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello").await;
+        session
+            .req_header_mut()
+            .insert_header("transfer-encoding", "chunked")
+            .unwrap();
+        let rejection = normalize_request_headers(&mut session);
+        assert!(
+            rejection.is_some_and(|r| r.status == 400),
+            "requests with both Content-Length and Transfer-Encoding must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn content_length_alone_passes_normalization() {
+        let (mut session, _client) = session_for("POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\n\r\nhello").await;
+        let rejection = normalize_request_headers(&mut session);
+        assert!(rejection.is_none(), "Content-Length alone must pass");
+    }
+
+    #[tokio::test]
+    async fn clean_requests_pass_normalization() {
+        let (mut session, _client) = session_for("GET / HTTP/1.1\r\nHost: x\r\nContent-Type: text/plain\r\n\r\n").await;
+        let rejection = normalize_request_headers(&mut session);
+        assert!(rejection.is_none(), "well-formed requests must pass");
     }
 }

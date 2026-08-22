@@ -287,4 +287,38 @@ mod tests {
             "original request body should survive clone"
         );
     }
+
+    #[test]
+    fn accessor_methods_expose_loop_state() {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let state = IterationState {
+            original_request: SubRequest {
+                method: http::Method::GET,
+                uri: "/".parse().unwrap(),
+                headers: HeaderMap::new(),
+                body: Bytes::new(),
+            },
+            previous_response: None,
+            accumulator: HashMap::new(),
+            iteration: 3,
+            max_iterations: 9,
+            deadline,
+            max_response_bytes: 2048,
+            depth: 2,
+        };
+
+        assert_eq!(state.iteration(), 3, "iteration accessor must expose the count");
+        assert_eq!(
+            state.max_iterations(),
+            9,
+            "max_iterations accessor must expose the limit"
+        );
+        assert_eq!(state.deadline(), deadline, "deadline accessor must expose the instant");
+        assert_eq!(
+            state.max_response_bytes(),
+            2048,
+            "max_response_bytes accessor must expose the cap"
+        );
+        assert_eq!(state.depth(), 2, "depth accessor must expose the nesting level");
+    }
 }

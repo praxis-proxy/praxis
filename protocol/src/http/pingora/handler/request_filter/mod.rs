@@ -64,21 +64,27 @@ pub(in crate::http) async fn execute(
     ctx: &mut PingoraRequestCtx,
 ) -> Result<bool> {
     if let Some(rejection) = validation::validate_host_header(session) {
+        snapshot_for_early_exit(session, ctx);
         send_rejection(session, rejection).await;
         return Ok(true);
     }
 
     if let Some(rejection) = super::normalize::normalize_request_headers(session) {
+        snapshot_for_early_exit(session, ctx);
         send_rejection(session, rejection).await;
         return Ok(true);
     }
 
     if let Some(rejection) = reject_reserved_internal_headers(session) {
+        snapshot_for_early_exit(session, ctx);
         send_rejection(session, rejection).await;
         return Ok(true);
     }
 
     if let Some(handled) = validation::handle_max_forwards(session).await {
+        if handled {
+            snapshot_for_early_exit(session, ctx);
+        }
         return Ok(handled);
     }
 
@@ -92,16 +98,18 @@ pub(in crate::http) async fn execute(
         .map(normalize_mapped_ipv4);
     let ssl_digest = session.digest().and_then(|d| d.ssl_digest.as_ref());
     ctx.downstream_tls = ssl_digest.is_some();
-    ctx.peer_identity = ssl_digest.and_then(|d| {
-        if d.cert_digest.is_empty() {
-            return None;
-        }
-        Some(praxis_tls::TlsPeerIdentity {
-            cert_digest: d.cert_digest.clone(),
-            organization: d.organization.clone(),
-            serial_number: d.serial_number.clone(),
+    ctx.peer_identity = ssl_digest
+        .and_then(|d| {
+            if d.cert_digest.is_empty() {
+                return None;
+            }
+            Some(praxis_tls::TlsPeerIdentity {
+                cert_digest: d.cert_digest.clone(),
+                organization: d.organization.clone(),
+                serial_number: d.serial_number.clone(),
+            })
         })
-    });
+        .map(Arc::new);
     ctx.request_is_idempotent = matches!(
         session.req_header().method,
         http::Method::GET | http::Method::HEAD | http::Method::OPTIONS
@@ -125,11 +133,13 @@ pub(in crate::http) async fn execute(
                 ctx.pre_read_mutations = pre_read.mutations;
             },
             Err(PreReadError::Rejected(rejection)) => {
+                ctx.request_snapshot = Some(request);
                 send_rejection(session, rejection).await;
                 return Ok(true);
             },
             Err(PreReadError::Filter(e)) => {
                 error!(error = %e, "body filter error during pre-read");
+                ctx.request_snapshot = Some(request);
                 send_rejection(session, Rejection::status(500)).await;
                 return Ok(true);
             },
@@ -218,6 +228,12 @@ async fn run_pipeline(
         response_body_mode,
         selected_endpoint_index,
         metrics_route,
+        attempted_endpoints,
+        retry_policy,
+        route_retry_policy,
+        cluster_retry_state,
+        cluster_retry_state_released,
+        endpoint_reselector,
         extensions,
         filter_metadata,
         filter_state,
@@ -243,6 +259,12 @@ async fn run_pipeline(
             filter_ctx.response_body_mode,
             filter_ctx.selected_endpoint_index,
             filter_ctx.metrics_route,
+            filter_ctx.attempted_endpoints,
+            filter_ctx.retry_policy,
+            filter_ctx.route_retry_policy,
+            filter_ctx.cluster_retry_state,
+            filter_ctx.cluster_retry_state_released,
+            filter_ctx.endpoint_reselector,
             filter_ctx.extensions,
             filter_ctx.filter_metadata,
             filter_ctx.filter_state,
@@ -287,6 +309,12 @@ async fn run_pipeline(
             ctx.rewritten_path = rewritten_path;
             ctx.request_body_mode = super::clamp_body_mode_to_ceiling(request_body_mode, baseline_request_body_mode);
             ctx.selected_endpoint_index = selected_endpoint_index;
+            ctx.attempted_endpoints = attempted_endpoints;
+            ctx.retry_policy = retry_policy;
+            ctx.route_retry_policy = route_retry_policy;
+            ctx.cluster_retry_state = cluster_retry_state;
+            ctx.cluster_retry_state_released = cluster_retry_state_released;
+            ctx.endpoint_reselector = endpoint_reselector;
             Ok(PipelineResult {
                 action: FilterAction::Continue,
                 extra_headers,
@@ -316,19 +344,47 @@ async fn run_pipeline(
     }
 }
 
+/// Populate the request snapshot and client address for a pre-pipeline exit.
+///
+/// The fallback access record built during the logging phase needs a
+/// request snapshot; rejections issued before the pipeline runs (Host
+/// validation, header normalization, reserved-header and Max-Forwards
+/// handling) would otherwise leave it unset and the record silently
+/// skipped — precisely the requests operators most want logged.
+fn snapshot_for_early_exit(session: &mut Session, ctx: &mut PingoraRequestCtx) {
+    if ctx.request_snapshot.is_none() {
+        ctx.request_snapshot = Some(request_header_from_session(session));
+    }
+    if ctx.client_addr.is_none() {
+        ctx.client_addr = session
+            .client_addr()
+            .and_then(|a| a.as_inet())
+            .map(std::net::SocketAddr::ip)
+            .map(normalize_mapped_ipv4);
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Terminal Response
 // -----------------------------------------------------------------------------
 
 /// Run response filters on a buffered terminal response and send it downstream.
-#[expect(clippy::large_stack_frames, reason = "terminal response lifecycle with body filters")]
 async fn run_terminal_response(
     pipeline: &FilterPipeline,
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
     terminal: TerminalResponse,
 ) {
-    let mut resp = match prepare_terminal_response(pipeline, ctx, terminal.status, terminal.headers).await {
+    // Boxed to keep this frame under the stack-size threshold: the header
+    // filter future is large and terminal responses are not the hot path.
+    let prepared = Box::pin(prepare_terminal_response(
+        pipeline,
+        ctx,
+        terminal.status,
+        terminal.headers,
+    ))
+    .await;
+    let mut resp = match prepared {
         Ok(resp) => resp,
         Err(rejection) => {
             send_rejection(session, rejection).await;
@@ -336,7 +392,19 @@ async fn run_terminal_response(
         },
     };
     let mut body = terminal.body;
-    if let Err(rejection) = run_parent_terminal_body_filters(pipeline, ctx, &resp, &mut body, true) {
+    // Bodyless responses (HEAD, 204, 304, 1xx) have no body phase: running
+    // the body filters would make access_log emit a second record after its
+    // on_response already emitted for the bodyless status.
+    let is_bodyless = ctx
+        .request_snapshot
+        .as_ref()
+        .is_some_and(|request| praxis_filter::bodyless_response(resp.status, &request.method));
+    if is_bodyless {
+        // The body phase (which would set the completion flag) is skipped,
+        // so mark delivery complete here or the logging-phase fallback would
+        // emit a duplicate record for a response access_log already logged.
+        ctx.response_delivery_complete = true;
+    } else if let Err(rejection) = run_parent_terminal_body_filters(pipeline, ctx, &resp, &mut body, true) {
         send_rejection(session, rejection).await;
         return;
     }
@@ -484,7 +552,12 @@ fn run_parent_terminal_body_filters(
             error!(error = %e, "response body filter error on terminal response");
             Err(Rejection::status(500))
         },
-        _ => Ok(()),
+        _ => {
+            if end_of_stream {
+                ctx.response_delivery_complete = true;
+            }
+            Ok(())
+        },
     }
 }
 
@@ -531,7 +604,7 @@ async fn run_streaming_terminal_response(
         http::StatusCode::NO_CONTENT | http::StatusCode::NOT_MODIFIED
     );
     if is_head || body_prohibited {
-        suppress_streaming_terminal_response(pipeline, session, ctx, &mut resp, streaming_body.as_mut(), is_head).await;
+        suppress_streaming_terminal_response(session, ctx, &mut resp, streaming_body.as_mut(), is_head).await;
         return;
     }
 
@@ -554,7 +627,7 @@ async fn run_streaming_terminal_response(
             Ok(Some(chunk)) => {
                 let mut body = Some(chunk);
                 if run_parent_terminal_body_filters(pipeline, ctx, &resp, &mut body, false).is_err()
-                    || streaming_size_limit_exceeded(ctx)
+                    || streaming_size_limit_exceeded(ctx, pipeline)
                 {
                     streaming_body.cancel().await;
                     session.as_downstream_mut().shutdown().await;
@@ -590,13 +663,12 @@ async fn run_streaming_terminal_response(
     }
 }
 
-/// Suppress a streaming body while still running clean completion hooks once.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "streaming suppress needs pipeline, session, ctx, resp, body, and flags"
-)]
+/// Suppress a bodyless streaming terminal response (HEAD, 204, 304).
+///
+/// The body phase is skipped entirely: the `access_log` filter's response
+/// hook already logged the bodyless completion, so running the body-EOS
+/// hook would emit a duplicate record.
 async fn suppress_streaming_terminal_response(
-    pipeline: &FilterPipeline,
     session: &mut Session,
     ctx: &mut PingoraRequestCtx,
     resp: &mut praxis_filter::Response,
@@ -609,12 +681,12 @@ async fn suppress_streaming_terminal_response(
         send_rejection(session, Rejection::status(500)).await;
         return;
     }
-    let mut completion_body = None;
-    if let Err(rejection) = run_parent_terminal_body_filters(pipeline, ctx, resp, &mut completion_body, true) {
-        streaming_body.cancel().await;
-        send_rejection(session, rejection).await;
-        return;
-    }
+    // This path handles HEAD and 204/304 — bodyless responses with no body
+    // phase. Running the body-EOS hook would make access_log emit a second
+    // record after its on_response already logged the bodyless completion
+    // (mirrors the buffered terminal path). Mark delivery complete so the
+    // logging-phase fallback does not fire a third.
+    ctx.response_delivery_complete = true;
 
     let is_not_modified = resp.status == http::StatusCode::NOT_MODIFIED;
     prepare_streaming_headers(resp, is_head, is_not_modified, http::Version::HTTP_10);
@@ -678,8 +750,16 @@ fn build_streaming_terminal_header(resp: &praxis_filter::Response) -> Option<pin
 }
 
 /// Enforce an incremental response size limit after raw bytes are counted.
-fn streaming_size_limit_exceeded(ctx: &PingoraRequestCtx) -> bool {
-    let BodyMode::SizeLimit { max_bytes } = ctx.response_body_mode else {
+fn streaming_size_limit_exceeded(ctx: &PingoraRequestCtx, pipeline: &FilterPipeline) -> bool {
+    // SizeLimit carries the effective limit directly; Stream mode delivers
+    // chunks without buffering but the global body_limits ceiling still
+    // applies, enforced here by the running byte count.
+    let max_bytes = match ctx.response_body_mode {
+        BodyMode::SizeLimit { max_bytes } => Some(max_bytes),
+        BodyMode::Stream => pipeline.response_body_ceiling(),
+        _ => None,
+    };
+    let Some(max_bytes) = max_bytes else {
         return false;
     };
     if ctx.response_body_bytes <= max_bytes as u64 {
@@ -1578,7 +1658,7 @@ mod tests {
         ctx.response_body_mode = BodyMode::SizeLimit { max_bytes: 1024 };
         ctx.response_body_bytes = 512;
 
-        assert!(!streaming_size_limit_exceeded(&ctx));
+        assert!(!streaming_size_limit_exceeded(&ctx, &empty_pipeline()));
     }
 
     #[test]
@@ -1587,7 +1667,7 @@ mod tests {
         ctx.response_body_mode = BodyMode::SizeLimit { max_bytes: 100 };
         ctx.response_body_bytes = 101;
 
-        assert!(streaming_size_limit_exceeded(&ctx));
+        assert!(streaming_size_limit_exceeded(&ctx, &empty_pipeline()));
     }
 
     #[test]
@@ -1596,7 +1676,7 @@ mod tests {
         ctx.response_body_mode = BodyMode::Stream;
         ctx.response_body_bytes = 999_999;
 
-        assert!(!streaming_size_limit_exceeded(&ctx));
+        assert!(!streaming_size_limit_exceeded(&ctx, &empty_pipeline()));
     }
 
     #[test]
@@ -1605,6 +1685,6 @@ mod tests {
         ctx.response_body_mode = BodyMode::SizeLimit { max_bytes: 100 };
         ctx.response_body_bytes = 100;
 
-        assert!(!streaming_size_limit_exceeded(&ctx));
+        assert!(!streaming_size_limit_exceeded(&ctx, &empty_pipeline()));
     }
 }

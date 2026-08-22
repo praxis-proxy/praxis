@@ -177,9 +177,13 @@ Security is enforced at the lint level. See lints in
   (e.g. `1.2.3`, not `1.2` or `1`)
 - `cargo audit` and `cargo deny check` enforce supply
   chain safety (see [getting-started.md])
+- Dependency policy, enforcement tooling, and the
+  provenance review of every direct dependency live
+  in [dependencies.md]
 
 [Cargo.toml]:../../Cargo.toml
 [getting-started.md]:./getting-started.md
+[dependencies.md]:./dependencies.md
 
 #### Lint Suppression Policy
 
@@ -655,4 +659,4 @@ its code. The gates:
   of what tooling they used to produce it.
 - **Proposals**: proposal files must satisfy the
   frontmatter and lifecycle rules in
-  [proposals.md](../proposals/README.md).
+  [proposals.md](../proposals.md).

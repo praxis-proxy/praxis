@@ -70,3 +70,6 @@ filter_chains:
 # Global body size ceiling (10 MB).
 body_limits:
   max_request_bytes: 10485760
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

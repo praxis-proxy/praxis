@@ -17,7 +17,7 @@ use tracing::{debug, error, warn};
 
 use super::{
     super::{context::PingoraRequestCtx, convert::response_header_from_pingora},
-    hop_by_hop::RemoveHeader as _,
+    hop_by_hop::{self, RemoveHeader as _},
 };
 
 // -----------------------------------------------------------------------------
@@ -55,8 +55,19 @@ pub(super) async fn execute(
     let mut resp = response_header_from_pingora(upstream_response);
     let name_fingerprint_before = header_name_fingerprint(&resp.headers);
     ctx.connection_upgraded = is_upgrade_response;
-    ctx.response_phase_done = true;
     ctx.upstream_response_status = Some(upstream_response.status.as_u16());
+    let is_bodyless = ctx
+        .request_snapshot
+        .as_ref()
+        .is_some_and(|request| praxis_filter::bodyless_response(resp.status, &request.method));
+
+    // Evaluate HTTP-status retry before running response filters / committing
+    // the response phase, so a retriable 5xx does not leak to the client.
+    if let Some(err) = super::maybe_retry_response(ctx, upstream_response.status.as_u16()) {
+        return Err(err);
+    }
+
+    ctx.response_phase_done = true;
 
     let (result, filter_flagged_modification) = run_response_pipeline(pipeline, ctx, &mut resp).await?;
     // A filter may rearrange the header name sequence without changing the
@@ -80,7 +91,7 @@ pub(super) async fn execute(
             status: resp.status,
         });
     }
-    handle_response_result(result, upstream_response, resp, headers_modified)
+    handle_response_result(result, upstream_response, resp, headers_modified, is_bodyless, ctx)
 }
 
 /// Run the response pipeline and capture the result plus header-modified flag.
@@ -96,6 +107,7 @@ async fn run_response_pipeline(
         headers_modified,
         response_body_mode,
         cluster,
+        cluster_retry_state_released,
         extensions,
         filter_metadata,
         filter_state,
@@ -114,6 +126,7 @@ async fn run_response_pipeline(
             fctx.response_headers_modified,
             fctx.response_body_mode,
             fctx.cluster,
+            fctx.cluster_retry_state_released,
             fctx.extensions,
             fctx.filter_metadata,
             fctx.filter_state,
@@ -122,6 +135,7 @@ async fn run_response_pipeline(
         )
     };
     ctx.cluster = cluster;
+    ctx.cluster_retry_state_released = cluster_retry_state_released;
     ctx.response_body_mode = super::clamp_body_mode_to_ceiling(response_body_mode, baseline_response_body_mode);
     ctx.extensions = extensions;
     ctx.filter_metadata = filter_metadata;
@@ -145,11 +159,18 @@ async fn run_response_pipeline(
 ///
 /// [`HeaderMap`]: http::HeaderMap
 /// [`RespParts`]: http::response::Parts
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "linear result dispatch"
+)]
 fn handle_response_result(
     result: std::result::Result<FilterAction, praxis_filter::FilterError>,
     upstream_response: &mut pingora_http::ResponseHeader,
     mut resp: praxis_filter::Response,
     headers_modified: bool,
+    is_bodyless: bool,
+    ctx: &mut PingoraRequestCtx,
 ) -> Result<()> {
     match result {
         Ok(
@@ -159,13 +180,23 @@ fn handle_response_result(
             | FilterAction::TerminalResponse(_)
             | FilterAction::StreamingTerminalResponse(_),
         ) => {
+            // Bodyless responses skip the body phase, so a successful
+            // header phase is their delivery completion. Marking earlier
+            // would hide responses the pipeline itself rejects.
+            if is_bodyless {
+                ctx.response_delivery_complete = true;
+            }
             write_back_response(upstream_response, &mut resp, headers_modified);
             Ok(())
         },
         Ok(FilterAction::Reject(rejection)) => {
             warn!(status = rejection.status, "filter rejected response");
+            let status = rejection.status;
+            // Carry the full rejection across the error boundary so
+            // fail_to_proxy can deliver its configured headers and body.
+            ctx.pending_rejection = Some(rejection);
             Err(pingora_core::Error::explain(
-                pingora_core::ErrorType::HTTPStatus(rejection.status),
+                pingora_core::ErrorType::HTTPStatus(status),
                 "response rejected by filter pipeline",
             ))
         },
@@ -274,11 +305,7 @@ fn request_has_upgrade(ctx: &PingoraRequestCtx) -> bool {
 /// without proper `WebSocket` headers (e.g. from a buggy upstream)
 /// should not be treated as a successful upgrade.
 fn is_websocket_101(headers: &http::HeaderMap) -> bool {
-    headers
-        .get(http::header::UPGRADE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(|v| v.trim().eq_ignore_ascii_case("websocket"))
-        && headers.get("sec-websocket-accept").is_some()
+    hop_by_hop::has_websocket_upgrade(headers) && headers.get("sec-websocket-accept").is_some()
 }
 
 // -----------------------------------------------------------------------------
@@ -575,7 +602,15 @@ mod tests {
             status: http::StatusCode::IM_A_TEAPOT,
         };
 
-        handle_response_result(Ok(FilterAction::Continue), &mut upstream, resp, false).unwrap();
+        handle_response_result(
+            Ok(FilterAction::Continue),
+            &mut upstream,
+            resp,
+            false,
+            false,
+            &mut PingoraRequestCtx::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             upstream.status, 418,
@@ -598,7 +633,15 @@ mod tests {
             status: http::StatusCode::OK,
         };
 
-        handle_response_result(Ok(FilterAction::Continue), &mut upstream, resp, true).unwrap();
+        handle_response_result(
+            Ok(FilterAction::Continue),
+            &mut upstream,
+            resp,
+            true,
+            false,
+            &mut PingoraRequestCtx::default(),
+        )
+        .unwrap();
 
         // Serialising exercises the name-map zip that aborts on desync.
         let mut buf = bytes::BytesMut::new();
@@ -619,7 +662,15 @@ mod tests {
             status: http::StatusCode::OK,
         };
 
-        handle_response_result(Ok(FilterAction::Continue), &mut upstream, resp, true).unwrap();
+        handle_response_result(
+            Ok(FilterAction::Continue),
+            &mut upstream,
+            resp,
+            true,
+            false,
+            &mut PingoraRequestCtx::default(),
+        )
+        .unwrap();
 
         assert_eq!(
             upstream.get_reason_phrase(),

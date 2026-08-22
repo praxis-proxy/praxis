@@ -69,3 +69,6 @@ filter_chains:
             on_result:
               - default: true
                 done: true
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

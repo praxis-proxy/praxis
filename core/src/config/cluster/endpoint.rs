@@ -21,7 +21,7 @@ use serde::{Deserialize, Serialize};
 ///     weight: 3
 /// ```
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(untagged)]
+#[serde(untagged, try_from = "EndpointRaw")]
 pub enum Endpoint {
     /// Plain `host:port` string; weight is implicitly 1.
     Simple(String),
@@ -41,6 +41,61 @@ pub enum Endpoint {
 /// Serde default for [`Endpoint::Weighted::weight`].
 fn default_weight() -> u32 {
     1
+}
+
+/// Raw deserialization target for [`Endpoint`].
+///
+/// The untagged enum's struct variant silently absorbs unknown keys, so a
+/// typo like `wieght: 3` would parse as weight 1 with no error. The raw
+/// shape collects unrecognized keys and [`TryFrom`] rejects them by name.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum EndpointRaw {
+    /// Plain `host:port` string.
+    Simple(String),
+
+    /// Endpoint object form.
+    Weighted(WeightedEndpointRaw),
+}
+
+/// Object form of an endpoint, capturing unknown keys for rejection.
+#[derive(Deserialize)]
+struct WeightedEndpointRaw {
+    /// Socket address as `host:port`.
+    address: String,
+
+    /// Relative forwarding weight.
+    #[serde(default = "default_weight")]
+    weight: u32,
+
+    /// Every key not matched above; must be empty.
+    #[serde(flatten)]
+    unknown: std::collections::HashMap<String, serde_yaml::Value>,
+}
+
+impl TryFrom<EndpointRaw> for Endpoint {
+    type Error = String;
+
+    fn try_from(raw: EndpointRaw) -> Result<Self, Self::Error> {
+        match raw {
+            EndpointRaw::Simple(address) => Ok(Self::Simple(address)),
+            EndpointRaw::Weighted(w) => {
+                if !w.unknown.is_empty() {
+                    let mut keys: Vec<&str> = w.unknown.keys().map(String::as_str).collect();
+                    keys.sort_unstable();
+                    return Err(format!(
+                        "endpoint '{}': unknown field(s): {}; expected only 'address' and 'weight'",
+                        w.address,
+                        keys.join(", ")
+                    ));
+                }
+                Ok(Self::Weighted {
+                    address: w.address,
+                    weight: w.weight,
+                })
+            },
+        }
+    }
 }
 
 impl Endpoint {
@@ -146,5 +201,25 @@ weight: 3
         assert_eq!(eps.len(), 2, "mixed list should parse two endpoints");
         assert_eq!(eps[0].weight(), 1, "simple entry should have weight 1");
         assert_eq!(eps[1].weight(), 3, "weighted entry should have weight 3");
+    }
+
+    #[test]
+    fn typoed_weight_key_rejected() {
+        let yaml = "address: \"10.0.0.2:8080\"\nwieght: 3\n";
+        let err = serde_yaml::from_str::<Endpoint>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("wieght"),
+            "a typoed weight key must be rejected by name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn unknown_endpoint_key_rejected() {
+        let yaml = "address: \"10.0.0.2:8080\"\nweight: 3\nmax_conns: 7\n";
+        let err = serde_yaml::from_str::<Endpoint>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("max_conns"),
+            "unknown endpoint keys must be rejected by name, got: {err}"
+        );
     }
 }

@@ -5,6 +5,8 @@
 
 Embeds the Praxis Policy Engine in-process to enforce multi-source JWT identity, APL route policy, RFC 8693 token exchange, PII scanning, audit emission, and (under `body_access: read_write`) request / response body rewriting.
 
+Requires Cargo feature: `policy-engine`.
+
 ## Configuration Notes
 
 Experimental: requires the `policy-engine` cargo feature, which is off by default. Registered under the YAML filter name `policy`.

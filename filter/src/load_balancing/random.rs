@@ -50,13 +50,17 @@ impl Random {
     /// to the first healthy endpoint when all healthy candidates have zero
     /// weight, or to all endpoints (panic mode) when none are healthy.
     #[inline]
-    pub(crate) fn select(&self, health: Option<&ClusterHealthState>) -> Option<Arc<str>> {
+    pub(crate) fn select(&self, health: Option<&ClusterHealthState>, exclude: &[Arc<str>]) -> Option<Arc<str>> {
         if self.total_weight == 0 {
             return None;
         }
 
         if let Some(state) = health {
-            let healthy = self.healthy_candidates(state);
+            let healthy: SmallVec<[&WeightedEndpoint; 8]> = self
+                .healthy_candidates(state)
+                .into_iter()
+                .filter(|ep| !is_excluded(&ep.address, exclude))
+                .collect();
             if let Some(first) = healthy.first() {
                 let total: usize = healthy.iter().map(|ep| ep.weight as usize).sum();
                 if total > 0 {
@@ -66,7 +70,16 @@ impl Random {
             }
         }
 
-        Some(pick(&self.endpoints, super::next_random(&self.rng), self.total_weight))
+        let candidates: SmallVec<[&WeightedEndpoint; 8]> = self
+            .endpoints
+            .iter()
+            .filter(|ep| !is_excluded(&ep.address, exclude))
+            .collect();
+        let total: usize = candidates.iter().map(|ep| ep.weight as usize).sum();
+        if total == 0 {
+            return None;
+        }
+        Some(pick(&candidates, super::next_random(&self.rng), total))
     }
 
     /// Filter to healthy endpoints.
@@ -99,6 +112,11 @@ fn pick<E: Borrow<WeightedEndpoint>>(endpoints: &[E], random: u64, total_weight:
     Arc::clone(&endpoints.last().expect("endpoints must be non-empty").borrow().address)
 }
 
+/// Returns `true` if `addr` appears in the exclusion list.
+fn is_excluded(addr: &str, exclude: &[Arc<str>]) -> bool {
+    exclude.iter().any(|e| e.as_ref() == addr)
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -123,7 +141,7 @@ mod tests {
         let r = Random::new(vec![ep("10.0.0.1:80", 1, 0)]);
         for _ in 0..10 {
             assert_eq!(
-                &*r.select(None).unwrap(),
+                &*r.select(None, &[]).unwrap(),
                 "10.0.0.1:80",
                 "single endpoint must always be returned"
             );
@@ -140,7 +158,7 @@ mod tests {
 
         let mut counts = std::collections::HashMap::new();
         for _ in 0..300 {
-            *counts.entry(r.select(None).unwrap()).or_insert(0_u32) += 1;
+            *counts.entry(r.select(None, &[]).unwrap()).or_insert(0_u32) += 1;
         }
 
         assert_eq!(counts.len(), 3, "random should use all 3 endpoints");
@@ -155,7 +173,7 @@ mod tests {
 
         let mut counts = std::collections::HashMap::new();
         for _ in 0..1000 {
-            *counts.entry(r.select(None).unwrap()).or_insert(0_u32) += 1;
+            *counts.entry(r.select(None, &[]).unwrap()).or_insert(0_u32) += 1;
         }
 
         let heavy = counts.get("10.0.0.2:80").copied().unwrap_or(0);
@@ -173,7 +191,7 @@ mod tests {
 
         for _ in 0..10 {
             assert_eq!(
-                &*r.select(Some(&state)).unwrap(),
+                &*r.select(Some(&state), &[]).unwrap(),
                 "10.0.0.2:80",
                 "should skip unhealthy endpoint"
             );
@@ -187,7 +205,7 @@ mod tests {
         state.endpoints()[0].mark_unhealthy();
         state.endpoints()[1].mark_unhealthy();
 
-        let addr = r.select(Some(&state)).unwrap();
+        let addr = r.select(Some(&state), &[]).unwrap();
         assert!(
             &*addr == "10.0.0.1:80" || &*addr == "10.0.0.2:80",
             "panic mode should still return an endpoint"
@@ -197,7 +215,7 @@ mod tests {
     #[test]
     fn empty_endpoints_returns_none() {
         let r = Random::new(vec![]);
-        assert!(r.select(None).is_none(), "empty endpoint list should return None");
+        assert!(r.select(None, &[]).is_none(), "empty endpoint list should return None");
     }
 
     #[test]
@@ -205,7 +223,7 @@ mod tests {
         let r = Random::new(vec![]);
         let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(vec![], vec![], None, None));
         assert!(
-            r.select(Some(&state)).is_none(),
+            r.select(Some(&state), &[]).is_none(),
             "empty endpoint list with health state should return None"
         );
     }
@@ -213,7 +231,10 @@ mod tests {
     #[test]
     fn all_zero_weight_returns_none() {
         let r = Random::new(vec![ep("10.0.0.1:80", 0, 0), ep("10.0.0.2:80", 0, 1)]);
-        assert!(r.select(None).is_none(), "all-zero-weight endpoints should return None");
+        assert!(
+            r.select(None, &[]).is_none(),
+            "all-zero-weight endpoints should return None"
+        );
     }
 
     #[test]
@@ -222,7 +243,7 @@ mod tests {
         let state = health_state(2);
         state.endpoints()[1].mark_unhealthy();
 
-        let addr = r.select(Some(&state)).unwrap();
+        let addr = r.select(Some(&state), &[]).unwrap();
         assert_eq!(
             &*addr, "10.0.0.1:80",
             "should return first healthy endpoint when healthy candidates have zero total weight"

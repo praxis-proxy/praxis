@@ -3,7 +3,9 @@
 
 //! Deserialized YAML configuration types for the router filter.
 
-use praxis_core::config::Route;
+use std::{collections::HashMap, sync::Arc};
+
+use praxis_core::config::{PathMatch, Route};
 use serde::Deserialize;
 
 // -----------------------------------------------------------------------------
@@ -59,16 +61,16 @@ pub(super) struct RouterConfig {
 /// Router-owned route config so JSON body aliasing stays out of
 /// [`praxis_core::config::Route`].
 ///
-/// `deny_unknown_fields` is intentionally omitted because
-/// `#[serde(flatten)]` on `route` is incompatible with it.
-/// Unknown fields within the `Route` portion are validated by
-/// `Route`'s own `deny_unknown_fields`.
+/// Deserializes via [`RouterRouteConfigRaw`], which spells out the
+/// route fields instead of flattening [`Route`]: `#[serde(flatten)]`
+/// is incompatible with `deny_unknown_fields`, and would silently
+/// absorb typoed route keys.
 ///
 /// [`praxis_core::config::Route`]: praxis_core::config::Route
 #[derive(Clone, Debug, Deserialize)]
+#[serde(try_from = "RouterRouteConfigRaw")]
 pub(super) struct RouterRouteConfig {
     /// Generic path, host, header, and cluster routing fields.
-    #[serde(flatten)]
     pub route: Route,
 
     /// Not implemented. Setting this is rejected at startup.
@@ -76,7 +78,6 @@ pub(super) struct RouterRouteConfig {
     /// Body-field routing is not wired into the request path. Promote
     /// the value to a header with a classifier filter and match it via
     /// the route's `headers` field instead.
-    #[serde(default)]
     pub json_aliases: Option<Vec<JsonAlias>>,
 }
 
@@ -86,6 +87,58 @@ impl From<Route> for RouterRouteConfig {
             route,
             json_aliases: None,
         }
+    }
+}
+
+/// Raw deserialization target for [`RouterRouteConfig`].
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RouterRouteConfigRaw {
+    /// Exact path to match. Exactly one of `path` or `path_prefix`
+    /// must be set.
+    #[serde(default)]
+    path: Option<String>,
+
+    /// Path prefix to match; the longest matching prefix wins. Exactly
+    /// one of `path` or `path_prefix` must be set.
+    #[serde(default)]
+    path_prefix: Option<String>,
+
+    /// Name of the cluster to route matched requests to.
+    cluster: Arc<str>,
+
+    /// Request headers to match. All specified headers must be present
+    /// with matching values (AND semantics, case-sensitive).
+    #[serde(default)]
+    headers: Option<HashMap<String, String>>,
+
+    /// Host to match. If set, the route only applies to this host.
+    #[serde(default)]
+    host: Option<String>,
+
+    /// Not implemented. Setting this is rejected at startup.
+    #[serde(default)]
+    json_aliases: Option<Vec<JsonAlias>>,
+
+    /// Optional per-route retry policy override.
+    #[serde(default)]
+    retry_policy: Option<praxis_core::config::RetryPolicy>,
+}
+
+impl TryFrom<RouterRouteConfigRaw> for RouterRouteConfig {
+    type Error = String;
+
+    fn try_from(raw: RouterRouteConfigRaw) -> Result<Self, Self::Error> {
+        Ok(Self {
+            route: Route {
+                path_match: PathMatch::from_parts(raw.path, raw.path_prefix)?,
+                cluster: raw.cluster,
+                headers: raw.headers,
+                host: raw.host,
+                retry_policy: raw.retry_policy,
+            },
+            json_aliases: raw.json_aliases,
+        })
     }
 }
 

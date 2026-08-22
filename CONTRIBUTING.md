@@ -24,7 +24,7 @@ Features that span multiple PRs, introduce new
 architectural patterns, or affect the public interface
 go through the [proposal process].
 
-[proposal process]: docs/proposals/README.md
+[proposal process]: docs/proposals.md
 
 ## Pull Request Gates
 
