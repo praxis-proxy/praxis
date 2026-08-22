@@ -3,10 +3,10 @@
 
 //! Filter chain validation: cardinality, name uniqueness, and listener references.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::{
-    config::{FilterChainConfig, Listener},
+    config::{ChainRef, Condition, FilterChainConfig, FilterEntry, Listener, ResponseCondition},
     errors::ProxyError,
 };
 
@@ -29,7 +29,113 @@ pub(super) fn validate_filter_chains(chains: &[FilterChainConfig], listeners: &[
     validate_chain_cardinality(chains)?;
     validate_chain_names(chains)?;
     validate_terminal_filters(chains)?;
+    validate_conditions(chains)?;
     validate_listener_references(chains, listeners)
+}
+
+/// Reject conditions whose match predicate is empty.
+///
+/// An empty predicate (`when: {}` / `unless: {}`) matches every request,
+/// so `unless: {}` silently disables its filter — almost certainly a
+/// config-generation or editing accident rather than intent.
+fn validate_conditions(chains: &[FilterChainConfig]) -> Result<(), ProxyError> {
+    for chain in chains {
+        for entry in &chain.filters {
+            validate_entry_conditions(&chain.name, entry)?;
+        }
+    }
+    Ok(())
+}
+
+/// Reject empty condition predicates on one filter entry, recursing
+/// into inline branch chains.
+fn validate_entry_conditions(chain_name: &str, entry: &FilterEntry) -> Result<(), ProxyError> {
+    validate_request_conditions(chain_name, entry)?;
+    validate_response_conditions(chain_name, entry)?;
+    if let Some(branches) = &entry.branch_chains {
+        for branch in branches {
+            for chain_ref in &branch.chains {
+                if let ChainRef::Inline { filters, .. } = chain_ref {
+                    for inline_entry in filters {
+                        validate_entry_conditions(chain_name, inline_entry)?;
+                    }
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Reject empty request-condition predicates on one filter entry.
+fn validate_request_conditions(chain_name: &str, entry: &FilterEntry) -> Result<(), ProxyError> {
+    for (idx, condition) in entry.conditions.iter().enumerate() {
+        let matcher = match condition {
+            Condition::When(m) | Condition::Unless(m) => m,
+        };
+        if matcher.path.is_none()
+            && matcher.path_prefix.is_none()
+            && matcher.methods.is_none()
+            && matcher.headers.is_none()
+        {
+            return Err(ProxyError::Config(format!(
+                "filter '{filter}' in chain '{chain_name}': condition {idx} is \
+                 empty; set at least one of path, path_prefix, methods, or \
+                 headers (an empty condition matches every request, so \
+                 'unless' would disable the filter entirely)",
+                filter = entry.filter_type,
+            )));
+        }
+        // An empty container is as pathological as an all-absent predicate:
+        // `methods: []` can never match and `headers: {}` always matches.
+        if matcher.methods.as_ref().is_some_and(Vec::is_empty) {
+            return Err(empty_predicate_error(chain_name, &entry.filter_type, idx, "methods"));
+        }
+        if matcher.headers.as_ref().is_some_and(HashMap::is_empty) {
+            return Err(empty_predicate_error(chain_name, &entry.filter_type, idx, "headers"));
+        }
+    }
+    Ok(())
+}
+
+/// Reject empty response-condition predicates on one filter entry.
+fn validate_response_conditions(chain_name: &str, entry: &FilterEntry) -> Result<(), ProxyError> {
+    for (idx, condition) in entry.response_conditions.iter().enumerate() {
+        let matcher = match condition {
+            ResponseCondition::When(m) | ResponseCondition::Unless(m) => m,
+        };
+        if matcher.status.is_none() && matcher.headers.is_none() {
+            return Err(ProxyError::Config(format!(
+                "filter '{filter}' in chain '{chain_name}': response condition \
+                 {idx} is empty; set at least one of status or headers",
+                filter = entry.filter_type,
+            )));
+        }
+        if matcher.status.as_ref().is_some_and(Vec::is_empty) {
+            return Err(empty_predicate_error(
+                chain_name,
+                &entry.filter_type,
+                idx,
+                "response status",
+            ));
+        }
+        if matcher.headers.as_ref().is_some_and(HashMap::is_empty) {
+            return Err(empty_predicate_error(
+                chain_name,
+                &entry.filter_type,
+                idx,
+                "response headers",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Error for a condition predicate given as an empty container.
+fn empty_predicate_error(chain_name: &str, filter: &str, idx: usize, field: &str) -> ProxyError {
+    ProxyError::Config(format!(
+        "filter '{filter}' in chain '{chain_name}': condition {idx} has an \
+         empty {field} list; remove the field or list at least one value"
+    ))
 }
 
 /// Filter types that must be the last filter in their chain and in
@@ -76,13 +182,14 @@ fn validate_chain_cardinality(chains: &[FilterChainConfig]) -> Result<(), ProxyE
     Ok(())
 }
 
-/// Reject empty or duplicate chain names.
+/// Reject empty, invalid-character, or duplicate chain names.
 fn validate_chain_names(chains: &[FilterChainConfig]) -> Result<(), ProxyError> {
     let mut seen = HashSet::new();
     for chain in chains {
         if chain.name.is_empty() {
             return Err(ProxyError::Config("filter chain name must not be empty".into()));
         }
+        super::validate_name_chars(&chain.name, "filter chain")?;
         if !seen.insert(&chain.name) {
             return Err(ProxyError::Config(format!(
                 "duplicate filter chain name '{}'",
@@ -147,6 +254,190 @@ filter_chains:
     }
 
     #[test]
+    fn reject_empty_unless_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: ip_acl
+        deny: ["10.0.0.0/8"]
+        conditions:
+          - unless: {}
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("condition 0 is empty"),
+            "an empty unless predicate silently disables the filter: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_when_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        conditions:
+          - when: {}
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("is empty"),
+            "an empty when predicate should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_methods_list_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        conditions:
+          - when:
+              methods: []
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("empty methods list"),
+            "an empty methods list can never match and must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_headers_map_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        conditions:
+          - unless:
+              headers: {}
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("empty headers list"),
+            "an empty headers map matches vacuously and must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_status_list_response_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        response_add:
+          - name: X-A
+            value: b
+        response_conditions:
+          - when:
+              status: []
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("empty response status list"),
+            "an empty status list can never match and must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_response_condition() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        response_conditions:
+          - when: {}
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("response condition 0 is empty"),
+            "an empty response predicate should be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_populated_conditions() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        conditions:
+          - when:
+              path_prefix: "/health"
+"#;
+        Config::from_yaml(yaml).expect("populated conditions are valid");
+    }
+
+    #[test]
+    fn reject_empty_condition_in_inline_branch_chain() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        branch_chains:
+          - name: branch
+            chains:
+              - name: inline
+                filters:
+                  - filter: headers
+                    conditions:
+                      - unless: {}
+      - filter: static_response
+        status: 200
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("condition 0 is empty"),
+            "empty predicates inside inline branch chains should be rejected: {err}"
+        );
+    }
+
+    #[test]
     fn reject_duplicate_chain_names() {
         let yaml = r#"
 listeners:
@@ -164,6 +455,26 @@ filter_chains:
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("duplicate filter chain name"));
+    }
+
+    #[test]
+    fn reject_chain_name_with_special_chars() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:8080"
+    filter_chains:
+      - "bad.chain"
+filter_chains:
+  - name: "bad.chain"
+    filters:
+      - filter: request_id
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("alphanumeric"),
+            "filter chain names with special chars should be rejected: {err}"
+        );
     }
 
     #[test]

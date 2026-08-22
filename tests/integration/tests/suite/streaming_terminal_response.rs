@@ -615,6 +615,7 @@ fn h2c_get(addr: &str, path: &str) -> (http::Response<()>, String) {
     rt.block_on(async {
         let tcp = tokio::net::TcpStream::connect(addr).await.unwrap();
         let (mut client, h2_conn) = h2::client::handshake(tcp).await.unwrap();
+        let h2_conn = Box::pin(h2_conn);
         tokio::spawn(async move {
             drop(h2_conn.await);
         });

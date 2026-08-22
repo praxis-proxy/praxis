@@ -160,13 +160,20 @@ fn build_filters(
 // Name Index
 // -----------------------------------------------------------------------------
 
-/// Build a mapping from filter name to position in the pipeline.
-fn build_name_index(filters: &[PipelineFilter]) -> HashMap<Arc<str>, usize> {
-    filters
-        .iter()
-        .enumerate()
-        .filter_map(|(i, pf)| pf.name.as_ref().map(|n| (Arc::clone(n), i)))
-        .collect()
+/// Build a mapping from filter name to every position holding it.
+///
+/// All occurrences are kept, not just the last: rejoin targets bind by
+/// name, and [`resolve_named_rejoin`] rejects a target whose name is
+/// held by more than one filter instead of silently binding to an
+/// arbitrary one.
+fn build_name_index(filters: &[PipelineFilter]) -> HashMap<Arc<str>, Vec<usize>> {
+    let mut index: HashMap<Arc<str>, Vec<usize>> = HashMap::new();
+    for (i, pf) in filters.iter().enumerate() {
+        if let Some(name) = &pf.name {
+            index.entry(Arc::clone(name)).or_default().push(i);
+        }
+    }
+    index
 }
 
 // -----------------------------------------------------------------------------
@@ -178,7 +185,7 @@ fn attach_branches(
     filters: &mut [PipelineFilter],
     branch_configs: BranchConfigs,
     bctx: &mut BuildContext<'_>,
-    name_index: &HashMap<Arc<str>, usize>,
+    name_index: &HashMap<Arc<str>, Vec<usize>>,
     depth: usize,
 ) -> Result<(), FilterError> {
     for (idx, bc) in branch_configs.into_iter().enumerate() {
@@ -198,7 +205,7 @@ fn attach_branches(
 fn resolve_branches(
     configs: &[BranchChainConfig],
     bctx: &mut BuildContext<'_>,
-    name_index: &HashMap<Arc<str>, usize>,
+    name_index: &HashMap<Arc<str>, Vec<usize>>,
     current_idx: usize,
     depth: usize,
 ) -> Result<Vec<ResolvedBranch>, FilterError> {
@@ -215,12 +222,12 @@ fn resolve_branches(
 fn resolve_single_branch(
     config: &BranchChainConfig,
     bctx: &mut BuildContext<'_>,
-    name_index: &HashMap<Arc<str>, usize>,
+    name_index: &HashMap<Arc<str>, Vec<usize>>,
     current_idx: usize,
     depth: usize,
 ) -> Result<ResolvedBranch, FilterError> {
     let condition = config.on_result.as_ref().map(resolve_condition);
-    check_on_result_filter(config, &bctx.pipeline_filter_type_names)?;
+    check_on_result_filter(config, &bctx.pipeline_filter_type_names, current_idx)?;
     let branch_filters = resolve_chain_refs(&config.chains, bctx, depth + 1)?;
     let rejoin = resolve_rejoin(&config.rejoin, name_index, current_idx)?;
     if matches!(rejoin, RejoinTarget::ReEnter(_)) && config.max_iterations.is_none() {
@@ -244,26 +251,30 @@ fn resolve_single_branch(
 // Condition Resolution
 // -----------------------------------------------------------------------------
 
-/// Reject configs where `on_result.filter` does not match any filter
-/// TYPE name in the pipeline.
-fn check_on_result_filter(config: &BranchChainConfig, pipeline_filter_type_names: &[&str]) -> Result<(), FilterError> {
-    if let Some(cond) = &config.on_result
-        && !on_result_filter_type_in_pipeline(&cond.filter, pipeline_filter_type_names)
-    {
-        return Err(FilterError::from(format!(
-            "branch '{}': on_result.filter '{}' does not match any filter type in this pipeline",
-            config.name, cond.filter,
-        )));
+/// Reject configs where `on_result.filter` does not name the filter the
+/// branch is attached to.
+///
+/// `ctx.filter_results` is cleared after every filter's branch evaluation,
+/// so when a branch is evaluated the result map can only contain entries
+/// written by its host filter. A condition naming any other filter would
+/// build cleanly yet never fire at runtime.
+fn check_on_result_filter(
+    config: &BranchChainConfig,
+    pipeline_filter_type_names: &[&str],
+    current_idx: usize,
+) -> Result<(), FilterError> {
+    if let Some(cond) = &config.on_result {
+        let host = pipeline_filter_type_names.get(current_idx).copied().unwrap_or("");
+        if cond.filter != host {
+            return Err(FilterError::from(format!(
+                "branch '{}': on_result.filter '{}' must name the filter the branch is \
+                 attached to ('{host}'); other filters' results are cleared before this \
+                 branch is evaluated, so the condition could never match",
+                config.name, cond.filter,
+            )));
+        }
     }
     Ok(())
-}
-
-/// Check if the `on_result.filter` value matches any filter TYPE name
-/// (from [`HttpFilter::name()`]) in the pipeline.
-///
-/// [`HttpFilter::name()`]: crate::HttpFilter::name
-fn on_result_filter_type_in_pipeline(filter_name: &str, pipeline_filter_type_names: &[&str]) -> bool {
-    pipeline_filter_type_names.contains(&filter_name)
 }
 
 /// Convert a [`BranchCondition`] to a runtime [`ResolvedBranchCondition`].
@@ -317,7 +328,7 @@ fn resolve_chain_refs(
 /// [`RejoinTarget`]: super::branch::RejoinTarget
 fn resolve_rejoin(
     rejoin: &str,
-    name_index: &HashMap<Arc<str>, usize>,
+    name_index: &HashMap<Arc<str>, Vec<usize>>,
     current_idx: usize,
 ) -> Result<RejoinTarget, FilterError> {
     match rejoin {
@@ -333,17 +344,27 @@ fn resolve_rejoin(
 /// [`ReEnter`]: RejoinTarget::ReEnter
 fn resolve_named_rejoin(
     target: &str,
-    name_index: &HashMap<Arc<str>, usize>,
+    name_index: &HashMap<Arc<str>, Vec<usize>>,
     current_idx: usize,
 ) -> Result<RejoinTarget, FilterError> {
-    if let Some(&idx) = name_index.get(target) {
-        return if idx <= current_idx {
-            Ok(RejoinTarget::ReEnter(idx))
-        } else {
-            Ok(RejoinTarget::SkipTo(idx))
-        };
+    match name_index.get(target).map(Vec::as_slice) {
+        Some(&[idx]) => {
+            if idx <= current_idx {
+                Ok(RejoinTarget::ReEnter(idx))
+            } else {
+                Ok(RejoinTarget::SkipTo(idx))
+            }
+        },
+        Some([]) | None => Err(format!("rejoin target '{target}' not found in pipeline").into()),
+        Some(indices) => Err(format!(
+            "rejoin target '{target}' is ambiguous: {count} filters in the \
+             flattened pipeline share this name (positions {indices:?}); \
+             filter names used as rejoin targets must be unique across all \
+             chains referenced by a listener",
+            count = indices.len(),
+        )
+        .into()),
     }
-    Err(format!("rejoin target '{target}' not found in pipeline").into())
 }
 
 // -----------------------------------------------------------------------------
@@ -381,8 +402,8 @@ mod tests {
         ];
         let (filters, _) = build_filters(&mut entries, &registry, &mut 0).unwrap();
         let index = build_name_index(&filters);
-        assert_eq!(index.get("first"), Some(&0), "first filter at index 0");
-        assert_eq!(index.get("second"), Some(&1), "second filter at index 1");
+        assert_eq!(index.get("first"), Some(&vec![0]), "first filter at index 0");
+        assert_eq!(index.get("second"), Some(&vec![1]), "second filter at index 1");
     }
 
     #[test]
@@ -392,7 +413,79 @@ mod tests {
         let (filters, _) = build_filters(&mut entries, &registry, &mut 0).unwrap();
         let index = build_name_index(&filters);
         assert_eq!(index.len(), 1, "only named filters should appear");
-        assert_eq!(index.get("named"), Some(&1), "named filter at index 1");
+        assert_eq!(index.get("named"), Some(&vec![1]), "named filter at index 1");
+    }
+
+    #[test]
+    fn duplicate_named_rejoin_target_fails_build() {
+        let registry = FilterRegistry::with_builtins();
+        let yaml = "
+- filter: request_id
+  name: shared
+- filter: headers
+  branch_chains:
+    - name: jump
+      rejoin: shared
+      chains:
+        - name: inline
+          filters:
+            - filter: headers
+- filter: request_id
+  name: shared
+";
+        let mut entries: Vec<FilterEntry> = serde_yaml::from_str(yaml).unwrap();
+        let chains = HashMap::new();
+        let err = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap_err();
+        assert!(
+            err.to_string().contains("ambiguous") && err.to_string().contains("shared"),
+            "a rejoin targeting a duplicated name must fail the build: {err}"
+        );
+    }
+
+    #[test]
+    fn duplicate_names_without_named_rejoin_still_build() {
+        let registry = FilterRegistry::with_builtins();
+        let yaml = "
+- filter: request_id
+  name: shared
+- filter: request_id
+  name: shared
+";
+        let mut entries: Vec<FilterEntry> = serde_yaml::from_str(yaml).unwrap();
+        let chains = HashMap::new();
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        assert_eq!(
+            filters.len(),
+            2,
+            "duplicate names are only rejected when a rejoin binds to them"
+        );
+    }
+
+    #[test]
+    fn build_name_index_collects_duplicates() {
+        let registry = FilterRegistry::with_builtins();
+        let mut entries = vec![
+            make_entry("request_id", Some("shared")),
+            make_entry("request_id", Some("shared")),
+        ];
+        let (filters, _) = build_filters(&mut entries, &registry, &mut 0).unwrap();
+        let index = build_name_index(&filters);
+        assert_eq!(
+            index.get("shared"),
+            Some(&vec![0, 1]),
+            "every occurrence of a duplicate name must be recorded"
+        );
+    }
+
+    #[test]
+    fn resolve_rejoin_duplicate_name_is_rejected() {
+        let mut index = HashMap::new();
+        index.insert(Arc::from("shared"), vec![1, 4]);
+        let err = resolve_rejoin("shared", &index, 0).unwrap_err();
+        assert!(
+            err.to_string().contains("ambiguous"),
+            "duplicate rejoin target names must be rejected, not silently bound: {err}"
+        );
     }
 
     #[test]
@@ -425,7 +518,7 @@ mod tests {
     #[test]
     fn resolve_rejoin_forward_named() {
         let mut index = HashMap::new();
-        index.insert(Arc::from("routing"), 5);
+        index.insert(Arc::from("routing"), vec![5]);
         match resolve_rejoin("routing", &index, 2).unwrap() {
             RejoinTarget::SkipTo(idx) => assert_eq!(idx, 5, "should skip to index 5"),
             other => panic!("expected SkipTo, got {other:?}"),
@@ -435,7 +528,7 @@ mod tests {
     #[test]
     fn resolve_rejoin_backward_named() {
         let mut index = HashMap::new();
-        index.insert(Arc::from("auth"), 1);
+        index.insert(Arc::from("auth"), vec![1]);
         match resolve_rejoin("auth", &index, 3).unwrap() {
             RejoinTarget::ReEnter(idx) => assert_eq!(idx, 1, "should re-enter at index 1"),
             other => panic!("expected ReEnter, got {other:?}"),
@@ -445,7 +538,7 @@ mod tests {
     #[test]
     fn resolve_rejoin_same_index_is_reenter() {
         let mut index = HashMap::new();
-        index.insert(Arc::from("self_ref"), 3);
+        index.insert(Arc::from("self_ref"), vec![3]);
         match resolve_rejoin("self_ref", &index, 3).unwrap() {
             RejoinTarget::ReEnter(idx) => assert_eq!(idx, 3, "same index should be ReEnter"),
             other => panic!("expected ReEnter, got {other:?}"),
@@ -674,26 +767,31 @@ mod tests {
     }
 
     #[test]
-    fn on_result_filter_found_in_pipeline() {
+    fn on_result_filter_matching_host_accepted() {
+        let config = make_branch_config("br", Some(("router", "k", "v")));
         assert!(
-            on_result_filter_type_in_pipeline("router", &["headers", "router", "static_response"]),
-            "filter present in pipeline should match"
+            check_on_result_filter(&config, &["headers", "router", "static_response"], 1).is_ok(),
+            "on_result naming the host filter should be accepted"
         );
     }
 
     #[test]
-    fn on_result_filter_not_found_in_pipeline() {
+    fn on_result_filter_naming_other_filter_rejected() {
+        let config = make_branch_config("br", Some(("headers", "k", "v")));
+        let err = check_on_result_filter(&config, &["headers", "router", "static_response"], 1).unwrap_err();
         assert!(
-            !on_result_filter_type_in_pipeline("nonexistent", &["headers", "router", "static_response"]),
-            "filter absent from pipeline should not match"
+            err.to_string()
+                .contains("must name the filter the branch is attached to"),
+            "a condition on another filter's results can never match, got: {err}"
         );
     }
 
     #[test]
-    fn on_result_filter_empty_pipeline() {
+    fn on_result_filter_absent_condition_accepted() {
+        let config = make_branch_config("br", None);
         assert!(
-            !on_result_filter_type_in_pipeline("router", &[]),
-            "empty pipeline should not match any filter"
+            check_on_result_filter(&config, &["router"], 0).is_ok(),
+            "unconditional branches need no on_result check"
         );
     }
 
@@ -720,7 +818,8 @@ mod tests {
         }];
         let err = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap_err();
         assert!(
-            err.to_string().contains("does not match any filter type"),
+            err.to_string()
+                .contains("must name the filter the branch is attached to"),
             "should report unmatched on_result.filter: {err}"
         );
     }
@@ -868,6 +967,20 @@ mod tests {
     // -------------------------------------------------------------------------
 
     /// Create a minimal [`FilterEntry`] for testing.
+    fn make_branch_config(name: &str, on_result: Option<(&str, &str, &str)>) -> BranchChainConfig {
+        BranchChainConfig {
+            chains: vec![],
+            max_iterations: None,
+            name: name.to_owned(),
+            on_result: on_result.map(|(filter, key, value)| BranchCondition {
+                filter: filter.to_owned(),
+                key: key.to_owned(),
+                value: value.to_owned(),
+            }),
+            rejoin: "next".to_owned(),
+        }
+    }
+
     fn make_entry(filter_type: &str, name: Option<&str>) -> FilterEntry {
         FilterEntry {
             branch_chains: None,

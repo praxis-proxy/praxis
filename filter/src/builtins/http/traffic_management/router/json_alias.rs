@@ -298,6 +298,7 @@ mod tests {
                 host: None,
                 headers: None,
                 cluster: Arc::from("test"),
+                retry_policy: None,
             },
             json_aliases: Some(
                 aliases

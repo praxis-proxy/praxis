@@ -47,6 +47,8 @@ filter_chains:
           - name: "default"
             endpoints:
               - "127.0.0.1:{default_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -102,6 +104,8 @@ filter_chains:
         response_add:
           - name: X-Processed
             value: "true"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -163,6 +167,8 @@ filter_chains:
         response_add:
           - name: X-Enriched
             value: "yes"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -229,6 +235,8 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -289,6 +297,8 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 

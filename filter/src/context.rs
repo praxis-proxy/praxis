@@ -108,6 +108,10 @@ pub enum SubRequestResponseMode {
 ///
 /// Created by the protocol layer for each incoming request. Filters read
 /// and mutate it to select clusters, choose upstreams, and inject headers.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "flags map to independent protocol concerns"
+)]
 pub struct HttpFilterContext<'a> {
     /// Complete request body captured by protocol pre-read, when the
     /// pipeline's effective request mode is [`BodyMode::StreamBuffer`].
@@ -163,7 +167,7 @@ pub struct HttpFilterContext<'a> {
     /// request` with no cert).  Populated once from the SSL digest
     /// before the first filter runs and preserved across all
     /// subsequent `build_filter_context()` calls for the request.
-    pub peer_identity: Option<TlsPeerIdentity>,
+    pub peer_identity: Option<Arc<TlsPeerIdentity>>,
 
     /// Type-safe request-scoped extension container.
     ///
@@ -305,6 +309,24 @@ pub struct HttpFilterContext<'a> {
     /// for use by passive health checking in the
     /// protocol layer.
     pub selected_endpoint_index: Option<usize>,
+
+    /// Endpoints already attempted for this request (alternate-host retry).
+    pub attempted_endpoints: Vec<Arc<str>>,
+
+    /// Resolved retry policy snapshot for this request.
+    pub retry_policy: Option<Arc<praxis_core::config::RetryPolicy>>,
+
+    /// Optional route-level retry policy override (merged by the load balancer).
+    pub route_retry_policy: Option<Arc<praxis_core::config::RetryPolicy>>,
+
+    /// Shared cluster retry state (budget + active-request counter).
+    pub cluster_retry_state: Option<Arc<praxis_core::retry::ClusterRetryState>>,
+
+    /// Whether `cluster_retry_state.leave()` has already been called.
+    pub cluster_retry_state_released: bool,
+
+    /// Reselector for alternate-host retries after connect/response failure.
+    pub endpoint_reselector: Option<Arc<crate::EndpointReselector>>,
 
     /// Wall-clock time source for timestamp generation.
     pub time_source: &'a dyn TimeSource,

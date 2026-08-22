@@ -14,9 +14,9 @@ Logs structured access records for each request and response.
 | `request_headers` | string[] | no | Request header names allowed for `request_header.<name>` tokens. |
 | `response_headers` | string[] | no | Response header names allowed for `response_header.<name>` tokens. |
 | `conditions` | AccessLogEmitConditions | no | Emit-time conditions (AND across keys). |
-| `conditions.min_duration_ms` | integer | no |  |
-| `conditions.status_classes` | string[] | no |  |
-| `conditions.paths` | string[] | no |  |
+| `conditions.min_duration_ms` | integer | no | Skip emit when request duration is below this threshold (milliseconds). |
+| `conditions.status_classes` | string[] | no | Status code classes to emit; OR within the list (`1xx`–`5xx`). |
+| `conditions.paths` | string[] | no | Path prefixes to emit; OR within the list (segment-boundary match). |
 
 ## Example
 

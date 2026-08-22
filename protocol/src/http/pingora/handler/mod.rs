@@ -25,7 +25,7 @@ use pingora_proxy::{Session, http_proxy};
 use praxis_core::{config::ABSOLUTE_MAX_BODY_BYTES, connectivity::Upstream};
 use praxis_filter::{BodyBuffer, BodyMode, CompressionConfig, FilterPipeline, HttpFilterContext, RequestExtensions};
 use tokio::sync::Semaphore;
-use tracing::{debug, warn};
+use tracing::debug;
 
 use super::{context::PingoraRequestCtx, metrics};
 
@@ -45,6 +45,8 @@ mod reserved_headers;
 mod response_body_filter;
 /// Response filter hook.
 mod response_filter;
+/// Policy-aware retry decision engine.
+mod retry;
 /// Upstream peer selection hook.
 mod upstream_peer;
 /// Upstream request transformation hook.
@@ -58,20 +60,6 @@ mod with_body;
 
 pub use upstream_peer::{UpstreamRetryGateRelease, arm_upstream_retry_gate, lock_upstream_retry_gate_tests};
 pub use with_body::PingoraHttpHandler;
-
-// -----------------------------------------------------------------------------
-// Constants
-// -----------------------------------------------------------------------------
-
-/// Maximum number of upstream connection retries for idempotent requests.
-const MAX_RETRIES: usize = 3;
-
-/// Pingora still replays retry attempts from a fixed-size internal buffer.
-///
-/// `StreamBuffer` initial forwarding uses Praxis-owned `pre_read_body`, but
-/// retry replay cannot safely cover bodies larger than Pingora's retry
-/// buffer.
-const RETRY_BODY_LIMIT: u64 = 65_536; // 64 KiB
 
 // -----------------------------------------------------------------------------
 // Load Handler
@@ -238,67 +226,158 @@ fn adjust_compression(
     }
 }
 
-/// Handle upstream connect failures with retry logic.
+/// Handle upstream connect failures with the policy-aware retry engine.
 ///
 /// Retries are skipped when the effective forwarded body size exceeds
-/// Pingora's retry buffer limit.
-///
-/// Body-mutating filters can change payload length after `request_filter`,
-/// so the retry guard uses the larger of the original and mutated lengths.
+/// the configured replay limit, the method is non-idempotent without
+/// opt-in, the budget is exhausted, or the overall deadline has passed.
+#[expect(clippy::too_many_lines, reason = "sequential guard checks")]
 fn handle_connect_failure(ctx: &mut PingoraRequestCtx, e: Box<pingora_core::Error>) -> Box<pingora_core::Error> {
     let cluster = ctx.metrics_cluster_shared.clone().unwrap_or_else(metrics::cluster_none);
     if let Some(start) = ctx.upstream_connect_start.take() {
         metrics::record_upstream_connect_duration(cluster.clone(), start.elapsed().as_secs_f64());
     }
     metrics::record_upstream_connect_failure(cluster.clone());
-    if ctx.request_is_idempotent {
-        maybe_retry_idempotent_connect(ctx, cluster, e)
-    } else {
-        e
+
+    let policy = ctx
+        .retry_policy
+        .clone()
+        .unwrap_or_else(|| Arc::new(praxis_core::config::RetryPolicy::legacy_default()));
+    let outcome = retry::classify_error(&e);
+    let decision = retry::should_retry(ctx, &policy, outcome, ctx.cluster_retry_state.as_deref());
+
+    match decision {
+        retry::RetryDecision::Retry { backoff } => {
+            ctx.retries += 1;
+            ctx.pending_backoff = Some(backoff);
+            ctx.reselect_on_retry = true;
+            if let Some(upstream) = ctx.upstream_for_retry.as_ref() {
+                let addr = Arc::clone(&upstream.address);
+                if !ctx.attempted_endpoints.iter().any(|e| e.as_ref() == addr.as_ref()) {
+                    ctx.attempted_endpoints.push(addr);
+                }
+            }
+            // Release the failed endpoint's in-flight counter before clearing,
+            // preventing phantom +1 leaks on LeastConnections/P2C strategies.
+            if let Some(upstream) = ctx.upstream_for_retry.as_ref()
+                && let Some(reselector) = ctx.endpoint_reselector.as_ref()
+            {
+                reselector.release(&upstream.address);
+            }
+            // Clear so upstream_peer re-selects an alternate host.
+            ctx.upstream_for_retry = None;
+            debug!(
+                retries = ctx.retries,
+                max = policy.effective_max_retries(),
+                ?backoff,
+                "retrying after connect failure"
+            );
+            let mut e = e;
+            e.set_retry(true);
+            e
+        },
+        retry::RetryDecision::DoNotRetry => {
+            record_retry_exhausted_if_attempted(ctx, cluster);
+            // Pingora may mark some errors retriable by default; clear the
+            // flag so the policy decision is authoritative.
+            let mut e = e;
+            e.set_retry(false);
+            e
+        },
     }
 }
 
-/// Decide whether an idempotent request may retry after a connect failure.
-fn maybe_retry_idempotent_connect(
-    ctx: &mut PingoraRequestCtx,
-    cluster: ::metrics::SharedString,
-    e: Box<pingora_core::Error>,
-) -> Box<pingora_core::Error> {
-    let mutated_len = ctx.mutated_request_body_len.unwrap_or(0) as u64;
-    if std::cmp::max(ctx.request_body_bytes, mutated_len) > RETRY_BODY_LIMIT {
-        warn!(
-            body_bytes = ctx.request_body_bytes,
-            mutated_len = ?ctx.mutated_request_body_len,
-            limit = RETRY_BODY_LIMIT,
-            "skipping retry: request body exceeds Pingora retry buffer limit"
-        );
-        record_retry_exhausted_if_attempted(ctx, cluster);
-        return e;
+/// Decide whether an HTTP response status should trigger a retry.
+///
+/// Returns `Some(error)` marked retriable when the status is retriable
+/// and all guards pass; `None` when the response should be forwarded.
+#[expect(clippy::too_many_lines, reason = "sequential guard checks")]
+fn maybe_retry_response(ctx: &mut PingoraRequestCtx, status: u16) -> Option<Box<pingora_core::Error>> {
+    let policy = ctx
+        .retry_policy
+        .clone()
+        .unwrap_or_else(|| Arc::new(praxis_core::config::RetryPolicy::legacy_default()));
+    let outcome = retry::RetryOutcome::StatusCode(status);
+    let decision = retry::should_retry(ctx, &policy, outcome, ctx.cluster_retry_state.as_deref());
+    match decision {
+        retry::RetryDecision::Retry { backoff } => {
+            ctx.retries += 1;
+            ctx.pending_backoff = Some(backoff);
+            ctx.reselect_on_retry = true;
+            if let Some(upstream) = ctx.upstream_for_retry.as_ref() {
+                let addr = Arc::clone(&upstream.address);
+                if !ctx.attempted_endpoints.iter().any(|e| e.as_ref() == addr.as_ref()) {
+                    ctx.attempted_endpoints.push(addr);
+                }
+            }
+            // Release the failed endpoint's in-flight counter before clearing,
+            // preventing phantom +1 leaks on LeastConnections/P2C strategies.
+            if let Some(upstream) = ctx.upstream_for_retry.as_ref()
+                && let Some(reselector) = ctx.endpoint_reselector.as_ref()
+            {
+                reselector.release(&upstream.address);
+            }
+            ctx.upstream_for_retry = None;
+            debug!(
+                status,
+                retries = ctx.retries,
+                max = policy.effective_max_retries(),
+                ?backoff,
+                "retrying after retriable response status"
+            );
+            let mut e =
+                pingora_core::Error::explain(pingora_core::ErrorType::HTTPStatus(status), "retriable upstream status");
+            e.set_retry(true);
+            Some(e)
+        },
+        retry::RetryDecision::DoNotRetry => None,
     }
-    if (ctx.retries as usize) < MAX_RETRIES {
-        ctx.retries += 1;
-        debug!(
-            retries = ctx.retries,
-            max = MAX_RETRIES,
-            "retrying idempotent request after connect failure"
-        );
-        let mut e = e;
-        e.set_retry(true);
-        return e;
+}
+
+/// Release the active-request counter if it has not already been released.
+fn release_retry_state(ctx: &mut PingoraRequestCtx) {
+    if !ctx.cluster_retry_state_released
+        && let Some(state) = ctx.cluster_retry_state.take()
+    {
+        state.leave();
+        ctx.cluster_retry_state_released = true;
     }
-    warn!(
-        retries = ctx.retries,
-        max = MAX_RETRIES,
-        "retry limit reached for idempotent request"
-    );
-    metrics::record_upstream_retry(cluster, metrics::RETRY_RESULT_EXHAUSTED);
-    e
 }
 
 /// Record `result=exhausted` only when at least one retry was already attempted.
 fn record_retry_exhausted_if_attempted(ctx: &PingoraRequestCtx, cluster: ::metrics::SharedString) {
     if ctx.retries > 0 {
         metrics::record_upstream_retry(cluster, metrics::RETRY_RESULT_EXHAUSTED);
+    }
+}
+
+/// Emit a fallback access record for requests whose lifecycle ended
+/// before the access log filter's completion hooks could run.
+///
+/// Covers pre-upstream rejections, upstream connect and read failures,
+/// and streamed responses aborted mid-body: none of these reach the
+/// bodyless response phase or body end-of-stream where the filter
+/// emits. Only fires when the pipeline configures an `access_log`
+/// filter; these records bypass the filter's sampling because
+/// incomplete requests are always worth a record.
+fn maybe_emit_fallback_access_log(pipeline: &FilterPipeline, status: u16, ctx: &mut PingoraRequestCtx) {
+    if ctx.response_delivery_complete || ctx.connection_upgraded || !pipeline.contains_filter("access_log") {
+        return;
+    }
+    if let Some(filter_ctx) = ctx.filter_context_for(pipeline, None) {
+        // The access_log filter already logged this request (e.g. a bodyless
+        // response whose on_response emitted before a later filter rejected):
+        // no fallback record, or it would duplicate.
+        if praxis_filter::access_record_already_emitted(&filter_ctx) {
+            return;
+        }
+        // Honor the entry's request conditions: a scoped access_log (e.g.
+        // only /api paths) must not gain fallback records for requests the
+        // operator excluded. Sampling is still deliberately bypassed.
+        if !pipeline.filter_request_conditions_match("access_log", filter_ctx.request) {
+            return;
+        }
+        praxis_filter::emit_access_record(&filter_ctx, status);
     }
 }
 
@@ -315,11 +394,18 @@ async fn logging_cleanup(pipeline: &FilterPipeline, ctx: &mut PingoraRequestCtx)
         let state = filter_ctx.filter_state;
         let exec_idx = filter_ctx.executed_filter_indices;
         let body_idx = filter_ctx.body_done_indices;
+        // The context macro takes cluster/upstream out of ctx; restore them
+        // so the fallback access record that follows can attribute the
+        // failure to the routed cluster and selected endpoint.
+        let cluster = filter_ctx.cluster;
+        let upstream = filter_ctx.upstream;
         ctx.extensions = extensions;
         ctx.filter_metadata = metadata;
         ctx.filter_state = state;
         ctx.cached_executed_filter_indices = exec_idx;
         ctx.cached_body_done_indices = body_idx;
+        ctx.cluster = cluster;
+        ctx.upstream = upstream;
     }
 }
 
@@ -651,6 +737,12 @@ mod tests {
 
     use super::*;
 
+    /// Maximum number of upstream connection retries for the legacy default policy.
+    const MAX_RETRIES: usize = praxis_core::config::DEFAULT_MAX_RETRIES as usize;
+
+    /// Default Pingora retry body buffer limit (64 `KiB`).
+    const RETRY_BODY_LIMIT: u64 = praxis_core::config::DEFAULT_RETRY_BODY_LIMIT_BYTES;
+
     #[test]
     fn first_failure_idempotent_sets_retry() {
         let mut ctx = PingoraRequestCtx::default();
@@ -747,6 +839,72 @@ mod tests {
         );
     }
 
+    #[test]
+    fn response_503_retries_when_status5xx_enabled() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.request_is_idempotent = true;
+        ctx.retry_policy = Some(Arc::new(praxis_core::config::RetryPolicy {
+            retriable_conditions: vec![praxis_core::config::RetriableCondition::Status5xx],
+            ..praxis_core::config::RetryPolicy::legacy_default()
+        }));
+        let e = maybe_retry_response(&mut ctx, 503).expect("503 should be retriable");
+        assert!(e.retry(), "503 under Status5xx should set retry");
+        assert_eq!(ctx.retries, 1);
+        assert!(ctx.reselect_on_retry);
+        assert!(ctx.pending_backoff.is_some());
+    }
+
+    #[test]
+    fn response_404_does_not_retry() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.request_is_idempotent = true;
+        ctx.retry_policy = Some(Arc::new(praxis_core::config::RetryPolicy {
+            retriable_conditions: vec![praxis_core::config::RetriableCondition::Status5xx],
+            ..praxis_core::config::RetryPolicy::legacy_default()
+        }));
+        assert!(
+            maybe_retry_response(&mut ctx, 404).is_none(),
+            "404 must never trigger status-based retry"
+        );
+        assert_eq!(ctx.retries, 0);
+    }
+
+    #[test]
+    fn response_502_does_not_retry_under_legacy_default() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.request_is_idempotent = true;
+        // Legacy default is connect_failure only — no Status5xx.
+        assert!(
+            maybe_retry_response(&mut ctx, 502).is_none(),
+            "legacy default must forward 5xx without retry"
+        );
+    }
+
+    #[test]
+    fn max_retries_zero_disables_connect_retry() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.request_is_idempotent = true;
+        ctx.retry_policy = Some(Arc::new(praxis_core::config::RetryPolicy {
+            max_retries: Some(0),
+            ..praxis_core::config::RetryPolicy::legacy_default()
+        }));
+        let e = handle_connect_failure(&mut ctx, make_error());
+        assert!(!e.retry(), "max_retries: 0 must disable retries");
+        assert_eq!(ctx.retries, 0);
+    }
+
+    #[test]
+    fn non_idempotent_clears_pingora_default_retry_flag() {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.request_is_idempotent = false;
+        // Simulate Pingora marking the error retriable by default.
+        let mut e = make_error();
+        e.set_retry(true);
+        let e = handle_connect_failure(&mut ctx, e);
+        assert!(!e.retry(), "policy denial must clear Pingora's default retry flag");
+        assert_eq!(ctx.retries, 0);
+    }
+
     #[tokio::test]
     async fn logging_cleanup_noop_when_response_phase_done() {
         let registry = praxis_filter::FilterRegistry::with_builtins();
@@ -784,8 +942,11 @@ mod tests {
             headers: http::HeaderMap::new(),
         });
         logging_cleanup(&pipeline, &mut ctx).await;
-        assert!(ctx.cluster.is_none(), "cluster should be taken by logging_cleanup");
-        assert!(ctx.upstream.is_none(), "upstream should be taken by logging_cleanup");
+        assert_eq!(
+            ctx.cluster.as_deref(),
+            Some("test-cluster"),
+            "cluster must be restored so the fallback access record can attribute the failure"
+        );
     }
 
     #[tokio::test]
@@ -1193,6 +1354,116 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Fallback Access Log
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn fallback_access_log_emits_for_incomplete_request() {
+        let pipeline = access_log_pipeline();
+        let mut ctx = make_fallback_ctx();
+
+        let events = capture_access_events(|| maybe_emit_fallback_access_log(&pipeline, 502, &mut ctx));
+        assert_eq!(
+            events.len(),
+            1,
+            "incomplete request must produce a fallback access record"
+        );
+    }
+
+    #[test]
+    fn fallback_access_log_skips_completed_delivery() {
+        let pipeline = access_log_pipeline();
+        let mut ctx = make_fallback_ctx();
+        ctx.response_delivery_complete = true;
+
+        let events = capture_access_events(|| maybe_emit_fallback_access_log(&pipeline, 200, &mut ctx));
+        assert!(events.is_empty(), "completed delivery already logged via the filter");
+    }
+
+    #[test]
+    fn fallback_access_log_skips_upgraded_connections() {
+        let pipeline = access_log_pipeline();
+        let mut ctx = make_fallback_ctx();
+        ctx.connection_upgraded = true;
+
+        let events = capture_access_events(|| maybe_emit_fallback_access_log(&pipeline, 101, &mut ctx));
+        assert!(events.is_empty(), "upgraded connections have no body completion");
+    }
+
+    #[test]
+    fn fallback_access_log_skips_without_access_log_filter() {
+        let registry = praxis_filter::FilterRegistry::with_builtins();
+        let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+        let mut ctx = make_fallback_ctx();
+
+        let events = capture_access_events(|| maybe_emit_fallback_access_log(&pipeline, 502, &mut ctx));
+        assert!(events.is_empty(), "no access_log filter means no fallback record");
+    }
+
+    #[test]
+    fn fallback_access_log_honors_entry_conditions() {
+        let registry = praxis_filter::FilterRegistry::with_builtins();
+        let mut entries = vec![praxis_filter::FilterEntry {
+            branch_chains: None,
+            conditions: vec![serde_yaml::from_str("when:\n  path_prefix: /api\n").unwrap()],
+            failure_mode: praxis_filter::FailureMode::default(),
+            filter_type: "access_log".to_owned(),
+            config: serde_yaml::Value::Null,
+            name: None,
+            response_conditions: vec![],
+        }];
+        let pipeline = FilterPipeline::build(&mut entries, &registry).unwrap();
+
+        let mut excluded = make_fallback_ctx();
+        let events = capture_access_events(|| maybe_emit_fallback_access_log(&pipeline, 502, &mut excluded));
+        assert!(
+            events.is_empty(),
+            "requests the operator scoped out must not gain fallback records"
+        );
+
+        let mut included = make_fallback_ctx();
+        if let Some(snapshot) = included.request_snapshot.as_mut() {
+            snapshot.uri = "/api/users".parse().unwrap();
+        }
+        let events = capture_access_events(|| maybe_emit_fallback_access_log(&pipeline, 502, &mut included));
+        assert_eq!(events.len(), 1, "in-scope incomplete requests still get a record");
+    }
+
+    #[test]
+    fn aborted_response_body_at_eos_is_not_marked_delivered() {
+        // access_log declares read-only response body access, so the hook
+        // reaches the SizeLimit check instead of early-returning.
+        let pipeline = access_log_pipeline();
+        let mut ctx = make_fallback_ctx();
+        ctx.response_body_mode = BodyMode::SizeLimit { max_bytes: 4 };
+        let mut body = Some(Bytes::from_static(b"exceeds the limit"));
+
+        let result = response_body_filter::execute(&pipeline, &mut body, true, &mut ctx);
+        assert!(result.is_err(), "over-limit body must abort");
+        assert!(
+            !ctx.response_delivery_complete,
+            "a response aborted at end-of-stream was not delivered; the fallback record must fire"
+        );
+    }
+
+    #[test]
+    fn response_body_eos_marks_delivery_complete() {
+        let registry = praxis_filter::FilterRegistry::with_builtins();
+        let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+        let mut ctx = PingoraRequestCtx::default();
+        let mut body: Option<Bytes> = None;
+
+        let _timeout = response_body_filter::execute(&pipeline, &mut body, false, &mut ctx).unwrap();
+        assert!(
+            !ctx.response_delivery_complete,
+            "mid-stream chunks must not mark delivery complete"
+        );
+
+        let _timeout = response_body_filter::execute(&pipeline, &mut body, true, &mut ctx).unwrap();
+        assert!(ctx.response_delivery_complete, "end-of-stream marks delivery complete");
+    }
+
+    // -------------------------------------------------------------------------
     // Span Attribute Helpers
     // -------------------------------------------------------------------------
 
@@ -1273,6 +1544,68 @@ mod tests {
     /// Create a connect error for tests.
     fn make_error() -> Box<pingora_core::Error> {
         pingora_core::Error::explain(pingora_core::ErrorType::ConnectError, "test connect failure")
+    }
+
+    /// Build a pipeline containing an `access_log` filter.
+    fn access_log_pipeline() -> FilterPipeline {
+        let registry = praxis_filter::FilterRegistry::with_builtins();
+        let mut entries = vec![praxis_filter::FilterEntry {
+            branch_chains: None,
+            conditions: vec![],
+            failure_mode: praxis_filter::FailureMode::default(),
+            filter_type: "access_log".to_owned(),
+            config: serde_yaml::Value::Null,
+            name: None,
+            response_conditions: vec![],
+        }];
+        FilterPipeline::build(&mut entries, &registry).unwrap()
+    }
+
+    /// Build a context with a request snapshot for fallback logging tests.
+    fn make_fallback_ctx() -> PingoraRequestCtx {
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.request_snapshot = Some(praxis_filter::Request {
+            method: http::Method::GET,
+            uri: "/incomplete".parse().unwrap(),
+            headers: http::HeaderMap::new(),
+        });
+        ctx
+    }
+
+    /// Capture `access` info events emitted while running `f`.
+    fn capture_access_events<F: FnOnce()>(f: F) -> Vec<String> {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let messages = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let capture = AccessCapture(Arc::clone(&messages));
+        let subscriber = tracing_subscriber::registry().with(capture);
+        tracing::subscriber::with_default(subscriber, f);
+        let mut guard = messages.lock().unwrap();
+        std::mem::take(&mut *guard)
+    }
+
+    /// Layer capturing `access` records for assertions.
+    struct AccessCapture(Arc<std::sync::Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for AccessCapture {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+            let mut visitor = AccessMessageVisitor(String::new());
+            event.record(&mut visitor);
+            if visitor.0.contains("access") {
+                self.0.lock().unwrap().push(visitor.0);
+            }
+        }
+    }
+
+    /// Visitor extracting the `message` field from an event.
+    struct AccessMessageVisitor(String);
+
+    impl tracing::field::Visit for AccessMessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
     }
 
     /// Build a [`PingoraRequestCtx`] for passive health testing.

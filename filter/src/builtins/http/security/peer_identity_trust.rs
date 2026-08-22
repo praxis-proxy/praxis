@@ -477,11 +477,11 @@ mod tests {
         let f = make_org_filter("test-org");
         let req = crate::test_utils::make_request(Method::GET, "/");
         let mut ctx = crate::test_utils::make_filter_context(&req);
-        ctx.peer_identity = Some(TlsPeerIdentity {
+        ctx.peer_identity = Some(std::sync::Arc::new(TlsPeerIdentity {
             cert_digest: vec![1],
             organization: None,
             serial_number: None,
-        });
+        }));
 
         let action = f.on_request(&mut ctx).await.unwrap();
         assert!(
@@ -509,11 +509,11 @@ mod tests {
         format!("{byte:02x}").repeat(32)
     }
 
-    fn make_identity(digest: Vec<u8>, org: &str, serial: &str) -> TlsPeerIdentity {
-        TlsPeerIdentity {
+    fn make_identity(digest: Vec<u8>, org: &str, serial: &str) -> std::sync::Arc<TlsPeerIdentity> {
+        std::sync::Arc::new(TlsPeerIdentity {
             cert_digest: digest,
             organization: Some(org.to_owned()),
             serial_number: Some(serial.to_owned()),
-        }
+        })
     }
 }

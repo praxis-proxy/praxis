@@ -96,12 +96,13 @@ fn split_filter_conditions(
 ) -> Result<(Vec<Condition>, Option<serde_yaml::Value>), String> {
     match conditions_val {
         None => Ok((Vec::new(), None)),
+        Some(v) if v.is_null() => Ok((Vec::new(), None)),
         Some(v) if v.is_sequence() => Ok((serde_yaml::from_value(v).map_err(|e| e.to_string())?, None)),
         Some(v) if filter_type == "access_log" && v.is_mapping() => Ok((Vec::new(), Some(v))),
-        Some(_) => Err("conditions must be a sequence of pipeline predicates; \
-             access_log emit conditions use a mapping with min_duration_ms, \
-             status_classes, and/or paths"
-            .to_owned()),
+        Some(_) if filter_type == "access_log" => {
+            Err("access_log conditions must be a mapping with min_duration_ms, status_classes, and/or paths".to_owned())
+        },
+        Some(_) => Err("conditions must be a sequence of pipeline predicates".to_owned()),
     }
 }
 
@@ -544,6 +545,46 @@ fields: [method, status]
         assert!(entry.conditions.is_empty(), "emit conditions belong in config");
         let conditions = entry.config.get("conditions").expect("conditions in config");
         assert!(conditions.is_mapping(), "emit conditions should be a mapping");
+    }
+
+    #[test]
+    fn parse_filter_entry_rejects_mapping_conditions_for_non_access_log() {
+        let yaml = r#"
+filter: headers
+conditions:
+  path: /
+"#;
+        let err = serde_yaml::from_str::<FilterEntry>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("sequence of pipeline predicates"),
+            "non-access_log mapping conditions should not mention access_log: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_filter_entry_null_conditions_treated_as_absent() {
+        let yaml = r#"
+filter: router
+conditions: ~
+routes: []
+"#;
+        let entry: FilterEntry = serde_yaml::from_str(yaml).unwrap();
+        assert!(entry.conditions.is_empty(), "null conditions should be absent");
+    }
+
+    #[test]
+    fn parse_filter_entry_access_log_null_emit_conditions() {
+        let yaml = r#"
+filter: access_log
+conditions: ~
+sample_rate: 1.0
+"#;
+        let entry: FilterEntry = serde_yaml::from_str(yaml).unwrap();
+        assert!(entry.conditions.is_empty(), "null emit conditions belong in config");
+        assert!(
+            entry.config.get("conditions").is_none(),
+            "null access_log conditions should not be stored in config"
+        );
     }
 
     #[test]

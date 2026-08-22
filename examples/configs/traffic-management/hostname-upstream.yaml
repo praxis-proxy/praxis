@@ -29,3 +29,6 @@ filter_chains:
           - name: backend
             endpoints:
               - "localhost:9000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

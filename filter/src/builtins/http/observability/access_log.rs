@@ -4,8 +4,6 @@
 //! Structured JSON access log filter with optional sampling, field selection,
 //! header projection, and emit-time conditions.
 
-#![allow(clippy::missing_docs_in_private_items, reason = "internal emit plan types")]
-
 use std::{
     borrow::Cow,
     collections::{BTreeMap, HashSet},
@@ -56,6 +54,10 @@ use crate::{
 /// When `fields` is omitted, the default ten fields are emitted:
 /// `method`, `path`, `client_ip`, `status`, `duration_ms`, `cluster`,
 /// `upstream`, `request_id`, `request_body_bytes`, `response_body_bytes`.
+///
+/// Custom `fields` sets emit structured tracing key-value pairs for small
+/// known combinations; otherwise a single JSON `record` field carries the
+/// projected map so parsers can rely on one shape for arbitrary field sets.
 ///
 /// Pipeline `conditions` / `response_conditions` on the filter entry still gate
 /// whether this filter runs; access-log `conditions` are evaluated at emit time.
@@ -117,8 +119,11 @@ struct AccessLogConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AccessLogEmitConditions {
+    /// Skip emit when request duration is below this threshold (milliseconds).
     min_duration_ms: Option<u64>,
+    /// Status code classes to emit; OR within the list (`1xx`–`5xx`).
     status_classes: Option<Vec<String>>,
+    /// Path prefixes to emit; OR within the list (segment-boundary match).
     paths: Option<Vec<String>>,
 }
 
@@ -151,33 +156,51 @@ const SENSITIVE_HEADERS: &[&str] = &["authorization", "proxy-authorization", "co
 /// Parsed scalar field token.
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum FieldToken {
+    /// `method`
     Method,
+    /// `path`
     Path,
+    /// `client_ip`
     ClientIp,
+    /// `status`
     Status,
+    /// `duration_ms`
     DurationMs,
+    /// `cluster`
     Cluster,
+    /// `upstream`
     Upstream,
+    /// `request_id`
     RequestId,
+    /// `request_body_bytes`
     RequestBodyBytes,
+    /// `response_body_bytes`
     ResponseBodyBytes,
+    /// `trace_id`
     TraceId,
+    /// `span_id`
     SpanId,
+    /// `request_header.<name>`
     RequestHeader(String),
+    /// `response_header.<name>`
     ResponseHeader(String),
 }
 
 /// Runtime emit plan built from config.
 #[derive(Clone, Debug)]
 struct EmitPlan {
+    /// Selected field tokens in emit order.
     fields: Vec<FieldToken>,
+    /// Whether the default ten-field set is used.
     is_default: bool,
 }
 
 /// Cached response metadata for emit on the body phase.
 #[derive(Clone, Debug)]
 struct AccessLogState {
+    /// HTTP status captured in `on_response`.
     status: u16,
+    /// Response headers when projection needs them.
     response_headers: Option<http::HeaderMap>,
 }
 
@@ -199,6 +222,7 @@ impl AccessLogFilter {
     }
 
     #[expect(clippy::too_many_lines, reason = "config validation and emit plan assembly")]
+    /// Validate config and assemble runtime emit state.
     fn build(cfg: AccessLogConfig) -> Result<Self, FilterError> {
         if cfg.sample_rate <= 0.0 || cfg.sample_rate > 1.0 {
             return Err(format!("access_log: sample_rate must be in (0.0, 1.0], got {}", cfg.sample_rate).into());
@@ -273,24 +297,18 @@ impl AccessLogFilter {
             .is_multiple_of(self.sample_every)
     }
 
-    /// Returns `true` for responses that Pingora delivers without a body phase.
-    fn is_bodyless(status: http::StatusCode, req_method: &http::Method) -> bool {
-        status.as_u16() < 200
-            || status == http::StatusCode::NO_CONTENT
-            || status == http::StatusCode::NOT_MODIFIED
-            || req_method == http::Method::HEAD
-    }
-
-    fn maybe_emit(&self, ctx: &HttpFilterContext<'_>, status: u16, response_headers: Option<&http::HeaderMap>) {
+    /// Evaluate emit conditions and sampling, then emit when both pass.
+    fn maybe_emit(&self, ctx: &mut HttpFilterContext<'_>, status: u16, response_headers: Option<&http::HeaderMap>) {
         if !self.passes_emit_conditions(ctx, status) {
             return;
         }
         if !self.should_log() {
             return;
         }
-        self.emit_access_log(ctx, status, response_headers);
+        self.emit_and_mark(ctx, status, response_headers);
     }
 
+    /// Returns `true` when all configured emit-time conditions match.
     fn passes_emit_conditions(&self, ctx: &HttpFilterContext<'_>, status: u16) -> bool {
         let Some(conditions) = &self.emit_conditions else {
             return true;
@@ -319,38 +337,77 @@ impl AccessLogFilter {
         true
     }
 
-    /// Emit a structured access log entry for the current request.
-    fn emit_access_log(&self, ctx: &HttpFilterContext<'_>, status: u16, response_headers: Option<&http::HeaderMap>) {
+    /// Emit the configured access record and mark it for protocol-layer dedup.
+    fn emit_and_mark(&self, ctx: &mut HttpFilterContext<'_>, status: u16, response_headers: Option<&http::HeaderMap>) {
         if self.emit_plan.is_default {
-            Self::emit_default(ctx, status);
-            return;
+            emit_access_record(ctx, status);
+        } else {
+            let record = self.emit_plan.build_record(ctx, status, response_headers);
+            emit_projected_record(&record);
         }
-
-        let record = self.emit_plan.build_record(ctx, status, response_headers);
-        emit_projected_record(&record);
-    }
-
-    /// Default ten-field emit path (unchanged from pre-#799 behaviour).
-    fn emit_default(ctx: &HttpFilterContext<'_>, status: u16) {
-        let path = sanitize_for_log(ctx.request.uri.path());
-        let client_ip = ctx.client_addr.map(|a| a.to_string()).unwrap_or_default();
-        info!(
-            method = %ctx.request.method,
-            path = %path,
-            client_ip = %client_ip,
-            status,
-            duration_ms = truncate_u128(ctx.request_start.elapsed().as_millis()),
-            cluster = ctx.cluster_name().unwrap_or("-"),
-            upstream = ctx.upstream_addr().unwrap_or("-"),
-            request_id = ctx.request_id().unwrap_or("-"),
-            request_body_bytes = ctx.request_body_bytes,
-            response_body_bytes = ctx.response_body_bytes,
-            "access"
-        );
+        mark_access_record_emitted(ctx);
     }
 }
 
+/// Returns `true` for responses that Pingora delivers without a body phase.
+///
+/// Shared by [`AccessLogFilter`] and the protocol layer's delivery
+/// completion tracking: bodyless responses finish at the response
+/// phase, everything else finishes at body end-of-stream.
+pub fn bodyless_response(status: http::StatusCode, req_method: &http::Method) -> bool {
+    status.as_u16() < 200
+        || status == http::StatusCode::NO_CONTENT
+        || status == http::StatusCode::NOT_MODIFIED
+        || req_method == http::Method::HEAD
+}
+
+/// Marker inserted into request extensions once an access record has been
+/// emitted for this request.
+///
+/// The protocol-layer fallback checks for it via
+/// [`access_record_already_emitted`] so a request the filter already logged
+/// (e.g. a bodyless response whose `on_response` emitted before a later
+/// response filter rejected) does not gain a duplicate fallback record.
+struct AccessRecordEmitted;
+
+/// Whether an access record has already been emitted for this request.
+#[must_use]
+pub fn access_record_already_emitted(ctx: &HttpFilterContext<'_>) -> bool {
+    ctx.extensions.get::<AccessRecordEmitted>().is_some()
+}
+
+/// Record that an access record has been emitted for this request.
+pub fn mark_access_record_emitted(ctx: &mut HttpFilterContext<'_>) {
+    ctx.extensions.insert(AccessRecordEmitted);
+}
+
+/// Emit the default ten-field access log record for the current request.
+///
+/// Shared by [`AccessLogFilter`]'s completion hooks and the protocol
+/// layer's fallback for requests whose lifecycle ended before those
+/// hooks could run (pre-upstream rejections, upstream failures, and
+/// streamed responses aborted mid-body). Fallback records bypass the
+/// filter's sampling: incomplete requests are always worth a record.
+pub fn emit_access_record(ctx: &HttpFilterContext<'_>, status: u16) {
+    let path = sanitize_for_log(ctx.request.uri.path());
+    let client_ip = ctx.client_addr.map(|a| a.to_string()).unwrap_or_default();
+    info!(
+        method = %ctx.request.method,
+        path = %path,
+        client_ip = %client_ip,
+        status,
+        duration_ms = truncate_u128(ctx.request_start.elapsed().as_millis()),
+        cluster = ctx.cluster_name().unwrap_or("-"),
+        upstream = ctx.upstream_addr().unwrap_or("-"),
+        request_id = ctx.request_id().unwrap_or("-"),
+        request_body_bytes = ctx.request_body_bytes,
+        response_body_bytes = ctx.response_body_bytes,
+        "access"
+    );
+}
+
 impl EmitPlan {
+    /// Build the projected JSON map for the configured field tokens.
     #[expect(clippy::too_many_lines, reason = "field projection match arms")]
     fn build_record(
         &self,
@@ -403,13 +460,13 @@ impl EmitPlan {
                 },
                 FieldToken::RequestHeader(name) => {
                     let value = first_header_value(&ctx.request.headers, name).unwrap_or_else(|| "-".to_owned());
-                    record.insert(header_json_key(name), value);
+                    record.insert(header_json_key("request_header", name), value);
                 },
                 FieldToken::ResponseHeader(name) => {
                     let value = response_headers
                         .and_then(|headers| first_header_value(headers, name))
                         .unwrap_or_else(|| "-".to_owned());
-                    record.insert(header_json_key(name), value);
+                    record.insert(header_json_key("response_header", name), value);
                 },
             }
         }
@@ -430,7 +487,7 @@ impl HttpFilter for AccessLogFilter {
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if let Some(resp) = &ctx.response_header {
             let status = resp.status.as_u16();
-            let bodyless = Self::is_bodyless(resp.status, &ctx.request.method);
+            let bodyless = bodyless_response(resp.status, &ctx.request.method);
 
             let response_headers = self.needs_response_headers.then(|| resp.headers.clone());
             ctx.insert_filter_state(AccessLogState {
@@ -439,10 +496,10 @@ impl HttpFilter for AccessLogFilter {
             });
 
             if bodyless {
-                let headers = ctx
+                let response_header_map = ctx
                     .get_filter_state::<AccessLogState>()
-                    .and_then(|state| state.response_headers.as_ref());
-                self.maybe_emit(ctx, status, headers);
+                    .and_then(|state| state.response_headers.clone());
+                self.maybe_emit(ctx, status, response_header_map.as_ref());
             }
         }
         Ok(FilterAction::Continue)
@@ -459,10 +516,10 @@ impl HttpFilter for AccessLogFilter {
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         if end_of_stream {
-            let (status, headers) = ctx
+            let (status, response_header_map) = ctx
                 .get_filter_state::<AccessLogState>()
-                .map_or((0, None), |state| (state.status, state.response_headers.as_ref()));
-            self.maybe_emit(ctx, status, headers);
+                .map_or((0, None), |state| (state.status, state.response_headers.clone()));
+            self.maybe_emit(ctx, status, response_header_map.as_ref());
         }
         Ok(FilterAction::Continue)
     }
@@ -472,6 +529,7 @@ impl HttpFilter for AccessLogFilter {
 // Config validation helpers
 // -----------------------------------------------------------------------------
 
+/// Normalize configured header names to lowercase ASCII.
 fn normalize_header_names(names: Option<&[String]>) -> Result<HashSet<String>, FilterError> {
     let Some(names) = names else {
         return Ok(HashSet::new());
@@ -486,11 +544,15 @@ fn normalize_header_names(names: Option<&[String]>) -> Result<HashSet<String>, F
         if is_sensitive_header(trimmed) {
             return Err(format!("access_log: header {trimmed:?} is not allowed in v1").into());
         }
+        if HeaderName::from_bytes(trimmed.as_bytes()).is_err() {
+            return Err(format!("access_log: header {trimmed:?} is not a valid HTTP header name").into());
+        }
         normalized.insert(trimmed.to_ascii_lowercase());
     }
     Ok(normalized)
 }
 
+/// Parse and validate `fields` tokens against configured header allowlists.
 fn parse_field_tokens(
     fields: Option<Vec<&str>>,
     request_headers: &HashSet<String>,
@@ -521,9 +583,44 @@ fn parse_field_tokens(
         }
     }
 
+    reject_duplicate_field_tokens(&tokens)?;
+
     Ok(tokens)
 }
 
+/// Reject duplicate entries in `tokens`.
+fn reject_duplicate_field_tokens(tokens: &[FieldToken]) -> Result<(), FilterError> {
+    let mut seen = HashSet::new();
+    for token in tokens {
+        let key = field_token_config_key(token);
+        if !seen.insert(key.clone()) {
+            return Err(format!("access_log: duplicate field token {key:?}").into());
+        }
+    }
+    Ok(())
+}
+
+/// Config key for a parsed field token (used for duplicate detection).
+fn field_token_config_key(token: &FieldToken) -> String {
+    match token {
+        FieldToken::Method => "method".to_owned(),
+        FieldToken::Path => "path".to_owned(),
+        FieldToken::ClientIp => "client_ip".to_owned(),
+        FieldToken::Status => "status".to_owned(),
+        FieldToken::DurationMs => "duration_ms".to_owned(),
+        FieldToken::Cluster => "cluster".to_owned(),
+        FieldToken::Upstream => "upstream".to_owned(),
+        FieldToken::RequestId => "request_id".to_owned(),
+        FieldToken::RequestBodyBytes => "request_body_bytes".to_owned(),
+        FieldToken::ResponseBodyBytes => "response_body_bytes".to_owned(),
+        FieldToken::TraceId => "trace_id".to_owned(),
+        FieldToken::SpanId => "span_id".to_owned(),
+        FieldToken::RequestHeader(name) => format!("request_header.{name}"),
+        FieldToken::ResponseHeader(name) => format!("response_header.{name}"),
+    }
+}
+
+/// Parse one scalar field token from config text.
 fn parse_scalar_field_token(token: &str) -> Result<FieldToken, FilterError> {
     if let Some(name) = token.strip_prefix("request_header.") {
         if name.is_empty() {
@@ -556,6 +653,7 @@ fn parse_scalar_field_token(token: &str) -> Result<FieldToken, FilterError> {
     }
 }
 
+/// Validate emit-time `conditions` when present.
 fn validate_emit_conditions(conditions: Option<&AccessLogEmitConditions>) -> Result<(), FilterError> {
     let Some(conditions) = conditions else {
         return Ok(());
@@ -593,6 +691,7 @@ fn validate_emit_conditions(conditions: Option<&AccessLogEmitConditions>) -> Res
     Ok(())
 }
 
+/// Validate one status class token (`1xx`–`5xx`).
 fn parse_status_class(class: &str) -> Result<(), FilterError> {
     match class {
         "1xx" | "2xx" | "3xx" | "4xx" | "5xx" => Ok(()),
@@ -600,6 +699,7 @@ fn parse_status_class(class: &str) -> Result<(), FilterError> {
     }
 }
 
+/// Returns `true` when `status` falls in the configured class.
 fn status_matches_class(status: u16, class: &str) -> bool {
     let hundred = status / 100;
     matches!(
@@ -608,15 +708,18 @@ fn status_matches_class(status: u16, class: &str) -> bool {
     )
 }
 
+/// Returns `true` when the header name is blocked in v1.
 fn is_sensitive_header(name: &str) -> bool {
     let lower = name.to_ascii_lowercase();
     SENSITIVE_HEADERS.contains(&lower.as_str())
 }
 
-fn header_json_key(name: &str) -> String {
-    name.to_ascii_lowercase()
+/// JSON map key for a projected header field.
+fn header_json_key(prefix: &str, name: &str) -> String {
+    format!("{prefix}.{}", name.to_ascii_lowercase())
 }
 
+/// Return the first valid UTF-8 value for `name`, if any.
 fn first_header_value(headers: &http::HeaderMap, name: &str) -> Option<String> {
     let name = HeaderName::from_bytes(name.as_bytes()).ok()?;
     headers
@@ -625,6 +728,7 @@ fn first_header_value(headers: &http::HeaderMap, name: &str) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Current `OTel` trace ID from the active span, or `"-"`.
 fn current_trace_id() -> String {
     let span = tracing::Span::current();
     let context = span.context();
@@ -637,6 +741,7 @@ fn current_trace_id() -> String {
     }
 }
 
+/// Current `OTel` span ID from the active span, or `"-"`.
 fn current_span_id() -> String {
     let span = tracing::Span::current();
     let context = span.context();
@@ -663,6 +768,7 @@ fn emit_projected_record(record: &BTreeMap<String, String>) {
     info!(message = "access", record = %json);
 }
 
+/// Try known small field combinations before falling back to JSON `record`.
 fn emit_projected_record_known(record: &BTreeMap<String, String>) -> bool {
     match record.len() {
         1 => emit_one_field(record),
@@ -673,6 +779,7 @@ fn emit_projected_record_known(record: &BTreeMap<String, String>) -> bool {
     }
 }
 
+/// Emit a one-field projected record when the key is recognized.
 fn emit_one_field(record: &BTreeMap<String, String>) -> bool {
     if let Some(value) = record.get("method") {
         info!(message = "access", method = %value);
@@ -691,6 +798,7 @@ fn emit_one_field(record: &BTreeMap<String, String>) -> bool {
     false
 }
 
+/// Emit a two-field projected record when the keys are recognized.
 fn emit_two_fields(record: &BTreeMap<String, String>) -> bool {
     if let (Some(method), Some(path)) = (record.get("method"), record.get("path")) {
         info!(message = "access", method = %method, path = %path);
@@ -705,6 +813,7 @@ fn emit_two_fields(record: &BTreeMap<String, String>) -> bool {
     false
 }
 
+/// Emit a three-field projected record when the keys are recognized.
 fn emit_three_fields(record: &BTreeMap<String, String>) -> bool {
     if let (Some(method), Some(path), Some(status)) = (record.get("method"), record.get("path"), record.get("status"))
         && let Ok(status) = status.parse::<u16>()
@@ -715,6 +824,7 @@ fn emit_three_fields(record: &BTreeMap<String, String>) -> bool {
     false
 }
 
+/// Emit a four-field projected record when the keys are recognized.
 fn emit_four_fields(record: &BTreeMap<String, String>) -> bool {
     if let (Some(method), Some(path), Some(status), Some(duration_ms)) = (
         record.get("method"),
@@ -911,6 +1021,19 @@ fields:
     }
 
     #[test]
+    fn from_config_rejects_invalid_header_name_syntax() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str(
+            "
+request_headers: [\"foo bar\"]
+fields: [request_header.foo]
+",
+        )
+        .unwrap();
+        let err = AccessLogFilter::from_config(&yaml).err().expect("should fail");
+        assert!(err.to_string().contains("not a valid HTTP header name"), "got: {err}");
+    }
+
+    #[test]
     fn from_config_rejects_sensitive_request_header() {
         let yaml: serde_yaml::Value = serde_yaml::from_str(
             "
@@ -1026,6 +1149,70 @@ conditions:
         assert!(status_matches_class(500, "5xx"));
         assert!(status_matches_class(404, "4xx"));
         assert!(!status_matches_class(200, "5xx"));
+    }
+
+    #[test]
+    fn from_config_rejects_duplicate_fields() {
+        let yaml: serde_yaml::Value = serde_yaml::from_str("fields: [method, method]").unwrap();
+        let err = AccessLogFilter::from_config(&yaml).err().expect("should fail");
+        assert!(err.to_string().contains("duplicate field token"), "got: {err}");
+    }
+
+    #[test]
+    fn build_record_prefixes_request_and_response_header_keys() {
+        let plan = EmitPlan {
+            fields: vec![
+                FieldToken::RequestHeader("content-type".to_owned()),
+                FieldToken::ResponseHeader("content-type".to_owned()),
+            ],
+            is_default: false,
+        };
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut headers = http::HeaderMap::new();
+        headers.insert(http::header::CONTENT_TYPE, "application/json".parse().unwrap());
+        let ctx = crate::test_utils::make_filter_context(&req);
+        let record = plan.build_record(&ctx, 200, Some(&headers));
+        assert_eq!(
+            record.get("request_header.content-type"),
+            Some(&"-".to_owned()),
+            "request header key should be prefixed"
+        );
+        assert_eq!(
+            record.get("response_header.content-type"),
+            Some(&"application/json".to_owned()),
+            "response header key should be prefixed"
+        );
+    }
+
+    #[test]
+    fn passes_emit_conditions_paths_prefix() {
+        let filter = AccessLogFilter {
+            sample_every: 1,
+            counter: AtomicU64::default(),
+            emit_plan: EmitPlan {
+                fields: vec![FieldToken::Method],
+                is_default: false,
+            },
+            emit_conditions: Some(AccessLogEmitConditions {
+                min_duration_ms: None,
+                status_classes: None,
+                paths: Some(vec!["/api".to_owned()]),
+            }),
+            needs_response_headers: false,
+        };
+        let api_req = crate::test_utils::make_request(http::Method::GET, "/api/users");
+        let api_ctx = crate::test_utils::make_filter_context(&api_req);
+        assert!(
+            filter.passes_emit_conditions(&api_ctx, 200),
+            "/api/users should match /api prefix"
+        );
+
+        let other_req = crate::test_utils::make_request(http::Method::GET, "/other");
+        let other_ctx = crate::test_utils::make_filter_context(&other_req);
+        assert!(
+            !filter.passes_emit_conditions(&other_ctx, 200),
+            "/other should not match /api prefix"
+        );
     }
 
     #[test]
@@ -1279,7 +1466,7 @@ conditions:
     #[test]
     fn is_bodyless_detects_1xx() {
         assert!(
-            AccessLogFilter::is_bodyless(http::StatusCode::CONTINUE, &http::Method::GET),
+            bodyless_response(http::StatusCode::CONTINUE, &http::Method::GET),
             "100 Continue should be bodyless"
         );
     }
@@ -1287,7 +1474,7 @@ conditions:
     #[test]
     fn is_bodyless_detects_204() {
         assert!(
-            AccessLogFilter::is_bodyless(http::StatusCode::NO_CONTENT, &http::Method::DELETE),
+            bodyless_response(http::StatusCode::NO_CONTENT, &http::Method::DELETE),
             "204 No Content should be bodyless"
         );
     }
@@ -1295,7 +1482,7 @@ conditions:
     #[test]
     fn is_bodyless_detects_304() {
         assert!(
-            AccessLogFilter::is_bodyless(http::StatusCode::NOT_MODIFIED, &http::Method::GET),
+            bodyless_response(http::StatusCode::NOT_MODIFIED, &http::Method::GET),
             "304 Not Modified should be bodyless"
         );
     }
@@ -1303,7 +1490,7 @@ conditions:
     #[test]
     fn is_bodyless_detects_head() {
         assert!(
-            AccessLogFilter::is_bodyless(http::StatusCode::OK, &http::Method::HEAD),
+            bodyless_response(http::StatusCode::OK, &http::Method::HEAD),
             "HEAD request should be bodyless regardless of status"
         );
     }
@@ -1311,7 +1498,7 @@ conditions:
     #[test]
     fn is_bodyless_returns_false_for_normal_response() {
         assert!(
-            !AccessLogFilter::is_bodyless(http::StatusCode::OK, &http::Method::GET),
+            !bodyless_response(http::StatusCode::OK, &http::Method::GET),
             "normal 200 GET should not be bodyless"
         );
     }

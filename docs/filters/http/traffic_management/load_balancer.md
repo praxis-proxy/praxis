@@ -46,6 +46,20 @@ Supported strategies: - `round_robin` (default): cycles through endpoints in ord
 | `clusters[].tls.verify` | bool | no | Verify upstream certificate. |
 | `clusters[].total_connection_timeout_ms` | integer | no | Total connection timeout in milliseconds (TCP + TLS). Bounds the combined TCP handshake and TLS negotiation. When exceeded, the connection attempt fails with a 502 response. Prefer this over [`connection_timeout_ms`] for TLS-enabled clusters where the handshake dominates latency. |
 | `clusters[].write_timeout_ms` | integer | no | Per-write timeout in milliseconds. Applies to each individual write operation on an established upstream connection. A timeout fires a 502 response to the client. |
+| `clusters[].retry_policy` | RetryPolicy | no | Optional retry policy for this cluster. When unset, the proxy retains the legacy connect-failure retry behavior (3 attempts, idempotent methods, 64 `KiB` body). |
+| `clusters[].retry_policy.max_retries` | integer | no | Maximum number of retry attempts after the initial try. `None` means inherit from the merge parent / use the legacy default. |
+| `clusters[].retry_policy.retriable_status_codes` | HttpStatusCode[] | no | Explicit HTTP status codes that are retriable. |
+| `clusters[].retry_policy.retriable_conditions` | (`connect_failure` \| `reset` \| `refused_stream` \| `status5xx`)[] | no | Named retriable conditions (connect failure, reset, 5xx, ...). |
+| `clusters[].retry_policy.per_try_timeout_ms` | integer | no | Independent timeout for a single upstream attempt, in milliseconds. |
+| `clusters[].retry_policy.request_timeout_ms` | integer | no | Overall request deadline across all attempts, in milliseconds. When unset, the overall-timeout guard is skipped. |
+| `clusters[].retry_policy.backoff` | BackoffConfig | no | Exponential backoff between attempts. |
+| `clusters[].retry_policy.backoff.base_interval_ms` | integer | yes | Exponential base interval in milliseconds. |
+| `clusters[].retry_policy.backoff.max_interval_ms` | integer | yes | Maximum capped interval in milliseconds. |
+| `clusters[].retry_policy.retry_budget` | RetryBudgetConfig | no | Token-bucket retry budget. |
+| `clusters[].retry_policy.retry_budget.percent` | BudgetPercent | yes | Maximum retries as a percentage of active requests (0.0..=100.0). |
+| `clusters[].retry_policy.retry_budget.min_retries_per_second` | integer | no | Floor on tokens per second even at low traffic. |
+| `clusters[].retry_policy.retry_body_limit_bytes` | RetryBodyLimit | no | Max request body size eligible for replay (bytes). Defaults to 64 `KiB`. |
+| `clusters[].retry_policy.allow_non_idempotent` | bool | no | Allow retries for non-idempotent methods (POST/PATCH) when true. |
 
 ## Example
 

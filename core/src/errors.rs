@@ -13,17 +13,16 @@ use thiserror::Error;
 
 /// Errors that can occur during proxy operation.
 ///
+/// Runtime routing failures (no route matched, no healthy upstream) are
+/// not `ProxyError` variants: the router and load balancer short-circuit
+/// with filter rejections, and upstream connect failures surface through
+/// the protocol layer's error classification.
+///
 /// ```
 /// use praxis_core::ProxyError;
 ///
 /// let e = ProxyError::Config("bad yaml".into());
 /// assert_eq!(e.to_string(), "config: bad yaml");
-///
-/// let e = ProxyError::NoRoute("GET /missing".into());
-/// assert_eq!(e.to_string(), "no route for GET /missing");
-///
-/// let e = ProxyError::NoUpstream("backend".into());
-/// assert_eq!(e.to_string(), "no upstream in cluster 'backend'");
 /// ```
 #[derive(Debug, Error)]
 pub enum ProxyError {
@@ -35,23 +34,6 @@ pub enum ProxyError {
     /// hot-reload failures.
     #[error("config: {0}")]
     Config(String),
-
-    /// No route matched the incoming request.
-    ///
-    /// Raised during request routing when no filter chain's
-    /// router matches the method, path, and headers. Returns
-    /// 404 to the client. Not retriable for the same request.
-    #[error("no route for {0}")]
-    NoRoute(String),
-
-    /// No upstream available in the given cluster.
-    ///
-    /// Raised when a route matched but all endpoints in the
-    /// target cluster are unhealthy or the cluster is empty.
-    /// Returns 503 to the client. Retriable after health checks
-    /// recover an endpoint.
-    #[error("no upstream in cluster '{0}'")]
-    NoUpstream(String),
 }
 
 // -----------------------------------------------------------------------------
@@ -66,19 +48,5 @@ mod tests {
     fn error_display() {
         let e = ProxyError::Config("bad yaml".into());
         assert_eq!(e.to_string(), "config: bad yaml", "Config error display mismatch");
-
-        let e = ProxyError::NoRoute("GET /missing".into());
-        assert_eq!(
-            e.to_string(),
-            "no route for GET /missing",
-            "NoRoute error display mismatch"
-        );
-
-        let e = ProxyError::NoUpstream("backend".into());
-        assert_eq!(
-            e.to_string(),
-            "no upstream in cluster 'backend'",
-            "NoUpstream error display mismatch"
-        );
     }
 }

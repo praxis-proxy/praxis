@@ -48,6 +48,7 @@
 
 mod adversarial;
 mod body;
+mod body_filter_failures;
 mod body_pipeline;
 mod compression;
 mod conditions;
@@ -79,6 +80,7 @@ mod sni_router;
 mod stream_buffer_adapter;
 mod streaming_terminal_response;
 mod tcp_access_log;
+mod tcp_edge_cases;
 mod tcp_load_balancer;
 mod tls;
 mod url_rewrite;

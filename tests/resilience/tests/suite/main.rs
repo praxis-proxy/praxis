@@ -54,6 +54,7 @@ mod health_check_recovery;
 mod large_payload;
 mod multi_listener_isolation;
 mod rate_limit_burst;
+mod reload_under_load;
 mod retry;
 mod slow_client;
 mod throughput_body;

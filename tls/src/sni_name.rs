@@ -223,6 +223,67 @@ mod tests {
         assert_eq!(validate(&name), Err(SniNameError::TooLong));
     }
 
+    mod properties {
+        use proptest::prelude::*;
+
+        use super::*;
+
+        /// Strategy for a valid DNS label (letters/digits, no hyphen
+        /// boundary issues).
+        fn label() -> impl Strategy<Value = String> {
+            "[a-z][a-z0-9]{0,10}"
+        }
+
+        /// Strategy for a valid hostname of 1..=4 labels.
+        fn hostname() -> impl Strategy<Value = String> {
+            proptest::collection::vec(label(), 1..=4).prop_map(|labels| labels.join("."))
+        }
+
+        proptest! {
+            /// Every generated well-formed hostname validates.
+            #[test]
+            fn valid_hostnames_pass(name in hostname()) {
+                prop_assert_eq!(validate(&name), Ok(()));
+            }
+
+            /// A leading wildcard on a valid hostname stays valid.
+            #[test]
+            fn wildcard_prefix_stays_valid(name in hostname()) {
+                let wildcard = format!("*.{name}");
+                prop_assert_eq!(validate(&wildcard), Ok(()));
+            }
+
+            /// A wildcard anywhere but the complete leftmost label is
+            /// rejected.
+            #[test]
+            fn non_leftmost_wildcard_rejected(head in label(), tail in hostname()) {
+                let mid = format!("{head}.*.{tail}");
+                prop_assert_eq!(validate(&mid), Err(SniNameError::InvalidWildcard));
+                let fused = format!("{head}*.{tail}");
+                prop_assert_eq!(validate(&fused), Err(SniNameError::InvalidWildcard));
+            }
+
+            /// Underscores are never valid in any label position.
+            #[test]
+            fn underscore_rejected(a in label(), b in label()) {
+                let name = format!("{a}_{b}.example.com");
+                prop_assert_eq!(
+                    validate(&name),
+                    Err(SniNameError::InvalidLabel(DnsLabelError::InvalidCharacter))
+                );
+            }
+
+            /// Validation never panics on arbitrary input, and only
+            /// accepts names within the RFC size bounds.
+            #[test]
+            fn never_panics(name in "\\PC{0,300}") {
+                if validate(&name).is_ok() {
+                    prop_assert!(!name.is_empty() && name.len() <= 253);
+                }
+            }
+        }
+    }
+
     #[test]
     fn display_messages() {
         assert_eq!(SniNameError::Empty.to_string(), "must not be empty");

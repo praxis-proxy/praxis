@@ -31,8 +31,9 @@ use super::{
 ///
 /// [RFC 6455]: https://datatracker.ietf.org/doc/html/rfc6455
 pub(crate) fn strip_hop_by_hop(req: &mut RequestHeader, is_upgrade: bool) {
-    let is_ws = is_upgrade && is_websocket_request(&req.headers);
+    let is_ws = is_upgrade && hop_by_hop::has_websocket_upgrade(&req.headers);
     let conn_values = hop_by_hop::snapshot_connection_values(&req.headers);
+    let was_chunked = hop_by_hop::declares_chunked_framing(&req.headers);
 
     for name in REQUEST_HOP_BY_HOP {
         if hop_by_hop::preserve_for_upgrade(name, is_ws) {
@@ -41,18 +42,13 @@ pub(crate) fn strip_hop_by_hop(req: &mut RequestHeader, is_upgrade: bool) {
         let _remove = req.remove_header(*name);
     }
     hop_by_hop::strip_connection_tokens(req, &conn_values, REQUEST_HOP_BY_HOP);
+    if hop_by_hop::should_restore_chunked_framing(&req.headers, was_chunked) {
+        let _insert = req.insert_header(http::header::TRANSFER_ENCODING, "chunked");
+    }
 
     if is_upgrade && !is_ws {
         debug!("stripping non-WebSocket upgrade headers to prevent h2c smuggling");
     }
-}
-
-/// Check whether the request's `Upgrade` header is `WebSocket`.
-fn is_websocket_request(headers: &http::HeaderMap) -> bool {
-    headers
-        .get("upgrade")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(hop_by_hop::is_websocket_upgrade)
 }
 
 // -----------------------------------------------------------------------------
@@ -113,11 +109,18 @@ pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &mut PingoraReq
 ///
 /// Pingora forwards upstream headers after `StreamBuffer` pre-read, so a
 /// body-mutating filter must update `Content-Length` before those headers
-/// are sent to the backend.
+/// are sent to the backend. The pre-read fully dechunks the body, so the
+/// mutated length is authoritative: remove any `Transfer-Encoding` that
+/// hop-by-hop stripping re-established for a chunked inbound request, since
+/// emitting both `Content-Length` and `Transfer-Encoding: chunked` violates
+/// [RFC 9112 Section 6.2] and is the canonical request-smuggling ambiguity.
+///
+/// [RFC 9112 Section 6.2]: https://datatracker.ietf.org/doc/html/rfc9112#section-6.2
 pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &PingoraRequestCtx) {
     let Some(new_len) = ctx.mutated_request_body_len else {
         return;
     };
+    let _remove = req.remove_header(&http::header::TRANSFER_ENCODING);
     let _result = req.insert_header(http::header::CONTENT_LENGTH, new_len.to_string());
 }
 
@@ -163,9 +166,10 @@ mod tests {
             req.headers.get("keep-alive").is_none(),
             "keep-alive header should be stripped"
         );
-        assert!(
-            req.headers.get("transfer-encoding").is_none(),
-            "transfer-encoding header should be stripped"
+        assert_eq!(
+            req.headers.get("transfer-encoding").unwrap(),
+            "chunked",
+            "chunked framing must be re-established for the upstream body writer"
         );
         assert!(
             req.headers.get("upgrade").is_none(),
@@ -700,6 +704,83 @@ mod tests {
     }
 
     #[test]
+    fn chunked_framing_preserved_without_content_length() {
+        let mut req = make_request(&[("transfer-encoding", "chunked"), ("content-type", "text/plain")]);
+
+        strip_hop_by_hop(&mut req, false);
+
+        assert_eq!(
+            req.headers.get("transfer-encoding").unwrap(),
+            "chunked",
+            "chunked request bodies must stay framed for Pingora's upstream writer"
+        );
+    }
+
+    #[test]
+    fn chunked_framing_normalized_from_compound_value() {
+        let mut req = make_request(&[("transfer-encoding", "gzip, chunked")]);
+
+        strip_hop_by_hop(&mut req, false);
+
+        assert_eq!(
+            req.headers.get("transfer-encoding").unwrap(),
+            "chunked",
+            "compound transfer codings ending in chunked are normalized to plain chunked"
+        );
+    }
+
+    #[test]
+    fn non_chunked_transfer_encoding_stripped() {
+        let mut req = make_request(&[("transfer-encoding", "gzip")]);
+
+        strip_hop_by_hop(&mut req, false);
+
+        assert!(
+            req.headers.get("transfer-encoding").is_none(),
+            "non-chunked transfer codings are hop-by-hop and must not be re-added"
+        );
+    }
+
+    #[test]
+    fn chunked_framing_not_restored_over_content_length() {
+        let mut req = make_request(&[("transfer-encoding", "chunked"), ("content-length", "5")]);
+
+        strip_hop_by_hop(&mut req, false);
+
+        assert!(
+            req.headers.get("transfer-encoding").is_none(),
+            "content-length framing wins once transfer-encoding is stripped"
+        );
+        assert_eq!(
+            req.headers.get("content-length").unwrap(),
+            "5",
+            "content-length must survive"
+        );
+    }
+
+    #[test]
+    fn connection_token_cannot_strip_host_or_content_length() {
+        let mut req = make_request(&[
+            ("connection", "host, content-length"),
+            ("host", "backend.internal"),
+            ("content-length", "5"),
+        ]);
+
+        strip_hop_by_hop(&mut req, false);
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "backend.internal",
+            "Host must not be strippable via a Connection token"
+        );
+        assert_eq!(
+            req.headers.get("content-length").unwrap(),
+            "5",
+            "Content-Length must not be strippable via a Connection token"
+        );
+    }
+
+    #[test]
     fn apply_mutated_content_length_updates_header() {
         let mut req = make_request(&[("content-length", "1024")]);
         let mut ctx = PingoraRequestCtx::default();
@@ -708,6 +789,35 @@ mod tests {
         assert_eq!(
             req.headers.get("content-length").and_then(|v| v.to_str().ok()),
             Some("512")
+        );
+    }
+
+    #[test]
+    fn mutated_content_length_strips_restored_chunked_framing() {
+        // A chunked inbound request through a body-mutating StreamBuffer
+        // pipeline: strip_hop_by_hop re-adds Transfer-Encoding, then the
+        // content-length mutation must remove it — emitting both is a
+        // request-smuggling gadget (RFC 9112 §6.2).
+        let mut req = make_request(&[("transfer-encoding", "chunked")]);
+        strip_hop_by_hop(&mut req, false);
+        assert_eq!(
+            req.headers.get("transfer-encoding").unwrap(),
+            "chunked",
+            "framing is restored before the length is known"
+        );
+
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.mutated_request_body_len = Some(42);
+        apply_mutated_content_length(&mut req, &ctx);
+
+        assert!(
+            req.headers.get("transfer-encoding").is_none(),
+            "content-length framing must remove the transfer-encoding header"
+        );
+        assert_eq!(
+            req.headers.get("content-length").and_then(|v| v.to_str().ok()),
+            Some("42"),
+            "the mutated length is authoritative"
         );
     }
 

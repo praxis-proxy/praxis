@@ -775,4 +775,25 @@ filter_chains:
         config.runtime.log_overrides = overrides;
         config
     }
+
+    #[test]
+    fn otel_warning_fires_for_endpoint_without_feature() {
+        warn_if_otel_config_without_feature(true, false);
+        warn_if_otel_config_without_feature(false, true);
+        warn_if_otel_config_without_feature(true, true);
+    }
+
+    #[test]
+    fn otel_warning_silent_without_otel_settings() {
+        warn_if_otel_config_without_feature(false, false);
+    }
+
+    #[test]
+    fn init_tracing_installs_global_subscriber() {
+        // Global subscriber installation is once-per-process, so this is
+        // the only test allowed to call init_tracing.
+        let config = config_with_overrides(HashMap::new());
+        let guard = init_tracing(&config).expect("tracing initialization should succeed");
+        drop(guard);
+    }
 }

@@ -28,6 +28,12 @@ curl http://127.0.0.1:8080/
 Create `praxis.yaml`:
 
 ```yaml
+# The backend below is on loopback, which the SSRF endpoint check
+# rejects unless you opt in. Drop this block once your backends are
+# on real addresses.
+insecure_options:
+  allow_private_endpoints: true
+
 listeners:
   - name: web
     address: "127.0.0.1:8080"
@@ -46,6 +52,12 @@ filter_chains:
             endpoints:
               - "127.0.0.1:3000"
 ```
+
+> **Note:** Praxis rejects upstream endpoints that resolve to
+> loopback, link-local, or cloud-metadata addresses by default, as an
+> SSRF guard. `insecure_options.allow_private_endpoints: true` opts a
+> config into using them — appropriate for local development, not for
+> production configs pointing at real backends.
 
 Start Praxis with your config:
 

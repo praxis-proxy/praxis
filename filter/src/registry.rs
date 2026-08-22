@@ -170,7 +170,10 @@ impl FilterRegistry {
     /// use praxis_filter::FilterRegistry;
     ///
     /// let registry = FilterRegistry::with_builtins();
-    /// let filter = registry.create("router", &serde_yaml::from_str("routes: []").unwrap());
+    /// let filter = registry.create(
+    ///     "router",
+    ///     &serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
+    /// );
     /// assert!(filter.is_ok());
     ///
     /// let err = registry

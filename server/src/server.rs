@@ -574,8 +574,97 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:3000"
+insecure_options:
+  allow_private_endpoints: true
 "#
         );
         Config::from_yaml(&yaml).expect("test config should parse")
+    }
+
+    #[test]
+    fn init_runtime_limits_with_max_connections_does_not_panic() {
+        let runtime = praxis_core::config::RuntimeConfig {
+            max_connections: Some(1024),
+            ..Default::default()
+        };
+        init_runtime_limits(&runtime);
+    }
+
+    #[test]
+    fn dedicated_runtime_runs_the_future() {
+        let (tx, rx) = std::sync::mpsc::channel::<u8>();
+        spawn_on_dedicated_runtime("test runtime", async move {
+            tx.send(7).expect("send completion marker");
+        });
+        let received = rx.recv_timeout(Duration::from_secs(5));
+        assert_eq!(received.ok(), Some(7), "the future must run on the dedicated runtime");
+    }
+
+    #[test]
+    fn health_check_tasks_skip_empty_registry() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
+        let config = Config::from_yaml(yaml).expect("test config should parse");
+        let registry: HealthRegistry = Arc::new(std::collections::HashMap::new());
+        let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        spawn_health_check_tasks(&config, registry, &health_shutdown);
+    }
+
+    #[test]
+    fn health_check_tasks_spawn_for_health_checked_clusters() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_health_checks: true
+clusters:
+  - name: pool
+    endpoints:
+      - "127.0.0.1:1"
+    health_check:
+      type: tcp
+      interval_ms: 60000
+      timeout_ms: 1000
+      healthy_threshold: 1
+      unhealthy_threshold: 2
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: pool
+      - filter: load_balancer
+        clusters:
+          - name: pool
+            endpoints:
+              - "127.0.0.1:1"
+"#;
+        let config = Config::from_yaml(yaml).expect("test config should parse");
+        let registry = build_health_registry(&config.clusters);
+        assert!(!registry.is_empty(), "health-checked clusters must register");
+        let health_shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        spawn_health_check_tasks(&config, registry, &health_shutdown);
+        // Cancel promptly so the dedicated runtime exits.
+        health_shutdown.lock().expect("health shutdown lock").cancel();
+    }
+
+    #[test]
+    fn circuit_eviction_task_spawns_without_panicking() {
+        let connector = praxis_core::subrequest::SubRequestConnector::new(1, None);
+        let client = praxis_core::subrequest::SubRequestClient::new(connector);
+        spawn_circuit_eviction_task(client);
     }
 }

@@ -37,6 +37,8 @@ pub mod logging;
 pub mod memory;
 /// Reserved internal header prefixes for proxy-internal metadata.
 pub mod reserved_headers;
+/// Shared retry budget and per-cluster active-request tracking.
+pub mod retry;
 /// Server factory and runtime options.
 pub mod server;
 /// Shared HTTP connector for sub-request execution.
