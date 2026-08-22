@@ -210,6 +210,9 @@ struct ModuleItems {
     structs: BTreeMap<String, ConfigStruct>,
     /// Enum definitions with `Deserialize` for variant rendering.
     enums: BTreeMap<String, EnumInfo>,
+    /// `serde(try_from)` aliases: public struct name to the raw struct
+    /// whose fields describe the actual YAML shape.
+    try_from_aliases: BTreeMap<String, String>,
 }
 
 impl ModuleItems {
@@ -221,6 +224,7 @@ impl ModuleItems {
             struct_docs: Vec::new(),
             structs: BTreeMap::new(),
             enums: BTreeMap::new(),
+            try_from_aliases: BTreeMap::new(),
         }
     }
 
@@ -232,7 +236,14 @@ impl ModuleItems {
             struct_docs: Vec::new(),
             structs: self.structs.clone(),
             enums: self.enums.clone(),
+            try_from_aliases: self.try_from_aliases.clone(),
         }
+    }
+
+    /// Resolve a struct name through any `serde(try_from)` alias to the
+    /// struct whose fields describe the YAML shape.
+    fn resolve_alias<'a>(&'a self, name: &'a str) -> &'a str {
+        self.try_from_aliases.get(name).map_or(name, String::as_str)
     }
 }
 
@@ -509,7 +520,17 @@ fn cfg_feature_from_expr(expr: &syn::Expr) -> Option<String> {
     }
 }
 
-/// Extract the filter name from `register_http(..., "name", ...)`.
+/// Extract the raw struct name from a `#[serde(try_from = "...")]`
+/// container attribute, taking the last path segment.
+fn serde_try_from(attrs: &[syn::Attribute]) -> Option<String> {
+    attrs
+        .iter()
+        .find_map(|attr| serde_lit_value(attr, "try_from"))
+        .map(|path| path.rsplit("::").next().unwrap_or(&path).to_owned())
+}
+
+/// Extract the filter name from `register_http*(..., "name", ...)` or
+/// `register_tcp*(..., "name", ...)` registration helper calls.
 fn filter_name_from_register_call(expr: &syn::Expr) -> Option<String> {
     let syn::Expr::Call(call) = expr else {
         return None;
@@ -518,7 +539,7 @@ fn filter_name_from_register_call(expr: &syn::Expr) -> Option<String> {
         return None;
     };
     let function_name = func.path.segments.last()?.ident.to_string();
-    if function_name != "register_http" && function_name != "register_tcp" {
+    if !function_name.starts_with("register_http") && !function_name.starts_with("register_tcp") {
         return None;
     }
     call.args.iter().nth(1).and_then(extract_str_literal)
@@ -743,6 +764,9 @@ fn parse_file_items(file: &syn::File, out: &mut ModuleItems) {
 /// Handle a struct item: check for config struct and filter doc comments.
 fn parse_struct(s: &syn::ItemStruct, out: &mut ModuleItems) {
     let docs = extract_doc_comment(&s.attrs);
+    if let Some(raw_name) = serde_try_from(&s.attrs) {
+        out.try_from_aliases.insert(s.ident.to_string(), raw_name);
+    }
     if let Some(fields) = parse_config_fields(s) {
         let config = ConfigStruct {
             name: s.ident.to_string(),
@@ -870,6 +894,7 @@ fn append_nested_fields(
         return;
     }
 
+    let type_name = items.resolve_alias(&type_name).to_owned();
     if let Some(config) = items.structs.get(&type_name) {
         stack.push(type_name);
         append_rendered_fields(prefix, &config.fields, items, stack, out);
@@ -916,7 +941,7 @@ fn collection_field_path(path: &str, ty: &syn::Type) -> String {
 
 /// Select the config struct matching the type name from `parse_filter_config`.
 fn select_config<'a>(items: &'a ModuleItems, config_type: Option<&str>) -> Option<&'a ConfigStruct> {
-    let type_name = config_type?;
+    let type_name = items.resolve_alias(config_type?);
     items.configs.iter().find(|c| c.name == type_name)
 }
 

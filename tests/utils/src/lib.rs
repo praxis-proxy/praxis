@@ -26,7 +26,7 @@ pub mod filters;
 pub mod net;
 pub mod proxy;
 
-pub use example_config::{example_config_path, load_example_config, patch_yaml};
+pub use example_config::{allow_loopback_endpoints, example_config_path, load_example_config, patch_yaml};
 pub use net::*;
 pub use proxy::{
     ProxyGuard, ReloadableProxyGuard, build_pipeline, custom_filter_yaml, registry_with, simple_proxy_yaml,

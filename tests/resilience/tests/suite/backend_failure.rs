@@ -160,6 +160,8 @@ filter_chains:
           - name: live
             endpoints:
               - "127.0.0.1:{live_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -201,6 +203,8 @@ filter_chains:
             endpoints:
               - "127.0.0.1:{hang_port}"
             read_timeout_ms: 500
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -336,6 +340,8 @@ filter_chains:
             endpoints:
               - "127.0.0.1:{backend_port}"
             read_timeout_ms: {read_timeout_ms}
+insecure_options:
+  allow_private_endpoints: true
 "#
     )
 }
@@ -362,6 +368,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     )
 }

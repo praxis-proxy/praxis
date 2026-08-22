@@ -51,6 +51,7 @@ mod protocol_examples;
 mod protocols;
 mod random;
 mod redirect;
+mod retry_policy;
 mod round_robin;
 mod security_examples;
 mod session_affinity;

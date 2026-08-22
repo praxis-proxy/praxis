@@ -45,15 +45,39 @@ impl Strategy {
     ///
     /// For HTTP, the caller extracts the key from headers or URI path.
     /// For TCP, the caller typically passes the client IP address.
-    pub(crate) fn select(&self, hash_key: Option<&str>, health: Option<&ClusterHealthState>) -> Option<Arc<str>> {
-        match self {
-            Self::RoundRobin(rr) => rr.select(health),
-            Self::LeastConnections(lc) => lc.select(health),
-            Self::ConsistentHash(ch) => ch.select(hash_key, health),
-            Self::PowerOfTwoChoices(p2c) => p2c.select(health),
-            Self::Random(r) => r.select(health),
-            Self::Maglev(m) => m.select(hash_key, health),
+    ///
+    /// When `exclude` is non-empty, previously attempted endpoints are
+    /// skipped. If every endpoint is excluded, the exclusion set is
+    /// ignored and selection falls back to the full set (best-effort).
+    pub(crate) fn select(
+        &self,
+        hash_key: Option<&str>,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+    ) -> Option<Arc<str>> {
+        let addr = match self {
+            Self::RoundRobin(rr) => rr.select(health, exclude),
+            Self::LeastConnections(lc) => lc.select(health, exclude),
+            Self::ConsistentHash(ch) => ch.select(hash_key, health, exclude),
+            Self::PowerOfTwoChoices(p2c) => p2c.select(health, exclude),
+            Self::Random(r) => r.select(health, exclude),
+            Self::Maglev(m) => m.select(hash_key, health, exclude),
+        };
+        if addr.is_some() {
+            return addr;
         }
+        // All endpoints excluded — fall back to the full set.
+        if !exclude.is_empty() {
+            return match self {
+                Self::RoundRobin(rr) => rr.select(health, &[]),
+                Self::LeastConnections(lc) => lc.select(health, &[]),
+                Self::ConsistentHash(ch) => ch.select(hash_key, health, &[]),
+                Self::PowerOfTwoChoices(p2c) => p2c.select(health, &[]),
+                Self::Random(r) => r.select(health, &[]),
+                Self::Maglev(m) => m.select(hash_key, health, &[]),
+            };
+        }
+        None
     }
 
     /// Called after a response arrives so that strategies that track in-flight
@@ -186,7 +210,7 @@ mod tests {
             &LoadBalancerStrategy::Simple(SimpleStrategy::LeastConnections),
             make_endpoints(),
         );
-        strategy.select(None, None);
+        strategy.select(None, None, &[]);
         if let Strategy::LeastConnections(lc) = &strategy {
             let before = lc.counters["10.0.0.1:80"].load(Ordering::Relaxed);
             strategy.release("10.0.0.1:80");
@@ -208,7 +232,7 @@ mod tests {
             make_endpoints(),
         );
         assert!(
-            strategy.select(None, None).is_some(),
+            strategy.select(None, None, &[]).is_some(),
             "RoundRobin select should return Some with healthy endpoints"
         );
     }
@@ -220,7 +244,7 @@ mod tests {
             make_endpoints(),
         );
         assert!(
-            strategy.select(None, None).is_some(),
+            strategy.select(None, None, &[]).is_some(),
             "LeastConnections select should return Some with healthy endpoints"
         );
     }
@@ -234,7 +258,7 @@ mod tests {
             make_endpoints(),
         );
         assert!(
-            strategy.select(Some("/path"), None).is_some(),
+            strategy.select(Some("/path"), None, &[]).is_some(),
             "ConsistentHash select should return Some with healthy endpoints"
         );
     }
@@ -257,7 +281,7 @@ mod tests {
             &LoadBalancerStrategy::Simple(SimpleStrategy::PowerOfTwoChoices),
             make_endpoints(),
         );
-        strategy.select(None, None);
+        strategy.select(None, None, &[]);
         if let Strategy::PowerOfTwoChoices(p2c) = &strategy {
             let before = p2c.counters["10.0.0.1:80"].load(Ordering::Relaxed)
                 + p2c.counters["10.0.0.2:80"].load(Ordering::Relaxed);
@@ -271,7 +295,7 @@ mod tests {
     fn select_random_returns_some() {
         let strategy = build_strategy(&LoadBalancerStrategy::Simple(SimpleStrategy::Random), make_endpoints());
         assert!(
-            strategy.select(None, None).is_some(),
+            strategy.select(None, None, &[]).is_some(),
             "Random select should return Some with healthy endpoints"
         );
     }
@@ -283,7 +307,7 @@ mod tests {
             make_endpoints(),
         );
         assert!(
-            strategy.select(None, None).is_some(),
+            strategy.select(None, None, &[]).is_some(),
             "P2C select should return Some with healthy endpoints"
         );
     }
@@ -316,7 +340,7 @@ mod tests {
             make_endpoints(),
         );
         assert!(
-            strategy.select(Some("/path"), None).is_some(),
+            strategy.select(Some("/path"), None, &[]).is_some(),
             "Maglev select should return Some with healthy endpoints"
         );
     }

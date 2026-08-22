@@ -59,6 +59,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     )
 }
@@ -253,6 +255,8 @@ filter_chains:
           - name: {CLUSTER}
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config = Config::from_yaml(&yaml).unwrap();
@@ -325,6 +329,8 @@ filter_chains:
           - name: {CLUSTER}
             endpoints:
               - "127.0.0.1:{}"
+insecure_options:
+  allow_private_endpoints: true
 "#,
         failing.port()
     );
@@ -411,6 +417,8 @@ filter_chains:
           - name: {CLUSTER}
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config = Config::from_yaml(&yaml).unwrap();
@@ -458,6 +466,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 insecure_options:
+  allow_private_endpoints: true
   allow_root: true
 filter_chains:
   - name: main
@@ -488,6 +497,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 insecure_options:
+  allow_private_endpoints: true
   allow_root: true
 filter_chains:
   - name: main
@@ -540,6 +550,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 insecure_options:
+  allow_private_endpoints: true
   allow_private_health_checks: true
 clusters:
   - name: backend
@@ -600,6 +611,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 insecure_options:
+  allow_private_endpoints: true
   allow_private_health_checks: true
 clusters:
   - name: backend
@@ -733,6 +745,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 insecure_options:
+  allow_private_endpoints: true
   allow_root: true
 filter_chains:
   - name: main
@@ -764,6 +777,7 @@ listeners:
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
 insecure_options:
+  allow_private_endpoints: true
   allow_root: true
 filter_chains:
   - name: main

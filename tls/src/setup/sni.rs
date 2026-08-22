@@ -584,4 +584,85 @@ mod tests {
         }];
         build_sni_resolver(&certificates).unwrap()
     }
+
+    mod properties {
+        use std::sync::LazyLock;
+
+        use proptest::prelude::*;
+
+        use super::*;
+
+        /// Shared resolver with distinct certs for the exact name
+        /// `api.example.com` and the wildcard `*.example.com`, plus
+        /// the pointers of each certificate for identity checks.
+        ///
+        /// Built once: test certificate generation is too slow to
+        /// repeat per proptest case.
+        static RESOLVER: LazyLock<(SniCertResolver, usize, usize)> = LazyLock::new(|| {
+            let exact_certs = gen_test_certs_with_sans(vec!["api.example.com".to_owned()]);
+            let wildcard_certs = gen_test_certs_with_sans(vec!["*.example.com".to_owned()]);
+            let certificates = vec![
+                CertKeyPair {
+                    cert_path: exact_certs.cert_path.to_str().expect("path").to_owned(),
+                    default: false,
+                    key_path: exact_certs.key_path.to_str().expect("path").to_owned(),
+                    server_names: vec!["api.example.com".to_owned()],
+                },
+                CertKeyPair {
+                    cert_path: wildcard_certs.cert_path.to_str().expect("path").to_owned(),
+                    default: false,
+                    key_path: wildcard_certs.key_path.to_str().expect("path").to_owned(),
+                    server_names: vec!["*.example.com".to_owned()],
+                },
+            ];
+            let resolver = build_sni_resolver(&certificates).expect("resolver build");
+            let exact_ptr = Arc::as_ptr(resolver.certs.get("api.example.com").expect("exact cert")) as usize;
+            let wildcard_ptr = Arc::as_ptr(&resolver.wildcard_certs.first().expect("wildcard cert").1) as usize;
+            (resolver, exact_ptr, wildcard_ptr)
+        });
+
+        /// Strategy for a single DNS label.
+        fn label() -> impl Strategy<Value = String> {
+            "[a-z][a-z0-9]{0,10}"
+        }
+
+        proptest! {
+            /// An exact mapping always beats a wildcard covering the
+            /// same name, regardless of SNI case.
+            #[test]
+            fn exact_beats_wildcard(upper in proptest::bool::ANY) {
+                let (resolver, exact_ptr, _) = &*RESOLVER;
+                let sni = if upper { "API.EXAMPLE.COM" } else { "api.example.com" };
+                let resolved = resolver.lookup(Some(sni)).expect("exact match");
+                prop_assert_eq!(Arc::as_ptr(&resolved) as usize, *exact_ptr);
+            }
+
+            /// Any single-level subdomain (other than the exact name)
+            /// matches the wildcard.
+            #[test]
+            fn wildcard_matches_single_level(sub in label()) {
+                prop_assume!(sub != "api");
+                let (resolver, _, wildcard_ptr) = &*RESOLVER;
+                let sni = format!("{sub}.example.com");
+                let resolved = resolver.lookup(Some(&sni)).expect("wildcard match");
+                prop_assert_eq!(Arc::as_ptr(&resolved) as usize, *wildcard_ptr);
+            }
+
+            /// Wildcards never cross label boundaries: multi-level
+            /// subdomains resolve to nothing (no default is set).
+            #[test]
+            fn wildcard_does_not_cross_labels(a in label(), b in label()) {
+                let (resolver, _, _) = &*RESOLVER;
+                let sni = format!("{a}.{b}.example.com");
+                prop_assert!(resolver.lookup(Some(&sni)).is_none());
+            }
+
+            /// The bare domain itself never matches its own wildcard.
+            #[test]
+            fn bare_domain_does_not_match_wildcard(_dummy in proptest::bool::ANY) {
+                let (resolver, _, _) = &*RESOLVER;
+                prop_assert!(resolver.lookup(Some("example.com")).is_none());
+            }
+        }
+    }
 }

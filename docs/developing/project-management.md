@@ -8,7 +8,7 @@ and tracking work.
 
 Every issue goes through triage before it becomes
 accepted work. New issues are automatically labeled
-`triage/needs-triage` when opened. Maintainers review
+`triage/needs-triage` when opened. Reviewers review
 incoming issues regularly (typically daily) to assess
 scope, validity, and priority.
 
@@ -21,7 +21,7 @@ reverts it to `triage/needs-triage`.
 
 | Label | Meaning |
 | --- | --- |
-| `triage/needs-triage` | Awaiting maintainer review |
+| `triage/needs-triage` | Awaiting reviewer review |
 | `triage/accepted` | Assigned to a milestone; accepted for work |
 
 ## Milestones

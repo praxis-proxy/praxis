@@ -342,7 +342,7 @@ mod tests {
         let mut entries = vec![crate::FilterEntry {
             branch_chains: None,
             filter_type: "router".into(),
-            config: serde_yaml::from_str("routes: []").unwrap(),
+            config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
             conditions: vec![],
             name: None,
             response_conditions: vec![],
@@ -472,6 +472,10 @@ mod tests {
             may_select_streaming_subrequest_response: false,
             pipeline_extensions: Vec::new(),
             time_source: Arc::new(praxis_core::time::SystemTimeSource),
+            request_body_ceiling: None,
+            response_body_ceiling: None,
+            request_body_access_by_idx: Vec::new(),
+            response_body_access_by_idx: Vec::new(),
         }
     }
 

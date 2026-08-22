@@ -33,3 +33,6 @@ filter_chains:
             endpoints:
               - "127.0.0.1:3001"
               - "127.0.0.1:3002"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

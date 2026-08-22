@@ -11,13 +11,18 @@ and `response_body_mode()`. Three variants exist:
 
 | Variant | Buffering | Forwarding | Size enforcement |
 |---------|-----------|------------|------------------|
-| `Stream` | None | Immediate | None |
-| `StreamBuffer` | Accumulate | On `Release` / EOS | Optional `max_bytes` |
+| `Stream` | None | Immediate | Global ceiling (running count) |
+| `StreamBuffer` | Accumulate | On `Release` / EOS | `max_bytes`, then global ceiling after `Release` |
 | `SizeLimit` | None | Immediate | Running byte count |
 
 **Stream** (default): chunks pass through filters and
 forward to upstream as they arrive. Lowest latency and
-memory.
+memory. The global `body_limits` ceiling still applies
+— even when a filter selects `Stream` mode, the
+handler counts bytes and rejects (413 request / abort
+response) once the running total exceeds the ceiling.
+The ceiling can only be lifted with
+`insecure_options.allow_unbounded_body`.
 
 **StreamBuffer**: chunks are delivered to filters
 incrementally (each `on_request_body` /
@@ -25,8 +30,10 @@ incrementally (each `on_request_body` /
 but the handler withholds them from upstream. When a
 filter returns `FilterAction::Release` or
 end-of-stream arrives, all accumulated bytes are
-frozen into a single `Bytes` and forwarded. After
-release, subsequent chunks flow in stream mode.
+frozen into a single `Bytes` and forwarded. The
+`max_bytes` cap bounds the buffered phase; after
+`Release`, subsequent chunks flow in stream mode and
+the global ceiling bounds them.
 
 **SizeLimit**: pure pass-through with a running byte
 counter. Returns 413 (request) or aborts (response)

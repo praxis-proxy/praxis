@@ -141,6 +141,7 @@ page.
 | [random.yaml](configs/traffic-management/random.yaml) | Selects an upstream endpoint at random, weighted by endpoint weight |
 | [rate-limiting.yaml](configs/traffic-management/rate-limiting.yaml) | Token bucket rate limiter with per-IP or global modes |
 | [redirect.yaml](configs/traffic-management/redirect.yaml) | Returns a 3xx redirect without contacting any upstream |
+| [retry-policy.yaml](configs/traffic-management/retry-policy.yaml) | Automatically retries failed upstream requests with exponential backoff and a token-bucket budget to prevent retry storms |
 | [round-robin.yaml](configs/traffic-management/round-robin.yaml) | Default strategy |
 | [session-affinity.yaml](configs/traffic-management/session-affinity.yaml) | Hashes a request header to pin a user's requests to one backend |
 | [static-response.yaml](configs/traffic-management/static-response.yaml) | Returns a fixed response without contacting any upstream |

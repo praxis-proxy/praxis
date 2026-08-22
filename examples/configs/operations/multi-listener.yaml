@@ -76,3 +76,6 @@ filter_chains:
           - name: web
             endpoints:
               - "127.0.0.1:4000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

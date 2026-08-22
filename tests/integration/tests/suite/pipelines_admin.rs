@@ -50,6 +50,10 @@ filter_chains:
                       - name: X-Utility
                         value: "applied"
       - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - address: "127.0.0.1:{backend_port}"
 "#,
         admin_port = admin_port,
         proxy_port = proxy_port,
@@ -175,6 +179,10 @@ filter_chains:
           - path_prefix: "/"
             cluster: backend
       - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - address: "127.0.0.1:{backend_port}"
 "#
     );
     let updated = format!(
@@ -304,6 +312,10 @@ filter_chains:
           - path_prefix: "/"
             cluster: backend
       - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - address: "127.0.0.1:{backend_port}"
 "#
     );
     let config = Config::from_yaml(&yaml).expect("config should parse");

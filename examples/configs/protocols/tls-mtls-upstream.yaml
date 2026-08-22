@@ -11,6 +11,7 @@
 #   curl http://localhost:8080/
 
 insecure_options:
+  allow_private_endpoints: true # example proxies to local backends
   allow_tls_no_verify: true
 
 listeners:

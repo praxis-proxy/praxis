@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use rustls::{
     RootCertStore,
-    pki_types::CertificateRevocationListDer,
+    pki_types::{CertificateDer, CertificateRevocationListDer, pem::PemObject as _},
     server::{WebPkiClientVerifier, danger::ClientCertVerifier},
 };
 
@@ -93,7 +93,7 @@ fn load_crls(paths: &[String]) -> Result<Vec<CertificateRevocationListDer<'stati
             detail: e.to_string(),
         })?);
 
-        let parsed: Vec<_> = rustls_pemfile::crls(&mut &pem[..])
+        let parsed: Vec<_> = CertificateRevocationListDer::pem_slice_iter(&pem)
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| TlsError::FileLoadError {
                 path: path.clone(),
@@ -119,7 +119,7 @@ fn load_ca_root_store(ca_path: &str) -> Result<RootCertStore, TlsError> {
         detail: e.to_string(),
     })?);
 
-    let certs: Vec<_> = rustls_pemfile::certs(&mut &ca_pem[..])
+    let certs: Vec<_> = CertificateDer::pem_slice_iter(&ca_pem)
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| TlsError::FileLoadError {
             path: ca_path.to_owned(),
@@ -261,6 +261,81 @@ mod tests {
         assert!(
             err.to_string().contains("no CRLs found"),
             "error should mention no CRLs found, got: {err}"
+        );
+    }
+
+    /// Generate a CA PEM and an empty CRL PEM signed by that CA.
+    fn gen_ca_and_crl(dir: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+        let ca_key = rcgen::KeyPair::generate().expect("CA key generation");
+        let mut ca_params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA params");
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "CRL Test CA");
+        let ca_cert = ca_params.self_signed(&ca_key).expect("CA self-sign");
+        let issuer = rcgen::Issuer::from_params(&ca_params, &ca_key);
+
+        let crl = rcgen::CertificateRevocationListParams {
+            this_update: rcgen::date_time_ymd(2026, 1, 1),
+            next_update: rcgen::date_time_ymd(2036, 1, 1),
+            crl_number: rcgen::SerialNumber::from_slice(&[1]),
+            issuing_distribution_point: None,
+            revoked_certs: Vec::new(),
+            key_identifier_method: rcgen::KeyIdMethod::Sha256,
+        }
+        .signed_by(&issuer)
+        .expect("CRL signing");
+
+        let ca_path = dir.join("ca.pem");
+        let crl_path = dir.join("crl.pem");
+        std::fs::write(&ca_path, ca_cert.pem()).expect("write CA PEM");
+        std::fs::write(&crl_path, crl.pem().expect("CRL PEM encoding")).expect("write CRL PEM");
+        (ca_path, crl_path)
+    }
+
+    #[test]
+    fn build_client_verifier_with_valid_crl() {
+        ensure_crypto_provider();
+        let dir = tempfile::TempDir::new().expect("tempdir creation should succeed");
+        let (ca_path, crl_path) = gen_ca_and_crl(dir.path());
+
+        let verifier = build_client_verifier(
+            ca_path.to_str().expect("ca path should be valid UTF-8"),
+            ClientCertMode::Require,
+            &[crl_path.to_str().expect("crl path should be valid UTF-8").to_owned()],
+        )
+        .expect("require mode with valid CA and CRL should succeed");
+        assert!(
+            verifier.client_auth_mandatory(),
+            "require mode with CRLs should still mandate client auth"
+        );
+    }
+
+    #[test]
+    fn load_crls_parses_generated_crl() {
+        let dir = tempfile::TempDir::new().expect("tempdir creation should succeed");
+        let (_ca_path, crl_path) = gen_ca_and_crl(dir.path());
+
+        let crls = load_crls(&[crl_path.to_str().expect("crl path should be valid UTF-8").to_owned()])
+            .expect("valid CRL PEM should parse");
+        assert_eq!(crls.len(), 1, "exactly one CRL should be parsed");
+    }
+
+    #[test]
+    fn load_ca_root_store_rejects_garbage_certificate_der() {
+        let temp_dir = tempfile::TempDir::new().expect("tempdir creation should succeed");
+        let bad_path = temp_dir.path().join("bad.pem");
+        std::fs::write(
+            &bad_path,
+            "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n",
+        )
+        .expect("write bad PEM should succeed");
+
+        let err = load_ca_root_store(bad_path.to_str().expect("path should be valid UTF-8"))
+            .expect_err("garbage certificate DER should fail");
+        assert!(
+            matches!(&err, TlsError::FileLoadError { detail, .. } if detail.contains("failed to add CA cert")),
+            "error should mention the failing add, got: {err}"
         );
     }
 }

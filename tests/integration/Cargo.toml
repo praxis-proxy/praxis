@@ -26,14 +26,13 @@ h2 = { workspace = true }
 http = { workspace = true }
 # Used only by the policy example test to mint HS256 JWTs for the
 # happy-path case (matches the filter crate's signing dependency).
-jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
-praxis = { version = "0.5.1", path = "../../server", package = "praxis-proxy" }
+jsonwebtoken = { workspace = true }
+praxis = { workspace = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
 praxis-protocol = { workspace = true }
 praxis-test-utils = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

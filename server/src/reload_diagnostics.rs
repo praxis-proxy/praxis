@@ -20,6 +20,8 @@ pub(crate) fn log_restart_required_changes(old: &Config, new: &Config) {
     detect_tls_toggles(old, new);
     detect_subrequest_max_connections_change(old, new);
     detect_subrequest_circuit_breaker_change(old, new);
+    detect_startup_only_runtime_changes(old, new);
+    detect_admin_changes(old, new);
 }
 
 /// Detect listener additions, removals, and address rebinds.
@@ -107,7 +109,7 @@ pub(crate) fn find_chains_with_compression(config: &Config) -> std::collections:
         .collect()
 }
 
-/// Detect TLS enable/disable toggles.
+/// Detect TLS enable/disable toggles and in-block TLS changes.
 pub(crate) fn detect_tls_toggles(old: &Config, new: &Config) {
     for new_l in &new.listeners {
         if let Some(old_l) = old.listeners.iter().find(|l| l.name == new_l.name) {
@@ -124,9 +126,28 @@ pub(crate) fn detect_tls_toggles(old: &Config, new: &Config) {
                         "TLS disabled; requires restart"
                     );
                 },
-                _ => {},
+                (Some(old_tls), Some(new_tls)) => warn_tls_block_change(&new_l.name, old_tls, new_tls),
+                (None, None) => {},
             }
         }
+    }
+}
+
+/// Warn when the contents of an existing listener `tls` block changed.
+fn warn_tls_block_change(
+    listener: &str,
+    old_tls: &praxis_core::config::ListenerTls,
+    new_tls: &praxis_core::config::ListenerTls,
+) {
+    let old_yaml = serde_yaml::to_string(old_tls).ok();
+    let new_yaml = serde_yaml::to_string(new_tls).ok();
+    if old_yaml != new_yaml {
+        warn!(
+            listener = %listener,
+            "listener TLS configuration changed; requires restart \
+             (certificate file contents are hot-reloaded by the \
+             certificate watcher, but config-level TLS changes are not)"
+        );
     }
 }
 
@@ -167,6 +188,54 @@ fn detect_subrequest_circuit_breaker_change(old: &Config, new: &Config) {
             )),
             "runtime.subrequest_circuit_breaker changed; requires restart \
              (circuit breaker registry is bound to the connector)"
+        );
+    }
+}
+
+/// Warn for each changed startup-only runtime field.
+macro_rules! detect_runtime_field_changes {
+    ($old:expr, $new:expr, [$($field:ident),* $(,)?]) => {
+        $(
+            if $old.runtime.$field != $new.runtime.$field {
+                warn!(
+                    field = concat!("runtime.", stringify!($field)),
+                    "startup-only runtime setting changed; requires restart"
+                );
+            }
+        )*
+    };
+}
+
+/// Detect changes to runtime fields that are only applied at startup.
+///
+/// `subrequest_max_connections` and `subrequest_circuit_breaker` have
+/// dedicated detectors with tailored messages and are excluded here.
+fn detect_startup_only_runtime_changes(old: &Config, new: &Config) {
+    detect_runtime_field_changes!(
+        old,
+        new,
+        [
+            global_queue_interval,
+            log_overrides,
+            max_connections,
+            max_memory_bytes,
+            subrequest_pool_size,
+            threads,
+            upstream_ca_file,
+            upstream_keepalive_pool_size,
+            work_stealing,
+        ]
+    );
+}
+
+/// Detect changes to the admin endpoint configuration.
+fn detect_admin_changes(old: &Config, new: &Config) {
+    let changed = old.admin.address != new.admin.address || old.admin.verbose != new.admin.verbose;
+    if changed {
+        warn!(
+            old_address = ?old.admin.address,
+            new_address = ?new.admin.address,
+            "admin configuration changed; requires restart (admin endpoint binds at startup)"
         );
     }
 }
@@ -287,7 +356,8 @@ pub(crate) fn warn_stateful_filter_reset(config: &Config) {
     if has_stateful {
         warn!(
             "stateful filters (rate_limit, circuit_breaker) have been \
-             reset; in-flight requests retain old state via Arc guard"
+             reset; in-flight requests and open TCP connections retain \
+             the old state via their pinned pipeline generation"
         );
     }
 }
@@ -456,6 +526,93 @@ mod tests {
         let config = config_with_subrequest_max(None);
         let warnings = capture_warnings(|| detect_subrequest_max_connections_change(&config, &config));
         assert!(warnings.is_empty(), "both-default should produce no warnings");
+    }
+
+    fn config_with_tls_cert(cert: &str) -> Config {
+        Config::from_yaml(&format!(
+            "listeners:\n  - name: web\n    address: \"127.0.0.1:8443\"\n    \
+             filter_chains: [main]\n    tls:\n      certificates:\n        - cert_path: \"{cert}\"\n          \
+             key_path: \"certs/key.pem\"\nfilter_chains:\n  - name: main\n    \
+             filters:\n      - filter: static_response\n        status: 200\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn tls_in_block_change_warns() {
+        let old = config_with_tls_cert("certs/old.pem");
+        let new = config_with_tls_cert("certs/new.pem");
+        let warnings = capture_warnings(|| detect_tls_toggles(&old, &new));
+        assert_eq!(warnings.len(), 1, "in-block TLS change should produce one warning");
+        assert!(
+            warnings[0].contains("TLS configuration changed"),
+            "warning should mention the TLS config change: {:?}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn tls_unchanged_no_warning() {
+        let config = config_with_tls_cert("certs/same.pem");
+        let warnings = capture_warnings(|| detect_tls_toggles(&config, &config));
+        assert!(warnings.is_empty(), "identical TLS blocks should produce no warnings");
+    }
+
+    fn config_with_runtime(runtime: &str) -> Config {
+        Config::from_yaml(&format!(
+            "listeners:\n  - name: web\n    address: \"127.0.0.1:8080\"\n    \
+             filter_chains: [main]\n{runtime}filter_chains:\n  - name: main\n    \
+             filters:\n      - filter: static_response\n        status: 200\n"
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn runtime_max_memory_change_warns() {
+        let old = config_with_runtime("");
+        let new = config_with_runtime("runtime:\n  max_memory_bytes: 1048576\n");
+        let warnings = capture_warnings(|| detect_startup_only_runtime_changes(&old, &new));
+        assert_eq!(warnings.len(), 1, "changed max_memory_bytes should produce one warning");
+        assert!(
+            warnings[0].contains("requires restart"),
+            "warning should say a restart is required: {:?}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn runtime_log_overrides_change_warns() {
+        let old = config_with_runtime("");
+        let new = config_with_runtime("runtime:\n  log_overrides:\n    praxis_filter: debug\n");
+        let warnings = capture_warnings(|| detect_startup_only_runtime_changes(&old, &new));
+        assert_eq!(warnings.len(), 1, "changed log_overrides should produce one warning");
+    }
+
+    #[test]
+    fn runtime_unchanged_no_warning() {
+        let config = config_with_runtime("runtime:\n  max_memory_bytes: 1048576\n");
+        let warnings = capture_warnings(|| detect_startup_only_runtime_changes(&config, &config));
+        assert!(warnings.is_empty(), "unchanged runtime should produce no warnings");
+    }
+
+    #[test]
+    fn admin_address_change_warns() {
+        let old = config_with_runtime("");
+        let new = config_with_runtime("admin:\n  address: \"127.0.0.1:9901\"\n");
+        let warnings = capture_warnings(|| detect_admin_changes(&old, &new));
+        assert_eq!(warnings.len(), 1, "changed admin address should produce one warning");
+        assert!(
+            warnings[0].contains("admin configuration changed"),
+            "warning should mention the admin change: {:?}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn admin_unchanged_no_warning() {
+        let config = config_with_runtime("admin:\n  address: \"127.0.0.1:9901\"\n");
+        let warnings = capture_warnings(|| detect_admin_changes(&config, &config));
+        assert!(warnings.is_empty(), "unchanged admin should produce no warnings");
     }
 
     // -------------------------------------------------------------------------

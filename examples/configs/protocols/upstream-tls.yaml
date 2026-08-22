@@ -31,3 +31,6 @@ filter_chains:
               sni: "api.example.com"
             endpoints:
               - "127.0.0.1:8443"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

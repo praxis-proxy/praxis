@@ -32,3 +32,6 @@ filter_chains:
                 weight: 1          # receives 1/4 of requests
               - address: "127.0.0.1:3002"
                 weight: 3          # receives 3/4 of requests
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

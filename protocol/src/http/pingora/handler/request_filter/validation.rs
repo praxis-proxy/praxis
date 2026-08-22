@@ -325,4 +325,66 @@ mod tests {
     fn is_max_forwards_method(method: &http::Method) -> bool {
         matches!(*method, http::Method::TRACE | http::Method::OPTIONS)
     }
+
+    /// Build a proxy session that has read the given raw HTTP/1.1
+    /// request. The returned client half must stay alive so response
+    /// writes have somewhere to go.
+    async fn session_for(raw: &str) -> (Session, tokio::io::DuplexStream) {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut client, server) = tokio::io::duplex(1_048_576);
+        client.write_all(raw.as_bytes()).await.unwrap();
+        let mut session = Session::new_h1(Box::new(server));
+        let read = session.read_request().await.unwrap();
+        assert!(read, "the session must parse the request header");
+        (session, client)
+    }
+
+    #[tokio::test]
+    async fn conflicting_third_host_value_rejected() {
+        let (mut session, _client) = session_for("GET / HTTP/1.1\r\nHost: one.example\r\n\r\n").await;
+        session.req_header_mut().append_header("host", "one.example").unwrap();
+        session.req_header_mut().append_header("host", "two.example").unwrap();
+
+        let rejection = validate_host_header(&mut session);
+        assert!(
+            rejection.is_some_and(|r| r.status == 400),
+            "a conflicting third Host value must reject with 400"
+        );
+    }
+
+    #[tokio::test]
+    async fn trace_with_zero_max_forwards_is_answered_directly() {
+        let (mut session, _client) = session_for("TRACE / HTTP/1.1\r\nHost: x\r\nMax-Forwards: 0\r\n\r\n").await;
+        let handled = handle_max_forwards(&mut session).await;
+        assert_eq!(handled, Some(true), "TRACE with Max-Forwards 0 must be answered");
+    }
+
+    #[tokio::test]
+    async fn options_with_zero_max_forwards_is_answered_directly() {
+        let (mut session, _client) = session_for("OPTIONS / HTTP/1.1\r\nHost: x\r\nMax-Forwards: 0\r\n\r\n").await;
+        let handled = handle_max_forwards(&mut session).await;
+        assert_eq!(handled, Some(true), "OPTIONS with Max-Forwards 0 must be answered");
+    }
+
+    #[tokio::test]
+    async fn positive_max_forwards_is_decremented() {
+        let (mut session, _client) = session_for("TRACE / HTTP/1.1\r\nHost: x\r\nMax-Forwards: 3\r\n\r\n").await;
+        let handled = handle_max_forwards(&mut session).await;
+        assert_eq!(handled, None, "positive Max-Forwards must forward");
+        let value = session
+            .req_header()
+            .headers
+            .get("max-forwards")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        assert_eq!(value.as_deref(), Some("2"), "Max-Forwards must be decremented");
+    }
+
+    #[tokio::test]
+    async fn get_requests_ignore_max_forwards() {
+        let (mut session, _client) = session_for("GET / HTTP/1.1\r\nHost: x\r\nMax-Forwards: 0\r\n\r\n").await;
+        let handled = handle_max_forwards(&mut session).await;
+        assert_eq!(handled, None, "GET must ignore Max-Forwards");
+    }
 }

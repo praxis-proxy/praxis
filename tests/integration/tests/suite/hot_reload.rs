@@ -60,6 +60,30 @@ fn reload_route_change_shifts_traffic() {
 }
 
 #[test]
+fn reload_adding_health_checks_restarts_health_tasks() {
+    let backend = start_backend_with_shutdown("healthy-backend");
+    let proxy_port = free_port();
+    let proxy = start_reloadable_proxy(&proxy_yaml(proxy_port, backend.port()));
+    let addr = format!("127.0.0.1:{proxy_port}");
+
+    let (status, body) = http_get(&addr, "/", None);
+    assert_eq!(status, 200, "initial request should succeed");
+    assert_eq!(body, "healthy-backend", "initial route should hit the backend");
+
+    proxy.reload(&health_checked_yaml(proxy_port, backend.port()));
+
+    let (status, body) = get_eventually(&addr, "/", |code, b| code == 200 && b == "healthy-backend");
+    assert_eq!(
+        status, 200,
+        "requests should keep succeeding after the health-check reload"
+    );
+    assert_eq!(
+        body, "healthy-backend",
+        "the health-checked cluster should keep serving"
+    );
+}
+
+#[test]
 fn reload_endpoint_swap_shifts_traffic() {
     let backend1 = start_backend_with_shutdown("endpoint-a");
     let backend2 = start_backend_with_shutdown("endpoint-b");
@@ -275,6 +299,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{endpoint_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
         )
     };
@@ -344,6 +370,8 @@ filter_chains:
             endpoints:
               - "127.0.0.1:{p1}"
               - "127.0.0.1:{p2}"
+insecure_options:
+  allow_private_endpoints: true
 "#
         )
     };
@@ -437,6 +465,8 @@ filter_chains:
           - name: api
             endpoints:
               - "127.0.0.1:{api_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#,
         api_port = api_backend.port()
     );
@@ -473,6 +503,8 @@ filter_chains:
           - name: health
             endpoints:
               - "127.0.0.1:{health_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#,
         api_port = api_backend.port(),
         health_port = health_backend.port()
@@ -503,6 +535,45 @@ listeners:
   - name: default
     address: "127.0.0.1:{proxy_port}"
     filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
+"#
+    )
+}
+
+/// Proxy YAML whose cluster carries an active TCP health check.
+fn health_checked_yaml(proxy_port: u16, backend_port: u16) -> String {
+    format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+insecure_options:
+  allow_private_endpoints: true
+  allow_private_health_checks: true
+clusters:
+  - name: backend
+    endpoints:
+      - "127.0.0.1:{backend_port}"
+    health_check:
+      type: tcp
+      interval_ms: 1000
+      timeout_ms: 500
+      healthy_threshold: 1
+      unhealthy_threshold: 2
 filter_chains:
   - name: main
     filters:
@@ -559,6 +630,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     )
 }

@@ -39,8 +39,34 @@ use praxis_core::config::Config;
 pub fn load_example_config(filename: &str, listener_port: u16, port_map: HashMap<&str, u16>) -> Config {
     let path = example_config_path(filename);
     let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
-    let patched = patch_yaml(&yaml, listener_port, &port_map);
+    let patched = allow_loopback_endpoints(&patch_yaml(&yaml, listener_port, &port_map));
     Config::from_yaml(&patched).unwrap_or_else(|e| panic!("parse {filename}: {e}"))
+}
+
+/// Enable `allow_private_endpoints` on a patched example config.
+///
+/// The port map rewrites example endpoints to loopback test backends, which
+/// the endpoint SSRF validation would otherwise reject; the flag is a
+/// property of the test harness rewrite, not of the example itself.
+///
+/// # Examples
+///
+/// ```
+/// let yaml = praxis_test_utils::allow_loopback_endpoints("listeners: []\n");
+/// assert!(yaml.contains("allow_private_endpoints: true"));
+/// ```
+pub fn allow_loopback_endpoints(yaml: &str) -> String {
+    if yaml.contains("allow_private_endpoints") {
+        return yaml.to_owned();
+    }
+    if yaml.contains("\ninsecure_options:") || yaml.starts_with("insecure_options:") {
+        return yaml.replacen(
+            "insecure_options:\n",
+            "insecure_options:\n  allow_private_endpoints: true\n",
+            1,
+        );
+    }
+    format!("{yaml}\ninsecure_options:\n  allow_private_endpoints: true\n")
 }
 
 /// Resolve the absolute path to an example config file.

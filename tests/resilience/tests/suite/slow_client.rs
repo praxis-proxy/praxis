@@ -74,6 +74,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{partial_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config = Config::from_yaml(&yaml).unwrap();
@@ -108,6 +110,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     )
 }

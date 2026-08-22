@@ -129,9 +129,100 @@ pub fn start_stateful_backend(responses: Vec<(u16, String)>) -> BackendGuard {
     })
 }
 
+/// Shared request log for [`start_reused_connection_kill_backend`]:
+/// `(connection_number, request_number_within_connection, method, path)`.
+pub type ReusedConnectionLog = Arc<Mutex<Vec<(usize, usize, String, String)>>>;
+
+/// Start a keep-alive backend that kills the connection on its second
+/// request without responding.
+///
+/// The first request on each connection is answered `200 OK` with
+/// keep-alive so the proxy pools the connection. The second request on
+/// the same connection is read fully, recorded, and the socket closed
+/// without a response — simulating an upstream that received a request
+/// on a reused connection and died before responding. Used to verify
+/// retry safety for requests whose bytes were already written upstream.
+///
+/// # Panics
+///
+/// Panics if the server fails to bind.
+pub fn start_reused_connection_kill_backend() -> (BackendGuard, ReusedConnectionLog) {
+    let log: ReusedConnectionLog = Arc::new(Mutex::new(Vec::new()));
+    let log_handle = Arc::clone(&log);
+    let connection_counter = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let guard = spawn_tcp_server_with_shutdown(move |stream| {
+        let connection_num = connection_counter.fetch_add(1, Ordering::Relaxed);
+        serve_then_kill_connection(stream, connection_num, &log);
+    });
+
+    (guard, log_handle)
+}
+
+/// Serve the first request on `stream` with keep-alive, then read and
+/// drop the second without responding, recording each into `log`.
+fn serve_then_kill_connection(mut stream: TcpStream, connection_num: usize, log: &ReusedConnectionLog) {
+    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+
+    for request_num in 0_usize.. {
+        let Some((method, path)) = read_one_request(&mut stream) else {
+            break;
+        };
+        log.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push((connection_num, request_num, method, path));
+
+        if request_num > 0 {
+            tracing::debug!(connection_num, request_num, "killing reused connection");
+            break;
+        }
+
+        let body = "pooled-ok";
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{body}",
+            body.len()
+        );
+        if stream.write_all(response.as_bytes()).is_err() {
+            break;
+        }
+    }
+}
+
 // -----------------------------------------------------------------------------
 // Shared TCP Server Utilities
 // -----------------------------------------------------------------------------
+
+/// Read exactly one HTTP request (headers plus `Content-Length` body)
+/// from the stream. Returns the method and path, or `None` on EOF or
+/// read error.
+fn read_one_request(stream: &mut TcpStream) -> Option<(String, String)> {
+    let mut data = Vec::new();
+    let mut buf = [0_u8; 4096];
+
+    let header_end = loop {
+        if let Some(pos) = data.windows(4).position(|w| w == b"\r\n\r\n") {
+            break pos + 4;
+        }
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => data.extend_from_slice(&buf[..n]),
+        }
+    };
+
+    let headers = String::from_utf8_lossy(&data[..header_end]).into_owned();
+    let content_length = parse_content_length(&headers);
+    while data.len() < header_end + content_length {
+        match stream.read(&mut buf) {
+            Ok(0) | Err(_) => return None,
+            Ok(n) => data.extend_from_slice(&buf[..n]),
+        }
+    }
+
+    let mut request_line = headers.lines().next().unwrap_or("").split(' ');
+    let method = request_line.next().unwrap_or("").to_owned();
+    let path = request_line.next().unwrap_or("").to_owned();
+    Some((method, path))
+}
 
 /// Spawn a raw TCP server that calls `handler` in a new
 /// thread for each accepted connection. Returns the port.

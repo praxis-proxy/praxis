@@ -38,6 +38,29 @@ pub fn ensure_crypto_provider() {
     let _ = rustls::crypto::ring::default_provider().install_default();
 }
 
+/// Parse a PEM certificate chain and private key into rustls DER types.
+///
+/// # Panics
+///
+/// Panics if either input fails to parse or contains no matching PEM
+/// sections.
+pub fn parse_cert_chain_and_key(
+    cert_pem: &[u8],
+    key_pem: &[u8],
+) -> (
+    Vec<rustls::pki_types::CertificateDer<'static>>,
+    rustls::pki_types::PrivateKeyDer<'static>,
+) {
+    use rustls::pki_types::pem::PemObject as _;
+
+    let certs = rustls::pki_types::CertificateDer::pem_slice_iter(cert_pem)
+        .collect::<Result<Vec<_>, _>>()
+        .expect("parse cert PEM");
+    assert!(!certs.is_empty(), "no certificates found in PEM");
+    let key = rustls::pki_types::PrivateKeyDer::from_pem_slice(key_pem).expect("parse key PEM");
+    (certs, key)
+}
+
 // -----------------------------------------------------------------------------
 // TestCertificates
 // -----------------------------------------------------------------------------
@@ -271,12 +294,7 @@ impl TestCertificates {
         let cert_pem = std::fs::read(&client_cert.cert_path).expect("read client cert PEM");
         let key_pem = std::fs::read(&client_cert.key_path).expect("read client key PEM");
 
-        let certs: Vec<_> = rustls_pemfile::certs(&mut &*cert_pem)
-            .collect::<Result<Vec<_>, _>>()
-            .expect("parse client cert PEM");
-        let key = rustls_pemfile::private_key(&mut &*key_pem)
-            .expect("parse client key PEM")
-            .expect("no client private key found");
+        let (certs, key) = parse_cert_chain_and_key(&cert_pem, &key_pem);
 
         let mut config = ClientConfig::builder()
             .with_root_certificates(root_store)
@@ -305,12 +323,7 @@ impl TestCertificates {
         let cert_pem = std::fs::read(&client_cert.cert_path).expect("read client cert PEM");
         let key_pem = std::fs::read(&client_cert.key_path).expect("read client key PEM");
 
-        let certs: Vec<_> = rustls_pemfile::certs(&mut &*cert_pem)
-            .collect::<Result<Vec<_>, _>>()
-            .expect("parse client cert PEM");
-        let key = rustls_pemfile::private_key(&mut &*key_pem)
-            .expect("parse client key PEM")
-            .expect("no client private key found");
+        let (certs, key) = parse_cert_chain_and_key(&cert_pem, &key_pem);
 
         Arc::new(
             ClientConfig::builder()
@@ -615,12 +628,7 @@ fn build_tls_acceptor(certs: &TestCertificates) -> tokio_rustls::TlsAcceptor {
     let certs_pem = std::fs::read(&certs.cert_path).expect("read cert PEM");
     let key_pem = std::fs::read(&certs.key_path).expect("read key PEM");
 
-    let certs = rustls_pemfile::certs(&mut &*certs_pem)
-        .collect::<Result<Vec<_>, _>>()
-        .expect("parse cert PEM");
-    let key = rustls_pemfile::private_key(&mut &*key_pem)
-        .expect("parse key PEM")
-        .expect("no private key found");
+    let (certs, key) = parse_cert_chain_and_key(&certs_pem, &key_pem);
 
     let server_config = rustls::ServerConfig::builder()
         .with_no_client_auth()
@@ -661,12 +669,7 @@ fn build_mtls_acceptor(certs: &TestCertificates) -> tokio_rustls::TlsAcceptor {
     let certs_pem = std::fs::read(&certs.cert_path).expect("read cert PEM");
     let key_pem = std::fs::read(&certs.key_path).expect("read key PEM");
 
-    let server_certs = rustls_pemfile::certs(&mut &*certs_pem)
-        .collect::<Result<Vec<_>, _>>()
-        .expect("parse cert PEM");
-    let key = rustls_pemfile::private_key(&mut &*key_pem)
-        .expect("parse key PEM")
-        .expect("no private key found");
+    let (server_certs, key) = parse_cert_chain_and_key(&certs_pem, &key_pem);
 
     let ca_der = rustls::pki_types::CertificateDer::from(certs.ca_cert_der.clone());
     let mut root_store = rustls::RootCertStore::empty();

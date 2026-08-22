@@ -416,8 +416,6 @@ fn spawn_revert_task(state: Arc<LogLevelState>, target: String, duration_secs: u
 mod tests {
     use std::sync::OnceLock;
 
-    use tracing_subscriber::{layer::SubscriberExt as _, util::SubscriberInitExt as _};
-
     use super::*;
 
     /// Serializes overlay mutation tests that share one global [`LogLevelState`].
@@ -429,10 +427,13 @@ mod tests {
 
     fn shared_test_state() -> Arc<LogLevelState> {
         static STATE: OnceLock<Arc<LogLevelState>> = OnceLock::new();
+        // Keep the reload layer alive for handle.reload() without installing a
+        // global subscriber (that would race init_tracing unit tests).
+        static FILTER_LAYER: OnceLock<reload::Layer<EnvFilter, tracing_subscriber::Registry>> = OnceLock::new();
         Arc::clone(STATE.get_or_init(|| {
             let baseline = "info".to_owned();
             let (filter_layer, reload_handle) = reload::Layer::new(EnvFilter::new(&baseline));
-            drop(tracing_subscriber::registry().with(filter_layer).try_init());
+            drop(FILTER_LAYER.set(filter_layer));
             LogLevelState::new(baseline, reload_handle)
         }))
     }

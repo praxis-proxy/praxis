@@ -1,0 +1,42 @@
+# Retry Policy
+#
+# Automatically retries failed upstream requests with exponential backoff
+# and a token-bucket budget to prevent retry storms.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/retry-policy.yaml
+#   curl http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            load_balancer_strategy: round_robin
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"
+            retry_policy:
+              max_retries: 2
+              retriable_conditions:
+                - connect_failure
+                - reset
+              backoff:
+                base_interval_ms: 25
+                max_interval_ms: 250
+              retry_body_limit_bytes: 65536
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

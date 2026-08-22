@@ -7,7 +7,7 @@ use bytes::Bytes;
 use http::HeaderValue;
 use pingora_core::ErrorType;
 use pingora_proxy::{FailToProxy, Session};
-use praxis_filter::{ErrorResponseContext, ErrorResponseFormatterHandle, FormattedErrorResponse};
+use praxis_filter::{ErrorResponseContext, ErrorResponseFormatterHandle, FormattedErrorResponse, Rejection};
 use tracing::{debug, error};
 
 use crate::http::pingora::context::PingoraRequestCtx;
@@ -33,11 +33,23 @@ struct ProxyError {
 /// response), dead downstream connections, and HEAD requests (body
 /// suppressed). Writable downstream failures (e.g. client body read
 /// timeout) receive a structured 400 response.
-pub(super) async fn execute(session: &mut Session, e: &pingora_core::Error, ctx: &PingoraRequestCtx) -> FailToProxy {
+#[expect(
+    clippy::large_stack_frames,
+    reason = "linear error classification inlines each response-writing branch"
+)]
+pub(super) async fn execute(
+    session: &mut Session,
+    e: &pingora_core::Error,
+    ctx: &mut PingoraRequestCtx,
+) -> FailToProxy {
     let etype = e.etype().clone();
+    let pending_rejection = ctx.pending_rejection.take();
     let formatter = ctx.extensions.get::<ErrorResponseFormatterHandle>();
 
     if let ErrorType::HTTPStatus(code) = etype {
+        if let Some(rejection) = pending_rejection {
+            return handle_pending_rejection(session, code, rejection).await;
+        }
         return handle_http_status(session, code, formatter).await;
     }
 
@@ -77,6 +89,20 @@ async fn handle_http_status(
         status: code,
     };
     write_error_response(session, err, formatter).await
+}
+
+/// Deliver a rejection raised during the response phase with its full
+/// configured headers and body.
+///
+/// A response-phase `Reject` cannot write to the session directly (the
+/// upstream response is mid-flight), so the rejection crosses the error
+/// boundary via the request context and is written here.
+async fn handle_pending_rejection(session: &mut Session, code: u16, rejection: Rejection) -> FailToProxy {
+    if final_response_written(session) {
+        return done(code);
+    }
+    crate::http::pingora::convert::send_rejection(session, rejection).await;
+    done(code)
 }
 
 /// Handle a downstream-origin error.

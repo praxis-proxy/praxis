@@ -190,7 +190,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
     let mut last_failure: Option<Instant> = None;
 
     // Check for changes that may have occurred between config load and watcher startup
-    handle_reload(
+    let precheck_ok = handle_reload(
         &params.config_path,
         &params.referenced_files,
         &mut current_config,
@@ -203,11 +203,12 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
         &params.subrequest_client,
         params.log_level.as_ref(),
     );
-
     // A change seen while backing off is remembered rather than dropped,
     // and retried when the window expires. The filesystem will not
-    // re-notify us about an edit we already consumed.
-    let mut reload_pending = false;
+    // re-notify us about an edit we already consumed. A failed startup
+    // pre-check arms the same retry path: the triggering edit happened
+    // before the watch existed, so no new event will ever re-deliver it.
+    let mut reload_pending = arm_startup_retry(precheck_ok, &mut consecutive_failures, &mut last_failure);
 
     loop {
         let retry_in = if reload_pending {
@@ -253,6 +254,17 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: &WatcherParams) {
         // arm retries it once the (now longer) backoff window elapses.
         reload_pending = !ok;
     }
+}
+
+/// Convert the startup pre-check result into initial retry state.
+///
+/// A failed pre-check must leave a reload pending with backoff armed:
+/// the edit that triggered it happened before the watch existed, so no
+/// filesystem event will ever re-deliver it and only the deferred-retry
+/// timer can recover the operator's change.
+fn arm_startup_retry(precheck_ok: bool, consecutive_failures: &mut u32, last_failure: &mut Option<Instant>) -> bool {
+    update_reload_backoff(precheck_ok, consecutive_failures, last_failure);
+    !precheck_ok
 }
 
 /// Reset or advance consecutive-failure backoff state after a reload attempt.
@@ -1467,6 +1479,26 @@ mod tests {
             remaining <= Duration::from_secs(BACKOFF_BASE_SECS),
             "remaining must not exceed the window, got {remaining:?}"
         );
+    }
+
+    #[test]
+    fn failed_startup_precheck_arms_deferred_retry() {
+        let mut failures = 0;
+        let mut last = None;
+        let pending = arm_startup_retry(false, &mut failures, &mut last);
+        assert!(pending, "a failed pre-check must leave a reload pending");
+        assert_eq!(failures, 1, "a failed pre-check must arm backoff");
+        assert!(last.is_some(), "a failed pre-check must record the failure time");
+    }
+
+    #[test]
+    fn clean_startup_precheck_leaves_nothing_pending() {
+        let mut failures = 0;
+        let mut last = None;
+        let pending = arm_startup_retry(true, &mut failures, &mut last);
+        assert!(!pending, "a clean pre-check must not schedule a retry");
+        assert_eq!(failures, 0, "a clean pre-check must not count as a failure");
+        assert!(last.is_none(), "a clean pre-check must not record a failure time");
     }
 
     /// A fix that lands while the watcher is backing off must still be
