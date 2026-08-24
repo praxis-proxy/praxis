@@ -1,0 +1,24 @@
+# TCP Connections Total
+#
+# Prometheus counter for total accepted TCP connections per listener.
+# Incremented once per connection, regardless of duration. Scraped
+# via the admin /metrics endpoint.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/observability/tcp-connections-total.yaml
+#
+# Exercise:
+#   for i in 1 2 3; do echo "hi" | nc localhost 5432; done
+#   curl -s http://localhost:9901/metrics | grep tcp_connections_total
+
+admin:
+  address: "127.0.0.1:9901"
+
+insecure_options:
+  allow_private_upstreams: true
+
+listeners:
+  - name: postgres
+    address: "127.0.0.1:5432"
+    protocol: tcp
+    upstream: "127.0.0.1:15432"

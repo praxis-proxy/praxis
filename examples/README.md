@@ -41,6 +41,7 @@ page.
 | [process-logging.yaml](configs/observability/process-logging.yaml) | Non-blocking process logs written to a file |
 | [tcp-access-log.yaml](configs/observability/tcp-access-log.yaml) | Structured JSON logging of TCP connection events (connect and disconnect) |
 | [tcp-connection-metrics.yaml](configs/observability/tcp-connection-metrics.yaml) | Prometheus histogram for TCP connection duration |
+| [tcp-connections-total.yaml](configs/observability/tcp-connections-total.yaml) | Prometheus counter for total accepted TCP connections per listener |
 | [trace-context.yaml](configs/observability/trace-context.yaml) | W3C Trace Context header propagation |
 | [tracing-otlp.yaml](configs/observability/tracing-otlp.yaml) | Exports distributed tracing spans to an OpenTelemetry Collector via OTLP/gRPC |
 

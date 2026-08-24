@@ -65,6 +65,7 @@ mod sticky_sessions;
 mod stream_buffer;
 mod subset_lb;
 mod tcp_connection_metrics;
+mod tcp_connections_total;
 mod timeout;
 mod trace_context;
 #[cfg(feature = "otel")]
