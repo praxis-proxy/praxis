@@ -122,9 +122,10 @@ return **400** JSON errors.
 
 ## Metrics Reference
 
-Praxis records two categories of Prometheus metrics:
-HTTP request metrics (always on when admin is
-enabled) and per-filter duration histograms (opt-in).
+Praxis records Prometheus metrics in three
+categories: HTTP request metrics, TCP connection
+metrics (both always on when admin is enabled), and
+per-filter duration histograms (opt-in).
 
 Recorder upkeep runs every five seconds whenever the
 admin endpoint is enabled. It is independent of
@@ -156,6 +157,45 @@ code `0` (no response written) maps to `unknown`.
 Wall-clock duration of completed HTTP requests in
 seconds. Uses the same label set as
 `praxis_http_requests_total`.
+
+### TCP Connection Metrics
+
+These are recorded automatically for every TCP
+connection when the admin endpoint is enabled.
+
+#### `praxis_tcp_connection_duration_seconds` (histogram)
+
+Wall-clock lifetime of a TCP connection from accept
+to close, in seconds.
+
+| Label | Values |
+| ---------- | ---------------------------------------- |
+| `listener` | Listener name from config |
+| `reason` | `completed`, `sni_timeout`, `filter_rejection`, `connect_failure`, `peeked_write_error` |
+
+The `reason` label captures why the connection
+closed:
+
+| Reason | Meaning |
+| --------------------- | ---------------------------------------- |
+| `completed` | Normal forwarding finished |
+| `sni_timeout` | SNI peek timed out before routing |
+| `filter_rejection` | Connect filters rejected the connection |
+| `connect_failure` | Upstream connection failed |
+| `peeked_write_error` | Writing peeked bytes to upstream failed |
+
+#### `praxis_tcp_connections_total` (counter)
+
+Total accepted TCP connections.
+
+| Label | Values |
+| ---------- | ---------------------------------------- |
+| `listener` | Listener name from config |
+
+Incremented once per accepted connection after
+overload checks pass. Use with
+`praxis_connections_active` to derive connection
+rates and concurrency.
 
 ### Filter Duration Histograms
 

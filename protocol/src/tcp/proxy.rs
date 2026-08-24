@@ -216,6 +216,11 @@ impl PingoraTcpProxy {
 
         let result = resolve_connect_result(pipeline, &mut ctx, remote_addr).await;
         if result.is_none() {
+            super::metrics::record_tcp_connection_duration(
+                self.listener_label_for(local_addr),
+                "filter_rejection",
+                connect_time.elapsed().as_secs_f64(),
+            );
             log_early_close(connect_time, "filter_rejection");
         }
         result
@@ -309,6 +314,11 @@ impl ServerApp for PingoraTcpProxy {
             let (sni_hostname, peeked_bytes) = if self.upstream_addr.is_none() {
                 let Ok(result) = tokio::time::timeout(SNI_PEEK_TIMEOUT, peek_sni(&mut session)).await else {
                     warn!(remote = %remote_addr, "SNI peek timed out, closing connection");
+                    super::metrics::record_tcp_connection_duration(
+                        self.listener_label_for(&local_addr),
+                        "sni_timeout",
+                        connect_time.elapsed().as_secs_f64(),
+                    );
                     log_early_close(connect_time, "sni_timeout");
                     return None;
                 };
@@ -360,6 +370,11 @@ impl ServerApp for PingoraTcpProxy {
                         0,
                     )
                     .await;
+                    super::metrics::record_tcp_connection_duration(
+                        self.listener_label_for(&local_addr),
+                        "connect_failure",
+                        connect_time.elapsed().as_secs_f64(),
+                    );
                     log_early_close(connect_time, "connect_failure");
                     return None;
                 };
@@ -384,6 +399,11 @@ impl ServerApp for PingoraTcpProxy {
                     0,
                 )
                 .await;
+                super::metrics::record_tcp_connection_duration(
+                    self.listener_label_for(&local_addr),
+                    "peeked_write_error",
+                    connect_time.elapsed().as_secs_f64(),
+                );
                 log_early_close(connect_time, "peeked_write_error");
                 return None;
             }
@@ -414,6 +434,11 @@ impl ServerApp for PingoraTcpProxy {
                 duration_ms,
                 reason = "completed",
                 "connection_close"
+            );
+            super::metrics::record_tcp_connection_duration(
+                self.listener_label_for(&local_addr),
+                "completed",
+                connect_time.elapsed().as_secs_f64(),
             );
 
             None

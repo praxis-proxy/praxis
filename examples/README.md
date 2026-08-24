@@ -40,6 +40,7 @@ page.
 | [logging.yaml](configs/observability/logging.yaml) | request_id — ensures every request has a correlation ID |
 | [process-logging.yaml](configs/observability/process-logging.yaml) | Non-blocking process logs written to a rotating file |
 | [tcp-access-log.yaml](configs/observability/tcp-access-log.yaml) | Structured JSON logging of TCP connection events (connect and disconnect) |
+| [tcp-connection-metrics.yaml](configs/observability/tcp-connection-metrics.yaml) | Prometheus histogram for TCP connection duration |
 | [trace-context.yaml](configs/observability/trace-context.yaml) | W3C Trace Context header propagation |
 | [tracing-otlp.yaml](configs/observability/tracing-otlp.yaml) | Exports distributed tracing spans to an OpenTelemetry Collector via OTLP/gRPC |
 
