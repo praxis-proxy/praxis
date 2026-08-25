@@ -1,0 +1,47 @@
+# Priority-Level Load Balancing
+#
+# Defines primary and failover endpoint tiers. Traffic uses the
+# highest-priority (lowest-number) tier exclusively until its healthy
+# capacity drops below the overprovisioning threshold, then spills to
+# the next tier.
+#
+# overprovisioning_factor=140 means traffic spills when a tier's
+# healthy% < 100/140 ≈ 71%.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/priority-lb.yaml
+#   curl http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            load_balancer_strategy:
+              priority:
+                inner_strategy: round_robin
+                overprovisioning_factor: 140
+            endpoints:
+              - address: "127.0.0.1:3001"
+                priority: 0
+              - address: "127.0.0.1:3002"
+                priority: 0
+              - address: "127.0.0.1:3003"
+                priority: 1
+              - address: "127.0.0.1:3004"
+                priority: 1
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

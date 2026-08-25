@@ -76,11 +76,12 @@ pub struct PingoraRequestCtx {
     /// Verified downstream TLS peer identity.
     ///
     /// Set once from the SSL digest in `request_filter` before
-    /// the first filter runs.  Cloned (not moved) into each
-    /// `HttpFilterContext` so it is available in both pre-read
+    /// the first filter runs.  Shared via [`Arc`] with each
+    /// `HttpFilterContext` (an `Arc` clone per phase, not a deep
+    /// copy per body chunk) so it is available in both pre-read
     /// body phases and the main filter pipeline.  `None` for
     /// non-mTLS or no-client-cert connections.
-    pub peer_identity: Option<praxis_tls::TlsPeerIdentity>,
+    pub peer_identity: Option<Arc<praxis_tls::TlsPeerIdentity>>,
 
     /// Whether the connection was upgraded via 101 Switching Protocols.
     ///
@@ -212,9 +213,18 @@ pub struct PingoraRequestCtx {
     ///
     /// Created during `request_filter` with OpenTelemetry HTTP semantic
     /// convention attributes. Response-phase attributes
-    /// (`http.response.status_code`, `upstream.address`, `upstream.cluster`)
-    /// are recorded in the `logging` hook before the span is dropped.
+    /// (`http.response.status_code`, `http.route`, `error.type`,
+    /// `upstream.address`, `upstream.cluster`) are recorded in the
+    /// `logging` hook before the span is dropped.
     pub request_span: Span,
+
+    /// Child span covering upstream request/response exchange.
+    ///
+    /// Created in `connected_to_upstream` after the connection is
+    /// established (or reused). Response-phase attributes
+    /// (`http.response.status_code`, `http.response.body.size`) are
+    /// recorded in the `logging` hook before the span is dropped.
+    pub upstream_exchange_span: Span,
 
     /// When this request was received.
     pub request_start: Instant,
@@ -251,6 +261,18 @@ pub struct PingoraRequestCtx {
     /// `logging()` hook when errors bypass `response_filter`.
     pub response_phase_done: bool,
 
+    /// Rejection raised during the response phase, carried across the
+    /// Pingora error boundary so `fail_to_proxy` can deliver its full
+    /// configured headers and body instead of a bare status envelope.
+    pub pending_rejection: Option<praxis_filter::Rejection>,
+
+    /// Whether the response was delivered to completion: a bodyless
+    /// response finished its response phase, or the response body
+    /// reached end-of-stream. When still `false` in the `logging()`
+    /// hook, the request ended early (rejection, upstream failure, or
+    /// aborted stream) and a fallback access record is emitted.
+    pub response_delivery_complete: bool,
+
     /// Number of upstream connection retries attempted.
     pub retries: u32,
 
@@ -258,6 +280,30 @@ pub struct PingoraRequestCtx {
     /// endpoint list. Set during load balancing; used
     /// for passive health recording in the logging hook.
     pub selected_endpoint_index: Option<usize>,
+
+    /// Endpoints already attempted (for alternate-host retry).
+    pub attempted_endpoints: Vec<Arc<str>>,
+
+    /// Snapshot of the resolved retry policy for this request.
+    pub retry_policy: Option<Arc<praxis_core::config::RetryPolicy>>,
+
+    /// Optional route-level retry policy override (merged by the load balancer).
+    pub route_retry_policy: Option<Arc<praxis_core::config::RetryPolicy>>,
+
+    /// Shared cluster retry state (budget + active requests).
+    pub cluster_retry_state: Option<Arc<praxis_core::retry::ClusterRetryState>>,
+
+    /// Whether `cluster_retry_state.leave()` has already been called.
+    pub cluster_retry_state_released: bool,
+
+    /// Reselector for alternate-host selection on retry.
+    pub endpoint_reselector: Option<Arc<praxis_filter::EndpointReselector>>,
+
+    /// Pending backoff delay to apply before the next `upstream_peer` call.
+    pub pending_backoff: Option<std::time::Duration>,
+
+    /// Whether the next upstream attempt should re-select (alternate host).
+    pub reselect_on_retry: bool,
 
     /// Rewritten URI path for the upstream request.
     ///
@@ -285,7 +331,6 @@ pub struct PingoraRequestCtx {
 /// [`HttpFilterContext`]: praxis_filter::HttpFilterContext
 macro_rules! filter_context {
     ($ctx:expr, $pipeline:expr, $request:expr, $response_header:expr) => {{
-        $pipeline.prepare_extensions(&mut $ctx.extensions);
         praxis_filter::HttpFilterContext {
             buffered_request_body: $ctx
                 .pre_read_body
@@ -312,6 +357,7 @@ macro_rules! filter_context {
             health_registry: $pipeline.health_registry(),
             id_generator: $pipeline.id_generator(),
             kv_stores: $pipeline.kv_stores(),
+            session_stores: $pipeline.session_stores(),
             subrequest_client: $pipeline.subrequest_client(),
             subrequest_response_mode: praxis_filter::SubRequestResponseMode::Buffered,
             request: $request,
@@ -324,8 +370,15 @@ macro_rules! filter_context {
             response_headers_modified: false,
             rewritten_path: $ctx.rewritten_path.take(),
             selected_endpoint_index: $ctx.selected_endpoint_index,
+            attempted_endpoints: std::mem::take(&mut $ctx.attempted_endpoints),
+            retry_policy: $ctx.retry_policy.clone(),
+            route_retry_policy: $ctx.route_retry_policy.clone(),
+            cluster_retry_state: $ctx.cluster_retry_state.clone(),
+            cluster_retry_state_released: $ctx.cluster_retry_state_released,
+            endpoint_reselector: $ctx.endpoint_reselector.clone(),
+            pinned_endpoint_address: None,
             time_source: $pipeline.time_source(),
-            upstream: $ctx.upstream.take(),
+            upstream: $ctx.upstream.take().or_else(|| $ctx.upstream_for_retry.clone()),
         }
     }};
 }
@@ -431,6 +484,9 @@ impl PingoraRequestCtx {
             return Arc::clone(existing);
         }
         let pipeline = swap.load_full();
+        // Extension preparation is once per request, when the pipeline is
+        // pinned — not per filter context (body chunks build one each).
+        pipeline.prepare_extensions(&mut self.extensions);
         self.pinned_pipeline = Some(Arc::clone(&pipeline));
         pipeline
     }
@@ -493,6 +549,7 @@ impl Default for PingoraRequestCtx {
             request_snapshot: None,
             request_span: Span::none(),
             request_start: Instant::now(),
+            upstream_exchange_span: Span::none(),
             response_body_buffer: None,
             response_body_bytes: 0,
             response_body_mode: BodyMode::Stream,
@@ -500,9 +557,19 @@ impl Default for PingoraRequestCtx {
             response_header_snapshot: None,
             upstream_response_status: None,
             response_phase_done: false,
+            response_delivery_complete: false,
+            pending_rejection: None,
             retries: 0,
             rewritten_path: None,
             selected_endpoint_index: None,
+            attempted_endpoints: Vec::new(),
+            retry_policy: None,
+            route_retry_policy: None,
+            cluster_retry_state: None,
+            cluster_retry_state_released: false,
+            endpoint_reselector: None,
+            pending_backoff: None,
+            reselect_on_retry: false,
             upstream: None,
             upstream_for_retry: None,
         }
@@ -591,6 +658,15 @@ mod tests {
     }
 
     #[test]
+    fn default_state_upstream_exchange_span_is_disabled() {
+        let ctx = default_ctx();
+        assert!(
+            ctx.upstream_exchange_span.is_disabled(),
+            "default upstream_exchange_span should be a disabled (none) span"
+        );
+    }
+
+    #[test]
     fn default_state_snapshots_are_none() {
         let ctx = default_ctx();
         assert!(
@@ -632,6 +708,7 @@ mod tests {
         let mut ctx = default_ctx();
         let upstream = Upstream {
             address: Arc::from("10.0.0.1:80"),
+            authority: None,
             tls: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         };

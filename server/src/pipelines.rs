@@ -43,11 +43,13 @@ use praxis_protocol::ListenerPipelines;
 /// resolution error, body limit conflict, or pipeline ordering violation).
 ///
 /// [`FilterPipeline`]: praxis_filter::FilterPipeline
+#[expect(clippy::too_many_arguments, reason = "pipeline wiring passes multiple registries")]
 pub fn resolve_pipelines(
     config: &Config,
     registry: &FilterRegistry,
     health_registry: &praxis_core::health::HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
+    session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
     subrequest_client: &praxis_core::subrequest::SubRequestClient,
 ) -> Result<ListenerPipelines, Box<dyn std::error::Error + Send + Sync>> {
     let chains: HashMap<&str, &[_]> = config
@@ -71,7 +73,14 @@ pub fn resolve_pipelines(
         validate_terminal_position(&entries, &listener.name)?;
 
         let mut pipeline = FilterPipeline::build_with_chains(&mut entries, registry, &chains)?;
-        configure_pipeline(&mut pipeline, config, health_registry, kv_stores, subrequest_client)?;
+        configure_pipeline(
+            &mut pipeline,
+            config,
+            health_registry,
+            kv_stores,
+            session_stores,
+            subrequest_client,
+        )?;
 
         validate_pipeline(&pipeline, &entries, &listener.name, &config.insecure_options)?;
 
@@ -83,11 +92,13 @@ pub fn resolve_pipelines(
 
 /// Apply body limits, health registry, KV stores, pipeline extensions,
 /// and insecure options to a pipeline.
+#[expect(clippy::too_many_arguments, reason = "pipeline wiring passes multiple registries")]
 fn configure_pipeline(
     pipeline: &mut FilterPipeline,
     config: &Config,
     health_registry: &praxis_core::health::HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
+    session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
     subrequest_client: &praxis_core::subrequest::SubRequestClient,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     pipeline.apply_body_limits(
@@ -102,6 +113,10 @@ fn configure_pipeline(
     if !kv_stores.is_empty() {
         pipeline.set_kv_stores(kv_stores.clone());
     }
+    // Always inject the process-wide registry (even while empty): the sticky
+    // sessions filter adopts per-cluster stores into it on demand, which is
+    // what lets session bindings survive config reloads.
+    pipeline.set_session_stores(Arc::clone(session_stores));
     pipeline.set_subrequest_client(subrequest_client.clone());
     pipeline.apply_insecure_options(&config.insecure_options);
     Ok(())
@@ -192,6 +207,7 @@ mod tests {
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -242,6 +258,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -283,6 +300,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -321,6 +339,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -367,6 +386,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(result.is_ok(), "router without LB should be a warning, not an error");
@@ -398,6 +418,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(result.is_ok(), "skip_pipeline_validation should allow startup");
@@ -431,6 +452,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(result.is_err(), "misaligned clusters should fail validation");
@@ -472,6 +494,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(result.is_err(), "open security filter should fail validation");
@@ -515,6 +538,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(result.is_ok(), "allow_open_security_filters should permit open ip_acl");
@@ -550,6 +574,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -570,6 +595,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &kv,
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -587,6 +613,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &kv,
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -628,6 +655,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(
@@ -667,6 +695,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(
@@ -701,6 +730,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(
@@ -726,6 +756,11 @@ filter_chains:
     /// Empty KV store registry for tests without KV stores.
     fn empty_kv_stores() -> praxis_core::kv::KvStoreRegistry {
         praxis_core::kv::KvStoreRegistry::new()
+    }
+
+    /// Empty session store registry for tests.
+    fn empty_session_stores() -> Arc<praxis_filter::SessionStoreRegistry> {
+        Arc::new(praxis_filter::SessionStoreRegistry::new())
     }
 
     /// Empty sub-request client for tests.

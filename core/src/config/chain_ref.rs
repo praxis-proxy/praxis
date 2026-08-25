@@ -2,6 +2,13 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Chain reference: named or inline chain definition for branch chains.
+//!
+//! A branch references the filters it runs either by name, pointing at a
+//! top-level `filter_chains` entry so a chain can be shared across
+//! branches, or inline, embedding filters directly where reuse is not
+//! needed. This is a config-time (pipelining) construct: named chains
+//! are resolved and concatenated into concrete pipelines at startup, not
+//! selected at request time.
 
 use serde::Deserialize;
 
@@ -34,7 +41,7 @@ use super::filters::FilterEntry;
 /// assert!(matches!(inline, ChainRef::Inline { ref name, .. } if name == "inline_chain"));
 /// ```
 #[derive(Clone, Debug, Deserialize, serde::Serialize)]
-#[serde(untagged)]
+#[serde(untagged, try_from = "ChainRefRaw")]
 pub enum ChainRef {
     /// Inline chain definition.
     Inline {
@@ -47,6 +54,63 @@ pub enum ChainRef {
 
     /// Reference to a top-level named chain.
     Named(String),
+}
+
+/// Raw deserialization target for [`ChainRef`].
+///
+/// The untagged enum's struct variant silently absorbs unknown keys, so a
+/// branch-level field (`rejoin`, `on_result`, `max_iterations`) mis-indented
+/// onto an inline chain entry would be dropped without a diagnostic. The raw
+/// shape collects unrecognized keys and [`TryFrom`] rejects them by name.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ChainRefRaw {
+    /// Inline chain object form.
+    Inline(InlineChainRaw),
+
+    /// Named chain reference.
+    Named(String),
+}
+
+/// Object form of an inline chain, capturing unknown keys for rejection.
+#[derive(Deserialize)]
+struct InlineChainRaw {
+    /// Globally unique chain name.
+    name: String,
+
+    /// Ordered list of filters.
+    filters: Vec<FilterEntry>,
+
+    /// Every key not matched above; must be empty.
+    #[serde(flatten)]
+    unknown: std::collections::HashMap<String, serde_yaml::Value>,
+}
+
+impl TryFrom<ChainRefRaw> for ChainRef {
+    type Error = String;
+
+    fn try_from(raw: ChainRefRaw) -> Result<Self, Self::Error> {
+        match raw {
+            ChainRefRaw::Named(name) => Ok(Self::Named(name)),
+            ChainRefRaw::Inline(inline) => {
+                if !inline.unknown.is_empty() {
+                    let mut keys: Vec<&str> = inline.unknown.keys().map(String::as_str).collect();
+                    keys.sort_unstable();
+                    return Err(format!(
+                        "inline chain '{}': unknown field(s): {}; expected only 'name' and \
+                         'filters' (branch-level fields like 'rejoin' belong on the branch, \
+                         not the chain)",
+                        inline.name,
+                        keys.join(", ")
+                    ));
+                }
+                Ok(Self::Inline {
+                    name: inline.name,
+                    filters: inline.filters,
+                })
+            },
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -143,5 +207,25 @@ filters:
             "first should be Named"
         );
         assert!(matches!(&refs[1], ChainRef::Inline { .. }), "second should be Inline");
+    }
+
+    #[test]
+    fn inline_chain_with_misplaced_branch_field_rejected() {
+        let yaml = "name: inline\nfilters:\n  - filter: router\nrejoin: next\n";
+        let err = serde_yaml::from_str::<ChainRef>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("rejoin"),
+            "a branch-level key on an inline chain must be rejected by name, got: {err}"
+        );
+    }
+
+    #[test]
+    fn inline_chain_with_unknown_key_rejected() {
+        let yaml = "name: inline\nfilters:\n  - filter: router\nfitlers: []\n";
+        let err = serde_yaml::from_str::<ChainRef>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("fitlers"),
+            "typoed keys on an inline chain must be rejected by name, got: {err}"
+        );
     }
 }

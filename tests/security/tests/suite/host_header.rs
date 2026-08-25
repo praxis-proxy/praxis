@@ -146,6 +146,8 @@ filter_chains:
           - name: "attacker"
             endpoints:
               - "127.0.0.1:{attacker_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 

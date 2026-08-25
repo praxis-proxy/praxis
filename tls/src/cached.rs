@@ -8,11 +8,62 @@
 //! containers. Per-connection code converts the DER bytes into
 //! library-specific types without touching the filesystem.
 
-use std::{fmt, sync::Arc};
+use std::{
+    any::Any,
+    fmt,
+    sync::{Arc, OnceLock},
+};
 
 use zeroize::Zeroizing;
 
 use crate::TlsError;
+
+// -----------------------------------------------------------------------------
+// ConvertedSlot
+// -----------------------------------------------------------------------------
+
+/// Memoized library-specific conversion of cached DER material.
+///
+/// The TLS crate cannot name protocol-library types, so the slot is
+/// type erased: the consumer supplies both the conversion closure and
+/// the concrete type. Populated once on first use; clones start empty.
+struct ConvertedSlot(OnceLock<Box<dyn Any + Send + Sync>>);
+
+impl ConvertedSlot {
+    /// Return the memoized value, initializing it on first use.
+    ///
+    /// Returns `None` only if a previously stored value has a
+    /// different type than `T`.
+    fn get_or_init<T, F>(&self, init: F) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+        F: FnOnce() -> T,
+    {
+        self.0.get_or_init(|| Box::new(init())).downcast_ref::<T>()
+    }
+}
+
+impl Default for ConvertedSlot {
+    fn default() -> Self {
+        Self(OnceLock::new())
+    }
+}
+
+impl Clone for ConvertedSlot {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl fmt::Debug for ConvertedSlot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(if self.0.get().is_some() {
+            "ConvertedSlot(initialized)"
+        } else {
+            "ConvertedSlot(empty)"
+        })
+    }
+}
 
 // -----------------------------------------------------------------------------
 // CachedCaCerts
@@ -28,6 +79,9 @@ use crate::TlsError;
 /// ```
 #[derive(Clone, Debug)]
 pub struct CachedCaCerts {
+    /// Memoized library-specific conversion of the DER certificates.
+    converted: ConvertedSlot,
+
     /// DER-encoded certificate bytes.
     der_certs: Vec<Vec<u8>>,
 }
@@ -35,12 +89,29 @@ pub struct CachedCaCerts {
 impl CachedCaCerts {
     /// Wrap pre-parsed DER certificate bytes.
     pub fn new(der_certs: Vec<Vec<u8>>) -> Self {
-        Self { der_certs }
+        Self {
+            converted: ConvertedSlot::default(),
+            der_certs,
+        }
     }
 
     /// Borrow the DER-encoded certificates.
     pub fn der_certs(&self) -> &[Vec<u8>] {
         &self.der_certs
+    }
+
+    /// Return the memoized library-specific conversion of these
+    /// certificates, initializing it on first use.
+    ///
+    /// The conversion runs at most once per instance; shared clones of
+    /// the containing [`Arc`] observe the same value. Returns `None`
+    /// only if a previously stored conversion has a different type.
+    pub fn converted_or_init<T, F>(&self, init: F) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+        F: FnOnce() -> T,
+    {
+        self.converted.get_or_init(init)
     }
 
     /// Read and parse a PEM CA file into cached DER certificates.
@@ -107,6 +178,9 @@ pub struct CachedClientCert {
     /// DER-encoded certificate chain.
     cert_der: Vec<Vec<u8>>,
 
+    /// Memoized library-specific conversion of the cert and key.
+    converted: ConvertedSlot,
+
     /// DER-encoded private key (zeroized on drop).
     key_der: CachedPrivateKeyDer,
 }
@@ -129,6 +203,7 @@ impl CachedClientCert {
     pub fn new(cert_der: Vec<Vec<u8>>, key_der: Zeroizing<Vec<u8>>) -> Self {
         Self {
             cert_der,
+            converted: ConvertedSlot::default(),
             key_der: CachedPrivateKeyDer::new(key_der),
         }
     }
@@ -136,6 +211,20 @@ impl CachedClientCert {
     /// Borrow the DER-encoded certificate chain.
     pub fn cert_der(&self) -> &[Vec<u8>] {
         &self.cert_der
+    }
+
+    /// Return the memoized library-specific conversion of this cert and
+    /// key, initializing it on first use.
+    ///
+    /// The conversion runs at most once per instance; shared clones of
+    /// the containing [`Arc`] observe the same value. Returns `None`
+    /// only if a previously stored conversion has a different type.
+    pub fn converted_or_init<T, F>(&self, init: F) -> Option<&T>
+    where
+        T: Send + Sync + 'static,
+        F: FnOnce() -> T,
+    {
+        self.converted.get_or_init(init)
     }
 
     /// Borrow the DER-encoded private key.
@@ -188,7 +277,10 @@ pub struct CachedClusterTls {
     client_cert: Option<Arc<CachedClientCert>>,
 
     /// SNI hostname for outbound connections.
-    sni: Option<String>,
+    ///
+    /// [`Arc<str>`] so the per-request clone in the load balancer's
+    /// upstream construction is reference-counted, not reallocated.
+    sni: Option<Arc<str>>,
 
     /// Whether to verify upstream certificates.
     verify: bool,
@@ -222,7 +314,7 @@ impl CachedClusterTls {
         Ok(Self {
             ca,
             client_cert,
-            sni: tls.sni.clone(),
+            sni: tls.sni.as_deref().map(Arc::from),
             verify: tls.verify,
         })
     }
@@ -243,8 +335,12 @@ impl CachedClusterTls {
     }
 
     /// Set the SNI hostname.
-    pub fn set_sni(&mut self, sni: String) {
-        self.sni = Some(sni);
+    ///
+    /// Accepts anything convertible into `Arc<str>`; pass a `&str` to
+    /// allocate the shared buffer once rather than building a `String`
+    /// first and copying it.
+    pub fn set_sni<S: Into<Arc<str>>>(&mut self, sni: S) {
+        self.sni = Some(sni.into());
     }
 
     /// Whether to verify upstream certificates.
@@ -273,27 +369,31 @@ fn load_and_validate_certs(path: &str, context: &str) -> Result<Vec<Vec<u8>>, Tl
 
 /// Read a PEM certificate file and return DER-encoded certificate bytes.
 fn parse_cert_pem(cert_path: &str) -> Result<Vec<Vec<u8>>, TlsError> {
+    use rustls::pki_types::{CertificateDer, pem::PemObject as _};
+
     let pem = read_pem_file(cert_path)?;
-    rustls_pemfile::certs(&mut &pem[..])
+    CertificateDer::pem_slice_iter(&pem)
+        .map(|item| item.map(|cert| cert.to_vec()))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| TlsError::FileLoadError {
             path: cert_path.to_owned(),
             detail: e.to_string(),
         })
-        .map(|certs| certs.into_iter().map(|c| c.to_vec()).collect())
 }
 
 /// Read a PEM private key file and return the DER-encoded key bytes.
 fn parse_key_pem(key_path: &str) -> Result<Zeroizing<Vec<u8>>, TlsError> {
+    use rustls::pki_types::{PrivateKeyDer, pem::PemObject as _};
+
     let pem = read_pem_file(key_path)?;
-    rustls_pemfile::private_key(&mut &pem[..])
+    PrivateKeyDer::from_pem_slice(&pem)
         .map_err(|e| TlsError::FileLoadError {
             path: key_path.to_owned(),
-            detail: e.to_string(),
-        })?
-        .ok_or_else(|| TlsError::FileLoadError {
-            path: key_path.to_owned(),
-            detail: "no private key found".to_owned(),
+            detail: if matches!(e, rustls::pki_types::pem::Error::NoItemsFound) {
+                "no private key found".to_owned()
+            } else {
+                e.to_string()
+            },
         })
         .map(|k| Zeroizing::new(k.secret_der().to_vec()))
 }
@@ -536,6 +636,49 @@ mod tests {
     }
 
     #[test]
+    fn converted_slot_initializes_once() {
+        let cached = CachedCaCerts::new(vec![vec![1, 2, 3]]);
+        let mut calls = 0_u32;
+        let first = *cached
+            .converted_or_init(|| {
+                calls += 1;
+                42_u64
+            })
+            .unwrap();
+        let second = *cached.converted_or_init(|| 99_u64).unwrap();
+        assert_eq!(calls, 1, "conversion must run exactly once");
+        assert_eq!(first, 42, "first call stores the converted value");
+        assert_eq!(second, 42, "second call returns the memoized value");
+    }
+
+    #[test]
+    fn converted_slot_type_mismatch_returns_none() {
+        let cached = CachedCaCerts::new(vec![vec![1]]);
+        let _stored = cached.converted_or_init(|| 1_u64);
+        assert!(
+            cached.converted_or_init(|| "other".to_owned()).is_none(),
+            "a mismatched type must not observe the stored value"
+        );
+    }
+
+    #[test]
+    fn converted_slot_clone_starts_empty() {
+        let cached = CachedCaCerts::new(vec![vec![1]]);
+        let _stored = cached.converted_or_init(|| 7_u64);
+        let cloned = cached.clone();
+        let value = *cloned.converted_or_init(|| 8_u64).unwrap();
+        assert_eq!(value, 8, "clones must not share the memoized conversion");
+    }
+
+    #[test]
+    fn client_cert_converted_slot_initializes_once() {
+        let cached = CachedClientCert::new(vec![vec![1]], Zeroizing::new(vec![2]));
+        let first = *cached.converted_or_init(|| 5_u64).unwrap();
+        let second = *cached.converted_or_init(|| 6_u64).unwrap();
+        assert_eq!(first, second, "client cert conversion must be memoized");
+    }
+
+    #[test]
     fn cached_ca_clone() {
         let cached = CachedCaCerts::new(vec![vec![1, 2, 3]]);
         let cloned = cached.clone();
@@ -563,7 +706,7 @@ mod tests {
         let cached = CachedClusterTls {
             ca: None,
             client_cert: Some(Arc::new(client_cert)),
-            sni: Some("api.example.com".to_owned()),
+            sni: Some(Arc::from("api.example.com")),
             verify: true,
         };
 

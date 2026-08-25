@@ -24,7 +24,7 @@ use metrics::SharedString;
 use praxis_core::circuit::{
     CircuitBreaker, CircuitBreakerConfig as CoreCircuitBreakerConfig, CircuitCheck, CircuitState, CircuitToken,
 };
-use tracing::{debug, info, warn};
+use tracing::{debug, warn};
 
 use self::config::CircuitBreakerConfig;
 use crate::{
@@ -243,7 +243,7 @@ impl HttpFilter for CircuitBreakerFilter {
                 Ok(FilterAction::Continue)
             },
             CircuitCheck::Rejected => {
-                info!(cluster = %cluster_name, "circuit open, rejecting request");
+                warn!(cluster = %cluster_name, "circuit breaker tripped, rejecting request");
                 Ok(FilterAction::Reject(
                     Rejection::status(503).with_header("X-Circuit-State", "open"),
                 ))

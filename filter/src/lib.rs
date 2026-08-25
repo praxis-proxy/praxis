@@ -18,6 +18,28 @@
 )]
 
 //! Filter pipeline engine for Praxis.
+//!
+//! `praxis-filter` sits between `protocol` and `core` in the crate
+//! dependency flow `server -> protocol -> filter -> core -> tls`. It
+//! turns the validated configuration from [`praxis_core`] into an
+//! executable request/response processing pipeline that the protocol
+//! adapters drive. This is where "what processing a request receives"
+//! is defined, as opposed to "where a request goes" (runtime routing
+//! performed by the [`RouterFilter`]).
+//!
+//! Key entry types:
+//! - [`HttpFilter`] and [`TcpFilter`]: the traits every built-in and external filter implements, each with a
+//!   `from_config` factory.
+//! - [`FilterRegistry`]: maps filter names to factories and builds filters from config; extend it with the
+//!   [`register_filters!`] macro.
+//! - [`FilterPipeline`]: the resolved, ordered chain executed per request, including conditional branch chains.
+//! - [`FilterResultSet`]: filters record results here without knowing about branches; the pipeline executor reads them
+//!   to evaluate branch conditions and dispatch.
+//! - [`BodyAccess`] / [`BodyMode`]: body access and buffering, so streaming filters can process chunks without
+//!   buffering whole bodies.
+//!
+//! Built-in filters live under [`builtins`], organized by protocol and
+//! category.
 
 mod actions;
 mod any_filter;
@@ -43,9 +65,11 @@ pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, Bod
 #[cfg(feature = "basic-auth-filter")]
 pub use builtins::BasicAuthFilter;
 pub use builtins::{
-    CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, EndpointSelectorFilter,
-    GuardrailsAction, GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode, RedirectStatus, RouterFilter,
-    RuleTargetKind, has_dot_dot_traversal, http::payload_processing::compression_config::CompressionConfig,
+    CircuitBreakerFilter, ContainsValue, CredentialInjectionFilter, DisallowedOriginMode, EndpointReselector,
+    EndpointSelectorFilter, GuardrailsAction, GuardrailsFilter, LoadBalancerFilter, PiiKind, RateLimitMode,
+    RedirectStatus, RouterFilter, RuleTargetKind, SessionStore, SessionStoreRegistry, StickySessionsFilter,
+    access_record_already_emitted, bodyless_response, emit_access_record, has_dot_dot_traversal,
+    http::payload_processing::compression_config::CompressionConfig, mark_access_record_emitted,
     normalize_rewritten_path,
 };
 #[cfg(feature = "policy-engine")]
@@ -447,6 +471,7 @@ pub(crate) mod test_utils {
             health_registry: None,
             id_generator: &TEST_ID_GENERATOR,
             kv_stores: None,
+            session_stores: None,
             metrics_route: None,
             peer_identity: None,
             subrequest_client: None,
@@ -461,6 +486,13 @@ pub(crate) mod test_utils {
             response_headers_modified: false,
             rewritten_path: None,
             selected_endpoint_index: None,
+            attempted_endpoints: Vec::new(),
+            retry_policy: None,
+            route_retry_policy: None,
+            cluster_retry_state: None,
+            cluster_retry_state_released: false,
+            endpoint_reselector: None,
+            pinned_endpoint_address: None,
             time_source: &praxis_core::time::SystemTimeSource,
             upstream: None,
         }

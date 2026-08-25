@@ -5,14 +5,19 @@
 
 use std::sync::Arc;
 
+use http::header::HeaderValue;
 use praxis_core::{
-    config::{CachedClusterTls, Cluster},
+    config::{CachedClusterTls, Cluster, RetryPolicy},
     connectivity::{ConnectionOptions, Upstream},
+    retry::ClusterRetryState,
 };
-use tracing::{debug, error};
+use tracing::debug;
 
-use super::strategy::{Strategy, build_strategy};
-use crate::{filter::HttpFilterContext, load_balancing::endpoint::build_weighted_endpoints};
+use super::{
+    reselector::EndpointReselector,
+    strategy::{Strategy, build_strategy},
+};
+use crate::{FilterError, filter::HttpFilterContext, load_balancing::endpoint::build_weighted_endpoints};
 
 // -----------------------------------------------------------------------------
 // ClusterEntry
@@ -20,15 +25,26 @@ use crate::{filter::HttpFilterContext, load_balancing::endpoint::build_weighted_
 
 /// Resolved state for a single cluster.
 pub(super) struct ClusterEntry {
+    /// Pre-parsed upstream authority override as a [`HeaderValue`].
+    /// `None` means forward the downstream `Host` header unchanged.
+    /// Parsed at config load time to avoid per-request conversion.
+    pub(super) authority: Option<HeaderValue>,
+
     /// Connection options derived from the cluster config, [`Arc`]-wrapped
     /// to avoid per-request cloning.
     pub(super) opts: Arc<ConnectionOptions>,
 
     /// The load-balancing strategy for this cluster.
-    pub(super) strategy: Strategy,
+    pub(super) strategy: Arc<Strategy>,
 
     /// Pre-cached TLS material. `None` means plain TCP.
     pub(super) tls: Option<CachedClusterTls>,
+
+    /// Resolved retry policy (legacy default when unset).
+    pub(super) retry_policy: Arc<RetryPolicy>,
+
+    /// Shared active-request counter and retry budget.
+    pub(super) retry_state: Arc<ClusterRetryState>,
 }
 
 impl ClusterEntry {
@@ -49,15 +65,33 @@ impl ClusterEntry {
                     .get(http::header::HOST)
                     .and_then(|v| v.to_str().ok())
             {
-                t.set_sni(strip_host_port(host).to_owned());
+                t.set_sni(strip_host_port(host));
             }
             t
         });
         Upstream {
             address: addr,
+            authority: self.authority.clone(),
             connection: Arc::clone(&self.opts),
             tls,
         }
+    }
+
+    /// Capture a reselector with an already-merged retry policy.
+    pub(super) fn reselector_with_policy(
+        &self,
+        hash_key: Option<Arc<str>>,
+        retry_policy: Arc<RetryPolicy>,
+    ) -> EndpointReselector {
+        EndpointReselector::new(
+            Arc::clone(&self.strategy),
+            Arc::clone(&self.opts),
+            self.tls.clone(),
+            self.authority.clone(),
+            hash_key,
+            retry_policy,
+            Arc::clone(&self.retry_state),
+        )
     }
 }
 
@@ -74,7 +108,12 @@ fn strip_host_port(host: &str) -> &str {
 }
 
 /// Build a [`ClusterEntry`] from a cluster definition.
-pub(super) fn build_cluster_entry(cluster: &Cluster) -> ClusterEntry {
+///
+/// # Errors
+///
+/// Returns [`FilterError`] if the authority override cannot be parsed
+/// as a valid HTTP header value.
+pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, FilterError> {
     let endpoints = build_weighted_endpoints(cluster);
     let total_weight: u32 = endpoints.iter().map(|ep| ep.weight).sum();
     debug!(
@@ -84,27 +123,55 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> ClusterEntry {
         "cluster registered"
     );
 
-    let tls = cluster
-        .tls
-        .as_ref()
-        .and_then(|t| match CachedClusterTls::try_from_config(t) {
-            Ok(cached) => Some(cached),
-            Err(e) => {
-                error!(
-                    cluster = %cluster.name,
-                    error = %e,
-                    "failed to cache TLS certificates; TLS disabled for this cluster"
-                );
-                None
-            },
-        });
-
-    let strategy = build_strategy(&cluster.load_balancer_strategy, endpoints);
-    ClusterEntry {
+    let tls = build_cached_tls(cluster)?;
+    let authority = build_authority(cluster)?;
+    let strategy = Arc::new(build_strategy(&cluster.load_balancer_strategy, endpoints));
+    let retry_policy = Arc::new(cluster.retry_policy.clone().unwrap_or_else(RetryPolicy::legacy_default));
+    let retry_state = Arc::new(ClusterRetryState::new(retry_policy.retry_budget.as_ref()));
+    Ok(ClusterEntry {
+        authority,
         opts: Arc::new(ConnectionOptions::from(cluster)),
         strategy,
         tls,
-    }
+        retry_policy,
+        retry_state,
+    })
+}
+
+/// Pre-cache TLS material for a cluster, failing closed on unreadable material.
+///
+/// Returns an error instead of silently disabling TLS, so a misconfigured or
+/// unreadable certificate cannot cause traffic to fall back to plaintext.
+fn build_cached_tls(cluster: &Cluster) -> Result<Option<CachedClusterTls>, FilterError> {
+    let Some(t) = cluster.tls.as_ref() else {
+        return Ok(None);
+    };
+    CachedClusterTls::try_from_config(t).map(Some).map_err(|e| {
+        format!(
+            "cluster '{}': TLS material is unreadable, refusing to fall back to plaintext: {e}",
+            cluster.name,
+        )
+        .into()
+    })
+}
+
+/// Pre-parse the authority override as a [`HeaderValue`].
+///
+/// Returns an error instead of silently disabling the override, so
+/// that programmatic callers of `LoadBalancerFilter::new` cannot
+/// accidentally forward the caller's original `Host` header.
+fn build_authority(cluster: &Cluster) -> Result<Option<HeaderValue>, FilterError> {
+    let Some(a) = cluster.http.authority.as_deref() else {
+        return Ok(None);
+    };
+    cluster.validate_authority().map_err(|e| e.to_string())?;
+    HeaderValue::from_str(a).map(Some).map_err(|e| {
+        format!(
+            "cluster '{}': authority '{}' is not a valid HTTP header value: {e}",
+            cluster.name, a,
+        )
+        .into()
+    })
 }
 
 // -----------------------------------------------------------------------------

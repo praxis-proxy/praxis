@@ -604,5 +604,5 @@ filters and pipeline-scoped resources remain available.
 
 See the
 [`iterative_request_router` reference](http/traffic_management/iterative_request_router.md)
-and [proposal 00786](../proposals/00786_iterative-request-router.md)
+and [proposal 00786](https://github.com/praxis-proxy/enhancements/blob/main/proposals/00786_iterative-request-router.md)
 for the full design.

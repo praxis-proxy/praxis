@@ -14,13 +14,9 @@ use clap::Parser;
 /// requirement. Each entry must have a justification. Shrink this list over
 /// time by adding tests.
 const SKIP: &[&str] = &[
-    // --- Observability: TCP access log not yet integration-tested ---
-    "observability/tcp-access-log.yaml",
     // --- Operations: runtime/container configs that don't exercise filters ---
     "operations/container-default.yaml",
-    "operations/hot-reload.yaml",
     "operations/log-overrides.yaml",
-    "operations/multi-listener.yaml",
     // --- Payload processing ---
     "payload-processing/compression.yaml",
     "payload-processing/stream-buffer.yaml",
@@ -31,7 +27,6 @@ const SKIP: &[&str] = &[
     "protocols/mixed-protocol.yaml",
     "protocols/tcp-proxy.yaml",
     "protocols/tcp-timeouts.yaml",
-    "protocols/tcp-tls-mtls.yaml",
     "protocols/tcp-tls-termination.yaml",
     "protocols/tls-cipher-suites.yaml",
     "protocols/tls-http-reencrypt.yaml",

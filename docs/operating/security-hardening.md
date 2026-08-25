@@ -94,6 +94,24 @@ ambiguous configuration:
   listeners to cap concurrent connections. HTTP
   listeners reject excess requests with 503 and
   `Retry-After`; TCP listeners close immediately.
+- **Path-based gating is not a boundary against
+  normalizing upstreams**: filter conditions
+  (`when: { path_prefix: … }`) and `router` route
+  matches compare the raw request path. Praxis does
+  not resolve dot-segments (`/./`, `/../`), collapse
+  duplicate slashes (`//`), or percent-decode the
+  path before matching, and it forwards the path to
+  the upstream verbatim (this is deliberate — see the
+  `%2f`/`//` passthrough behavior). A request such as
+  `//admin` or `/%2e/admin` will therefore *not* match
+  a `path_prefix: /admin` gate, yet an upstream that
+  normalizes the path may still treat it as `/admin`.
+  Do not rely on path-prefix gating of `basic_auth`,
+  `ip_acl`, or `csrf` as the sole access control in
+  front of a backend that normalizes paths. Prefer
+  gating on a classifier-promoted `x-praxis-*` header
+  (the "classify → route → branch" pattern), or
+  terminate sensitive paths at the proxy.
 
 ## Resource Limits
 

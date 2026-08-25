@@ -162,6 +162,31 @@ impl ForwardedHeadersFilter {
 
         ctx.extra_request_headers.push((Cow::Borrowed("Forwarded"), value));
     }
+
+    /// Remove client-supplied forwarding headers that the overwrite pass
+    /// does not replace.
+    ///
+    /// Injected headers replace existing values, which covers the
+    /// `X-Forwarded-*` family and (when `use_standard_header` is on) the
+    /// RFC 7239 `Forwarded` header. Two spoofing paths remain for
+    /// untrusted clients and are closed here: a `Forwarded` header when
+    /// the standard header is not injected, and `X-Forwarded-Host` when
+    /// no usable `Host` header exists to derive a replacement from.
+    fn neutralize_untrusted_forwarding(&self, ctx: &mut HttpFilterContext<'_>, client_ip: &IpAddr, no_host: bool) {
+        if self.is_trusted(client_ip) {
+            return;
+        }
+        if !self.use_standard_header {
+            tracing::debug!("removing client-supplied Forwarded header from untrusted source");
+            ctx.request_headers_to_remove
+                .push(http::header::HeaderName::from_static("forwarded"));
+        }
+        if no_host {
+            tracing::debug!("removing client-supplied X-Forwarded-Host: no Host header to derive replacement");
+            ctx.request_headers_to_remove
+                .push(http::header::HeaderName::from_static("x-forwarded-host"));
+        }
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -258,6 +283,8 @@ impl HttpFilter for ForwardedHeadersFilter {
         if self.use_standard_header {
             self.inject_standard_forwarded(ctx, &client_ip, proto, host_value.as_deref());
         }
+
+        self.neutralize_untrusted_forwarding(ctx, &client_ip, host_value.is_none());
 
         Ok(FilterAction::Continue)
     }
@@ -812,6 +839,108 @@ use_standard_header: true
             proto,
             Some("http"),
             "non-TLS connection should set X-Forwarded-Proto to http"
+        );
+    }
+
+    #[tokio::test]
+    async fn untrusted_forwarded_removed_when_standard_disabled() {
+        let f = make_filter(&[]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert(
+            http::header::HeaderName::from_static("forwarded"),
+            "for=1.2.3.4;proto=https".parse().unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("203.0.113.50".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        assert!(
+            ctx.request_headers_to_remove.iter().any(|n| n == "forwarded"),
+            "client-supplied Forwarded must be removed for untrusted sources"
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_forwarded_preserved_when_standard_disabled() {
+        let f = make_filter(&["10.0.0.0/8"]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert(
+            http::header::HeaderName::from_static("forwarded"),
+            "for=1.2.3.4;proto=https".parse().unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("10.1.2.3".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        assert!(
+            !ctx.request_headers_to_remove.iter().any(|n| n == "forwarded"),
+            "trusted proxy's Forwarded must be preserved"
+        );
+    }
+
+    #[tokio::test]
+    async fn untrusted_forwarded_overwritten_when_standard_enabled() {
+        let f = make_standard_filter(&[]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert(
+            http::header::HeaderName::from_static("forwarded"),
+            "for=1.2.3.4".parse().unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("203.0.113.50".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let fwd = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "Forwarded")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            fwd,
+            Some("for=203.0.113.50;proto=http"),
+            "injected Forwarded must replace the spoofed value, not append to it"
+        );
+        assert!(
+            !ctx.request_headers_to_remove.iter().any(|n| n == "forwarded"),
+            "no removal needed when the injected header replaces existing values"
+        );
+    }
+
+    #[tokio::test]
+    async fn untrusted_xfh_removed_when_host_absent() {
+        let f = make_filter(&[]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert(
+            http::header::HeaderName::from_static("x-forwarded-host"),
+            "spoofed.example".parse().unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("203.0.113.50".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        assert!(
+            ctx.request_headers_to_remove.iter().any(|n| n == "x-forwarded-host"),
+            "spoofed X-Forwarded-Host must be removed when no Host header exists"
+        );
+    }
+
+    #[tokio::test]
+    async fn untrusted_xfh_not_removed_when_host_present() {
+        let f = make_filter(&[]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.insert(http::header::HOST, "example.com".parse().unwrap());
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("203.0.113.50".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        assert!(
+            !ctx.request_headers_to_remove.iter().any(|n| n == "x-forwarded-host"),
+            "injected X-Forwarded-Host already overwrites when Host is present"
         );
     }
 

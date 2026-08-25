@@ -27,9 +27,27 @@ pub(super) struct Strategy {
 
 impl Strategy {
     /// Pick the next endpoint address, skipping unhealthy endpoints.
-    pub(super) fn select(&self, ctx: &HttpFilterContext<'_>, health: Option<&ClusterHealthState>) -> Option<Arc<str>> {
+    ///
+    /// Endpoints in `exclude` are skipped; if all are excluded, selection
+    /// falls back to the full set.
+    pub(super) fn select(
+        &self,
+        ctx: &HttpFilterContext<'_>,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+    ) -> Option<Arc<str>> {
         let hash_key = self.extract_hash_key(ctx);
-        self.inner.select(hash_key, health)
+        self.inner.select(hash_key, health, exclude)
+    }
+
+    /// Pick the next endpoint using a pre-captured hash key (for retries).
+    pub(super) fn select_with_key(
+        &self,
+        hash_key: Option<&str>,
+        health: Option<&ClusterHealthState>,
+        exclude: &[Arc<str>],
+    ) -> Option<Arc<str>> {
+        self.inner.select(hash_key, health, exclude)
     }
 
     /// Called after a response arrives so that strategies that track in-flight
@@ -46,12 +64,14 @@ impl Strategy {
 
     /// Extract the hash key from the HTTP context for hash-based strategies.
     ///
-    /// Consistent-hash and Maglev both hash a configured header (falling back
-    /// to the URI path); other strategies ignore the key.
+    /// Hash-based strategies (consistent-hash, Maglev, ring-hash) hash a
+    /// configured header (falling back to the URI path); other strategies
+    /// ignore the key.
     fn extract_hash_key<'a>(&self, ctx: &'a HttpFilterContext<'_>) -> Option<&'a str> {
         let header = match &self.inner {
             shared::Strategy::ConsistentHash(ch) => ch.header(),
             shared::Strategy::Maglev(m) => m.header(),
+            shared::Strategy::RingHash(rh) => rh.header(),
             _ => return None,
         };
         let key: &str = header
@@ -59,6 +79,11 @@ impl Strategy {
             .and_then(|v| v.to_str().ok())
             .unwrap_or_else(|| ctx.request.uri.path());
         Some(key)
+    }
+
+    /// Capture the hash key as an owned string for retry re-selection.
+    pub(super) fn capture_hash_key(&self, ctx: &HttpFilterContext<'_>) -> Option<Arc<str>> {
+        self.extract_hash_key(ctx).map(Arc::from)
     }
 }
 

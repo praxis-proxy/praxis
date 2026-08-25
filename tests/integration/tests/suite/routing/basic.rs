@@ -85,6 +85,8 @@ filter_chains:
               - "127.0.0.1:{port_a}"
               - "127.0.0.1:{port_b}"
               - "127.0.0.1:{port_c}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 

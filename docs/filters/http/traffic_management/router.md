@@ -20,15 +20,30 @@ Longest prefix wins. Routes without `host` match any host. Header restrictions u
 | `json_alias_header` | string | no | Reserved for the unimplemented JSON alias feature; has no effect. Kept so existing configs continue to parse. Any route that actually sets `json_aliases` is rejected at startup. |
 | `json_alias_max_body_bytes` | integer | no | Reserved for the unimplemented JSON alias feature; has no effect. Kept so existing configs continue to parse. Any route that actually sets `json_aliases` is rejected at startup. |
 | `routes` | RouterRouteConfig[] | no | Route table entries. |
-| `routes[].path` | string | one of | The exact path to match. |
-| `routes[].path_prefix` | string | one of | Path prefix. The longest matching prefix wins. |
+| `routes[].path` | string | no | Exact path to match. Exactly one of `path` or `path_prefix` must be set. |
+| `routes[].path_prefix` | string | no | Path prefix to match; the longest matching prefix wins. Exactly one of `path` or `path_prefix` must be set. |
 | `routes[].cluster` | string | yes | Name of the cluster to route matched requests to. |
 | `routes[].headers` | object<string, string> | no | Request headers to match. All specified headers must be present with matching values (AND semantics, case-sensitive). |
 | `routes[].host` | string | no | Host to match. If set, the route only applies to this host. |
-| `routes[].json_aliases` | JsonAlias[] | no | Not implemented. Setting this is rejected at startup. Body-field routing is not wired into the request path. Promote the value to a header with a classifier filter and match it via the route's `headers` field instead. |
+| `routes[].json_aliases` | JsonAlias[] | no | Not implemented. Setting this is rejected at startup. |
 | `routes[].json_aliases[].field` | string | yes | Request JSON field whose string value is compared with `pattern`. |
 | `routes[].json_aliases[].match` | string | yes | Exact or single-wildcard pattern for the configured field value. |
 | `routes[].json_aliases[].target` | string | no | Replacement value; omitted aliases preserve the original value. |
+| `routes[].retry_policy` | RetryPolicy | no | Optional per-route retry policy override. |
+| `routes[].retry_policy.max_retries` | integer | no | Maximum number of retry attempts after the initial try. `None` means inherit from the merge parent / use the legacy default. |
+| `routes[].retry_policy.retriable_status_codes` | HttpStatusCode[] | no | Explicit HTTP status codes that are retriable. |
+| `routes[].retry_policy.retriable_conditions` | (`connect_failure` \| `reset` \| `refused_stream` \| `status5xx`)[] | no | Named retriable conditions (connect failure, reset, 5xx, ...). |
+| `routes[].retry_policy.per_try_timeout_ms` | integer | no | Independent timeout for a single upstream attempt, in milliseconds. |
+| `routes[].retry_policy.request_timeout_ms` | integer | no | Overall request deadline across all attempts, in milliseconds. When unset, the overall-timeout guard is skipped. |
+| `routes[].retry_policy.backoff` | BackoffConfig | no | Exponential backoff between attempts. |
+| `routes[].retry_policy.backoff.base_interval_ms` | integer | yes | Exponential base interval in milliseconds. |
+| `routes[].retry_policy.backoff.max_interval_ms` | integer | yes | Maximum capped interval in milliseconds. |
+| `routes[].retry_policy.configured` | bool | no | Whether this policy came from operator configuration rather than the built-in legacy default. Endpoint reselection on retry is enabled only for configured policies; the legacy default preserves the historical retry-same-endpoint semantics. |
+| `routes[].retry_policy.retry_budget` | RetryBudgetConfig | no | Token-bucket retry budget. |
+| `routes[].retry_policy.retry_budget.percent` | BudgetPercent | yes | Maximum retries as a percentage of active requests (0.0..=100.0). |
+| `routes[].retry_policy.retry_budget.min_retries_per_second` | integer | no | Floor on tokens per second even at low traffic. |
+| `routes[].retry_policy.retry_body_limit_bytes` | RetryBodyLimit | no | Max request body size eligible for replay (bytes). Defaults to 64 `KiB`. |
+| `routes[].retry_policy.allow_non_idempotent` | bool | no | Allow retries for non-idempotent methods (POST/PATCH) when true. |
 | `multi_level_subdomain_matching` | bool | no | Enable multi-level subdomain matching for wildcard hosts. When `false` (default), `*.example.com` matches only single-level subdomains like `foo.example.com`. When `true`, it also matches multi-level subdomains like `foo.bar.example.com` (suffix match). Some control planes (e.g. Kubernetes Gateway API) require this. |
 
 ## Example

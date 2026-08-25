@@ -121,6 +121,9 @@ pub struct FilterPipeline {
     /// Named key-value stores for runtime mappings.
     kv_stores: Option<KvStoreRegistry>,
 
+    /// Per-cluster session stores for sticky session affinity, preserved across reloads.
+    session_stores: Option<Arc<crate::SessionStoreRegistry>>,
+
     /// Shared sub-request client for iterative sub-requests.
     subrequest_client: Option<praxis_core::subrequest::SubRequestClient>,
 
@@ -133,6 +136,18 @@ pub struct FilterPipeline {
 
     /// Wall-clock time source for filters that need timestamps.
     time_source: Arc<dyn TimeSource>,
+
+    /// Global request body ceiling, enforced by counting in Stream mode.
+    request_body_ceiling: Option<usize>,
+
+    /// Global response body ceiling, enforced by counting in Stream mode.
+    response_body_ceiling: Option<usize>,
+
+    /// Per-filter request-body access flags, index-aligned with `filters`.
+    request_body_access_by_idx: Vec<bool>,
+
+    /// Per-filter response-body access flags, index-aligned with `filters`.
+    response_body_access_by_idx: Vec<bool>,
 }
 
 #[expect(
@@ -190,7 +205,22 @@ impl FilterPipeline {
             allow_unbounded,
         )?;
 
+        self.request_body_ceiling = max_request;
+        self.response_body_ceiling = max_response;
+
         Ok(())
+    }
+
+    /// Global request body ceiling; `None` means unbounded was allowed.
+    #[must_use]
+    pub fn request_body_ceiling(&self) -> Option<usize> {
+        self.request_body_ceiling
+    }
+
+    /// Global response body ceiling; `None` means unbounded was allowed.
+    #[must_use]
+    pub fn response_body_ceiling(&self) -> Option<usize> {
+        self.response_body_ceiling
     }
 
     /// Pre-computed body processing capabilities for this pipeline.
@@ -211,6 +241,32 @@ impl FilterPipeline {
     /// Whether the pipeline has no filters.
     pub fn is_empty(&self) -> bool {
         self.filters.is_empty()
+    }
+
+    /// Whether any top-level filter has the given type name.
+    ///
+    /// ```
+    /// use praxis_filter::{FilterPipeline, FilterRegistry};
+    ///
+    /// let registry = FilterRegistry::with_builtins();
+    /// let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+    /// assert!(!pipeline.contains_filter("access_log"));
+    /// ```
+    pub fn contains_filter(&self, type_name: &str) -> bool {
+        self.filters.iter().any(|pf| pf.filter.name() == type_name)
+    }
+
+    /// Whether any filter of `type_name` has request conditions matching
+    /// `request` (an unconditional entry always matches).
+    ///
+    /// Used by protocol-level fallbacks that emit on a filter's behalf, so
+    /// an operator's `when`/`unless` scoping is honored outside the normal
+    /// request phase.
+    pub fn filter_request_conditions_match(&self, type_name: &str, request: &crate::Request) -> bool {
+        self.filters
+            .iter()
+            .filter(|pf| pf.filter.name() == type_name)
+            .any(|pf| crate::condition::should_execute(&pf.conditions, request))
     }
 
     /// Compression configuration, if a compression filter is present.
@@ -256,6 +312,16 @@ impl FilterPipeline {
     /// Set the shared [`KvStoreRegistry`] for this pipeline.
     pub fn set_kv_stores(&mut self, stores: KvStoreRegistry) {
         self.kv_stores = Some(stores);
+    }
+
+    /// The shared session store registry, if set.
+    pub fn session_stores(&self) -> Option<&Arc<crate::SessionStoreRegistry>> {
+        self.session_stores.as_ref()
+    }
+
+    /// Set the shared [`crate::SessionStoreRegistry`] for this pipeline.
+    pub fn set_session_stores(&mut self, stores: Arc<crate::SessionStoreRegistry>) {
+        self.session_stores = Some(stores);
     }
 
     /// The shared sub-request client, if set.
@@ -429,7 +495,9 @@ pub(crate) fn check_failure_mode(
             warn!(
                 filter = filter_name,
                 error = %error,
-                "filter error during {phase}, continuing (failure_mode=open)"
+                phase,
+                failure_mode = "open",
+                "filter error, continuing"
             );
             Ok(())
         },
@@ -437,7 +505,9 @@ pub(crate) fn check_failure_mode(
             error!(
                 filter = filter_name,
                 error = %error,
-                "filter error during {phase}, aborting"
+                phase,
+                failure_mode = "closed",
+                "filter error, aborting request"
             );
             Err(error)
         },

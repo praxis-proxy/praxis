@@ -35,6 +35,48 @@ const JOIN_TIMEOUT: Duration = Duration::from_secs(5);
 /// to debounce (500ms) and apply the reload.
 const RELOAD_SETTLE: Duration = Duration::from_millis(1500);
 
+/// Path to the `praxis` binary for subprocess integration tests.
+///
+/// Uses `CARGO_BIN_EXE_praxis` when set; otherwise resolves under
+/// `CARGO_TARGET_DIR` (including llvm-cov's alternate target dir) and
+/// builds the binary if it is not already present.
+///
+/// # Panics
+///
+/// Panics if `cargo build` for the `praxis` binary fails or the binary is
+/// still missing afterward.
+pub fn praxis_bin() -> PathBuf {
+    let path = resolve_praxis_bin_path();
+    if path.exists() {
+        return path;
+    }
+
+    let status = std::process::Command::new(env!("CARGO"))
+        .args(["build", "-p", "praxis-proxy", "--bin", "praxis", "-q"])
+        .status()
+        .expect("spawn cargo build for praxis binary");
+    assert!(status.success(), "cargo build -p praxis-proxy --bin praxis failed");
+
+    let path = resolve_praxis_bin_path();
+    assert!(path.exists(), "praxis binary missing at {} after build", path.display());
+    path
+}
+
+/// Resolve the expected `praxis` binary path without building.
+fn resolve_praxis_bin_path() -> PathBuf {
+    std::env::var_os("CARGO_BIN_EXE_praxis").map_or_else(
+        || {
+            let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+                || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target"),
+                PathBuf::from,
+            );
+            let profile = std::env::var("PROFILE").unwrap_or_else(|_| "debug".into());
+            target.join(profile).join("praxis")
+        },
+        PathBuf::from,
+    )
+}
+
 // -----------------------------------------------------------------------------
 // Pipeline Building
 // -----------------------------------------------------------------------------
@@ -275,8 +317,16 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
     );
     let subrequest_client =
         praxis_core::subrequest::SubRequestClient::with_max_response_bytes(subrequest_connector, ceiling);
-    let pipelines = praxis::resolve_pipelines(config, registry, &health_registry, &kv_stores, &subrequest_client)
-        .expect("pipeline resolution should succeed in test");
+    let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
+    let pipelines = praxis::resolve_pipelines(
+        config,
+        registry,
+        &health_registry,
+        &kv_stores,
+        &session_stores,
+        &subrequest_client,
+    )
+    .expect("pipeline resolution should succeed in test");
     let pipelines = Arc::new(pipelines);
     let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
         praxis_protocol::http::pingora::health::listener_meta_from_config(config),
@@ -304,6 +354,7 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
                 health_registry: Some(Arc::clone(&health_registry)),
                 kv_registry: Some(kv_stores),
                 pipelines: Some((Arc::clone(&pipelines), listener_meta)),
+                log_level: None,
                 verbose: config.admin.verbose,
             },
         );
@@ -469,7 +520,7 @@ pub fn start_reloadable_proxy(yaml: &str) -> ReloadableProxyGuard {
 
     let path_for_server = config_path.clone();
     std::thread::spawn(move || {
-        praxis::run_server(config, Some(path_for_server));
+        praxis::run_server(config, Some(path_for_server), None);
     });
 
     crate::net::wait::wait_for_http(&addr);
@@ -546,6 +597,8 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     )
 }
@@ -572,6 +625,8 @@ filter_chains:
           - name: "backend"
             endpoints:
               - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     )
 }

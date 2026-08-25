@@ -365,6 +365,8 @@ filter_chains:
         clusters:
           - name: default
             endpoints: ["127.0.0.1:9090"]
+insecure_options:
+  allow_private_endpoints: true
 "#,
         )
         .unwrap()
@@ -389,6 +391,8 @@ filter_chains:
         clusters:
           - name: default
             endpoints: ["127.0.0.1:9090"]
+insecure_options:
+  allow_private_endpoints: true
 "#,
         )
         .unwrap()

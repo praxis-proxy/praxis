@@ -269,7 +269,7 @@ impl ClientCertVerifier for ReloadableClientVerifier {
         now: UnixTime,
     ) -> Result<ClientCertVerified, rustls::Error> {
         self.inner
-            .load_full()
+            .load()
             .verifier
             .verify_client_cert(end_entity, intermediates, now)
     }
@@ -280,10 +280,7 @@ impl ClientCertVerifier for ReloadableClientVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.inner
-            .load_full()
-            .verifier
-            .verify_tls12_signature(message, cert, dss)
+        self.inner.load().verifier.verify_tls12_signature(message, cert, dss)
     }
 
     fn verify_tls13_signature(
@@ -292,18 +289,15 @@ impl ClientCertVerifier for ReloadableClientVerifier {
         cert: &CertificateDer<'_>,
         dss: &DigitallySignedStruct,
     ) -> Result<HandshakeSignatureValid, rustls::Error> {
-        self.inner
-            .load_full()
-            .verifier
-            .verify_tls13_signature(message, cert, dss)
+        self.inner.load().verifier.verify_tls13_signature(message, cert, dss)
     }
 
     fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
-        self.inner.load_full().verifier.supported_verify_schemes()
+        self.inner.load().verifier.supported_verify_schemes()
     }
 
     fn requires_raw_public_keys(&self) -> bool {
-        self.inner.load_full().verifier.requires_raw_public_keys()
+        self.inner.load().verifier.requires_raw_public_keys()
     }
 }
 

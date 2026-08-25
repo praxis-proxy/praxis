@@ -3,12 +3,29 @@
 
 #![expect(
     clippy::arithmetic_side_effects,
-    clippy::as_conversions,
     clippy::min_ident_chars,
     reason = "TODO(conventions-sync): fix violations and remove"
 )]
 
 //! Server bootstrap for the Praxis proxy.
+//!
+//! `praxis` is the top of the crate dependency flow
+//! `server -> protocol -> filter -> core -> tls` and the library behind
+//! the `praxis-proxy` binary. It wires the other crates together into a
+//! running proxy: loading configuration, building the filter registry,
+//! resolving named filter chains into concrete pipelines, and starting
+//! the Pingora runtime.
+//!
+//! Responsibilities:
+//! - Configuration loading and config-path resolution ([`load_config`], [`resolve_config_path`]).
+//! - Registry assembly with built-in and auto-discovered external filters ([`build_full_registry`]); external filter
+//!   crates are discovered at build time via `[package.metadata.praxis-filters]`.
+//! - Pipeline resolution: named chains are concatenated into per-listener [`FilterPipeline`]s at startup
+//!   ([`resolve_pipelines`]).
+//! - Running the server ([`run_server`], [`run_server_with_registry`]) and the file-watching hot-reload path that
+//!   rebuilds and atomically swaps pipelines when the config file changes.
+//!
+//! [`FilterPipeline`]: praxis_filter::FilterPipeline
 
 pub(crate) mod pipelines;
 pub(crate) mod reload;

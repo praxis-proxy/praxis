@@ -173,6 +173,12 @@ pub(super) async fn pre_read_body(
         ctx.cluster = filter_ctx.cluster;
         ctx.rewritten_path = filter_ctx.rewritten_path;
         ctx.upstream = filter_ctx.upstream;
+        ctx.attempted_endpoints = filter_ctx.attempted_endpoints;
+        ctx.retry_policy = filter_ctx.retry_policy;
+        ctx.route_retry_policy = filter_ctx.route_retry_policy;
+        ctx.cluster_retry_state = filter_ctx.cluster_retry_state;
+        ctx.cluster_retry_state_released = filter_ctx.cluster_retry_state_released;
+        ctx.endpoint_reselector = filter_ctx.endpoint_reselector;
         ctx.extensions = filter_ctx.extensions;
         ctx.filter_metadata = filter_ctx.filter_metadata;
         ctx.filter_state = filter_ctx.filter_state;

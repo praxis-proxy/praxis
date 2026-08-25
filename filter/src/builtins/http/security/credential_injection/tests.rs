@@ -359,3 +359,44 @@ fn find_header<'a>(headers: &'a [(std::borrow::Cow<'static, str>, String)], name
         .find(|(k, v)| k.eq_ignore_ascii_case(name) && !v.is_empty())
         .map(|(_, v)| v.as_str())
 }
+
+#[test]
+fn from_config_rejects_invalid_header_name() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+clusters:
+  - name: provider
+    header: \"bad header\"
+    value: token
+",
+    )
+    .unwrap();
+    let err = CredentialInjectionFilter::from_config(&yaml)
+        .err()
+        .expect("spaces in header names must be rejected");
+    assert!(
+        err.to_string().contains("invalid header name"),
+        "error must name the bad header: {err}"
+    );
+}
+
+#[test]
+fn from_config_rejects_invalid_assembled_header_value() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+clusters:
+  - name: provider
+    header: Authorization
+    value: token
+    header_prefix: \"Bearer\\n\"
+",
+    )
+    .unwrap();
+    let err = CredentialInjectionFilter::from_config(&yaml)
+        .err()
+        .expect("control characters in the assembled value must be rejected");
+    assert!(
+        err.to_string().contains("assembled header value is invalid"),
+        "error must name the invalid value: {err}"
+    );
+}

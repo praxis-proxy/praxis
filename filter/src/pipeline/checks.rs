@@ -20,6 +20,7 @@ use praxis_core::config::{FailureMode, FilterEntry};
 use tracing::warn;
 
 use super::{branch::RejoinTarget, filter::PipelineFilter};
+use crate::{any_filter::AnyFilter, body::BodyAccess};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -50,10 +51,15 @@ const REWRITE_FILTERS: &[&str] = &["path_rewrite", "url_rewrite"];
 
 /// `load_balancer` without a filter that sets `ctx.cluster` will fail
 /// every request with "no cluster selected".
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_lb_without_cluster_selector(filters: &[PipelineFilter], errors: &mut Vec<String>) {
     for (i, filter) in filters.iter().enumerate() {
-        if filter.filter.name() == "load_balancer" && !filters[..i].iter().any(|f| f.filter.selects_cluster()) {
+        if filter.filter.name() == "load_balancer"
+            && !filters
+                .get(..i)
+                .unwrap_or_default()
+                .iter()
+                .any(|f| f.filter.selects_cluster())
+        {
             errors.push(
                 "load_balancer without a preceding router \
                  or cluster-selecting filter; requests will \
@@ -66,7 +72,6 @@ pub(super) fn check_lb_without_cluster_selector(filters: &[PipelineFilter], erro
 }
 
 /// Unconditional `static_response` blocking subsequent filters.
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_unconditional_static_response(
     names: &[&str],
     filters: &[PipelineFilter],
@@ -74,13 +79,13 @@ pub(super) fn check_unconditional_static_response(
 ) {
     for (i, name) in names.iter().enumerate() {
         if *name == "static_response" && i + 1 < names.len() {
-            let conditions = &filters[i].conditions;
-            if conditions.is_empty() {
+            let unconditional = filters.get(i).is_some_and(|pf| pf.conditions.is_empty());
+            if unconditional {
                 errors.push(format!(
                     "unconditional static_response at \
                      position {i} makes subsequent filters \
                      unreachable: {}",
-                    names[i + 1..].join(", ")
+                    names.get(i + 1..).unwrap_or_default().join(", ")
                 ));
             }
         }
@@ -88,18 +93,14 @@ pub(super) fn check_unconditional_static_response(
 }
 
 /// Security filters with request conditions (bypass risk).
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_conditional_security(names: &[&str], filters: &[PipelineFilter], errors: &mut Vec<String>) {
-    for (i, name) in names.iter().enumerate() {
-        if SECURITY_FILTERS.contains(name) {
-            let conditions = &filters[i].conditions;
-            if !conditions.is_empty() {
-                errors.push(format!(
-                    "security filter '{name}' at position {i} has \
-                     request conditions; it will be bypassed for \
-                     non-matching requests"
-                ));
-            }
+    for (i, (name, pf)) in names.iter().zip(filters).enumerate() {
+        if SECURITY_FILTERS.contains(name) && !pf.conditions.is_empty() {
+            errors.push(format!(
+                "security filter '{name}' at position {i} has \
+                 request conditions; it will be bypassed for \
+                 non-matching requests"
+            ));
         }
     }
 }
@@ -107,15 +108,14 @@ pub(super) fn check_conditional_security(names: &[&str], filters: &[PipelineFilt
 /// Security filters with `failure_mode: open` (bypass risk on error).
 ///
 /// When `allow` is `true`, the error is demoted to a warning.
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_open_security_filters(
     names: &[&str],
     filters: &[PipelineFilter],
     allow: bool,
     errors: &mut Vec<String>,
 ) {
-    for (i, name) in names.iter().enumerate() {
-        if SECURITY_FILTERS.contains(name) && filters[i].failure_mode == FailureMode::Open {
+    for (i, (name, pf)) in names.iter().zip(filters).enumerate() {
+        if SECURITY_FILTERS.contains(name) && pf.failure_mode == FailureMode::Open {
             let msg = format!(
                 "security filter '{name}' at position {i} has \
                  failure_mode: open; runtime errors will bypass \
@@ -224,7 +224,6 @@ pub(super) fn check_misaligned_clusters(filters: &[PipelineFilter], errors: &mut
 }
 
 /// Multiple path rewriting filters (`path_rewrite` / `url_rewrite`).
-#[expect(clippy::indexing_slicing, reason = "checked before usage")]
 pub(super) fn check_duplicate_rewrite_filters(names: &[&str], entries: &[FilterEntry], errors: &mut Vec<String>) {
     let rewrite_indices: Vec<usize> = names
         .iter()
@@ -233,15 +232,13 @@ pub(super) fn check_duplicate_rewrite_filters(names: &[&str], entries: &[FilterE
         .map(|(i, _)| i)
         .collect();
 
-    if rewrite_indices.len() < 2 {
+    let Some((&first_idx, rest)) = rewrite_indices.split_first() else {
         return;
-    }
+    };
+    let first_name = names.get(first_idx).copied().unwrap_or_default();
 
-    let first_idx = rewrite_indices[0];
-    let first_name = names[first_idx];
-
-    for &idx in &rewrite_indices[1..] {
-        let later_name = names[idx];
+    for &idx in rest {
+        let later_name = names.get(idx).copied().unwrap_or_default();
         let allows_override = has_allow_rewrite_override(entries, idx);
 
         if allows_override {
@@ -291,6 +288,41 @@ pub(super) fn check_skip_to_bypasses_security(filters: &[PipelineFilter], errors
     }
 }
 
+/// Body-access filters inside branch chains.
+///
+/// Branch sub-chains only run `on_request`: `on_request_body` and
+/// `on_response_body` never execute for filters inside branches, yet
+/// their declared body access would silently enable pipeline-wide
+/// buffering for hooks that never run. Body-processing filters must be
+/// in the main pipeline path or gated with normal filter conditions.
+pub(super) fn check_branch_body_filters(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for pf in filters {
+        for branch in &pf.branches {
+            collect_branch_body_errors(&branch.name, &branch.filters, errors);
+        }
+    }
+}
+
+/// Recursively collect body-access violations inside one branch sub-chain.
+fn collect_branch_body_errors(branch_name: &str, filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for pf in filters {
+        if let AnyFilter::Http(filter) = &pf.filter
+            && (filter.request_body_access() != BodyAccess::None || filter.response_body_access() != BodyAccess::None)
+        {
+            errors.push(format!(
+                "filter '{name}' in branch '{branch_name}' declares body \
+                 access, but branch filters only run on_request and body \
+                 hooks never execute; move it to the main pipeline or gate \
+                 it with filter conditions",
+                name = filter.name(),
+            ));
+        }
+        for branch in &pf.branches {
+            collect_branch_body_errors(&branch.name, &branch.filters, errors);
+        }
+    }
+}
+
 /// `iterative_request_router` coexisting with `router` or `load_balancer`.
 ///
 /// The IRR owns the full sub-request lifecycle including routing.
@@ -336,7 +368,6 @@ pub(super) fn check_router_without_lb(names: &[&str], warnings: &mut Vec<String>
 }
 
 /// All routers conditional with no unconditional fallback.
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_all_routers_conditional(names: &[&str], filters: &[PipelineFilter], warnings: &mut Vec<String>) {
     let router_indices: Vec<usize> = names
         .iter()
@@ -349,7 +380,9 @@ pub(super) fn check_all_routers_conditional(names: &[&str], filters: &[PipelineF
         return;
     }
 
-    let all_conditional = router_indices.iter().all(|&i| !filters[i].conditions.is_empty());
+    let all_conditional = router_indices
+        .iter()
+        .all(|&i| filters.get(i).is_some_and(|pf| !pf.conditions.is_empty()));
 
     if all_conditional {
         warnings.push(
@@ -956,6 +989,59 @@ mod tests {
     }
 
     #[test]
+    fn branch_body_filter_errors() {
+        let mut parent = named_noop_filter("headers", vec![]);
+        parent.branches = vec![make_branch_with_filters("body_branch", vec![body_filter()])];
+        let filters = vec![parent];
+        let mut errors = Vec::new();
+        check_branch_body_filters(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "body filter in branch should error");
+        assert!(
+            errors[0].contains("body_branch") && errors[0].contains("branch_body"),
+            "error should name the branch and the filter: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn nested_branch_body_filter_errors() {
+        let mut inner_parent = named_noop_filter("classifier", vec![]);
+        inner_parent.branches = vec![make_branch_with_filters("inner", vec![body_filter()])];
+        let mut parent = named_noop_filter("headers", vec![]);
+        parent.branches = vec![make_branch_with_filters("outer", vec![inner_parent])];
+        let filters = vec![parent];
+        let mut errors = Vec::new();
+        check_branch_body_filters(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "nested branch body filter should error");
+        assert!(
+            errors[0].contains("inner"),
+            "error should name the innermost branch: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn branch_without_body_filters_no_error() {
+        let mut parent = named_noop_filter("headers", vec![]);
+        parent.branches = vec![make_branch_with_filters(
+            "noop_branch",
+            vec![named_noop_filter("request_id", vec![])],
+        )];
+        let filters = vec![parent];
+        let mut errors = Vec::new();
+        check_branch_body_filters(&filters, &mut errors);
+        assert!(errors.is_empty(), "branch without body filters should not error");
+    }
+
+    #[test]
+    fn top_level_body_filter_no_branch_error() {
+        let filters = vec![body_filter()];
+        let mut errors = Vec::new();
+        check_branch_body_filters(&filters, &mut errors);
+        assert!(errors.is_empty(), "top-level body filters are legitimate");
+    }
+
+    #[test]
     fn irr_with_router_errors() {
         let names = vec!["iterative_request_router", "router"];
         let mut errors = Vec::new();
@@ -1052,5 +1138,42 @@ mod tests {
             name: Arc::from(name),
             rejoin: RejoinTarget::SkipTo(target),
         }
+    }
+
+    /// Build a [`ResolvedBranch`] containing the given filters.
+    fn make_branch_with_filters(name: &str, filters: Vec<PipelineFilter>) -> ResolvedBranch {
+        ResolvedBranch {
+            condition: None,
+            filters,
+            max_iterations: None,
+            name: Arc::from(name),
+            rejoin: RejoinTarget::Next,
+        }
+    }
+
+    /// Build a [`PipelineFilter`] whose filter declares request body access.
+    fn body_filter() -> PipelineFilter {
+        /// Minimal filter declaring request body access.
+        struct BranchBodyFilter;
+
+        #[async_trait::async_trait]
+        impl crate::filter::HttpFilter for BranchBodyFilter {
+            fn name(&self) -> &'static str {
+                "branch_body"
+            }
+
+            async fn on_request(
+                &self,
+                _ctx: &mut crate::HttpFilterContext<'_>,
+            ) -> Result<crate::FilterAction, crate::FilterError> {
+                Ok(crate::FilterAction::Continue)
+            }
+
+            fn request_body_access(&self) -> BodyAccess {
+                BodyAccess::ReadOnly
+            }
+        }
+
+        PipelineFilter::new(0, AnyFilter::Http(Box::new(BranchBodyFilter)), vec![], vec![])
     }
 }

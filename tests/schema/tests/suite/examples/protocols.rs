@@ -67,6 +67,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:3000"
+insecure_options:
+  allow_private_endpoints: true
 "#,
         cert = tmp.cert,
         key = tmp.key,
@@ -131,6 +133,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:3000"
+insecure_options:
+  allow_private_endpoints: true
 "#,
         api_cert = api.cert,
         api_key = api.key,
@@ -190,6 +194,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:3000"
+insecure_options:
+  allow_private_endpoints: true
 "#,
         cert = tmp.cert,
         key = tmp.key,
@@ -239,6 +245,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:3000"
+insecure_options:
+  allow_private_endpoints: true
 "#,
         cert = tmp.cert,
         key = tmp.key,

@@ -24,12 +24,17 @@ use super::endpoint::WeightedEndpoint;
 /// Uses an optimistic CAS loop for lock-free selection. Weight
 /// influences tie-breaking: when two endpoints have equal
 /// connection counts, the one with the higher weight wins.
+/// When weights are also equal, a round-robin counter ensures
+/// even distribution across endpoints with identical load.
 pub(crate) struct LeastConnections {
     /// Per-endpoint active-request counter.
     pub(crate) counters: HashMap<Arc<str>, AtomicUsize>,
 
     /// Deduplicated endpoint list with weights and original indices.
     endpoints: Vec<WeightedEndpoint>,
+
+    /// Round-robin tiebreaker for equal load and weight.
+    rr_counter: AtomicUsize,
 }
 
 impl LeastConnections {
@@ -39,7 +44,11 @@ impl LeastConnections {
             .iter()
             .map(|ep| (Arc::clone(&ep.address), AtomicUsize::new(0)))
             .collect();
-        Self { counters, endpoints }
+        Self {
+            counters,
+            endpoints,
+            rr_counter: AtomicUsize::new(0),
+        }
     }
 
     /// Pick the healthy endpoint with the fewest in-flight requests.
@@ -49,9 +58,9 @@ impl LeastConnections {
     /// optimistic CAS loop: scans for the minimum, then atomically
     /// increments. On CAS failure, rescans and retries.
     #[expect(clippy::indexing_slicing, reason = "keyed by endpoints")]
-    pub(crate) fn select(&self, health: Option<&ClusterHealthState>) -> Option<Arc<str>> {
+    pub(crate) fn select(&self, health: Option<&ClusterHealthState>, exclude: &[Arc<str>]) -> Option<Arc<str>> {
         loop {
-            let (addr, load) = self.find_best(health)?;
+            let (addr, load) = self.find_best(health, exclude)?;
             let counter = &self.counters[&*addr];
 
             if counter
@@ -74,31 +83,69 @@ impl LeastConnections {
     /// current load. Prefers healthy endpoints when health state is
     /// available; falls back to all endpoints.
     #[expect(clippy::indexing_slicing, reason = "bounds checked")]
-    fn find_best(&self, health: Option<&ClusterHealthState>) -> Option<(Arc<str>, usize)> {
+    fn find_best(&self, health: Option<&ClusterHealthState>, exclude: &[Arc<str>]) -> Option<(Arc<str>, usize)> {
+        let offset = self.rr_counter.fetch_add(1, Ordering::Relaxed);
+
         if let Some(state) = health
-            && let Some((addr, load)) = self
-                .endpoints
-                .iter()
-                .filter(|ep| ep.index < state.endpoints().len() && state.endpoints()[ep.index].is_healthy())
-                .map(|ep| {
-                    let load = self.counters[&*ep.address].load(Ordering::Acquire);
-                    (ep, load)
-                })
-                .min_by(|(a, a_load), (b, b_load)| a_load.cmp(b_load).then(b.weight.cmp(&a.weight)))
-                .map(|(ep, load)| (Arc::clone(&ep.address), load))
+            && let Some((addr, load)) = self.select_from_candidates(
+                |ep| {
+                    ep.index < state.endpoints().len()
+                        && state.endpoints()[ep.index].is_healthy()
+                        && !is_excluded(&ep.address, exclude)
+                },
+                offset,
+            )
         {
             return Some((addr, load));
         }
 
-        self.endpoints
-            .iter()
-            .map(|ep| {
-                let load = self.counters[&*ep.address].load(Ordering::Acquire);
-                (ep, load)
-            })
-            .min_by(|(a, a_load), (b, b_load)| a_load.cmp(b_load).then(b.weight.cmp(&a.weight)))
-            .map(|(ep, load)| (Arc::clone(&ep.address), load))
+        self.select_from_candidates(|ep| !is_excluded(&ep.address, exclude), offset)
     }
+
+    /// Select the best candidate among endpoints matching `keep`, using the
+    /// round-robin offset to break ties on equal load and weight.
+    ///
+    /// Two passes over the endpoint slice (count, then a rank-scan) avoid the
+    /// per-call `Vec` allocation a collected rotated scan would need, while
+    /// preserving the exact tie-break: lowest load wins, then highest weight,
+    /// then the endpoint earliest in rotation order (rank 0 == `start`).
+    #[expect(clippy::indexing_slicing, reason = "counters is keyed by every endpoint address")]
+    fn select_from_candidates(
+        &self,
+        keep: impl Fn(&WeightedEndpoint) -> bool,
+        offset: usize,
+    ) -> Option<(Arc<str>, usize)> {
+        let len = self.endpoints.iter().filter(|ep| keep(ep)).count();
+        if len == 0 {
+            return None;
+        }
+        let start = offset % len;
+
+        // best = (rank, load, weight, address); lower rank is earlier in the
+        // rotation starting at `start`.
+        let mut best: Option<(usize, usize, u32, &Arc<str>)> = None;
+        for (filtered_index, ep) in self.endpoints.iter().filter(|ep| keep(ep)).enumerate() {
+            let rank = (filtered_index + len - start) % len;
+            let load = self.counters[&*ep.address].load(Ordering::Acquire);
+            let better = match best {
+                None => true,
+                Some((best_rank, best_load, best_weight, _)) => {
+                    load < best_load
+                        || (load == best_load && ep.weight > best_weight)
+                        || (load == best_load && ep.weight == best_weight && rank < best_rank)
+                },
+            };
+            if better {
+                best = Some((rank, load, ep.weight, &ep.address));
+            }
+        }
+        best.map(|(_, load, _, addr)| (Arc::clone(addr), load))
+    }
+}
+
+/// Returns `true` if `addr` appears in the exclusion list.
+fn is_excluded(addr: &str, exclude: &[Arc<str>]) -> bool {
+    exclude.iter().any(|e| e.as_ref() == addr)
 }
 
 // -----------------------------------------------------------------------------
@@ -125,48 +172,31 @@ mod tests {
     #[test]
     fn selects_min() {
         let lc = LeastConnections::new(vec![
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.1:80"),
-                weight: 1,
-                index: 0,
-            },
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.2:80"),
-                weight: 1,
-                index: 1,
-            },
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.3:80"),
-                weight: 1,
-                index: 2,
-            },
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.3:80"), 2, 1),
         ]);
 
-        assert_eq!(
-            &*lc.select(None).unwrap(),
-            "10.0.0.1:80",
-            "first selection should go to first endpoint"
-        );
-        assert_eq!(
-            &*lc.select(None).unwrap(),
-            "10.0.0.2:80",
-            "second selection should pick least-loaded"
-        );
+        let first = lc.select(None, &[]).unwrap();
+        assert_eq!(&*first, "10.0.0.1:80", "first selection should go to first endpoint");
+
+        let second = lc.select(None, &[]).unwrap();
+        assert_eq!(&*second, "10.0.0.2:80", "second selection should pick least-loaded");
+
         lc.release("10.0.0.1:80");
+        // After release: A=0, B=1, C=0. Either A or C is valid (both min-load).
+        let third = lc.select(None, &[]).unwrap();
+        let load_of_third = lc.counters[&*third].load(Ordering::Relaxed);
         assert_eq!(
-            &*lc.select(None).unwrap(),
-            "10.0.0.1:80",
-            "released endpoint should be selected again"
+            load_of_third, 1,
+            "third selection should pick an endpoint that was at 0 (now incremented to 1)"
         );
+        assert_ne!(&*third, "10.0.0.2:80", "should not pick the loaded endpoint");
     }
 
     #[test]
     fn release_does_not_underflow() {
-        let lc = LeastConnections::new(vec![WeightedEndpoint {
-            address: Arc::from("10.0.0.1:80"),
-            weight: 1,
-            index: 0,
-        }]);
+        let lc = LeastConnections::new(vec![WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1)]);
 
         lc.release("10.0.0.1:80");
         assert_eq!(
@@ -178,11 +208,7 @@ mod tests {
 
     #[test]
     fn release_unknown_addr_is_noop() {
-        let lc = LeastConnections::new(vec![WeightedEndpoint {
-            address: Arc::from("10.0.0.1:80"),
-            weight: 1,
-            index: 0,
-        }]);
+        let lc = LeastConnections::new(vec![WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1)]);
 
         lc.release("10.0.0.99:80");
     }
@@ -190,16 +216,8 @@ mod tests {
     #[test]
     fn skips_unhealthy_endpoints() {
         let lc = LeastConnections::new(vec![
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.1:80"),
-                weight: 1,
-                index: 0,
-            },
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.2:80"),
-                weight: 1,
-                index: 1,
-            },
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
         ]);
         let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
             vec![EndpointHealth::new(), EndpointHealth::new()],
@@ -210,7 +228,7 @@ mod tests {
         state.endpoints()[0].mark_unhealthy();
 
         assert_eq!(
-            &*lc.select(Some(&state)).unwrap(),
+            &*lc.select(Some(&state), &[]).unwrap(),
             "10.0.0.2:80",
             "should skip unhealthy endpoint"
         );
@@ -219,16 +237,8 @@ mod tests {
     #[test]
     fn panic_mode_when_all_unhealthy() {
         let lc = LeastConnections::new(vec![
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.1:80"),
-                weight: 1,
-                index: 0,
-            },
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.2:80"),
-                weight: 1,
-                index: 1,
-            },
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
         ]);
         let state: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
             vec![EndpointHealth::new(), EndpointHealth::new()],
@@ -239,7 +249,7 @@ mod tests {
         state.endpoints()[0].mark_unhealthy();
         state.endpoints()[1].mark_unhealthy();
 
-        let selected = lc.select(Some(&state)).unwrap();
+        let selected = lc.select(Some(&state), &[]).unwrap();
         assert!(
             &*selected == "10.0.0.1:80" || &*selected == "10.0.0.2:80",
             "panic mode should still return an endpoint"
@@ -249,20 +259,12 @@ mod tests {
     #[test]
     fn weight_breaks_ties() {
         let lc = LeastConnections::new(vec![
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.1:80"),
-                weight: 1,
-                index: 0,
-            },
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.2:80"),
-                weight: 3,
-                index: 1,
-            },
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 3),
         ]);
 
         assert_eq!(
-            &*lc.select(None).unwrap(),
+            &*lc.select(None, &[]).unwrap(),
             "10.0.0.2:80",
             "higher-weight endpoint should win tie at 0 connections"
         );
@@ -271,22 +273,14 @@ mod tests {
     #[test]
     fn concurrent_select_distributes_load() {
         let lc = Arc::new(LeastConnections::new(vec![
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.1:80"),
-                weight: 1,
-                index: 0,
-            },
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.2:80"),
-                weight: 1,
-                index: 1,
-            },
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
         ]));
         let total = 100;
 
         let handles: Vec<_> = std::iter::repeat_with(|| {
             let lc = Arc::clone(&lc);
-            thread::spawn(move || lc.select(None))
+            thread::spawn(move || lc.select(None, &[]))
         })
         .take(total)
         .collect();
@@ -303,22 +297,14 @@ mod tests {
     #[test]
     fn concurrent_select_and_release() {
         let lc = Arc::new(LeastConnections::new(vec![
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.1:80"),
-                weight: 1,
-                index: 0,
-            },
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.2:80"),
-                weight: 1,
-                index: 1,
-            },
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
         ]));
 
         let handles: Vec<_> = std::iter::repeat_with(|| {
             let lc = Arc::clone(&lc);
             thread::spawn(move || {
-                let addr = lc.select(None).unwrap();
+                let addr = lc.select(None, &[]).unwrap();
                 lc.release(&addr);
             })
         })

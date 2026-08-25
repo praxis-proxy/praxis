@@ -84,7 +84,10 @@ impl FilterPipeline {
                 run_request_filter(http_filter, ctx, pf.failure_mode, self.record_filter_duration_metrics).await;
             ctx.current_filter_id = None;
             match outcome? {
-                HeaderFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
+                HeaderFilterOutcome::Rejected(r) => {
+                    ctx.executed_filter_indices[idx] = true;
+                    return Ok(FilterAction::Reject(r));
+                },
                 HeaderFilterOutcome::TerminalResponse(terminal) => {
                     ctx.executed_filter_indices[idx] = true;
                     return Ok(FilterAction::TerminalResponse(Box::new(terminal)));
@@ -99,16 +102,20 @@ impl FilterPipeline {
             match super::evaluate::evaluate_branches(&pf.branches, ctx).await? {
                 BranchOutcome::Continue => idx += 1,
                 BranchOutcome::Terminal => {
+                    if ctx.cluster.is_some() {
+                        // The branch set a cluster via `router` + `load_balancer`,
+                        // so upstream forwarding is intended. Stop the pipeline
+                        // and let the proxy forward to the selected cluster.
+                        return Ok(FilterAction::Continue);
+                    }
                     // A `terminal`/`client` rejoin whose sub-chain produced no
-                    // response (a filter that responds returns via the
-                    // TerminalResponse arm above). The documented behaviour is
-                    // "stop the pipeline; respond to client", so fail closed
-                    // with a 500 rather than proxying upstream with the
-                    // remaining filters (cors, csrf, auth, ...) skipped.
+                    // response and selected no cluster. Fail closed with a 500
+                    // rather than proxying upstream with the remaining filters
+                    // (cors, csrf, auth, ...) skipped.
                     warn!(
                         filter = http_filter.name(),
-                        "terminal branch produced no response; stopping the pipeline with 500 \
-                         instead of forwarding upstream"
+                        "terminal branch produced no response and selected no cluster; \
+                         stopping the pipeline with 500 instead of forwarding upstream"
                     );
                     return Ok(FilterAction::Reject(Rejection::status(500)));
                 },
@@ -179,7 +186,6 @@ impl FilterPipeline {
     /// Returns [`FilterError`] if any body filter fails.
     ///
     /// [`BodyDone`]: FilterAction::BodyDone
-    #[expect(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
     #[expect(clippy::too_many_lines, reason = "body hook loop with metrics dispatch")]
     pub async fn execute_http_request_body(
         &self,
@@ -203,6 +209,11 @@ impl FilterPipeline {
                 );
                 continue;
             }
+            // Declared body access is a per-filter constant; the pre-computed
+            // flag skips non-body filters without a per-chunk virtual call.
+            if !self.request_body_access_by_idx.get(idx).copied().unwrap_or(true) {
+                continue;
+            }
             let Some(http_filter) = as_request_body_filter(&pf.filter, &pf.conditions, ctx.request) else {
                 continue;
             };
@@ -221,7 +232,9 @@ impl FilterPipeline {
                 BodyFilterOutcome::Continue => {},
                 BodyFilterOutcome::Released => released = true,
                 BodyFilterOutcome::BodyDone => {
-                    ctx.body_done_indices[idx] = true;
+                    if let Some(done) = ctx.body_done_indices.get_mut(idx) {
+                        *done = true;
+                    }
                 },
                 BodyFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
             }
@@ -244,11 +257,17 @@ impl FilterPipeline {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        let response_header = ctx.response_header.as_ref().map(|resp| crate::context::Response {
-            headers: resp.headers.clone(),
-            status: resp.status,
-        });
-        self.execute_http_response_body_with_response_header(ctx, body, end_of_stream, response_header.as_ref())
+        if !self.body_capabilities.any_response_body_condition {
+            return self.execute_http_response_body_with_response_header(ctx, body, end_of_stream, None);
+        }
+        // Temporarily move the exclusive header borrow out of the context
+        // so a shared view can be passed alongside `&mut ctx` — no header
+        // map clone per body chunk.
+        let response_header = ctx.response_header.take();
+        let result =
+            self.execute_http_response_body_with_response_header(ctx, body, end_of_stream, response_header.as_deref());
+        ctx.response_header = response_header;
+        result
     }
 
     /// Run all HTTP response body filters in reverse order, using `response_header`
@@ -258,7 +277,6 @@ impl FilterPipeline {
     /// # Errors
     ///
     /// Returns [`FilterError`] if any body filter fails.
-    #[expect(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
     #[expect(clippy::too_many_lines, reason = "body hook loop with per-filter skip checks")]
     pub fn execute_http_response_body_with_response_header(
         &self,
@@ -283,6 +301,11 @@ impl FilterPipeline {
                 );
                 continue;
             }
+            // Declared body access is a per-filter constant; the pre-computed
+            // flag skips non-body filters without a per-chunk virtual call.
+            if !self.response_body_access_by_idx.get(idx).copied().unwrap_or(true) {
+                continue;
+            }
             let Some(http_filter) = as_response_body_filter(&pf.filter, &pf.response_conditions, response_header)
             else {
                 continue;
@@ -300,7 +323,11 @@ impl FilterPipeline {
             match outcome? {
                 BodyFilterOutcome::Continue => {},
                 BodyFilterOutcome::Released => released = true,
-                BodyFilterOutcome::BodyDone => ctx.body_done_indices[idx] = true,
+                BodyFilterOutcome::BodyDone => {
+                    if let Some(done) = ctx.body_done_indices.get_mut(idx) {
+                        *done = true;
+                    }
+                },
                 BodyFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
             }
         }

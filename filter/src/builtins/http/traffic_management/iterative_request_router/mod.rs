@@ -41,7 +41,13 @@ mod config;
 mod streaming;
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
-#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::too_many_lines,
+    reason = "tests"
+)]
 mod tests;
 
 use std::{
@@ -1339,7 +1345,7 @@ struct SubPipelineRuntimeResources<'a> {
     kv_stores: Option<&'a praxis_core::kv::KvStoreRegistry>,
 
     /// Verified downstream mTLS identity.
-    peer_identity: Option<&'a praxis_tls::TlsPeerIdentity>,
+    peer_identity: Option<&'a Arc<praxis_tls::TlsPeerIdentity>>,
 
     /// Start time of the containing client request.
     request_start: Instant,
@@ -1376,6 +1382,7 @@ fn build_sub_filter_context<'a>(
         health_registry: runtime.health_registry,
         id_generator: runtime.id_generator,
         kv_stores: runtime.kv_stores,
+        session_stores: None,
         metrics_route: None,
         peer_identity: runtime.peer_identity.cloned(),
         pre_read_mutations: Vec::new(),
@@ -1391,6 +1398,13 @@ fn build_sub_filter_context<'a>(
         response_headers_modified: false,
         rewritten_path: None,
         selected_endpoint_index: None,
+        attempted_endpoints: Vec::new(),
+        retry_policy: None,
+        route_retry_policy: None,
+        cluster_retry_state: None,
+        cluster_retry_state_released: false,
+        endpoint_reselector: None,
+        pinned_endpoint_address: None,
         structured_metadata: HashMap::new(),
         subrequest_client: runtime.subrequest_client,
         subrequest_response_mode: SubRequestResponseMode::Buffered,

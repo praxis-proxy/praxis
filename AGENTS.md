@@ -24,7 +24,7 @@ make fmt            # format with nightly rustfmt
 make lint           # clippy + nightly fmt check + xtask lint-deps
 make doc            # rustdoc with -D warnings, including private items
 make audit          # cargo audit + cargo deny check
-make coverage-check # fail if line coverage < 95%
+make coverage-check # fail if line coverage < 96%
 make container      # container image build
 cargo run -p praxis-proxy # run the proxy
 ```
@@ -88,7 +88,10 @@ server -> protocol -> filter -> core -> tls
 ## Conventions
 
 See `docs/developing/conventions.md` for the full
-coding style guide. Praxis-specific coding conventions:
+coding style guide, and
+`docs/developing/review-criteria.md` for the criteria
+used in deep analysis and audit passes over the
+codebase. Praxis-specific coding conventions:
 
 - Prefer `Option`/`Result` combinator chains
   (`strip_prefix()`, `filter()`, `map()`) over

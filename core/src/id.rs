@@ -81,9 +81,8 @@ impl IdGenerator {
     /// - Chars 12-19: per-instance seed (32-bit)
     /// - Chars 20-31: monotone counter (48-bit, masked)
     #[must_use]
-    #[expect(clippy::cast_possible_truncation, reason = "clamped to u64::MAX before cast")]
     pub fn generate(&self, time_source: &dyn TimeSource) -> String {
-        let micros = time_source.now().as_micros().min(u128::from(u64::MAX)) as u64;
+        let micros = u64::try_from(time_source.now().as_micros()).unwrap_or(u64::MAX);
         let micros_masked = micros & COUNTER_MASK;
 
         let seq = self.counter.fetch_add(1, Ordering::Relaxed) & COUNTER_MASK;

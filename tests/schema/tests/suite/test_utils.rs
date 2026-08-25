@@ -30,6 +30,8 @@ filter_chains:
         clusters:
           - name: backend
             endpoints: ["127.0.0.1:3000"]
+insecure_options:
+  allow_private_endpoints: true
 "#
     .to_owned()
 }

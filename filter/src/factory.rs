@@ -70,7 +70,15 @@ fn strip_structural_keys(config: &serde_yaml::Value) -> serde_yaml::Value {
 
     let filtered = mapping
         .iter()
-        .filter(|(k, _)| !k.as_str().is_some_and(|key| STRUCTURAL.contains(&key)))
+        .filter(|(k, v)| {
+            match k.as_str() {
+                // Pipeline conditions are never valid inside filter config; access_log
+                // emit-time conditions are a mapping and must be preserved.
+                Some("conditions") => v.is_mapping(),
+                Some(key) => !STRUCTURAL.contains(&key),
+                None => true,
+            }
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect();
 
@@ -100,6 +108,12 @@ pub type HttpFilterFactory = Arc<dyn Fn(&serde_yaml::Value) -> Result<Box<dyn Ht
 
 /// Factory function for creating TCP filters from config.
 pub type TcpFilterFactory = Arc<dyn Fn(&serde_yaml::Value) -> Result<Box<dyn TcpFilter>, FilterError> + Send + Sync>;
+
+/// Bare function-pointer factory for a built-in HTTP filter.
+pub(crate) type HttpFilterFactoryFn = fn(&serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError>;
+
+/// Bare function-pointer factory for a built-in TCP filter.
+pub(crate) type TcpFilterFactoryFn = fn(&serde_yaml::Value) -> Result<Box<dyn TcpFilter>, FilterError>;
 
 // -----------------------------------------------------------------------------
 // FilterFactory
@@ -139,8 +153,7 @@ impl FilterFactory {
 ///
 /// let _factory: FilterFactory = http_builtin(my_factory);
 /// ```
-#[expect(clippy::type_complexity, reason = "complex function pointer")]
-pub fn http_builtin(f: fn(&serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError>) -> FilterFactory {
+pub fn http_builtin(f: HttpFilterFactoryFn) -> FilterFactory {
     FilterFactory::Http(Arc::new(f))
 }
 
@@ -155,8 +168,7 @@ pub fn http_builtin(f: fn(&serde_yaml::Value) -> Result<Box<dyn HttpFilter>, Fil
 ///
 /// let _factory: FilterFactory = tcp_builtin(my_factory);
 /// ```
-#[expect(clippy::type_complexity, reason = "complex function pointer")]
-pub fn tcp_builtin(f: fn(&serde_yaml::Value) -> Result<Box<dyn TcpFilter>, FilterError>) -> FilterFactory {
+pub fn tcp_builtin(f: TcpFilterFactoryFn) -> FilterFactory {
     FilterFactory::Tcp(Arc::new(f))
 }
 
@@ -230,6 +242,26 @@ mod tests {
             result.get("my_config_field").and_then(|v| v.as_str()),
             Some("value"),
             "non-structural key should be preserved"
+        );
+    }
+
+    #[test]
+    fn strip_structural_keys_preserves_access_log_conditions_mapping() {
+        let mut mapping = serde_yaml::Mapping::new();
+        mapping.insert(
+            "conditions".into(),
+            serde_yaml::Value::Mapping(serde_yaml::Mapping::from_iter([(
+                serde_yaml::Value::from("status_classes"),
+                serde_yaml::Value::Sequence(vec!["5xx".into()]),
+            )])),
+        );
+        mapping.insert("sample_rate".into(), 1.0.into());
+
+        let cleaned = strip_structural_keys(&serde_yaml::Value::Mapping(mapping));
+        let result = cleaned.as_mapping().expect("should be mapping");
+        assert!(
+            result.get("conditions").is_some(),
+            "access_log emit conditions mapping should be preserved"
         );
     }
 

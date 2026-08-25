@@ -55,12 +55,19 @@ pub(crate) fn reload_pipelines(
     listener_meta: &praxis_protocol::http::pingora::health::ListenerMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
+    session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
     subrequest_client: &praxis_core::subrequest::SubRequestClient,
+    log_level: Option<&Arc<praxis_core::logging::LogLevelState>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("building new pipelines from reloaded config");
 
     if let Err(e) = praxis_core::logging::validate_log_overrides(new_config) {
         error!(error = %e, "config reload failed: invalid log_overrides");
+        return Err(e.into());
+    }
+
+    if let Err(e) = praxis_core::logging::validate_logging(new_config) {
+        error!(error = %e, "config reload failed: invalid logging config");
         return Err(e.into());
     }
 
@@ -72,7 +79,14 @@ pub(crate) fn reload_pipelines(
         new_ceiling,
     );
 
-    let new_pipelines = match resolve_pipelines(new_config, registry, &health_registry, kv_stores, &updated_client) {
+    let new_pipelines = match resolve_pipelines(
+        new_config,
+        registry,
+        &health_registry,
+        kv_stores,
+        session_stores,
+        &updated_client,
+    ) {
         Ok(p) => p,
         Err(e) => {
             error!(error = %e, "config reload failed: pipeline build error");
@@ -84,6 +98,11 @@ pub(crate) fn reload_pipelines(
     warn_insecure_option_escalations(old_config, new_config);
     warn_stateful_filter_reset(new_config);
     log_config_change_audit(old_config, new_config);
+
+    // Copy known-down endpoint state into the new registry BEFORE the
+    // swap: afterwards `live` already serves the new pipelines and the
+    // old registry is no longer reachable through them.
+    carry_over_health_state(live, old_config, new_config, &health_registry);
 
     let mut swapped = Vec::new();
     let mut skipped = Vec::new();
@@ -106,6 +125,13 @@ pub(crate) fn reload_pipelines(
 
     respawn_health_checks(old_config, new_config, &health_registry, health_shutdown);
 
+    if let Some(log_level) = log_level
+        && let Err(error) = log_level.refresh_baseline(new_config)
+    {
+        error!(%error, "config reload failed: log level baseline refresh");
+        return Err(error.into());
+    }
+
     info!(
         swapped = ?swapped,
         skipped = ?skipped,
@@ -118,6 +144,85 @@ pub(crate) fn reload_pipelines(
 // -----------------------------------------------------------------------------
 // Health Check Lifecycle
 // -----------------------------------------------------------------------------
+
+/// The health registry pinned by the currently live pipelines.
+///
+/// Only listeners present in the previous config are considered:
+/// `ListenerPipelines` keeps its startup key set forever, so a listener
+/// removed or renamed in an earlier reload still holds an old-generation
+/// pipeline pinned to a registry whose probe tasks were cancelled. Reading
+/// from that frozen registry would carry over stale health verdicts.
+fn live_health_registry(live: &ListenerPipelines, old_config: &Config) -> Option<HealthRegistry> {
+    old_config
+        .listeners
+        .iter()
+        .filter_map(|listener| live.get(&listener.name))
+        .find_map(|slot| slot.load().health_registry().cloned())
+}
+
+/// Carry endpoint health state from the live registry into the new one.
+///
+/// The rebuilt registry starts every endpoint healthy, which would route
+/// live traffic to known-down upstreams until the new probe generation
+/// re-detects them. For each cluster present in both configs with an
+/// unchanged `health_check` config, copy each endpoint's unhealthy flag
+/// by address so known-down endpoints stay out of rotation.
+fn carry_over_health_state(
+    live: &ListenerPipelines,
+    old_config: &Config,
+    new_config: &Config,
+    new_registry: &HealthRegistry,
+) {
+    let Some(old_registry) = live_health_registry(live, old_config) else {
+        return;
+    };
+
+    let mut carried: usize = 0;
+    for cluster in &new_config.clusters {
+        let unchanged_check = old_config.clusters.iter().any(|old_c| {
+            old_c.name == cluster.name
+                && serde_yaml::to_string(&old_c.health_check).ok() == serde_yaml::to_string(&cluster.health_check).ok()
+        });
+        if !unchanged_check {
+            continue;
+        }
+        let (Some(old_entry), Some(new_entry)) = (
+            old_registry.get(cluster.name.as_ref()),
+            new_registry.get(cluster.name.as_ref()),
+        ) else {
+            continue;
+        };
+        carried = carried.saturating_add(carry_cluster_endpoints(cluster, old_entry, new_entry));
+    }
+
+    if carried > 0 {
+        info!(
+            endpoints = carried,
+            "carried unhealthy endpoint state across reload; probes must confirm recovery"
+        );
+    }
+}
+
+/// Copy unhealthy endpoint flags for one cluster; returns how many carried.
+fn carry_cluster_endpoints(
+    cluster: &praxis_core::config::Cluster,
+    old_entry: &praxis_core::health::ClusterHealthEntry,
+    new_entry: &praxis_core::health::ClusterHealthEntry,
+) -> usize {
+    let mut carried: usize = 0;
+    for endpoint in &cluster.endpoints {
+        let addr = endpoint.address();
+        if let (Some(old_idx), Some(new_idx)) = (old_entry.endpoint_index(addr), new_entry.endpoint_index(addr))
+            && let (Some(old_ep), Some(new_ep)) =
+                (old_entry.endpoints().get(old_idx), new_entry.endpoints().get(new_idx))
+            && !old_ep.is_healthy()
+        {
+            new_ep.mark_unhealthy();
+            carried = carried.saturating_add(1);
+        }
+    }
+    carried
+}
 
 /// Cluster names that currently have an active health-check config.
 fn health_checked_cluster_names(config: &Config) -> Vec<&str> {
@@ -224,7 +329,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         );
 
         assert!(result.is_ok(), "valid reload should succeed");
@@ -278,7 +385,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         );
         assert!(result.is_err(), "invalid filter should return Err");
 
@@ -300,7 +409,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -324,7 +435,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -363,7 +476,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         );
         assert!(
             !old_token.is_cancelled(),
@@ -401,7 +516,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         );
         assert!(result.is_ok(), "reload with new listener should succeed");
         assert!(
@@ -968,6 +1085,235 @@ filter_chains:
         assert!(escalated.is_empty(), "already-true flags should not be reported");
     }
 
+    fn health_checked_config() -> Config {
+        Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80", "10.0.0.2:80"]
+    health_check:
+      type: tcp
+      interval_ms: 60000
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "backend"
+      - filter: load_balancer
+        clusters:
+          - name: "backend"
+            endpoints:
+              - "10.0.0.1:80"
+              - "10.0.0.2:80"
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn reload_carries_unhealthy_endpoint_state() {
+        let config = health_checked_config();
+        let registry = FilterRegistry::with_builtins();
+        let old_health = build_health_registry(&config.clusters);
+        let live = resolve_pipelines(
+            &config,
+            &registry,
+            &old_health,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+        )
+        .unwrap();
+        let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        );
+
+        old_health.get("backend").unwrap().endpoints()[1].mark_unhealthy();
+
+        reload_pipelines(
+            &config,
+            &config,
+            &registry,
+            &live,
+            &meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        let new_registry = live.get("web").unwrap().load().health_registry().cloned().unwrap();
+        assert!(
+            !Arc::ptr_eq(&new_registry, &old_health),
+            "reload must install a fresh registry"
+        );
+        let entry = new_registry.get("backend").unwrap();
+        assert!(
+            !entry.endpoints()[1].is_healthy(),
+            "known-down endpoint must stay down across reload"
+        );
+        assert!(
+            entry.endpoints()[0].is_healthy(),
+            "healthy endpoint must stay healthy across reload"
+        );
+    }
+
+    /// Same cluster/chain as [`health_checked_config`] plus a second
+    /// listener that a later reload removes from the config.
+    fn health_checked_config_two_listeners() -> Config {
+        Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+  - name: legacy
+    address: "127.0.0.1:8081"
+    filter_chains: [main]
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80", "10.0.0.2:80"]
+    health_check:
+      type: tcp
+      interval_ms: 60000
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "backend"
+      - filter: load_balancer
+        clusters:
+          - name: "backend"
+            endpoints:
+              - "10.0.0.1:80"
+              - "10.0.0.2:80"
+"#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn carry_over_ignores_stale_pipeline_of_removed_listener() {
+        let two = health_checked_config_two_listeners();
+        let one = health_checked_config();
+        let registry = FilterRegistry::with_builtins();
+        let stale_health = build_health_registry(&two.clusters);
+        let live = resolve_pipelines(
+            &two,
+            &registry,
+            &stale_health,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+        )
+        .unwrap();
+        let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&two),
+        );
+
+        // First reload (new=one, old=two) removes the 'legacy' listener;
+        // its pipeline stays pinned to the now probe-less first-generation
+        // registry while 'web' swaps to a fresh one.
+        reload_pipelines(
+            &one,
+            &two,
+            &registry,
+            &live,
+            &meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        // The frozen registry accumulates a stale verdict.
+        stale_health.get("backend").unwrap().endpoints()[0].mark_unhealthy();
+
+        // The next reload must carry state from the current generation
+        // (via 'web', all healthy), never from the removed listener's
+        // frozen registry.
+        reload_pipelines(
+            &one,
+            &one,
+            &registry,
+            &live,
+            &meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        let new_registry = live.get("web").unwrap().load().health_registry().cloned().unwrap();
+        assert!(
+            new_registry.get("backend").unwrap().endpoints()[0].is_healthy(),
+            "a stale verdict from a removed listener's frozen registry must not be carried over"
+        );
+    }
+
+    #[test]
+    fn reload_resets_health_when_check_config_changes() {
+        let config = health_checked_config();
+        let registry = FilterRegistry::with_builtins();
+        let old_health = build_health_registry(&config.clusters);
+        let live = resolve_pipelines(
+            &config,
+            &registry,
+            &old_health,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+        )
+        .unwrap();
+        let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        );
+
+        old_health.get("backend").unwrap().endpoints()[1].mark_unhealthy();
+
+        let mut new_config = health_checked_config();
+        if let Some(hc) = &mut new_config.clusters[0].health_check {
+            hc.interval_ms = 30_000;
+        }
+
+        reload_pipelines(
+            &new_config,
+            &config,
+            &registry,
+            &live,
+            &meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        let new_registry = live.get("web").unwrap().load().health_registry().cloned().unwrap();
+        assert!(
+            new_registry.get("backend").unwrap().endpoints()[1].is_healthy(),
+            "changed health_check config must reset endpoint state"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -1006,6 +1352,7 @@ filter_chains:
             &registry,
             &health_registry,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -1019,6 +1366,11 @@ filter_chains:
     /// Empty KV store registry for tests without KV stores.
     fn empty_kv_stores() -> praxis_core::kv::KvStoreRegistry {
         praxis_core::kv::KvStoreRegistry::new()
+    }
+
+    /// Empty session store registry for tests.
+    fn empty_session_stores() -> Arc<praxis_filter::SessionStoreRegistry> {
+        Arc::new(praxis_filter::SessionStoreRegistry::new())
     }
 
     /// Empty sub-request client for tests.

@@ -99,3 +99,6 @@ filter_chains:
 # Body size ceiling: applies to all listeners.
 body_limits:
   max_request_bytes: 1048576
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

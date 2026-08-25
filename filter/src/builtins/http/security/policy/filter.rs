@@ -170,6 +170,7 @@ impl PolicyFilter {
             );
         }
         for (kind, factory) in host_factories {
+            tracing::debug!(target: "policy.filter", kind = %kind, "registering host plugin factory");
             mgr.register_factory(kind, factory);
         }
 
@@ -376,7 +377,7 @@ impl PolicyFilter {
 
     /// Publish the raw-credential-free subject projection for downstream filters.
     ///
-    /// Praxis Policy Engine (PPE) may authenticate a client or workload without resolving a user
+    /// The Praxis Policy Engine (PPE) may authenticate a client or workload without resolving a user
     /// subject. In that case no `AuthenticatedIdentity` is published; a
     /// consumer that requires a user principal must fail closed when the
     /// extension is absent.

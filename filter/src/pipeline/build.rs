@@ -23,7 +23,11 @@ use praxis_core::{
 };
 use tracing::{debug, warn};
 
-use super::{FilterPipeline, body::compute_body_capabilities, filter::PipelineFilter};
+use super::{
+    FilterPipeline,
+    body::{body_access_by_index, compute_body_capabilities},
+    filter::PipelineFilter,
+};
 use crate::{FilterError, any_filter::AnyFilter, registry::FilterRegistry};
 
 // -----------------------------------------------------------------------------
@@ -95,18 +99,24 @@ impl FilterPipeline {
         let body_capabilities = compute_body_capabilities(&filters);
         let compression = extract_compression_config(&filters);
         let may_select_streaming_subrequest_response = filters_may_select_streaming_subrequest_response(&filters);
+        let (request_body_access_by_idx, response_body_access_by_idx) = body_access_by_index(&filters);
         Self {
             body_capabilities,
             compression,
             filters,
+            request_body_access_by_idx,
+            response_body_access_by_idx,
             health_registry: None,
             id_generator: Arc::new(IdGenerator::new()),
             kv_stores: None,
+            session_stores: None,
             pipeline_extensions: Vec::new(),
             record_filter_duration_metrics: false,
             subrequest_client: None,
             may_select_streaming_subrequest_response,
             time_source: Arc::new(SystemTimeSource),
+            request_body_ceiling: None,
+            response_body_ceiling: None,
         }
     }
 
@@ -125,7 +135,8 @@ impl FilterPipeline {
     /// let mut entries = vec![FilterEntry {
     ///     branch_chains: None,
     ///     filter_type: "load_balancer".into(),
-    ///     config: serde_yaml::from_str("clusters: []").unwrap(),
+    ///     config: serde_yaml::from_str("clusters:\n  - name: web\n    endpoints: [\"10.0.0.1:80\"]")
+    ///         .unwrap(),
     ///     conditions: vec![],
     ///     name: None,
     ///     response_conditions: vec![],
@@ -183,6 +194,7 @@ impl FilterPipeline {
             super::checks::check_duplicate_rewrite_filters(&names, entries, &mut errors);
         }
         super::checks::check_skip_to_bypasses_security(&self.filters, &mut errors);
+        super::checks::check_branch_body_filters(&self.filters, &mut errors);
         super::checks::check_irr_with_router_or_lb(&names, &mut errors);
         if self.may_select_streaming_subrequest_response
             && matches!(
@@ -211,7 +223,7 @@ impl FilterPipeline {
     /// let mut entries = vec![FilterEntry {
     ///     branch_chains: None,
     ///     filter_type: "router".into(),
-    ///     config: serde_yaml::from_str("routes: []").unwrap(),
+    ///     config: serde_yaml::from_str("routes:\n  - path_prefix: \"/\"\n    cluster: web").unwrap(),
     ///     conditions: vec![praxis_core::config::Condition::When(
     ///         praxis_core::config::ConditionMatch {
     ///             path: None,

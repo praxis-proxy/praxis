@@ -50,6 +50,7 @@ fn host_filtering() {
             host: Some("api.example.com".to_owned()),
             headers: None,
             cluster: "api".into(),
+            retry_policy: None,
         },
         prefix_route("/", "default"),
     ]);
@@ -80,6 +81,7 @@ fn host_with_port() {
         host: Some("api.example.com".to_owned()),
         headers: None,
         cluster: "api".into(),
+        retry_policy: None,
     }]);
 
     let route = router
@@ -109,6 +111,7 @@ fn no_match_wrong_host() {
         host: Some("api.example.com".to_owned()),
         headers: None,
         cluster: "api".into(),
+        retry_policy: None,
     }]);
     assert!(
         router.match_route("/", Some("other.com"), &HeaderMap::new()).is_none(),
@@ -159,12 +162,17 @@ fn empty_route_table_still_declares_cluster_selection() {
 }
 
 #[test]
-fn from_config_empty_routes_key_missing() {
+fn from_config_empty_routes_rejected() {
     let yaml = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
 
-    let filter = RouterFilter::from_config(&yaml).unwrap();
+    let Err(err) = RouterFilter::from_config(&yaml) else {
+        panic!("empty routes must be rejected");
+    };
 
-    assert_eq!(filter.name(), "router", "missing routes key should still create router");
+    assert!(
+        err.to_string().contains("empty"),
+        "an empty route table can match nothing and must be rejected, got: {err}"
+    );
 }
 
 #[tokio::test]
@@ -233,6 +241,7 @@ async fn on_request_combined_host_and_path() {
             host: Some("api.example.com".to_owned()),
             headers: None,
             cluster: "api".into(),
+            retry_policy: None,
         },
         prefix_route("/", "default"),
     ]);
@@ -266,6 +275,7 @@ fn route_matches_by_header() {
         host: None,
         headers: Some(HashMap::from([("x-model".to_owned(), "model-alpha-1".to_owned())])),
         cluster: "alpha_cluster".into(),
+        retry_policy: None,
     }]);
 
     let mut hdrs = HeaderMap::new();
@@ -286,6 +296,7 @@ fn route_skips_mismatched_header() {
         host: None,
         headers: Some(HashMap::from([("x-model".to_owned(), "model-alpha-1".to_owned())])),
         cluster: "alpha_cluster".into(),
+        retry_policy: None,
     }]);
 
     let mut hdrs = HeaderMap::new();
@@ -306,6 +317,7 @@ fn route_with_headers_wins_over_plain() {
             host: None,
             headers: Some(HashMap::from([("x-model".to_owned(), "model-alpha-1".to_owned())])),
             cluster: "alpha_cluster".into(),
+            retry_policy: None,
         },
         prefix_route("/", "default"),
     ]);
@@ -329,6 +341,7 @@ fn route_without_headers_used_as_fallback() {
             host: None,
             headers: Some(HashMap::from([("x-model".to_owned(), "model-alpha-1".to_owned())])),
             cluster: "alpha_cluster".into(),
+            retry_policy: None,
         },
         prefix_route("/", "default"),
     ]);
@@ -352,6 +365,7 @@ async fn host_falls_back_to_uri_authority() {
             host: Some("api.example.com".to_owned()),
             headers: None,
             cluster: "api".into(),
+            retry_policy: None,
         },
         prefix_route("/", "default"),
     ]);
@@ -379,6 +393,7 @@ fn multi_value_header_matches_any() {
         host: None,
         headers: Some(HashMap::from([("x-model".to_owned(), "model-alpha-1".to_owned())])),
         cluster: "alpha_cluster".into(),
+        retry_policy: None,
     }]);
 
     let mut hdrs = HeaderMap::new();
@@ -400,6 +415,7 @@ fn ipv6_host_with_port() {
         host: Some("[::1]".to_owned()),
         headers: None,
         cluster: "ipv6".into(),
+        retry_policy: None,
     }]);
 
     let route = router.match_route("/", Some("[::1]:8080"), &HeaderMap::new()).unwrap();
@@ -415,6 +431,7 @@ fn ipv6_host_without_port() {
         host: Some("[::1]".to_owned()),
         headers: None,
         cluster: "ipv6".into(),
+        retry_policy: None,
     }]);
 
     let route = router.match_route("/", Some("[::1]"), &HeaderMap::new()).unwrap();
@@ -443,6 +460,7 @@ fn route_with_host_and_headers() {
             host: Some("api.example.com".to_owned()),
             headers: Some(HashMap::from([("x-version".to_owned(), "v2".to_owned())])),
             cluster: "api-v2".into(),
+            retry_policy: None,
         },
         prefix_route("/", "default"),
     ]);
@@ -466,6 +484,7 @@ fn same_prefix_same_constraints_first_wins() {
             host: None,
             headers: Some(HashMap::from([("x-a".to_owned(), "1".to_owned())])),
             cluster: "first".into(),
+            retry_policy: None,
         },
         Route {
             path_match: PathMatch::Prefix {
@@ -474,6 +493,7 @@ fn same_prefix_same_constraints_first_wins() {
             host: None,
             headers: Some(HashMap::from([("x-b".to_owned(), "2".to_owned())])),
             cluster: "second".into(),
+            retry_policy: None,
         },
     ]);
 
@@ -496,6 +516,7 @@ fn empty_headers_map_matches_everything() {
         host: None,
         headers: Some(HashMap::new()),
         cluster: "vacuous".into(),
+        retry_policy: None,
     }]);
 
     let route = router.match_route("/test", None, &HeaderMap::new()).unwrap();
@@ -514,6 +535,7 @@ async fn on_request_strips_port_from_host_header() {
         host: Some("example.com".to_owned()),
         headers: None,
         cluster: "example".into(),
+        retry_policy: None,
     }]);
 
     let mut req = crate::test_utils::make_request(http::Method::GET, "/");
@@ -538,6 +560,7 @@ fn route_matches_request_path_only_hit() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         route_matches_request(&resolved, "/api/users", None, &HeaderMap::new(), false),
@@ -552,6 +575,7 @@ fn route_matches_request_path_miss() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         !route_matches_request(&resolved, "/other", None, &HeaderMap::new(), false),
@@ -568,11 +592,13 @@ fn route_matches_request_host_hit() {
         host: Some("example.com".to_owned()),
         headers: None,
         cluster: "ex".into(),
+        retry_policy: None,
     };
     let resolved = ResolvedRoute {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         route_matches_request(&resolved, "/", Some("example.com"), &HeaderMap::new(), false),
@@ -589,11 +615,13 @@ fn route_matches_request_host_miss() {
         host: Some("example.com".to_owned()),
         headers: None,
         cluster: "ex".into(),
+        retry_policy: None,
     };
     let resolved = ResolvedRoute {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         !route_matches_request(&resolved, "/", Some("other.com"), &HeaderMap::new(), false),
@@ -610,11 +638,13 @@ fn route_matches_request_host_miss_when_no_host() {
         host: Some("example.com".to_owned()),
         headers: None,
         cluster: "ex".into(),
+        retry_policy: None,
     };
     let resolved = ResolvedRoute {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         !route_matches_request(&resolved, "/", None, &HeaderMap::new(), false),
@@ -631,11 +661,13 @@ fn route_matches_request_header_hit() {
         host: None,
         headers: Some(HashMap::from([("x-key".to_owned(), "val".to_owned())])),
         cluster: "h".into(),
+        retry_policy: None,
     };
     let resolved = ResolvedRoute {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-key", HeaderValue::from_static("val"));
@@ -654,11 +686,13 @@ fn route_matches_request_header_miss() {
         host: None,
         headers: Some(HashMap::from([("x-key".to_owned(), "val".to_owned())])),
         cluster: "h".into(),
+        retry_policy: None,
     };
     let resolved = ResolvedRoute {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-key", HeaderValue::from_static("wrong"));
@@ -677,11 +711,13 @@ fn route_matches_request_compound() {
         host: Some("example.com".to_owned()),
         headers: Some(HashMap::from([("x-ver".to_owned(), "2".to_owned())])),
         cluster: "c".into(),
+        retry_policy: None,
     };
     let resolved = ResolvedRoute {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-ver", HeaderValue::from_static("2"));
@@ -709,6 +745,7 @@ fn update_best_match_prefers_more_constraints_at_same_prefix() {
         host: Some("example.com".to_owned()),
         headers: None,
         cluster: "b".into(),
+        retry_policy: None,
     };
     let best = update_best_match(None, &route_a);
     let best = update_best_match(best, &route_b);
@@ -737,6 +774,7 @@ fn update_best_match_keeps_current_when_dominated() {
         host: Some("example.com".to_owned()),
         headers: None,
         cluster: "first".into(),
+        retry_policy: None,
     };
     let second = prefix_route("/", "second");
     let best = update_best_match(None, &first);
@@ -801,11 +839,13 @@ fn route_matches_request_empty_headers_constraint() {
         host: None,
         headers: Some(HashMap::new()),
         cluster: "vacuous".into(),
+        retry_policy: None,
     };
     let resolved = ResolvedRoute {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-anything", HeaderValue::from_static("whatever"));
@@ -899,6 +939,7 @@ fn wildcard_host_matches_subdomain() {
         host: Some("*.example.com".to_owned()),
         headers: None,
         cluster: "wildcard".into(),
+        retry_policy: None,
     }]);
 
     let route = router
@@ -919,6 +960,7 @@ fn wildcard_host_does_not_match_bare_domain() {
         host: Some("*.example.com".to_owned()),
         headers: None,
         cluster: "wildcard".into(),
+        retry_policy: None,
     }]);
 
     assert!(
@@ -938,6 +980,7 @@ fn wildcard_host_rejects_multi_level_subdomain_by_default() {
         host: Some("*.example.com".to_owned()),
         headers: None,
         cluster: "wildcard".into(),
+        retry_policy: None,
     }]);
 
     assert!(
@@ -957,6 +1000,7 @@ fn wildcard_host_matches_multi_level_with_flag() {
         host: Some("*.example.com".to_owned()),
         headers: None,
         cluster: "wildcard".into(),
+        retry_policy: None,
     }])
     .with_multi_level_subdomain_matching(true);
 
@@ -977,6 +1021,7 @@ fn wildcard_host_with_port() {
         host: Some("*.example.com".to_owned()),
         headers: None,
         cluster: "wildcard".into(),
+        retry_policy: None,
     }]);
 
     let route = router
@@ -997,6 +1042,7 @@ fn wildcard_host_case_insensitive() {
         host: Some("*.Example.COM".to_owned()),
         headers: None,
         cluster: "wildcard".into(),
+        retry_policy: None,
     }]);
 
     let route = router
@@ -1018,6 +1064,7 @@ fn wildcard_host_with_fallback() {
             host: Some("*.example.com".to_owned()),
             headers: None,
             cluster: "wildcard".into(),
+            retry_policy: None,
         },
         prefix_route("/", "default"),
     ]);
@@ -1047,6 +1094,7 @@ fn exact_host_wins_over_wildcard_same_constraints() {
             host: Some("api.example.com".to_owned()),
             headers: None,
             cluster: "exact".into(),
+            retry_policy: None,
         },
         Route {
             path_match: PathMatch::Prefix {
@@ -1055,6 +1103,7 @@ fn exact_host_wins_over_wildcard_same_constraints() {
             host: Some("*.example.com".to_owned()),
             headers: None,
             cluster: "wildcard".into(),
+            retry_policy: None,
         },
     ]);
 
@@ -1076,6 +1125,7 @@ fn wildcard_host_does_not_match_empty_subdomain() {
         host: Some("*.example.com".to_owned()),
         headers: None,
         cluster: "wildcard".into(),
+        retry_policy: None,
     }]);
 
     assert!(
@@ -1096,6 +1146,7 @@ async fn on_request_wildcard_host_via_host_header() {
             host: Some("*.example.com".to_owned()),
             headers: None,
             cluster: "wildcard".into(),
+            retry_policy: None,
         },
         prefix_route("/", "default"),
     ]);
@@ -1163,6 +1214,32 @@ async fn on_request_rewritten_path_no_match_still_rejects() {
     assert!(
         ctx.cluster.is_none(),
         "cluster should remain unset when rewritten path matches nothing"
+    );
+}
+
+#[tokio::test]
+async fn on_request_rewritten_path_with_query_matches_exact_route() {
+    // A rewrite filter stores "<path>?<query>" in rewritten_path. The router
+    // must match on the path only; otherwise a query-bearing request misses
+    // the exact route and is silently diverted to the catch-all.
+    let router = make_router(vec![exact_route("/v1/users", "users"), prefix_route("/", "default")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/api/v1/users?page=2");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.rewritten_path = Some("/v1/users?page=2".to_owned());
+    let action = router.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "query-bearing rewritten path should still match the exact route"
+    );
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("users"),
+        "exact route must be selected despite the trailing query string"
+    );
+    assert_eq!(
+        ctx.rewritten_path.as_deref(),
+        Some("/v1/users?page=2"),
+        "rewritten_path must be left intact for upstream forwarding"
     );
 }
 
@@ -1258,6 +1335,7 @@ fn exact_path_with_host_constraint() {
             host: Some("api.example.com".to_owned()),
             headers: None,
             cluster: "api-health".into(),
+            retry_policy: None,
         },
         exact_route("/health", "any-health"),
     ]);
@@ -1302,6 +1380,7 @@ fn exact_path_with_headers() {
             host: None,
             headers: Some(headers_constraint),
             cluster: "v2".into(),
+            retry_policy: None,
         },
         exact_route("/api", "default"),
     ]);
@@ -1782,6 +1861,7 @@ fn prefix_route(prefix: &str, cluster: &str) -> Route {
         host: None,
         headers: None,
         cluster: cluster.into(),
+        retry_policy: None,
     }
 }
 
@@ -1791,6 +1871,7 @@ fn exact_route(path: &str, cluster: &str) -> Route {
         host: None,
         headers: None,
         cluster: cluster.into(),
+        retry_policy: None,
     }
 }
 

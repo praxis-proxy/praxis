@@ -52,3 +52,6 @@ filter_chains:
 # rejected with 413 before field extraction runs.
 body_limits:
   max_request_bytes: 1024
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

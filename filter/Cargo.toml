@@ -23,6 +23,10 @@ basic-auth-filter = [
     "dep:sha2",
     "dep:subtle",
 ]
+otel = [
+    "dep:opentelemetry",
+    "dep:tracing-opentelemetry",
+]
 
 [lints]
 workspace = true
@@ -35,13 +39,14 @@ ppe = { workspace = true, optional = true }
 dashmap = { workspace = true }
 http = { workspace = true }
 metrics = { workspace = true }
+opentelemetry = { workspace = true, optional = true }
 percent-encoding = { workspace = true }
 pingora-core = { workspace = true }
 praxis-core = { workspace = true }
 praxis-tls = { workspace = true }
 rand = { workspace = true }
 regex = { workspace = true }
-secrecy = { version = "0.10.3", features = ["serde"] }
+secrecy = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true, features = ["raw_value"] }
 smallvec = { workspace = true }
@@ -53,11 +58,15 @@ thiserror = { workspace = true }
 # construction and JWT identity plugins that fetch JWKS at init time.
 tokio = { workspace = true, features = ["rt", "sync", "time", "net"] }
 tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true, optional = true }
 zeroize = { workspace = true }
 
 [dev-dependencies]
 chrono = { workspace = true }
-jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
+jsonwebtoken = { workspace = true }
+opentelemetry_sdk = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
+proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
+tracing-subscriber = { workspace = true }

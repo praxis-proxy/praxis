@@ -18,7 +18,7 @@
 //! and a completion guard. The continuation owns an `Arc<FilterPipeline>`
 //! so the pipeline outlives the router filter.
 
-use std::{any::Any, collections::HashMap};
+use std::{any::Any, collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -38,7 +38,7 @@ use crate::{
 /// router's `on_request` has already completed.
 pub(super) struct StepResponseContinuation {
     /// Arc-wrapped step pipeline for executing response-body filters.
-    pub(super) pipeline: std::sync::Arc<FilterPipeline>,
+    pub(super) pipeline: Arc<FilterPipeline>,
     /// Snapshot of the step's request for filter context reconstruction.
     pub(super) request_snapshot: crate::Request,
     /// Snapshot of the step's response headers for filter context reconstruction.
@@ -70,7 +70,7 @@ pub(super) struct StepResponseContinuation {
     /// Start time of the containing client request.
     pub(super) request_start: std::time::Instant,
     /// Verified downstream mTLS identity.
-    pub(super) peer_identity: Option<praxis_tls::TlsPeerIdentity>,
+    pub(super) peer_identity: Option<Arc<praxis_tls::TlsPeerIdentity>>,
 }
 
 /// Streaming body implementation for iterative request router steps.
@@ -143,6 +143,14 @@ impl IrrStreamingBody {
             response_headers_modified: false,
             rewritten_path: None,
             selected_endpoint_index: None,
+            attempted_endpoints: Vec::new(),
+            retry_policy: None,
+            route_retry_policy: None,
+            cluster_retry_state: None,
+            cluster_retry_state_released: false,
+            endpoint_reselector: None,
+            pinned_endpoint_address: None,
+            session_stores: None,
             structured_metadata: std::mem::take(&mut cont.structured_metadata),
             subrequest_client: None,
             subrequest_response_mode: crate::context::SubRequestResponseMode::Buffered,

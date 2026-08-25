@@ -27,9 +27,10 @@ use tokio::sync::Semaphore;
 use tracing::{Instrument as _, debug};
 
 use super::{
-    adjust_compression, emit_request_metrics, fail_to_proxy, handle_connect_failure, hop_by_hop::RemoveHeader as _,
-    logging_cleanup, record_passive_health, record_response_span_attributes, request_body_filter, request_filter,
-    response_body_filter, response_filter, upstream_peer, upstream_request, via,
+    adjust_compression, connected_to_upstream, emit_request_metrics, fail_to_proxy, handle_connect_failure,
+    hop_by_hop::RemoveHeader as _, logging_cleanup, record_passive_health, record_response_span_attributes,
+    release_retry_state, request_body_filter, request_filter, response_body_filter, response_filter, upstream_peer,
+    upstream_request, via,
 };
 use crate::http::pingora::{context::PingoraRequestCtx, metrics};
 
@@ -111,6 +112,31 @@ impl PingoraHttpHandler {
     }
 }
 
+/// Resolve retry safety for a stale (`ReusedOnly`) upstream connection.
+///
+/// A pooled connection that closed while idle is not a real attempt, but the
+/// request bytes were already written upstream, so replay must be safe: an
+/// idempotent method (or explicit opt-in) and an intact buffered body.
+fn resolve_reused_only_retry(
+    ctx: &PingoraRequestCtx,
+    session: &Session,
+    client_reused: bool,
+    mut e: Box<pingora_core::Error>,
+) -> Box<pingora_core::Error> {
+    let policy = ctx
+        .retry_policy
+        .clone()
+        .unwrap_or_else(|| Arc::new(praxis_core::config::RetryPolicy::legacy_default()));
+    let replay_safe = client_reused
+        && !session.as_ref().retry_buffer_truncated()
+        && (ctx.request_is_idempotent || policy.allow_non_idempotent());
+    if !replay_safe {
+        debug!("clearing reused-connection retry: replay is not safe for this request");
+    }
+    e.set_retry(replay_safe);
+    e
+}
+
 #[async_trait]
 impl ProxyHttp for PingoraHttpHandler {
     type CTX = PingoraRequestCtx;
@@ -129,7 +155,6 @@ impl ProxyHttp for PingoraHttpHandler {
         }
     }
 
-    #[expect(clippy::cast_possible_truncation, reason = "millis fit u64")]
     async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()>
     where
         Self::CTX: Send + Sync,
@@ -159,7 +184,7 @@ impl ProxyHttp for PingoraHttpHandler {
 
         if let Some(timeout) = self.downstream_read_timeout {
             debug!(
-                timeout_ms = timeout.as_millis() as u64,
+                timeout_ms = u64::try_from(timeout.as_millis()).unwrap_or(u64::MAX),
                 "applying downstream read timeout"
             );
             session.set_read_timeout(Some(timeout));
@@ -207,13 +232,64 @@ impl ProxyHttp for PingoraHttpHandler {
 
     fn fail_to_connect(
         &self,
-        _session: &mut Session,
+        session: &mut Session,
         _peer: &HttpPeer,
         ctx: &mut Self::CTX,
         e: Box<pingora_core::Error>,
     ) -> Box<pingora_core::Error> {
         let span = ctx.request_span.clone();
         let _entered = span.enter();
+        // A truncated replay buffer means a retry would resend a partial
+        // request body — refuse rather than corrupt the request upstream.
+        if session.as_mut().retry_buffer_truncated() {
+            let mut e = e;
+            e.set_retry(false);
+            return e;
+        }
+        handle_connect_failure(ctx, e)
+    }
+
+    fn error_while_proxy(
+        &self,
+        peer: &HttpPeer,
+        session: &mut Session,
+        e: Box<pingora_core::Error>,
+        ctx: &mut Self::CTX,
+        client_reused: bool,
+    ) -> Box<pingora_core::Error> {
+        // Never retry once a final response reached the client: a second
+        // attempt cannot rewrite the response line, so its body would be
+        // spliced after whatever was already sent. A non-final 1xx (e.g.
+        // 100 Continue) does not commit the final response, so it must not
+        // block a retry; mirror fail_to_proxy's final-response predicate.
+        if session.response_written().is_some_and(fail_to_proxy::is_final_response) {
+            let mut e = e;
+            e.set_retry(false);
+            return e;
+        }
+        // A truncated replay buffer means a retry would resend a partial
+        // request body — silent request corruption.
+        let truncated = session.as_mut().retry_buffer_truncated();
+        // Preserve an explicit retry decision from the response-status path
+        // (already validated by the policy engine).
+        if matches!(e.retry, pingora_core::RetryType::Decided(true)) {
+            return e;
+        }
+        // Stale-connection (ReusedOnly) errors skip the retry budget but still
+        // require replay safety; see resolve_reused_only_retry.
+        // See docs/architecture/http-correctness.md.
+        if matches!(e.retry, pingora_core::RetryType::ReusedOnly) {
+            return resolve_reused_only_retry(ctx, session, client_reused, e);
+        }
+        let e = e.more_context(format!("Peer: {peer}"));
+        if truncated {
+            let mut e = e;
+            e.set_retry(false);
+            return e;
+        }
+        // Mid-proxy errors (reset, refused stream, etc.) go through the same
+        // policy engine as connect failures — Pingora's decide_reuse must not
+        // bypass idempotency / budget / max_retries guards.
         handle_connect_failure(ctx, e)
     }
 
@@ -223,31 +299,6 @@ impl ProxyHttp for PingoraHttpHandler {
     {
         let span = ctx.request_span.clone();
         fail_to_proxy::execute(session, e, ctx).instrument(span).await
-    }
-
-    async fn connected_to_upstream(
-        &self,
-        _session: &mut Session,
-        reused: bool,
-        _peer: &HttpPeer,
-        #[cfg(unix)] _fd: std::os::unix::io::RawFd,
-        #[cfg(windows)] _sock: std::os::windows::io::RawSocket,
-        _digest: Option<&pingora_core::protocols::Digest>,
-        ctx: &mut Self::CTX,
-    ) -> Result<()>
-    where
-        Self::CTX: Send + Sync,
-    {
-        let span = ctx.request_span.clone();
-        let _entered = span.enter();
-        let cluster = ctx.metrics_cluster_shared.clone().unwrap_or_else(metrics::cluster_none);
-        if !reused && let Some(start) = ctx.upstream_connect_start.take() {
-            metrics::record_upstream_connect_duration(cluster.clone(), start.elapsed().as_secs_f64());
-        }
-        if ctx.retries > 0 {
-            metrics::record_upstream_retry(cluster, metrics::RETRY_RESULT_SUCCESS);
-        }
-        Ok(())
     }
 
     async fn upstream_request_filter(
@@ -264,6 +315,7 @@ impl ProxyHttp for PingoraHttpHandler {
         let is_upgrade = session.is_upgrade_req();
         upstream_request::strip_hop_by_hop(upstream_request, is_upgrade);
         upstream_request.strip_reserved_internal();
+        upstream_request::apply_authority_override(upstream_request, ctx)?;
         upstream_request::apply_rewritten_path(upstream_request, ctx)?;
         upstream_request::apply_mutated_content_length(upstream_request, ctx);
         let client_ver = ctx.client_http_version.unwrap_or(http::Version::HTTP_11);
@@ -282,7 +334,9 @@ impl ProxyHttp for PingoraHttpHandler {
     {
         let pipeline = ctx.pipeline(&self.pipeline);
         let span = ctx.request_span.clone();
+        let exchange_span = ctx.upstream_exchange_span.clone();
         let result = response_filter::execute(&pipeline, upstream_response, ctx)
+            .instrument(exchange_span)
             .instrument(span)
             .await;
         if result.is_ok() {
@@ -298,14 +352,47 @@ impl ProxyHttp for PingoraHttpHandler {
         upstream_peer::execute(ctx).instrument(span).await
     }
 
+    async fn connected_to_upstream(
+        &self,
+        _session: &mut Session,
+        reused: bool,
+        peer: &HttpPeer,
+        #[cfg(unix)] _fd: std::os::unix::io::RawFd,
+        #[cfg(windows)] _sock: std::os::windows::io::RawSocket,
+        digest: Option<&pingora_core::protocols::Digest>,
+        ctx: &mut Self::CTX,
+    ) -> Result<()>
+    where
+        Self::CTX: Send + Sync,
+    {
+        let span = ctx.request_span.clone();
+        let _entered = span.enter();
+        let cluster = ctx.metrics_cluster_shared.clone().unwrap_or_else(metrics::cluster_none);
+        if !reused && let Some(start) = ctx.upstream_connect_start.take() {
+            metrics::record_upstream_connect_duration(cluster.clone(), start.elapsed().as_secs_f64());
+        }
+        if ctx.retries > 0 {
+            metrics::record_upstream_retry(cluster, metrics::RETRY_RESULT_SUCCESS);
+        }
+        connected_to_upstream::execute(reused, peer, digest, ctx);
+        Ok(())
+    }
+
     async fn logging(&self, session: &mut Session, e: Option<&pingora_core::Error>, ctx: &mut Self::CTX) {
         record_response_span_attributes(session, ctx);
+        // Drop the exchange span before the request span so child
+        // ends before parent in tracing output.
+        let _exchange_span = std::mem::replace(&mut ctx.upstream_exchange_span, tracing::Span::none());
+        drop(_exchange_span);
         let span = std::mem::replace(&mut ctx.request_span, tracing::Span::none());
+        let written_status = session.response_written().map_or(0, |resp| resp.status.as_u16());
         async {
             let pipeline = ctx.pipeline(&self.pipeline);
             emit_request_metrics(session, ctx);
             record_passive_health(&pipeline, e, ctx);
+            release_retry_state(ctx);
             logging_cleanup(&pipeline, ctx).await;
+            super::maybe_emit_fallback_access_log(&pipeline, written_status, ctx);
         }
         .instrument(span)
         .await;

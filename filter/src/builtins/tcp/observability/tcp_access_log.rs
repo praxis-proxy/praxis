@@ -70,8 +70,7 @@ impl TcpFilter for TcpAccessLogFilter {
     }
 
     async fn on_disconnect(&self, ctx: &mut TcpFilterContext<'_>) -> Result<(), FilterError> {
-        #[expect(clippy::cast_possible_truncation, reason = "millis fit u64")]
-        let duration_ms = ctx.connect_time.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+        let duration_ms = u64::try_from(ctx.connect_time.elapsed().as_millis()).unwrap_or(u64::MAX);
         info!(
             remote = ctx.remote_addr,
             upstream = ctx.upstream_addr.as_deref().unwrap_or("-"),

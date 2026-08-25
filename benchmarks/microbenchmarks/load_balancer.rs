@@ -65,6 +65,21 @@ fn bench_load_balancer(c: &mut Criterion) {
         }
     }
 
+    let mut authority_cluster = make_cluster(LoadBalancerStrategy::Simple(SimpleStrategy::RoundRobin), 10);
+    authority_cluster.http.authority = Some("api.example.com".into());
+    let authority_lb = LoadBalancerFilter::new(&[authority_cluster]);
+    group.bench_function("round_robin_authority/10", |b| {
+        let authority_lb = &authority_lb;
+        b.to_async(&rt).iter_batched(
+            || make_request("/api/v1/users"),
+            |req| async move {
+                let mut ctx = make_ctx_with_cluster(&req, "bench");
+                let _result = black_box(authority_lb.on_request(black_box(&mut ctx)).await.unwrap());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
     group.finish();
 }
 
@@ -83,6 +98,7 @@ fn make_ctx_with_cluster<'a>(req: &'a praxis_filter::Request, cluster: &str) -> 
 fn make_cluster(strategy: LoadBalancerStrategy, n: usize) -> Cluster {
     let endpoints: Vec<String> = (0..n).map(|i| format!("10.0.{}.{}:8080", i / 256, i % 256)).collect();
     Cluster {
+        http: praxis_core::config::ClusterHttpOptions::default(),
         connection_timeout_ms: None,
         endpoints: endpoints.into_iter().map(Into::into).collect(),
         health_check: None,
@@ -91,6 +107,7 @@ fn make_cluster(strategy: LoadBalancerStrategy, n: usize) -> Cluster {
         max_connections: None,
         name: "bench".into(),
         read_timeout_ms: None,
+        retry_policy: None,
         tls: None,
         total_connection_timeout_ms: None,
         write_timeout_ms: None,

@@ -7,8 +7,9 @@ use crate::errors::ProxyError;
 
 mod branch_chain;
 pub use branch_chain::{MAX_BRANCH_DEPTH, MAX_ITERATIONS_CEILING};
-mod cluster;
+pub(in crate::config) mod cluster;
 mod filter_chain;
+mod inline_clusters;
 mod listener;
 mod rules;
 

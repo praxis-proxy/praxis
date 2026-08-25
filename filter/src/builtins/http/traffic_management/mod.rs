@@ -12,6 +12,7 @@ mod rate_limit;
 mod redirect;
 mod router;
 mod static_response;
+pub(crate) mod sticky_sessions;
 mod timeout;
 pub(crate) mod token_bucket;
 
@@ -19,11 +20,12 @@ pub use circuit_breaker::CircuitBreakerFilter;
 pub use endpoint_selector::EndpointSelectorFilter;
 pub use grpc_detection::GrpcDetectionFilter;
 pub use iterative_request_router::IterativeRequestRouterFilter;
-pub use load_balancer::LoadBalancerFilter;
+pub use load_balancer::{EndpointReselector, LoadBalancerFilter};
 pub use rate_limit::{RateLimitFilter, RateLimitMode};
 pub use redirect::{RedirectFilter, RedirectStatus};
 pub use router::RouterFilter;
 pub use static_response::StaticResponseFilter;
+pub use sticky_sessions::StickySessionsFilter;
 pub use timeout::TimeoutFilter;
 
 // -----------------------------------------------------------------------------

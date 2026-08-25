@@ -104,11 +104,6 @@ impl CertWatcher {
     /// `shutdown` to request early termination: send `true` to
     /// stop the watcher, or drop the sender to keep it running
     /// indefinitely.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the tokio runtime cannot be created.
-    #[expect(clippy::expect_used, reason = "fatal if tokio runtime cannot start")]
     pub fn spawn(
         current: Arc<ArcSwap<CertifiedKey>>,
         pair: CertKeyPair,
@@ -116,10 +111,13 @@ impl CertWatcher {
         shutdown: tokio::sync::watch::Receiver<bool>,
     ) -> std::thread::JoinHandle<()> {
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("cert watcher tokio runtime");
+            let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(rt) => rt,
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to start certificate watcher runtime; hot reload disabled");
+                    return;
+                },
+            };
             rt.block_on(watch_loop(current, pair, verifier_reload, shutdown));
         })
     }

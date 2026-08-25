@@ -14,10 +14,13 @@ use super::{
     branch_chain::validate_branch_chains,
     cluster::validate_clusters,
     filter_chain::validate_filter_chains,
+    inline_clusters::validate_inline_clusters,
     listener::{validate_listener_names, validate_listeners},
 };
 use crate::{
-    config::{ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, Config, InsecureOptions, ProtocolKind, SkipPipelineChecks},
+    config::{
+        ABSOLUTE_MAX_BODY_BYTES, BodyLimitsConfig, Config, InsecureOptions, LogOutput, ProtocolKind, SkipPipelineChecks,
+    },
     connectivity::normalize_mapped_ipv4,
     errors::ProxyError,
 };
@@ -83,6 +86,16 @@ impl Config {
         validate_body_limits(&self.body_limits, self.insecure_options.allow_unbounded_body)?;
         validate_cluster_names(&self.clusters)?;
         validate_clusters(&self.clusters, &self.insecure_options)?;
+        validate_inline_clusters(&self.filter_chains, &self.insecure_options)?;
+        self.validate_runtime()?;
+        validate_shutdown_timeout(self.shutdown_timeout_secs)?;
+        validate_telemetry(&self.telemetry)?;
+
+        Ok(())
+    }
+
+    /// Validate runtime-section constraints (threads, pools, limits, logging).
+    fn validate_runtime(&self) -> Result<(), ProxyError> {
         validate_upstream_ca_file(self.runtime.upstream_ca_file.as_deref())?;
         validate_runtime_threads(self.runtime.threads)?;
         validate_runtime_max_connections(self.runtime.max_connections)?;
@@ -91,9 +104,7 @@ impl Config {
         validate_subrequest_max_connections(self.runtime.subrequest_max_connections)?;
         validate_subrequest_circuit_breaker(self.runtime.subrequest_circuit_breaker.as_ref())?;
         validate_global_queue_interval(self.runtime.global_queue_interval)?;
-        validate_shutdown_timeout(self.shutdown_timeout_secs)?;
-        validate_telemetry(&self.telemetry)?;
-
+        validate_logging(&self.runtime.logging)?;
         Ok(())
     }
 }
@@ -386,6 +397,17 @@ fn validate_global_queue_interval(interval: Option<u32>) -> Result<(), ProxyErro
         return Err(ProxyError::Config(
             "runtime.global_queue_interval must be > 0".to_owned(),
         ));
+    }
+    Ok(())
+}
+
+/// Reject invalid `runtime.logging` settings.
+fn validate_logging(logging: &crate::config::LoggingConfig) -> Result<(), ProxyError> {
+    logging.validate().map_err(ProxyError::Config)?;
+    if logging.output == LogOutput::File
+        && let Some(path) = logging.file_path.as_deref()
+    {
+        warn_if_symlink(path);
     }
     Ok(())
 }

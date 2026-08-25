@@ -3,10 +3,16 @@
 
 //! Tests for operations example configurations.
 
-use std::collections::HashMap;
+use std::{
+    collections::HashMap,
+    time::{Duration, Instant},
+};
 
 use praxis_core::config::Config;
-use praxis_test_utils::{free_port, http_get, http_send, parse_header, start_backend_with_shutdown, start_proxy};
+use praxis_test_utils::{
+    TestCertificates, example_config_path, free_port, http_get, http_send, https_get, parse_header, patch_yaml,
+    start_backend_with_shutdown, start_full_proxy, start_proxy, start_reloadable_proxy, wait_for_https,
+};
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -125,6 +131,8 @@ runtime:
   work_stealing: true
 
 shutdown_timeout_secs: 30
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
     let config = Config::from_yaml(&yaml).unwrap();
@@ -150,4 +158,98 @@ shutdown_timeout_secs: 30
         Some("nosniff".to_owned()),
         "X-Content-Type-Options should be nosniff"
     );
+}
+
+#[test]
+fn production_gateway_example_serves_https_and_http() {
+    let certs = TestCertificates::generate();
+    let api = start_backend_with_shutdown("api-backend");
+    let web = start_backend_with_shutdown("web-backend");
+    let https_port = free_port();
+    let http_port = free_port();
+
+    let path = example_config_path("operations/production-gateway.yaml");
+    let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let patched = patch_yaml(
+        &yaml,
+        http_port,
+        &HashMap::from([
+            ("127.0.0.1:443", https_port),
+            ("127.0.0.1:80", http_port),
+            ("10.0.1.10:8080", api.port()),
+            ("10.0.1.11:8080", api.port()),
+            ("10.0.1.12:8080", api.port()),
+            ("10.0.2.10:8080", web.port()),
+            ("10.0.2.11:8080", web.port()),
+        ]),
+    )
+    .replace("/etc/praxis/tls/cert.pem", &certs.cert_path.display().to_string())
+    .replace("/etc/praxis/tls/key.pem", &certs.key_path.display().to_string());
+    let patched = praxis_test_utils::allow_loopback_endpoints(&patched);
+    let config = Config::from_yaml(&patched).expect("production-gateway example should parse");
+
+    let _proxy = start_full_proxy(&config);
+    let client_cfg = certs.client_config();
+    wait_for_https(&format!("127.0.0.1:{https_port}"), &client_cfg);
+
+    // HTTPS listener: path routing plus the security header pipeline.
+    let (status, body) = https_get(&format!("127.0.0.1:{https_port}"), "/api/v1/users", &client_cfg);
+    assert_eq!(status, 200, "HTTPS /api/ should return 200");
+    assert_eq!(body, "api-backend", "HTTPS /api/ should route to the api cluster");
+
+    // Plain HTTP listener runs the same composed chains.
+    let (status, body) = http_get(&format!("127.0.0.1:{http_port}"), "/", None);
+    assert_eq!(status, 200, "HTTP root should return 200");
+    assert_eq!(body, "web-backend", "HTTP root should route to the web cluster");
+
+    let raw = http_send(
+        &format!("127.0.0.1:{http_port}"),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(
+        parse_header(&raw, "x-frame-options"),
+        Some("DENY".to_owned()),
+        "the security chain should set X-Frame-Options"
+    );
+    assert_eq!(
+        parse_header(&raw, "x-content-type-options"),
+        Some("nosniff".to_owned()),
+        "the security chain should set X-Content-Type-Options"
+    );
+}
+
+#[test]
+fn hot_reload_example_applies_config_change() {
+    let proxy_port = free_port();
+
+    let path = example_config_path("operations/hot-reload.yaml");
+    let yaml = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path}: {e}"));
+    let patched = patch_yaml(&yaml, proxy_port, &HashMap::new());
+
+    let proxy = start_reloadable_proxy(&patched);
+
+    let (status, body) = http_get(proxy.addr(), "/api/hello", None);
+    assert_eq!(status, 200, "hot-reload example should return 200");
+    assert!(
+        body.contains("hello from praxis"),
+        "initial static response should serve, got: {body}"
+    );
+
+    // Edit the config the way the example instructs: change the
+    // static_response body and let the watcher swap the pipeline.
+    proxy.write_config(&patched.replace("hello from praxis", "reloaded"));
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let (status, body) = http_get(proxy.addr(), "/api/hello", None);
+        assert_eq!(status, 200, "proxy should keep serving across the reload");
+        if body.contains("reloaded") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "reloaded static response should serve within the deadline, last body: {body}"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }

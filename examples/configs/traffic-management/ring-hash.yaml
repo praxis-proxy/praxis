@@ -1,0 +1,42 @@
+# Ring Hash Load Balancing
+#
+# Routes requests to a stable backend by hashing a configurable request
+# header through a sorted virtual-node ring. Compared to basic consistent
+# hash, ring hash offers pluggable hash functions (fnv1a, xxhash, murmur3)
+# and tunable virtual node density for better distribution uniformity.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/ring-hash.yaml
+#   for i in $(seq 1 6); do
+#     curl -H "X-Session-Id: sess-42" http://localhost:8080/
+#   done
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            load_balancer_strategy:
+              ring_hash:
+                header: "X-Session-Id"
+                hash_function: xxhash
+                virtual_nodes: 150
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"
+              - "127.0.0.1:3003"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

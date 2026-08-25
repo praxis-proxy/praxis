@@ -51,6 +51,8 @@ filter_chains:
           - name: live_cluster
             endpoints:
               - "127.0.0.1:{live_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -108,6 +110,8 @@ filter_chains:
         response_add:
           - name: X-Listener
             value: beta
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -197,6 +201,8 @@ filter_chains:
           - name: internal_backend
             endpoints:
               - "127.0.0.1:{internal_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 
@@ -260,6 +266,8 @@ filter_chains:
           - name: dead
             endpoints:
               - "127.0.0.1:{dead_port}"
+insecure_options:
+  allow_private_endpoints: true
 "#
     );
 

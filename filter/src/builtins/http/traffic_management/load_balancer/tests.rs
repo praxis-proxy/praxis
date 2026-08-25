@@ -32,6 +32,59 @@ fn new_creates_clusters() {
 }
 
 #[test]
+fn try_new_rejects_semantically_invalid_authority() {
+    let cluster = Cluster {
+        http: praxis_core::config::ClusterHttpOptions {
+            authority: Some(Arc::from("https://api.example.com")),
+        },
+        ..test_cluster("api", &["127.0.0.1:8080"])
+    };
+
+    let error = LoadBalancerFilter::try_new(&[cluster])
+        .err()
+        .expect("scheme-bearing authority should be rejected");
+    assert!(
+        error.to_string().contains("not a valid HTTP authority"),
+        "error should identify the invalid authority component: {error}"
+    );
+}
+
+#[test]
+fn from_config_rejects_semantically_invalid_authority() {
+    let config: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+clusters:
+  - name: api
+    endpoints: ["127.0.0.1:8080"]
+    http:
+      authority: "api.example.com/v1"
+"#,
+    )
+    .unwrap();
+
+    let error = LoadBalancerFilter::from_config(&config)
+        .err()
+        .expect("path-bearing authority should be rejected");
+    assert!(
+        error.to_string().contains("not a valid HTTP authority"),
+        "error should identify the invalid authority component: {error}"
+    );
+}
+
+#[test]
+#[should_panic(expected = "invalid load balancer cluster configuration")]
+fn new_panics_on_invalid_authority() {
+    let cluster = Cluster {
+        http: praxis_core::config::ClusterHttpOptions {
+            authority: Some(Arc::from("user@api.example.com")),
+        },
+        ..test_cluster("api", &["127.0.0.1:8080"])
+    };
+
+    drop(LoadBalancerFilter::new(&[cluster]));
+}
+
+#[test]
 fn new_multiple_clusters() {
     let clusters = vec![
         test_cluster("web", &["127.0.0.1:8080"]),
@@ -198,13 +251,14 @@ fn from_config_parses_yaml() {
 }
 
 #[test]
-fn from_config_empty_clusters() {
+fn from_config_empty_clusters_rejected() {
     let yaml = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
-    let filter = LoadBalancerFilter::from_config(&yaml).unwrap();
-    assert_eq!(
-        filter.name(),
-        "load_balancer",
-        "empty clusters should still create filter"
+    let Err(err) = LoadBalancerFilter::from_config(&yaml) else {
+        panic!("empty clusters must be rejected");
+    };
+    assert!(
+        err.to_string().contains("empty"),
+        "an empty cluster table can serve nothing and must be rejected, got: {err}"
     );
 }
 
@@ -257,6 +311,9 @@ async fn weighted_endpoints_expand_proportionally() {
             Endpoint::Weighted {
                 address: "10.0.0.2:80".into(),
                 weight: 3,
+                metadata: HashMap::default(),
+                zone: None,
+                priority: 0,
             },
         ],
     );
@@ -362,12 +419,12 @@ async fn explicit_sni_overrides_host_header() {
 #[test]
 fn build_cluster_entry_preserves_endpoints_via_selection() {
     let cluster = test_cluster("web", &["10.0.0.1:80", "10.0.0.2:80", "10.0.0.3:80"]);
-    let entry = build_cluster_entry(&cluster);
+    let entry = build_cluster_entry(&cluster).unwrap();
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let ctx = crate::test_utils::make_filter_context(&req);
     let mut seen = std::collections::HashSet::new();
     for _ in 0..3 {
-        seen.insert(entry.strategy.select(&ctx, None).unwrap().to_string());
+        seen.insert(entry.strategy.select(&ctx, None, &[]).unwrap().to_string());
     }
     assert_eq!(seen.len(), 3, "all three endpoints should be reachable");
 }
@@ -380,20 +437,26 @@ fn build_cluster_entry_preserves_weights_via_distribution() {
             Endpoint::Weighted {
                 address: "10.0.0.1:80".into(),
                 weight: 5,
+                metadata: HashMap::default(),
+                zone: None,
+                priority: 0,
             },
             Endpoint::Weighted {
                 address: "10.0.0.2:80".into(),
                 weight: 3,
+                metadata: HashMap::default(),
+                zone: None,
+                priority: 0,
             },
         ],
     );
-    let entry = build_cluster_entry(&cluster);
+    let entry = build_cluster_entry(&cluster).unwrap();
     let req = crate::test_utils::make_request(http::Method::GET, "/");
     let ctx = crate::test_utils::make_filter_context(&req);
     let mut counts = HashMap::new();
     for _ in 0..8 {
         *counts
-            .entry(entry.strategy.select(&ctx, None).unwrap().to_string())
+            .entry(entry.strategy.select(&ctx, None, &[]).unwrap().to_string())
             .or_insert(0_u32) += 1;
     }
     assert_eq!(
@@ -415,7 +478,7 @@ fn build_cluster_entry_tls_and_sni() {
         }),
         ..Cluster::with_defaults("secure", vec!["10.0.0.1:443".into()])
     };
-    let entry = build_cluster_entry(&cluster);
+    let entry = build_cluster_entry(&cluster).unwrap();
     assert!(entry.tls.is_some(), "TLS should be present");
     assert_eq!(
         entry.tls.as_ref().unwrap().sni(),
@@ -425,12 +488,29 @@ fn build_cluster_entry_tls_and_sni() {
 }
 
 #[test]
+fn build_cluster_entry_unreadable_tls_material_fails_closed() {
+    let cluster = Cluster {
+        tls: Some(praxis_core::config::ClusterTls {
+            ca: Some(praxis_tls::CaConfig {
+                ca_path: "/nonexistent/ca.pem".to_owned(),
+                crl_paths: vec![],
+            }),
+            ..praxis_core::config::ClusterTls::default()
+        }),
+        ..Cluster::with_defaults("secure", vec!["10.0.0.1:443".into()])
+    };
+    let Err(err) = build_cluster_entry(&cluster) else {
+        panic!("unreadable TLS material must fail the build, not silently disable TLS");
+    };
+    assert!(
+        err.to_string().contains("refusing to fall back to plaintext"),
+        "the error should say TLS will not silently downgrade: {err}"
+    );
+}
+
+#[test]
 fn build_strategy_round_robin() {
-    let endpoints = vec![WeightedEndpoint {
-        address: Arc::from("10.0.0.1:80"),
-        weight: 1,
-        index: 0,
-    }];
+    let endpoints = vec![WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1)];
     let strategy = build_strategy(&LoadBalancerStrategy::Simple(SimpleStrategy::RoundRobin), endpoints);
     assert!(
         matches!(strategy.inner(), SharedStrategy::RoundRobin(_)),
@@ -440,11 +520,7 @@ fn build_strategy_round_robin() {
 
 #[test]
 fn build_strategy_least_connections() {
-    let endpoints = vec![WeightedEndpoint {
-        address: Arc::from("10.0.0.1:80"),
-        weight: 1,
-        index: 0,
-    }];
+    let endpoints = vec![WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1)];
     let strategy = build_strategy(
         &LoadBalancerStrategy::Simple(SimpleStrategy::LeastConnections),
         endpoints,
@@ -457,11 +533,7 @@ fn build_strategy_least_connections() {
 
 #[test]
 fn build_strategy_consistent_hash() {
-    let endpoints = vec![WeightedEndpoint {
-        address: Arc::from("10.0.0.1:80"),
-        weight: 1,
-        index: 0,
-    }];
+    let endpoints = vec![WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1)];
     let strategy = build_strategy(
         &LoadBalancerStrategy::Parameterised(ParameterisedStrategy::ConsistentHash(ConsistentHashOpts {
             header: None,
@@ -477,6 +549,9 @@ fn build_strategy_consistent_hash() {
 #[tokio::test]
 async fn tls_and_sni_wired_from_cluster() {
     let cluster = Cluster {
+        http: praxis_core::config::ClusterHttpOptions {
+            authority: Some(Arc::from("public.example.com")),
+        },
         tls: Some(praxis_core::config::ClusterTls {
             sni: Some("api.example.com".into()),
             ..praxis_core::config::ClusterTls::default()
@@ -489,6 +564,11 @@ async fn tls_and_sni_wired_from_cluster() {
     ctx.cluster = Some(Arc::from("secure"));
     drop(lb.on_request(&mut ctx).await.unwrap());
     let upstream = ctx.upstream.unwrap();
+    assert_eq!(
+        upstream.authority.as_ref().and_then(|value| value.to_str().ok()),
+        Some("public.example.com"),
+        "HTTP authority should remain independent from TLS SNI"
+    );
     assert!(upstream.tls.is_some(), "TLS should be enabled from cluster config");
     assert_eq!(
         upstream.tls.as_ref().unwrap().sni(),

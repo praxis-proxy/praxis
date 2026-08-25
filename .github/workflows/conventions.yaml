@@ -23,6 +23,7 @@ jobs:
   pr-size-check:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Generate token
         id: app-token
@@ -60,6 +61,7 @@ jobs:
   pr-description-check:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Generate token
         id: app-token
@@ -93,6 +95,7 @@ jobs:
   dep-version-check:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Generate token
         id: app-token
@@ -168,6 +171,7 @@ jobs:
       !startsWith(github.head_ref, 'release-notes/pr-') ||
       github.event.pull_request.user.login != 'github-actions[bot]'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Generate token
         id: app-token
@@ -204,6 +208,7 @@ jobs:
   commit-message-check:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Generate token
         id: app-token
@@ -250,6 +255,7 @@ jobs:
   authorship-check:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Generate token
         id: app-token
@@ -332,91 +338,3 @@ jobs:
             exit 1
           fi
 
-  # ----------------------------------------------------------------------------
-  # Proposal Check
-  # ----------------------------------------------------------------------------
-
-  proposal-check:
-    if: ${{ !github.event.pull_request.draft }}
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Generate token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.PRAXIS_BOT_APP_ID }}
-          private-key: ${{ secrets.PRAXIS_BOT_APP_PRIVATE_KEY }}
-
-      - name: Validate proposal files
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-        run: |
-          proposal_files=$(gh api "repos/${{ github.repository }}/pulls/${PR_NUMBER}/files" --paginate \
-            --jq '[.[] | select(.filename | startswith("docs/proposals/")) | select(.filename | endswith(".md")) | select(.filename != "docs/proposals/template.md")]')
-
-          count=$(echo "$proposal_files" | jq 'length')
-          if [ "$count" -eq 0 ]; then
-            echo "No proposal files in this PR — skipping"
-            exit 0
-          fi
-
-          errors=""
-
-          while IFS= read -r file; do
-            status=$(echo "$proposal_files" | jq -r --arg f "$file" '.[] | select(.filename == $f) | .status')
-
-            if [ "$status" = "removed" ]; then
-              continue
-            fi
-
-            content=$(gh api "repos/${{ github.repository }}/contents/${file}?ref=$HEAD_SHA" \
-              --jq '.content' | base64 -d)
-
-            frontmatter=$(echo "$content" | sed -n '/^---$/,/^---$/p' | sed '1d;$d')
-
-            discussion=$(echo "$frontmatter" | grep -E '^discussion:' | sed 's/^discussion:[[:space:]]*//')
-            if [ -z "$discussion" ]; then
-              discussion=$(echo "$frontmatter" | awk '/^discussion:/{f=1;next} f && /^  - /{print;exit} f && /^[^ ]/{exit}')
-            fi
-            if [ -z "$discussion" ]; then
-              errors="${errors}\n- \`${file}\`: missing \`discussion\` field in frontmatter"
-            fi
-
-            issue=$(echo "$frontmatter" | grep -E '^issue:' | sed 's/^issue:[[:space:]]*//')
-            if [ -z "$issue" ]; then
-              errors="${errors}\n- \`${file}\`: missing \`issue\` field in frontmatter"
-            fi
-
-            has_authors=$(echo "$frontmatter" | grep -E '^  - ' | head -1)
-            if [ -z "$has_authors" ]; then
-              errors="${errors}\n- \`${file}\`: missing or empty \`authors\` list in frontmatter"
-            fi
-
-            if [ "$status" = "added" ]; then
-              proposal_name=$(basename "$file" .md | sed 's/^[0-9][0-9]*_//')
-              renamed_from=$(echo "$proposal_files" | jq -r --arg b "$proposal_name" \
-                '[.[] | select(.status == "removed") | select(.filename | endswith($b + ".md"))] | length')
-              if [ "$renamed_from" -eq 0 ]; then
-                if echo "$content" | grep -qF '## How?'; then
-                  errors="${errors}\n- \`${file}\`: new proposals must not include the \`## How?\` section in the first PR. Submit What? and Why? first; add How? in a follow-up."
-                fi
-              fi
-            fi
-          done < <(echo "$proposal_files" | jq -r '.[].filename')
-
-          if [ -n "$errors" ]; then
-            marker="<!-- praxis:proposal-check -->"
-            already=$(gh api "repos/${{ github.repository }}/issues/${PR_NUMBER}/comments" \
-              --jq "[.[] | select(.body | contains(\"${marker}\"))] | length")
-            if [ "$already" -eq 0 ]; then
-              gh pr comment "$PR_NUMBER" --repo "${{ github.repository }}" \
-                --body "${marker}
-          **Proposal validation failed**:
-          $(echo -e "$errors")
-          See [proposal process](docs/proposals.md) for requirements."
-            fi
-            echo "::error::Proposal validation failed"
-            exit 1
-          fi

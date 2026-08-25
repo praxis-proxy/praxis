@@ -11,7 +11,10 @@ mod traffic_management;
 mod transformation;
 pub mod value_safety;
 
-pub use observability::{AccessLogFilter, RequestIdFilter};
+pub use observability::{
+    AccessLogFilter, RequestIdFilter, TraceContextFilter, access_record_already_emitted, bodyless_response,
+    emit_access_record, mark_access_record_emitted,
+};
 pub use payload_processing::{CompressionFilter, JsonBodyFieldFilter, JsonRpcFilter};
 #[cfg(feature = "basic-auth-filter")]
 pub use security::BasicAuthFilter;
@@ -22,9 +25,10 @@ pub use security::{
 #[cfg(feature = "policy-engine")]
 pub use security::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
 pub use traffic_management::{
-    CircuitBreakerFilter, EndpointSelectorFilter, GrpcDetectionFilter, IterativeRequestRouterFilter,
-    LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus, RouterFilter,
-    StaticResponseFilter, TimeoutFilter,
+    CircuitBreakerFilter, EndpointReselector, EndpointSelectorFilter, GrpcDetectionFilter,
+    IterativeRequestRouterFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus,
+    RouterFilter, StaticResponseFilter, StickySessionsFilter, TimeoutFilter,
+    sticky_sessions::{SessionStore, SessionStoreRegistry},
 };
 pub use transformation::{
     HeaderFilter, PathRewriteFilter, UrlRewriteFilter, has_dot_dot_traversal, normalize_rewritten_path,

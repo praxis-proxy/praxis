@@ -226,3 +226,101 @@ fn is_safe_header_value(text: &str, field: &str, header: &str) -> bool {
 // -----------------------------------------------------------------------------
 
 pub(super) use crate::builtins::http::value_safety::contains_control_chars;
+
+// -----------------------------------------------------------------------------
+// Tests
+// -----------------------------------------------------------------------------
+
+#[cfg(test)]
+#[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
+#[allow(clippy::unwrap_used, clippy::expect_used, reason = "tests")]
+mod tests {
+    use super::*;
+
+    /// Promoted headers collected by [`extract_one`].
+    type PromotedHeaders = Vec<(Cow<'static, str>, String)>;
+
+    /// Run extraction of `field` -> `x-field` over `body`.
+    fn extract_one(body: &str) -> (bool, PromotedHeaders) {
+        let mappings = vec![("field".to_owned(), "x-field".to_owned())];
+        let mut headers = Vec::new();
+        let found = extract_fields(&mappings, body.as_bytes(), &mut headers);
+        (found, headers)
+    }
+
+    #[test]
+    fn empty_mappings_extract_nothing() {
+        let mut headers = Vec::new();
+        assert!(
+            !extract_fields(&[], b"{\"a\":1}", &mut headers),
+            "no mappings means nothing to promote"
+        );
+        assert!(headers.is_empty(), "no headers should be emitted");
+    }
+
+    #[test]
+    fn invalid_json_extracts_nothing() {
+        let (found, headers) = extract_one("{not json");
+        assert!(!found, "malformed JSON must not promote fields");
+        assert!(headers.is_empty(), "no headers should be emitted");
+    }
+
+    #[test]
+    fn non_object_roots_extract_nothing() {
+        for body in ["true", "false", "-3", "17", "2.5", "\"text\"", "null", "[1,2,3]"] {
+            let (found, headers) = extract_one(body);
+            assert!(!found, "root {body} must not promote fields");
+            assert!(headers.is_empty(), "no headers for root {body}");
+        }
+    }
+
+    #[test]
+    fn nested_array_roots_are_skipped() {
+        let (found, _) = extract_one("[{\"field\":\"x\"},[1,[2]]]");
+        assert!(!found, "fields inside array roots must not be promoted");
+    }
+
+    #[test]
+    fn string_value_is_unescaped() {
+        let (found, headers) = extract_one("{\"field\":\"a\\nb\\u0041\"}");
+        assert!(!found, "unescaped control characters must be rejected");
+        assert!(headers.is_empty(), "control characters must never reach headers");
+    }
+
+    #[test]
+    fn escaped_string_value_promotes_unescaped_text() {
+        let (found, headers) = extract_one("{\"field\":\"caf\\u00e9\"}");
+        assert!(found, "escaped values must promote");
+        assert_eq!(
+            headers.first().map(|(_, v)| v.as_str()),
+            Some("café"),
+            "the unescaped text must be promoted"
+        );
+    }
+
+    #[test]
+    fn overlong_value_is_skipped() {
+        let long = "x".repeat(MAX_DYNAMIC_VALUE_LEN + 1);
+        let (found, headers) = extract_one(&format!("{{\"field\":\"{long}\"}}"));
+        assert!(!found, "values beyond the length ceiling must be skipped");
+        assert!(headers.is_empty(), "no headers should be emitted for overlong values");
+    }
+
+    #[test]
+    fn object_value_uses_raw_json_text() {
+        let (found, headers) = extract_one("{\"field\":{\"a\":1}}");
+        assert!(found, "object values promote their raw JSON");
+        assert_eq!(
+            headers.first().map(|(_, v)| v.as_str()),
+            Some("{\"a\":1}"),
+            "raw object text must be preserved"
+        );
+    }
+
+    #[test]
+    fn truncated_body_after_needed_field_still_fails_cleanly() {
+        let (found, headers) = extract_one("{\"other\":1,\"fie");
+        assert!(!found, "truncated JSON must not promote fields");
+        assert!(headers.is_empty(), "no headers should be emitted");
+    }
+}

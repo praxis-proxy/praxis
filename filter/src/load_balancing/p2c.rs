@@ -28,7 +28,7 @@ use super::endpoint::WeightedEndpoint;
 ///
 /// ```ignore
 /// let p2c = PowerOfTwoChoices::new(endpoints);
-/// let addr = p2c.select(None);
+/// let addr = p2c.select(None, &[]);
 /// // ... forward request ...
 /// p2c.release(&addr);
 /// ```
@@ -62,16 +62,28 @@ impl PowerOfTwoChoices {
     /// Falls back to all endpoints when every endpoint is unhealthy.
     /// With a single endpoint, returns it directly.
     #[expect(clippy::indexing_slicing, reason = "keyed by endpoints built in new()")]
-    pub(crate) fn select(&self, health: Option<&ClusterHealthState>) -> Option<Arc<str>> {
+    pub(crate) fn select(&self, health: Option<&ClusterHealthState>, exclude: &[Arc<str>]) -> Option<Arc<str>> {
         if self.endpoints.is_empty() {
             return None;
         }
-        let candidates = self.healthy_candidates(health);
+        let candidates: SmallVec<[&WeightedEndpoint; 8]> = self
+            .healthy_candidates(health)
+            .into_iter()
+            .filter(|ep| !is_excluded(&ep.address, exclude))
+            .collect();
         let total_w: usize = candidates.iter().map(|ep| ep.weight as usize).sum();
 
         if candidates.len() <= 1 || total_w <= 1 {
-            let fallback = &self.endpoints[0];
+            let fallback = self
+                .endpoints
+                .iter()
+                .find(|ep| !is_excluded(&ep.address, exclude))
+                .unwrap_or(&self.endpoints[0]);
             let ep = candidates.first().copied().unwrap_or(fallback);
+            if is_excluded(&ep.address, exclude) {
+                return None;
+            }
+            self.counters[&*ep.address].fetch_add(1, Ordering::AcqRel);
             return Some(Arc::clone(&ep.address));
         }
 
@@ -128,13 +140,17 @@ impl PowerOfTwoChoices {
     }
 
     /// Filter to healthy endpoints, falling back to all on panic mode.
-    #[expect(clippy::indexing_slicing, reason = "bounds checked by ep.index < len()")]
     fn healthy_candidates(&self, health: Option<&ClusterHealthState>) -> SmallVec<[&WeightedEndpoint; 8]> {
         if let Some(state) = health {
             let healthy: SmallVec<[_; 8]> = self
                 .endpoints
                 .iter()
-                .filter(|ep| ep.index < state.endpoints().len() && state.endpoints()[ep.index].is_healthy())
+                .filter(|ep| {
+                    state
+                        .endpoints()
+                        .get(ep.index)
+                        .is_some_and(praxis_core::health::EndpointHealth::is_healthy)
+                })
                 .collect();
             if !healthy.is_empty() {
                 return healthy;
@@ -162,6 +178,11 @@ fn weight_index<'a>(endpoints: &[&'a WeightedEndpoint], slot: usize, total_weigh
     endpoints.last().expect("endpoints must be non-empty")
 }
 
+/// Returns `true` if `addr` appears in the exclusion list.
+fn is_excluded(addr: &str, exclude: &[Arc<str>]) -> bool {
+    exclude.iter().any(|e| e.as_ref() == addr)
+}
+
 // -----------------------------------------------------------------------------
 // Tests
 // -----------------------------------------------------------------------------
@@ -186,7 +207,7 @@ mod tests {
         let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1, 0)]);
         for _ in 0..10 {
             assert_eq!(
-                &*p2c.select(None).unwrap(),
+                &*p2c.select(None, &[]).unwrap(),
                 "10.0.0.1:80",
                 "single endpoint must always be returned"
             );
@@ -202,7 +223,7 @@ mod tests {
         ]);
 
         for _ in 0..30 {
-            let addr = p2c.select(None).unwrap();
+            let addr = p2c.select(None, &[]).unwrap();
             p2c.release(&addr);
         }
 
@@ -219,7 +240,7 @@ mod tests {
 
         let mut picked_2 = 0_u32;
         for _ in 0..20 {
-            let addr = p2c.select(None).unwrap();
+            let addr = p2c.select(None, &[]).unwrap();
             if &*addr == "10.0.0.2:80" {
                 picked_2 += 1;
             }
@@ -237,7 +258,7 @@ mod tests {
 
         let mut counts = HashMap::new();
         for _ in 0..100 {
-            let addr = p2c.select(None).unwrap();
+            let addr = p2c.select(None, &[]).unwrap();
             *counts.entry(Arc::clone(&addr)).or_insert(0_u32) += 1;
             p2c.release(&addr);
         }
@@ -254,7 +275,7 @@ mod tests {
 
         for _ in 0..10 {
             assert_eq!(
-                &*p2c.select(Some(&state)).unwrap(),
+                &*p2c.select(Some(&state), &[]).unwrap(),
                 "10.0.0.2:80",
                 "should skip unhealthy endpoint"
             );
@@ -269,7 +290,7 @@ mod tests {
         state.endpoints()[0].mark_unhealthy();
         state.endpoints()[1].mark_unhealthy();
 
-        let addr = p2c.select(Some(&state)).unwrap();
+        let addr = p2c.select(Some(&state), &[]).unwrap();
         assert!(
             &*addr == "10.0.0.1:80" || &*addr == "10.0.0.2:80",
             "panic mode should still return an endpoint"
@@ -303,7 +324,7 @@ mod tests {
         let handles: Vec<_> = std::iter::repeat_with(|| {
             let p = Arc::clone(&p2c);
             std::thread::spawn(move || {
-                let addr = p.select(None).unwrap();
+                let addr = p.select(None, &[]).unwrap();
                 p.release(&addr);
             })
         })
@@ -324,11 +345,7 @@ mod tests {
 
     /// Build a [`WeightedEndpoint`] for testing.
     fn ep(addr: &str, weight: u32, index: usize) -> WeightedEndpoint {
-        WeightedEndpoint {
-            address: Arc::from(addr),
-            weight,
-            index,
-        }
+        WeightedEndpoint::simple(Arc::from(addr), index, weight)
     }
 
     /// Build a [`ClusterHealthState`] with `n` healthy endpoints.

@@ -391,6 +391,7 @@ impl HttpFilter for EndpointSelectorFilter {
 
         let upstream = Upstream {
             address: Arc::from(value.as_str()),
+            authority: None,
             connection: Arc::clone(&self.connection),
             tls: self.tls.clone(),
         };
@@ -482,6 +483,123 @@ fn parse_port(port_str: &str, addr: &str) -> Result<u16, FilterError> {
 mod tests {
     use super::*;
     use crate::context::TrustedHeaderMutation;
+
+    #[test]
+    fn debug_impl_omits_tls_material() {
+        let filter = make_filter("x-dest", true);
+        let rendered = format!("{filter:?}");
+        assert!(
+            rendered.contains("source_header"),
+            "Debug output should list config fields: {rendered}"
+        );
+        assert!(
+            rendered.contains(".."),
+            "Debug output should be non-exhaustive: {rendered}"
+        );
+    }
+
+    #[test]
+    fn parse_invalid_source_header_name_errors() {
+        let config: serde_yaml::Value = serde_yaml::from_str("source_header: \"bad header\"").unwrap();
+        let result = EndpointSelectorFilter::from_config(&config);
+        assert!(result.is_err(), "spaces are not valid in header names");
+    }
+
+    #[test]
+    fn parse_out_of_range_failure_status_errors() {
+        let config: serde_yaml::Value =
+            serde_yaml::from_str("source_header: x-dest\nrequired: true\nstatus_on_required_failure: 99").unwrap();
+        let result = EndpointSelectorFilter::from_config(&config);
+        assert!(result.is_err(), "status codes below 100 must be rejected");
+    }
+
+    #[test]
+    fn parse_tls_verify_without_sni_errors() {
+        let config: serde_yaml::Value = serde_yaml::from_str("source_header: x-dest\ntls:\n  verify: true").unwrap();
+        let Err(err) = EndpointSelectorFilter::from_config(&config) else {
+            panic!("verify without sni must be rejected");
+        };
+        assert!(
+            err.to_string().contains("tls.sni is required"),
+            "error must explain the missing SNI: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_tls_invalid_sni_errors() {
+        let config: serde_yaml::Value =
+            serde_yaml::from_str("source_header: x-dest\ntls:\n  sni: \"bad name!\"").unwrap();
+        let result = EndpointSelectorFilter::from_config(&config);
+        assert!(result.is_err(), "invalid SNI names must be rejected");
+    }
+
+    #[tokio::test]
+    async fn required_mode_rejects_explicitly_removed_header() {
+        let filter = make_required_filter("x-dest", true);
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations
+            .push(TrustedHeaderMutation::Remove("x-dest".parse().unwrap()));
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        let rejected = matches!(&action, FilterAction::Reject(rej) if rej.status == 503);
+        assert!(rejected, "a removed required header must reject: {action:?}");
+    }
+
+    #[tokio::test]
+    async fn rejects_empty_trusted_value() {
+        let filter = make_required_filter("x-dest", true);
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations
+            .push(TrustedHeaderMutation::Add("x-dest".parse().unwrap(), String::new()));
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        let rejected = matches!(&action, FilterAction::Reject(_));
+        assert!(rejected, "an empty trusted value must reject: {action:?}");
+    }
+
+    #[tokio::test]
+    async fn rejects_multi_value_destination() {
+        let filter = make_required_filter("x-dest", true);
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.pre_read_mutations.push(TrustedHeaderMutation::Add(
+            "x-dest".parse().unwrap(),
+            "a.example:1,b.example:2".to_owned(),
+        ));
+
+        let action = filter.on_request(&mut ctx).await.unwrap();
+        let rejected = matches!(&action, FilterAction::Reject(_));
+        assert!(rejected, "comma-separated destinations must reject: {action:?}");
+    }
+
+    #[test]
+    fn host_port_validation_covers_malformed_addresses() {
+        for bad in [
+            "noport",
+            ":8080",
+            "host:0",
+            "host:notaport",
+            "host:99999",
+            "[::1:8080",
+            "[not-an-ip]:8080",
+            "[::1]:0",
+        ] {
+            assert!(
+                validate_host_port(bad).is_err(),
+                "'{bad}' must fail host:port validation"
+            );
+        }
+    }
+
+    #[test]
+    fn host_port_validation_accepts_bracketed_ipv6() {
+        assert!(
+            validate_host_port("[::1]:8080").is_ok(),
+            "bracketed IPv6 with port must validate"
+        );
+    }
 
     #[test]
     fn parse_valid_config() {

@@ -31,8 +31,9 @@ use super::{
 ///
 /// [RFC 6455]: https://datatracker.ietf.org/doc/html/rfc6455
 pub(crate) fn strip_hop_by_hop(req: &mut RequestHeader, is_upgrade: bool) {
-    let is_ws = is_upgrade && is_websocket_request(&req.headers);
+    let is_ws = is_upgrade && hop_by_hop::has_websocket_upgrade(&req.headers);
     let conn_values = hop_by_hop::snapshot_connection_values(&req.headers);
+    let was_chunked = hop_by_hop::declares_chunked_framing(&req.headers);
 
     for name in REQUEST_HOP_BY_HOP {
         if hop_by_hop::preserve_for_upgrade(name, is_ws) {
@@ -41,18 +42,13 @@ pub(crate) fn strip_hop_by_hop(req: &mut RequestHeader, is_upgrade: bool) {
         let _remove = req.remove_header(*name);
     }
     hop_by_hop::strip_connection_tokens(req, &conn_values, REQUEST_HOP_BY_HOP);
+    if hop_by_hop::should_restore_chunked_framing(&req.headers, was_chunked) {
+        let _insert = req.insert_header(http::header::TRANSFER_ENCODING, "chunked");
+    }
 
     if is_upgrade && !is_ws {
         debug!("stripping non-WebSocket upgrade headers to prevent h2c smuggling");
     }
-}
-
-/// Check whether the request's `Upgrade` header is `WebSocket`.
-fn is_websocket_request(headers: &http::HeaderMap) -> bool {
-    headers
-        .get("upgrade")
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(hop_by_hop::is_websocket_upgrade)
 }
 
 // -----------------------------------------------------------------------------
@@ -109,15 +105,106 @@ pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &mut PingoraReq
     Ok(())
 }
 
+// -----------------------------------------------------------------------------
+// Authority Override
+// -----------------------------------------------------------------------------
+
+/// Apply the per-cluster upstream authority override.
+///
+/// When the selected upstream carries a configured authority, this
+/// replaces the request's `Host` header and normalizes the URI
+/// authority component. Both updates are required:
+///
+/// - **Host header**: Praxis currently uses HTTP/1.1 for all upstream connections, so the `Host` header is sent
+///   directly. Pingora's HTTP/2 upstream path (`proxy_h2.rs`) would remove `Host` and rebuild the URI `:authority` from
+///   it, so setting `Host` here covers both protocols.
+///
+/// - **URI authority**: Defence-in-depth for absolute-form requests whose URI already contains an authority. Without
+///   this, a pre-existing URI authority could survive into the upstream request if Pingora's internal flow changes.
+///
+/// The authority `HeaderValue` is pre-parsed at cluster build
+/// time, so this path performs no string-to-header conversion.
+///
+/// Called after hop-by-hop and reserved-header stripping so that
+/// a downstream-supplied `Host` value cannot survive into the
+/// upstream request when an override is configured.
+///
+/// # Errors
+///
+/// Returns a Pingora error if the URI cannot be rebuilt with the
+/// new authority (should not happen with a pre-validated value).
+pub(crate) fn apply_authority_override(req: &mut RequestHeader, ctx: &PingoraRequestCtx) -> pingora_core::Result<()> {
+    let Some(authority) = ctx.upstream_for_retry.as_ref().and_then(|u| u.authority.as_ref()) else {
+        return Ok(());
+    };
+
+    debug!(authority = ?authority, "applying upstream authority override");
+
+    req.insert_header(http::header::HOST, authority).map_err(|e| {
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("failed to set Host header for authority override: {e}"),
+        )
+    })?;
+
+    normalize_uri_authority(req, authority)?;
+
+    Ok(())
+}
+
+/// Replace the authority component of the request URI.
+///
+/// Rebuilds the URI preserving scheme, path, and query while
+/// substituting the authority. This prevents absolute-form
+/// requests from retaining an outdated authority in the URI.
+fn normalize_uri_authority(req: &mut RequestHeader, authority: &http::header::HeaderValue) -> pingora_core::Result<()> {
+    let uri = &req.uri;
+    if uri.authority().is_none() && uri.scheme().is_none() {
+        return Ok(());
+    }
+
+    let authority_str = authority.to_str().map_err(|e| {
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("authority override is not valid UTF-8: {e}"),
+        )
+    })?;
+
+    let scheme = uri.scheme_str().unwrap_or("https");
+    let path_and_query = uri.path_and_query().map_or("/", http::uri::PathAndQuery::as_str);
+    let rebuilt = format!("{scheme}://{authority_str}{path_and_query}");
+
+    let new_uri: Uri = rebuilt.parse().map_err(|e| {
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("failed to rebuild URI with authority override: {e}"),
+        )
+    })?;
+
+    req.set_uri(new_uri);
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Content-Length Repair
+// -----------------------------------------------------------------------------
+
 /// Repair request framing after `StreamBuffer` body mutation.
 ///
 /// Pingora forwards upstream headers after `StreamBuffer` pre-read, so a
 /// body-mutating filter must update `Content-Length` before those headers
-/// are sent to the backend.
+/// are sent to the backend. The pre-read fully dechunks the body, so the
+/// mutated length is authoritative: remove any `Transfer-Encoding` that
+/// hop-by-hop stripping re-established for a chunked inbound request, since
+/// emitting both `Content-Length` and `Transfer-Encoding: chunked` violates
+/// [RFC 9112 Section 6.2] and is the canonical request-smuggling ambiguity.
+///
+/// [RFC 9112 Section 6.2]: https://datatracker.ietf.org/doc/html/rfc9112#section-6.2
 pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &PingoraRequestCtx) {
     let Some(new_len) = ctx.mutated_request_body_len else {
         return;
     };
+    let _remove = req.remove_header(&http::header::TRANSFER_ENCODING);
     let _result = req.insert_header(http::header::CONTENT_LENGTH, new_len.to_string());
 }
 
@@ -137,6 +224,8 @@ pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &Pingor
     reason = "tests"
 )]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -163,9 +252,10 @@ mod tests {
             req.headers.get("keep-alive").is_none(),
             "keep-alive header should be stripped"
         );
-        assert!(
-            req.headers.get("transfer-encoding").is_none(),
-            "transfer-encoding header should be stripped"
+        assert_eq!(
+            req.headers.get("transfer-encoding").unwrap(),
+            "chunked",
+            "chunked framing must be re-established for the upstream body writer"
         );
         assert!(
             req.headers.get("upgrade").is_none(),
@@ -682,6 +772,28 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_upgrade_headers_strip_all() {
+        // Two separate `Upgrade` headers (`websocket` then `h2c`) must not be
+        // treated as a WebSocket upgrade: reading only the first value would
+        // preserve the whole multi-valued header and smuggle the h2c token.
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        let _ws = req.append_header("upgrade".to_owned(), "websocket".to_owned());
+        let _h2c = req.append_header("upgrade".to_owned(), "h2c".to_owned());
+        let _conn = req.insert_header("connection".to_owned(), "Upgrade".to_owned());
+
+        strip_hop_by_hop(&mut req, true);
+
+        assert!(
+            req.headers.get("upgrade").is_none(),
+            "duplicate Upgrade headers must all be stripped to prevent h2c smuggling"
+        );
+        assert!(
+            req.headers.get("connection").is_none(),
+            "connection must be stripped when Upgrade is not a single websocket value"
+        );
+    }
+
+    #[test]
     fn websocket_case_insensitive() {
         let mut req = make_request(&[("upgrade", "WEBSOCKET"), ("connection", "Upgrade")]);
 
@@ -700,6 +812,229 @@ mod tests {
     }
 
     #[test]
+    fn chunked_framing_preserved_without_content_length() {
+        let mut req = make_request(&[("transfer-encoding", "chunked"), ("content-type", "text/plain")]);
+
+        strip_hop_by_hop(&mut req, false);
+
+        assert_eq!(
+            req.headers.get("transfer-encoding").unwrap(),
+            "chunked",
+            "chunked request bodies must stay framed for Pingora's upstream writer"
+        );
+    }
+
+    #[test]
+    fn chunked_framing_normalized_from_compound_value() {
+        let mut req = make_request(&[("transfer-encoding", "gzip, chunked")]);
+
+        strip_hop_by_hop(&mut req, false);
+
+        assert_eq!(
+            req.headers.get("transfer-encoding").unwrap(),
+            "chunked",
+            "compound transfer codings ending in chunked are normalized to plain chunked"
+        );
+    }
+
+    #[test]
+    fn non_chunked_transfer_encoding_stripped() {
+        let mut req = make_request(&[("transfer-encoding", "gzip")]);
+
+        strip_hop_by_hop(&mut req, false);
+
+        assert!(
+            req.headers.get("transfer-encoding").is_none(),
+            "non-chunked transfer codings are hop-by-hop and must not be re-added"
+        );
+    }
+
+    #[test]
+    fn chunked_framing_not_restored_over_content_length() {
+        let mut req = make_request(&[("transfer-encoding", "chunked"), ("content-length", "5")]);
+
+        strip_hop_by_hop(&mut req, false);
+
+        assert!(
+            req.headers.get("transfer-encoding").is_none(),
+            "content-length framing wins once transfer-encoding is stripped"
+        );
+        assert_eq!(
+            req.headers.get("content-length").unwrap(),
+            "5",
+            "content-length must survive"
+        );
+    }
+
+    #[test]
+    fn connection_token_cannot_strip_host_or_content_length() {
+        let mut req = make_request(&[
+            ("connection", "host, content-length"),
+            ("host", "backend.internal"),
+            ("content-length", "5"),
+        ]);
+
+        strip_hop_by_hop(&mut req, false);
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "backend.internal",
+            "Host must not be strippable via a Connection token"
+        );
+        assert_eq!(
+            req.headers.get("content-length").unwrap(),
+            "5",
+            "Content-Length must not be strippable via a Connection token"
+        );
+    }
+
+    #[test]
+    fn apply_authority_override_sets_host() {
+        let mut req = make_request(&[("host", "original.example.com")]);
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from("10.0.0.1:443"),
+            authority: Some(http::header::HeaderValue::from_static("api.example.com")),
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+
+        apply_authority_override(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "api.example.com",
+            "Host header should be overridden"
+        );
+    }
+
+    #[test]
+    fn apply_authority_override_with_port() {
+        let mut req = make_request(&[("host", "original.example.com")]);
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from("10.0.0.1:8443"),
+            authority: Some(http::header::HeaderValue::from_static("api.example.com:8443")),
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+
+        apply_authority_override(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "api.example.com:8443",
+            "Host header should include port"
+        );
+    }
+
+    #[test]
+    fn apply_authority_override_noop_when_none() {
+        let mut req = make_request(&[("host", "original.example.com")]);
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from("10.0.0.1:443"),
+            authority: None,
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+
+        apply_authority_override(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "original.example.com",
+            "Host header should be unchanged when no authority override"
+        );
+    }
+
+    #[test]
+    fn apply_authority_override_noop_when_no_upstream() {
+        let mut req = make_request(&[("host", "original.example.com")]);
+        let ctx = PingoraRequestCtx::default();
+
+        apply_authority_override(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "original.example.com",
+            "Host header should be unchanged when no upstream"
+        );
+    }
+
+    #[test]
+    fn apply_authority_override_replaces_downstream_host() {
+        let mut req = make_request(&[("host", "attacker.evil.com")]);
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from("10.0.0.1:443"),
+            authority: Some(http::header::HeaderValue::from_static("api.example.com")),
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+
+        apply_authority_override(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "api.example.com",
+            "configured authority must override downstream Host"
+        );
+    }
+
+    #[test]
+    fn apply_authority_override_replaces_absolute_form_uri() {
+        let mut req = RequestHeader::build("GET", b"/v1/chat", None).unwrap();
+        req.set_uri("http://original.example.com/v1/chat".parse::<Uri>().unwrap());
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from("10.0.0.1:443"),
+            authority: Some(http::header::HeaderValue::from_static("api.example.com")),
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+
+        apply_authority_override(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "api.example.com",
+            "Host header should be overridden"
+        );
+        assert_eq!(
+            req.uri.authority().unwrap().as_str(),
+            "api.example.com",
+            "URI authority should be replaced for absolute-form requests"
+        );
+        assert_eq!(req.uri.path(), "/v1/chat", "URI path should be preserved");
+    }
+
+    #[test]
+    fn apply_authority_override_preserves_origin_form_uri() {
+        let mut req = RequestHeader::build("GET", b"/v1/chat", None).unwrap();
+        req.insert_header("host", "original.example.com").unwrap();
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from("10.0.0.1:443"),
+            authority: Some(http::header::HeaderValue::from_static("api.example.com")),
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+
+        apply_authority_override(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "api.example.com",
+            "Host header should be overridden"
+        );
+        assert!(
+            req.uri.authority().is_none(),
+            "origin-form URI should not gain an authority component"
+        );
+    }
+
+    #[test]
     fn apply_mutated_content_length_updates_header() {
         let mut req = make_request(&[("content-length", "1024")]);
         let mut ctx = PingoraRequestCtx::default();
@@ -708,6 +1043,35 @@ mod tests {
         assert_eq!(
             req.headers.get("content-length").and_then(|v| v.to_str().ok()),
             Some("512")
+        );
+    }
+
+    #[test]
+    fn mutated_content_length_strips_restored_chunked_framing() {
+        // A chunked inbound request through a body-mutating StreamBuffer
+        // pipeline: strip_hop_by_hop re-adds Transfer-Encoding, then the
+        // content-length mutation must remove it — emitting both is a
+        // request-smuggling gadget (RFC 9112 §6.2).
+        let mut req = make_request(&[("transfer-encoding", "chunked")]);
+        strip_hop_by_hop(&mut req, false);
+        assert_eq!(
+            req.headers.get("transfer-encoding").unwrap(),
+            "chunked",
+            "framing is restored before the length is known"
+        );
+
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.mutated_request_body_len = Some(42);
+        apply_mutated_content_length(&mut req, &ctx);
+
+        assert!(
+            req.headers.get("transfer-encoding").is_none(),
+            "content-length framing must remove the transfer-encoding header"
+        );
+        assert_eq!(
+            req.headers.get("content-length").and_then(|v| v.to_str().ok()),
+            Some("42"),
+            "the mutated length is authoritative"
         );
     }
 

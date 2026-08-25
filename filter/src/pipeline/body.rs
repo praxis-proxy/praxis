@@ -77,26 +77,56 @@ pub(super) fn compute_body_capabilities(filters: &[PipelineFilter]) -> BodyCapab
     caps
 }
 
+/// Precompute each filter's declared body access as index-aligned flags.
+///
+/// The body-chunk loops run once per chunk per filter; the declared
+/// access is a per-filter constant, so these flags let the loops skip
+/// non-body filters without a per-chunk virtual call.
+pub(super) fn body_access_by_index(filters: &[PipelineFilter]) -> (Vec<bool>, Vec<bool>) {
+    filters
+        .iter()
+        .map(|pf| match &pf.filter {
+            AnyFilter::Http(f) => (
+                f.request_body_access() != BodyAccess::None,
+                f.response_body_access() != BodyAccess::None,
+            ),
+            AnyFilter::Tcp(_) => (false, false),
+        })
+        .unzip()
+}
+
 /// Recursively accumulate body capabilities from a slice of pipeline filters.
 pub(super) fn accumulate_caps(caps: &mut BodyCapabilities, filters: &[PipelineFilter]) {
+    accumulate_caps_inner(caps, filters, false);
+}
+
+/// Recursive worker for [`accumulate_caps`].
+///
+/// Branch sub-chains only run `on_request`: body hooks never execute for
+/// filters inside branches, so their body access declarations must not
+/// enable pipeline-wide buffering (`in_branch` skips body accumulation).
+/// Request-context needs still accumulate because `on_request` runs.
+fn accumulate_caps_inner(caps: &mut BodyCapabilities, filters: &[PipelineFilter], in_branch: bool) {
     for pf in filters {
         let http_filter = match &pf.filter {
             AnyFilter::Http(f) => f.as_ref(),
             AnyFilter::Tcp(_) => continue,
         };
 
-        accumulate_request_body(caps, http_filter);
-        accumulate_response_body(caps, http_filter, &pf.response_conditions);
+        if !in_branch {
+            accumulate_request_body(caps, http_filter);
+            accumulate_response_body(caps, http_filter, &pf.response_conditions);
+            if !caps.any_response_condition_uses_headers {
+                caps.any_response_condition_uses_headers = resp_conditions_use_headers(&pf.response_conditions);
+            }
+        }
 
         if http_filter.needs_request_context() {
             caps.needs_request_context = true;
         }
-        if !caps.any_response_condition_uses_headers {
-            caps.any_response_condition_uses_headers = resp_conditions_use_headers(&pf.response_conditions);
-        }
 
         for branch in &pf.branches {
-            accumulate_caps(caps, &branch.filters);
+            accumulate_caps_inner(caps, &branch.filters, true);
         }
     }
 }
@@ -341,7 +371,7 @@ mod tests {
     }
 
     #[test]
-    fn body_caps_recurse_into_branches() {
+    fn body_caps_ignore_branch_body_filters() {
         use std::sync::Arc;
 
         use async_trait::async_trait;
@@ -410,17 +440,72 @@ mod tests {
         };
         let caps = compute_body_capabilities(&[parent]);
         assert!(
-            caps.needs_request_body,
-            "body filter in branch should enable request body"
+            !caps.needs_request_body,
+            "branch filters only run on_request; their body access must not enable buffering"
         );
         assert!(
-            caps.any_request_body_writer,
-            "ReadWrite filter in branch should set writer flag"
+            !caps.any_request_body_writer,
+            "ReadWrite filter in branch must not set writer flag"
         );
         assert_eq!(
             caps.request_body_mode,
-            BodyMode::StreamBuffer { max_bytes: Some(4096) },
-            "StreamBuffer mode from branch filter should propagate"
+            BodyMode::Stream,
+            "StreamBuffer mode from branch filter must not propagate"
+        );
+    }
+
+    #[test]
+    fn body_caps_branch_filters_still_accumulate_request_context() {
+        use std::sync::Arc;
+
+        use crate::pipeline::branch::{RejoinTarget, ResolvedBranch};
+
+        /// Branch filter that needs the request context on `on_request`.
+        struct ContextFilter;
+
+        #[async_trait::async_trait]
+        impl crate::filter::HttpFilter for ContextFilter {
+            fn name(&self) -> &'static str {
+                "context_filter"
+            }
+
+            async fn on_request(
+                &self,
+                _ctx: &mut crate::HttpFilterContext<'_>,
+            ) -> Result<crate::FilterAction, crate::FilterError> {
+                Ok(crate::FilterAction::Continue)
+            }
+
+            fn needs_request_context(&self) -> bool {
+                true
+            }
+        }
+
+        let branch = ResolvedBranch {
+            condition: None,
+            filters: vec![PipelineFilter::new(
+                100,
+                AnyFilter::Http(Box::new(ContextFilter)),
+                vec![],
+                vec![],
+            )],
+            max_iterations: None,
+            name: Arc::from("context_branch"),
+            rejoin: RejoinTarget::Next,
+        };
+        let parent = PipelineFilter {
+            filter_id: 0,
+            branches: vec![branch],
+            conditions: vec![],
+            failure_mode: FailureMode::default(),
+            filter: AnyFilter::Http(Box::new(NoopHttpFilter)),
+            name: None,
+            response_conditions: vec![],
+        };
+        let caps = compute_body_capabilities(&[parent]);
+        assert!(
+            caps.needs_request_context,
+            "branch filters run on_request, so request-context needs must accumulate"
         );
     }
 

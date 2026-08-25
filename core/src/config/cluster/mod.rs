@@ -6,19 +6,51 @@
 mod endpoint;
 mod health_check;
 mod load_balancer_strategy;
+mod retry_policy;
 
 use std::sync::Arc;
 
 pub use endpoint::Endpoint;
 pub use health_check::{HealthCheckConfig, HealthCheckType};
 pub use load_balancer_strategy::{
-    ConsistentHashOpts, LoadBalancerStrategy, MaglevOpts, ParameterisedStrategy, SimpleStrategy,
+    ConsistentHashOpts, HashFunction, LoadBalancerStrategy, MaglevOpts, ParameterisedStrategy, PriorityOpts,
+    RingHashOpts, SimpleStrategy, SubsetFallbackPolicy, SubsetOpts, ZoneAwareOpts,
+};
+pub use retry_policy::{
+    BackoffConfig, BudgetPercent, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BODY_LIMIT_BYTES, HttpStatusCode,
+    MAX_EFFECTIVE_RETRIES, MAX_RETRY_BODY_LIMIT_BYTES, RetriableCondition, RetryBodyLimit, RetryBudgetConfig,
+    RetryPolicy,
 };
 use serde::{Deserialize, Serialize};
+
+use crate::errors::ProxyError;
 
 // -----------------------------------------------------------------------------
 // Cluster
 // -----------------------------------------------------------------------------
+
+/// HTTP-specific options for a cluster.
+///
+/// These apply only when the cluster serves HTTP listeners; TCP load
+/// balancers do not process HTTP headers and ignore this block.
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClusterHttpOptions {
+    /// Override the upstream HTTP `Host` header.
+    ///
+    /// When set, the proxy rewrites the `Host` header sent to the
+    /// upstream instead of forwarding the downstream value. Upstream
+    /// connections use HTTP/1.1; the `:authority` pseudo-header on
+    /// the downstream HTTP/2 side is not forwarded upstream. TLS SNI
+    /// remains independent — configure `tls.sni` separately when
+    /// needed.
+    ///
+    /// Must be a valid HTTP authority: a hostname with an optional
+    /// port, or a bracketed IPv6 address with an optional port. URI
+    /// schemes, paths, userinfo, and fragments are rejected.
+    #[serde(default)]
+    pub authority: Option<Arc<str>>,
+}
 
 /// A named group of upstream endpoints.
 ///
@@ -41,6 +73,28 @@ use serde::{Deserialize, Serialize};
 pub struct Cluster {
     /// Unique name for the cluster.
     pub name: Arc<str>,
+
+    /// HTTP-specific cluster options.
+    ///
+    /// Grouped under `http:` so the shared cluster/upstream transport
+    /// types stay protocol-agnostic; TCP load balancers ignore this
+    /// block entirely.
+    ///
+    /// ```
+    /// # use praxis_core::config::Cluster;
+    /// let yaml = r#"
+    /// name: "api"
+    /// endpoints: ["10.0.0.1:443"]
+    /// http:
+    ///   authority: "api.example.com"
+    /// tls:
+    ///   sni: "api.example.com"
+    /// "#;
+    /// let cluster: Cluster = serde_yaml::from_str(yaml).unwrap();
+    /// assert_eq!(cluster.http.authority.as_deref(), Some("api.example.com"));
+    /// ```
+    #[serde(default)]
+    pub http: ClusterHttpOptions,
 
     /// TCP connection timeout in milliseconds.
     ///
@@ -123,9 +177,30 @@ pub struct Cluster {
     /// response to the client.
     #[serde(default)]
     pub write_timeout_ms: Option<u64>,
+
+    /// Optional retry policy for this cluster.
+    ///
+    /// When unset, the proxy retains the legacy connect-failure
+    /// retry behavior (3 attempts, idempotent methods, 64 `KiB` body).
+    #[serde(default)]
+    pub retry_policy: Option<RetryPolicy>,
 }
 
 impl Cluster {
+    /// Validate the optional upstream HTTP authority override.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ProxyError::Config`] when the authority is not a
+    /// supported hostname with an optional port or a bracketed IPv6
+    /// address with an optional port.
+    pub fn validate_authority(&self) -> Result<(), ProxyError> {
+        let Some(authority) = self.http.authority.as_deref() else {
+            return Ok(());
+        };
+        super::validate::cluster::validate_authority(authority, &self.name)
+    }
+
     /// Build a cluster with only a name and endpoints; all other
     /// fields use their defaults (no timeouts, no TLS, no health
     /// check, `round_robin` strategy).
@@ -145,6 +220,7 @@ impl Cluster {
     pub fn with_defaults(name: &str, endpoints: Vec<Endpoint>) -> Self {
         Self {
             name: Arc::from(name),
+            http: ClusterHttpOptions::default(),
             connection_timeout_ms: None,
             endpoints,
             health_check: None,
@@ -155,6 +231,7 @@ impl Cluster {
             tls: None,
             total_connection_timeout_ms: None,
             write_timeout_ms: None,
+            retry_policy: None,
         }
     }
 }

@@ -18,8 +18,9 @@ pub(crate) struct EffectiveConfigDump {
     /// Where the configuration was loaded from.
     pub config_source: String,
 
-    /// The fully parsed configuration (with defaults applied),
-    /// sensitive values redacted.
+    /// The fully parsed configuration (with defaults applied). Known
+    /// sensitive values are redacted on a best-effort, name-based basis
+    /// (see `redact_sensitive_keys`); review before sharing.
     pub configuration: Config,
 
     /// Resolved top-level listener chains, preserving config order.
@@ -67,8 +68,11 @@ pub(crate) struct ResolvedFilterDump {
 
 /// Build the dump model from a validated configuration.
 ///
-/// Sensitive values (e.g. credential injection literals) are
-/// redacted before inclusion in the dump.
+/// Known sensitive values are redacted before inclusion in the dump:
+/// credential-injection literals, the field names in `SENSITIVE_FIELD_NAMES`,
+/// and credential-bearing header values. Redaction is name-based and
+/// best-effort — it cannot cover every custom secret field, so dump output
+/// should still be reviewed before sharing.
 ///
 /// # Errors
 ///
@@ -152,6 +156,13 @@ fn redact_credential_values(config: &mut serde_yaml::Value) {
 }
 
 /// Recursively redact known sensitive field names in any filter config.
+///
+/// Redaction is name-based and best-effort: it covers the field names in
+/// [`SENSITIVE_FIELD_NAMES`] and the `value` of a `{name, value}` pair whose
+/// `name` is a credential-bearing header (see [`CREDENTIAL_HEADER_NAMES`],
+/// which catches the `headers` filter's `request_set`/`response_set`
+/// entries). It cannot know about every custom secret field, so dump output
+/// should still be reviewed before sharing.
 fn redact_sensitive_keys(value: &mut serde_yaml::Value) {
     let Some(mapping) = value.as_mapping_mut() else {
         return;
@@ -163,6 +174,11 @@ fn redact_sensitive_keys(value: &mut serde_yaml::Value) {
             mapping.insert(key, redacted.clone());
         }
     }
+    // Redact the `value` of a `{name, value}` header pair when `name` is a
+    // credential-bearing header. This catches header-injection filters that
+    // carry a bearer token or API key as a plain `value` field, which is not
+    // otherwise covered by the field-name list above.
+    redact_credential_header_value(mapping, &redacted);
     for (_, val) in mapping.iter_mut() {
         match val {
             serde_yaml::Value::Mapping(_) => redact_sensitive_keys(val),
@@ -180,8 +196,50 @@ fn redact_sensitive_keys(value: &mut serde_yaml::Value) {
     }
 }
 
+/// Redact the `value` entry of a mapping when its sibling `name` entry names a
+/// credential-bearing header (case-insensitive).
+fn redact_credential_header_value(mapping: &mut serde_yaml::Mapping, redacted: &serde_yaml::Value) {
+    let name_key = serde_yaml::Value::String("name".to_owned());
+    let value_key = serde_yaml::Value::String("value".to_owned());
+    let is_credential_header = mapping
+        .get(&name_key)
+        .and_then(serde_yaml::Value::as_str)
+        .map(str::to_ascii_lowercase)
+        .is_some_and(|name| CREDENTIAL_HEADER_NAMES.contains(&name.as_str()));
+    if is_credential_header && mapping.contains_key(&value_key) {
+        mapping.insert(value_key, redacted.clone());
+    }
+}
+
 /// Field names that should be redacted in config dumps.
-const SENSITIVE_FIELD_NAMES: &[&str] = &["database_url", "key_path", "password", "secret", "token"];
+const SENSITIVE_FIELD_NAMES: &[&str] = &[
+    "access_key",
+    "api_key",
+    "apikey",
+    "auth_token",
+    "bearer_token",
+    "client_secret",
+    "credential",
+    "database_url",
+    "key_path",
+    "password",
+    "private_key",
+    "secret",
+    "signing_key",
+    "token",
+];
+
+/// Header names whose injected `value` carries a credential and must be
+/// redacted (compared case-insensitively).
+const CREDENTIAL_HEADER_NAMES: &[&str] = &[
+    "authorization",
+    "cookie",
+    "proxy-authorization",
+    "set-cookie",
+    "x-amz-security-token",
+    "x-api-key",
+    "x-auth-token",
+];
 
 /// Resolve all listeners into their dump representations.
 fn build_resolved_listeners(
@@ -375,6 +433,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:9090"
+insecure_options:
+  allow_private_endpoints: true
 "#;
 
     #[test]
@@ -504,6 +564,8 @@ filter_chains:
           - name: backend
             endpoints:
               - "127.0.0.1:9090"
+insecure_options:
+  allow_private_endpoints: true
 "#;
 
     #[test]
@@ -644,6 +706,66 @@ filter_chains:
             nested_password.as_str(),
             Some("[REDACTED]"),
             "nested password field must be redacted"
+        );
+    }
+
+    #[test]
+    fn redact_sensitive_keys_extended_field_names() {
+        let mut value: serde_yaml::Value =
+            serde_yaml::from_str("api_key: abc\nclient_secret: def\nsigning_key: ghi\nkeep: visible")
+                .expect("test YAML must parse");
+        redact_sensitive_keys(&mut value);
+        let mapping = value.as_mapping().unwrap();
+        for field in ["api_key", "client_secret", "signing_key"] {
+            assert_eq!(
+                mapping
+                    .get(serde_yaml::Value::String(field.to_owned()))
+                    .and_then(|v| v.as_str()),
+                Some("[REDACTED]"),
+                "{field} must be redacted"
+            );
+        }
+        assert_eq!(
+            mapping
+                .get(serde_yaml::Value::String("keep".to_owned()))
+                .and_then(|v| v.as_str()),
+            Some("visible"),
+            "non-sensitive field must not be redacted"
+        );
+    }
+
+    #[test]
+    fn redact_credential_header_value_in_request_set() {
+        // Mirrors the `headers` filter shape: request_set: [{name, value}].
+        let mut value: serde_yaml::Value = serde_yaml::from_str(
+            "request_set:\n  - name: Authorization\n    value: Bearer sekret\n  - name: X-Trace\n    value: keep-me",
+        )
+        .expect("test YAML must parse");
+        redact_sensitive_keys(&mut value);
+        let seq = value
+            .as_mapping()
+            .unwrap()
+            .get(serde_yaml::Value::String("request_set".to_owned()))
+            .unwrap()
+            .as_sequence()
+            .unwrap();
+        assert_eq!(
+            seq[0]
+                .as_mapping()
+                .unwrap()
+                .get(serde_yaml::Value::String("value".to_owned()))
+                .and_then(|v| v.as_str()),
+            Some("[REDACTED]"),
+            "Authorization header value must be redacted (case-insensitive match)"
+        );
+        assert_eq!(
+            seq[1]
+                .as_mapping()
+                .unwrap()
+                .get(serde_yaml::Value::String("value".to_owned()))
+                .and_then(|v| v.as_str()),
+            Some("keep-me"),
+            "non-credential header value must not be redacted"
         );
     }
 

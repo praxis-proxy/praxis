@@ -60,6 +60,7 @@ fn bench_pipeline_execute_request(c: &mut Criterion) {
             host: None,
             headers: None,
             cluster: "api".into(),
+            retry_policy: None,
         },
         Route {
             path_match: PathMatch::Prefix {
@@ -68,6 +69,7 @@ fn bench_pipeline_execute_request(c: &mut Criterion) {
             host: None,
             headers: None,
             cluster: "default".into(),
+            retry_policy: None,
         },
     ];
 
@@ -134,7 +136,7 @@ fn make_entries(n: usize) -> Vec<FilterEntry> {
     (0..n)
         .map(|i| {
             if i % 2 == 0 {
-                filter_entry("router", "routes: []")
+                filter_entry("router", "routes:\n  - path_prefix: /\n    cluster: default")
             } else {
                 filter_entry("headers", "response_add: []")
             }

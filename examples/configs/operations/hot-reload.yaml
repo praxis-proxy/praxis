@@ -56,3 +56,6 @@ filter_chains:
         headers:
           - name: content-type
             value: "application/json"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

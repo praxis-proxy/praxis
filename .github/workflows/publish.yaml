@@ -20,6 +20,7 @@ jobs:
 
   container:
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     if: >-
       github.event_name == 'push' ||
       github.event.workflow_run.conclusion == 'success'
@@ -28,6 +29,8 @@ jobs:
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Build and publish container
         uses: praxis-proxy/conventions/.github/actions/ghcr-publish@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0

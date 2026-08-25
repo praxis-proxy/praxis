@@ -341,7 +341,7 @@ pub struct PeerKey {
 
 impl PeerKey {
     /// Create a peer key from an address and optional SNI.
-    pub fn new(addr: SocketAddr, sni: impl Into<String>) -> Self {
+    pub fn new<S: Into<String>>(addr: SocketAddr, sni: S) -> Self {
         Self { addr, sni: sni.into() }
     }
 }
@@ -416,17 +416,30 @@ impl CircuitBreakerRegistry {
     /// Returns the number of entries removed. The caller is
     /// responsible for scheduling periodic invocations.
     pub fn evict_idle(&self, idle_threshold: Duration) -> usize {
-        let stale: Vec<PeerKey> = self
+        // Collect candidates first: mutating the map while iterating it can
+        // deadlock on the shard locks.
+        let candidates: Vec<PeerKey> = self
             .breakers
             .iter()
             .filter(|entry| entry.value().is_idle(idle_threshold))
             .map(|entry| entry.key().clone())
             .collect();
-        let count = stale.len();
-        for key in &stale {
-            self.breakers.remove(key);
-        }
-        count
+        // Re-check is_idle atomically under the shard lock at removal time.
+        // Between the collect above and the remove, a concurrent try_acquire
+        // (which serializes on the same shard lock) can take an in-flight
+        // token on one of these breakers; removing it unconditionally would
+        // drop that request's outcome via a generation mismatch against a
+        // recreated breaker. remove_if evaluates the predicate while holding
+        // the lock, so an entry that became busy is left in place. Count only
+        // entries actually removed.
+        candidates
+            .iter()
+            .filter(|key| {
+                self.breakers
+                    .remove_if(key, |_, cb| cb.is_idle(idle_threshold))
+                    .is_some()
+            })
+            .count()
     }
 
     /// Number of tracked peers.

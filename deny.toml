@@ -4,7 +4,7 @@ maximum-db-staleness = "P30D"
 ignore = [
     # derivative 2.2.0: unmaintained (pingora transitive)
     "RUSTSEC-2024-0388",
-    # rustls-pemfile 2.2.0: unmaintained (direct dep in praxis-tls + transitive via pingora-rustls)
+    # rustls-pemfile 2.2.0: unmaintained (transitive via pingora fork)
     "RUSTSEC-2025-0134",
 ]
 
@@ -16,11 +16,9 @@ allow = [
     "BSD-3-Clause",
     "BSL-1.0",
     "CC0-1.0",
-    "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
     "Unicode-3.0",
-    "Unicode-DFS-2016",
     "Unlicense",
     "Zlib",
 ]

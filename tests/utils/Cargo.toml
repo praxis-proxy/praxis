@@ -20,7 +20,6 @@ h2 = { workspace = true }
 http = { workspace = true }
 rcgen = { workspace = true }
 rustls = { workspace = true }
-rustls-pemfile = { workspace = true }
 serde_yaml = { workspace = true }
 tempfile = { workspace = true }
 async-trait = { workspace = true }

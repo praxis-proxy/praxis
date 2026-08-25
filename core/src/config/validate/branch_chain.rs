@@ -2,6 +2,15 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Branch chain validation: name uniqueness, chain references, cycle detection, and nesting depth.
+//!
+//! Branch chains are resolved into concrete pipelines at startup, so
+//! structural problems must be caught here rather than at request time.
+//! This module rejects duplicate branch names, dangling chain
+//! references, and reference cycles, and enforces ceilings on nesting
+//! depth, branch counts, and re-entrant iteration limits so that a
+//! configuration cannot cause combinatorial blow-up during build-time
+//! resolution or an unbounded loop when a branch rejoins at or before
+//! its own filter.
 
 use std::collections::HashSet;
 

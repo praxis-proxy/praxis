@@ -7,6 +7,12 @@ use std::{fmt::Debug, sync::Arc};
 
 use dashmap::DashMap;
 
+/// A matched key-value entry: the stored key and its value.
+pub type KvEntry = (Arc<str>, Arc<str>);
+
+/// Concurrent map of store name to backend.
+type StoreMap = DashMap<Arc<str>, Arc<dyn KvBackend>>;
+
 // -----------------------------------------------------------------------------
 // MatchType
 // -----------------------------------------------------------------------------
@@ -123,8 +129,7 @@ pub trait KvBackend: Send + Sync + Debug {
     /// the pattern fails to compile.
     ///
     /// [`Regex`]: MatchType::Regex
-    #[expect(clippy::type_complexity, reason = "trait return type")]
-    fn lookup(&self, pattern: &str, match_type: MatchType) -> Result<Option<(Arc<str>, Arc<str>)>, String>;
+    fn lookup(&self, pattern: &str, match_type: MatchType) -> Result<Option<KvEntry>, String>;
 
     /// Number of entries in the store.
     fn len(&self) -> usize;
@@ -240,8 +245,7 @@ impl KvLookup {
 #[derive(Clone, Debug)]
 pub struct KvStoreRegistry {
     /// Named store backends.
-    #[expect(clippy::type_complexity, reason = "single-field struct wrapping DashMap")]
-    stores: Arc<DashMap<Arc<str>, Arc<dyn KvBackend>>>,
+    stores: Arc<StoreMap>,
 }
 
 impl KvStoreRegistry {
