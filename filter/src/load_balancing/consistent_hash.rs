@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use praxis_core::health::ClusterHealthState;
 
-use super::endpoint::WeightedEndpoint;
+use super::{endpoint::WeightedEndpoint, hash::fnv1a};
 
 // -----------------------------------------------------------------------------
 // ConsistentHash
@@ -98,21 +98,6 @@ fn is_excluded(addr: &str, exclude: &[Arc<str>]) -> bool {
     exclude.iter().any(|e| e.as_ref() == addr)
 }
 
-/// FNV-1a 64-bit hash (fast, deterministic).
-///
-/// **Security note:** FNV-1a is unkeyed; an attacker who knows
-/// the backend addresses can brute-force header values to target
-/// a specific backend. For adversarial environments, consider
-/// offering a keyed hash (e.g. `SipHash` with a random seed) as
-/// an alternative strategy.
-fn fnv1a(s: &str) -> u64 {
-    let mut hash: u64 = 0xCBF2_9CE4_8422_2325;
-    for byte in s.bytes() {
-        hash ^= u64::from(byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
-    }
-    hash
-}
 
 // -----------------------------------------------------------------------------
 // Tests
@@ -140,16 +125,8 @@ mod tests {
     fn same_key_same_endpoint() {
         let ch = ConsistentHash::new(
             vec![
-                WeightedEndpoint {
-                    address: Arc::from("10.0.0.1:80"),
-                    weight: 1,
-                    index: 0,
-                },
-                WeightedEndpoint {
-                    address: Arc::from("10.0.0.2:80"),
-                    weight: 1,
-                    index: 1,
-                },
+                WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
+                WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
             ],
             None,
         );
@@ -163,16 +140,8 @@ mod tests {
     fn different_keys_select_different_endpoints() {
         let ch = ConsistentHash::new(
             vec![
-                WeightedEndpoint {
-                    address: Arc::from("10.0.0.1:80"),
-                    weight: 1,
-                    index: 0,
-                },
-                WeightedEndpoint {
-                    address: Arc::from("10.0.0.2:80"),
-                    weight: 1,
-                    index: 1,
-                },
+                WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
+                WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
             ],
             None,
         );
@@ -189,21 +158,9 @@ mod tests {
     fn skips_unhealthy() {
         let ch = ConsistentHash::new(
             vec![
-                WeightedEndpoint {
-                    address: Arc::from("10.0.0.1:80"),
-                    weight: 1,
-                    index: 0,
-                },
-                WeightedEndpoint {
-                    address: Arc::from("10.0.0.2:80"),
-                    weight: 1,
-                    index: 1,
-                },
-                WeightedEndpoint {
-                    address: Arc::from("10.0.0.3:80"),
-                    weight: 1,
-                    index: 2,
-                },
+                WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
+                WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
+                WeightedEndpoint::simple(Arc::from("10.0.0.3:80"), 2, 1),
             ],
             None,
         );
@@ -233,16 +190,8 @@ mod tests {
     fn panic_mode_when_all_unhealthy() {
         let ch = ConsistentHash::new(
             vec![
-                WeightedEndpoint {
-                    address: Arc::from("10.0.0.1:80"),
-                    weight: 1,
-                    index: 0,
-                },
-                WeightedEndpoint {
-                    address: Arc::from("10.0.0.2:80"),
-                    weight: 1,
-                    index: 1,
-                },
+                WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
+                WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
             ],
             None,
         );
@@ -266,21 +215,9 @@ mod tests {
     fn select_with_none_hash_key_uses_fallback() {
         let ch = ConsistentHash::new(
             vec![
-                WeightedEndpoint {
-                    address: Arc::from("10.0.0.1:80"),
-                    weight: 1,
-                    index: 0,
-                },
-                WeightedEndpoint {
-                    address: Arc::from("10.0.0.2:80"),
-                    weight: 1,
-                    index: 1,
-                },
-                WeightedEndpoint {
-                    address: Arc::from("10.0.0.3:80"),
-                    weight: 1,
-                    index: 2,
-                },
+                WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1),
+                WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
+                WeightedEndpoint::simple(Arc::from("10.0.0.3:80"), 2, 1),
             ],
             None,
         );
@@ -298,16 +235,8 @@ mod tests {
     #[test]
     fn weight_stability() {
         let endpoints = vec![
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.1:80"),
-                weight: 3,
-                index: 0,
-            },
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.2:80"),
-                weight: 1,
-                index: 1,
-            },
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 3),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
         ];
         let ch = ConsistentHash::new(endpoints, None);
 

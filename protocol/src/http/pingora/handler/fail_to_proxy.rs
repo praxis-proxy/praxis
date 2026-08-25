@@ -35,7 +35,8 @@ struct ProxyError {
 /// timeout) receive a structured 400 response.
 #[expect(
     clippy::large_stack_frames,
-    reason = "linear error classification inlines each response-writing branch"
+    clippy::too_many_lines,
+    reason = "linear error classification inlines each response-writing branch and adds structured error fields"
 )]
 pub(super) async fn execute(
     session: &mut Session,
@@ -59,6 +60,18 @@ pub(super) async fn execute(
     }
 
     let err = classify_error(&etype, source);
+
+    let upstream_address = ctx
+        .upstream_for_retry
+        .as_ref()
+        .map_or("unknown", |u| u.address.as_ref());
+    error!(
+        error_code = err.code,
+        error_message = err.message,
+        status = err.status,
+        upstream_address,
+        "upstream error"
+    );
 
     if final_response_written(session) {
         debug!(
@@ -228,7 +241,7 @@ fn final_response_written(session: &Session) -> bool {
 }
 
 /// Whether a response header blocks a later final error response.
-fn is_final_response(header: &pingora_http::ResponseHeader) -> bool {
+pub(super) fn is_final_response(header: &pingora_http::ResponseHeader) -> bool {
     !header.status.is_informational() || header.status == http::StatusCode::SWITCHING_PROTOCOLS
 }
 

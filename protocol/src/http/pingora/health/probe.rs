@@ -125,14 +125,10 @@ async fn read_status_line(stream: &mut TcpStream, addr: &str) -> Option<String> 
 /// );
 /// assert_eq!(parse_status_code("garbage"), None);
 /// ```
-#[expect(clippy::indexing_slicing, reason = "guarded by length check")]
 pub(crate) fn parse_status_code(response: &str) -> Option<u16> {
     let first_line = response.lines().next()?;
     let parts: Vec<&str> = first_line.splitn(3, ' ').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    parts[1].parse().ok()
+    parts.get(1)?.parse().ok()
 }
 
 // -----------------------------------------------------------------------------
@@ -245,9 +241,8 @@ async fn h2_close_gracefully(stream: &mut TcpStream) {
 /// let not_settings = &[0, 0, 0, 1, 0, 0, 0, 0, 0];
 /// assert!(!is_settings_frame(not_settings));
 /// ```
-#[expect(clippy::indexing_slicing, reason = "guarded by length check")]
 pub(crate) fn is_settings_frame(buf: &[u8]) -> bool {
-    buf.len() >= H2_FRAME_HEADER_LEN && buf[3] == H2_FRAME_TYPE_SETTINGS
+    buf.len() >= H2_FRAME_HEADER_LEN && buf.get(3) == Some(&H2_FRAME_TYPE_SETTINGS)
 }
 
 // -----------------------------------------------------------------------------

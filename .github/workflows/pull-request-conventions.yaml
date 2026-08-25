@@ -16,6 +16,7 @@ jobs:
 
   draft-on-failure:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       checks: read
       pull-requests: write
@@ -63,6 +64,7 @@ jobs:
 
   close-stale-drafts:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       issues: read
       pull-requests: write
@@ -110,6 +112,7 @@ jobs:
 
   close-stale-prs:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       issues: read
       pull-requests: write

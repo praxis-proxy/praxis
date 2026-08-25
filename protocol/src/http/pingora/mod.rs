@@ -2,6 +2,15 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Pingora HTTP integration: handler, listener setup, health endpoints.
+//!
+//! This module adapts Praxis's filter pipeline to Pingora's HTTP proxy
+//! service. Pingora owns request-smuggling prevention, HTTP/2
+//! backpressure, connection-pool safety, and HTTP/1.1 upgrade detection
+//! with bidirectional forwarding (WebSocket and similar). Praxis code
+//! layered on top, here and in the `handler` submodule, owns
+//! hop-by-hop header stripping (with conditional preservation for
+//! upgrade requests), Host validation, `X-Forwarded-*` injection, and
+//! retry logic.
 
 use std::sync::Arc;
 

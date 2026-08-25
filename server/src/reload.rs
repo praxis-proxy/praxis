@@ -55,7 +55,9 @@ pub(crate) fn reload_pipelines(
     listener_meta: &praxis_protocol::http::pingora::health::ListenerMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
+    session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
     subrequest_client: &praxis_core::subrequest::SubRequestClient,
+    log_level: Option<&Arc<praxis_core::logging::LogLevelState>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("building new pipelines from reloaded config");
 
@@ -77,7 +79,14 @@ pub(crate) fn reload_pipelines(
         new_ceiling,
     );
 
-    let new_pipelines = match resolve_pipelines(new_config, registry, &health_registry, kv_stores, &updated_client) {
+    let new_pipelines = match resolve_pipelines(
+        new_config,
+        registry,
+        &health_registry,
+        kv_stores,
+        session_stores,
+        &updated_client,
+    ) {
         Ok(p) => p,
         Err(e) => {
             error!(error = %e, "config reload failed: pipeline build error");
@@ -115,6 +124,13 @@ pub(crate) fn reload_pipelines(
     ));
 
     respawn_health_checks(old_config, new_config, &health_registry, health_shutdown);
+
+    if let Some(log_level) = log_level
+        && let Err(error) = log_level.refresh_baseline(new_config)
+    {
+        error!(%error, "config reload failed: log level baseline refresh");
+        return Err(error.into());
+    }
 
     info!(
         swapped = ?swapped,
@@ -313,7 +329,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         );
 
         assert!(result.is_ok(), "valid reload should succeed");
@@ -367,7 +385,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         );
         assert!(result.is_err(), "invalid filter should return Err");
 
@@ -389,7 +409,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -413,7 +435,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -452,7 +476,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         );
         assert!(
             !old_token.is_cancelled(),
@@ -490,7 +516,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         );
         assert!(result.is_ok(), "reload with new listener should succeed");
         assert!(
@@ -1098,6 +1126,7 @@ filter_chains:
             &registry,
             &old_health,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -1116,7 +1145,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -1183,6 +1214,7 @@ filter_chains:
             &registry,
             &stale_health,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -1202,7 +1234,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -1220,7 +1254,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -1241,6 +1277,7 @@ filter_chains:
             &registry,
             &old_health,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -1264,7 +1301,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -1313,6 +1352,7 @@ filter_chains:
             &registry,
             &health_registry,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -1326,6 +1366,11 @@ filter_chains:
     /// Empty KV store registry for tests without KV stores.
     fn empty_kv_stores() -> praxis_core::kv::KvStoreRegistry {
         praxis_core::kv::KvStoreRegistry::new()
+    }
+
+    /// Empty session store registry for tests.
+    fn empty_session_stores() -> Arc<praxis_filter::SessionStoreRegistry> {
+        Arc::new(praxis_filter::SessionStoreRegistry::new())
     }
 
     /// Empty sub-request client for tests.

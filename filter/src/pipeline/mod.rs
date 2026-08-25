@@ -121,6 +121,9 @@ pub struct FilterPipeline {
     /// Named key-value stores for runtime mappings.
     kv_stores: Option<KvStoreRegistry>,
 
+    /// Per-cluster session stores for sticky session affinity, preserved across reloads.
+    session_stores: Option<Arc<crate::SessionStoreRegistry>>,
+
     /// Shared sub-request client for iterative sub-requests.
     subrequest_client: Option<praxis_core::subrequest::SubRequestClient>,
 
@@ -311,6 +314,16 @@ impl FilterPipeline {
         self.kv_stores = Some(stores);
     }
 
+    /// The shared session store registry, if set.
+    pub fn session_stores(&self) -> Option<&Arc<crate::SessionStoreRegistry>> {
+        self.session_stores.as_ref()
+    }
+
+    /// Set the shared [`crate::SessionStoreRegistry`] for this pipeline.
+    pub fn set_session_stores(&mut self, stores: Arc<crate::SessionStoreRegistry>) {
+        self.session_stores = Some(stores);
+    }
+
     /// The shared sub-request client, if set.
     pub fn subrequest_client(&self) -> Option<&praxis_core::subrequest::SubRequestClient> {
         self.subrequest_client.as_ref()
@@ -482,7 +495,9 @@ pub(crate) fn check_failure_mode(
             warn!(
                 filter = filter_name,
                 error = %error,
-                "filter error during {phase}, continuing (failure_mode=open)"
+                phase,
+                failure_mode = "open",
+                "filter error, continuing"
             );
             Ok(())
         },
@@ -490,7 +505,9 @@ pub(crate) fn check_failure_mode(
             error!(
                 filter = filter_name,
                 error = %error,
-                "filter error during {phase}, aborting"
+                phase,
+                failure_mode = "closed",
+                "filter error, aborting request"
             );
             Err(error)
         },

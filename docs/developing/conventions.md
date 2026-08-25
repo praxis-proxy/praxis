@@ -659,4 +659,4 @@ its code. The gates:
   of what tooling they used to produce it.
 - **Proposals**: proposal files must satisfy the
   frontmatter and lifecycle rules in
-  [proposals.md](../proposals.md).
+  [the enhancements repository](https://github.com/praxis-proxy/enhancements).

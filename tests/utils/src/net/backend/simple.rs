@@ -453,7 +453,7 @@ fn start_server(mut config: Config) -> u16 {
     }
 
     std::thread::spawn(move || {
-        praxis::run_server(config, None);
+        praxis::run_server(config, None, None);
     });
 
     crate::net::wait::wait_for_http(&addr);

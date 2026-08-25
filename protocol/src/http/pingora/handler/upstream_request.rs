@@ -105,6 +105,90 @@ pub(crate) fn apply_rewritten_path(req: &mut RequestHeader, ctx: &mut PingoraReq
     Ok(())
 }
 
+// -----------------------------------------------------------------------------
+// Authority Override
+// -----------------------------------------------------------------------------
+
+/// Apply the per-cluster upstream authority override.
+///
+/// When the selected upstream carries a configured authority, this
+/// replaces the request's `Host` header and normalizes the URI
+/// authority component. Both updates are required:
+///
+/// - **Host header**: Praxis currently uses HTTP/1.1 for all upstream connections, so the `Host` header is sent
+///   directly. Pingora's HTTP/2 upstream path (`proxy_h2.rs`) would remove `Host` and rebuild the URI `:authority` from
+///   it, so setting `Host` here covers both protocols.
+///
+/// - **URI authority**: Defence-in-depth for absolute-form requests whose URI already contains an authority. Without
+///   this, a pre-existing URI authority could survive into the upstream request if Pingora's internal flow changes.
+///
+/// The authority `HeaderValue` is pre-parsed at cluster build
+/// time, so this path performs no string-to-header conversion.
+///
+/// Called after hop-by-hop and reserved-header stripping so that
+/// a downstream-supplied `Host` value cannot survive into the
+/// upstream request when an override is configured.
+///
+/// # Errors
+///
+/// Returns a Pingora error if the URI cannot be rebuilt with the
+/// new authority (should not happen with a pre-validated value).
+pub(crate) fn apply_authority_override(req: &mut RequestHeader, ctx: &PingoraRequestCtx) -> pingora_core::Result<()> {
+    let Some(authority) = ctx.upstream_for_retry.as_ref().and_then(|u| u.authority.as_ref()) else {
+        return Ok(());
+    };
+
+    debug!(authority = ?authority, "applying upstream authority override");
+
+    req.insert_header(http::header::HOST, authority).map_err(|e| {
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("failed to set Host header for authority override: {e}"),
+        )
+    })?;
+
+    normalize_uri_authority(req, authority)?;
+
+    Ok(())
+}
+
+/// Replace the authority component of the request URI.
+///
+/// Rebuilds the URI preserving scheme, path, and query while
+/// substituting the authority. This prevents absolute-form
+/// requests from retaining an outdated authority in the URI.
+fn normalize_uri_authority(req: &mut RequestHeader, authority: &http::header::HeaderValue) -> pingora_core::Result<()> {
+    let uri = &req.uri;
+    if uri.authority().is_none() && uri.scheme().is_none() {
+        return Ok(());
+    }
+
+    let authority_str = authority.to_str().map_err(|e| {
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("authority override is not valid UTF-8: {e}"),
+        )
+    })?;
+
+    let scheme = uri.scheme_str().unwrap_or("https");
+    let path_and_query = uri.path_and_query().map_or("/", http::uri::PathAndQuery::as_str);
+    let rebuilt = format!("{scheme}://{authority_str}{path_and_query}");
+
+    let new_uri: Uri = rebuilt.parse().map_err(|e| {
+        pingora_core::Error::explain(
+            pingora_core::ErrorType::InternalError,
+            format!("failed to rebuild URI with authority override: {e}"),
+        )
+    })?;
+
+    req.set_uri(new_uri);
+    Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Content-Length Repair
+// -----------------------------------------------------------------------------
+
 /// Repair request framing after `StreamBuffer` body mutation.
 ///
 /// Pingora forwards upstream headers after `StreamBuffer` pre-read, so a
@@ -140,6 +224,8 @@ pub(crate) fn apply_mutated_content_length(req: &mut RequestHeader, ctx: &Pingor
     reason = "tests"
 )]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
 
     #[test]
@@ -686,6 +772,28 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_upgrade_headers_strip_all() {
+        // Two separate `Upgrade` headers (`websocket` then `h2c`) must not be
+        // treated as a WebSocket upgrade: reading only the first value would
+        // preserve the whole multi-valued header and smuggle the h2c token.
+        let mut req = RequestHeader::build("GET", b"/", None).unwrap();
+        let _ws = req.append_header("upgrade".to_owned(), "websocket".to_owned());
+        let _h2c = req.append_header("upgrade".to_owned(), "h2c".to_owned());
+        let _conn = req.insert_header("connection".to_owned(), "Upgrade".to_owned());
+
+        strip_hop_by_hop(&mut req, true);
+
+        assert!(
+            req.headers.get("upgrade").is_none(),
+            "duplicate Upgrade headers must all be stripped to prevent h2c smuggling"
+        );
+        assert!(
+            req.headers.get("connection").is_none(),
+            "connection must be stripped when Upgrade is not a single websocket value"
+        );
+    }
+
+    #[test]
     fn websocket_case_insensitive() {
         let mut req = make_request(&[("upgrade", "WEBSOCKET"), ("connection", "Upgrade")]);
 
@@ -777,6 +885,152 @@ mod tests {
             req.headers.get("content-length").unwrap(),
             "5",
             "Content-Length must not be strippable via a Connection token"
+        );
+    }
+
+    #[test]
+    fn apply_authority_override_sets_host() {
+        let mut req = make_request(&[("host", "original.example.com")]);
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from("10.0.0.1:443"),
+            authority: Some(http::header::HeaderValue::from_static("api.example.com")),
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+
+        apply_authority_override(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "api.example.com",
+            "Host header should be overridden"
+        );
+    }
+
+    #[test]
+    fn apply_authority_override_with_port() {
+        let mut req = make_request(&[("host", "original.example.com")]);
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from("10.0.0.1:8443"),
+            authority: Some(http::header::HeaderValue::from_static("api.example.com:8443")),
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+
+        apply_authority_override(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "api.example.com:8443",
+            "Host header should include port"
+        );
+    }
+
+    #[test]
+    fn apply_authority_override_noop_when_none() {
+        let mut req = make_request(&[("host", "original.example.com")]);
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from("10.0.0.1:443"),
+            authority: None,
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+
+        apply_authority_override(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "original.example.com",
+            "Host header should be unchanged when no authority override"
+        );
+    }
+
+    #[test]
+    fn apply_authority_override_noop_when_no_upstream() {
+        let mut req = make_request(&[("host", "original.example.com")]);
+        let ctx = PingoraRequestCtx::default();
+
+        apply_authority_override(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "original.example.com",
+            "Host header should be unchanged when no upstream"
+        );
+    }
+
+    #[test]
+    fn apply_authority_override_replaces_downstream_host() {
+        let mut req = make_request(&[("host", "attacker.evil.com")]);
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from("10.0.0.1:443"),
+            authority: Some(http::header::HeaderValue::from_static("api.example.com")),
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+
+        apply_authority_override(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "api.example.com",
+            "configured authority must override downstream Host"
+        );
+    }
+
+    #[test]
+    fn apply_authority_override_replaces_absolute_form_uri() {
+        let mut req = RequestHeader::build("GET", b"/v1/chat", None).unwrap();
+        req.set_uri("http://original.example.com/v1/chat".parse::<Uri>().unwrap());
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from("10.0.0.1:443"),
+            authority: Some(http::header::HeaderValue::from_static("api.example.com")),
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+
+        apply_authority_override(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "api.example.com",
+            "Host header should be overridden"
+        );
+        assert_eq!(
+            req.uri.authority().unwrap().as_str(),
+            "api.example.com",
+            "URI authority should be replaced for absolute-form requests"
+        );
+        assert_eq!(req.uri.path(), "/v1/chat", "URI path should be preserved");
+    }
+
+    #[test]
+    fn apply_authority_override_preserves_origin_form_uri() {
+        let mut req = RequestHeader::build("GET", b"/v1/chat", None).unwrap();
+        req.insert_header("host", "original.example.com").unwrap();
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream_for_retry = Some(praxis_core::connectivity::Upstream {
+            address: Arc::from("10.0.0.1:443"),
+            authority: Some(http::header::HeaderValue::from_static("api.example.com")),
+            connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+            tls: None,
+        });
+
+        apply_authority_override(&mut req, &ctx).unwrap();
+
+        assert_eq!(
+            req.headers.get("host").unwrap(),
+            "api.example.com",
+            "Host header should be overridden"
+        );
+        assert!(
+            req.uri.authority().is_none(),
+            "origin-form URI should not gain an authority component"
         );
     }
 

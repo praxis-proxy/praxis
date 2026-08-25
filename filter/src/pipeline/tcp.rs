@@ -468,6 +468,7 @@ mod tests {
             health_registry: None,
             id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
             kv_stores: None,
+            session_stores: None,
             subrequest_client: None,
             may_select_streaming_subrequest_response: false,
             pipeline_extensions: Vec::new(),

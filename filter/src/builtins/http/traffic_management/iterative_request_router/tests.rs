@@ -3168,6 +3168,7 @@ async fn build_peer_applies_tls_with_explicit_sni() {
         address: std::sync::Arc::from("127.0.0.1:9443"),
         connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: Some(cached),
+        authority: None,
     };
 
     let peer = super::build_peer(&upstream).await.unwrap();
@@ -3182,6 +3183,7 @@ async fn build_peer_derives_sni_from_hostname_address() {
         address: std::sync::Arc::from("localhost:9443"),
         connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: Some(cached),
+        authority: None,
     };
 
     let peer = super::build_peer(&upstream).await.unwrap();

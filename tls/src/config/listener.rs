@@ -141,7 +141,7 @@ impl ListenerTls {
     ///
     /// [`TlsError`]: crate::TlsError
     /// [`ListenerTls`]: crate::ListenerTls
-    pub fn new_validated(cert_path: impl Into<String>, key_path: impl Into<String>) -> Result<Self, TlsError> {
+    pub fn new_validated<C: Into<String>, K: Into<String>>(cert_path: C, key_path: K) -> Result<Self, TlsError> {
         let config = Self {
             certificates: vec![CertKeyPair {
                 cert_path: cert_path.into(),
@@ -263,10 +263,10 @@ impl ListenerTls {
     /// assert_eq!(c, cert.to_str().unwrap());
     /// assert_eq!(k, key.to_str().unwrap());
     /// ```
-    #[expect(clippy::indexing_slicing, reason = "validated non-empty")]
     pub fn primary_cert_paths(&self) -> (&str, &str) {
-        let cert = &self.certificates[0];
-        (&cert.cert_path, &cert.key_path)
+        self.certificates
+            .first()
+            .map_or(("", ""), |cert| (cert.cert_path.as_str(), cert.key_path.as_str()))
     }
 }
 

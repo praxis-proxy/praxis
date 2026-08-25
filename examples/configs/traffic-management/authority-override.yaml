@@ -1,0 +1,39 @@
+# Per-Cluster Upstream Authority Override
+#
+# Demonstrates overriding the HTTP Host header sent to a specific
+# upstream cluster, including requests received over HTTP/2.
+#
+# The proxy replaces the downstream Host header with the configured
+# authority value before forwarding to the upstream. TLS SNI is
+# independent and configured separately via `tls.sni`.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/authority-override.yaml
+#
+#   curl -H "Host: anything.example.com" http://localhost:8080/
+#
+# The upstream receives Host: api.example.com regardless of
+# the downstream request's Host header.
+
+listeners:
+  - name: default
+    address: "0.0.0.0:8080"
+    filter_chains: [main]
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "localhost:9000"
+            http:
+              authority: "api.example.com"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

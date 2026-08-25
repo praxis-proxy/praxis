@@ -2,6 +2,14 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Path-prefix and host-header routing filter.
+//!
+//! The router performs runtime routing: for each request it selects an
+//! upstream cluster by matching path prefix, host, and headers. This
+//! decides *where* a request goes, distinct from pipelining, which
+//! decides *what* processing it receives. In the classify-route-branch
+//! pattern, classifier filters promote facts to internal `x-praxis-*`
+//! headers and the router matches those headers, alongside path and
+//! host, to choose a cluster.
 
 mod config;
 mod json_alias;
@@ -106,6 +114,10 @@ struct ResolvedRoute {
     /// suffix with leading dot: `.example.com`. `None` for exact hosts
     /// or routes without a host constraint.
     wildcard_suffix: Option<String>,
+    /// The route's retry policy pre-wrapped in an `Arc` at build time, so a
+    /// matched request only bumps a refcount instead of deep-cloning the
+    /// policy's status-code and condition vectors.
+    retry_policy: Option<Arc<praxis_core::config::RetryPolicy>>,
 }
 
 impl RouterFilter {
@@ -384,10 +396,12 @@ fn resolve_routes(routes: Vec<RouterRouteConfig>) -> Vec<ResolvedRoute> {
                 let lower = suffix.to_ascii_lowercase();
                 format!(".{lower}")
             });
+            let retry_policy = route.retry_policy.clone().map(Arc::new);
             ResolvedRoute {
                 route,
                 metrics_label,
                 wildcard_suffix,
+                retry_policy,
             }
         })
         .collect()
@@ -419,7 +433,15 @@ impl HttpFilter for RouterFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        let path = ctx.rewritten_path.as_deref().unwrap_or_else(|| ctx.request.uri.path());
+        // Match on the path only, excluding any query string. A preceding
+        // path_rewrite/url_rewrite stores "<path>?<query>" in rewritten_path,
+        // so matching it verbatim would make exact and boundary-prefix routes
+        // miss any query-bearing request (and silently divert it to a
+        // catch-all). ctx.request.uri.path() already excludes the query, so
+        // the no-rewrite branch is unaffected. rewritten_path itself is left
+        // intact for upstream forwarding.
+        let raw_path = ctx.rewritten_path.as_deref().unwrap_or_else(|| ctx.request.uri.path());
+        let path = raw_path.split('?').next().unwrap_or(raw_path);
         let host = ctx
             .request
             .headers
@@ -436,8 +458,8 @@ impl HttpFilter for RouterFilter {
             );
             ctx.metrics_route = Some(resolved.metrics_label.clone());
             ctx.cluster = Some(Arc::clone(&resolved.route.cluster));
-            if let Some(policy) = &resolved.route.retry_policy {
-                ctx.route_retry_policy = Some(Arc::new(policy.clone()));
+            if let Some(policy) = &resolved.retry_policy {
+                ctx.route_retry_policy = Some(Arc::clone(policy));
             }
             Ok(FilterAction::Continue)
         } else {

@@ -34,7 +34,7 @@ use super::{
     },
 };
 use crate::{
-    FilterAction, FilterError, Rejection,
+    AuthenticatedIdentity, FilterAction, FilterError, Rejection,
     body::{BodyAccess, BodyMode},
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
@@ -43,6 +43,29 @@ use crate::{
 // -----------------------------------------------------------------------------
 // PolicyFilter
 // -----------------------------------------------------------------------------
+
+/// Per-filter admission state shared across lifecycle phases. Both fields live
+/// here so multiple policy instances cannot overwrite one another's temporary
+/// identity projection or completion marker.
+#[derive(Default)]
+struct AdmissionState {
+    /// Whether this instance has already admitted the request.
+    complete: bool,
+    /// Sanitized result retained from the unscoped early gate.
+    gated_identity: GatedIdentity,
+}
+
+/// Three-state result for an early identity gate.
+#[derive(Default)]
+enum GatedIdentity {
+    /// The gate has not run for this policy instance.
+    #[default]
+    NotRun,
+    /// Validation succeeded without producing a user subject.
+    NoSubject,
+    /// Validation succeeded and produced a raw-credential-free subject.
+    Subject(AuthenticatedIdentity),
+}
 
 /// Embeds the Praxis Policy Engine in-process to enforce multi-source JWT
 /// identity, APL route policy, RFC 8693 token exchange, PII
@@ -147,6 +170,7 @@ impl PolicyFilter {
             );
         }
         for (kind, factory) in host_factories {
+            tracing::debug!(target: "policy.filter", kind = %kind, "registering host plugin factory");
             mgr.register_factory(kind, factory);
         }
 
@@ -351,11 +375,135 @@ impl PolicyFilter {
         ext
     }
 
+    /// Publish the raw-credential-free subject projection for downstream filters.
+    ///
+    /// The Praxis Policy Engine (PPE) may authenticate a client or workload without resolving a user
+    /// subject. In that case no `AuthenticatedIdentity` is published; a
+    /// consumer that requires a user principal must fail closed when the
+    /// extension is absent.
+    fn publish_authenticated_identity(ctx: &mut HttpFilterContext<'_>, identity: &IdentityPayload) {
+        Self::publish_identity_projection(ctx, Self::authenticated_identity(identity));
+    }
+
+    /// Build the public raw-credential-free projection from PPE's private
+    /// validated payload.
+    fn authenticated_identity(identity: &IdentityPayload) -> Option<AuthenticatedIdentity> {
+        identity.subject.as_ref().and_then(|subject| {
+            AuthenticatedIdentity::new(
+                subject.id.clone()?,
+                subject.roles.iter().cloned(),
+                subject.teams.iter().cloned(),
+                subject.claims.iter().map(|(name, value)| (name.clone(), value.clone())),
+            )
+        })
+    }
+
+    /// Insert a sanitized projection, or clear a projection left by an earlier
+    /// identity attempt when validation produced no subject.
+    fn publish_identity_projection(ctx: &mut HttpFilterContext<'_>, authenticated: Option<AuthenticatedIdentity>) {
+        if let Some(authenticated) = authenticated {
+            ctx.extensions.insert(authenticated);
+        } else {
+            // Do not let a value from an earlier authentication attempt remain
+            // authoritative when the current resolved identity has no subject.
+            ctx.extensions.remove::<AuthenticatedIdentity>();
+        }
+    }
+
+    /// Whether this policy instance already completed admission in an earlier
+    /// lifecycle phase.
+    fn admission_complete(ctx: &HttpFilterContext<'_>) -> bool {
+        ctx.get_filter_state::<AdmissionState>()
+            .is_some_and(|state| state.complete)
+    }
+
+    /// Record successful admission when executing through a pipeline. Direct
+    /// unit-test calls have no current filter ID and intentionally skip the
+    /// marker rather than emitting the context helper's warning.
+    fn mark_admission_complete(ctx: &mut HttpFilterContext<'_>) {
+        if ctx.current_filter_id.is_none() {
+            return;
+        }
+        if let Some(state) = ctx.get_filter_state_mut::<AdmissionState>() {
+            state.complete = true;
+        } else {
+            ctx.insert_filter_state(AdmissionState {
+                complete: true,
+                ..Default::default()
+            });
+        }
+    }
+
+    /// Preserve an unscoped gate result in state owned by this policy filter
+    /// instance until classification proves that no entity route applies.
+    fn store_gated_identity(ctx: &mut HttpFilterContext<'_>, authenticated: Option<AuthenticatedIdentity>) {
+        if ctx.current_filter_id.is_none() {
+            return;
+        }
+        let gated_identity = authenticated.map_or(GatedIdentity::NoSubject, GatedIdentity::Subject);
+        if let Some(state) = ctx.get_filter_state_mut::<AdmissionState>() {
+            state.gated_identity = gated_identity;
+        } else {
+            ctx.insert_filter_state(AdmissionState {
+                gated_identity,
+                ..Default::default()
+            });
+        }
+    }
+
+    /// Remove and return this policy instance's temporary early-gate result.
+    fn take_gated_identity(ctx: &mut HttpFilterContext<'_>) -> GatedIdentity {
+        ctx.get_filter_state_mut::<AdmissionState>()
+            .map_or(GatedIdentity::NotRun, |state| std::mem::take(&mut state.gated_identity))
+    }
+
+    /// Run the unscoped identity hook and return only its raw-credential-free
+    /// projection. Route-aware callers defer publication until classification.
+    #[expect(clippy::large_stack_frames, reason = "async PPE identity payload")]
+    async fn resolve_gated_identity(
+        &self,
+        ctx: &HttpFilterContext<'_>,
+    ) -> Result<Option<AuthenticatedIdentity>, Rejection> {
+        let (result, _bg) = self
+            .mgr
+            .invoke_named::<IdentityHook>(
+                HOOK_IDENTITY_RESOLVE,
+                Self::identity_payload(Self::snapshot_headers(ctx)),
+                Extensions::default(),
+                None,
+            )
+            .await;
+
+        if !result.continue_processing {
+            return Err(auth_rejection(result.violation.as_ref()));
+        }
+        let identity = IdentityPayload::from_pipeline_result(&result).ok_or_else(|| {
+            Rejection::status(500).with_body(Bytes::from_static(b"policy: identity result missing modified payload"))
+        })?;
+        Ok(Self::authenticated_identity(&identity))
+    }
+
+    /// Finish an identity-only admission after classification establishes that
+    /// no entity-specific resolver can apply.
+    async fn complete_gated_admission(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let authenticated = match Self::take_gated_identity(ctx) {
+            GatedIdentity::Subject(authenticated) => Some(authenticated),
+            GatedIdentity::NoSubject => None,
+            GatedIdentity::NotRun => match self.resolve_gated_identity(ctx).await {
+                Ok(authenticated) => authenticated,
+                Err(rejection) => return Ok(FilterAction::Reject(rejection)),
+            },
+        };
+        Self::publish_identity_projection(ctx, authenticated);
+        Self::mark_admission_complete(ctx);
+        Ok(FilterAction::BodyDone)
+    }
+
     /// Early identity gate: resolve identity in `on_request` so
     /// un-authenticated traffic is rejected before the body-buffer cost is
     /// paid. For entity-aware policies, authorization runs later, in
     /// `on_request_body`, once the request is classified.
-    async fn identity_gate(&self, ctx: &HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+    async fn identity_gate(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         // When a downstream body-buffering filter (e.g. the protocol
         // classifier) forces a pre-read, praxis runs `on_request_body` BEFORE
         // this header phase. That body phase already resolved and enforced
@@ -369,19 +517,20 @@ impl PolicyFilter {
             return Ok(FilterAction::Continue);
         }
 
-        let (result, _bg) = self
-            .mgr
-            .invoke_named::<IdentityHook>(
-                HOOK_IDENTITY_RESOLVE,
-                Self::identity_payload(Self::snapshot_headers(ctx)),
-                Extensions::default(),
-                None,
-            )
-            .await;
-
-        if !result.continue_processing {
-            tracing::debug!(target: "policy.filter", "identity deny (on_request)");
-            return Ok(FilterAction::Reject(auth_rejection(result.violation.as_ref())));
+        let authenticated = match self.resolve_gated_identity(ctx).await {
+            Ok(authenticated) => authenticated,
+            Err(rejection) => {
+                tracing::debug!(target: "policy.filter", "identity deny (on_request)");
+                return Ok(FilterAction::Reject(rejection));
+            },
+        };
+        // Entity-routed policies resolve again once classifier metadata gives
+        // PPE the authoritative route coordinates. Publishing this unscoped
+        // gate result could expose a principal from the wrong route resolver.
+        if self.entity_routes {
+            Self::store_gated_identity(ctx, authenticated);
+        } else {
+            Self::publish_identity_projection(ctx, authenticated);
         }
         tracing::trace!(target: "policy.filter", "identity allow (on_request)");
         Ok(FilterAction::Continue)
@@ -409,6 +558,7 @@ impl PolicyFilter {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
+        Self::publish_authenticated_identity(ctx, &identity);
         let mut extensions = Self::extensions_from_identity(&headers, &identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL);
         Self::attach_http_attributes(ctx, &mut extensions, headers);
 
@@ -551,6 +701,14 @@ impl HttpFilter for PolicyFilter {
     }
 
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        // A StreamBuffer filter can force the body phase to run before this
+        // header phase. In that case admission already ran in on_request_body,
+        // and re-running it could fail after credential-stripping mutations.
+        if Self::admission_complete(ctx) {
+            tracing::trace!(target: "policy.filter", "admission already completed in body phase; skipping header phase");
+            return Ok(FilterAction::Continue);
+        }
+
         // Pure L7 policy (a `global` HTTP policy, no entity routes): authorize
         // here over `http.*` + identity. Authorization is an admission check
         // with no body, and no classifier is involved, so this is the
@@ -558,14 +716,22 @@ impl HttpFilter for PolicyFilter {
         if self.http_global && !self.entity_routes {
             // Box the (large CMF-typed) future so it lives on the heap
             // rather than inflating this method's stack frame.
-            return Box::pin(self.on_request_http_authz(ctx)).await;
+            let action = Box::pin(self.on_request_http_authz(ctx)).await?;
+            if matches!(action, FilterAction::Continue) {
+                Self::mark_admission_complete(ctx);
+            }
+            return Ok(action);
         }
 
         // Otherwise (entity-aware policy, or identity-only): early identity
         // gate. Saves the per-request body-buffer cost on un-auth'd traffic —
         // if there's no valid token, we never reach `on_request_body` and the
         // body never gets buffered.
-        self.identity_gate(ctx).await
+        let action = self.identity_gate(ctx).await?;
+        if !self.entity_routes && matches!(action, FilterAction::Continue) {
+            Self::mark_admission_complete(ctx);
+        }
+        Ok(action)
     }
 
     #[expect(
@@ -579,19 +745,31 @@ impl HttpFilter for PolicyFilter {
         body: &mut Option<Bytes>,
         end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
-        // CMF dispatch only fires once the full body has been seen
-        // (so the protocol classifier filter has finished parsing and writing its
-        // metadata). For streaming chunks we just pass.
-        if !end_of_stream {
-            return Ok(FilterAction::Continue);
+        // A downstream StreamBuffer filter makes this body hook run before
+        // on_request. Pure-L7 and identity-only admission needs no body, so run
+        // it on the first chunk before any later body filter can act. In the
+        // normal header-first lifecycle, the completion marker makes this a
+        // no-op and prevents duplicate validation.
+        if !self.entity_routes {
+            if Self::admission_complete(ctx) {
+                return Ok(FilterAction::BodyDone);
+            }
+            let action = if self.http_global {
+                Box::pin(self.on_request_http_authz(ctx)).await?
+            } else {
+                self.identity_gate(ctx).await?
+            };
+            if matches!(action, FilterAction::Continue) {
+                Self::mark_admission_complete(ctx);
+                return Ok(FilterAction::BodyDone);
+            }
+            return Ok(action);
         }
 
-        // No entity routes means there is nothing to authorize at the body
-        // phase: a pure L7 policy already ran (and allowed) in `on_request`
-        // over the policy's `global` block, and an identity-only policy has no
-        // per-entity step. Skip rather than trip the classifier-metadata gate.
-        if !self.entity_routes {
-            return Ok(FilterAction::BodyDone);
+        // Entity CMF dispatch waits for the full body so the protocol
+        // classifier has finished writing route metadata.
+        if !end_of_stream {
+            return Ok(FilterAction::Continue);
         }
 
         // This policy declares entity routes (tool/prompt/resource), so it
@@ -614,7 +792,7 @@ impl HttpFilter for PolicyFilter {
                 return Ok(FilterAction::Reject(missing_protocol_metadata_rejection()));
             }
             tracing::trace!(target: "policy.filter", "no mcp.method in metadata; no CMF dispatch");
-            return Ok(FilterAction::BodyDone);
+            return self.complete_gated_admission(ctx).await;
         };
         let Some((entity_type, hook_name)) = entity_for_protocol_method(&method) else {
             tracing::trace!(
@@ -622,15 +800,15 @@ impl HttpFilter for PolicyFilter {
                 protocol_method = %method,
                 "JSON-RPC method has no entity binding; no CMF dispatch",
             );
-            return Ok(FilterAction::BodyDone);
+            return self.complete_gated_admission(ctx).await;
         };
         let Some(entity_name) = ctx.get_metadata("mcp.name").map(str::to_owned) else {
-            tracing::debug!(
+            tracing::error!(
                 target: "policy.filter",
                 protocol_method = %method,
-                "JSON-RPC method missing mcp.name metadata; skipping CMF dispatch",
+                "entity-bound JSON-RPC method is missing mcp.name metadata; denying fail-closed",
             );
-            return Ok(FilterAction::BodyDone);
+            return Ok(FilterAction::Reject(missing_protocol_metadata_rejection()));
         };
 
         // Snapshot headers once for both identity resolution and
@@ -643,6 +821,8 @@ impl HttpFilter for PolicyFilter {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };
+        Self::take_gated_identity(ctx);
+        Self::publish_authenticated_identity(ctx, &identity);
         let mut extensions = Self::extensions_from_identity(&headers, &identity, entity_type, &entity_name);
         // Attach the HTTP request line + headers so a single policy can combine
         // entity/`args.*` checks with `http.*` predicates in one evaluation.
@@ -747,6 +927,7 @@ impl HttpFilter for PolicyFilter {
             entity = %entity_name,
             "CMF allow",
         );
+        Self::mark_admission_complete(ctx);
         Ok(FilterAction::BodyDone)
     }
 

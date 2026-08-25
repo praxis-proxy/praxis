@@ -1,0 +1,50 @@
+# Access Log Field Selection
+#
+# Logs only server errors with a lean field set. Fast successful
+# requests are not emitted. Use RUST_LOG=info to see output.
+#
+# Usage:
+#   RUST_LOG=info cargo run -p praxis-proxy -- -c examples/configs/observability/access-log-fields.yaml
+#   curl http://localhost:8080/ok
+#   curl http://localhost:8080/error
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: request_id
+
+      - filter: access_log
+        sample_rate: 1.0
+        fields:
+          - method
+          - path
+          - status
+          - duration_ms
+          - request_id
+        conditions:
+          status_classes: [5xx]
+
+      - filter: router
+        routes:
+          - path_prefix: "/ok"
+            cluster: backend
+          - path_prefix: "/error"
+            cluster: error_backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+          - name: error_backend
+            endpoints:
+              - "127.0.0.1:3001"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

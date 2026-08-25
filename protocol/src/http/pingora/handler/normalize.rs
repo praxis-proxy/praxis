@@ -167,6 +167,17 @@ fn unfold_obs_fold(value: &[u8]) -> Vec<u8> {
 /// Rejects the request if obs-fold is found in security-sensitive
 /// headers. For other headers, replaces obs-fold with a single SP.
 fn handle_obs_fold(session: &mut Session) -> Option<Rejection> {
+    // Obs-fold (a CRLF followed by SP/HTAB inside a header value) is an
+    // HTTP/1.x wire artifact. The HTTP/2 and HTTP/3 codecs reject CR/LF in
+    // header values at frame decode, so no obs-fold can reach here on those
+    // protocols — skip the full per-request header scan for them.
+    if !matches!(
+        session.req_header().version,
+        http::Version::HTTP_09 | http::Version::HTTP_10 | http::Version::HTTP_11
+    ) {
+        return None;
+    }
+
     for name in OBS_FOLD_REJECT_HEADERS {
         if let Some(value) = session.req_header().headers.get(name)
             && contains_obs_fold(value.as_bytes())

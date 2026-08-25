@@ -3,7 +3,7 @@
 
 //! Weighted endpoint type and construction from cluster config.
 
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use praxis_core::config::Cluster;
 
@@ -14,7 +14,7 @@ use praxis_core::config::Cluster;
 /// A deduplicated endpoint carrying its own weight and original index.
 ///
 /// ```ignore
-/// let ep = WeightedEndpoint { address: "10.0.0.1:80".into(), weight: 3, index: 0 };
+/// let ep = WeightedEndpoint { address: "10.0.0.1:80".into(), weight: 3, index: 0, ..Default::default() };
 /// assert_eq!(ep.address.as_ref(), "10.0.0.1:80");
 /// assert_eq!(ep.weight, 3);
 /// assert_eq!(ep.index, 0);
@@ -29,6 +29,31 @@ pub(crate) struct WeightedEndpoint {
 
     /// Relative forwarding weight (>= 1).
     pub(crate) weight: u32,
+
+    /// Arbitrary key-value metadata for subset-based load balancing.
+    pub(crate) metadata: HashMap<String, String>,
+
+    /// Priority tier (0 = primary, 1 = first failover, etc.).
+    pub(crate) priority: u32,
+
+    /// Locality zone identifier for zone-aware routing.
+    pub(crate) zone: Option<Arc<str>>,
+}
+
+impl WeightedEndpoint {
+    /// Construct a minimal endpoint for use in tests and strategies that don't
+    /// need metadata/zone/priority.
+    #[cfg(test)]
+    pub(crate) fn simple(address: Arc<str>, index: usize, weight: u32) -> Self {
+        Self {
+            address,
+            index,
+            weight,
+            metadata: HashMap::new(),
+            priority: 0,
+            zone: None,
+        }
+    }
 }
 
 /// Build a [`WeightedEndpoint`] list from a cluster's endpoints.
@@ -41,6 +66,9 @@ pub(crate) fn build_weighted_endpoints(cluster: &Cluster) -> Vec<WeightedEndpoin
             address: Arc::from(ep.address()),
             weight: ep.weight(),
             index: i,
+            metadata: ep.metadata().clone(),
+            priority: ep.priority(),
+            zone: ep.zone().map(Arc::from),
         })
         .collect()
 }
@@ -72,6 +100,9 @@ mod tests {
                 Endpoint::Weighted {
                     address: "10.0.0.2:80".to_owned(),
                     weight: 3,
+                    metadata: HashMap::new(),
+                    priority: 0,
+                    zone: None,
                 },
                 Endpoint::from("10.0.0.3:80"),
             ],

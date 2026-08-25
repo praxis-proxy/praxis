@@ -51,10 +51,15 @@ const REWRITE_FILTERS: &[&str] = &["path_rewrite", "url_rewrite"];
 
 /// `load_balancer` without a filter that sets `ctx.cluster` will fail
 /// every request with "no cluster selected".
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_lb_without_cluster_selector(filters: &[PipelineFilter], errors: &mut Vec<String>) {
     for (i, filter) in filters.iter().enumerate() {
-        if filter.filter.name() == "load_balancer" && !filters[..i].iter().any(|f| f.filter.selects_cluster()) {
+        if filter.filter.name() == "load_balancer"
+            && !filters
+                .get(..i)
+                .unwrap_or_default()
+                .iter()
+                .any(|f| f.filter.selects_cluster())
+        {
             errors.push(
                 "load_balancer without a preceding router \
                  or cluster-selecting filter; requests will \
@@ -67,7 +72,6 @@ pub(super) fn check_lb_without_cluster_selector(filters: &[PipelineFilter], erro
 }
 
 /// Unconditional `static_response` blocking subsequent filters.
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_unconditional_static_response(
     names: &[&str],
     filters: &[PipelineFilter],
@@ -75,13 +79,13 @@ pub(super) fn check_unconditional_static_response(
 ) {
     for (i, name) in names.iter().enumerate() {
         if *name == "static_response" && i + 1 < names.len() {
-            let conditions = &filters[i].conditions;
-            if conditions.is_empty() {
+            let unconditional = filters.get(i).is_some_and(|pf| pf.conditions.is_empty());
+            if unconditional {
                 errors.push(format!(
                     "unconditional static_response at \
                      position {i} makes subsequent filters \
                      unreachable: {}",
-                    names[i + 1..].join(", ")
+                    names.get(i + 1..).unwrap_or_default().join(", ")
                 ));
             }
         }
@@ -89,18 +93,14 @@ pub(super) fn check_unconditional_static_response(
 }
 
 /// Security filters with request conditions (bypass risk).
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_conditional_security(names: &[&str], filters: &[PipelineFilter], errors: &mut Vec<String>) {
-    for (i, name) in names.iter().enumerate() {
-        if SECURITY_FILTERS.contains(name) {
-            let conditions = &filters[i].conditions;
-            if !conditions.is_empty() {
-                errors.push(format!(
-                    "security filter '{name}' at position {i} has \
-                     request conditions; it will be bypassed for \
-                     non-matching requests"
-                ));
-            }
+    for (i, (name, pf)) in names.iter().zip(filters).enumerate() {
+        if SECURITY_FILTERS.contains(name) && !pf.conditions.is_empty() {
+            errors.push(format!(
+                "security filter '{name}' at position {i} has \
+                 request conditions; it will be bypassed for \
+                 non-matching requests"
+            ));
         }
     }
 }
@@ -108,15 +108,14 @@ pub(super) fn check_conditional_security(names: &[&str], filters: &[PipelineFilt
 /// Security filters with `failure_mode: open` (bypass risk on error).
 ///
 /// When `allow` is `true`, the error is demoted to a warning.
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_open_security_filters(
     names: &[&str],
     filters: &[PipelineFilter],
     allow: bool,
     errors: &mut Vec<String>,
 ) {
-    for (i, name) in names.iter().enumerate() {
-        if SECURITY_FILTERS.contains(name) && filters[i].failure_mode == FailureMode::Open {
+    for (i, (name, pf)) in names.iter().zip(filters).enumerate() {
+        if SECURITY_FILTERS.contains(name) && pf.failure_mode == FailureMode::Open {
             let msg = format!(
                 "security filter '{name}' at position {i} has \
                  failure_mode: open; runtime errors will bypass \
@@ -225,7 +224,6 @@ pub(super) fn check_misaligned_clusters(filters: &[PipelineFilter], errors: &mut
 }
 
 /// Multiple path rewriting filters (`path_rewrite` / `url_rewrite`).
-#[expect(clippy::indexing_slicing, reason = "checked before usage")]
 pub(super) fn check_duplicate_rewrite_filters(names: &[&str], entries: &[FilterEntry], errors: &mut Vec<String>) {
     let rewrite_indices: Vec<usize> = names
         .iter()
@@ -234,15 +232,13 @@ pub(super) fn check_duplicate_rewrite_filters(names: &[&str], entries: &[FilterE
         .map(|(i, _)| i)
         .collect();
 
-    if rewrite_indices.len() < 2 {
+    let Some((&first_idx, rest)) = rewrite_indices.split_first() else {
         return;
-    }
+    };
+    let first_name = names.get(first_idx).copied().unwrap_or_default();
 
-    let first_idx = rewrite_indices[0];
-    let first_name = names[first_idx];
-
-    for &idx in &rewrite_indices[1..] {
-        let later_name = names[idx];
+    for &idx in rest {
+        let later_name = names.get(idx).copied().unwrap_or_default();
         let allows_override = has_allow_rewrite_override(entries, idx);
 
         if allows_override {
@@ -372,7 +368,6 @@ pub(super) fn check_router_without_lb(names: &[&str], warnings: &mut Vec<String>
 }
 
 /// All routers conditional with no unconditional fallback.
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_all_routers_conditional(names: &[&str], filters: &[PipelineFilter], warnings: &mut Vec<String>) {
     let router_indices: Vec<usize> = names
         .iter()
@@ -385,7 +380,9 @@ pub(super) fn check_all_routers_conditional(names: &[&str], filters: &[PipelineF
         return;
     }
 
-    let all_conditional = router_indices.iter().all(|&i| !filters[i].conditions.is_empty());
+    let all_conditional = router_indices
+        .iter()
+        .all(|&i| filters.get(i).is_some_and(|pf| !pf.conditions.is_empty()));
 
     if all_conditional {
         warnings.push(

@@ -311,6 +311,9 @@ fn per_ip_eviction_skips_when_below_threshold() {
         rate,
         burst,
         burst_string: (burst as u64).to_string(),
+        header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
+        header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
+        header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
         epoch: Instant::now(),
     };
     filter.maybe_evict(&state, 999_999_999_999);
@@ -451,6 +454,9 @@ fn hard_cap_rejects_new_ips() {
         rate,
         burst,
         burst_string: (burst as u64).to_string(),
+        header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
+        header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
+        header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
         epoch: Instant::now(),
     };
 
@@ -482,6 +488,9 @@ fn hard_cap_allows_known_ips() {
         rate,
         burst,
         burst_string: (burst as u64).to_string(),
+        header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
+        header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
+        header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
         epoch: Instant::now(),
     };
 
@@ -600,6 +609,9 @@ fn make_eviction_filter(rate: f64, burst: f64) -> RateLimitFilter {
         rate,
         burst,
         burst_string: (burst as u64).to_string(),
+        header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
+        header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
+        header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
         epoch: Instant::now(),
     }
 }
@@ -617,6 +629,9 @@ fn make_filter(mode: &str, rate: f64, burst: u32) -> RateLimitFilter {
         rate,
         burst: burst_f,
         burst_string: u64::from(burst).to_string(),
+        header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
+        header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
+        header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
         epoch: Instant::now(),
     }
 }

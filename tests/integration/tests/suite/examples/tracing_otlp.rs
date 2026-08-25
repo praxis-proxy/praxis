@@ -1,25 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2026 Praxis Contributors
 
-//! Functional test for the OTLP tracing example config.
-//!
-//! Verifies the proxy starts and serves traffic with the `otel` feature
-//! enabled and an OTLP endpoint configured via YAML. The batch exporter
-//! buffers spans internally when no collector is reachable, so no
-//! external service is needed for this test.
-//!
-//! Note: env var fallback (`OTEL_EXPORTER_OTLP_ENDPOINT`) is tested via
-//! pure unit tests in `TelemetryConfig::resolved()`. A full integration
-//! test for env var → OTLP activation would require spawning the proxy
-//! binary as a subprocess, which is out of scope for this PR.
+//! Functional tests for the OTLP tracing example config.
 
 use std::collections::HashMap;
 
 use praxis_test_utils::{free_port, http_get, start_proxy};
-
-// -----------------------------------------------------------------------------
-// Tests
-// -----------------------------------------------------------------------------
 
 #[test]
 fn tracing_otlp() {
@@ -30,3 +16,7 @@ fn tracing_otlp() {
     let (status, _body) = http_get(proxy.addr(), "/", None);
     assert_eq!(status, 200, "proxy with OTLP tracing config should serve requests");
 }
+
+// The span-export test (`otlp_exporter_delivers_spans`) installs a process-
+// global tracing subscriber, so it lives in its own test binary
+// (`tests/otlp_exporter.rs`) rather than in this shared `suite` process.

@@ -560,6 +560,7 @@ fn route_matches_request_path_only_hit() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         route_matches_request(&resolved, "/api/users", None, &HeaderMap::new(), false),
@@ -574,6 +575,7 @@ fn route_matches_request_path_miss() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         !route_matches_request(&resolved, "/other", None, &HeaderMap::new(), false),
@@ -596,6 +598,7 @@ fn route_matches_request_host_hit() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         route_matches_request(&resolved, "/", Some("example.com"), &HeaderMap::new(), false),
@@ -618,6 +621,7 @@ fn route_matches_request_host_miss() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         !route_matches_request(&resolved, "/", Some("other.com"), &HeaderMap::new(), false),
@@ -640,6 +644,7 @@ fn route_matches_request_host_miss_when_no_host() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         !route_matches_request(&resolved, "/", None, &HeaderMap::new(), false),
@@ -662,6 +667,7 @@ fn route_matches_request_header_hit() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-key", HeaderValue::from_static("val"));
@@ -686,6 +692,7 @@ fn route_matches_request_header_miss() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-key", HeaderValue::from_static("wrong"));
@@ -710,6 +717,7 @@ fn route_matches_request_compound() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-ver", HeaderValue::from_static("2"));
@@ -837,6 +845,7 @@ fn route_matches_request_empty_headers_constraint() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-anything", HeaderValue::from_static("whatever"));
@@ -1205,6 +1214,32 @@ async fn on_request_rewritten_path_no_match_still_rejects() {
     assert!(
         ctx.cluster.is_none(),
         "cluster should remain unset when rewritten path matches nothing"
+    );
+}
+
+#[tokio::test]
+async fn on_request_rewritten_path_with_query_matches_exact_route() {
+    // A rewrite filter stores "<path>?<query>" in rewritten_path. The router
+    // must match on the path only; otherwise a query-bearing request misses
+    // the exact route and is silently diverted to the catch-all.
+    let router = make_router(vec![exact_route("/v1/users", "users"), prefix_route("/", "default")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/api/v1/users?page=2");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.rewritten_path = Some("/v1/users?page=2".to_owned());
+    let action = router.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "query-bearing rewritten path should still match the exact route"
+    );
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("users"),
+        "exact route must be selected despite the trailing query string"
+    );
+    assert_eq!(
+        ctx.rewritten_path.as_deref(),
+        Some("/v1/users?page=2"),
+        "rewritten_path must be left intact for upstream forwarding"
     );
 }
 

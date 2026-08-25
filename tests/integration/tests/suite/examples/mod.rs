@@ -7,9 +7,11 @@ mod test_utils;
 #[expect(unreachable_pub)]
 pub use test_utils::load_example_config;
 
+mod access_log_fields;
 mod access_logging;
 mod admin_interface;
 mod api_key_filter;
+mod authority_override;
 mod basic_reverse_proxy;
 mod branching;
 mod canary_routing;
@@ -47,18 +49,23 @@ mod pipeline;
 mod policy;
 #[cfg(feature = "policy-engine")]
 mod policy_http;
+mod priority_lb;
 mod process_logging;
 mod protocol_examples;
 mod protocols;
 mod random;
 mod redirect;
 mod retry_policy;
+mod ring_hash;
 mod round_robin;
 mod security_examples;
 mod session_affinity;
 mod static_response;
+mod sticky_sessions;
 mod stream_buffer;
+mod subset_lb;
 mod timeout;
+mod trace_context;
 #[cfg(feature = "otel")]
 mod tracing_otlp;
 mod traffic_management_examples;
@@ -66,3 +73,4 @@ mod url_rewriting;
 mod virtual_hosts;
 mod websocket;
 mod weighted_load_balancing;
+mod zone_aware;

@@ -109,6 +109,7 @@ impl FilterPipeline {
             health_registry: None,
             id_generator: Arc::new(IdGenerator::new()),
             kv_stores: None,
+            session_stores: None,
             pipeline_extensions: Vec::new(),
             record_filter_duration_metrics: false,
             subrequest_client: None,

@@ -551,6 +551,223 @@ clusters:
 }
 
 #[test]
+fn accept_cluster_with_authority() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: api
+    endpoints: ["10.0.0.1:443"]
+    http:
+      authority: "api.example.com"
+"#;
+    let config = Config::from_yaml(yaml).unwrap();
+    assert_eq!(
+        config.clusters[0].http.authority.as_deref(),
+        Some("api.example.com"),
+        "authority should be parsed"
+    );
+}
+
+#[test]
+fn accept_cluster_with_authority_and_tls_sni_independent() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: api
+    endpoints: ["10.0.0.1:443"]
+    http:
+      authority: "api.example.com:8443"
+    tls:
+      sni: "backend.internal.com"
+"#;
+    let config = Config::from_yaml(yaml).unwrap();
+    assert_eq!(
+        config.clusters[0].http.authority.as_deref(),
+        Some("api.example.com:8443"),
+        "authority should be independent of SNI"
+    );
+    assert_eq!(
+        config.clusters[0].tls.as_ref().unwrap().sni.as_deref(),
+        Some("backend.internal.com"),
+        "SNI should be independent of authority"
+    );
+}
+
+#[test]
+fn accept_cluster_without_authority_preserves_default() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80"]
+"#;
+    let config = Config::from_yaml(yaml).unwrap();
+    assert!(
+        config.clusters[0].http.authority.is_none(),
+        "authority should default to None"
+    );
+}
+
+#[test]
+fn reject_authority_with_scheme() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:443"]
+    http:
+      authority: "https://api.example.com"
+"#;
+    let err = Config::from_yaml(yaml).unwrap_err();
+    assert!(
+        err.to_string().contains("not a valid HTTP authority"),
+        "should reject authority with scheme: {err}"
+    );
+}
+
+#[test]
+fn reject_authority_with_path() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:443"]
+    http:
+      authority: "api.example.com/v1"
+"#;
+    let err = Config::from_yaml(yaml).unwrap_err();
+    assert!(
+        err.to_string().contains("not a valid HTTP authority"),
+        "should reject authority with path: {err}"
+    );
+}
+
+#[test]
+fn reject_authority_empty() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:443"]
+    http:
+      authority: ""
+"#;
+    let err = Config::from_yaml(yaml).unwrap_err();
+    assert!(
+        err.to_string().contains("must not be empty"),
+        "should reject empty authority: {err}"
+    );
+}
+
+#[test]
+fn authority_roundtrips_via_serde() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: api
+    endpoints: ["10.0.0.1:443"]
+    http:
+      authority: "api.example.com"
+"#;
+    let config = Config::from_yaml(yaml).unwrap();
+    let value = serde_yaml::to_value(&config.clusters[0]).unwrap();
+    let back: praxis_core::config::Cluster = serde_yaml::from_value(value).unwrap();
+    assert_eq!(
+        back.http.authority.as_deref(),
+        Some("api.example.com"),
+        "authority should roundtrip through serde"
+    );
+}
+
+#[test]
+fn accept_two_clusters_mixed_authority() {
+    let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: with-authority
+    endpoints: ["10.0.0.1:443"]
+    http:
+      authority: "api.example.com"
+  - name: without-authority
+    endpoints: ["10.0.0.2:80"]
+"#;
+    let config = Config::from_yaml(yaml).unwrap();
+    assert_eq!(
+        config.clusters[0].http.authority.as_deref(),
+        Some("api.example.com"),
+        "first cluster should have authority"
+    );
+    assert!(
+        config.clusters[1].http.authority.is_none(),
+        "second cluster should have no authority"
+    );
+}
+
+#[test]
 fn accept_consistent_hash_without_header() {
     let yaml = r#"
 listeners:

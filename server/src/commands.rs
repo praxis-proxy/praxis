@@ -41,7 +41,15 @@ pub(crate) fn validate_config_for_startup(config: &Config) -> Result<(), Box<dyn
         praxis_core::subrequest::SubRequestConnector::new(128, None),
         ceiling,
     );
-    praxis::resolve_pipelines(config, &registry, &health_registry, &kv_stores, &subrequest_client)?;
+    let session_stores = std::sync::Arc::new(praxis_filter::SessionStoreRegistry::new());
+    praxis::resolve_pipelines(
+        config,
+        &registry,
+        &health_registry,
+        &kv_stores,
+        &session_stores,
+        &subrequest_client,
+    )?;
     Ok(())
 }
 

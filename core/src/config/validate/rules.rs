@@ -87,10 +87,24 @@ impl Config {
         validate_cluster_names(&self.clusters)?;
         validate_clusters(&self.clusters, &self.insecure_options)?;
         validate_inline_clusters(&self.filter_chains, &self.insecure_options)?;
-        validate_runtime_config(&self.runtime)?;
+        self.validate_runtime()?;
         validate_shutdown_timeout(self.shutdown_timeout_secs)?;
         validate_telemetry(&self.telemetry)?;
 
+        Ok(())
+    }
+
+    /// Validate runtime-section constraints (threads, pools, limits, logging).
+    fn validate_runtime(&self) -> Result<(), ProxyError> {
+        validate_upstream_ca_file(self.runtime.upstream_ca_file.as_deref())?;
+        validate_runtime_threads(self.runtime.threads)?;
+        validate_runtime_max_connections(self.runtime.max_connections)?;
+        validate_keepalive_pool_size(self.runtime.upstream_keepalive_pool_size)?;
+        validate_max_memory_bytes(self.runtime.max_memory_bytes)?;
+        validate_subrequest_max_connections(self.runtime.subrequest_max_connections)?;
+        validate_subrequest_circuit_breaker(self.runtime.subrequest_circuit_breaker.as_ref())?;
+        validate_global_queue_interval(self.runtime.global_queue_interval)?;
+        validate_logging(&self.runtime.logging)?;
         Ok(())
     }
 }
@@ -384,20 +398,6 @@ fn validate_global_queue_interval(interval: Option<u32>) -> Result<(), ProxyErro
             "runtime.global_queue_interval must be > 0".to_owned(),
         ));
     }
-    Ok(())
-}
-
-/// Validate `runtime.*` fields applied at startup.
-fn validate_runtime_config(runtime: &crate::config::RuntimeConfig) -> Result<(), ProxyError> {
-    validate_upstream_ca_file(runtime.upstream_ca_file.as_deref())?;
-    validate_runtime_threads(runtime.threads)?;
-    validate_runtime_max_connections(runtime.max_connections)?;
-    validate_keepalive_pool_size(runtime.upstream_keepalive_pool_size)?;
-    validate_max_memory_bytes(runtime.max_memory_bytes)?;
-    validate_subrequest_max_connections(runtime.subrequest_max_connections)?;
-    validate_subrequest_circuit_breaker(runtime.subrequest_circuit_breaker.as_ref())?;
-    validate_global_queue_interval(runtime.global_queue_interval)?;
-    validate_logging(&runtime.logging)?;
     Ok(())
 }
 

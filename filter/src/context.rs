@@ -253,6 +253,9 @@ pub struct HttpFilterContext<'a> {
     /// Named key-value stores for runtime mappings.
     pub kv_stores: Option<&'a KvStoreRegistry>,
 
+    /// Per-cluster session stores for sticky session affinity.
+    pub session_stores: Option<&'a Arc<crate::SessionStoreRegistry>>,
+
     /// Shared sub-request client for iterative sub-requests.
     pub subrequest_client: Option<&'a praxis_core::subrequest::SubRequestClient>,
 
@@ -327,6 +330,13 @@ pub struct HttpFilterContext<'a> {
 
     /// Reselector for alternate-host retries after connect/response failure.
     pub endpoint_reselector: Option<Arc<crate::EndpointReselector>>,
+    /// Address of an endpoint pinned by session affinity.
+    ///
+    /// Set by the sticky sessions filter on cache hit. The load
+    /// balancer consumes this to build a proper [`Upstream`] with
+    /// the cluster's TLS and connection options, then clears it.
+    /// This avoids duplicating connection config across filters.
+    pub pinned_endpoint_address: Option<Arc<str>>,
 
     /// Wall-clock time source for timestamp generation.
     pub time_source: &'a dyn TimeSource,
@@ -827,6 +837,7 @@ mod tests {
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.upstream = Some(Upstream {
             address: Arc::from("10.0.0.1:8080"),
+            authority: None,
             tls: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         });

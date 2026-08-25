@@ -42,7 +42,7 @@ struct ActiveFile {
 
 impl SizeRotatingWriter {
     /// Open or create the log file and initialize rotation state.
-    pub(crate) fn open(path: impl Into<PathBuf>, max_bytes: u64, max_files: u32) -> Result<Self, ProxyError> {
+    pub(crate) fn open<P: Into<PathBuf>>(path: P, max_bytes: u64, max_files: u32) -> Result<Self, ProxyError> {
         let path = path.into();
         ensure_parent_dir(&path)?;
         let file = open_append(&path)
@@ -60,7 +60,7 @@ impl SizeRotatingWriter {
     ///
     /// On failure after the active handle is dropped, reopens the original path
     /// so logging continues without rotation instead of leaving `file` unset.
-    /// A failed roll that degrades to append-only emits `tracing::warn!`.
+    /// A failed roll that degrades to append-only emits a stderr warning.
     fn roll_locked(state: &mut ActiveFile, path: &Path, max_files: u32) -> io::Result<()> {
         let previous_size = state.size;
         if let Some(mut file) = state.file.take()
@@ -79,7 +79,7 @@ impl SizeRotatingWriter {
         }
     }
 
-    /// Reopen after a failed roll and emit `tracing::warn!` when append-only continues.
+    /// Reopen after a failed roll and emit a stderr warning when append-only continues.
     fn restore_or_warn_after_failed_roll(
         state: &mut ActiveFile,
         path: &Path,
@@ -89,19 +89,11 @@ impl SizeRotatingWriter {
         let roll_error = roll_err.to_string();
         match Self::restore_active_after_failed_roll(state, path, fallback_size, roll_err) {
             Ok(()) => {
-                tracing::warn!(
-                    path = %path.display(),
-                    error = %roll_error,
-                    "log size rotation failed; continuing to append to the active file"
-                );
+                emit_rotation_degraded_warning(path, &roll_error);
                 Ok(())
             },
             Err(e) => {
-                tracing::error!(
-                    path = %path.display(),
-                    error = %e,
-                    "log size rotation failed and could not reopen the active file"
-                );
+                emit_rotation_unrecoverable_error(path, &e);
                 Err(e)
             },
         }
@@ -110,6 +102,15 @@ impl SizeRotatingWriter {
     /// Shift archives and rename the active file to `.1`.
     fn perform_roll(path: &Path, max_files: u32) -> io::Result<()> {
         prune_and_shift(path, max_files)?;
+        if max_files <= 1 {
+            // Retain only the active file: discard the rolled-out content
+            // instead of renaming it to `.1`, which would leave active + `.1`
+            // (two files) for a configured limit of one.
+            if path.exists() {
+                fs::remove_file(path)?;
+            }
+            return Ok(());
+        }
         fs::rename(path, rotated_path(path, 1))?;
         Ok(())
     }
@@ -152,6 +153,61 @@ impl SizeRotatingWriter {
 }
 
 // -----------------------------------------------------------------------------
+// Rotation failure diagnostics
+// -----------------------------------------------------------------------------
+
+/// Format the append-only degrade warning for a failed size roll.
+fn rotation_degraded_warning(path: &Path, roll_error: &str) -> String {
+    format!(
+        "warning: log size rotation failed for '{}': {roll_error}; \
+         continuing to append to the active file",
+        path.display()
+    )
+}
+
+/// Format the unrecoverable rotation failure message.
+fn rotation_unrecoverable_error(path: &Path, error: &impl std::fmt::Display) -> String {
+    format!(
+        "error: log size rotation failed for '{}' and could not reopen the active file: {error}",
+        path.display()
+    )
+}
+
+/// Emit a rotation degrade warning on stderr.
+///
+/// Uses `eprintln!` instead of `tracing` because this runs on the blocking
+/// file-writer path inside the fmt layer's `on_event` dispatch, where nested
+/// tracing events are dropped by the per-thread reentrancy guard.
+#[expect(clippy::print_stderr, reason = "inside tracing write path")]
+fn emit_rotation_degraded_warning(path: &Path, roll_error: &str) {
+    let message = rotation_degraded_warning(path, roll_error);
+    eprintln!("{message}");
+    record_rotation_diagnostic(message);
+}
+
+/// Emit an unrecoverable rotation failure on stderr.
+#[expect(clippy::print_stderr, reason = "inside tracing write path")]
+fn emit_rotation_unrecoverable_error(path: &Path, error: &impl std::fmt::Display) {
+    let message = rotation_unrecoverable_error(path, error);
+    eprintln!("{message}");
+    record_rotation_diagnostic(message);
+}
+
+/// Record rotation diagnostics for unit tests (no-op in production builds).
+fn record_rotation_diagnostic(message: String) {
+    #[cfg(test)]
+    if let Ok(mut diagnostics) = ROTATION_DIAGNOSTICS.lock() {
+        diagnostics.push(message);
+    }
+
+    #[cfg(not(test))]
+    drop(message);
+}
+
+#[cfg(test)]
+static ROTATION_DIAGNOSTICS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+// -----------------------------------------------------------------------------
 // Write
 // -----------------------------------------------------------------------------
 
@@ -167,8 +223,14 @@ impl Write for SizeRotatingWriter {
             .ok_or_else(|| io::Error::other("size rotation writer file not open"))?;
         let written = file.write(buf)?;
         state.size += written as u64;
-        if state.size >= self.max_bytes {
-            Self::roll_locked(&mut state, &self.path, self.max_files)?;
+        // The bytes are already committed to the active file. If the roll
+        // fails, honor io::Write by still reporting them as written rather
+        // than returning Err (which a blocking caller could retry, duplicating
+        // the line). size stays over the threshold, so the next write retries
+        // the roll.
+        if state.size >= self.max_bytes && Self::roll_locked(&mut state, &self.path, self.max_files).is_err() {
+            drop(state);
+            return Ok(written);
         }
         drop(state);
         Ok(written)
@@ -274,6 +336,10 @@ mod tests {
 
     use super::*;
 
+    fn clear_rotation_diagnostics() {
+        ROTATION_DIAGNOSTICS.lock().expect("rotation diagnostic lock").clear();
+    }
+
     #[test]
     fn rolls_and_prunes_to_max_files() {
         let dir = tempfile::tempdir().unwrap();
@@ -296,6 +362,25 @@ mod tests {
     }
 
     #[test]
+    fn max_files_one_keeps_only_active() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proxy.log");
+        let mut writer = SizeRotatingWriter::open(&path, 8, 1).unwrap();
+
+        writer.write_all(b"12345678").unwrap();
+        assert!(path.exists(), "active file should exist after roll");
+        assert!(
+            list_rotated_indices(&path).is_empty(),
+            "max_files = 1 must retain only the active file, with no .1 archive"
+        );
+
+        // A second roll still leaves just the active file.
+        writer.write_all(b"abcdefgh").unwrap();
+        assert!(path.exists());
+        assert!(list_rotated_indices(&path).is_empty());
+    }
+
+    #[test]
     fn active_file_is_exact_path() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nested").join("proxy.log");
@@ -308,6 +393,7 @@ mod tests {
 
     #[test]
     fn continues_logging_when_roll_fails() {
+        clear_rotation_diagnostics();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("proxy.log");
         let mut writer = SizeRotatingWriter::open(&path, 8, 3).unwrap();
@@ -316,27 +402,75 @@ mod tests {
         assert_eq!(list_rotated_indices(&path), vec![1], "first roll should succeed");
         block_subsequent_rolls(dir.path());
 
-        let warnings = capture_warnings(|| {
-            writer
-                .write_all(b"abcdefgh")
-                .expect("should keep writing when roll fails");
-            writer.flush().expect("flush after failed roll");
+        writer
+            .write_all(b"abcdefgh")
+            .expect("should keep writing when roll fails");
+        writer.flush().expect("flush after failed roll");
+
+        assert_append_only_after_failed_roll(&path);
+        assert!(
+            rotation_diagnostic_present(),
+            "operator should see a stderr warning when rotation degrades"
+        );
+    }
+
+    #[test]
+    fn failed_roll_diagnostic_reaches_stderr_under_subscriber_dispatch() {
+        clear_rotation_diagnostics();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("proxy.log");
+        let mut writer = SizeRotatingWriter::open(&path, 8, 3).unwrap();
+        writer.write_all(b"12345678").unwrap();
+        block_subsequent_rolls(dir.path());
+
+        let layer = RollDuringDispatch(Arc::new(Mutex::new(writer)));
+        let tracing_warnings = capture_warnings(|| {
+            let subscriber = tracing_subscriber::registry().with(layer);
+            tracing::subscriber::with_default(subscriber, || {
+                tracing::info!("trigger roll during dispatch");
+            });
         });
 
-        let contents = fs::read_to_string(&path).expect("active log readable");
+        assert!(
+            rotation_diagnostic_present(),
+            "stderr diagnostic should fire under subscriber dispatch"
+        );
+        assert!(
+            !tracing_warnings.iter().any(|w| w.contains("log size rotation failed")),
+            "tracing warn would be dropped here; got: {tracing_warnings:?}"
+        );
+        assert_append_only_after_failed_roll(&path);
+    }
+
+    fn rotation_diagnostic_present() -> bool {
+        ROTATION_DIAGNOSTICS
+            .lock()
+            .expect("rotation diagnostic lock")
+            .iter()
+            .any(|m| m.contains("log size rotation failed"))
+    }
+
+    fn assert_append_only_after_failed_roll(path: &Path) {
+        let contents = fs::read_to_string(path).expect("active log readable");
         assert!(
             contents.contains("abcdefgh"),
             "failed roll should degrade to append-only; got: {contents:?}"
         );
         assert_eq!(
-            list_rotated_indices(&path),
+            list_rotated_indices(path),
             vec![1],
             "failed roll should not create a new archive"
         );
-        assert!(
-            warnings.iter().any(|w| w.contains("log size rotation failed")),
-            "operator should see a warning when rotation degrades; got: {warnings:?}"
-        );
+    }
+
+    struct RollDuringDispatch(Arc<Mutex<SizeRotatingWriter>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for RollDuringDispatch {
+        fn on_event(&self, _event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if let Ok(mut writer) = self.0.lock() {
+                drop(writer.write_all(b"abcdefgh"));
+            }
+        }
     }
 
     #[cfg(unix)]

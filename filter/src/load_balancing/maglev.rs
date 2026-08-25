@@ -306,16 +306,8 @@ mod tests {
     #[test]
     fn weight_stability() {
         let eps = vec![
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.1:80"),
-                index: 0,
-                weight: 3,
-            },
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.2:80"),
-                index: 1,
-                weight: 1,
-            },
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 3),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
         ];
         let mg = Maglev::new(eps, None);
 
@@ -433,11 +425,7 @@ mod tests {
     /// Build `n` equal-weight endpoints `10.0.0.{i+1}:80`.
     fn endpoints(n: usize) -> Vec<WeightedEndpoint> {
         (0..n)
-            .map(|i| WeightedEndpoint {
-                address: Arc::from(format!("10.0.0.{}:80", i + 1).as_str()),
-                index: i,
-                weight: 1,
-            })
+            .map(|i| WeightedEndpoint::simple(Arc::from(format!("10.0.0.{}:80", i + 1).as_str()), i, 1))
             .collect()
     }
 

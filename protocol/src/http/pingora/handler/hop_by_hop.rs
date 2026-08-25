@@ -124,13 +124,26 @@ pub(crate) fn is_websocket_upgrade(value: &str) -> bool {
 
 /// Whether a header map's `Upgrade` header indicates a `WebSocket` upgrade.
 ///
-/// Extracts the `Upgrade` header value and delegates to
-/// [`is_websocket_upgrade`].
+/// Returns `true` only when there is exactly one `Upgrade` header whose
+/// value is exactly `websocket` (via [`is_websocket_upgrade`]). Zero
+/// headers, or two or more `Upgrade` headers, yield `false` so the strip
+/// path removes them.
+///
+/// Reading only the first value (e.g. via [`HeaderMap::get`]) would let a
+/// client smuggle a second protocol past the WebSocket check: a request
+/// carrying `Upgrade: websocket` followed by `Upgrade: h2c` would be seen
+/// as a clean WebSocket upgrade, and [`preserve_for_upgrade`] would then
+/// forward the entire (multi-valued) `Upgrade` header — including the
+/// `h2c` token — to the backend, defeating the h2c-smuggling protection.
 pub(crate) fn has_websocket_upgrade(headers: &HeaderMap) -> bool {
-    headers
-        .get(http::header::UPGRADE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(is_websocket_upgrade)
+    let mut values = headers.get_all(http::header::UPGRADE).iter();
+    match (values.next(), values.next()) {
+        // Exactly one Upgrade header; value must be exactly `websocket`.
+        (Some(value), None) => value.to_str().is_ok_and(is_websocket_upgrade),
+        // Zero, or two or more Upgrade headers: not a clean WebSocket
+        // upgrade, so let the caller strip every Upgrade value.
+        _ => false,
+    }
 }
 
 /// Snapshot `Connection` header values before they are removed.
@@ -436,6 +449,33 @@ mod tests {
         assert!(
             !has_websocket_upgrade(&headers),
             "should return false for non-websocket upgrade"
+        );
+    }
+
+    #[test]
+    fn duplicate_upgrade_headers_are_not_websocket() {
+        // A client sending `Upgrade: websocket` followed by `Upgrade: h2c`
+        // must not be treated as a clean WebSocket upgrade: reading only the
+        // first value would preserve the whole (multi-valued) Upgrade header
+        // and smuggle the h2c token to the backend.
+        let mut headers = HeaderMap::new();
+        headers.append("upgrade", "websocket".parse().unwrap());
+        headers.append("upgrade", "h2c".parse().unwrap());
+        assert!(
+            !has_websocket_upgrade(&headers),
+            "duplicate Upgrade headers must not be recognized as a WebSocket upgrade (h2c smuggling)"
+        );
+    }
+
+    #[test]
+    fn duplicate_upgrade_headers_websocket_first_or_last() {
+        // Order must not matter: h2c before or after websocket both fail.
+        let mut headers = HeaderMap::new();
+        headers.append("upgrade", "h2c".parse().unwrap());
+        headers.append("upgrade", "websocket".parse().unwrap());
+        assert!(
+            !has_websocket_upgrade(&headers),
+            "duplicate Upgrade headers must not be recognized regardless of order"
         );
     }
 

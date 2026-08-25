@@ -213,9 +213,18 @@ pub struct PingoraRequestCtx {
     ///
     /// Created during `request_filter` with OpenTelemetry HTTP semantic
     /// convention attributes. Response-phase attributes
-    /// (`http.response.status_code`, `upstream.address`, `upstream.cluster`)
-    /// are recorded in the `logging` hook before the span is dropped.
+    /// (`http.response.status_code`, `http.route`, `error.type`,
+    /// `upstream.address`, `upstream.cluster`) are recorded in the
+    /// `logging` hook before the span is dropped.
     pub request_span: Span,
+
+    /// Child span covering upstream request/response exchange.
+    ///
+    /// Created in `connected_to_upstream` after the connection is
+    /// established (or reused). Response-phase attributes
+    /// (`http.response.status_code`, `http.response.body.size`) are
+    /// recorded in the `logging` hook before the span is dropped.
+    pub upstream_exchange_span: Span,
 
     /// When this request was received.
     pub request_start: Instant,
@@ -348,6 +357,7 @@ macro_rules! filter_context {
             health_registry: $pipeline.health_registry(),
             id_generator: $pipeline.id_generator(),
             kv_stores: $pipeline.kv_stores(),
+            session_stores: $pipeline.session_stores(),
             subrequest_client: $pipeline.subrequest_client(),
             subrequest_response_mode: praxis_filter::SubRequestResponseMode::Buffered,
             request: $request,
@@ -366,8 +376,9 @@ macro_rules! filter_context {
             cluster_retry_state: $ctx.cluster_retry_state.clone(),
             cluster_retry_state_released: $ctx.cluster_retry_state_released,
             endpoint_reselector: $ctx.endpoint_reselector.clone(),
+            pinned_endpoint_address: None,
             time_source: $pipeline.time_source(),
-            upstream: $ctx.upstream.take(),
+            upstream: $ctx.upstream.take().or_else(|| $ctx.upstream_for_retry.clone()),
         }
     }};
 }
@@ -538,6 +549,7 @@ impl Default for PingoraRequestCtx {
             request_snapshot: None,
             request_span: Span::none(),
             request_start: Instant::now(),
+            upstream_exchange_span: Span::none(),
             response_body_buffer: None,
             response_body_bytes: 0,
             response_body_mode: BodyMode::Stream,
@@ -646,6 +658,15 @@ mod tests {
     }
 
     #[test]
+    fn default_state_upstream_exchange_span_is_disabled() {
+        let ctx = default_ctx();
+        assert!(
+            ctx.upstream_exchange_span.is_disabled(),
+            "default upstream_exchange_span should be a disabled (none) span"
+        );
+    }
+
+    #[test]
     fn default_state_snapshots_are_none() {
         let ctx = default_ctx();
         assert!(
@@ -687,6 +708,7 @@ mod tests {
         let mut ctx = default_ctx();
         let upstream = Upstream {
             address: Arc::from("10.0.0.1:80"),
+            authority: None,
             tls: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         };

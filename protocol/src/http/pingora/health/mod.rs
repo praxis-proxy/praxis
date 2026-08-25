@@ -6,6 +6,7 @@
 /// Listener metadata for `GET /api/pipelines`.
 pub mod listener_meta;
 /// `GET /api/pipelines` admin dispatch.
+mod log_level_admin;
 mod pipelines_admin;
 /// Health check probe functions (HTTP and TCP).
 pub mod probe;

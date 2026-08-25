@@ -39,10 +39,11 @@ pub use bootstrap::{DEFAULT_CONFIG, load_config};
 pub use branch_chain::{BranchChainConfig, BranchCondition};
 pub use chain_ref::ChainRef;
 pub use cluster::{
-    BackoffConfig, BudgetPercent, Cluster, ConsistentHashOpts, DEFAULT_MAX_RETRIES, DEFAULT_RETRY_BODY_LIMIT_BYTES,
-    Endpoint, HealthCheckConfig, HealthCheckType, HttpStatusCode, LoadBalancerStrategy, MAX_RETRY_BODY_LIMIT_BYTES,
-    MaglevOpts, ParameterisedStrategy, RetriableCondition, RetryBodyLimit, RetryBudgetConfig, RetryPolicy,
-    SimpleStrategy,
+    BackoffConfig, BudgetPercent, Cluster, ClusterHttpOptions, ConsistentHashOpts, DEFAULT_MAX_RETRIES,
+    DEFAULT_RETRY_BODY_LIMIT_BYTES, Endpoint, HashFunction, HealthCheckConfig, HealthCheckType, HttpStatusCode,
+    LoadBalancerStrategy, MAX_EFFECTIVE_RETRIES, MAX_RETRY_BODY_LIMIT_BYTES, MaglevOpts, ParameterisedStrategy,
+    PriorityOpts, RetriableCondition, RetryBodyLimit, RetryBudgetConfig, RetryPolicy, RingHashOpts, SimpleStrategy,
+    SubsetFallbackPolicy, SubsetOpts, ZoneAwareOpts,
 };
 pub use condition::{Condition, ConditionMatch, ResponseCondition, ResponseConditionMatch};
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
@@ -51,6 +52,7 @@ pub use listener::{Listener, ListenerTls, ProtocolKind};
 pub use logging::{DEFAULT_BUFFER_SIZE_LINES, DEFAULT_MAX_LOG_FILES, LogOutput, LogRotation, LoggingConfig};
 pub use metrics::MetricsConfig;
 use parse::check_yaml_safety;
+pub use parse::read_config_file;
 pub use praxis_tls::{CachedClusterTls, ClusterTls};
 pub use route::{PathMatch, Route};
 pub use runtime::{DEFAULT_SUBREQUEST_POOL_SIZE, RuntimeConfig};
@@ -189,12 +191,7 @@ impl Config {
     ///
     /// [`ProxyError::Config`]: crate::errors::ProxyError::Config
     pub fn from_file(path: &Path) -> Result<Self, crate::errors::ProxyError> {
-        parse::check_file_size(path)?;
-        let content = std::fs::read_to_string(path).map_err(|e| {
-            let display = path.display();
-            crate::errors::ProxyError::Config(format!("failed to read {display}: {e}"))
-        })?;
-
+        let content = read_config_file(path)?;
         Self::from_yaml(&content)
     }
 

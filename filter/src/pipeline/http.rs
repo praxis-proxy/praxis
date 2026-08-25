@@ -186,7 +186,6 @@ impl FilterPipeline {
     /// Returns [`FilterError`] if any body filter fails.
     ///
     /// [`BodyDone`]: FilterAction::BodyDone
-    #[expect(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
     #[expect(clippy::too_many_lines, reason = "body hook loop with metrics dispatch")]
     pub async fn execute_http_request_body(
         &self,
@@ -233,7 +232,9 @@ impl FilterPipeline {
                 BodyFilterOutcome::Continue => {},
                 BodyFilterOutcome::Released => released = true,
                 BodyFilterOutcome::BodyDone => {
-                    ctx.body_done_indices[idx] = true;
+                    if let Some(done) = ctx.body_done_indices.get_mut(idx) {
+                        *done = true;
+                    }
                 },
                 BodyFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
             }
@@ -276,7 +277,6 @@ impl FilterPipeline {
     /// # Errors
     ///
     /// Returns [`FilterError`] if any body filter fails.
-    #[expect(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
     #[expect(clippy::too_many_lines, reason = "body hook loop with per-filter skip checks")]
     pub fn execute_http_response_body_with_response_header(
         &self,
@@ -323,7 +323,11 @@ impl FilterPipeline {
             match outcome? {
                 BodyFilterOutcome::Continue => {},
                 BodyFilterOutcome::Released => released = true,
-                BodyFilterOutcome::BodyDone => ctx.body_done_indices[idx] = true,
+                BodyFilterOutcome::BodyDone => {
+                    if let Some(done) = ctx.body_done_indices.get_mut(idx) {
+                        *done = true;
+                    }
+                },
                 BodyFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
             }
         }

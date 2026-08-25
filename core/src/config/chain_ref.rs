@@ -2,6 +2,13 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Chain reference: named or inline chain definition for branch chains.
+//!
+//! A branch references the filters it runs either by name, pointing at a
+//! top-level `filter_chains` entry so a chain can be shared across
+//! branches, or inline, embedding filters directly where reuse is not
+//! needed. This is a config-time (pipelining) construct: named chains
+//! are resolved and concatenated into concrete pipelines at startup, not
+//! selected at request time.
 
 use serde::Deserialize;
 

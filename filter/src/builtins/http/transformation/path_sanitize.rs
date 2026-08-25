@@ -90,7 +90,6 @@ fn normalize(path: &str) -> String {
 }
 
 /// Return true when a path segment is exactly two literal or percent-encoded dots.
-#[expect(clippy::indexing_slicing, reason = "bounds checked by i + 2 < b.len()")]
 fn is_traversal_segment(seg: &str) -> bool {
     if seg == ".." {
         return true;
@@ -98,15 +97,14 @@ fn is_traversal_segment(seg: &str) -> bool {
     let mut dots = 0_u16;
     let mut i = 0;
     let b = seg.as_bytes();
-    while i < b.len() {
-        if b[i] == b'%'
-            && i + 2 < b.len()
-            && b[i + 1].eq_ignore_ascii_case(&b'2')
-            && b[i + 2].eq_ignore_ascii_case(&b'e')
+    while let Some(&c) = b.get(i) {
+        if c == b'%'
+            && b.get(i + 1).is_some_and(|d| d.eq_ignore_ascii_case(&b'2'))
+            && b.get(i + 2).is_some_and(|e| e.eq_ignore_ascii_case(&b'e'))
         {
             dots += 1;
             i += 3;
-        } else if b[i] == b'.' {
+        } else if c == b'.' {
             dots += 1;
             i += 1;
         } else {

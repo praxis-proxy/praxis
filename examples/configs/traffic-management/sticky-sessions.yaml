@@ -1,0 +1,106 @@
+# Sticky Sessions
+#
+# Pins clients to a specific backend across requests. Three persistence
+# modes on three listeners: proxy-managed session cookie (port 8080),
+# client-supplied header key (port 8081), and learn mode (port 8082),
+# which adopts the session cookie the backend itself sets.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/sticky-sessions.yaml
+#   curl -c cookies.txt -b cookies.txt http://localhost:8080/
+#   curl -c cookies.txt -b cookies.txt http://localhost:8080/  # same backend
+#   curl -H 'X-Session-Id: user-1' http://localhost:8081/      # header mode
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+  - name: header-mode
+    address: "127.0.0.1:8081"
+    filter_chains:
+      - header-chain
+  - name: learn-mode
+    address: "127.0.0.1:8082"
+    filter_chains:
+      - learn-chain
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: app
+
+      - filter: sticky_sessions
+        clusters:
+          - name: app
+            type: cookie
+            cookie_name: "_praxis_sticky"
+            ttl_secs: 3600
+            cookie_attributes:
+              path: "/"
+              http_only: true
+            failover: true
+            max_entries: 10000
+            eviction: lru
+
+      - filter: load_balancer
+        clusters:
+          - name: app
+            endpoints:
+              - "127.0.0.1:3001"
+              - "127.0.0.1:3002"
+              - "127.0.0.1:3003"
+
+  - name: header-chain
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: header-app
+
+      - filter: sticky_sessions
+        clusters:
+          - name: header-app
+            type: header
+            header_name: "X-Session-Id"
+            ttl_secs: 3600
+            failover: true
+            max_entries: 10000
+            eviction: lru
+
+      - filter: load_balancer
+        clusters:
+          - name: header-app
+            endpoints:
+              - "127.0.0.1:3011"
+              - "127.0.0.1:3012"
+
+  - name: learn-chain
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: learn-app
+
+      - filter: sticky_sessions
+        clusters:
+          - name: learn-app
+            type: learn
+            cookie_name: "JSESSIONID"
+            ttl_secs: 3600
+            failover: true
+            max_entries: 10000
+            eviction: lru
+
+      - filter: load_balancer
+        clusters:
+          - name: learn-app
+            endpoints:
+              - "127.0.0.1:3021"
+              - "127.0.0.1:3022"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

@@ -159,45 +159,37 @@ pub fn parse_sni(buf: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
 // -----------------------------------------------------------------------------
 
 /// Parse the TLS record header, returning the fragment payload.
-#[expect(clippy::indexing_slicing, reason = "bounds checked before access")]
 fn parse_record_header(buf: &[u8]) -> Result<&[u8], SniParseError> {
     if buf.len() < TLS_RECORD_HEADER_LEN {
         return Err(SniParseError::TooShort);
     }
 
-    if buf[0] != CONTENT_TYPE_HANDSHAKE {
+    if *buf.first().ok_or(SniParseError::TooShort)? != CONTENT_TYPE_HANDSHAKE {
         return Err(SniParseError::NotHandshake);
     }
 
     let record_len = read_u16(buf, 3)? as usize;
     let total = TLS_RECORD_HEADER_LEN + record_len;
 
-    if buf.len() < total {
-        return Err(SniParseError::NeedMoreData);
-    }
-
-    Ok(&buf[TLS_RECORD_HEADER_LEN..total])
+    buf.get(TLS_RECORD_HEADER_LEN..total).ok_or(SniParseError::NeedMoreData)
 }
 
 /// Parse the handshake message header, returning the `ClientHello` body.
-#[expect(clippy::indexing_slicing, reason = "bounds checked before access")]
 fn parse_handshake_header(fragment: &[u8]) -> Result<&[u8], SniParseError> {
     if fragment.len() < HANDSHAKE_HEADER_LEN {
         return Err(SniParseError::NeedMoreData);
     }
 
-    if fragment[0] != HANDSHAKE_TYPE_CLIENT_HELLO {
+    if *fragment.first().ok_or(SniParseError::NeedMoreData)? != HANDSHAKE_TYPE_CLIENT_HELLO {
         return Err(SniParseError::NotClientHello);
     }
 
     let hs_len = read_u24(fragment, 1)? as usize;
     let end = HANDSHAKE_HEADER_LEN + hs_len;
 
-    if fragment.len() < end {
-        return Err(SniParseError::NeedMoreData);
-    }
-
-    Ok(&fragment[HANDSHAKE_HEADER_LEN..end])
+    fragment
+        .get(HANDSHAKE_HEADER_LEN..end)
+        .ok_or(SniParseError::NeedMoreData)
 }
 
 // -----------------------------------------------------------------------------

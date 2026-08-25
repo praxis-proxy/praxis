@@ -83,7 +83,8 @@ pub struct TelemetryConfig {
 
     /// Custom headers for the OTLP exporter (e.g. API keys).
     ///
-    /// Sent as gRPC metadata on every export request.
+    /// Sent on every export request — as gRPC metadata for the default
+    /// `grpc` protocol, or as HTTP headers for `http/protobuf`.
     #[serde(skip_serializing)]
     pub otlp_headers: Option<HashMap<String, String>>,
 
@@ -168,6 +169,12 @@ impl TelemetryConfig {
                 "telemetry.sampling_rate must be between 0.0 and 1.0, got {rate}"
             ));
         }
+        if self.service_name.as_ref().is_some_and(|s| s.trim().is_empty()) {
+            return Err("telemetry.service_name must not be empty when set".to_owned());
+        }
+        if self.service_version.as_ref().is_some_and(|s| s.trim().is_empty()) {
+            return Err("telemetry.service_version must not be empty when set".to_owned());
+        }
         Ok(())
     }
 
@@ -200,7 +207,11 @@ impl TelemetryConfig {
             service_name: self
                 .service_name
                 .clone()
-                .or_else(|| std::env::var(OTEL_SERVICE_NAME_ENV_VAR).ok())
+                .or_else(|| {
+                    std::env::var(OTEL_SERVICE_NAME_ENV_VAR)
+                        .ok()
+                        .filter(|s| !s.trim().is_empty())
+                })
                 .or_else(|| extract_resource_attribute_from_env("service.name")),
             service_version: self
                 .service_version
@@ -237,7 +248,10 @@ impl TelemetryConfig {
 /// the key is absent.
 fn extract_resource_attribute_from_env(key: &str) -> Option<String> {
     let attrs = std::env::var(OTEL_RESOURCE_ATTRIBUTES_ENV_VAR).ok()?;
-    extract_resource_attribute(&attrs, key)
+    // Drop empty values (e.g. `service.version=`) so an empty env attribute
+    // does not flow into the OTel Resource, matching the config-side
+    // validation and the OTEL_SERVICE_NAME empty-filter in resolve().
+    extract_resource_attribute(&attrs, key).filter(|s| !s.trim().is_empty())
 }
 
 /// Extract a single attribute value from an `OTel` resource-attributes string.
@@ -267,10 +281,17 @@ fn parse_otlp_headers_from_env() -> Option<HashMap<String, String>> {
     let headers: HashMap<String, String> = raw
         .split(',')
         .filter_map(|pair| pair.split_once('='))
-        .map(|(k, v)| (k.trim().to_owned(), v.trim().to_owned()))
+        .map(|(k, v)| (percent_decode(k.trim()), percent_decode(v.trim())))
         .filter(|(k, _)| !k.is_empty())
         .collect();
     if headers.is_empty() { None } else { Some(headers) }
+}
+
+/// Percent-decode a string per RFC 3986.
+fn percent_decode(input: &str) -> String {
+    percent_encoding::percent_decode_str(input)
+        .decode_utf8_lossy()
+        .into_owned()
 }
 
 // -----------------------------------------------------------------------------

@@ -81,4 +81,4 @@ and security. AI Gateway docs live in
 
 - [Benchmarks](benchmarks.md)
 - [Release Process](release.md)
-- [Proposals](proposals.md)
+- [Proposals](https://github.com/praxis-proxy/enhancements)

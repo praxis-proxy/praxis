@@ -317,8 +317,16 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
     );
     let subrequest_client =
         praxis_core::subrequest::SubRequestClient::with_max_response_bytes(subrequest_connector, ceiling);
-    let pipelines = praxis::resolve_pipelines(config, registry, &health_registry, &kv_stores, &subrequest_client)
-        .expect("pipeline resolution should succeed in test");
+    let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
+    let pipelines = praxis::resolve_pipelines(
+        config,
+        registry,
+        &health_registry,
+        &kv_stores,
+        &session_stores,
+        &subrequest_client,
+    )
+    .expect("pipeline resolution should succeed in test");
     let pipelines = Arc::new(pipelines);
     let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
         praxis_protocol::http::pingora::health::listener_meta_from_config(config),
@@ -346,6 +354,7 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
                 health_registry: Some(Arc::clone(&health_registry)),
                 kv_registry: Some(kv_stores),
                 pipelines: Some((Arc::clone(&pipelines), listener_meta)),
+                log_level: None,
                 verbose: config.admin.verbose,
             },
         );
@@ -511,7 +520,7 @@ pub fn start_reloadable_proxy(yaml: &str) -> ReloadableProxyGuard {
 
     let path_for_server = config_path.clone();
     std::thread::spawn(move || {
-        praxis::run_server(config, Some(path_for_server));
+        praxis::run_server(config, Some(path_for_server), None);
     });
 
     crate::net::wait::wait_for_http(&addr);

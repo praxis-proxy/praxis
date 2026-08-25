@@ -16,7 +16,8 @@ use tempfile::TempDir;
 
 use super::{config::PolicyFilterConfig, filter::PolicyFilter};
 use crate::{
-    FilterAction,
+    AuthenticatedIdentity, BodyAccess, BodyMode, FilterAction, FilterEntry, FilterFactory, FilterPipeline,
+    FilterRegistry,
     filter::HttpFilter as _,
     test_utils::{make_filter_context, make_request},
 };
@@ -102,6 +103,12 @@ fn write_single_plugin_config() -> (TempDir, String) {
 /// derives `entity_routes = true`, so it authorizes at the body phase and
 /// requires classifier metadata.
 fn write_tool_route_config() -> (TempDir, String) {
+    write_tool_route_config_for_header("Authorization")
+}
+
+/// Variant used to prove that temporary gate results stay isolated when a
+/// pipeline contains multiple policy instances with different credentials.
+fn write_tool_route_config_for_header(header: &str) -> (TempDir, String) {
     let dir = TempDir::new().expect("create tempdir");
     let cfg_path = dir.path().join("cpex.yaml");
     let yaml = format!(
@@ -112,7 +119,7 @@ fn write_tool_route_config() -> (TempDir, String) {
       - identity.resolve
     on_error: fail
     config:
-      header: Authorization
+      header: {header}
       trusted_issuers:
         - issuer: "{TEST_ISSUER}"
           audiences: ["{TEST_AUDIENCE}"]
@@ -667,6 +674,62 @@ async fn route_without_authentication_inherits_global_resolver() {
     );
 }
 
+/// The header-phase gate has no route coordinates and therefore must not
+/// publish its unscoped identity result. Once body classification selects
+/// `open-tool`, the route-scoped resolution is authoritative and publishes the
+/// global resolver's subject even when a different route token is also present.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "linear two-phase route identity regression")]
+async fn route_scoped_identity_is_published_only_after_authoritative_resolution() {
+    let (_dir, path) = write_route_scoped_identity_config();
+    let filter = build_filter(path);
+    let global_token = mint_jwt(&standard_claims("alice"));
+    let route_token = mint_jwt(&standard_claims("bob"));
+
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {global_token}")).expect("header value"),
+    );
+    req.headers.insert(
+        "X-Route-Token",
+        HeaderValue::from_str(&format!("Bearer {route_token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+
+    let gate = filter.on_request(&mut ctx).await.expect("identity gate ran");
+    assert!(
+        matches!(&gate, FilterAction::Continue),
+        "identity gate should continue before route resolution; got {gate:?}",
+    );
+    assert!(
+        ctx.extensions.get::<AuthenticatedIdentity>().is_none(),
+        "unscoped header gate must not publish a route-dependent principal",
+    );
+
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "open-tool");
+    let mut body = Some(bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"open-tool","arguments":{}}}"#,
+    ));
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("route policy ran");
+
+    assert!(
+        matches!(&action, FilterAction::BodyDone),
+        "authoritative route policy should complete body processing; got {action:?}",
+    );
+    assert_eq!(
+        ctx.extensions
+            .get::<AuthenticatedIdentity>()
+            .map(AuthenticatedIdentity::subject_id),
+        Some("alice"),
+        "open-tool inherits the global resolver; the route-only Bob token must not win",
+    );
+}
+
 /// Write a policy document selecting the Valkey-backed session store via a
 /// flat `global.session_store` block. The `valkey` factory connects
 /// lazily (the pool dials on first request), so this config loads
@@ -730,6 +793,213 @@ fn build_filter(config_path: String) -> PolicyFilter {
         max_buffer_bytes: 10_485_760,
     };
     PolicyFilter::new(cfg).expect("filter should construct")
+}
+
+/// Body filter that records the authenticated subject visible at its position
+/// in the pipeline. Its `StreamBuffer` mode forces body-first pre-read.
+struct IdentityBodyObserver {
+    observed_subjects: Arc<Mutex<Vec<String>>>,
+}
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for IdentityBodyObserver {
+    fn name(&self) -> &'static str {
+        "identity_body_observer"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, crate::FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn request_body_access(&self) -> BodyAccess {
+        BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> BodyMode {
+        BodyMode::StreamBuffer { max_bytes: Some(1_024) }
+    }
+
+    async fn on_request_body(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<bytes::Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<FilterAction, crate::FilterError> {
+        let subject = ctx
+            .extensions
+            .get::<AuthenticatedIdentity>()
+            .map_or("<missing>", AuthenticatedIdentity::subject_id)
+            .to_owned();
+        self.observed_subjects.lock().expect("observer lock").push(subject);
+        Ok(FilterAction::BodyDone)
+    }
+}
+
+/// Build a real two-filter pipeline so lifecycle state is keyed by the policy
+/// filter's runtime ID exactly as it is in production.
+fn build_policy_observer_pipeline(config_path: &str, observed_subjects: &Arc<Mutex<Vec<String>>>) -> FilterPipeline {
+    let mut registry = FilterRegistry::with_builtins();
+    let observer_state = Arc::clone(observed_subjects);
+    registry
+        .register(
+            "identity_body_observer",
+            FilterFactory::Http(Arc::new(move |_| {
+                let filter: Box<dyn crate::HttpFilter> = Box::new(IdentityBodyObserver {
+                    observed_subjects: Arc::clone(&observer_state),
+                });
+                Ok(filter)
+            })),
+        )
+        .expect("register observer");
+
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(&format!(
+        "- filter: policy\n  config_path: {config_path}\n- filter: identity_body_observer\n"
+    ))
+    .expect("pipeline config");
+    FilterPipeline::build(&mut entries, &registry).expect("build pipeline")
+}
+
+/// Exercise the protocol's body-first ordering: a partial body chunk reaches
+/// the policy and then the downstream observer before the header phase. The
+/// observer must see identity, and the later header phase must use the
+/// completion marker rather than requiring the credential again.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear body-first and header-second lifecycle regression"
+)]
+async fn assert_pre_read_admission(config_path: &str, method: Method) {
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let pipeline = build_policy_observer_pipeline(config_path, &observed);
+    assert!(
+        matches!(
+            pipeline.body_capabilities().request_body_mode,
+            BodyMode::StreamBuffer { .. }
+        ),
+        "observer must force body-first StreamBuffer mode",
+    );
+
+    let token = mint_jwt(&standard_claims("alice"));
+    let mut req = make_request(method, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut body_ctx = make_filter_context(&req);
+    let mut partial_body = Some(bytes::Bytes::from_static(b"{"));
+    let body_action = pipeline
+        .execute_http_request_body(&mut body_ctx, &mut partial_body, false)
+        .await
+        .expect("pre-read body pipeline ran");
+    assert!(
+        matches!(&body_action, FilterAction::Continue),
+        "partial pre-read body processing should continue; got {body_action:?}",
+    );
+    assert_eq!(
+        *observed.lock().expect("observer lock"),
+        ["alice"],
+        "downstream body consumer must see authenticated identity on its first invocation",
+    );
+
+    let extensions = std::mem::take(&mut body_ctx.extensions);
+    let filter_state = std::mem::take(&mut body_ctx.filter_state);
+    drop(body_ctx);
+    req.headers.remove("Authorization");
+
+    let mut header_ctx = make_filter_context(&req);
+    header_ctx.extensions = extensions;
+    header_ctx.filter_state = filter_state;
+    let header_action = pipeline
+        .execute_http_request(&mut header_ctx)
+        .await
+        .expect("header pipeline ran");
+    assert!(
+        matches!(header_action, FilterAction::Continue),
+        "body-phase completion marker must prevent credential revalidation",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_read_authenticates_before_identity_only_body_consumer() {
+    let (_dir, path) = write_single_plugin_config();
+    assert_pre_read_admission(&path, Method::POST).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pre_read_authorizes_before_pure_l7_body_consumer() {
+    let (_dir, path) = write_l7_global_config();
+    assert_pre_read_admission(&path, Method::GET).await;
+}
+
+/// Each policy instance owns its early gate result. The observer between two
+/// metadata-optional entity policies must see the first policy's Alice subject,
+/// not the second policy's Bob subject that was gated later in header order.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "two-policy lifecycle isolation regression")]
+async fn gated_identity_is_isolated_between_policy_instances() {
+    let (_first_dir, first_path) = write_tool_route_config_for_header("Authorization");
+    let (_second_dir, second_path) = write_tool_route_config_for_header("X-Second-Token");
+    let observed = Arc::new(Mutex::new(Vec::new()));
+    let observer_state = Arc::clone(&observed);
+    let mut registry = FilterRegistry::with_builtins();
+    registry
+        .register(
+            "identity_body_observer",
+            FilterFactory::Http(Arc::new(move |_| {
+                Ok(Box::new(IdentityBodyObserver {
+                    observed_subjects: Arc::clone(&observer_state),
+                }))
+            })),
+        )
+        .expect("register observer");
+    let mut entries: Vec<FilterEntry> = serde_yaml::from_str(&format!(
+        "- filter: policy\n  config_path: {first_path}\n  require_protocol_metadata: false\n\
+         - filter: identity_body_observer\n\
+         - filter: policy\n  config_path: {second_path}\n  require_protocol_metadata: false\n"
+    ))
+    .expect("pipeline config");
+    let pipeline = FilterPipeline::build(&mut entries, &registry).expect("build pipeline");
+
+    let alice_token = mint_jwt(&standard_claims("alice"));
+    let bob_token = mint_jwt(&standard_claims("bob"));
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {alice_token}")).expect("header value"),
+    );
+    req.headers.insert(
+        "X-Second-Token",
+        HeaderValue::from_str(&format!("Bearer {bob_token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+
+    let header_action = pipeline
+        .execute_http_request(&mut ctx)
+        .await
+        .expect("header pipeline ran");
+    assert!(
+        matches!(&header_action, FilterAction::Continue),
+        "both policy header gates should continue; got {header_action:?}",
+    );
+    assert!(
+        ctx.extensions.get::<AuthenticatedIdentity>().is_none(),
+        "route-dependent header gates must not publish an unscoped identity",
+    );
+
+    let body_action = pipeline
+        .execute_http_request_body(&mut ctx, &mut Some(bytes::Bytes::new()), true)
+        .await
+        .expect("body pipeline ran");
+    assert!(
+        matches!(&body_action, FilterAction::Continue),
+        "body pipeline should continue after both policy evaluations; got {body_action:?}",
+    );
+    assert_eq!(*observed.lock().expect("observer lock"), ["alice"]);
+    assert_eq!(
+        ctx.extensions
+            .get::<AuthenticatedIdentity>()
+            .map(AuthenticatedIdentity::subject_id),
+        Some("bob"),
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -875,11 +1145,18 @@ async fn identity_gate_rejects_when_identity_not_yet_resolved() {
 /// A valid HS256 JWT in the configured header passes the identity
 /// chain and the filter emits Continue.
 #[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "linear identity projection contract assertions")]
 async fn valid_hs256_jwt_continues() {
     let (_dir, path) = write_single_plugin_config();
     let filter = build_filter(path);
 
-    let token = mint_jwt(&standard_claims("alice"));
+    let mut claims = standard_claims("alice");
+    claims["roles"] = json!(["admin", "writer", "admin"]);
+    claims["teams"] = json!(["platform"]);
+    claims["tenant"] = json!("acme");
+    claims["profile"] = json!({"tier": "gold"});
+    claims["authorization"] = json!("custom-value");
+    let token = mint_jwt(&claims);
     let mut req = make_request(Method::POST, "/");
     req.headers.insert(
         "Authorization",
@@ -891,6 +1168,99 @@ async fn valid_hs256_jwt_continues() {
     assert!(
         matches!(action, FilterAction::Continue),
         "expected Continue; got {action:?}"
+    );
+
+    let identity = ctx
+        .extensions
+        .get::<AuthenticatedIdentity>()
+        .expect("validated subject should be published");
+    assert_eq!(identity.subject_id(), "alice");
+    assert_eq!(
+        identity.roles().iter().map(String::as_str).collect::<Vec<_>>(),
+        ["admin", "writer"],
+    );
+    assert_eq!(
+        identity.teams().iter().map(String::as_str).collect::<Vec<_>>(),
+        ["platform"]
+    );
+    assert_eq!(identity.custom_claims().get("tenant").map(String::as_str), Some("acme"));
+    assert_eq!(
+        identity.custom_claims().get("authorization").map(String::as_str),
+        Some("custom-value"),
+    );
+    assert_eq!(
+        identity.custom_claims().get("profile").map(String::as_str),
+        Some(r#"{"tier":"gold"}"#),
+    );
+    for excluded in ["iss", "aud", "sub", "exp", "iat", "roles", "teams"] {
+        assert!(
+            !identity.custom_claims().contains_key(excluded),
+            "registered and promoted claims must not be exposed as custom claims: {excluded}",
+        );
+    }
+}
+
+/// The pure-L7 authorization path resolves identity independently of the
+/// identity-only gate and publishes the same stable extension.
+#[tokio::test(flavor = "multi_thread")]
+async fn pure_l7_allow_publishes_authenticated_identity() {
+    let (_dir, path) = write_l7_global_config();
+    let filter = build_filter(path);
+
+    let token = mint_jwt(&standard_claims("alice"));
+    let mut req = make_request(Method::GET, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+
+    let action = filter.on_request(&mut ctx).await.expect("filter ran");
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "expected Continue; got {action:?}"
+    );
+    assert_eq!(
+        ctx.extensions
+            .get::<AuthenticatedIdentity>()
+            .map(AuthenticatedIdentity::subject_id),
+        Some("alice"),
+    );
+}
+
+/// Entity-aware policies resolve identity in the body phase. That producer
+/// path must publish the extension before later body filters execute.
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_allow_publishes_authenticated_identity() {
+    let (_dir, path) = write_tool_route_config();
+    let filter = build_filter(path);
+
+    let token = mint_jwt(&standard_claims("alice"));
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let mut body = Some(bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
+    ));
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("filter ran");
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "expected BodyDone; got {action:?}"
+    );
+    assert_eq!(
+        ctx.extensions
+            .get::<AuthenticatedIdentity>()
+            .map(AuthenticatedIdentity::subject_id),
+        Some("alice"),
     );
 }
 
@@ -1130,10 +1500,49 @@ async fn missing_protocol_metadata_rejects_when_required() {
     }
 }
 
+/// An entity-bound method without its entity name cannot select the
+/// route-scoped resolver. The filter must reject instead of admitting the
+/// request with neither authorization nor a trusted identity projection.
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_entity_name_rejects_after_successful_identity_gate() {
+    let (_dir, path) = write_tool_route_config();
+    let filter = build_filter(path);
+    let authorization =
+        HeaderValue::from_str(&format!("Bearer {}", mint_jwt(&standard_claims("alice")))).expect("header value");
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert("Authorization", authorization);
+    let mut ctx = make_filter_context(&req);
+
+    let gate = filter.on_request(&mut ctx).await.expect("identity gate ran");
+    assert!(
+        matches!(&gate, FilterAction::Continue),
+        "identity gate should continue before entity metadata is available; got {gate:?}",
+    );
+    assert!(
+        ctx.extensions.get::<AuthenticatedIdentity>().is_none(),
+        "header gate must not publish identity before authoritative entity resolution",
+    );
+    ctx.set_metadata("mcp.method", "tools/call");
+
+    let action = filter
+        .on_request_body(&mut ctx, &mut Some(bytes::Bytes::new()), true)
+        .await
+        .expect("body policy ran");
+    assert!(
+        matches!(&action, FilterAction::Reject(rejection) if rejection.status == 500),
+        "missing entity name must reject fail-closed; got {action:?}",
+    );
+    assert!(
+        ctx.extensions.get::<AuthenticatedIdentity>().is_none(),
+        "failed entity resolution must not publish authenticated identity",
+    );
+}
+
 /// For an entity-aware policy with `require_protocol_metadata: false`, a
 /// request with no `mcp.method` passes through (identity-only mode for
 /// non-classified traffic). Pins the opt-out behavior.
 #[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "full identity-only fallback lifecycle")]
 async fn missing_protocol_metadata_passes_when_not_required() {
     let (_dir, path) = write_tool_route_config();
     let cfg = PolicyFilterConfig {
@@ -1160,6 +1569,13 @@ async fn missing_protocol_metadata_passes_when_not_required() {
     assert!(
         matches!(action, FilterAction::BodyDone),
         "expected BodyDone passthrough; got {action:?}",
+    );
+    assert_eq!(
+        ctx.extensions
+            .get::<AuthenticatedIdentity>()
+            .map(AuthenticatedIdentity::subject_id),
+        Some("alice"),
+        "identity-only fallback should publish the validated unscoped principal",
     );
 }
 
@@ -1935,12 +2351,40 @@ async fn session_taint_is_isolated_across_principals() {
     );
 }
 
-/// Non-EOS chunks must pass through untouched — CMF dispatch waits
-/// for the full body so the upstream protocol classifier filter has finished parsing
-/// and writing metadata. Pins the streaming-chunk fast path.
+/// A non-entity policy behind a `StreamBuffer` downstream must reject
+/// unauthenticated traffic on its FIRST body chunk — before the downstream body
+/// consumer ever executes. Proves the pre-read admission path rejects (not just
+/// accepts) when credentials are absent, closing the window where a body
+/// consumer could run before authentication.
 #[tokio::test(flavor = "multi_thread")]
-async fn on_request_body_continues_on_partial_chunks() {
+async fn pre_read_rejects_unauthenticated_before_downstream_body_consumer() {
+    let observed = Arc::new(Mutex::new(Vec::new()));
     let (_dir, path) = write_single_plugin_config();
+    let pipeline = build_policy_observer_pipeline(&path, &observed);
+
+    let req = make_request(Method::POST, "/");
+    let mut ctx = make_filter_context(&req);
+    let mut partial_body = Some(bytes::Bytes::from_static(b"{"));
+    let action = pipeline
+        .execute_http_request_body(&mut ctx, &mut partial_body, false)
+        .await
+        .expect("pre-read body pipeline ran");
+    assert!(
+        matches!(&action, FilterAction::Reject(rej) if rej.status == 401),
+        "unauthenticated pre-read must reject 401 before downstream observer runs; got {action:?}",
+    );
+    assert!(
+        observed.lock().expect("observer lock").is_empty(),
+        "downstream body consumer must NOT execute when policy rejects",
+    );
+}
+
+/// Entity-routed policy waits for the full body so the upstream protocol
+/// classifier has finished parsing and writing route metadata. Non-entity
+/// policies intentionally authenticate on the first chunk instead.
+#[tokio::test(flavor = "multi_thread")]
+async fn entity_on_request_body_continues_on_partial_chunks() {
+    let (_dir, path) = write_tool_route_config();
     let filter = build_filter(path);
     let req = make_request(Method::POST, "/");
     let mut ctx = make_filter_context(&req);
@@ -2184,7 +2628,7 @@ async fn concurrent_cmf_dispatch_completes_without_blocking() {
 // -----------------------------------------------------------------------------
 
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
 };
 

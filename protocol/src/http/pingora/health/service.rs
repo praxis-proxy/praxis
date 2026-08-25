@@ -20,7 +20,7 @@ use praxis_core::{health::HealthRegistry, kv::KvStoreRegistry};
 use tokio::time::Duration;
 use tracing::{error, info};
 
-use super::{listener_meta::ListenerMetaStore, pipelines_admin};
+use super::{listener_meta::ListenerMetaStore, log_level_admin, pipelines_admin};
 use crate::http::pingora::{json::json_response, kv::dispatch_kv_request, metrics};
 
 /// Recorder upkeep runs independently of Prometheus scrape traffic.
@@ -153,6 +153,9 @@ pub struct PingoraAdminService {
     /// Optional live pipelines + metadata for `GET /api/pipelines`.
     pipelines: Option<pipelines_admin::PipelinesAdminState>,
 
+    /// Optional runtime log-level state for `/api/log-level`.
+    log_level: Option<Arc<praxis_core::logging::LogLevelState>>,
+
     /// When `true`, include per-cluster detail in `/ready` responses.
     verbose: bool,
 }
@@ -166,12 +169,14 @@ impl PingoraAdminService {
         health_registry: Option<HealthRegistry>,
         kv_registry: Option<KvStoreRegistry>,
         pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
+        log_level: Option<Arc<praxis_core::logging::LogLevelState>>,
         verbose: bool,
     ) -> Self {
         Self {
             health_registry,
             kv_registry,
             pipelines: pipelines.map(|(pipelines, meta)| pipelines_admin::PipelinesAdminState { pipelines, meta }),
+            log_level,
             verbose,
         }
     }
@@ -179,6 +184,38 @@ impl PingoraAdminService {
     /// Build the `/ready` response status and body.
     fn ready_response(&self) -> (u16, String) {
         compute_ready_response(self.health_registry.as_ref(), self.verbose)
+    }
+
+    /// Dispatch `/api/*` admin routes when configured.
+    async fn dispatch_admin_api(
+        &self,
+        http_session: &mut ServerSession,
+        path: &str,
+        method: &str,
+        query: Option<&str>,
+    ) -> Option<Response<Vec<u8>>> {
+        if path.starts_with("/api/kv/") {
+            return Some(match &self.kv_registry {
+                Some(registry) => dispatch_kv_request(registry, http_session).await,
+                None => json_response(404, br#"{"error":"not found"}"#),
+            });
+        }
+
+        if path == "/api/pipelines" {
+            return Some(match &self.pipelines {
+                Some(state) => pipelines_admin::pipelines_response(&state.pipelines, &state.meta, method, query),
+                None => json_response(404, br#"{"error":"not found"}"#),
+            });
+        }
+
+        if path == "/api/log-level" {
+            return Some(match &self.log_level {
+                Some(state) => log_level_admin::log_level_response(state, http_session, method, query).await,
+                None => json_response(404, br#"{"error":"not found"}"#),
+            });
+        }
+
+        None
     }
 }
 
@@ -190,20 +227,11 @@ impl ServeHttp for PingoraAdminService {
         let method = req.method.as_str().to_owned();
         let query = req.uri.query().map(str::to_owned);
 
-        if path.starts_with("/api/kv/") {
-            if let Some(registry) = &self.kv_registry {
-                return dispatch_kv_request(registry, http_session).await;
-            }
-            return json_response(404, br#"{"error":"not found"}"#);
-        }
-
-        if path == "/api/pipelines" {
-            return match &self.pipelines {
-                Some(state) => {
-                    pipelines_admin::pipelines_response(&state.pipelines, &state.meta, &method, query.as_deref())
-                },
-                None => json_response(404, br#"{"error":"not found"}"#),
-            };
+        if let Some(resp) = self
+            .dispatch_admin_api(http_session, &path, &method, query.as_deref())
+            .await
+        {
+            return resp;
         }
 
         match path.as_str() {
@@ -249,6 +277,9 @@ pub struct AdminEndpointOptions {
 
     /// Live pipelines + metadata for `GET /api/pipelines`.
     pub pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
+
+    /// Runtime log-level state for `/api/log-level`.
+    pub log_level: Option<Arc<praxis_core::logging::LogLevelState>>,
 
     /// When `true`, include per-cluster detail in `/ready`.
     pub verbose: bool,
@@ -368,10 +399,16 @@ pub fn add_admin_endpoints_to_pingora_server_with_recorder(
     let handle = recorder.handle;
     let upkeep = PrometheusUpkeepService { handle };
     server.add_service(background_service("Prometheus upkeep", upkeep));
-    let admin = PingoraAdminService::new(options.health_registry, options.kv_registry, options.pipelines, verbose);
+    let admin = PingoraAdminService::new(
+        options.health_registry,
+        options.kv_registry,
+        options.pipelines,
+        options.log_level,
+        verbose,
+    );
     let mut service = Service::new("admin".to_owned(), admin);
     service.add_tcp(admin_addr);
-    info!(address = %admin_addr, verbose, "admin endpoints enabled (health + metrics + kv + pipelines)");
+    info!(address = %admin_addr, verbose, "admin endpoints enabled (health + metrics + kv + pipelines + log-level)");
     server.add_service(service);
 }
 
