@@ -808,7 +808,7 @@ impl HttpFilter for PolicyFilter {
                 protocol_method = %method,
                 "entity-bound JSON-RPC method is missing mcp.name metadata; denying fail-closed",
             );
-            return Ok(FilterAction::Reject(missing_protocol_metadata_rejection()));
+            return Ok(FilterAction::Reject(missing_entity_name_rejection(&method)));
         };
 
         // Snapshot headers once for both identity resolution and
@@ -1166,6 +1166,20 @@ fn missing_protocol_metadata_rejection() -> Rejection {
               `require_protocol_metadata: false` to disable this guard \
               for non-classified traffic.",
         ))
+}
+
+/// Rejection emitted when an entity-bound JSON-RPC method is present but
+/// the protocol classifier did not populate `mcp.name`. HTTP 500 because
+/// this is a server-side classifier gap, not a client error.
+fn missing_entity_name_rejection(method: &str) -> Rejection {
+    Rejection::status(500)
+        .with_header("Content-Type", "text/plain")
+        .with_header(VIOLATION_HEADER, "config.missing_entity_name")
+        .with_body(Bytes::from(format!(
+            "policy: entity-bound method `{method}` requires mcp.name metadata \
+             from the protocol classifier. The classifier identified the method \
+             but did not extract the entity name.",
+        )))
 }
 
 // -----------------------------------------------------------------------------
