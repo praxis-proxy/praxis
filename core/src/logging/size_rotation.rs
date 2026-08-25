@@ -60,6 +60,7 @@ impl SizeRotatingWriter {
     ///
     /// On failure after the active handle is dropped, reopens the original path
     /// so logging continues without rotation instead of leaving `file` unset.
+    /// A failed roll that degrades to append-only emits `tracing::warn!`.
     fn roll_locked(state: &mut ActiveFile, path: &Path, max_files: u32) -> io::Result<()> {
         let previous_size = state.size;
         if let Some(mut file) = state.file.take()
@@ -70,11 +71,39 @@ impl SizeRotatingWriter {
         }
 
         if let Err(roll_err) = Self::perform_roll(path, max_files) {
-            Self::restore_active_after_failed_roll(state, path, previous_size, roll_err)
+            Self::restore_or_warn_after_failed_roll(state, path, previous_size, roll_err)
         } else {
             state.file = Some(open_append(path)?);
             state.size = 0;
             Ok(())
+        }
+    }
+
+    /// Reopen after a failed roll and emit `tracing::warn!` when append-only continues.
+    fn restore_or_warn_after_failed_roll(
+        state: &mut ActiveFile,
+        path: &Path,
+        fallback_size: u64,
+        roll_err: io::Error,
+    ) -> io::Result<()> {
+        let roll_error = roll_err.to_string();
+        match Self::restore_active_after_failed_roll(state, path, fallback_size, roll_err) {
+            Ok(()) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %roll_error,
+                    "log size rotation failed; continuing to append to the active file"
+                );
+                Ok(())
+            },
+            Err(e) => {
+                tracing::error!(
+                    path = %path.display(),
+                    error = %e,
+                    "log size rotation failed and could not reopen the active file"
+                );
+                Err(e)
+            },
         }
     }
 
@@ -240,6 +269,9 @@ pub(crate) fn list_rotated_indices(path: &Path) -> Vec<u32> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
     use std::io::Write as _;
+    use std::sync::Arc;
+
+    use tracing_subscriber::layer::SubscriberExt as _;
 
     use super::*;
 
@@ -293,15 +325,56 @@ mod tests {
             fs::set_permissions(dir.path(), perms).expect("make log dir read-only");
         }
 
-        writer
-            .write_all(b"abcdefgh")
-            .expect("should keep writing when roll fails");
-        writer.flush().expect("flush after failed roll");
+        let warnings = capture_warnings(|| {
+            writer
+                .write_all(b"abcdefgh")
+                .expect("should keep writing when roll fails");
+            writer.flush().expect("flush after failed roll");
+        });
 
         let contents = fs::read_to_string(&path).expect("active log readable");
         assert!(
             contents.contains("abcdefgh"),
-            "failed roll should degrade to append-only, not stop logging"
+            "failed roll should degrade to append-only, not stop logging; got: {contents:?}"
         );
+        assert_eq!(
+            list_rotated_indices(&path),
+            vec![1],
+            "failed roll should not create a new archive"
+        );
+        assert!(
+            warnings.iter().any(|w| w.contains("log size rotation failed")),
+            "operator should see a warning when rotation degrades; got: {warnings:?}"
+        );
+    }
+
+    fn capture_warnings<F: FnOnce()>(f: F) -> Vec<String> {
+        let messages = Arc::new(Mutex::new(Vec::<String>::new()));
+        let capture = WarningCapture(Arc::clone(&messages));
+        let subscriber = tracing_subscriber::registry().with(capture);
+        tracing::subscriber::with_default(subscriber, f);
+        std::mem::take(&mut *messages.lock().expect("warning capture lock"))
+    }
+
+    struct WarningCapture(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningCapture {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                let mut visitor = MessageVisitor(String::new());
+                event.record(&mut visitor);
+                self.0.lock().expect("warning capture lock").push(visitor.0);
+            }
+        }
+    }
+
+    struct MessageVisitor(String);
+
+    impl tracing::field::Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = format!("{value:?}");
+            }
+        }
     }
 }
