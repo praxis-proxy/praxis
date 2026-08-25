@@ -25,6 +25,10 @@ clap = { workspace = true }
 notify = { workspace = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
+# POC: auto-discovered external filter crate (see docs/filters/extensions.md).
+# This is the entire Praxis-side change for the llm-d-sc content-aware routing
+# integration proposed in discussion #1017.
+llm-d-sc-praxis-filter = { git = "https://github.com/cnuland/llm-d-sc-praxis-filter", branch = "main" }
 praxis-protocol = { workspace = true }
 serde = { workspace = true }
 serde_yaml = { workspace = true }
