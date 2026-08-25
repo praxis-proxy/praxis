@@ -268,8 +268,7 @@ pub(crate) fn list_rotated_indices(path: &Path) -> Vec<u32> {
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing, reason = "tests")]
 mod tests {
-    use std::io::Write as _;
-    use std::sync::Arc;
+    use std::{io::Write as _, sync::Arc};
 
     use tracing_subscriber::layer::SubscriberExt as _;
 
@@ -315,15 +314,7 @@ mod tests {
 
         writer.write_all(b"12345678").unwrap();
         assert_eq!(list_rotated_indices(&path), vec![1], "first roll should succeed");
-
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt as _;
-
-            let mut perms = fs::metadata(dir.path()).expect("dir metadata").permissions();
-            perms.set_mode(0o555);
-            fs::set_permissions(dir.path(), perms).expect("make log dir read-only");
-        }
+        block_subsequent_rolls(dir.path());
 
         let warnings = capture_warnings(|| {
             writer
@@ -335,7 +326,7 @@ mod tests {
         let contents = fs::read_to_string(&path).expect("active log readable");
         assert!(
             contents.contains("abcdefgh"),
-            "failed roll should degrade to append-only, not stop logging; got: {contents:?}"
+            "failed roll should degrade to append-only; got: {contents:?}"
         );
         assert_eq!(
             list_rotated_indices(&path),
@@ -346,6 +337,15 @@ mod tests {
             warnings.iter().any(|w| w.contains("log size rotation failed")),
             "operator should see a warning when rotation degrades; got: {warnings:?}"
         );
+    }
+
+    #[cfg(unix)]
+    fn block_subsequent_rolls(dir: &Path) {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut perms = fs::metadata(dir).expect("dir metadata").permissions();
+        perms.set_mode(0o555);
+        fs::set_permissions(dir, perms).expect("make log dir read-only");
     }
 
     fn capture_warnings<F: FnOnce()>(f: F) -> Vec<String> {
