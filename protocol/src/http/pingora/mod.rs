@@ -7,7 +7,7 @@
 //! service. Pingora owns request-smuggling prevention, HTTP/2
 //! backpressure, connection-pool safety, and HTTP/1.1 upgrade detection
 //! with bidirectional forwarding (WebSocket and similar). Praxis code
-//! layered on top, here and in the `handler` submodule, owns
+//! layered on top, here and in the [`handler`](crate::http::pingora::handler) submodule, owns
 //! hop-by-hop header stripping (with conditional preservation for
 //! upgrade requests), Host validation, `X-Forwarded-*` injection, and
 //! retry logic.

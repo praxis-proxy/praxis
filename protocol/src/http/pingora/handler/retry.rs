@@ -5,8 +5,8 @@
 //!
 //! Retry logic lives on the Praxis side of the Pingora boundary: given
 //! an upstream failure outcome, this engine decides whether to retry and
-//! how long to wait, applying the configured `praxis_core::config::RetryPolicy` (retriable
-//! conditions and backoff) against per-cluster `praxis_core::retry::ClusterRetryState` so
+//! how long to wait, applying the configured [`RetryPolicy`](praxis_core::config::RetryPolicy) (retriable
+//! conditions and backoff) against per-cluster [`ClusterRetryState`](praxis_core::retry::ClusterRetryState) so
 //! that retries cannot amplify upstream load without bound.
 
 use std::time::Duration;
