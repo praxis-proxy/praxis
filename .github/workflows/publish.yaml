@@ -33,6 +33,6 @@ jobs:
           persist-credentials: false
 
       - name: Build and publish container
-        uses: praxis-proxy/conventions/.github/actions/ghcr-publish@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/ghcr-publish@9e4a1eec33475d18854e7ad182d15c98f84fa8b7 # v0.1.0
         with:
           image-name: ${{ github.repository }}
