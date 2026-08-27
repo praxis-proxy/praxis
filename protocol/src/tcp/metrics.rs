@@ -25,11 +25,7 @@ const TCP_CONNECTION_DURATION_SECONDS: &str = "praxis_tcp_connection_duration_se
 ///
 /// No-op when the Prometheus recorder has not been installed
 /// (i.e. when the admin interface is disabled).
-pub(crate) fn record_tcp_connection_duration(
-    listener: SharedString,
-    reason: &'static str,
-    duration_secs: f64,
-) {
+pub(crate) fn record_tcp_connection_duration(listener: SharedString, reason: &'static str, duration_secs: f64) {
     if !is_recorder_installed() {
         return;
     }
