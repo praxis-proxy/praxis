@@ -13,7 +13,7 @@
 //!
 //! `praxis-tls` is the deepest crate in the dependency flow
 //! `server -> protocol -> filter -> core -> tls`: it has no Praxis
-//! dependencies and is consumed by [`praxis_core`] and the layers above
+//! dependencies and is consumed by `praxis_core` and the layers above
 //! it. Isolating TLS types here keeps certificate and SNI handling in
 //! one place so listener and upstream configuration can share a single
 //! representation.

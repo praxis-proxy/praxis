@@ -78,7 +78,7 @@ pub(crate) fn check_file_size(path: &Path) -> Result<(), ProxyError> {
 /// Read a config file safely into a string.
 ///
 /// Rejects non-regular files and caps the number of bytes read at
-/// [`MAX_YAML_READ_BYTES`], so a special file (e.g. `/dev/zero`) or a
+/// `MAX_YAML_READ_BYTES`, so a special file (e.g. `/dev/zero`) or a
 /// symlink to one cannot exhaust memory. Used by both the initial load and
 /// the hot-reload path.
 ///
