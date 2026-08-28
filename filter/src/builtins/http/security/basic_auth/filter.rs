@@ -15,7 +15,7 @@ use subtle::ConstantTimeEq as _;
 
 use super::config::{BasicAuthConfig, CredentialSourceConfig, InlineCredential};
 use crate::{
-    FilterAction, FilterError, Rejection,
+    FilterAction, FilterError, IDENTITY_USER_ID_METADATA, Rejection,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -168,6 +168,18 @@ impl HttpFilter for BasicAuthFilter {
         }
 
         tracing::debug!(username = %username, "authentication successful");
+
+        // The authenticated principal is trusted only after verification.
+        // Keep it bounded because filter metadata is request-scoped and can be
+        // consumed by downstream admission and routing filters.
+        if username.len() > 256 {
+            tracing::debug!("authenticated username exceeds metadata bounds");
+            return Ok(challenge_rejection(&self.challenge));
+        }
+        if let Err(error) = ctx.try_set_metadata(IDENTITY_USER_ID_METADATA, username) {
+            tracing::debug!(?error, "authenticated principal could not be published");
+            return Ok(challenge_rejection(&self.challenge));
+        }
 
         if self.strip_authorization {
             ctx.request_headers_to_remove.push(http::header::AUTHORIZATION);

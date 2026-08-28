@@ -160,6 +160,9 @@ impl TryFrom<RawInlineCredential> for InlineCredential {
         if raw.username.trim().is_empty() {
             return Err("username must not be empty".to_owned());
         }
+        if raw.username.len() > 256 {
+            return Err("username must not exceed 256 bytes".to_owned());
+        }
 
         Ok(Self {
             username: raw.username,
@@ -227,6 +230,21 @@ credentials:
             !debug.contains("REDACTED"),
             "Debug output should not redact absent password"
         );
+    }
+
+    #[test]
+    fn accepts_username_at_metadata_limit() {
+        let username = "u".repeat(256);
+        let config = format!("credentials:\n  - username: {username}\n    password: secret\n");
+        serde_yaml::from_str::<BasicAuthConfig>(&config).expect("256-byte username should be accepted");
+    }
+
+    #[test]
+    fn rejects_username_over_metadata_limit() {
+        let username = "u".repeat(257);
+        let config = format!("credentials:\n  - username: {username}\n    password: secret\n");
+        let error = serde_yaml::from_str::<BasicAuthConfig>(&config).expect_err("257-byte username should be rejected");
+        assert!(error.to_string().contains("256 bytes"));
     }
 
     #[test]
