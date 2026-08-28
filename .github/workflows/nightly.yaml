@@ -153,7 +153,7 @@ jobs:
           persist-credentials: false
 
       - name: Supply chain audit
-        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@465a493e9f18776294940c9912935eb7e68fb03b # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@9e4a1eec33475d18854e7ad182d15c98f84fa8b7 # v0.1.0
 
   # ----------------------------------------------------------------------------
   # Coverage gate
@@ -192,7 +192,7 @@ jobs:
           persist-credentials: false
 
       - name: Install ${{ matrix.toolchain }} toolchain
-        uses: dtolnay/rust-toolchain@56f84321dbccf38fb67ce29ab63e4754056677e0 # master
+        uses: dtolnay/rust-toolchain@6c977a6ca4077a0ceb28ffbe03f59d46e9ac8772 # master
         with:
           toolchain: ${{ matrix.toolchain }}
 
