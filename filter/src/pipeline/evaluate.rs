@@ -74,14 +74,16 @@ async fn evaluate_branches_inner(
     branches: &[ResolvedBranch],
     ctx: &mut HttpFilterContext<'_>,
 ) -> Result<BranchOutcome, FilterError> {
-    // Branch conditions read the host filter's results. Snapshot them:
-    // executing a branch chain clears `ctx.filter_results` after each branch
-    // filter's own branch evaluation, and without the snapshot a fired branch
-    // would wipe the results mid-loop, silently disabling every later
-    // sibling branch's condition.
-    let host_results = ctx.filter_results.clone();
+    // Branch conditions read the host filter's results. Snapshot them
+    // lazily: only executing a branch chain can clear
+    // `ctx.filter_results` mid-loop and wipe later siblings' condition
+    // inputs, so the clone (a map plus per-entry string copies) is paid
+    // just before the first branch fires — the common
+    // no-branch-fires case reads the live results for free.
+    let mut host_results: Option<std::collections::HashMap<&'static str, crate::FilterResultSet>> = None;
     for branch in branches {
-        if !should_branch_fire(branch, &host_results) {
+        let fires = should_branch_fire(branch, host_results.as_ref().unwrap_or(&ctx.filter_results));
+        if !fires {
             trace!(branch = %branch.name, "branch condition not met");
             continue;
         }
@@ -95,6 +97,9 @@ async fn evaluate_branches_inner(
             "executing branch chain"
         );
 
+        if host_results.is_none() {
+            host_results = Some(ctx.filter_results.clone());
+        }
         let action = execute_branch_filters(&branch.filters, ctx).await?;
 
         match action {
@@ -134,11 +139,10 @@ fn retain_filter_results(ctx: &mut HttpFilterContext<'_>) {
         return;
     }
     if let Some(retained) = ctx.extensions.get_mut::<crate::results::RetainedFilterResults>() {
-        retained.0.extend(
-            ctx.filter_results
-                .iter()
-                .map(|(name, results)| (*name, results.clone())),
-        );
+        // Every caller clears `filter_results` right after this, so the
+        // sets can be moved rather than cloned; the follow-up clear
+        // becomes a no-op.
+        retained.0.extend(ctx.filter_results.drain());
     }
 }
 

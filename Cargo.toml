@@ -52,7 +52,7 @@ clap = { version = "4.6.6", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.2.1"
 futures = "0.3.34"
-h2 = "0.4.17"
+h2 = "0.4.19"
 http = "1.5.0"
 jsonwebtoken = { version = "11.0.0", features = ["aws_lc_rs"] }
 metrics = "0.24.6"
@@ -61,7 +61,8 @@ nix = { version = "0.31.3", default-features = false, features = ["process", "si
 notify = "8.2.0"
 opentelemetry = { version = "0.32.0", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.32.1", default-features = false, features = ["trace", "rt-tokio"] }
-opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "trace"] }
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "http-proto", "reqwest-client", "trace"] }
+opentelemetry-proto = { version = "0.32.0", default-features = false, features = ["gen-tonic", "trace"] }
 # Temporary fork: https://github.com/praxis-proxy/pingora
 pingora-core = { version = "0.8.2", package = "quixotic-plecostomus-core", features = ["rustls"] }
 pingora-http = { version = "0.8.2", package = "quixotic-plecostomus-http" }
@@ -69,7 +70,7 @@ pingora-proxy = { version = "0.8.2", package = "quixotic-plecostomus-proxy", fea
 percent-encoding = "2.3.2"
 rand = "0.10.2"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
-proptest = "1.9.0"
+proptest = "1.11.0"
 quote = "1.0.47"
 praxis = { path = "server", package = "praxis-proxy" }
 praxis-core = { version = "0.5.3", path = "core", package = "praxis-proxy-core" }
@@ -88,7 +89,7 @@ regex = "1.13.1"
 rustls = "0.23.43"
 # NOTE: serde_yaml is deprecated; using yaml_serde (yaml.org maintained fork) as drop-in.
 serde_yaml = { package = "yaml_serde", version = "0.10.7" }
-syn = { version = "3.0.3", features = ["full", "extra-traits", "visit"] }
+syn = { version = "3.0.4", features = ["full", "extra-traits", "visit"] }
 tempfile = "3.27.0"
 tokio-rustls = "0.26.4"
 tokio-tungstenite = "0.30.0"
@@ -100,6 +101,7 @@ tokio = { version = "1.53.1", features = ["macros", "rt"] }
 tokio-stream = "0.1.19"
 tokio-util = "0.7.19"
 tracing = "0.1.44"
+tracing-appender = "0.2.5"
 tracing-opentelemetry = "0.33.0"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json", "registry"] }
 zeroize = "1.9.0"

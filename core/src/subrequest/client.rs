@@ -13,8 +13,8 @@ use super::{
     body::dispose_session_abnormal,
     internals::{
         CircuitGuard, RawExchange, SUBREQUEST_HEADER_DURATION_SECONDS, SubRequestConnector, check_clean_completion,
-        clamp_peer_timeouts, classify_timeout, empty_body_needs_framing, ensure_host_header, min_timeout,
-        record_header_termination, strip_hop_by_hop_headers, strip_request_framing_headers, strip_reserved_headers,
+        clamp_peer_timeouts, classify_timeout, connection_nominated_tokens, empty_body_needs_framing,
+        ensure_host_header, is_boundary_stripped, is_request_stripped, min_timeout, record_header_termination,
     },
     types::{
         FrameworkHeaders, StreamLimits, StreamingSubResponse, SubRequest, SubRequestError, SubResponse, SubResponseBody,
@@ -25,6 +25,19 @@ use crate::circuit::{CircuitCheck, PeerKey};
 // ---------------------------------------------------------------------------
 // SubRequestClient
 // ---------------------------------------------------------------------------
+
+/// Maximum number of 1xx interim responses tolerated before a final
+/// response, bounding a pathological upstream that only emits interim
+/// headers (the overall deadline is the other bound).
+const MAX_INTERIM_RESPONSES: u32 = 32;
+
+/// Eager buffer capacity cap for buffered response bodies.
+///
+/// Content-Length pre-sizes the collection buffer, but the header is
+/// untrusted: an upstream advertising a huge length while sending
+/// little must not pin limit-sized buffers per in-flight exchange.
+/// Doubling growth covers honest bodies past this cap.
+const EAGER_BODY_CAPACITY: usize = 131_072; // 128 KiB
 
 /// Hardened sub-request executor wrapping a shared connector.
 ///
@@ -119,7 +132,7 @@ impl SubRequestClient {
         framework_headers: Option<&FrameworkHeaders>,
     ) -> Result<RawExchange<'a>, SubRequestError> {
         let exchange_started = tokio::time::Instant::now();
-        let deadline = tokio::time::Instant::now()
+        let deadline = exchange_started
             .checked_add(timeout)
             .ok_or(SubRequestError::DeadlineExceeded)?;
         let mut bounded_peer = peer.clone();
@@ -133,17 +146,24 @@ impl SubRequestClient {
         let mut req_header = pingora_http::RequestHeader::build(request.method.clone(), path, None)
             .map_err(|e| SubRequestError::InvalidRequest(e.to_string()))?;
 
-        let mut sanitized = request.headers.clone();
-        strip_hop_by_hop_headers(&mut sanitized);
-        strip_request_framing_headers(&mut sanitized);
-        strip_reserved_headers(&mut sanitized);
+        // Forward the request headers in one pass — no intermediate map
+        // clone, no repeated removal passes: skip hop-by-hop (fixed and
+        // Connection-nominated), framing (re-computed below), and
+        // reserved internal names as each header streams by. Framework
+        // headers are inserted afterwards with replace semantics, as the
+        // old map-insert had.
+        let nominated = connection_nominated_tokens(&request.headers);
+        for (name, value) in &request.headers {
+            if is_request_stripped(name, &nominated) {
+                continue;
+            }
+            let _append = req_header.append_header(name.clone(), value.clone());
+        }
+        drop(nominated);
         if let Some(fw) = framework_headers {
             for (name, value) in fw.iter() {
-                sanitized.insert(name.clone(), value.clone());
+                let _insert = req_header.insert_header(name.clone(), value.clone());
             }
-        }
-        for (name, value) in &sanitized {
-            let _append = req_header.append_header(name.clone(), value.clone());
         }
         ensure_host_header(&mut req_header, &bounded_peer)?;
         if !request.body.is_empty() || empty_body_needs_framing(&request.method) {
@@ -238,38 +258,69 @@ impl SubRequestClient {
             .map_err(|_elapsed| classify_timeout(remaining, bounded_peer.options.write_timeout, "write"))?
             .map_err(|e| SubRequestError::Io(e.to_string()))?;
 
-        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        if remaining.is_zero() {
-            session.shutdown().await;
-            return Err(SubRequestError::DeadlineExceeded);
-        }
-        let read_timeout = min_timeout(bounded_peer.options.read_timeout, remaining);
+        // -- 6. Read the response header, skipping 1xx interim responses --
+        //
+        // Pingora's H1 client reads exactly one header block per call and does
+        // not advance past an informational (1xx) response; its body reader is
+        // left uninitialized, so reading the body while the status is still 1xx
+        // panics. An upstream may send an unsolicited `100 Continue` or
+        // `103 Early Hints` (RFC 8297) ahead of the final response, so loop
+        // until a final status arrives, honoring the overall deadline.
+        // `101 Switching Protocols` is a final response, not interim.
+        let mut interim_count = 0_u32;
+        let status = loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                session.shutdown().await;
+                return Err(SubRequestError::DeadlineExceeded);
+            }
+            let read_timeout = min_timeout(bounded_peer.options.read_timeout, remaining);
 
-        tokio::time::timeout(read_timeout, session.read_response_header())
-            .await
-            .map_err(|_elapsed| classify_timeout(remaining, bounded_peer.options.read_timeout, "read"))?
-            .map_err(|e| SubRequestError::Io(e.to_string()))?;
+            tokio::time::timeout(read_timeout, session.read_response_header())
+                .await
+                .map_err(|_elapsed| classify_timeout(remaining, bounded_peer.options.read_timeout, "read"))?
+                .map_err(|e| SubRequestError::Io(e.to_string()))?;
 
-        // -- 6. Validate response --
-        let resp_header = session
-            .response_header()
-            .ok_or_else(|| SubRequestError::Io("no response header received".to_owned()))?;
+            let resp_header = session
+                .response_header()
+                .ok_or_else(|| SubRequestError::Io("no response header received".to_owned()))?;
+            let status = resp_header.status.as_u16();
 
-        let status = resp_header.status.as_u16();
+            if (100..=199).contains(&status) && status != 101 {
+                interim_count += 1;
+                if interim_count > MAX_INTERIM_RESPONSES {
+                    session.shutdown().await;
+                    return Err(SubRequestError::Io(
+                        "upstream sent too many 1xx interim responses".to_owned(),
+                    ));
+                }
+                continue;
+            }
+            break status;
+        };
+
         if !(100..=599).contains(&status) {
             session.shutdown().await;
             return Err(SubRequestError::Io(format!(
                 "upstream returned unsupported HTTP status {status}"
             )));
         }
-        let mut resp_headers = HeaderMap::new();
+        let resp_header = session
+            .response_header()
+            .ok_or_else(|| SubRequestError::Io("no response header received".to_owned()))?;
+        // Copy the response headers in one pass, sized up front. The
+        // values are already-validated `HeaderValue`s (pingora's header
+        // map stores the http crate's type), so cloning is a refcount
+        // bump — re-validating every byte through `from_bytes` was pure
+        // waste and its error arm was unreachable.
+        let nominated = connection_nominated_tokens(&resp_header.headers);
+        let mut resp_headers = HeaderMap::with_capacity(resp_header.headers.len());
         for (name, value) in &resp_header.headers {
-            if let Ok(v) = http::header::HeaderValue::from_bytes(value.as_bytes()) {
-                resp_headers.append(name.clone(), v);
+            if is_boundary_stripped(name, &nominated) {
+                continue;
             }
+            resp_headers.append(name.clone(), value.clone());
         }
-        strip_hop_by_hop_headers(&mut resp_headers);
-        strip_reserved_headers(&mut resp_headers);
 
         // -- 7. Return RawExchange --
         histogram!(SUBREQUEST_HEADER_DURATION_SECONDS).record(exchange_started.elapsed().as_secs_f64());
@@ -373,14 +424,12 @@ impl SubRequestClient {
         let read_timeout = exchange.peer.options.read_timeout;
         exchange.session.set_read_timeout(None);
 
-        // Compute stream deadline from max_stream_duration.
+        // Compute stream deadline from max_stream_duration. One clock
+        // read serves both the deadline and the stream start below.
+        let handoff_now = tokio::time::Instant::now();
         let stream_deadline = limits
             .max_stream_duration
-            .map(|d| {
-                tokio::time::Instant::now()
-                    .checked_add(d)
-                    .ok_or(SubRequestError::DeadlineExceeded)
-            })
+            .map(|d| handoff_now.checked_add(d).ok_or(SubRequestError::DeadlineExceeded))
             .transpose()?;
 
         let body = SubResponseBody {
@@ -394,7 +443,7 @@ impl SubRequestClient {
             max_total_bytes: limits.max_total_bytes,
             received_bytes: 0,
             chunk_count: 0,
-            stream_started_at: tokio::time::Instant::now(),
+            stream_started_at: handoff_now,
             done: false,
         };
 
@@ -470,8 +519,19 @@ impl SubRequestClient {
             return Err(SubRequestError::DeadlineExceeded);
         }
 
+        // Size the buffer from Content-Length when present, clamped to
+        // the limit so an untrusted length can never over-allocate, and
+        // to a modest eager cap so an upstream advertising a huge
+        // length while sending little cannot pin limit-sized buffers
+        // per in-flight exchange. Doubling growth covers honest large
+        // bodies; the ResponseTooLarge check below stays authoritative.
+        let advertised = resp_headers
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.parse::<usize>().ok())
+            .map_or(0, |len| len.min(effective_limit).min(EAGER_BODY_CAPACITY));
         let body_result: Result<Bytes, SubRequestError> = tokio::time::timeout(remaining, async {
-            let mut body_buf = Vec::new();
+            let mut body_buf = Vec::with_capacity(advertised);
             while !session.response_done() {
                 match session.read_response_body().await {
                     Ok(Some(chunk)) => {
@@ -533,7 +593,7 @@ impl SubRequestClient {
 async fn fail_header_exchange(
     exchange: RawExchange<'_>,
     circuit_guard: Option<CircuitGuard<'_>>,
-    termination: &str,
+    termination: &'static str,
     error: SubRequestError,
 ) -> SubRequestError {
     drop(circuit_guard);

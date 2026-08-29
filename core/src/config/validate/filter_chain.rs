@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::{
-    config::{ChainRef, Condition, FilterChainConfig, FilterEntry, Listener, ResponseCondition},
+    config::{ChainRef, Condition, ConditionMatch, FilterChainConfig, FilterEntry, Listener, ResponseCondition},
     errors::ProxyError,
 };
 
@@ -63,6 +63,14 @@ fn validate_entry_conditions(chain_name: &str, entry: &FilterEntry) -> Result<()
             }
         }
     }
+    // Filters nested in an iterative_request_router's steps are built into
+    // real pipelines, so their conditions need the same empty-predicate
+    // check (matching the inline-cluster validation walk).
+    if entry.filter_type == super::inline_clusters::STEP_BEARING_FILTER {
+        for nested in super::inline_clusters::extract_step_filters(chain_name, entry)? {
+            validate_entry_conditions(chain_name, &nested)?;
+        }
+    }
     Ok(())
 }
 
@@ -92,6 +100,38 @@ fn validate_request_conditions(chain_name: &str, entry: &FilterEntry) -> Result<
         }
         if matcher.headers.as_ref().is_some_and(HashMap::is_empty) {
             return Err(empty_predicate_error(chain_name, &entry.filter_type, idx, "headers"));
+        }
+        validate_condition_paths(chain_name, &entry.filter_type, idx, matcher)?;
+    }
+    Ok(())
+}
+
+/// Reject condition `path`/`path_prefix` values that make the predicate a no-op.
+///
+/// Request paths always begin with '/', so a condition path without the
+/// leading slash can never match — a `when` then silently disables the gated
+/// filter (an `unless` silently un-gates it). Same accident class the
+/// router's route validation rejects. An empty `path` can never match and an
+/// empty `path_prefix` matches every request; both are equally pathological.
+fn validate_condition_paths(
+    chain_name: &str,
+    filter: &str,
+    idx: usize,
+    matcher: &ConditionMatch,
+) -> Result<(), ProxyError> {
+    for (field, value) in [("path", &matcher.path), ("path_prefix", &matcher.path_prefix)] {
+        if let Some(value) = value
+            && !value.starts_with('/')
+        {
+            let consequence = if value.is_empty() {
+                "an empty value makes this predicate a no-op"
+            } else {
+                "request paths always begin with '/', so this condition could never match"
+            };
+            return Err(ProxyError::Config(format!(
+                "filter '{filter}' in chain '{chain_name}': condition {idx} \
+                 {field} must start with '/' (got '{value}'); {consequence}",
+            )));
         }
     }
     Ok(())
@@ -174,9 +214,6 @@ fn validate_chain_cardinality(chains: &[FilterChainConfig]) -> Result<(), ProxyE
                 chain.name,
                 chain.filters.len()
             )));
-        }
-        for entry in &chain.filters {
-            entry.warn_config_typos();
         }
     }
     Ok(())
@@ -276,6 +313,33 @@ filter_chains:
     }
 
     #[test]
+    fn reject_empty_condition_in_iterative_router_step() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: iterative_request_router
+        steps:
+          - name: call
+            url: "http://backend"
+            filters:
+              - filter: ip_acl
+                deny: ["10.0.0.0/8"]
+                conditions:
+                  - unless: {}
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("condition 0 is empty"),
+            "an empty predicate inside an IRR step must be rejected too: {err}"
+        );
+    }
+
+    #[test]
     fn reject_empty_when_condition() {
         let yaml = r#"
 listeners:
@@ -340,6 +404,97 @@ filter_chains:
         assert!(
             err.to_string().contains("empty headers list"),
             "an empty headers map matches vacuously and must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_condition_path_without_leading_slash() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        conditions:
+          - when:
+              path: "health"
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path must start with '/'"),
+            "a condition path without a leading '/' can never match and must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_condition_path_prefix_without_leading_slash() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        conditions:
+          - unless:
+              path_prefix: "api"
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("path_prefix must start with '/'"),
+            "a condition path_prefix without a leading '/' can never match and must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_condition_empty_path_prefix() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        conditions:
+          - when:
+              path_prefix: ""
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("no-op"),
+            "an empty condition path_prefix matches everything and must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_condition_path_with_leading_slash() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+        conditions:
+          - when:
+              path_prefix: "/api"
+"#;
+        assert!(
+            Config::from_yaml(yaml).is_ok(),
+            "a '/'-prefixed condition path_prefix should be accepted"
         );
     }
 

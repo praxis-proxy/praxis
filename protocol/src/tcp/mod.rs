@@ -13,6 +13,8 @@ use tokio::sync::{Semaphore, watch};
 
 use crate::{ListenerPipelines, Protocol};
 
+/// TCP connection metrics (Prometheus histograms).
+pub(crate) mod metrics;
 /// Bidirectional TCP proxy application.
 pub(crate) mod proxy;
 /// TLS configuration and listener grouping utilities.
@@ -64,13 +66,21 @@ impl Protocol for PingoraTcp {
                 .first()
                 .and_then(|l| l.max_connections)
                 .map(|max| Arc::new(Semaphore::new(max as usize)));
+            // `from_shared` keeps labels as refcounted `Arc<str>`s: they
+            // are cloned per connection, and owned `String` labels would
+            // deep-copy on every clone.
             let listener_names: std::collections::HashMap<String, ::metrics::SharedString> = listeners
                 .iter()
-                .map(|l| (l.address.clone(), ::metrics::SharedString::from(l.name.clone())))
+                .map(|l| {
+                    (
+                        l.address.clone(),
+                        ::metrics::SharedString::from_shared(Arc::from(l.name.as_str())),
+                    )
+                })
                 .collect();
             let default_listener_name = listeners.first().map_or_else(
                 || ::metrics::SharedString::const_str("unknown"),
-                |l| ::metrics::SharedString::from(l.name.clone()),
+                |l| ::metrics::SharedString::from_shared(Arc::from(l.name.as_str())),
             );
             let app = proxy::PingoraTcpProxy::new(
                 upstream_opt.clone(),

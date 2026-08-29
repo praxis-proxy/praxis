@@ -5,6 +5,7 @@
 
 pub mod config;
 pub mod envelope;
+mod raw_envelope;
 
 #[cfg(test)]
 #[expect(clippy::allow_attributes, reason = "blanket test suppressions")]

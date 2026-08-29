@@ -158,11 +158,14 @@ impl HttpFilter for BasicAuthFilter {
             return Ok(challenge_rejection(&self.challenge));
         };
 
-        let Some((username, password)) = decode_basic_credentials(auth_value) else {
+        let Some((decoded, colon)) = decode_basic_credentials(auth_value) else {
+            return Ok(challenge_rejection(&self.challenge));
+        };
+        let (Some(username), Some(password)) = (decoded.get(..colon), decoded.get(colon + 1..)) else {
             return Ok(challenge_rejection(&self.challenge));
         };
 
-        if !self.source.verify(ctx, &username, &password) {
+        if !self.source.verify(ctx, username, password) {
             tracing::debug!(username = %username, "authentication failed");
             return Ok(challenge_rejection(&self.challenge));
         }
@@ -177,8 +180,14 @@ impl HttpFilter for BasicAuthFilter {
     }
 }
 
-/// Decode a `Basic` Authorization header into `(username, password)`.
-fn decode_basic_credentials(header: &http::HeaderValue) -> Option<(String, String)> {
+/// Decode a `Basic` Authorization header into the decoded credential
+/// string and the index of its first colon.
+///
+/// Returning positions instead of copying both halves spares two
+/// String allocations per attempt; the caller borrows the username
+/// and password from the returned buffer. Runs entirely before any
+/// comparison, so the constant-time verification is untouched.
+fn decode_basic_credentials(header: &http::HeaderValue) -> Option<(String, usize)> {
     let auth_str = header.to_str().ok()?;
 
     // RFC 7617: scheme comparison is case-insensitive.
@@ -194,8 +203,8 @@ fn decode_basic_credentials(header: &http::HeaderValue) -> Option<(String, Strin
         .and_then(|bytes| String::from_utf8(bytes).ok())?;
 
     // RFC 7617: split on first colon; password may contain colons.
-    let (username, password) = decoded.split_once(':')?;
-    Some((username.to_owned(), password.to_owned()))
+    let colon = decoded.find(':')?;
+    Some((decoded, colon))
 }
 
 /// Constant-time password hash check with dummy comparison for unknown

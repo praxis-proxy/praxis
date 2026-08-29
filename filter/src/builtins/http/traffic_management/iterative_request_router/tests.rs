@@ -89,6 +89,56 @@ steps:
 }
 
 #[test]
+fn rejects_zero_max_response_bytes() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+max_response_bytes: 0
+steps:
+  - name: step1
+    filters:
+      - filter: static_response
+        status: 200
+    on_result:
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", &yaml).unwrap();
+    let err = config::validate(&cfg).unwrap_err();
+    assert!(
+        err.to_string().contains("max_response_bytes must be > 0"),
+        "a zero response-byte limit 500s every non-empty response and must be rejected: {err}"
+    );
+}
+
+#[test]
+fn rejects_zero_step_timeout() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "
+initial_step: step1
+step_timeout_ms: 0
+steps:
+  - name: step1
+    filters:
+      - filter: static_response
+        status: 200
+    on_result:
+      - default: true
+        done: true
+",
+    )
+    .unwrap();
+    let cfg: IterativeRequestRouterConfig = parse_filter_config("iterative_request_router", &yaml).unwrap();
+    let err = config::validate(&cfg).unwrap_err();
+    assert!(
+        err.to_string().contains("step_timeout_ms must be > 0"),
+        "a zero step timeout fails every step and must be rejected: {err}"
+    );
+}
+
+#[test]
 fn rejects_empty_steps() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         "
@@ -3574,6 +3624,7 @@ async fn build_peer_applies_tls_with_explicit_sni() {
         address: std::sync::Arc::from("127.0.0.1:9443"),
         connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: Some(cached),
+        authority: None,
     };
 
     let peer = super::build_peer(&upstream).await.unwrap();
@@ -3588,6 +3639,7 @@ async fn build_peer_derives_sni_from_hostname_address() {
         address: std::sync::Arc::from("localhost:9443"),
         connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         tls: Some(cached),
+        authority: None,
     };
 
     let peer = super::build_peer(&upstream).await.unwrap();

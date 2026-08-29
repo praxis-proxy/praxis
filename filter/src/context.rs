@@ -73,6 +73,15 @@ const MAX_STRUCTURED_METADATA_KEYS: usize = 64;
 /// insert thousands of unique keys per request.
 const MAX_METADATA_ENTRIES: usize = 128;
 
+/// Maximum number of distinct `structured_metadata` namespaces per request.
+///
+/// Each namespace holds its own key-bounded JSON object, but without a
+/// cap on the namespace count a processor that derives the namespace from
+/// a dynamic/streaming source could accumulate an unbounded number of
+/// objects over a single long-lived request. Mirrors the entry cap on
+/// `filter_metadata`.
+const MAX_STRUCTURED_METADATA_NAMESPACES: usize = 64;
+
 /// Trusted header mutation recorded during pre-read body processing.
 ///
 /// Pre-read filters run *before* the request-phase pipeline. Mutations
@@ -342,6 +351,9 @@ pub struct HttpFilterContext<'a> {
     /// Named key-value stores for runtime mappings.
     pub kv_stores: Option<&'a KvStoreRegistry>,
 
+    /// Per-cluster session stores for sticky session affinity.
+    pub session_stores: Option<&'a Arc<crate::SessionStoreRegistry>>,
+
     /// Shared sub-request client for iterative sub-requests.
     pub subrequest_client: Option<&'a praxis_core::subrequest::SubRequestClient>,
 
@@ -416,6 +428,13 @@ pub struct HttpFilterContext<'a> {
 
     /// Reselector for alternate-host retries after connect/response failure.
     pub endpoint_reselector: Option<Arc<crate::EndpointReselector>>,
+    /// Address of an endpoint pinned by session affinity.
+    ///
+    /// Set by the sticky sessions filter on cache hit. The load
+    /// balancer consumes this to build a proper [`Upstream`] with
+    /// the cluster's TLS and connection options, then clears it.
+    /// This avoids duplicating connection config across filters.
+    pub pinned_endpoint_address: Option<Arc<str>>,
 
     /// Wall-clock time source for timestamp generation.
     pub time_source: &'a dyn TimeSource,
@@ -726,6 +745,16 @@ impl HttpFilterContext<'_> {
     /// New keys are silently dropped once the limit is reached;
     /// existing keys can still be overwritten.
     pub fn set_structured_metadata(&mut self, namespace: &str, key: &str, value: serde_json::Value) {
+        if !self.structured_metadata.contains_key(namespace)
+            && self.structured_metadata.len() >= MAX_STRUCTURED_METADATA_NAMESPACES
+        {
+            tracing::warn!(
+                namespace,
+                limit = MAX_STRUCTURED_METADATA_NAMESPACES,
+                "structured metadata namespace limit reached; dropping new namespace"
+            );
+            return;
+        }
         let ns = self
             .structured_metadata
             .entry(namespace.to_owned())
@@ -759,6 +788,16 @@ impl HttpFilterContext<'_> {
     /// that would exceed the per-namespace limit of 64
     /// are silently dropped.
     pub fn merge_structured_metadata(&mut self, namespace: &str, values: serde_json::Map<String, serde_json::Value>) {
+        if !self.structured_metadata.contains_key(namespace)
+            && self.structured_metadata.len() >= MAX_STRUCTURED_METADATA_NAMESPACES
+        {
+            tracing::warn!(
+                namespace,
+                limit = MAX_STRUCTURED_METADATA_NAMESPACES,
+                "structured metadata namespace limit reached; dropping new namespace"
+            );
+            return;
+        }
         let ns = self
             .structured_metadata
             .entry(namespace.to_owned())
@@ -982,6 +1021,7 @@ mod tests {
         let mut ctx = crate::test_utils::make_filter_context(&req);
         ctx.upstream = Some(Upstream {
             address: Arc::from("10.0.0.1:8080"),
+            authority: None,
             tls: None,
             connection: Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
         });
@@ -1759,6 +1799,44 @@ mod tests {
             ctx.get_structured_metadata("test_filter", "model"),
             Some(&serde_json::json!("gpt-4")),
             "get should return the value set by set_structured_metadata"
+        );
+    }
+
+    #[test]
+    fn structured_metadata_namespace_count_is_bounded() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        // Fill to the namespace cap, then attempt one more distinct namespace.
+        for i in 0..MAX_STRUCTURED_METADATA_NAMESPACES {
+            ctx.set_structured_metadata(&format!("ns{i}"), "k", serde_json::json!(i));
+        }
+        ctx.set_structured_metadata("overflow", "k", serde_json::json!(1));
+        assert!(
+            ctx.get_structured_metadata("overflow", "k").is_none(),
+            "a namespace beyond the cap must be dropped"
+        );
+        // Existing namespaces remain writable past the cap.
+        ctx.set_structured_metadata("ns0", "k2", serde_json::json!(2));
+        assert_eq!(
+            ctx.get_structured_metadata("ns0", "k2"),
+            Some(&serde_json::json!(2)),
+            "existing namespaces stay writable at the cap"
+        );
+    }
+
+    #[test]
+    fn merge_structured_metadata_namespace_count_is_bounded() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        for i in 0..MAX_STRUCTURED_METADATA_NAMESPACES {
+            ctx.set_structured_metadata(&format!("ns{i}"), "k", serde_json::json!(i));
+        }
+        let mut merge = serde_json::Map::new();
+        merge.insert("k".to_owned(), serde_json::json!(1));
+        ctx.merge_structured_metadata("overflow", merge);
+        assert!(
+            ctx.get_structured_metadata("overflow", "k").is_none(),
+            "merge into a namespace beyond the cap must be dropped"
         );
     }
 

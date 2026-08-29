@@ -38,6 +38,7 @@ Longest prefix wins. Routes without `host` match any host. Header restrictions u
 | `routes[].retry_policy.backoff` | BackoffConfig | no | Exponential backoff between attempts. |
 | `routes[].retry_policy.backoff.base_interval_ms` | integer | yes | Exponential base interval in milliseconds. |
 | `routes[].retry_policy.backoff.max_interval_ms` | integer | yes | Maximum capped interval in milliseconds. |
+| `routes[].retry_policy.configured` | bool | no | Whether this policy came from operator configuration rather than the built-in legacy default. Endpoint reselection on retry is enabled only for configured policies; the legacy default preserves the historical retry-same-endpoint semantics. |
 | `routes[].retry_policy.retry_budget` | RetryBudgetConfig | no | Token-bucket retry budget. |
 | `routes[].retry_policy.retry_budget.percent` | BudgetPercent | yes | Maximum retries as a percentage of active requests (0.0..=100.0). |
 | `routes[].retry_policy.retry_budget.min_retries_per_second` | integer | no | Floor on tokens per second even at low traffic. |

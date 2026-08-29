@@ -121,6 +121,9 @@ pub struct FilterPipeline {
     /// Named key-value stores for runtime mappings.
     kv_stores: Option<KvStoreRegistry>,
 
+    /// Per-cluster session stores for sticky session affinity, preserved across reloads.
+    session_stores: Option<Arc<crate::SessionStoreRegistry>>,
+
     /// Shared sub-request client for iterative sub-requests.
     subrequest_client: Option<praxis_core::subrequest::SubRequestClient>,
 
@@ -140,11 +143,11 @@ pub struct FilterPipeline {
     /// Global response body ceiling, enforced by counting in Stream mode.
     response_body_ceiling: Option<usize>,
 
-    /// Per-filter request-body access flags, index-aligned with `filters`.
-    request_body_access_by_idx: Vec<bool>,
+    /// Indices into `filters` of filters declaring request-body access.
+    request_body_filter_indices: Vec<usize>,
 
-    /// Per-filter response-body access flags, index-aligned with `filters`.
-    response_body_access_by_idx: Vec<bool>,
+    /// Indices into `filters` of filters declaring response-body access.
+    response_body_filter_indices: Vec<usize>,
 }
 
 #[expect(
@@ -276,6 +279,20 @@ impl FilterPipeline {
         self.filters.iter().any(|pf| pf.filter.name() == type_name)
     }
 
+    /// Names of filters in this pipeline whose protocol level is not
+    /// supported by `listener_protocol`.
+    ///
+    /// A TCP listener silently skips HTTP-level filters at runtime, so an
+    /// HTTP security filter placed on a TCP listener would never run. This
+    /// surfaces that mismatch at build time.
+    pub fn filters_unsupported_by(&self, listener_protocol: praxis_core::config::ProtocolKind) -> Vec<&'static str> {
+        self.filters
+            .iter()
+            .filter(|pf| !listener_protocol.supports(pf.filter.protocol_level()))
+            .map(|pf| pf.filter.name())
+            .collect()
+    }
+
     /// Whether any filter of `type_name` has request conditions matching
     /// `request` (an unconditional entry always matches).
     ///
@@ -336,6 +353,16 @@ impl FilterPipeline {
     pub fn set_kv_stores(&mut self, stores: KvStoreRegistry) {
         self.visit_nested_pipelines(&mut |pipeline| pipeline.set_kv_stores(stores.clone()));
         self.kv_stores = Some(stores);
+    }
+
+    /// The shared session store registry, if set.
+    pub fn session_stores(&self) -> Option<&Arc<crate::SessionStoreRegistry>> {
+        self.session_stores.as_ref()
+    }
+
+    /// Set the shared [`crate::SessionStoreRegistry`] for this pipeline.
+    pub fn set_session_stores(&mut self, stores: Arc<crate::SessionStoreRegistry>) {
+        self.session_stores = Some(stores);
     }
 
     /// The shared sub-request client, if set.
@@ -520,7 +547,9 @@ pub(crate) fn check_failure_mode(
             warn!(
                 filter = filter_name,
                 error = %error,
-                "filter error during {phase}, continuing (failure_mode=open)"
+                phase,
+                failure_mode = "open",
+                "filter error, continuing"
             );
             Ok(())
         },
@@ -528,7 +557,9 @@ pub(crate) fn check_failure_mode(
             error!(
                 filter = filter_name,
                 error = %error,
-                "filter error during {phase}, aborting"
+                phase,
+                failure_mode = "closed",
+                "filter error, aborting request"
             );
             Err(error)
         },

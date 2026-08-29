@@ -100,14 +100,38 @@ pub struct PeerIdentityTrustFilter {
 
 /// Validated trusted peer entry for runtime matching.
 struct TrustedPeer {
-    /// Lowercase hex SHA-256 certificate digest.
-    cert_digest: Option<String>,
+    /// SHA-256 certificate digest, hex-decoded at config load so the
+    /// per-request match is a byte compare instead of hex-encoding the
+    /// peer's digest once per configured entry.
+    cert_digest: Option<Vec<u8>>,
 
     /// X.509 subject organization.
     organization: Option<String>,
 
     /// Certificate serial number.
     serial_number: Option<String>,
+}
+
+/// Decode a validated 64-char lowercase hex digest into bytes.
+///
+/// Validation has already guaranteed the exact length and charset, so
+/// this cannot fail; the encode/decode pair is bijective, preserving
+/// the accept/reject decisions of the old string compare exactly.
+fn decode_validated_hex(digest: &str) -> Vec<u8> {
+    fn nibble(b: u8) -> u8 {
+        match b {
+            b'0'..=b'9' => b - b'0',
+            _ => b - b'a' + 10,
+        }
+    }
+    digest
+        .as_bytes()
+        .chunks_exact(2)
+        .map(|pair| match pair {
+            [hi, lo] => (nibble(*hi) << 4) | nibble(*lo),
+            _ => 0, // unreachable: chunks_exact(2) yields only pairs
+        })
+        .collect()
 }
 
 impl PeerIdentityTrustFilter {
@@ -180,7 +204,7 @@ fn validate_peers(raw: Vec<TrustedPeerConfig>) -> Result<Vec<TrustedPeer>, Filte
         }
 
         peers.push(TrustedPeer {
-            cert_digest: p.cert_digest,
+            cert_digest: p.cert_digest.as_deref().map(decode_validated_hex),
             organization: p.organization,
             serial_number: p.serial_number,
         });
@@ -220,7 +244,7 @@ fn is_trusted(identity: &TlsPeerIdentity, peers: &[TrustedPeer]) -> bool {
 /// All configured fields must match.
 fn matches_peer(identity: &TlsPeerIdentity, peer: &TrustedPeer) -> bool {
     if let Some(digest) = &peer.cert_digest
-        && identity.hex_digest() != *digest
+        && identity.cert_digest != *digest
     {
         return false;
     }

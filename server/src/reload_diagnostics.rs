@@ -14,18 +14,33 @@ use tracing::{info, warn};
 /// Compare old and new configs, logging warnings for changes that
 /// require a process restart to take effect.
 pub(crate) fn log_restart_required_changes(old: &Config, new: &Config) {
-    detect_listener_topology_changes(old, new);
-    detect_protocol_changes(old, new);
-    detect_compression_additions(old, new);
-    detect_tls_toggles(old, new);
+    // One shared name index serves all four listener detectors.
+    let old_by_name = listeners_by_name(old);
+    detect_listener_topology_changes_with(old, new, &old_by_name);
+    detect_protocol_changes_with(new, &old_by_name);
+    detect_compression_additions_with(old, new, &old_by_name);
+    detect_tls_toggles_with(new, &old_by_name);
     detect_subrequest_max_connections_change(old, new);
     detect_subrequest_circuit_breaker_change(old, new);
     detect_startup_only_runtime_changes(old, new);
     detect_admin_changes(old, new);
+    detect_logging_change(old, new);
 }
 
+/// Index a config's listeners by name for O(1) old/new pairing.
+///
+/// Each detector scans `new.listeners` and pairs by name; a linear
+/// `find` per listener would make every detector quadratic in
+/// listener count on each reload.
+fn listeners_by_name(config: &Config) -> ListenersByName<'_> {
+    config.listeners.iter().map(|l| (l.name.as_str(), l)).collect()
+}
+
+/// Index type shared by the restart-required listener detectors.
+type ListenersByName<'cfg> = std::collections::HashMap<&'cfg str, &'cfg praxis_core::config::Listener>;
+
 /// Detect listener additions, removals, and address rebinds.
-pub(crate) fn detect_listener_topology_changes(old: &Config, new: &Config) {
+fn detect_listener_topology_changes_with(old: &Config, new: &Config, old_by_name: &ListenersByName<'_>) {
     let old_names: std::collections::HashSet<&str> = old.listeners.iter().map(|l| l.name.as_str()).collect();
     let new_names: std::collections::HashSet<&str> = new.listeners.iter().map(|l| l.name.as_str()).collect();
 
@@ -43,7 +58,7 @@ pub(crate) fn detect_listener_topology_changes(old: &Config, new: &Config) {
     }
 
     for new_l in &new.listeners {
-        if let Some(old_l) = old.listeners.iter().find(|l| l.name == new_l.name)
+        if let Some(old_l) = old_by_name.get(new_l.name.as_str())
             && old_l.address != new_l.address
         {
             warn!(
@@ -57,9 +72,9 @@ pub(crate) fn detect_listener_topology_changes(old: &Config, new: &Config) {
 }
 
 /// Detect protocol changes (e.g. HTTP to TCP).
-pub(crate) fn detect_protocol_changes(old: &Config, new: &Config) {
+fn detect_protocol_changes_with(new: &Config, old_by_name: &ListenersByName<'_>) {
     for new_l in &new.listeners {
-        if let Some(old_l) = old.listeners.iter().find(|l| l.name == new_l.name)
+        if let Some(old_l) = old_by_name.get(new_l.name.as_str())
             && old_l.protocol != new_l.protocol
         {
             warn!(
@@ -73,12 +88,19 @@ pub(crate) fn detect_protocol_changes(old: &Config, new: &Config) {
 }
 
 /// Detect compression being added to a previously uncompressed listener.
+#[cfg(test)]
 pub(crate) fn detect_compression_additions(old: &Config, new: &Config) {
+    detect_compression_additions_with(old, new, &listeners_by_name(old));
+}
+
+/// Detect compression added to a previously uncompressed listener, using a
+/// prebuilt index of the old listeners by name.
+fn detect_compression_additions_with(old: &Config, new: &Config, old_by_name: &ListenersByName<'_>) {
     let old_chains_with_compression = find_chains_with_compression(old);
     let new_chains_with_compression = find_chains_with_compression(new);
 
     for new_l in &new.listeners {
-        if let Some(old_l) = old.listeners.iter().find(|l| l.name == new_l.name) {
+        if let Some(old_l) = old_by_name.get(new_l.name.as_str()) {
             let old_had_compression = old_l
                 .filter_chains
                 .iter()
@@ -110,9 +132,16 @@ pub(crate) fn find_chains_with_compression(config: &Config) -> std::collections:
 }
 
 /// Detect TLS enable/disable toggles and in-block TLS changes.
+#[cfg(test)]
 pub(crate) fn detect_tls_toggles(old: &Config, new: &Config) {
+    detect_tls_toggles_with(new, &listeners_by_name(old));
+}
+
+/// Detect TLS enable/disable toggles and in-block TLS changes, using a
+/// prebuilt index of the old listeners by name.
+fn detect_tls_toggles_with(new: &Config, old_by_name: &ListenersByName<'_>) {
     for new_l in &new.listeners {
-        if let Some(old_l) = old.listeners.iter().find(|l| l.name == new_l.name) {
+        if let Some(old_l) = old_by_name.get(new_l.name.as_str()) {
             match (&old_l.tls, &new_l.tls) {
                 (None, Some(_)) => {
                     warn!(
@@ -237,6 +266,13 @@ fn detect_admin_changes(old: &Config, new: &Config) {
             new_address = ?new.admin.address,
             "admin configuration changed; requires restart (admin endpoint binds at startup)"
         );
+    }
+}
+
+/// Detect `runtime.logging` changes that require a restart.
+fn detect_logging_change(old: &Config, new: &Config) {
+    if old.runtime.logging != new.runtime.logging {
+        warn!("runtime.logging changed; requires restart (subscriber init is once-per-process)");
     }
 }
 
@@ -675,5 +711,18 @@ mod tests {
         let config = config_with_circuit_breaker(None);
         let warnings = capture_warnings(|| detect_subrequest_circuit_breaker_change(&config, &config));
         assert!(warnings.is_empty(), "both-none should produce no warnings");
+    }
+
+    #[test]
+    fn logging_change_warns() {
+        let old = config_with_circuit_breaker(None);
+        let mut new = old.clone();
+        new.runtime.logging.output = praxis_core::config::LogOutput::Stderr;
+        let warnings = capture_warnings(|| detect_logging_change(&old, &new));
+        assert_eq!(warnings.len(), 1, "logging change should warn once");
+        assert!(
+            warnings[0].contains("runtime.logging"),
+            "warning should mention logging"
+        );
     }
 }

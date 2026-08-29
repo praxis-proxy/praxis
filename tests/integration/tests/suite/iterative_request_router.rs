@@ -2058,6 +2058,62 @@ steps:
 }
 
 #[test]
+fn streaming_response_bounded_by_overall_timeout() {
+    // A slow-drip streaming upstream (a chunk every 150ms, far below the 30s
+    // per-chunk idle timeout) must be cut off by the router's overall
+    // timeout_ms rather than allowed to hold the upstream session and its
+    // admission permit for the full multi-second drip.
+    let chunks: Vec<String> = (0..40).map(|i| format!("data: chunk{i}\n\n")).collect();
+    let backend = Backend::chunked(chunks)
+        .header("content-type", "text/event-stream")
+        .chunk_delay(std::time::Duration::from_millis(150))
+        .start_with_shutdown();
+    let proxy_port = free_port();
+    let registry = streaming_registry();
+    let config = Config::from_yaml(&irr_yaml(
+        proxy_port,
+        &format!(
+            r#"
+initial_step: stream
+timeout_ms: 500
+steps:
+  - name: stream
+    filters:
+      - filter: test_streaming_selector
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: sse
+      - filter: load_balancer
+        clusters:
+          - name: sse
+            endpoints: ["127.0.0.1:{}"]
+    on_result:
+      - default: true
+        done: true
+"#,
+            backend.port()
+        ),
+    ))
+    .unwrap();
+    let proxy = start_full_proxy_with_registry(&config, &registry);
+
+    let started = std::time::Instant::now();
+    let _raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nx-stream-response: true\r\nConnection: close\r\n\r\n",
+    );
+    let elapsed = started.elapsed();
+
+    // The full 40 × 150ms drip is ~6s; with the overall timeout enforced the
+    // stream is cut near 500ms. Without the cap it would run the whole drip.
+    assert!(
+        elapsed < std::time::Duration::from_secs(3),
+        "streamed response must be bounded by the overall timeout_ms, took {elapsed:?}"
+    );
+}
+
+#[test]
 fn streaming_head_request_suppresses_body() {
     let chunks = vec!["data: chunk1\n\n".to_owned(), "data: chunk2\n\n".to_owned()];
     let backend = Backend::chunked(chunks)

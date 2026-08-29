@@ -1,7 +1,21 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2024 Praxis Contributors
 
-//! Branch chain validation: name uniqueness, chain references, cycle detection, and nesting depth.
+//! Branch chain validation: name uniqueness, chain references, and nesting depth.
+//!
+//! Branch chains are resolved into concrete pipelines at startup, so
+//! structural problems must be caught here rather than at request time.
+//! This module rejects duplicate branch names, dangling chain
+//! references, and inline-nesting past the depth ceiling, and enforces
+//! ceilings on branch counts and re-entrant iteration limits so that a
+//! configuration cannot cause an unbounded loop when a branch rejoins at
+//! or before its own filter.
+//!
+//! Cycles through *named* chain references are not detected here (this
+//! module only follows inline chains); they are caught during pipeline
+//! resolution, where the recursion trips the depth limit and the build
+//! fails. The total expansion size is likewise bounded at build time by
+//! the pipeline builder's per-pipeline filter-instance ceiling.
 
 use std::collections::HashSet;
 

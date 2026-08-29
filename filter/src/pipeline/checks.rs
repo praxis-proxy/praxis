@@ -51,10 +51,15 @@ const REWRITE_FILTERS: &[&str] = &["path_rewrite", "url_rewrite"];
 
 /// `load_balancer` without a filter that sets `ctx.cluster` will fail
 /// every request with "no cluster selected".
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_lb_without_cluster_selector(filters: &[PipelineFilter], errors: &mut Vec<String>) {
     for (i, filter) in filters.iter().enumerate() {
-        if filter.filter.name() == "load_balancer" && !filters[..i].iter().any(|f| f.filter.selects_cluster()) {
+        if filter.filter.name() == "load_balancer"
+            && !filters
+                .get(..i)
+                .unwrap_or_default()
+                .iter()
+                .any(|f| f.filter.selects_cluster())
+        {
             errors.push(
                 "load_balancer without a preceding router \
                  or cluster-selecting filter; requests will \
@@ -67,7 +72,6 @@ pub(super) fn check_lb_without_cluster_selector(filters: &[PipelineFilter], erro
 }
 
 /// Unconditional `static_response` blocking subsequent filters.
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_unconditional_static_response(
     names: &[&str],
     filters: &[PipelineFilter],
@@ -75,13 +79,13 @@ pub(super) fn check_unconditional_static_response(
 ) {
     for (i, name) in names.iter().enumerate() {
         if *name == "static_response" && i + 1 < names.len() {
-            let conditions = &filters[i].conditions;
-            if conditions.is_empty() {
+            let unconditional = filters.get(i).is_some_and(|pf| pf.conditions.is_empty());
+            if unconditional {
                 errors.push(format!(
                     "unconditional static_response at \
                      position {i} makes subsequent filters \
                      unreachable: {}",
-                    names[i + 1..].join(", ")
+                    names.get(i + 1..).unwrap_or_default().join(", ")
                 ));
             }
         }
@@ -89,18 +93,14 @@ pub(super) fn check_unconditional_static_response(
 }
 
 /// Security filters with request conditions (bypass risk).
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_conditional_security(names: &[&str], filters: &[PipelineFilter], errors: &mut Vec<String>) {
-    for (i, name) in names.iter().enumerate() {
-        if SECURITY_FILTERS.contains(name) {
-            let conditions = &filters[i].conditions;
-            if !conditions.is_empty() {
-                errors.push(format!(
-                    "security filter '{name}' at position {i} has \
-                     request conditions; it will be bypassed for \
-                     non-matching requests"
-                ));
-            }
+    for (i, (name, pf)) in names.iter().zip(filters).enumerate() {
+        if SECURITY_FILTERS.contains(name) && !pf.conditions.is_empty() {
+            errors.push(format!(
+                "security filter '{name}' at position {i} has \
+                 request conditions; it will be bypassed for \
+                 non-matching requests"
+            ));
         }
     }
 }
@@ -108,15 +108,14 @@ pub(super) fn check_conditional_security(names: &[&str], filters: &[PipelineFilt
 /// Security filters with `failure_mode: open` (bypass risk on error).
 ///
 /// When `allow` is `true`, the error is demoted to a warning.
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_open_security_filters(
     names: &[&str],
     filters: &[PipelineFilter],
     allow: bool,
     errors: &mut Vec<String>,
 ) {
-    for (i, name) in names.iter().enumerate() {
-        if SECURITY_FILTERS.contains(name) && filters[i].failure_mode == FailureMode::Open {
+    for (i, (name, pf)) in names.iter().zip(filters).enumerate() {
+        if SECURITY_FILTERS.contains(name) && pf.failure_mode == FailureMode::Open {
             let msg = format!(
                 "security filter '{name}' at position {i} has \
                  failure_mode: open; runtime errors will bypass \
@@ -197,23 +196,40 @@ pub(super) fn check_conflicting_cluster_selectors(filters: &[PipelineFilter], er
 /// Every cluster selected by a pipeline filter must be defined by the
 /// load balancer that will consume `ctx.cluster`.
 pub(super) fn check_misaligned_clusters(filters: &[PipelineFilter], errors: &mut Vec<String>) {
-    let selected_clusters = super::clusters::extract_selected_clusters(filters);
-    let lb_clusters = super::clusters::extract_lb_clusters(filters);
+    // Reachability-aware alignment: a top-level selection must be served by a
+    // load balancer that is *guaranteed to run* for it. That is this level's
+    // own load balancers plus those inside unconditional branches on
+    // unconditional hosts (which always run and share `ctx`, so they serve an
+    // enclosing selection just like a top-level load balancer — see
+    // `reachable_lb_clusters`). A *conditional* branch's load balancer is
+    // excluded: it may not fire, so relying on it would hide a guaranteed 502
+    // for requests that skip the branch.
+    let top_selected = super::clusters::level_selected_clusters(filters);
+    let top_lb = super::clusters::reachable_lb_clusters(filters);
 
-    if selected_clusters.is_empty() || lb_clusters.is_empty() {
-        return;
-    }
-
-    for cluster in &selected_clusters {
-        if !lb_clusters.contains(cluster.as_str()) {
-            errors.push(format!(
-                "cluster-selecting filter references cluster \
-                 '{cluster}' which is not defined in the \
-                 load_balancer configuration"
-            ));
+    // The empty-LB escape is judged on the WHOLE pipeline: a pipeline with no
+    // load balancer anywhere may route by other means (static upstream), but
+    // one whose only LBs live inside branches cannot serve a top-level
+    // selection, so the top-level check must still run against top_lb.
+    let any_lb = !super::clusters::extract_lb_clusters(filters).is_empty();
+    if !top_selected.is_empty() && any_lb {
+        for cluster in &top_selected {
+            if !top_lb.contains(cluster.as_str()) {
+                errors.push(format!(
+                    "cluster-selecting filter references cluster \
+                     '{cluster}' which is not defined in the \
+                     load_balancer configuration"
+                ));
+            }
         }
     }
 
+    check_branch_cluster_demands(filters, &top_lb, any_lb, errors);
+
+    // The unused-cluster warning stays whole-pipeline: a cluster selected
+    // only inside a branch still counts as used.
+    let selected_clusters = super::clusters::extract_selected_clusters(filters);
+    let lb_clusters = super::clusters::extract_lb_clusters(filters);
     for cluster in &lb_clusters {
         if !selected_clusters.contains(cluster.as_str()) {
             warn!(
@@ -224,8 +240,51 @@ pub(super) fn check_misaligned_clusters(filters: &[PipelineFilter], errors: &mut
     }
 }
 
+/// Check each branch sub-chain's cluster demands against its availability.
+///
+/// A branch's available load balancers are those inherited from enclosing
+/// scopes plus the load balancers *guaranteed to run* within the branch —
+/// its own level plus any unconditional sub-branches on unconditional hosts
+/// (see [`reachable_lb_clusters`]). A *conditional* nested branch's load
+/// balancer is excluded: it only runs when that nested branch fires, so
+/// counting it here would hide the same guaranteed-502 shape one level down.
+/// The empty-LB escape is pipeline-global (`any_lb`), matching the top-level
+/// check: only a pipeline with no load balancer anywhere (static upstream)
+/// skips demand validation — a branch whose local availability happens to be
+/// empty is still checked.
+///
+/// [`reachable_lb_clusters`]: super::clusters::reachable_lb_clusters
+fn check_branch_cluster_demands(
+    filters: &[PipelineFilter],
+    inherited_lb: &std::collections::HashSet<String>,
+    any_lb: bool,
+    errors: &mut Vec<String>,
+) {
+    for pf in filters {
+        for branch in &pf.branches {
+            let mut available = inherited_lb.clone();
+            available.extend(super::clusters::reachable_lb_clusters(&branch.filters));
+
+            let demands = super::clusters::level_selected_clusters(&branch.filters);
+            if any_lb {
+                for cluster in &demands {
+                    if !available.contains(cluster.as_str()) {
+                        errors.push(format!(
+                            "cluster-selecting filter in branch '{name}' references cluster \
+                             '{cluster}' which is not defined in any load_balancer \
+                             visible to that branch",
+                            name = branch.name,
+                        ));
+                    }
+                }
+            }
+
+            check_branch_cluster_demands(&branch.filters, &available, any_lb, errors);
+        }
+    }
+}
+
 /// Multiple path rewriting filters (`path_rewrite` / `url_rewrite`).
-#[expect(clippy::indexing_slicing, reason = "checked before usage")]
 pub(super) fn check_duplicate_rewrite_filters(names: &[&str], entries: &[FilterEntry], errors: &mut Vec<String>) {
     let rewrite_indices: Vec<usize> = names
         .iter()
@@ -234,15 +293,13 @@ pub(super) fn check_duplicate_rewrite_filters(names: &[&str], entries: &[FilterE
         .map(|(i, _)| i)
         .collect();
 
-    if rewrite_indices.len() < 2 {
+    let Some((&first_idx, rest)) = rewrite_indices.split_first() else {
         return;
-    }
+    };
+    let first_name = names.get(first_idx).copied().unwrap_or_default();
 
-    let first_idx = rewrite_indices[0];
-    let first_name = names[first_idx];
-
-    for &idx in &rewrite_indices[1..] {
-        let later_name = names[idx];
+    for &idx in rest {
+        let later_name = names.get(idx).copied().unwrap_or_default();
         let allows_override = has_allow_rewrite_override(entries, idx);
 
         if allows_override {
@@ -290,6 +347,58 @@ pub(super) fn check_skip_to_bypasses_security(filters: &[PipelineFilter], errors
             }
         }
     }
+}
+
+/// `Terminal` branches that select a cluster and bypass later security filters.
+///
+/// When a branch rejoins at `Terminal` and its sub-chain selects a cluster,
+/// the pipeline forwards the request upstream immediately, skipping every
+/// top-level filter after the branch's host filter. A security filter placed
+/// after such a branch is silently bypassed for requests that take the branch
+/// — the same hazard [`check_skip_to_bypasses_security`] guards for `SkipTo`.
+pub(super) fn check_terminal_rejoin_bypasses_security(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    // Tracks whether any filter up to and including the branch host can
+    // select a cluster. The runtime forwards a Terminal branch upstream
+    // whenever ctx.cluster is set — by the branch sub-chain OR by a router
+    // earlier in the pipeline — so a terminal branch after a selector
+    // bypasses later security filters even when the sub-chain itself
+    // selects nothing. Reachability-blind over-approximation, consistent
+    // with the module's other ordering checks.
+    let mut cluster_selected_before = false;
+    for (i, pf) in filters.iter().enumerate() {
+        // The host filter runs before its branches are evaluated, so its own
+        // selection counts for its branches too — as does a selection made
+        // inside any branch sub-chain reached so far (a router in an earlier
+        // Next-rejoin branch sets ctx.cluster just like a top-level one).
+        cluster_selected_before = cluster_selected_before
+            || pf.filter.selects_cluster()
+            || pf.branches.iter().any(|b| branch_selects_cluster(&b.filters));
+        let terminal_selects_cluster = pf.branches.iter().any(|branch| {
+            matches!(branch.rejoin, RejoinTarget::Terminal)
+                && (cluster_selected_before || branch_selects_cluster(&branch.filters))
+        });
+        if !terminal_selects_cluster {
+            continue;
+        }
+        for (later_idx, later) in filters.iter().enumerate().skip(i + 1) {
+            let name = later.filter.name();
+            if SECURITY_FILTERS.contains(&name) {
+                errors.push(format!(
+                    "filter at position {i} has a Terminal branch that forwards upstream (a \
+                     cluster is selected in the sub-chain or earlier in the pipeline), \
+                     bypassing security filter '{name}' at position {later_idx}; \
+                     place the security filter before the routing branch"
+                ));
+            }
+        }
+    }
+}
+
+/// Whether any filter in a branch sub-chain (recursively) selects a cluster.
+fn branch_selects_cluster(filters: &[PipelineFilter]) -> bool {
+    filters
+        .iter()
+        .any(|pf| pf.filter.selects_cluster() || pf.branches.iter().any(|b| branch_selects_cluster(&b.filters)))
 }
 
 /// Body-access filters inside branch chains.
@@ -372,7 +481,6 @@ pub(super) fn check_router_without_lb(names: &[&str], warnings: &mut Vec<String>
 }
 
 /// All routers conditional with no unconditional fallback.
-#[expect(clippy::indexing_slicing, reason = "enumeration bounds")]
 pub(super) fn check_all_routers_conditional(names: &[&str], filters: &[PipelineFilter], warnings: &mut Vec<String>) {
     let router_indices: Vec<usize> = names
         .iter()
@@ -385,7 +493,9 @@ pub(super) fn check_all_routers_conditional(names: &[&str], filters: &[PipelineF
         return;
     }
 
-    let all_conditional = router_indices.iter().all(|&i| !filters[i].conditions.is_empty());
+    let all_conditional = router_indices
+        .iter()
+        .all(|&i| filters.get(i).is_some_and(|pf| !pf.conditions.is_empty()));
 
     if all_conditional {
         warnings.push(
@@ -866,6 +976,298 @@ mod tests {
         assert!(errors.is_empty(), "aligned clusters should produce no errors");
     }
 
+    /// Build an unconditional host filter carrying one unconditional
+    /// Next-rejoin branch with `filters`. Such a branch always runs and shares
+    /// `ctx`, so its load balancers are reachable for the enclosing scope.
+    fn host_with_branch(branch_filters: Vec<PipelineFilter>) -> PipelineFilter {
+        let mut host = noop_filter_with_conditions("headers", vec![]);
+        host.branches = vec![ResolvedBranch {
+            condition: None,
+            filters: branch_filters,
+            max_iterations: None,
+            name: Arc::from("br"),
+            rejoin: RejoinTarget::Next,
+        }];
+        host
+    }
+
+    /// Build an unconditional host filter carrying one *conditional*
+    /// Next-rejoin branch with `filters`. A conditional branch may not fire, so
+    /// its load balancers cannot be relied on to serve an enclosing selection.
+    fn host_with_conditional_branch(branch_filters: Vec<PipelineFilter>) -> PipelineFilter {
+        let mut host = noop_filter_with_conditions("headers", vec![]);
+        host.branches = vec![ResolvedBranch {
+            condition: Some(crate::pipeline::branch::ResolvedBranchCondition {
+                filter_name: Arc::from("classifier"),
+                key: Arc::from("kind"),
+                value: Arc::from("premium"),
+            }),
+            filters: branch_filters,
+            max_iterations: None,
+            name: Arc::from("cond_br"),
+            rejoin: RejoinTarget::Next,
+        }];
+        host
+    }
+
+    #[test]
+    fn unconditional_branch_lb_satisfies_top_level_selection() {
+        // An unconditional branch on an unconditional host always runs and its
+        // filters share `ctx`, so the branch LB sets `ctx.upstream` for the
+        // top-level selection exactly like a top-level LB (verified against the
+        // runtime: evaluate.rs runs branch filters on the shared ctx, and the
+        // trailing lb(other) early-returns once ctx.upstream is set). This
+        // config succeeds at runtime, so it must NOT be rejected at build time.
+        let filters = vec![
+            selector_filter("router", &["x"]),
+            host_with_branch(vec![lb_filter(&["x"])]),
+            lb_filter(&["other"]),
+        ];
+        let mut errors = Vec::new();
+        check_misaligned_clusters(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "an unconditional branch LB is always reachable and satisfies a top-level selection: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn conditional_branch_lb_does_not_satisfy_top_level_selection() {
+        // A CONDITIONAL branch may not fire; when it does not, the top-level
+        // selection of "x" reaches the trailing lb(other), which does not
+        // define "x", and the request 502s. The branch LB therefore cannot be
+        // relied on to satisfy the selection, so this must error.
+        let filters = vec![
+            selector_filter("router", &["x"]),
+            host_with_conditional_branch(vec![lb_filter(&["x"])]),
+            lb_filter(&["other"]),
+        ];
+        let mut errors = Vec::new();
+        check_misaligned_clusters(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a conditional branch LB must not satisfy a top-level selection: {errors:?}"
+        );
+        assert!(
+            errors[0].contains('x'),
+            "error should name the missing cluster: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn branch_selection_without_any_visible_lb_errors() {
+        // A router inside a branch demanding a cluster no visible LB defines
+        // is the guaranteed request-time 502 this check exists to catch.
+        let filters = vec![
+            host_with_branch(vec![selector_filter("router", &["y"])]),
+            lb_filter(&["other"]),
+        ];
+        let mut errors = Vec::new();
+        check_misaligned_clusters(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a branch selecting an undefined cluster must error: {errors:?}"
+        );
+        assert!(
+            errors[0].contains('y'),
+            "error should name the missing cluster: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn branch_selection_satisfied_by_top_level_lb_no_error() {
+        let filters = vec![
+            host_with_branch(vec![selector_filter("router", &["web"])]),
+            lb_filter(&["web"]),
+        ];
+        let mut errors = Vec::new();
+        check_misaligned_clusters(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a top-level LB is visible inside branches and satisfies the demand: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn top_level_selection_with_only_unconditional_branch_lb_no_error() {
+        // No top-level LB exists, but the only LB lives in an UNCONDITIONAL
+        // branch, which always runs and serves the top-level selection at
+        // runtime. It must NOT error.
+        let filters = vec![
+            selector_filter("router", &["x"]),
+            host_with_branch(vec![lb_filter(&["x"])]),
+        ];
+        let mut errors = Vec::new();
+        check_misaligned_clusters(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "an unconditional branch LB serves a top-level selection even with no top-level LB: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn top_level_selection_with_only_conditional_branch_lb_errors() {
+        // The pipeline's only LB lives in a CONDITIONAL branch that may not
+        // fire; a non-matching request then forwards with no upstream selected
+        // and 502s. The whole-pipeline escape must not skip this.
+        let filters = vec![
+            selector_filter("router", &["x"]),
+            host_with_conditional_branch(vec![lb_filter(&["x"])]),
+        ];
+        let mut errors = Vec::new();
+        check_misaligned_clusters(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a top-level selection served only by a conditional branch LB must error: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn branch_demand_served_by_unconditional_nested_branch_lb_no_error() {
+        // The demand sits at branch level and the LB defining its cluster is
+        // inside an UNCONDITIONAL nested branch on an unconditional host. That
+        // nested branch always runs when the outer branch runs, so lb(deep) is
+        // reachable and the request succeeds. It must NOT error.
+        let mut nested_host = noop_filter_with_conditions("headers", vec![]);
+        nested_host.branches = vec![ResolvedBranch {
+            condition: None,
+            filters: vec![lb_filter(&["deep"])],
+            max_iterations: None,
+            name: Arc::from("nested"),
+            rejoin: RejoinTarget::Next,
+        }];
+        let filters = vec![
+            host_with_branch(vec![selector_filter("router", &["deep"]), nested_host]),
+            lb_filter(&["web"]),
+        ];
+        let mut errors = Vec::new();
+        check_misaligned_clusters(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "an unconditional nested branch LB is reachable and serves the branch demand: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn branch_demand_served_only_by_conditional_nested_branch_lb_errors() {
+        // The LB defining "deep" is inside a CONDITIONAL nested branch that may
+        // not fire, so the branch-level selection of "deep" can reach
+        // forwarding with no upstream selected. This is the guaranteed-502
+        // shape one level down and must error.
+        let mut nested_host = noop_filter_with_conditions("headers", vec![]);
+        nested_host.branches = vec![ResolvedBranch {
+            condition: Some(crate::pipeline::branch::ResolvedBranchCondition {
+                filter_name: Arc::from("classifier"),
+                key: Arc::from("kind"),
+                value: Arc::from("premium"),
+            }),
+            filters: vec![lb_filter(&["deep"])],
+            max_iterations: None,
+            name: Arc::from("nested_cond"),
+            rejoin: RejoinTarget::Next,
+        }];
+        let filters = vec![
+            host_with_branch(vec![selector_filter("router", &["deep"]), nested_host]),
+            lb_filter(&["web"]),
+        ];
+        let mut errors = Vec::new();
+        check_misaligned_clusters(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a branch demand served only by a conditional nested branch LB must error: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("deep"),
+            "error should name the missing cluster: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn nested_unconditional_branch_lb_without_outer_lb_no_error() {
+        // The pipeline's only LB sits in an UNCONDITIONAL nested branch and
+        // there is no top-level LB. The nested branch always runs, so lb(deep)
+        // is reachable and the branch selection of "deep" succeeds at runtime.
+        // It must NOT error.
+        let mut nested_host = noop_filter_with_conditions("headers", vec![]);
+        nested_host.branches = vec![ResolvedBranch {
+            condition: None,
+            filters: vec![lb_filter(&["deep"])],
+            max_iterations: None,
+            name: Arc::from("nested"),
+            rejoin: RejoinTarget::Next,
+        }];
+        let filters = vec![host_with_branch(vec![
+            selector_filter("router", &["deep"]),
+            nested_host,
+        ])];
+        let mut errors = Vec::new();
+        check_misaligned_clusters(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "an unconditional nested branch LB is reachable even with no top-level LB: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn nested_conditional_branch_lb_without_outer_lb_still_errors() {
+        // The pipeline's only LB sits in a CONDITIONAL nested branch and there
+        // is no top-level LB. The empty-LB escape is pipeline-global, so the
+        // branch demand is still validated and rejected: the nested LB only
+        // runs when the nested branch fires.
+        let mut nested_host = noop_filter_with_conditions("headers", vec![]);
+        nested_host.branches = vec![ResolvedBranch {
+            condition: Some(crate::pipeline::branch::ResolvedBranchCondition {
+                filter_name: Arc::from("classifier"),
+                key: Arc::from("kind"),
+                value: Arc::from("premium"),
+            }),
+            filters: vec![lb_filter(&["deep"])],
+            max_iterations: None,
+            name: Arc::from("nested_cond"),
+            rejoin: RejoinTarget::Next,
+        }];
+        let filters = vec![host_with_branch(vec![
+            selector_filter("router", &["deep"]),
+            nested_host,
+        ])];
+        let mut errors = Vec::new();
+        check_misaligned_clusters(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "the pipeline-global escape must not skip a conditional branch demand: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("deep"),
+            "error should name the cluster: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn self_contained_branch_selection_no_error() {
+        // A branch that both selects and defines its own cluster is complete
+        // on its own; the top level must not be required to re-define it.
+        let filters = vec![
+            selector_filter("router", &["web"]),
+            host_with_branch(vec![selector_filter("router", &["z"]), lb_filter(&["z"])]),
+            lb_filter(&["web"]),
+        ];
+        let mut errors = Vec::new();
+        check_misaligned_clusters(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a self-contained branch selection must not error: {errors:?}"
+        );
+    }
+
     #[test]
     fn custom_selector_missing_cluster_reference_rejected() {
         let filters = vec![
@@ -1178,5 +1580,156 @@ mod tests {
         }
 
         PipelineFilter::new(0, AnyFilter::Http(Box::new(BranchBodyFilter)), vec![], vec![])
+    }
+
+    /// Build a [`PipelineFilter`] whose filter selects a cluster.
+    fn cluster_selecting_filter() -> PipelineFilter {
+        /// Minimal filter that reports it selects a cluster.
+        struct ClusterSelectingFilter;
+
+        #[async_trait::async_trait]
+        impl crate::filter::HttpFilter for ClusterSelectingFilter {
+            fn name(&self) -> &'static str {
+                "router"
+            }
+
+            async fn on_request(
+                &self,
+                _ctx: &mut crate::HttpFilterContext<'_>,
+            ) -> Result<crate::FilterAction, crate::FilterError> {
+                Ok(crate::FilterAction::Continue)
+            }
+
+            fn selects_cluster(&self) -> bool {
+                true
+            }
+        }
+
+        PipelineFilter::new(0, AnyFilter::Http(Box::new(ClusterSelectingFilter)), vec![], vec![])
+    }
+
+    /// Build a [`ResolvedBranch`] with a [`Terminal`] rejoin target.
+    ///
+    /// [`Terminal`]: RejoinTarget::Terminal
+    fn make_terminal_branch(name: &str, filters: Vec<PipelineFilter>) -> ResolvedBranch {
+        ResolvedBranch {
+            condition: None,
+            filters,
+            max_iterations: None,
+            name: Arc::from(name),
+            rejoin: RejoinTarget::Terminal,
+        }
+    }
+
+    #[test]
+    fn terminal_routing_branch_before_security_filter_errors() {
+        let mut host = named_noop_filter("classifier", vec![]);
+        host.branches = vec![make_terminal_branch("route", vec![cluster_selecting_filter()])];
+        let ip_acl = named_noop_filter("ip_acl", vec![]);
+        let filters = vec![host, ip_acl];
+        let mut errors = Vec::new();
+        check_terminal_rejoin_bypasses_security(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a terminal routing branch before ip_acl must be flagged"
+        );
+        assert!(
+            errors[0].contains("ip_acl") && errors[0].contains("bypassing"),
+            "error should name the bypassed filter: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn terminal_branch_without_cluster_selection_no_error() {
+        let mut host = named_noop_filter("headers", vec![]);
+        host.branches = vec![make_terminal_branch(
+            "br",
+            vec![named_noop_filter("request_id", vec![])],
+        )];
+        let ip_acl = named_noop_filter("ip_acl", vec![]);
+        let filters = vec![host, ip_acl];
+        let mut errors = Vec::new();
+        check_terminal_rejoin_bypasses_security(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a terminal branch that selects no cluster does not forward, so no bypass: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn terminal_branch_after_upstream_selector_errors() {
+        // The branch sub-chain selects nothing, but a router earlier in the
+        // pipeline already set the cluster, so at runtime the Terminal branch
+        // forwards upstream and bypasses the later security filter all the
+        // same.
+        let selector = cluster_selecting_filter();
+        let mut host = named_noop_filter("classifier", vec![]);
+        host.branches = vec![make_terminal_branch(
+            "br",
+            vec![named_noop_filter("request_id", vec![])],
+        )];
+        let ip_acl = named_noop_filter("ip_acl", vec![]);
+        let filters = vec![selector, host, ip_acl];
+        let mut errors = Vec::new();
+        check_terminal_rejoin_bypasses_security(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a terminal branch after an upstream selector forwards and must error: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("ip_acl"),
+            "the bypassed security filter should be named: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn terminal_branch_after_earlier_branch_selector_errors() {
+        // The selector lives inside an EARLIER host's Next-rejoin branch: a
+        // request taking that branch has ctx.cluster set when it reaches the
+        // later host's empty Terminal branch, which then forwards upstream
+        // past ip_acl.
+        let mut selector_host = named_noop_filter("classifier", vec![]);
+        selector_host.branches = vec![ResolvedBranch {
+            condition: None,
+            filters: vec![cluster_selecting_filter()],
+            max_iterations: None,
+            name: Arc::from("route"),
+            rejoin: RejoinTarget::Next,
+        }];
+        let mut terminal_host = named_noop_filter("headers", vec![]);
+        terminal_host.branches = vec![make_terminal_branch("stop", vec![])];
+        let ip_acl = named_noop_filter("ip_acl", vec![]);
+        let filters = vec![selector_host, terminal_host, ip_acl];
+        let mut errors = Vec::new();
+        check_terminal_rejoin_bypasses_security(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "a selection inside an earlier branch also forwards a later terminal branch: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("ip_acl"),
+            "the bypassed security filter should be named: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn terminal_routing_branch_after_security_filter_no_error() {
+        let ip_acl = named_noop_filter("ip_acl", vec![]);
+        let mut host = named_noop_filter("classifier", vec![]);
+        host.branches = vec![make_terminal_branch("route", vec![cluster_selecting_filter()])];
+        // ip_acl runs before the routing branch, so it is not bypassed.
+        let filters = vec![ip_acl, host];
+        let mut errors = Vec::new();
+        check_terminal_rejoin_bypasses_security(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "security filter before the branch is not bypassed: {errors:?}"
+        );
     }
 }

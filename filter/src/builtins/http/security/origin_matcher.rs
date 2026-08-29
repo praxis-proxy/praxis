@@ -53,7 +53,7 @@ impl OriginMatcher {
                 wildcard_suffixes,
             } => {
                 let normalized = normalize_origin(origin);
-                exact.contains(normalized.as_str()) || match_wildcard_subdomain(&normalized, wildcard_suffixes)
+                exact.contains(normalized.as_ref()) || match_wildcard_subdomain(&normalized, wildcard_suffixes)
             },
         }
     }
@@ -94,7 +94,7 @@ pub(crate) fn build_origin_matcher(origins: &[String]) -> OriginMatcher {
             let suffix = host.get(1..).unwrap_or("").to_owned();
             wildcard_suffixes.push((scheme.to_owned(), suffix));
         } else {
-            exact.insert(normalized);
+            exact.insert(normalized.into_owned());
         }
     }
 

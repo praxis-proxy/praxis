@@ -104,11 +104,15 @@ impl CompressionConfig {
     /// assert!(!config.matches_content_type("image/png"));
     /// ```
     pub fn matches_content_type(&self, content_type: &str) -> bool {
-        let lower = content_type.to_ascii_lowercase();
+        // Case-insensitive prefix compare against the raw value: the old
+        // shape lowercased the whole Content-Type (an allocation and a
+        // full copy) per response for the same verdicts.
         self.content_types.iter().any(|pattern| {
-            lower.starts_with(pattern)
+            content_type
+                .get(..pattern.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(pattern))
                 && (pattern.ends_with('/')
-                    || !lower
+                    || !content_type
                         .as_bytes()
                         .get(pattern.len())
                         .is_some_and(u8::is_ascii_alphanumeric))

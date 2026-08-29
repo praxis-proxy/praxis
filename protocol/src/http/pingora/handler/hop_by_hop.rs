@@ -124,13 +124,26 @@ pub(crate) fn is_websocket_upgrade(value: &str) -> bool {
 
 /// Whether a header map's `Upgrade` header indicates a `WebSocket` upgrade.
 ///
-/// Extracts the `Upgrade` header value and delegates to
-/// [`is_websocket_upgrade`].
+/// Returns `true` only when there is exactly one `Upgrade` header whose
+/// value is exactly `websocket` (via [`is_websocket_upgrade`]). Zero
+/// headers, or two or more `Upgrade` headers, yield `false` so the strip
+/// path removes them.
+///
+/// Reading only the first value (e.g. via [`HeaderMap::get`]) would let a
+/// client smuggle a second protocol past the WebSocket check: a request
+/// carrying `Upgrade: websocket` followed by `Upgrade: h2c` would be seen
+/// as a clean WebSocket upgrade, and [`preserve_for_upgrade`] would then
+/// forward the entire (multi-valued) `Upgrade` header — including the
+/// `h2c` token — to the backend, defeating the h2c-smuggling protection.
 pub(crate) fn has_websocket_upgrade(headers: &HeaderMap) -> bool {
-    headers
-        .get(http::header::UPGRADE)
-        .and_then(|v| v.to_str().ok())
-        .is_some_and(is_websocket_upgrade)
+    let mut values = headers.get_all(http::header::UPGRADE).iter();
+    match (values.next(), values.next()) {
+        // Exactly one Upgrade header; value must be exactly `websocket`.
+        (Some(value), None) => value.to_str().is_ok_and(is_websocket_upgrade),
+        // Zero, or two or more Upgrade headers: not a clean WebSocket
+        // upgrade, so let the caller strip every Upgrade value.
+        _ => false,
+    }
 }
 
 /// Snapshot `Connection` header values before they are removed.
@@ -199,6 +212,34 @@ pub(crate) fn strip_hop_by_hop_header_map(headers: &mut HeaderMap, static_list: 
                 headers.remove(token);
             }
         }
+    }
+}
+
+/// Remove reserved internal (`x-praxis-*` / `x-ext-*`) headers from a raw
+/// header map.
+///
+/// The upstream-response path strips these via
+/// [`RemoveHeader::strip_reserved_internal`], but a filter-produced terminal or
+/// streaming-terminal response carries an `http::HeaderMap` directly. Without
+/// this the "reserved internal headers must never reach the client" invariant
+/// held on the upstream path but not on the terminal paths.
+pub(crate) fn strip_reserved_internal_header_map(headers: &mut HeaderMap) {
+    let to_remove: Vec<http::HeaderName> = headers
+        .keys()
+        .filter(|name| super::reserved_headers::is_reserved_internal_header(name))
+        .cloned()
+        .collect();
+
+    for name in &to_remove {
+        headers.remove(name);
+    }
+
+    if !to_remove.is_empty() {
+        debug!(
+            count = to_remove.len(),
+            direction = "response",
+            "stripped reserved internal headers from client-bound response"
+        );
     }
 }
 
@@ -278,7 +319,8 @@ impl RemoveHeader for pingora_http::ResponseHeader {
 fn is_proxy_owned(name: &str) -> bool {
     name.get(..12).is_some_and(|p| p.eq_ignore_ascii_case("x-forwarded-"))
         || name.eq_ignore_ascii_case("forwarded")
-        || praxis_core::reserved_headers::is_reserved(&name.to_ascii_lowercase())
+        // is_reserved matches ASCII case-insensitively; no lowercase copy needed.
+        || praxis_core::reserved_headers::is_reserved(name)
 }
 
 /// Whether a header is essential to message routing or framing and must
@@ -304,6 +346,30 @@ fn is_essential(name: &str) -> bool {
 #[allow(clippy::unwrap_used, reason = "tests")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_reserved_internal_header_map_removes_reserved_keeps_others() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-praxis-route", http::HeaderValue::from_static("internal-cluster"));
+        headers.insert("x-ext-protocol-foo", http::HeaderValue::from_static("meta"));
+        headers.insert("content-type", http::HeaderValue::from_static("text/plain"));
+
+        strip_reserved_internal_header_map(&mut headers);
+
+        assert!(
+            !headers.contains_key("x-praxis-route"),
+            "reserved x-praxis-* header must be stripped from a terminal response"
+        );
+        assert!(
+            !headers.contains_key("x-ext-protocol-foo"),
+            "reserved x-ext-* header must be stripped from a terminal response"
+        );
+        assert_eq!(
+            headers.get("content-type").map(http::HeaderValue::as_bytes),
+            Some(b"text/plain".as_slice()),
+            "non-reserved headers must be preserved"
+        );
+    }
 
     #[test]
     fn declares_chunked_framing_matches_plain_and_compound() {
@@ -436,6 +502,33 @@ mod tests {
         assert!(
             !has_websocket_upgrade(&headers),
             "should return false for non-websocket upgrade"
+        );
+    }
+
+    #[test]
+    fn duplicate_upgrade_headers_are_not_websocket() {
+        // A client sending `Upgrade: websocket` followed by `Upgrade: h2c`
+        // must not be treated as a clean WebSocket upgrade: reading only the
+        // first value would preserve the whole (multi-valued) Upgrade header
+        // and smuggle the h2c token to the backend.
+        let mut headers = HeaderMap::new();
+        headers.append("upgrade", "websocket".parse().unwrap());
+        headers.append("upgrade", "h2c".parse().unwrap());
+        assert!(
+            !has_websocket_upgrade(&headers),
+            "duplicate Upgrade headers must not be recognized as a WebSocket upgrade (h2c smuggling)"
+        );
+    }
+
+    #[test]
+    fn duplicate_upgrade_headers_websocket_first_or_last() {
+        // Order must not matter: h2c before or after websocket both fail.
+        let mut headers = HeaderMap::new();
+        headers.append("upgrade", "h2c".parse().unwrap());
+        headers.append("upgrade", "websocket".parse().unwrap());
+        assert!(
+            !has_websocket_upgrade(&headers),
+            "duplicate Upgrade headers must not be recognized regardless of order"
         );
     }
 

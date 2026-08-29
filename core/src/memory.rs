@@ -97,7 +97,7 @@ impl MemoryPressure {
 
     /// Whether the most-recent RSS sample exceeds the threshold.
     ///
-    /// Lazily samples `/proc/self/statm` when the cached value
+    /// Lazily samples `/proc/self/status` when the cached value
     /// is older than `CHECK_INTERVAL_MS`.
     pub fn is_exceeded(&self) -> bool {
         self.maybe_refresh();

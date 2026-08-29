@@ -33,6 +33,7 @@ metrics = { workspace = true }
 opentelemetry = { workspace = true, optional = true }
 opentelemetry_sdk = { workspace = true, optional = true }
 opentelemetry-otlp = { workspace = true, optional = true }
+percent-encoding = { workspace = true }
 pingora-core = { workspace = true }
 pingora-http = { workspace = true }
 praxis-tls = { workspace = true }
@@ -42,13 +43,17 @@ serde = { workspace = true }
 serde_yaml = { workspace = true }
 thiserror = { workspace = true }
 
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["rt", "sync", "time", "macros"] }
 tonic = { workspace = true, optional = true }
 tracing = { workspace = true }
+tracing-appender = { workspace = true }
 tracing-opentelemetry = { workspace = true, optional = true }
 tracing-subscriber = { workspace = true }
+chrono = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 h2 = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net"] }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "net", "test-util"] }

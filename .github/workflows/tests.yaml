@@ -34,10 +34,13 @@ jobs:
 
   lint:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust (stable + nightly fmt)
         uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@465a493e9f18776294940c9912935eb7e68fb03b # v0.1.0
@@ -62,10 +65,13 @@ jobs:
 
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust
         uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
@@ -79,6 +85,7 @@ jobs:
 
   experimental-features:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
     strategy:
@@ -91,6 +98,8 @@ jobs:
           - praxis-proxy
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust
         uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0

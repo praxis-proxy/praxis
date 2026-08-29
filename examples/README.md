@@ -35,9 +35,13 @@ page.
 
 | File | Description |
 | ------ | ------------- |
+| [access-log-fields.yaml](configs/observability/access-log-fields.yaml) | Logs only server errors with a lean field set |
 | [access-logging.yaml](configs/observability/access-logging.yaml) | Structured JSON logging with sampling; logs ~10% of requests. request_id ensures each log line has a correlation ID. access_log emits method, path, status, and timing |
 | [logging.yaml](configs/observability/logging.yaml) | request_id — ensures every request has a correlation ID |
+| [process-logging.yaml](configs/observability/process-logging.yaml) | Non-blocking process logs written to a rotating file |
 | [tcp-access-log.yaml](configs/observability/tcp-access-log.yaml) | Structured JSON logging of TCP connection events (connect and disconnect) |
+| [tcp-connection-metrics.yaml](configs/observability/tcp-connection-metrics.yaml) | Prometheus histogram for TCP connection duration |
+| [trace-context.yaml](configs/observability/trace-context.yaml) | W3C Trace Context header propagation |
 | [tracing-otlp.yaml](configs/observability/tracing-otlp.yaml) | Exports distributed tracing spans to an OpenTelemetry Collector via OTLP/gRPC |
 
 ### Operations
@@ -124,6 +128,7 @@ page.
 
 | File | Description |
 | ------ | ------------- |
+| [authority-override.yaml](configs/traffic-management/authority-override.yaml) | Demonstrates overriding the HTTP Host header sent to a specific upstream cluster, including requests received over HTTP/2 |
 | [basic-reverse-proxy.yaml](configs/traffic-management/basic-reverse-proxy.yaml) | Minimal config: one listener, one upstream, default filter chain |
 | [canary-routing.yaml](configs/traffic-management/canary-routing.yaml) | Sends ~10% of traffic to a canary backend while the stable backend handles the remaining ~90% |
 | [circuit-breaker.yaml](configs/traffic-management/circuit-breaker.yaml) | Prevents cascading failures by tracking consecutive upstream errors per cluster |
@@ -138,15 +143,20 @@ page.
 | [maglev.yaml](configs/traffic-management/maglev.yaml) | Pins a user's requests to one backend by hashing a request header through a Maglev lookup table |
 | [p2c.yaml](configs/traffic-management/p2c.yaml) | Samples two random endpoints and picks the one with fewer in-flight requests |
 | [path-based-routing.yaml](configs/traffic-management/path-based-routing.yaml) | Routes by URL path prefix |
+| [priority-lb.yaml](configs/traffic-management/priority-lb.yaml) | Defines primary and failover endpoint tiers |
 | [random.yaml](configs/traffic-management/random.yaml) | Selects an upstream endpoint at random, weighted by endpoint weight |
 | [rate-limiting.yaml](configs/traffic-management/rate-limiting.yaml) | Token bucket rate limiter with per-IP or global modes |
 | [redirect.yaml](configs/traffic-management/redirect.yaml) | Returns a 3xx redirect without contacting any upstream |
 | [retry-policy.yaml](configs/traffic-management/retry-policy.yaml) | Automatically retries failed upstream requests with exponential backoff and a token-bucket budget to prevent retry storms |
+| [ring-hash.yaml](configs/traffic-management/ring-hash.yaml) | Routes requests to a stable backend by hashing a configurable request header through a sorted virtual-node ring |
 | [round-robin.yaml](configs/traffic-management/round-robin.yaml) | Default strategy |
 | [session-affinity.yaml](configs/traffic-management/session-affinity.yaml) | Hashes a request header to pin a user's requests to one backend |
 | [static-response.yaml](configs/traffic-management/static-response.yaml) | Returns a fixed response without contacting any upstream |
+| [sticky-sessions.yaml](configs/traffic-management/sticky-sessions.yaml) | Pins clients to a specific backend across requests |
+| [subset-lb.yaml](configs/traffic-management/subset-lb.yaml) | Filters endpoints by metadata labels and applies an inner strategy within the matching subset |
 | [timeout.yaml](configs/traffic-management/timeout.yaml) | Returns 504 if the upstream takes longer than timeout_ms to respond |
 | [weighted-load-balancing.yaml](configs/traffic-management/weighted-load-balancing.yaml) | Traffic split proportional to per-endpoint weights |
+| [zone-aware.yaml](configs/traffic-management/zone-aware.yaml) | Prefers same-zone endpoints to reduce cross-zone network costs and latency |
 
 ### Transformation
 

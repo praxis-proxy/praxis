@@ -23,14 +23,20 @@ fn circuit_breaker_config_parses() {
 
 #[test]
 fn circuit_breaker_functional() {
-    let backend_guard = praxis_test_utils::start_backend_with_shutdown("ok");
-    let backend_port = backend_guard.port();
+    // The backend cluster lists two distinct endpoints; give each its own
+    // backend rather than collapsing them onto one address (a duplicate
+    // endpoint address is rejected by config validation).
+    let backend_guard_1 = praxis_test_utils::start_backend_with_shutdown("ok");
+    let backend_guard_2 = praxis_test_utils::start_backend_with_shutdown("ok");
     let proxy_port = praxis_test_utils::free_port();
 
     let config = super::load_example_config(
         "traffic-management/circuit-breaker.yaml",
         proxy_port,
-        HashMap::from([("127.0.0.1:3001", backend_port), ("127.0.0.1:3002", backend_port)]),
+        HashMap::from([
+            ("127.0.0.1:3001", backend_guard_1.port()),
+            ("127.0.0.1:3002", backend_guard_2.port()),
+        ]),
     );
 
     let proxy = praxis_test_utils::start_proxy(&config);

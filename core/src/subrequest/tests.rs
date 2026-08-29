@@ -297,8 +297,18 @@ fn classify_timeout_io_includes_phase() {
 
 // -- Header sanitization ------------------------------------------------
 
+/// Which of `headers`' names survive the request-direction predicate.
+fn surviving_request_headers(headers: &HeaderMap) -> Vec<String> {
+    let nominated = connection_nominated_tokens(headers);
+    headers
+        .keys()
+        .filter(|name| !is_request_stripped(name, &nominated))
+        .map(|name| name.as_str().to_owned())
+        .collect()
+}
+
 #[test]
-fn strip_hop_by_hop_removes_static_and_connection_nominated() {
+fn request_predicate_strips_static_and_connection_nominated() {
     let mut headers = HeaderMap::new();
     headers.insert("connection", "x-custom, keep-alive".parse().unwrap());
     headers.insert("keep-alive", "timeout=5".parse().unwrap());
@@ -306,27 +316,37 @@ fn strip_hop_by_hop_removes_static_and_connection_nominated() {
     headers.insert("x-safe", "kept".parse().unwrap());
     headers.insert("transfer-encoding", "chunked".parse().unwrap());
 
-    strip_hop_by_hop_headers(&mut headers);
-
-    assert!(!headers.contains_key("connection"));
-    assert!(!headers.contains_key("keep-alive"));
-    assert!(!headers.contains_key("x-custom"));
-    assert!(!headers.contains_key("transfer-encoding"));
-    assert_eq!(headers.get("x-safe").unwrap(), "kept");
+    assert_eq!(
+        surviving_request_headers(&headers),
+        vec!["x-safe".to_owned()],
+        "hop-by-hop, nominated, and framing names must all be stripped"
+    );
 }
 
 #[test]
-fn strip_request_framing_removes_content_length_and_transfer_encoding() {
+fn request_predicate_strips_framing_headers() {
     let mut headers = HeaderMap::new();
     headers.insert(http::header::CONTENT_LENGTH, "42".parse().unwrap());
     headers.insert(http::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
     headers.insert("x-safe", "kept".parse().unwrap());
 
-    strip_request_framing_headers(&mut headers);
+    assert_eq!(
+        surviving_request_headers(&headers),
+        vec!["x-safe".to_owned()],
+        "framing headers the executor re-computes must be stripped"
+    );
+}
 
-    assert!(!headers.contains_key(http::header::CONTENT_LENGTH));
-    assert!(!headers.contains_key(http::header::TRANSFER_ENCODING));
-    assert_eq!(headers.get("x-safe").unwrap(), "kept");
+#[test]
+fn nominated_tokens_match_case_insensitively() {
+    let mut headers = HeaderMap::new();
+    headers.insert("connection", "X-Custom".parse().unwrap());
+    headers.insert("x-custom", "value".parse().unwrap());
+    let nominated = connection_nominated_tokens(&headers);
+    assert!(
+        is_request_stripped(&"x-custom".parse().unwrap(), &nominated),
+        "a nominated name must strip regardless of the token's case"
+    );
 }
 
 // -- Helpers ------------------------------------------------------------
@@ -485,7 +505,7 @@ fn client_default_ceiling_is_absolute_max() {
 // -- Response header sanitization -----------------------------------------
 
 #[test]
-fn response_hop_by_hop_headers_are_stripped() {
+fn response_predicate_strips_hop_by_hop_headers() {
     let mut headers = HeaderMap::new();
     headers.insert("connection", "x-nominated".parse().unwrap());
     headers.insert("transfer-encoding", "chunked".parse().unwrap());
@@ -493,19 +513,23 @@ fn response_hop_by_hop_headers_are_stripped() {
     headers.insert("x-nominated", "internal".parse().unwrap());
     headers.insert("content-type", "application/json".parse().unwrap());
 
-    strip_hop_by_hop_headers(&mut headers);
-
-    assert!(!headers.contains_key("connection"));
-    assert!(!headers.contains_key("transfer-encoding"));
-    assert!(!headers.contains_key("keep-alive"));
-    assert!(!headers.contains_key("x-nominated"));
-    assert_eq!(headers.get("content-type").unwrap(), "application/json");
+    let nominated = connection_nominated_tokens(&headers);
+    let surviving: Vec<&str> = headers
+        .keys()
+        .filter(|name| !is_boundary_stripped(name, &nominated))
+        .map(http::header::HeaderName::as_str)
+        .collect();
+    assert_eq!(
+        surviving,
+        vec!["content-type"],
+        "fixed and nominated hop-by-hop names must be stripped from responses"
+    );
 }
 
 // -- Reserved header sanitization ------------------------------------------
 
 #[test]
-fn strip_reserved_removes_internal_prefixes() {
+fn predicate_strips_reserved_internal_prefixes() {
     let mut headers = HeaderMap::new();
     headers.insert("x-praxis-route", "internal".parse().unwrap());
     headers.insert("x-ext-protocol-model", "gpt-4".parse().unwrap());
@@ -513,24 +537,26 @@ fn strip_reserved_removes_internal_prefixes() {
     headers.insert("x-custom", "kept".parse().unwrap());
     headers.insert("authorization", "Bearer tok".parse().unwrap());
 
-    strip_reserved_headers(&mut headers);
-
-    assert!(!headers.contains_key("x-praxis-route"));
-    assert!(!headers.contains_key("x-ext-protocol-model"));
-    assert!(!headers.contains_key("x-ext-agent-task"));
-    assert_eq!(headers.get("x-custom").unwrap(), "kept");
-    assert_eq!(headers.get("authorization").unwrap(), "Bearer tok");
+    let mut surviving = surviving_request_headers(&headers);
+    surviving.sort();
+    assert_eq!(
+        surviving,
+        vec!["authorization".to_owned(), "x-custom".to_owned()],
+        "reserved internal prefixes must be stripped, unreserved names kept"
+    );
 }
 
 #[test]
-fn strip_reserved_is_no_op_for_safe_headers() {
+fn predicate_keeps_all_safe_headers() {
     let mut headers = HeaderMap::new();
     headers.insert("content-type", "application/json".parse().unwrap());
     headers.insert("x-request-id", "abc".parse().unwrap());
 
-    strip_reserved_headers(&mut headers);
-
-    assert_eq!(headers.len(), 2);
+    assert_eq!(
+        surviving_request_headers(&headers).len(),
+        2,
+        "safe headers must all survive the predicate"
+    );
 }
 
 // -- Connector configured_max_connections ---------------------------------
@@ -539,9 +565,16 @@ fn strip_reserved_is_no_op_for_safe_headers() {
 fn connector_stores_configured_max_connections() {
     let connector = SubRequestConnector::new(4, Some(256));
     assert_eq!(connector.configured_max_connections, Some(256));
+    assert_eq!(
+        connector.configured_max_connections(),
+        Some(256),
+        "accessor matches field"
+    );
+    assert!(!connector.has_circuit_breaker(), "new() never wires a circuit breaker");
 
     let unbounded = SubRequestConnector::new(4, None);
     assert_eq!(unbounded.configured_max_connections, None);
+    assert_eq!(unbounded.configured_max_connections(), None, "accessor matches field");
 }
 
 // -- SubRequestConnectorOptions -----------------------------------------------
@@ -562,6 +595,7 @@ fn with_options_creates_connector() {
         connector.circuit_breakers.is_none(),
         "no circuit breaker config should mean no registry"
     );
+    assert!(!connector.has_circuit_breaker(), "accessor reflects no registry");
 }
 
 #[test]
@@ -579,6 +613,7 @@ fn with_options_circuit_breaker_enabled() {
         connector.circuit_breakers.is_some(),
         "circuit breaker config should create a registry"
     );
+    assert!(connector.has_circuit_breaker(), "accessor reflects the wired registry");
 }
 
 // -- CircuitGuard outcome classification ------------------------------------
@@ -2515,4 +2550,96 @@ async fn streaming_body_maps_unclean_close_to_io_error() {
     backend.abort();
 
     assert!(errored, "an unclean close must surface as an error");
+}
+
+#[tokio::test]
+#[expect(clippy::too_many_lines, reason = "test setup and validation")]
+async fn interim_1xx_response_is_skipped_not_panicked() {
+    use pingora_core::upstreams::peer::HttpPeer;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    // A backend that emits an unsolicited 103 Early Hints (RFC 8297) ahead of
+    // the final 200. Before the interim-skip loop, reading the body while the
+    // session status was still 103 panicked Pingora's uninitialized body
+    // reader (aborting the process in release builds).
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let backend = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0_u8; 4096];
+        let _bytes_read = socket.read(&mut buf).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload\r\n\r\n\
+                  HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello",
+            )
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        drop(socket);
+    });
+
+    let connector = SubRequestConnector::new(1, None);
+    let client = super::client::SubRequestClient::new(connector);
+    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let request = SubRequest {
+        method: http::Method::GET,
+        uri: "/".parse().unwrap(),
+        headers: HeaderMap::new(),
+        body: Bytes::new(),
+    };
+
+    let response = Box::pin(client.execute(&peer, &request, 1024, Duration::from_secs(5), None))
+        .await
+        .expect("interim 1xx must be skipped and the final response returned");
+    backend.abort();
+
+    assert_eq!(
+        response.status, 200,
+        "the final status, not the interim 103, must be returned"
+    );
+    assert_eq!(response.body.as_ref(), b"hello", "the final response body must be read");
+}
+
+#[tokio::test]
+async fn excessive_interim_1xx_responses_are_rejected() {
+    use pingora_core::upstreams::peer::HttpPeer;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    // A backend streaming an endless run of interim responses must not pin
+    // the client in the skip loop until the deadline: past the interim cap
+    // the sub-request fails fast with an explicit error.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let backend = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0_u8; 4096];
+        let _bytes_read = socket.read(&mut buf).await;
+        // More interim responses than the client's cap (32).
+        let flood = b"HTTP/1.1 103 Early Hints\r\n\r\n".repeat(40);
+        let _write = socket.write_all(&flood).await;
+        let _flush = socket.flush().await;
+        // Hold the socket open so the error is the cap, not a hangup.
+        let _hold = socket.read(&mut buf).await;
+    });
+
+    let connector = SubRequestConnector::new(1, None);
+    let client = super::client::SubRequestClient::new(connector);
+    let peer = HttpPeer::new(addr.to_string(), false, String::new());
+    let request = SubRequest {
+        method: http::Method::GET,
+        uri: "/".parse().unwrap(),
+        headers: HeaderMap::new(),
+        body: Bytes::new(),
+    };
+
+    let err = Box::pin(client.execute(&peer, &request, 1024, Duration::from_secs(5), None))
+        .await
+        .expect_err("a 1xx flood past the cap must fail the sub-request");
+    backend.abort();
+
+    assert!(
+        matches!(&err, SubRequestError::Io(msg) if msg.contains("too many 1xx")),
+        "the error must name the interim-response cap, got: {err:?}"
+    );
 }

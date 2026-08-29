@@ -34,9 +34,20 @@ pub(super) fn validate_endpoints(cluster: &Cluster, insecure_options: &InsecureO
             cluster.endpoints.len()
         )));
     }
+    let mut seen = std::collections::HashSet::with_capacity(cluster.endpoints.len());
     for ep in &cluster.endpoints {
         validate_endpoint_address(ep.address(), &cluster.name)?;
         validate_endpoint_weight(ep.weight(), ep.address(), &cluster.name)?;
+        // A duplicate address collapses the health address->index map (last
+        // wins), so passive health outcomes are misattributed and the address
+        // is never fully drained. Use `weight` to bias traffic, not repetition.
+        if !seen.insert(ep.address()) {
+            return Err(ProxyError::Config(format!(
+                "cluster '{}': endpoint '{}' is listed more than once (use 'weight' to bias traffic)",
+                cluster.name,
+                ep.address()
+            )));
+        }
     }
     validate_endpoint_ssrf(cluster, insecure_options)
 }
@@ -54,10 +65,23 @@ fn validate_endpoint_address(addr: &str, cluster_name: &str) -> Result<(), Proxy
     if addr.parse::<std::net::SocketAddr>().is_ok() {
         return Ok(());
     }
-    let port_str = addr.rsplit_once(':').map_or("", |(_, p)| p);
+    let Some((host, port_str)) = addr.rsplit_once(':') else {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': endpoint '{addr}' must be 'host:port' with a valid port"
+        )));
+    };
     if port_str.parse::<u16>().is_err() {
         return Err(ProxyError::Config(format!(
             "cluster '{cluster_name}': endpoint '{addr}' must be 'host:port' with a valid port"
+        )));
+    }
+    // A valid port with an empty host (`:80`) parses here but has no
+    // resolvable host, so every request to the cluster fails at connect;
+    // the empty host also slips past the SSRF hostname check.
+    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    if host.is_empty() {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': endpoint '{addr}' has an empty host (expected 'host:port')"
         )));
     }
     Ok(())
@@ -267,6 +291,36 @@ mod tests {
             err.to_string().contains("must not be empty"),
             "empty endpoint address should be rejected: {err}"
         );
+    }
+
+    #[test]
+    fn reject_duplicate_endpoint_addresses() {
+        let clusters = vec![Cluster::with_defaults(
+            "web",
+            vec!["10.0.0.1:80".into(), "10.0.0.2:80".into(), "10.0.0.1:80".into()],
+        )];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("listed more than once"),
+            "a duplicate endpoint address must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_host_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec![":80".into()])];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(
+            err.to_string().contains("empty host"),
+            "an endpoint with a valid port but empty host must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_bracketed_host_endpoint() {
+        let clusters = vec![Cluster::with_defaults("web", vec!["[]:80".into()])];
+        let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
+        assert!(err.to_string().contains("empty host"), "got: {err}");
     }
 
     #[test]

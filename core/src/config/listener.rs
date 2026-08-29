@@ -128,7 +128,7 @@ pub struct Listener {
 /// let kind: ProtocolKind = serde_yaml::from_str("http").unwrap();
 /// assert_eq!(kind, ProtocolKind::Http);
 /// ```
-#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, serde::Serialize)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ProtocolKind {
     /// HTTP (default).
@@ -153,7 +153,7 @@ impl ProtocolKind {
     /// assert_eq!(ProtocolKind::Tcp.stack().len(), 1);
     /// assert_eq!(ProtocolKind::Http.stack().len(), 2);
     /// ```
-    pub fn stack(&self) -> &'static [ProtocolKind] {
+    pub fn stack(self) -> &'static [ProtocolKind] {
         match self {
             Self::Tcp => &[ProtocolKind::Tcp],
             Self::Http => &[ProtocolKind::Tcp, ProtocolKind::Http],
@@ -165,11 +165,11 @@ impl ProtocolKind {
     /// ```
     /// use praxis_core::config::ProtocolKind;
     ///
-    /// assert!(ProtocolKind::Http.supports(&ProtocolKind::Tcp));
-    /// assert!(!ProtocolKind::Tcp.supports(&ProtocolKind::Http));
+    /// assert!(ProtocolKind::Http.supports(ProtocolKind::Tcp));
+    /// assert!(!ProtocolKind::Tcp.supports(ProtocolKind::Http));
     /// ```
-    pub fn supports(&self, filter_level: &ProtocolKind) -> bool {
-        self.stack().contains(filter_level)
+    pub fn supports(self, filter_level: ProtocolKind) -> bool {
+        self.stack().contains(&filter_level)
     }
 }
 
@@ -260,7 +260,7 @@ upstream: "10.0.0.1:5432"
     #[test]
     fn http_supports_tcp_filters() {
         assert!(
-            ProtocolKind::Http.supports(&ProtocolKind::Tcp),
+            ProtocolKind::Http.supports(ProtocolKind::Tcp),
             "HTTP should support TCP filters"
         );
     }
@@ -268,7 +268,7 @@ upstream: "10.0.0.1:5432"
     #[test]
     fn tcp_does_not_support_http_filters() {
         assert!(
-            !ProtocolKind::Tcp.supports(&ProtocolKind::Http),
+            !ProtocolKind::Tcp.supports(ProtocolKind::Http),
             "TCP should not support HTTP filters"
         );
     }
@@ -276,7 +276,7 @@ upstream: "10.0.0.1:5432"
     #[test]
     fn tcp_supports_tcp_filters() {
         assert!(
-            ProtocolKind::Tcp.supports(&ProtocolKind::Tcp),
+            ProtocolKind::Tcp.supports(ProtocolKind::Tcp),
             "TCP should support TCP filters"
         );
     }
@@ -284,7 +284,7 @@ upstream: "10.0.0.1:5432"
     #[test]
     fn http_supports_http_filters() {
         assert!(
-            ProtocolKind::Http.supports(&ProtocolKind::Http),
+            ProtocolKind::Http.supports(ProtocolKind::Http),
             "HTTP should support HTTP filters"
         );
     }

@@ -20,11 +20,52 @@
 //! [`FilterPipeline`]: praxis_filter::FilterPipeline
 //! [`FilterRegistry`]: praxis_filter::FilterRegistry
 
-use std::{collections::HashMap, sync::Arc};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use praxis_core::config::Config;
+use praxis_core::{
+    circuit::CircuitBreakerConfig,
+    config::{Config, DEFAULT_SUBREQUEST_POOL_SIZE},
+    subrequest::{SubRequestClient, SubRequestConnector, SubRequestConnectorOptions},
+};
 use praxis_filter::{FilterPipeline, FilterRegistry};
 use praxis_protocol::ListenerPipelines;
+
+// -----------------------------------------------------------------------------
+// Sub-request client construction
+// -----------------------------------------------------------------------------
+
+/// Build the shared sub-request [`SubRequestClient`] from runtime config.
+///
+/// Single source of truth for translating `runtime.subrequest_*` into a
+/// [`SubRequestConnector`], so the server startup path and the CLI
+/// config-validate/dump path build an identical client. Wiring the pool size,
+/// max-connections limit, and (critically) the circuit breaker here keeps
+/// `--validate`/`--dump` a faithful proxy for runtime behavior for anything
+/// gated on the circuit breaker being present. See issue #994.
+///
+/// [`SubRequestConnector`]: praxis_core::subrequest::SubRequestConnector
+#[must_use]
+pub fn build_subrequest_client(config: &Config) -> SubRequestClient {
+    let pool_size = config
+        .runtime
+        .subrequest_pool_size
+        .unwrap_or(DEFAULT_SUBREQUEST_POOL_SIZE);
+    let connector = SubRequestConnector::with_options(SubRequestConnectorOptions {
+        keepalive_pool_size: pool_size,
+        max_connections: config.runtime.subrequest_max_connections,
+        circuit_breaker: config
+            .runtime
+            .subrequest_circuit_breaker
+            .as_ref()
+            .map(|cb| CircuitBreakerConfig {
+                threshold: cb.consecutive_failures,
+                recovery_window: Duration::from_secs(cb.recovery_window_secs),
+                half_open_timeout: Duration::from_secs(cb.half_open_timeout_secs),
+            }),
+    });
+    let ceiling = config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
+    SubRequestClient::with_max_response_bytes(connector, ceiling)
+}
 
 // -----------------------------------------------------------------------------
 // Pipeline Resolution
@@ -43,12 +84,18 @@ use praxis_protocol::ListenerPipelines;
 /// resolution error, body limit conflict, or pipeline ordering violation).
 ///
 /// [`FilterPipeline`]: praxis_filter::FilterPipeline
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "pipeline wiring passes multiple registries and validates each listener inline"
+)]
 pub fn resolve_pipelines(
     config: &Config,
     registry: &FilterRegistry,
     health_registry: &praxis_core::health::HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
-    subrequest_client: &praxis_core::subrequest::SubRequestClient,
+    session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
+    subrequest_client: &SubRequestClient,
 ) -> Result<ListenerPipelines, Box<dyn std::error::Error + Send + Sync>> {
     let chains: HashMap<&str, &[_]> = config
         .filter_chains
@@ -71,7 +118,26 @@ pub fn resolve_pipelines(
         validate_terminal_position(&entries, &listener.name)?;
 
         let mut pipeline = FilterPipeline::build_with_chains(&mut entries, registry, &chains)?;
-        configure_pipeline(&mut pipeline, config, health_registry, kv_stores, subrequest_client)?;
+        configure_pipeline(
+            &mut pipeline,
+            config,
+            health_registry,
+            kv_stores,
+            session_stores,
+            subrequest_client,
+        )?;
+
+        let unsupported = pipeline.filters_unsupported_by(listener.protocol);
+        if !unsupported.is_empty() {
+            let lname = &listener.name;
+            let proto = listener.protocol;
+            return Err(format!(
+                "listener '{lname}' ({proto:?}) has filter(s) not supported at its protocol level and \
+                 would be silently skipped at runtime: {}",
+                unsupported.join(", ")
+            )
+            .into());
+        }
 
         validate_pipeline(&pipeline, &entries, &listener.name, &config.insecure_options)?;
 
@@ -83,12 +149,14 @@ pub fn resolve_pipelines(
 
 /// Apply body limits, health registry, KV stores, pipeline extensions,
 /// and insecure options to a pipeline.
+#[expect(clippy::too_many_arguments, reason = "pipeline wiring passes multiple registries")]
 fn configure_pipeline(
     pipeline: &mut FilterPipeline,
     config: &Config,
     health_registry: &praxis_core::health::HealthRegistry,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
-    subrequest_client: &praxis_core::subrequest::SubRequestClient,
+    session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
+    subrequest_client: &SubRequestClient,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     pipeline.apply_body_limits(
         config.body_limits.max_request_bytes,
@@ -99,9 +167,18 @@ fn configure_pipeline(
     if !health_registry.is_empty() {
         pipeline.set_health_registry(Arc::clone(health_registry));
     }
-    if !kv_stores.is_empty() {
-        pipeline.set_kv_stores(kv_stores.clone());
-    }
+    // Always inject the process-wide KV registry (even while empty): the
+    // registry is a shared Arc handle, and filters create their stores in it
+    // on demand at request time via `ctx.kv_stores`. Gating on `is_empty()`
+    // left the registry unreachable forever (nothing ever populates it before
+    // build), so `ctx.kv_stores` was always `None` — disabling the entire KV
+    // extension surface and the admin KV API, and making `basic_auth` in
+    // `kv_store` mode deny every request.
+    pipeline.set_kv_stores(kv_stores.clone());
+    // Always inject the process-wide registry (even while empty): the sticky
+    // sessions filter adopts per-cluster stores into it on demand, which is
+    // what lets session bindings survive config reloads.
+    pipeline.set_session_stores(Arc::clone(session_stores));
     pipeline.set_subrequest_client(subrequest_client.clone());
     pipeline.apply_insecure_options(&config.insecure_options);
     Ok(())
@@ -192,12 +269,77 @@ mod tests {
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
         assert!(
             pipelines.get("web").is_some(),
             "pipeline should exist for 'web' listener"
+        );
+    }
+
+    #[test]
+    fn resolve_pipelines_rejects_http_filter_on_tcp_listener() {
+        // An HTTP-level filter (ip_acl) on a TCP listener is silently skipped
+        // at runtime, so a configured security control would never run. Reject
+        // it at build time instead.
+        let config = Config::from_yaml(
+            r#"
+listeners:
+  - name: db
+    address: "127.0.0.1:5432"
+    protocol: tcp
+    upstream: "10.0.0.1:5432"
+    filter_chains: [guard]
+filter_chains:
+  - name: guard
+    filters:
+      - filter: ip_acl
+        deny: ["0.0.0.0/0"]
+"#,
+        )
+        .unwrap();
+        let registry = FilterRegistry::with_builtins();
+        let result = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+        );
+        let err = result
+            .err()
+            .expect("an HTTP filter on a TCP listener must be rejected at build")
+            .to_string();
+        assert!(
+            err.contains("ip_acl") && err.contains("silently skipped"),
+            "the error must name the offending filter: {err}"
+        );
+    }
+
+    #[test]
+    fn resolve_pipelines_wires_kv_registry_even_when_empty() {
+        // The KV registry starts empty and filters populate it on demand at
+        // request time, so it must be injected into every pipeline regardless
+        // of whether it currently holds any stores. A missing registry makes
+        // ctx.kv_stores None forever, disabling the whole KV surface.
+        let config = valid_config();
+        let registry = FilterRegistry::with_builtins();
+        let pipelines = resolve_pipelines(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+        )
+        .unwrap();
+        let pipeline = pipelines.get("web").expect("web pipeline exists").load();
+        assert!(
+            pipeline.kv_stores().is_some(),
+            "the KV registry must be wired into the pipeline even when it holds no stores yet"
         );
     }
 
@@ -242,6 +384,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -283,6 +426,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -321,6 +465,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -367,6 +512,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(result.is_ok(), "router without LB should be a warning, not an error");
@@ -398,6 +544,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(result.is_ok(), "skip_pipeline_validation should allow startup");
@@ -431,6 +578,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(result.is_err(), "misaligned clusters should fail validation");
@@ -472,6 +620,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(result.is_err(), "open security filter should fail validation");
@@ -515,6 +664,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(result.is_ok(), "allow_open_security_filters should permit open ip_acl");
@@ -550,6 +700,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -570,31 +721,12 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &kv,
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
         let pipeline = pipelines.get("web").unwrap().load();
         assert!(pipeline.kv_stores().is_some(), "pipeline should have kv_stores set");
-    }
-
-    #[test]
-    fn resolve_pipelines_empty_kv_not_set() {
-        let config = valid_config();
-        let registry = FilterRegistry::with_builtins();
-        let kv = empty_kv_stores();
-        let pipelines = resolve_pipelines(
-            &config,
-            &registry,
-            &empty_health_registry(),
-            &kv,
-            &empty_subrequest_client(),
-        )
-        .unwrap();
-        let pipeline = pipelines.get("web").unwrap().load();
-        assert!(
-            pipeline.kv_stores().is_none(),
-            "empty kv_stores should not be set on pipeline"
-        );
     }
 
     #[test]
@@ -628,6 +760,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(
@@ -667,6 +800,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(
@@ -701,6 +835,7 @@ filter_chains:
             &registry,
             &empty_health_registry(),
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         );
         assert!(
@@ -728,9 +863,14 @@ filter_chains:
         praxis_core::kv::KvStoreRegistry::new()
     }
 
+    /// Empty session store registry for tests.
+    fn empty_session_stores() -> Arc<praxis_filter::SessionStoreRegistry> {
+        Arc::new(praxis_filter::SessionStoreRegistry::new())
+    }
+
     /// Empty sub-request client for tests.
-    fn empty_subrequest_client() -> praxis_core::subrequest::SubRequestClient {
-        praxis_core::subrequest::SubRequestClient::new(praxis_core::subrequest::SubRequestConnector::new(8, None))
+    fn empty_subrequest_client() -> SubRequestClient {
+        SubRequestClient::new(SubRequestConnector::new(8, None))
     }
 
     /// KV store registry with one test store.
@@ -762,5 +902,78 @@ filter_chains:
 "#,
         )
         .unwrap()
+    }
+
+    /// Config that sets `runtime.subrequest_max_connections` and
+    /// `runtime.subrequest_circuit_breaker`, for exercising the
+    /// connector-wiring contract (issue #994).
+    fn config_with_circuit_breaker() -> Config {
+        Config::from_yaml(
+            r#"
+runtime:
+  subrequest_max_connections: 7
+  subrequest_circuit_breaker:
+    consecutive_failures: 5
+    recovery_window_secs: 30
+    half_open_timeout_secs: 30
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints: ["10.0.0.1:80"]
+"#,
+        )
+        .unwrap()
+    }
+
+    // -------------------------------------------------------------------------
+    // build_subrequest_client: issue #994 regression
+    //
+    // build_subrequest_client is the single construction path used by BOTH the
+    // server startup path (server.rs) and the CLI --validate/--dump path
+    // (commands.rs::validate_config_for_startup). A configured
+    // runtime.subrequest_circuit_breaker (and max-connections) must therefore
+    // reach the connector on both paths, so config-validate faithfully
+    // exercises the same circuit-breaker-gated code the live server does.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn build_subrequest_client_wires_circuit_breaker_from_config() {
+        let client = build_subrequest_client(&config_with_circuit_breaker());
+        assert!(
+            client.connector().has_circuit_breaker(),
+            "a configured runtime.subrequest_circuit_breaker must be wired into the connector; \
+             the CLI validate/dump path must not silently drop it (issue #994)"
+        );
+    }
+
+    #[test]
+    fn build_subrequest_client_omits_circuit_breaker_when_unset() {
+        // valid_config() configures no runtime.subrequest_circuit_breaker.
+        let client = build_subrequest_client(&valid_config());
+        assert!(
+            !client.connector().has_circuit_breaker(),
+            "no circuit breaker should be wired when none is configured"
+        );
+    }
+
+    #[test]
+    fn build_subrequest_client_threads_max_connections_from_config() {
+        let client = build_subrequest_client(&config_with_circuit_breaker());
+        assert_eq!(
+            client.connector().configured_max_connections(),
+            Some(7),
+            "runtime.subrequest_max_connections must reach the connector, not be hardcoded to None"
+        );
     }
 }

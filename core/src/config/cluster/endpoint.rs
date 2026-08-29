@@ -3,6 +3,8 @@
 
 //! Upstream endpoint definition with optional weighting.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 // -----------------------------------------------------------------------------
@@ -19,6 +21,10 @@ use serde::{Deserialize, Serialize};
 ///   - "10.0.0.1:8080"
 ///   - address: "10.0.0.2:8080"
 ///     weight: 3
+///     metadata:
+///       version: "canary"
+///     priority: 0
+///     zone: "us-east-1a"
 /// ```
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(untagged, try_from = "EndpointRaw")]
@@ -35,6 +41,18 @@ pub enum Endpoint {
         /// traffic. Defaults to 1.
         #[serde(default = "default_weight")]
         weight: u32,
+
+        /// Arbitrary key-value metadata for subset-based load balancing.
+        #[serde(default)]
+        metadata: HashMap<String, String>,
+
+        /// Priority tier (0 = primary, 1 = first failover, etc.).
+        #[serde(default)]
+        priority: u32,
+
+        /// Locality zone identifier for zone-aware routing.
+        #[serde(default)]
+        zone: Option<String>,
     },
 }
 
@@ -68,9 +86,21 @@ struct WeightedEndpointRaw {
     #[serde(default = "default_weight")]
     weight: u32,
 
+    /// Arbitrary key-value metadata for subset-based load balancing.
+    #[serde(default)]
+    metadata: HashMap<String, String>,
+
+    /// Priority tier (0 = primary, 1 = first failover, etc.).
+    #[serde(default)]
+    priority: u32,
+
+    /// Locality zone identifier for zone-aware routing.
+    #[serde(default)]
+    zone: Option<String>,
+
     /// Every key not matched above; must be empty.
     #[serde(flatten)]
-    unknown: std::collections::HashMap<String, serde_yaml::Value>,
+    unknown: HashMap<String, serde_yaml::Value>,
 }
 
 impl TryFrom<EndpointRaw> for Endpoint {
@@ -92,6 +122,9 @@ impl TryFrom<EndpointRaw> for Endpoint {
                 Ok(Self::Weighted {
                     address: w.address,
                     weight: w.weight,
+                    metadata: w.metadata,
+                    priority: w.priority,
+                    zone: w.zone,
                 })
             },
         }
@@ -126,6 +159,31 @@ impl Endpoint {
         match self {
             Self::Simple(_) => 1,
             Self::Weighted { weight, .. } => *weight,
+        }
+    }
+
+    /// Returns the metadata map (empty for `Simple` endpoints).
+    pub fn metadata(&self) -> &HashMap<String, String> {
+        static EMPTY: std::sync::LazyLock<HashMap<String, String>> = std::sync::LazyLock::new(HashMap::new);
+        match self {
+            Self::Simple(_) => &EMPTY,
+            Self::Weighted { metadata, .. } => metadata,
+        }
+    }
+
+    /// Returns the priority tier (0 for `Simple` endpoints).
+    pub fn priority(&self) -> u32 {
+        match self {
+            Self::Simple(_) => 0,
+            Self::Weighted { priority, .. } => *priority,
+        }
+    }
+
+    /// Returns the zone identifier (`None` for `Simple` endpoints).
+    pub fn zone(&self) -> Option<&str> {
+        match self {
+            Self::Simple(_) => None,
+            Self::Weighted { zone, .. } => zone.as_deref(),
         }
     }
 }
@@ -175,6 +233,32 @@ weight: 3
         let ep: Endpoint = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(ep.address(), "10.0.0.2:8080", "weighted endpoint address mismatch");
         assert_eq!(ep.weight(), 3, "weighted endpoint should preserve configured weight");
+    }
+
+    #[test]
+    fn endpoint_metadata_and_zone_and_priority() {
+        let yaml = r#"
+address: "10.0.0.1:8080"
+weight: 2
+metadata:
+  version: "canary"
+  gpu: "a100"
+zone: "us-east-1a"
+priority: 1
+"#;
+        let ep: Endpoint = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(ep.metadata().get("version").map(String::as_str), Some("canary"));
+        assert_eq!(ep.metadata().get("gpu").map(String::as_str), Some("a100"));
+        assert_eq!(ep.zone(), Some("us-east-1a"));
+        assert_eq!(ep.priority(), 1);
+    }
+
+    #[test]
+    fn simple_endpoint_defaults_for_metadata_zone_priority() {
+        let ep: Endpoint = "10.0.0.1:8080".into();
+        assert!(ep.metadata().is_empty());
+        assert_eq!(ep.zone(), None);
+        assert_eq!(ep.priority(), 0);
     }
 
     #[test]

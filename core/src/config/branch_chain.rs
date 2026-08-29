@@ -2,6 +2,21 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Branch chain configuration: conditional branching in filter pipelines.
+//!
+//! A branch chain lets a filter's outcome steer which filters run next
+//! without the filter itself knowing branches exist. Filters record
+//! outcomes in a `FilterResultSet`; the pipeline executor reads those
+//! results, evaluates each branch's `on_result` condition, and, on a
+//! match, runs the branch's chains before resuming at the configured
+//! rejoin point (the next filter, a terminal, a named filter, or a
+//! re-entrance bounded by an iteration limit).
+//!
+//! Branch sub-chains run only during the request phase (`on_request`);
+//! their `on_request_body` and `on_response_body` hooks are not
+//! executed, so body-transforming filters belong on the main pipeline
+//! path. This module defines only the config surface; validation lives
+//! in `crate::config::validate::branch_chain` and execution in the
+//! `praxis-filter` pipeline.
 
 use serde::Deserialize;
 

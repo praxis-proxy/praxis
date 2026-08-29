@@ -20,25 +20,25 @@ use crate::builtins::http::traffic_management::token_bucket::TokenBucket;
 
 impl RateLimitFilter {
     /// Nanoseconds elapsed since this filter's epoch.
-    #[expect(clippy::cast_possible_truncation, reason = "nanos fit u64")]
     pub(super) fn now_nanos(&self) -> u64 {
-        self.epoch.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64
+        u64::try_from(self.epoch.elapsed().as_nanos()).unwrap_or(u64::MAX)
     }
 
-    /// Build rate limit headers and compute the retry-after value.
+    /// Compute the `X-RateLimit-Remaining`/`-Reset` header values and the
+    /// `Retry-After` seconds (floored at 1 when the client is rate-limited).
     ///
-    /// Returns the header list and the `Retry-After` seconds (floored
-    /// at 1 when the client is rate-limited).
+    /// Shared by the response path (which inserts headers directly) and the
+    /// 429 rejection path (which builds an owned header list).
     #[expect(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "token count truncation"
     )]
-    pub(super) fn rate_limit_headers(
+    pub(super) fn rate_limit_values(
         &self,
         remaining: f64,
         time_source: &dyn praxis_core::time::TimeSource,
-    ) -> (Vec<(&'static str, String)>, u64) {
+    ) -> (String, String, u64) {
         let retry_secs = if remaining < 1.0 {
             ((1.0 - remaining) / self.rate).ceil().max(1.0) as u64
         } else {
@@ -47,11 +47,48 @@ impl RateLimitFilter {
         let now_unix = time_source.now().as_secs();
         let reset_unix = now_unix.saturating_add(retry_secs);
         let remaining_int = remaining.max(0.0) as u64;
+        (format!("{remaining_int}"), format!("{reset_unix}"), retry_secs)
+    }
 
+    /// Numeric form of [`rate_limit_values`], for the hot response path:
+    /// `(remaining, reset_unix, retry_secs)` with no String staging.
+    ///
+    /// [`rate_limit_values`]: Self::rate_limit_values
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "remaining is clamped non-negative and bounded by burst"
+    )]
+    pub(super) fn rate_limit_numbers(
+        &self,
+        remaining: f64,
+        time_source: &dyn praxis_core::time::TimeSource,
+    ) -> (u64, u64, u64) {
+        let retry_secs = if remaining < 1.0 {
+            ((1.0 - remaining) / self.rate).ceil().max(1.0) as u64
+        } else {
+            0
+        };
+        let now_unix = time_source.now().as_secs();
+        let reset_unix = now_unix.saturating_add(retry_secs);
+        (remaining.max(0.0) as u64, reset_unix, retry_secs)
+    }
+
+    /// Build rate limit headers and compute the retry-after value.
+    ///
+    /// Returns the header list and the `Retry-After` seconds. Used by the
+    /// cold 429 rejection path; the response path inserts pre-built header
+    /// names directly instead.
+    pub(super) fn rate_limit_headers(
+        &self,
+        remaining: f64,
+        time_source: &dyn praxis_core::time::TimeSource,
+    ) -> (Vec<(&'static str, String)>, u64) {
+        let (remaining_str, reset_str, retry_secs) = self.rate_limit_values(remaining, time_source);
         let headers = vec![
             (HEADER_RATELIMIT_LIMIT, self.burst_string.clone()),
-            (HEADER_RATELIMIT_REMAINING, format!("{remaining_int}")),
-            (HEADER_RATELIMIT_RESET, format!("{reset_unix}")),
+            (HEADER_RATELIMIT_REMAINING, remaining_str),
+            (HEADER_RATELIMIT_RESET, reset_str),
         ];
         (headers, retry_secs)
     }

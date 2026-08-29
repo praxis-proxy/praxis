@@ -5,7 +5,10 @@
 
 use serde_json::Value;
 
-use super::config::{BatchPolicy, JsonRpcConfig};
+use super::{
+    config::{BatchPolicy, JsonRpcConfig},
+    raw_envelope,
+};
 use crate::builtins::http::payload_processing::OnInvalidBehavior;
 
 // -----------------------------------------------------------------------------
@@ -161,8 +164,115 @@ pub fn parse_json_rpc_envelope(
     input: &[u8],
     config: &JsonRpcConfig,
 ) -> Result<Option<JsonRpcEnvelope>, JsonRpcParseError> {
-    let value: Value = serde_json::from_slice(input).map_err(|e| JsonRpcParseError::InvalidJson(e.to_string()))?;
-    parse_json_rpc_value(&value, config)
+    use serde::de::DeserializeSeed as _;
+
+    // Stream the body through an envelope-field visitor instead of
+    // materializing the whole document as a Value: serde still scans and
+    // validates every byte (trailing content included, via `end()`), but
+    // the `params` subtree — nearly the entire body for LLM payloads —
+    // is consumed without allocating a DOM.
+    let mut de = serde_json::Deserializer::from_slice(input);
+    let top = raw_envelope::TopSeed
+        .deserialize(&mut de)
+        .and_then(|top| de.end().map(|()| top))
+        .map_err(|e| JsonRpcParseError::InvalidJson(e.to_string()))?;
+
+    match top {
+        raw_envelope::RawTop::Message(message) => match message_to_envelope(&message) {
+            Ok(envelope) => Ok(Some(envelope)),
+            Err(JsonRpcParseError::MissingVersion) => handle_non_json_rpc(config),
+            Err(e) => Err(e),
+        },
+        raw_envelope::RawTop::Batch(items) => parse_raw_batch(&items, config),
+        raw_envelope::RawTop::Other => handle_non_json_rpc(config),
+    }
+}
+
+/// Convert a captured id into its rendered string and kind.
+fn raw_id_to_parts(id: &raw_envelope::RawId) -> Result<(Option<String>, JsonRpcIdKind), JsonRpcParseError> {
+    Ok(match id {
+        raw_envelope::RawId::Missing => (None, JsonRpcIdKind::Missing),
+        raw_envelope::RawId::Null => (Some("null".to_owned()), JsonRpcIdKind::Null),
+        raw_envelope::RawId::Str(s) => (Some(s.clone()), JsonRpcIdKind::String),
+        raw_envelope::RawId::Integer(s) => (Some(s.clone()), JsonRpcIdKind::Integer),
+        raw_envelope::RawId::Number(s) => (Some(s.clone()), JsonRpcIdKind::Number),
+        raw_envelope::RawId::Invalid => return Err(JsonRpcParseError::InvalidId),
+    })
+}
+
+/// Batch handling over captured items, mirroring [`parse_batch`]'s
+/// policy, size, and first-valid semantics exactly.
+fn parse_raw_batch(
+    items: &[Option<raw_envelope::RawMessage>],
+    config: &JsonRpcConfig,
+) -> Result<Option<JsonRpcEnvelope>, JsonRpcParseError> {
+    if items.is_empty() {
+        return Err(JsonRpcParseError::EmptyBatch);
+    }
+    match config.batch_policy {
+        BatchPolicy::Reject => Err(JsonRpcParseError::UnsupportedBatch),
+        BatchPolicy::First => {
+            if items.len() > config.max_batch_size {
+                return Err(JsonRpcParseError::BatchTooLarge(items.len(), config.max_batch_size));
+            }
+            for item in items {
+                if let Some(message) = item
+                    && let Ok(mut envelope) = message_to_envelope(message)
+                {
+                    envelope.kind = JsonRpcKind::Batch;
+                    envelope.batch_len = Some(items.len());
+                    return Ok(Some(envelope));
+                }
+            }
+            handle_non_json_rpc(config)
+        },
+    }
+}
+
+/// Validate a captured message in the same field order as
+/// [`parse_single_message`]: version, id, response-ness, method.
+#[expect(
+    clippy::too_many_lines,
+    reason = "linear field-order validation mirroring parse_single_message"
+)]
+fn message_to_envelope(message: &raw_envelope::RawMessage) -> Result<JsonRpcEnvelope, JsonRpcParseError> {
+    let version = match &message.version {
+        raw_envelope::RawVersion::Missing => return Err(JsonRpcParseError::MissingVersion),
+        raw_envelope::RawVersion::Str(v) => v,
+    };
+    if version != "2.0" {
+        return Err(JsonRpcParseError::WrongVersion(version.clone()));
+    }
+
+    let (id, id_kind) = raw_id_to_parts(&message.id)?;
+
+    if message.has_result_or_error {
+        return Ok(JsonRpcEnvelope {
+            batch_len: None,
+            id,
+            id_kind,
+            kind: JsonRpcKind::Response,
+            method: None,
+        });
+    }
+
+    let method = match &message.method {
+        raw_envelope::RawMethod::Missing => return Err(JsonRpcParseError::MissingMethod),
+        raw_envelope::RawMethod::NotString => return Err(JsonRpcParseError::InvalidMethod),
+        raw_envelope::RawMethod::Str(m) => m.clone(),
+    };
+    let kind = if id.is_some() {
+        JsonRpcKind::Request
+    } else {
+        JsonRpcKind::Notification
+    };
+    Ok(JsonRpcEnvelope {
+        batch_len: None,
+        id,
+        id_kind,
+        kind,
+        method: Some(method),
+    })
 }
 
 /// Parse a JSON-RPC 2.0 envelope from a pre-parsed [`Value`].

@@ -287,6 +287,8 @@ impl IrrStreamingBody {
             cluster_retry_state: None,
             cluster_retry_state_released: false,
             endpoint_reselector: None,
+            pinned_endpoint_address: None,
+            session_stores: None,
             structured_metadata: std::mem::take(&mut cont.structured_metadata),
             subrequest_client: cont.pipeline.subrequest_client(),
             subrequest_response_mode: crate::context::SubRequestResponseMode::Streaming,

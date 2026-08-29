@@ -163,8 +163,16 @@ insecure_options:
 #[test]
 fn production_gateway_example_serves_https_and_http() {
     let certs = TestCertificates::generate();
-    let api = start_backend_with_shutdown("api-backend");
-    let web = start_backend_with_shutdown("web-backend");
+    // The api and web clusters each list distinct endpoints; give every one
+    // its own backend rather than collapsing them onto one address (a
+    // duplicate endpoint address is rejected by config validation). All api
+    // backends share a response body, as do all web backends, so the routing
+    // assertions below stay meaningful regardless of which endpoint is chosen.
+    let api_1 = start_backend_with_shutdown("api-backend");
+    let api_2 = start_backend_with_shutdown("api-backend");
+    let api_3 = start_backend_with_shutdown("api-backend");
+    let web_1 = start_backend_with_shutdown("web-backend");
+    let web_2 = start_backend_with_shutdown("web-backend");
     let https_port = free_port();
     let http_port = free_port();
 
@@ -176,11 +184,11 @@ fn production_gateway_example_serves_https_and_http() {
         &HashMap::from([
             ("127.0.0.1:443", https_port),
             ("127.0.0.1:80", http_port),
-            ("10.0.1.10:8080", api.port()),
-            ("10.0.1.11:8080", api.port()),
-            ("10.0.1.12:8080", api.port()),
-            ("10.0.2.10:8080", web.port()),
-            ("10.0.2.11:8080", web.port()),
+            ("10.0.1.10:8080", api_1.port()),
+            ("10.0.1.11:8080", api_2.port()),
+            ("10.0.1.12:8080", api_3.port()),
+            ("10.0.2.10:8080", web_1.port()),
+            ("10.0.2.11:8080", web_2.port()),
         ]),
     )
     .replace("/etc/praxis/tls/cert.pem", &certs.cert_path.display().to_string())

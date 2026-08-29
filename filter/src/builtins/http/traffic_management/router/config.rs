@@ -129,14 +129,16 @@ impl TryFrom<RouterRouteConfigRaw> for RouterRouteConfig {
     type Error = String;
 
     fn try_from(raw: RouterRouteConfigRaw) -> Result<Self, Self::Error> {
+        let route = Route {
+            path_match: PathMatch::from_parts(raw.path, raw.path_prefix)?,
+            cluster: raw.cluster,
+            headers: raw.headers,
+            host: raw.host,
+            retry_policy: raw.retry_policy,
+        };
+        route.validate_semantics()?;
         Ok(Self {
-            route: Route {
-                path_match: PathMatch::from_parts(raw.path, raw.path_prefix)?,
-                cluster: raw.cluster,
-                headers: raw.headers,
-                host: raw.host,
-                retry_policy: raw.retry_policy,
-            },
+            route,
             json_aliases: raw.json_aliases,
         })
     }

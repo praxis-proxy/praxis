@@ -12,7 +12,11 @@
 /// Body-derived values that are promoted to metadata or filter results use
 /// the same rule as headers so every promotion sink has one safety policy.
 pub fn is_safe_promoted_value(s: &str) -> bool {
-    http::HeaderValue::from_str(s).is_ok()
+    // Byte-scan equivalent of `HeaderValue::from_str(s).is_ok()` without
+    // allocating a value just to learn Ok/Err: the http crate accepts
+    // HTAB, SP, visible ASCII, and obs-text (0x80-0xFF), rejecting other
+    // control bytes and DEL. Parity is pinned by a test over every byte.
+    s.bytes().all(|b| b == b'\t' || (b >= 0x20 && b != 0x7F))
 }
 
 /// Returns `true` if `s` is unsafe to promote to headers or metadata.
@@ -23,6 +27,27 @@ pub fn contains_control_chars(s: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_scan_matches_header_value_parse_for_every_byte() {
+        for byte in 0_u8..=255 {
+            let Ok(s) = std::str::from_utf8(std::slice::from_ref(&byte)) else {
+                continue;
+            };
+            assert_eq!(
+                is_safe_promoted_value(s),
+                http::HeaderValue::from_str(s).is_ok(),
+                "byte 0x{byte:02x} must classify exactly like HeaderValue::from_str"
+            );
+        }
+        for s in ["caf\u{e9}", "\u{1F600}", "mixed caf\u{e9}\ttab", "nul\u{0}"] {
+            assert_eq!(
+                is_safe_promoted_value(s),
+                http::HeaderValue::from_str(s).is_ok(),
+                "multi-byte sample {s:?} must classify exactly like HeaderValue::from_str"
+            );
+        }
+    }
 
     #[test]
     fn promoted_value_allows_visible_ascii() {

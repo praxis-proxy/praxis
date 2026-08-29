@@ -1164,7 +1164,10 @@ fn make_filter(
             methods.join(", ")
         },
         headers_header: headers.join(", "),
-        expose_header: expose.join(", "),
+        expose_header_value: {
+            let joined = expose.join(", ");
+            (!joined.is_empty()).then(|| joined.parse().ok()).flatten()
+        },
         max_age_header: "86400".to_owned(),
         vary_origin: HeaderValue::from_static(VARY_ORIGIN),
     }

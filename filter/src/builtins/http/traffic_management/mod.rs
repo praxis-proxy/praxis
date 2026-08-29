@@ -12,6 +12,7 @@ mod rate_limit;
 mod redirect;
 mod router;
 mod static_response;
+pub(crate) mod sticky_sessions;
 mod timeout;
 pub(crate) mod token_bucket;
 
@@ -24,6 +25,7 @@ pub use rate_limit::{RateLimitFilter, RateLimitMode};
 pub use redirect::{RedirectFilter, RedirectStatus};
 pub use router::RouterFilter;
 pub use static_response::StaticResponseFilter;
+pub use sticky_sessions::StickySessionsFilter;
 pub use timeout::TimeoutFilter;
 
 // -----------------------------------------------------------------------------

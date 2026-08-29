@@ -13,6 +13,7 @@ use praxis_core::{
     PingoraServerRuntime,
     config::{Config, ProtocolKind},
     health::{HealthRegistry, build_health_registry},
+    logging::LogLevelState,
 };
 use praxis_filter::FilterRegistry;
 use praxis_protocol::{CertWatcherShutdowns, ListenerPipelines, Protocol as _, http::PingoraHttp, tcp::PingoraTcp};
@@ -26,8 +27,21 @@ use crate::startup_checks::insecure_warn;
 use crate::startup_checks::warn_experimental_features;
 use crate::{
     pipelines::resolve_pipelines,
-    startup_checks::{enforce_root_check, warn_insecure_key_permissions, warn_insecure_options},
+    startup_checks::{
+        enforce_root_check, warn_insecure_key_permissions, warn_insecure_log_file_permissions, warn_insecure_options,
+    },
 };
+
+/// Root, insecure-option, and file-permission checks before the server starts.
+fn run_startup_security_checks(config: &Config) {
+    #[cfg(feature = "experimental")]
+    warn_experimental_features();
+    enforce_root_check(config);
+    warn_insecure_options(config);
+    init_runtime_limits(&config.runtime);
+    warn_insecure_key_permissions(config);
+    warn_insecure_log_file_permissions(config);
+}
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -77,8 +91,8 @@ pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
 /// Config is owned for the server's lifetime (never returns).
 #[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
-pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
-    run_server_with_registry(config, crate::build_full_registry(), config_path)
+pub fn run_server(config: Config, config_path: Option<PathBuf>, log_level: Option<Arc<LogLevelState>>) -> ! {
+    run_server_with_registry(config, crate::build_full_registry(), config_path, log_level)
 }
 
 /// Build filter pipelines from the given registry, register protocols and run the server.
@@ -92,13 +106,13 @@ pub fn run_server(config: Config, config_path: Option<PathBuf>) -> ! {
 /// [`register_filters!`]: praxis_filter::register_filters
 #[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
-pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config_path: Option<PathBuf>) -> ! {
-    #[cfg(feature = "experimental")]
-    warn_experimental_features();
-    enforce_root_check(&config);
-    warn_insecure_options(&config);
-    init_runtime_limits(&config.runtime);
-    warn_insecure_key_permissions(&config);
+pub fn run_server_with_registry(
+    config: Config,
+    registry: FilterRegistry,
+    config_path: Option<PathBuf>,
+    log_level: Option<Arc<LogLevelState>>,
+) -> ! {
+    run_startup_security_checks(&config);
 
     // Install before pipelines and health checks emit startup metrics. The same
     // handle is later shared by `/metrics` and the managed upkeep service.
@@ -109,7 +123,7 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
         .map(|_| praxis_protocol::http::pingora::health::install_prometheus_admin_recorder());
 
     let health_registry = build_health_registry(&config.clusters);
-    let state = build_server_state(&config, &registry, &health_registry);
+    let state = build_server_state(&config, &registry, &health_registry, log_level.clone());
 
     info!("initializing server");
     let mut server = PingoraServerRuntime::new(&config);
@@ -121,6 +135,7 @@ pub fn run_server_with_registry(config: Config, registry: FilterRegistry, config
             health_registry: Some(health_registry),
             kv_registry: Some(state.kv_stores.clone()),
             pipelines: Some((Arc::clone(&state.pipelines), Arc::clone(&state.listener_meta))),
+            log_level,
             verbose: config.admin.verbose,
         },
         prometheus_recorder,
@@ -145,45 +160,40 @@ struct ServerState {
     listener_meta: praxis_protocol::http::pingora::health::ListenerMetaStore,
     /// KV store registry.
     kv_stores: praxis_core::kv::KvStoreRegistry,
+    /// Session store registry, preserved across reloads.
+    session_stores: Arc<praxis_filter::SessionStoreRegistry>,
     /// Shared sub-request client for iterative sub-requests.
     subrequest_client: praxis_core::subrequest::SubRequestClient,
     /// Health check cancellation token.
     health_shutdown: Arc<Mutex<CancellationToken>>,
+    /// Runtime log-level overlay state for admin API and reload.
+    log_level: Option<Arc<LogLevelState>>,
 }
 
 /// Build filter pipelines, health checks, and registries.
-#[expect(
-    clippy::too_many_lines,
-    reason = "connector + pipeline + health wiring is sequential"
-)]
-fn build_server_state(config: &Config, registry: &FilterRegistry, health_registry: &HealthRegistry) -> ServerState {
+fn build_server_state(
+    config: &Config,
+    registry: &FilterRegistry,
+    health_registry: &HealthRegistry,
+    log_level: Option<Arc<LogLevelState>>,
+) -> ServerState {
     info!("building filter pipelines");
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
-    let pool_size = config
-        .runtime
-        .subrequest_pool_size
-        .unwrap_or(praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE);
-    let subrequest_connector = praxis_core::subrequest::SubRequestConnector::with_options(
-        praxis_core::subrequest::SubRequestConnectorOptions {
-            keepalive_pool_size: pool_size,
-            max_connections: config.runtime.subrequest_max_connections,
-            circuit_breaker: config.runtime.subrequest_circuit_breaker.as_ref().map(|cb| {
-                praxis_core::circuit::CircuitBreakerConfig {
-                    threshold: cb.consecutive_failures,
-                    recovery_window: Duration::from_secs(cb.recovery_window_secs),
-                    half_open_timeout: Duration::from_secs(cb.half_open_timeout_secs),
-                }
-            }),
-        },
-    );
-    let subrequest_response_ceiling = config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
-    let subrequest_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
-        subrequest_connector,
-        subrequest_response_ceiling,
-    );
+    // Shared with the CLI --validate/--dump path (commands.rs) so both build an
+    // identical connector, including the circuit breaker (issue #994).
+    let subrequest_client = crate::pipelines::build_subrequest_client(config);
 
-    let pipelines = resolve_pipelines(config, registry, health_registry, &kv_stores, &subrequest_client)
-        .unwrap_or_else(|e| fatal(&e));
+    let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
+
+    let pipelines = resolve_pipelines(
+        config,
+        registry,
+        health_registry,
+        &kv_stores,
+        &session_stores,
+        &subrequest_client,
+    )
+    .unwrap_or_else(|e| fatal(&e));
     let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
         praxis_protocol::http::pingora::health::listener_meta_from_config(config),
     );
@@ -199,8 +209,10 @@ fn build_server_state(config: &Config, registry: &FilterRegistry, health_registr
         pipelines: Arc::new(pipelines),
         listener_meta,
         kv_stores,
+        session_stores,
         subrequest_client,
         health_shutdown,
+        log_level,
     }
 }
 
@@ -257,11 +269,13 @@ fn spawn_watcher(
         initial_config: config,
         kv_stores: state.kv_stores,
         listener_meta: state.listener_meta,
+        session_stores: state.session_stores,
         pipelines: state.pipelines,
         referenced_files,
         registry: Arc::new(registry),
         shutdown: CancellationToken::new(),
         subrequest_client: state.subrequest_client,
+        log_level: state.log_level,
     });
     Some(handle)
 }
@@ -294,7 +308,7 @@ fn register_admin_endpoints(
 /// Initialize global connection and memory limits from runtime config.
 fn init_runtime_limits(runtime: &praxis_core::config::RuntimeConfig) {
     if let Some(max) = runtime.max_connections {
-        praxis_protocol::connections::init_global_limit(max as usize);
+        praxis_protocol::connections::init_global_limit(usize::try_from(max).unwrap_or(usize::MAX));
         info!(max_connections = max, "global connection limit enabled");
     }
     if let Some(threshold) = runtime.max_memory_bytes {
@@ -317,16 +331,18 @@ fn init_runtime_limits(runtime: &praxis_core::config::RuntimeConfig) {
 /// reactor is registered on the calling thread and a bare
 /// `tokio::spawn` would panic; background loops get their own thread
 /// and runtime instead.
-#[expect(clippy::expect_used, reason = "fatal")]
 fn spawn_on_dedicated_runtime<F>(runtime_name: &'static str, fut: F)
 where
     F: Future<Output = ()> + Send + 'static,
 {
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect(runtime_name);
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => {
+                tracing::error!(runtime = runtime_name, error = %e, "failed to start background runtime");
+                return;
+            },
+        };
         rt.block_on(fut);
     });
 }
@@ -354,7 +370,14 @@ fn spawn_health_check_tasks(
     }
 
     let shutdown = health_shutdown.lock().expect("health shutdown lock").clone();
-    let clusters = config.clusters.clone();
+    // The runner probes only health-checked clusters; routing-only
+    // cluster trees need not be cloned into the health thread.
+    let clusters: Vec<praxis_core::config::Cluster> = config
+        .clusters
+        .iter()
+        .filter(|c| c.health_check.is_some())
+        .cloned()
+        .collect();
 
     spawn_on_dedicated_runtime("health check runtime", async move {
         praxis_protocol::http::pingora::health::runner::spawn_health_checks(&clusters, &registry, &shutdown);

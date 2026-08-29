@@ -55,10 +55,12 @@ pub(super) fn build_trusted_origins(origins: &[String]) -> TrustedOrigins {
 /// is normalized to strip default ports ([RFC 6454]).
 ///
 /// [RFC 6454]: https://datatracker.ietf.org/doc/html/rfc6454
-pub(super) fn extract_origin(headers: &HeaderMap) -> Option<String> {
+pub(super) fn extract_origin(headers: &HeaderMap) -> Option<std::borrow::Cow<'_, str>> {
     if let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok())
         && origin != "null"
     {
+        // Already-normalized origins (the browser common case) borrow
+        // straight from the header instead of allocating.
         return Some(normalize_origin(origin));
     }
 
@@ -66,7 +68,11 @@ pub(super) fn extract_origin(headers: &HeaderMap) -> Option<String> {
         .get("referer")
         .and_then(|v| v.to_str().ok())
         .and_then(extract_origin_from_url)
-        .map(|o| normalize_origin(&o))
+        .map(|o| match normalize_origin(&o) {
+            // Already normalized: reuse the extracted String as-is.
+            std::borrow::Cow::Borrowed(_) => std::borrow::Cow::Owned(o),
+            std::borrow::Cow::Owned(normalized) => std::borrow::Cow::Owned(normalized),
+        })
 }
 
 /// Parse `scheme://host[:port]` from a full URL.

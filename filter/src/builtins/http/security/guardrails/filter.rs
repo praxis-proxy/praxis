@@ -8,7 +8,7 @@ use bytes::Bytes;
 
 use super::{
     config::{DEFAULT_MAX_BODY_BYTES, GuardrailsAction, GuardrailsConfig},
-    rule::{CompiledRule, RuleTarget, parse_matcher, parse_target},
+    rule::{CompiledRule, RuleMatcher, RuleTarget, parse_matcher, parse_target},
 };
 use crate::{
     FilterAction, FilterError, FilterResultSet, Rejection,
@@ -67,12 +67,20 @@ use crate::{
 /// let filter = GuardrailsFilter::from_config(&yaml).unwrap();
 /// assert_eq!(filter.name(), "guardrails");
 /// ```
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent pre-computed rule facts, not a state machine"
+)]
 pub struct GuardrailsFilter {
     /// What to do when a rule matches.
     pub(super) action: GuardrailsAction,
 
     /// Whether any rule targets the body (pre-computed at init).
     pub(super) needs_body: bool,
+
+    /// Whether any body rule is a `Contains` match (pre-computed at
+    /// init), so the per-body lowercase decision costs no rule scan.
+    pub(super) has_body_contains: bool,
 
     /// Reject bodies exceeding the inspection buffer limit.
     pub(super) reject_oversized: bool,
@@ -117,6 +125,7 @@ impl GuardrailsFilter {
 
         let mut rules = Vec::with_capacity(cfg.rules.len());
         let mut needs_body = false;
+        let mut has_body_contains = false;
 
         for rule in &cfg.rules {
             let target = parse_target(rule)?;
@@ -124,6 +133,9 @@ impl GuardrailsFilter {
 
             if matches!(target, RuleTarget::Body) {
                 needs_body = true;
+                if matches!(matcher, RuleMatcher::Contains(_)) {
+                    has_body_contains = true;
+                }
             }
 
             rules.push(CompiledRule {
@@ -136,6 +148,7 @@ impl GuardrailsFilter {
         Ok(Box::new(Self {
             action: cfg.action,
             needs_body,
+            has_body_contains,
             reject_oversized: cfg.reject_oversized,
             rules,
         }))
@@ -151,41 +164,10 @@ impl GuardrailsFilter {
 
     /// Check all header-targeted rules against the request headers.
     fn check_headers(&self, ctx: &HttpFilterContext<'_>) -> bool {
-        for rule in &self.rules {
-            let RuleTarget::Header(header_name) = &rule.target else {
-                continue;
-            };
-
-            // find_map returns the RuleEval from the first matching value,
-            // pii::matches_any is called at most once across all values.
-            let is_rule_match = ctx
-                .request
-                .headers
-                .get_all(header_name.as_str())
-                .iter()
-                .filter_map(|val| val.to_str().ok())
-                .find_map(|s| {
-                    let ev = rule.eval(s, None);
-                    ev.matched.then_some(ev)
-                });
-
-            let rule_matches = if rule.negate {
-                is_rule_match.is_none()
-            } else {
-                is_rule_match.is_some()
-            };
-
-            if rule_matches {
-                tracing::info!(
-                    header = %header_name,
-                    negate = rule.negate,
-                    pii_kind = ?is_rule_match.and_then(|ev| ev.pii_kind),
-                    "guardrails: header rule triggered"
-                );
-                return true;
-            }
-        }
-        false
+        self.rules.iter().any(|rule| match &rule.target {
+            RuleTarget::Header(header_name) => header_rule_triggered(rule, header_name, ctx),
+            RuleTarget::Body => false,
+        })
     }
 
     /// Check all body-targeted rules against the request body.
@@ -194,12 +176,7 @@ impl GuardrailsFilter {
     /// re-allocating per rule. Only allocates when at least one
     /// body-targeted `Contains` rule exists.
     fn check_body(&self, body: &str) -> bool {
-        use super::rule::RuleMatcher;
-        let has_body_contains = self
-            .rules
-            .iter()
-            .any(|r| matches!(r.target, RuleTarget::Body) && matches!(r.matcher, RuleMatcher::Contains(_)));
-        let body_lower = has_body_contains.then(|| body.to_lowercase());
+        let body_lower = self.has_body_contains.then(|| body.to_lowercase());
         for rule in &self.rules {
             if !matches!(rule.target, RuleTarget::Body) {
                 continue;
@@ -305,6 +282,74 @@ impl HttpFilter for GuardrailsFilter {
 // -----------------------------------------------------------------------------
 // Utility Functions
 // -----------------------------------------------------------------------------
+
+/// Evaluate one header-targeted rule; returns whether it triggered.
+///
+/// Values are decoded lossily rather than dropped: a value that is not valid
+/// UTF-8 (obs-text) must still be inspected, or a blocking rule would fail
+/// open (e.g. `User-Agent: bad-bot\xFF` evading a `bad-bot` reject rule while
+/// the upstream reads it as `bad-bot`). A non-ASCII pattern additionally
+/// cannot be faithfully evaluated over an undecodable value — the replacement
+/// character destroys exactly the bytes the pattern targets (a Latin-1
+/// encoding of the pattern sails past the lossy match while a lenient
+/// upstream reads the original) — so that combination fails closed like the
+/// body path.
+fn header_rule_triggered(rule: &CompiledRule, header_name: &str, ctx: &HttpFilterContext<'_>) -> bool {
+    let (is_rule_match, undecodable) = scan_header_values(rule, header_name, ctx);
+
+    if is_rule_match.is_none() && undecodable && !rule.is_ascii_only() {
+        tracing::info!(
+            header = %header_name,
+            "guardrails: non-UTF-8 header value cannot be checked against a \
+             non-ASCII pattern; failing closed"
+        );
+        return true;
+    }
+
+    let rule_matches = if rule.negate {
+        is_rule_match.is_none()
+    } else {
+        is_rule_match.is_some()
+    };
+
+    if rule_matches {
+        tracing::info!(
+            header = %header_name,
+            negate = rule.negate,
+            pii_kind = ?is_rule_match.and_then(|ev| ev.pii_kind),
+            "guardrails: header rule triggered"
+        );
+        return true;
+    }
+    false
+}
+
+/// Scan a rule's header values, returning the first match and whether any
+/// value failed UTF-8 decoding (lossily replaced).
+fn scan_header_values(
+    rule: &CompiledRule,
+    header_name: &str,
+    ctx: &HttpFilterContext<'_>,
+) -> (Option<super::rule::RuleEval>, bool) {
+    let mut undecodable = false;
+    let is_rule_match = ctx
+        .request
+        .headers
+        .get_all(header_name)
+        .iter()
+        .map(|val| {
+            let s = String::from_utf8_lossy(val.as_bytes());
+            if matches!(s, std::borrow::Cow::Owned(_)) {
+                undecodable = true;
+            }
+            s
+        })
+        .find_map(|s| {
+            let ev = rule.eval(&s, None);
+            ev.matched.then_some(ev)
+        });
+    (is_rule_match, undecodable)
+}
 
 /// Write a guardrails status result to the filter context.
 ///

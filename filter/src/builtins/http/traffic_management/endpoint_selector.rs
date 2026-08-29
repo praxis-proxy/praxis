@@ -391,6 +391,7 @@ impl HttpFilter for EndpointSelectorFilter {
 
         let upstream = Upstream {
             address: Arc::from(value.as_str()),
+            authority: None,
             connection: Arc::clone(&self.connection),
             tls: self.tls.clone(),
         };

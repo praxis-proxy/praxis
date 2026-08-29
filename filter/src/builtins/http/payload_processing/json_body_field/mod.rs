@@ -3,10 +3,11 @@
 
 //! Extracts top-level JSON fields from the request body and promotes them to request headers.
 //!
-//! Parsing walks the top-level object without building a full DOM: unmapped
-//! values are skipped, and extraction stops once every configured field is
-//! found (first-wins on duplicate keys). Trailing JSON after early exit is
-//! not validated.
+//! Parsing walks the complete top-level object without building a full DOM:
+//! unmapped values are skipped, duplicate keys are last-wins (matching
+//! `serde_json` and typical backend parsers), and trailing non-whitespace
+//! content after the document blocks promotion so a promoted value always
+//! matches what the backend will parse.
 
 mod config;
 mod extract;
@@ -49,8 +50,9 @@ struct Promoted;
 /// their values to request headers using [`StreamBuffer`] mode.
 ///
 /// Uses a map visitor (not a full JSON DOM). Unmapped values are skipped;
-/// once every configured field is found, parsing stops (first-wins on
-/// duplicate keys). Trailing bytes after early exit are not validated.
+/// the whole top-level object is scanned so duplicate keys are last-wins
+/// (matching `serde_json` and typical backend parsers), and trailing
+/// non-whitespace content after the document blocks promotion.
 ///
 /// On successful promotion the filter returns [`FilterAction::BodyDone`] so
 /// [`StreamBuffer`] pre-read does not re-run extraction on later chunks
@@ -101,6 +103,13 @@ pub struct JsonBodyFieldFilter {
 
     /// Field-to-header mappings: `(json_field_name, header_name)`.
     pub(crate) mappings: Vec<(String, String)>,
+
+    /// Field names from `mappings`, pre-built for the extraction walk.
+    ///
+    /// The extractor probes this on every JSON key it visits, and the
+    /// hook can run once per buffered chunk; rebuilding the set from
+    /// `mappings` each call allocated per chunk for config-stable data.
+    needed: std::collections::HashSet<String>,
 }
 
 impl JsonBodyFieldFilter {
@@ -135,9 +144,11 @@ impl JsonBodyFieldFilter {
         let cfg: JsonBodyFieldConfig = parse_filter_config("json_body_field", config)?;
         let max_body_bytes = cfg.max_body_bytes;
         let mappings = build_mappings(cfg)?;
+        let needed = mappings.iter().map(|(field, _)| field.clone()).collect();
         Ok(Box::new(Self {
             max_body_bytes,
             mappings,
+            needed,
         }))
     }
 }
@@ -179,7 +190,7 @@ impl HttpFilter for JsonBodyFieldFilter {
             return Ok(FilterAction::Continue);
         };
 
-        if extract_fields(&self.mappings, chunk, &mut ctx.extra_request_headers) {
+        if extract_fields(&self.mappings, &self.needed, chunk, &mut ctx.extra_request_headers) {
             ctx.insert_filter_state(Promoted);
             // BodyDone skips this filter on remaining chunks; Release would
             // still re-enter at EOS and duplicate TrustedHeaderMutation::Add.

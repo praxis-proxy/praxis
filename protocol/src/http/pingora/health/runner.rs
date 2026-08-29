@@ -12,7 +12,7 @@ use praxis_core::{
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, trace};
 
-use super::probe::{http_probe, tcp_probe};
+use super::probe::tcp_probe;
 
 // -----------------------------------------------------------------------------
 // HealthCheckParams
@@ -32,8 +32,8 @@ struct HealthCheckParams {
     /// [`Tcp`]: HealthCheckType::Tcp
     check_type: HealthCheckType,
 
-    /// HTTP path to probe (ignored for TCP).
-    path: String,
+    /// Pre-built HTTP probe request bytes (ignored for TCP).
+    http_request: String,
 
     /// Expected HTTP status code (ignored for TCP).
     expected_status: u16,
@@ -106,7 +106,9 @@ fn build_health_params(
         cluster_name: Arc::clone(&cluster.name),
         endpoints: cluster.endpoints.iter().map(|e| e.address().to_owned()).collect(),
         check_type: hc.check_type,
-        path: hc.path.clone(),
+        // The probe request only varies with the configured path, so it
+        // is built once per task rather than per probe.
+        http_request: crate::http::pingora::health::probe::build_http_probe_request(&hc.path),
         expected_status: hc.expected_status,
         interval: Duration::from_millis(hc.interval_ms),
         timeout: Duration::from_millis(hc.timeout_ms),
@@ -151,7 +153,7 @@ async fn probe_all_endpoints(params: &HealthCheckParams, shutdown: &Cancellation
         .endpoints
         .iter()
         .enumerate()
-        .map(|(idx, addr)| spawn_probe(idx, addr.clone(), params))
+        .map(|(idx, addr)| spawn_probe(idx, addr, params))
         .collect();
 
     futures::pin_mut!(futures);
@@ -163,12 +165,17 @@ async fn probe_all_endpoints(params: &HealthCheckParams, shutdown: &Cancellation
             );
             return;
         }
-        record_probe_result(params, idx, &addr, success);
+        record_probe_result(params, idx, addr, success);
     }
+
+    // Refresh the aggregate gauges once per completed round; writing
+    // them per endpoint repeated the same registry lookups and health
+    // scan E times per interval. Transitions still record immediately.
+    refresh_endpoint_gauges(params);
 }
 
 /// Spawn a single endpoint probe future.
-async fn spawn_probe(idx: usize, addr: String, params: &HealthCheckParams) -> (usize, String, bool) {
+async fn spawn_probe<'ep>(idx: usize, addr: &'ep str, params: &HealthCheckParams) -> (usize, &'ep str, bool) {
     debug!(
         cluster = %params.cluster_name,
         endpoint = %addr,
@@ -176,8 +183,16 @@ async fn spawn_probe(idx: usize, addr: String, params: &HealthCheckParams) -> (u
         "probing health check endpoint"
     );
     let success = match params.check_type {
-        HealthCheckType::Http => http_probe(&addr, &params.path, params.expected_status, params.timeout).await,
-        HealthCheckType::Tcp => tcp_probe(&addr, params.timeout).await,
+        HealthCheckType::Http => {
+            crate::http::pingora::health::probe::http_probe_with_request(
+                addr,
+                &params.http_request,
+                params.expected_status,
+                params.timeout,
+            )
+            .await
+        },
+        HealthCheckType::Tcp => tcp_probe(addr, params.timeout).await,
         HealthCheckType::Grpc => {
             tracing::error!("gRPC health checks not yet implemented");
             false
@@ -202,22 +217,33 @@ fn record_probe_result(params: &HealthCheckParams, idx: usize, addr: &str, succe
     publish_probe_metrics(params, addr, success, transitioned);
 }
 
-/// Emit transition counters and/or refresh aggregate health gauges.
+/// Emit transition logs and counters; aggregate gauges refresh once per
+/// round via [`refresh_endpoint_gauges`] (transitions also refresh them
+/// immediately through `record_health_transition`).
 fn publish_probe_metrics(params: &HealthCheckParams, addr: &str, success: bool, transitioned: bool) {
+    if !transitioned {
+        return;
+    }
+    let result = if success {
+        info!(cluster = %params.cluster_name, endpoint = %addr, "endpoint transitioned to healthy");
+        crate::http::pingora::metrics::HEALTH_RESULT_HEALTHY
+    } else {
+        info!(cluster = %params.cluster_name, endpoint = %addr, "endpoint transitioned to unhealthy");
+        crate::http::pingora::metrics::HEALTH_RESULT_UNHEALTHY
+    };
     let cluster = ::metrics::SharedString::from(Arc::clone(&params.cluster_name));
     let (healthy, total) = crate::http::pingora::metrics::count_healthy_endpoints(&params.state);
-    if transitioned {
-        let result = if success {
-            info!(cluster = %params.cluster_name, endpoint = %addr, "endpoint transitioned to healthy");
-            crate::http::pingora::metrics::HEALTH_RESULT_HEALTHY
-        } else {
-            info!(cluster = %params.cluster_name, endpoint = %addr, "endpoint transitioned to unhealthy");
-            crate::http::pingora::metrics::HEALTH_RESULT_UNHEALTHY
-        };
-        crate::http::pingora::metrics::record_health_transition(cluster, result, healthy, total);
-    } else {
-        crate::http::pingora::metrics::set_upstream_endpoint_gauges(cluster, healthy, total);
-    }
+    crate::http::pingora::metrics::record_health_transition(cluster, result, healthy, total);
+}
+
+/// Write the cluster's aggregate health gauges from current state.
+fn refresh_endpoint_gauges(params: &HealthCheckParams) {
+    let (healthy, total) = crate::http::pingora::metrics::count_healthy_endpoints(&params.state);
+    crate::http::pingora::metrics::set_upstream_endpoint_gauges(
+        ::metrics::SharedString::from(Arc::clone(&params.cluster_name)),
+        healthy,
+        total,
+    );
 }
 
 // -----------------------------------------------------------------------------
@@ -399,7 +425,7 @@ mod tests {
             cluster_name: "test".into(),
             endpoints,
             check_type: HealthCheckType::Tcp,
-            path: "/".to_owned(),
+            http_request: super::super::probe::build_http_probe_request("/"),
             expected_status: 200,
             interval: Duration::from_millis(100),
             timeout: Duration::from_millis(50),

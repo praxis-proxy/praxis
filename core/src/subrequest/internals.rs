@@ -133,6 +133,26 @@ impl SubRequestConnector {
         &self.inner
     }
 
+    /// Whether a sub-request circuit breaker registry is wired.
+    ///
+    /// `true` only when the connector was built (via [`with_options`]) with a
+    /// circuit-breaker config; [`new`] never wires one. Exposed so callers and
+    /// tests can assert that a configured `runtime.subrequest_circuit_breaker`
+    /// actually reached the connector.
+    ///
+    /// [`with_options`]: Self::with_options
+    /// [`new`]: Self::new
+    #[must_use]
+    pub fn has_circuit_breaker(&self) -> bool {
+        self.circuit_breakers.is_some()
+    }
+
+    /// The configured max-connections admission limit, if any.
+    #[must_use]
+    pub fn configured_max_connections(&self) -> Option<usize> {
+        self.configured_max_connections
+    }
+
     /// Acquire an admission permit if a concurrency limit is
     /// configured. Returns `None` when no limit is set.
     ///
@@ -290,8 +310,8 @@ pub(super) fn check_clean_completion(session: &mut HttpSession<()>) -> Result<bo
 ///
 /// Used by `send_streaming()` when the response completes at header
 /// time (HEAD, 204, 304, zero-length, or H2 error).
-pub(super) fn record_header_termination(termination: &str) {
-    counter!(SUBREQUEST_STREAMS_TOTAL, "termination" => termination.to_owned()).increment(1);
+pub(super) fn record_header_termination(termination: &'static str) {
+    counter!(SUBREQUEST_STREAMS_TOTAL, "termination" => termination).increment(1);
     histogram!(SUBREQUEST_STREAM_DURATION_SECONDS).record(0.0);
     debug!(termination, "sub-request: stream terminated at header phase");
 }
@@ -313,37 +333,38 @@ pub(super) const HOP_BY_HOP_HEADERS: &[&str] = &[
     "upgrade",
 ];
 
-/// Remove hop-by-hop headers and headers nominated by `Connection`.
-pub(super) fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
-    let connection_values: Vec<_> = headers.get_all(http::header::CONNECTION).iter().cloned().collect();
-    for name in HOP_BY_HOP_HEADERS {
-        headers.remove(*name);
-    }
-    for value in connection_values {
-        let Ok(value) = value.to_str() else { continue };
-        for token in value.split(',').map(str::trim).filter(|token| !token.is_empty()) {
-            headers.remove(token);
-        }
-    }
+/// Collect the `Connection`-nominated header names, borrowed from the
+/// map's own `Connection` values. Costs nothing when the header is
+/// absent (an empty iterator collects without allocating).
+pub(super) fn connection_nominated_tokens(headers: &HeaderMap) -> Vec<&str> {
+    headers
+        .get_all(http::header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|token| !token.is_empty())
+        .collect()
 }
 
-/// Remove request framing headers that the executor re-computes.
-pub(super) fn strip_request_framing_headers(headers: &mut HeaderMap) {
-    headers.remove(http::header::CONTENT_LENGTH);
-    headers.remove(http::header::TRANSFER_ENCODING);
+/// Whether a header must not cross the sub-request boundary in either
+/// direction: hop-by-hop (the fixed list or `Connection`-nominated) or
+/// a reserved internal prefix (`x-praxis-*`, `x-ext-protocol-*`,
+/// `x-ext-agent-*`).
+pub(super) fn is_boundary_stripped(name: &http::header::HeaderName, nominated: &[&str]) -> bool {
+    // `HeaderName::as_str` is always lowercase, so the fixed list needs
+    // no case folding; nominated tokens arrive raw from the wire.
+    let name = name.as_str();
+    HOP_BY_HOP_HEADERS.contains(&name)
+        || crate::reserved_headers::is_reserved(name)
+        || nominated.iter().any(|token| token.eq_ignore_ascii_case(name))
 }
 
-/// Remove headers matching reserved internal prefixes (`x-praxis-*`,
-/// `x-ext-protocol-*`, `x-ext-agent-*`).
-pub(super) fn strip_reserved_headers(headers: &mut HeaderMap) {
-    let reserved: Vec<http::header::HeaderName> = headers
-        .keys()
-        .filter(|name| crate::reserved_headers::is_reserved(name.as_str()))
-        .cloned()
-        .collect();
-    for name in reserved {
-        headers.remove(&name);
-    }
+/// Request-direction predicate: boundary-stripped plus the framing
+/// headers the executor re-computes.
+pub(super) fn is_request_stripped(name: &http::header::HeaderName, nominated: &[&str]) -> bool {
+    let lower = name.as_str();
+    lower == "content-length" || lower == "transfer-encoding" || is_boundary_stripped(name, nominated)
 }
 
 // ---------------------------------------------------------------------------

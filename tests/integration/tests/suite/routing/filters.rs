@@ -54,7 +54,7 @@ insecure_options:
     );
     let raw_lower = raw.to_lowercase();
     assert!(
-        raw_lower.contains("x-praxis-filtered: true"),
+        raw_lower.contains("x-test-filtered: true"),
         "response should contain header set by on_response filter, got:\n{raw}"
     );
 
@@ -120,7 +120,10 @@ impl HttpFilter for ResponseHeaderFilter {
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         if let Some(resp) = ctx.response_header.as_mut() {
-            resp.headers.insert("X-Praxis-Filtered", "true".parse().unwrap());
+            // Deliberately NOT an x-praxis-* name: reserved internal headers
+            // never reach the client (the post-pipeline strip removes them),
+            // so the test marker must use an unreserved name.
+            resp.headers.insert("X-Test-Filtered", "true".parse().unwrap());
         }
 
         Ok(FilterAction::Continue)

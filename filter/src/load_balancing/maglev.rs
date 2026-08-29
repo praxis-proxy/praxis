@@ -81,35 +81,58 @@ impl Maglev {
         #[expect(clippy::cast_possible_truncation, reason = "modulo fits usize")]
         let start = (fnv1a_seeded(key, 0) as usize) % len;
 
-        if let Some(state) = health {
-            for offset in 0..len {
-                let ep = self.endpoint_at((start + offset) % len);
-                if is_excluded(&ep.address, exclude) {
-                    continue;
-                }
-                if state.endpoints().get(ep.index).is_some_and(EndpointHealth::is_healthy) {
-                    return Some(Arc::clone(&ep.address));
-                }
-            }
+        if let Some(state) = health
+            && let Some(addr) = self.probe(start, exclude, |ep| {
+                state.endpoints().get(ep.index).is_some_and(EndpointHealth::is_healthy)
+            })
+        {
+            return Some(addr);
         }
 
-        for offset in 0..len {
-            let ep = self.endpoint_at((start + offset) % len);
-            if !is_excluded(&ep.address, exclude) {
-                return Some(Arc::clone(&ep.address));
-            }
-        }
-        None
+        self.probe(start, exclude, |_| true)
     }
 
-    /// The endpoint owning table `slot`. The slot is `< table.len()` and the
-    /// owner index it holds is a valid `endpoints` index by construction.
+    /// Probe table slots clockwise from `start` for an endpoint that is
+    /// not excluded and passes `accept`.
+    ///
+    /// The probe is bounded by distinct endpoints rather than table
+    /// slots (the ring-hash precedent): with every endpoint rejected,
+    /// walking all 65k slots would revisit each endpoint's slots
+    /// thousands of times — hundreds of microseconds per request exactly
+    /// during a full-cluster outage.
     #[expect(
         clippy::indexing_slicing,
         reason = "table slot and owner index are in bounds by construction"
     )]
-    fn endpoint_at(&self, slot: usize) -> &WeightedEndpoint {
-        &self.endpoints[self.table[slot] as usize]
+    fn probe(
+        &self,
+        start: usize,
+        exclude: &[Arc<str>],
+        accept: impl Fn(&WeightedEndpoint) -> bool,
+    ) -> Option<Arc<str>> {
+        let len = self.table.len();
+        // Built lazily on the first rejected slot (the ring-hash
+        // precedent): the dominant healthy-first-slot case must not pay
+        // a per-request memset — or, past the inline capacity, a heap
+        // allocation — for a set it never reads.
+        let mut visited: Option<smallvec::SmallVec<[bool; 32]>> = None;
+        let mut remaining = self.endpoints.len();
+        for offset in 0..len {
+            let owner = self.table[(start + offset) % len] as usize;
+            let ep = &self.endpoints[owner];
+            if !is_excluded(&ep.address, exclude) && accept(ep) {
+                return Some(Arc::clone(&ep.address));
+            }
+            let visited = visited.get_or_insert_with(|| smallvec::smallvec![false; self.endpoints.len()]);
+            if !visited[owner] {
+                visited[owner] = true;
+                remaining -= 1;
+                if remaining == 0 {
+                    break;
+                }
+            }
+        }
+        None
     }
 }
 
@@ -306,16 +329,8 @@ mod tests {
     #[test]
     fn weight_stability() {
         let eps = vec![
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.1:80"),
-                index: 0,
-                weight: 3,
-            },
-            WeightedEndpoint {
-                address: Arc::from("10.0.0.2:80"),
-                index: 1,
-                weight: 1,
-            },
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 3),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
         ];
         let mg = Maglev::new(eps, None);
 
@@ -433,11 +448,7 @@ mod tests {
     /// Build `n` equal-weight endpoints `10.0.0.{i+1}:80`.
     fn endpoints(n: usize) -> Vec<WeightedEndpoint> {
         (0..n)
-            .map(|i| WeightedEndpoint {
-                address: Arc::from(format!("10.0.0.{}:80", i + 1).as_str()),
-                index: i,
-                weight: 1,
-            })
+            .map(|i| WeightedEndpoint::simple(Arc::from(format!("10.0.0.{}:80", i + 1).as_str()), i, 1))
             .collect()
     }
 

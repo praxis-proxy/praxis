@@ -36,6 +36,26 @@ fn via_value(version: Version) -> &'static str {
     }
 }
 
+/// Pre-validated [`http::HeaderValue`] for [`via_value`]'s entry.
+///
+/// Inserting the `&str` directly would re-validate and heap-copy the
+/// value on every forwarded request and response; these statics wrap
+/// the same bytes once at compile time.
+fn via_header_value(entry: &'static str) -> http::HeaderValue {
+    const V09: http::HeaderValue = http::HeaderValue::from_static("0.9 praxis");
+    const V10: http::HeaderValue = http::HeaderValue::from_static("1.0 praxis");
+    const V11: http::HeaderValue = http::HeaderValue::from_static("1.1 praxis");
+    const V2: http::HeaderValue = http::HeaderValue::from_static("2 praxis");
+    const V3: http::HeaderValue = http::HeaderValue::from_static("3 praxis");
+    match entry {
+        "0.9 praxis" => V09,
+        "1.0 praxis" => V10,
+        "2 praxis" => V2,
+        "3 praxis" => V3,
+        _ => V11,
+    }
+}
+
 /// Append a Via entry to a Pingora request header.
 ///
 /// If a valid UTF-8 `Via` header already exists, appends
@@ -50,18 +70,25 @@ pub(crate) fn append_request_via(req: &mut pingora_http::RequestHeader, upstream
         },
         _ => {
             debug!(via = %entry, "adding request Via header");
-            let _insert = req.insert_header("via", entry);
+            let _insert = req.insert_header("via", via_header_value(entry));
         },
     }
 }
 
 /// Append a Via entry to a Pingora response header.
 ///
+/// Per [RFC 9110 Section 7.6.3] the `received-protocol` on a response `Via`
+/// records the protocol version over which this proxy received the response,
+/// i.e. the upstream leg (not the downstream client's version). Callers must
+/// pass the upstream response version accordingly.
+///
 /// If a valid UTF-8 `Via` header already exists, appends
 /// comma-separated. Non-UTF-8 values are replaced outright
 /// to avoid producing a malformed header.
-pub(crate) fn append_response_via(resp: &mut pingora_http::ResponseHeader, client_version: Version) {
-    let entry = via_value(client_version);
+///
+/// [RFC 9110 Section 7.6.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.3
+pub(crate) fn append_response_via(resp: &mut pingora_http::ResponseHeader, upstream_version: Version) {
+    let entry = via_value(upstream_version);
     match resp.headers.get("via").and_then(|v| v.to_str().ok()) {
         Some(existing) if !existing.is_empty() => {
             debug!(existing, new = %entry, "appending to existing response Via");
@@ -69,7 +96,7 @@ pub(crate) fn append_response_via(resp: &mut pingora_http::ResponseHeader, clien
         },
         _ => {
             debug!(via = %entry, "adding response Via header");
-            let _insert = resp.insert_header("via", entry);
+            let _insert = resp.insert_header("via", via_header_value(entry));
         },
     }
 }

@@ -5,7 +5,6 @@
 #![expect(
     clippy::arithmetic_side_effects,
     clippy::as_conversions,
-    clippy::impl_trait_in_params,
     clippy::iter_over_hash_type,
     clippy::min_ident_chars,
     clippy::mod_module_files,
@@ -18,6 +17,28 @@
 )]
 
 //! Protocol adapters for Praxis.
+//!
+//! `praxis-protocol` sits below `server` and above `filter` in the
+//! crate dependency flow `server -> protocol -> filter -> core -> tls`.
+//! It binds the [`praxis_filter`] pipeline engine to Pingora's HTTP and
+//! TCP proxy services, so that inbound connections are served, filters
+//! run at the right lifecycle points, and requests are forwarded to
+//! upstream clusters.
+//!
+//! Responsibilities:
+//! - HTTP protocol implementations and Pingora adapters ([`http`]).
+//! - Raw TCP/L4 forwarding ([`tcp`]).
+//! - Active health-check probes and admin/observability endpoints.
+//! - TLS listener setup (the `tls_setup` module) and keeping certificate hot-reload watchers alive for the process
+//!   lifetime ([`CertWatcherShutdowns`]).
+//!
+//! Boundary with Pingora: Pingora owns request-smuggling prevention,
+//! HTTP/2 backpressure, connection-pool safety, and HTTP/1.1 upgrade
+//! detection with bidirectional forwarding (WebSocket and similar).
+//! Praxis code in this crate and in [`praxis_filter`] owns hop-by-hop
+//! header stripping (with conditional preservation for upgrade
+//! requests), Host validation, `X-Forwarded-*` injection, and retry
+//! logic.
 
 use praxis_core::{PingoraServerRuntime, ProxyError, config::Config};
 use tokio::sync::watch;

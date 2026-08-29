@@ -40,9 +40,12 @@ pub(crate) struct SniCertResolver {
 
     /// Wildcard subdomain suffix to certificate mapping.
     ///
-    /// For `*.example.com`, stores `(".example.com", cert)`.
-    /// Only single-level subdomains match.
-    wildcard_certs: Vec<(String, Arc<CertifiedKey>)>,
+    /// For `*.example.com`, stores `("example.com", cert)` — the
+    /// suffix after the wildcard label's dot. Only single-level
+    /// subdomains match: stripping the SNI's first label yields the
+    /// unique candidate key, so lookup is one hash probe instead of
+    /// a scan over every wildcard entry.
+    wildcard_certs: HashMap<String, Arc<CertifiedKey>>,
 
     /// Fallback certificate when SNI does not match any entry.
     default: Option<Arc<CertifiedKey>>,
@@ -50,7 +53,7 @@ pub(crate) struct SniCertResolver {
 
 impl std::fmt::Debug for SniCertResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let wildcards: Vec<&str> = self.wildcard_certs.iter().map(|(s, _)| s.as_str()).collect();
+        let wildcards: Vec<String> = self.wildcard_certs.keys().map(|s| format!(".{s}")).collect();
         f.debug_struct("SniCertResolver")
             .field("hostnames", &self.certs.keys().collect::<Vec<_>>())
             .field("wildcards", &wildcards)
@@ -82,8 +85,7 @@ impl SniCertResolver {
 
     /// Whether the resolver has a wildcard mapping for `domain`.
     fn has_wildcard_for(&self, domain: &str) -> bool {
-        let suffix = format!(".{domain}");
-        self.wildcard_certs.iter().any(|(s, _)| s == &suffix)
+        self.wildcard_certs.contains_key(domain)
     }
 }
 
@@ -100,21 +102,27 @@ impl SniCertResolver {
         let Some(sni) = sni else {
             return self.default.as_ref().map(Arc::clone);
         };
-        let lower = sni.to_ascii_lowercase();
+        // Real-world SNI is virtually always lowercase already; keys are
+        // lowercased at build, so only a mixed-case hello pays for a copy.
+        let lower: std::borrow::Cow<'_, str> = if sni.bytes().any(|b| b.is_ascii_uppercase()) {
+            std::borrow::Cow::Owned(sni.to_ascii_lowercase())
+        } else {
+            std::borrow::Cow::Borrowed(sni)
+        };
 
-        if let Some(cert) = self.certs.get(&lower) {
+        if let Some(cert) = self.certs.get(lower.as_ref()) {
             return Some(Arc::clone(cert));
         }
 
-        for (suffix, cert) in &self.wildcard_certs {
-            if lower.ends_with(suffix.as_str())
-                && lower.len() > suffix.len()
-                && lower
-                    .get(..lower.len() - suffix.len())
-                    .is_some_and(|prefix| !prefix.contains('.'))
-            {
-                return Some(Arc::clone(cert));
-            }
+        // A wildcard matches exactly one dot-free label plus the stored
+        // suffix, so splitting at the first dot yields the unique
+        // candidate key. The empty-label guard preserves the old length
+        // check (`.example.com` must not match `*.example.com`).
+        if let Some((label, rest)) = lower.split_once('.')
+            && !label.is_empty()
+            && let Some(cert) = self.wildcard_certs.get(rest)
+        {
+            return Some(Arc::clone(cert));
         }
 
         self.default.as_ref().map(Arc::clone)
@@ -134,7 +142,7 @@ impl ResolvesServerCert for SniCertResolver {
 /// (the resolver returns `None`).
 pub(super) fn build_sni_resolver(certificates: &[CertKeyPair]) -> Result<SniCertResolver, TlsError> {
     let mut certs = HashMap::new();
-    let mut wildcard_certs = Vec::new();
+    let mut wildcard_certs = HashMap::new();
     let mut default: Option<Arc<CertifiedKey>> = None;
 
     for pair in certificates {
@@ -166,22 +174,26 @@ fn register_server_names(
     pair: &CertKeyPair,
     certified: &Arc<CertifiedKey>,
     certs: &mut HashMap<String, Arc<CertifiedKey>>,
-    wildcard_certs: &mut Vec<(String, Arc<CertifiedKey>)>,
+    wildcard_certs: &mut HashMap<String, Arc<CertifiedKey>>,
 ) -> Result<(), TlsError> {
+    use std::collections::hash_map::Entry;
+
     for name in &pair.server_names {
         let lower = name.to_ascii_lowercase();
 
         if let Some(suffix) = lower.strip_prefix("*.") {
-            let wildcard_suffix = format!(".{suffix}");
-            if wildcard_certs.iter().any(|(s, _)| s == &wildcard_suffix) {
-                return Err(TlsError::DuplicateServerName {
-                    name: format!("*.{suffix}"),
-                    path: pair.cert_path.clone(),
-                });
+            match wildcard_certs.entry(suffix.to_owned()) {
+                Entry::Occupied(e) => {
+                    return Err(TlsError::DuplicateServerName {
+                        name: format!("*.{}", e.key()),
+                        path: pair.cert_path.clone(),
+                    });
+                },
+                Entry::Vacant(e) => {
+                    e.insert(Arc::clone(certified));
+                },
             }
-            wildcard_certs.push((wildcard_suffix, Arc::clone(certified)));
         } else {
-            use std::collections::hash_map::Entry;
             match certs.entry(lower) {
                 Entry::Occupied(e) => {
                     return Err(TlsError::DuplicateServerName {
@@ -535,6 +547,40 @@ mod tests {
         );
     }
 
+    #[test]
+    fn resolve_wildcard_rejects_empty_label() {
+        // A leading-dot SNI has an empty first label; the old length
+        // check rejected it and the split-based lookup must too.
+        let certs = gen_test_certs_with_sans(vec!["*.example.com".to_owned()]);
+        let certificates = vec![CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("path").to_owned(),
+            server_names: vec!["*.example.com".to_owned()],
+        }];
+        let resolver = build_sni_resolver(&certificates).unwrap();
+        assert!(
+            resolver.lookup(Some(".example.com")).is_none(),
+            "an empty subdomain label must NOT match *.example.com"
+        );
+    }
+
+    #[test]
+    fn resolve_wildcard_case_insensitive_match() {
+        let certs = gen_test_certs_with_sans(vec!["*.example.com".to_owned()]);
+        let certificates = vec![CertKeyPair {
+            cert_path: certs.cert_path.to_str().expect("path").to_owned(),
+            default: false,
+            key_path: certs.key_path.to_str().expect("path").to_owned(),
+            server_names: vec!["*.example.com".to_owned()],
+        }];
+        let resolver = build_sni_resolver(&certificates).unwrap();
+        assert!(
+            resolver.lookup(Some("APP.Example.COM")).is_some(),
+            "mixed-case SNI should match the wildcard case-insensitively"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Construction Tests
     // -------------------------------------------------------------------------
@@ -617,7 +663,7 @@ mod tests {
             ];
             let resolver = build_sni_resolver(&certificates).expect("resolver build");
             let exact_ptr = Arc::as_ptr(resolver.certs.get("api.example.com").expect("exact cert")) as usize;
-            let wildcard_ptr = Arc::as_ptr(&resolver.wildcard_certs.first().expect("wildcard cert").1) as usize;
+            let wildcard_ptr = Arc::as_ptr(resolver.wildcard_certs.get("example.com").expect("wildcard cert")) as usize;
             (resolver, exact_ptr, wildcard_ptr)
         });
 

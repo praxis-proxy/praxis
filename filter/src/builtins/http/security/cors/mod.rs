@@ -119,8 +119,10 @@ pub struct CorsFilter {
     /// Pre-joined `Access-Control-Allow-Headers` value.
     headers_header: String,
 
-    /// Pre-joined `Access-Control-Expose-Headers` value.
-    expose_header: String,
+    /// Pre-validated `Access-Control-Expose-Headers` value, so allowed
+    /// responses clone (a refcount bump) instead of re-parsing the
+    /// config-stable list.
+    expose_header_value: Option<HeaderValue>,
 
     /// Pre-formatted `Access-Control-Max-Age` value.
     max_age_header: String,
@@ -174,7 +176,10 @@ impl CorsFilter {
             reject_mode: cfg.disallowed_origin_mode == DisallowedOriginMode::Reject,
             methods_header: methods.join(", "),
             headers_header: cfg.allow_headers.join(", "),
-            expose_header: cfg.expose_headers.join(", "),
+            expose_header_value: {
+                let joined = cfg.expose_headers.join(", ");
+                (!joined.is_empty()).then(|| joined.parse().ok()).flatten()
+            },
             max_age_header: cfg.max_age.to_string(),
             vary_origin: HeaderValue::from_static(VARY_ORIGIN),
         }))

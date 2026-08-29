@@ -7,12 +7,17 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 pub(crate) mod consistent_hash;
 pub(crate) mod endpoint;
+pub(crate) mod hash;
 pub(crate) mod least_connections;
 pub(crate) mod maglev;
 pub(crate) mod p2c;
+pub(crate) mod priority;
 pub(crate) mod random;
+pub(crate) mod ring_hash;
 pub(crate) mod round_robin;
 pub(crate) mod strategy;
+pub(crate) mod subset;
+pub(crate) mod zone_aware;
 
 // -----------------------------------------------------------------------------
 // Shared LCG RNG
@@ -30,4 +35,17 @@ fn next_random(rng: &AtomicU64) -> u64 {
         Some(s.wrapping_mul(LCG_A).wrapping_add(LCG_C))
     })
     .unwrap_or(0)
+}
+
+// -----------------------------------------------------------------------------
+// Shared Helpers
+// -----------------------------------------------------------------------------
+
+/// Whether `addr` appears in a retry-exclusion list.
+///
+/// Exclusion lists hold endpoints already attempted for this request, so a
+/// retry lands somewhere new. Kept here so composite and hash-ring
+/// strategies share one definition.
+pub(crate) fn is_excluded(addr: &str, exclude: &[std::sync::Arc<str>]) -> bool {
+    exclude.iter().any(|e| e.as_ref() == addr)
 }

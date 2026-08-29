@@ -339,7 +339,7 @@ impl CachedClusterTls {
     /// Accepts anything convertible into `Arc<str>`; pass a `&str` to
     /// allocate the shared buffer once rather than building a `String`
     /// first and copying it.
-    pub fn set_sni(&mut self, sni: impl Into<Arc<str>>) {
+    pub fn set_sni<S: Into<Arc<str>>>(&mut self, sni: S) {
         self.sni = Some(sni.into());
     }
 

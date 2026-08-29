@@ -67,10 +67,8 @@ pub(super) fn inject_response_headers(filter: &CorsFilter, origin: &str, resp: &
             http::HeaderValue::from_static("true"),
         );
     }
-    if !filter.expose_header.is_empty()
-        && let Ok(v) = filter.expose_header.parse()
-    {
-        resp.headers.insert("access-control-expose-headers", v);
+    if let Some(v) = &filter.expose_header_value {
+        resp.headers.insert("access-control-expose-headers", v.clone());
     }
     if filter.policy.needs_vary() {
         filter.append_vary(resp);

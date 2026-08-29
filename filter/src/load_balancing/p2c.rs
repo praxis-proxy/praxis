@@ -33,8 +33,16 @@ use super::endpoint::WeightedEndpoint;
 /// p2c.release(&addr);
 /// ```
 pub(crate) struct PowerOfTwoChoices {
-    /// Per-endpoint active-request counter.
-    pub(crate) counters: HashMap<Arc<str>, AtomicUsize>,
+    /// Per-endpoint active-request counters, positionally aligned with
+    /// `endpoints` so selection indexes instead of hashing the address
+    /// string on every load and increment.
+    counters: Vec<AtomicUsize>,
+
+    /// Address-to-position lookup for [`release`], the only entry point
+    /// keyed by address.
+    ///
+    /// [`release`]: Self::release
+    index_by_addr: HashMap<Arc<str>, usize>,
 
     /// Deduplicated endpoint list with weights and original indices.
     endpoints: Vec<WeightedEndpoint>,
@@ -46,12 +54,23 @@ pub(crate) struct PowerOfTwoChoices {
 impl PowerOfTwoChoices {
     /// Create a P2C selector from a weighted endpoint list.
     pub(crate) fn new(endpoints: Vec<WeightedEndpoint>) -> Self {
-        let counters = endpoints
+        let counters = endpoints.iter().map(|_| AtomicUsize::new(0)).collect();
+        let index_by_addr: HashMap<Arc<str>, usize> = endpoints
             .iter()
-            .map(|ep| (Arc::clone(&ep.address), AtomicUsize::new(0)))
+            .enumerate()
+            .map(|(pos, ep)| (Arc::clone(&ep.address), pos))
             .collect();
+        // Config validation rejects duplicate endpoint addresses; a
+        // programmatic caller bypassing it would silently leak counters
+        // (release() only ever decrements the last duplicate's slot).
+        debug_assert_eq!(
+            index_by_addr.len(),
+            endpoints.len(),
+            "endpoint addresses must be unique for positional load counters"
+        );
         Self {
             counters,
+            index_by_addr,
             endpoints,
             rng: AtomicU64::new(1),
         }
@@ -61,59 +80,66 @@ impl PowerOfTwoChoices {
     ///
     /// Falls back to all endpoints when every endpoint is unhealthy.
     /// With a single endpoint, returns it directly.
-    #[expect(clippy::indexing_slicing, reason = "keyed by endpoints built in new()")]
+    #[expect(clippy::indexing_slicing, reason = "positions come from the endpoints scan")]
     pub(crate) fn select(&self, health: Option<&ClusterHealthState>, exclude: &[Arc<str>]) -> Option<Arc<str>> {
         if self.endpoints.is_empty() {
             return None;
         }
-        let candidates: SmallVec<[&WeightedEndpoint; 8]> = self
-            .healthy_candidates(health)
-            .into_iter()
-            .filter(|ep| !is_excluded(&ep.address, exclude))
-            .collect();
-        let total_w: usize = candidates.iter().map(|ep| ep.weight as usize).sum();
+        let candidates = self.candidate_positions(health, exclude);
+        let total_w: usize = candidates.iter().map(|&pos| self.endpoints[pos].weight as usize).sum();
 
         if candidates.len() <= 1 || total_w <= 1 {
-            let fallback = self
+            let fallback_pos = self
                 .endpoints
                 .iter()
-                .find(|ep| !is_excluded(&ep.address, exclude))
-                .unwrap_or(&self.endpoints[0]);
-            let ep = candidates.first().copied().unwrap_or(fallback);
+                .position(|ep| !is_excluded(&ep.address, exclude))
+                .unwrap_or(0);
+            let pos = candidates.first().copied().unwrap_or(fallback_pos);
+            let ep = &self.endpoints[pos];
             if is_excluded(&ep.address, exclude) {
                 return None;
             }
-            self.counters[&*ep.address].fetch_add(1, Ordering::AcqRel);
+            self.counters[pos].fetch_add(1, Ordering::AcqRel);
             return Some(Arc::clone(&ep.address));
         }
 
         let (a, b) = self.pick_two(total_w);
-        let ep_a = weight_index(&candidates, a, total_w);
-        let ep_b = weight_index(&candidates, b, total_w);
-        let chosen = self.less_loaded(ep_a, ep_b);
+        let pos_a = self.weight_index_pos(&candidates, a, total_w);
+        let pos_b = self.weight_index_pos(&candidates, b, total_w);
+        let chosen = self.less_loaded(pos_a, pos_b);
 
-        self.counters[&*chosen.address].fetch_add(1, Ordering::AcqRel);
-        Some(Arc::clone(&chosen.address))
+        self.counters[chosen].fetch_add(1, Ordering::AcqRel);
+        Some(Arc::clone(&self.endpoints[chosen].address))
     }
 
     /// Decrement the in-flight counter for `addr` after a response.
     pub(crate) fn release(&self, addr: &str) {
-        if let Some(counter) = self.counters.get(addr) {
+        if let Some(counter) = self.index_by_addr.get(addr).and_then(|pos| self.counters.get(*pos)) {
             _ = counter.fetch_update(Ordering::Release, Ordering::Relaxed, |v| Some(v.saturating_sub(1)));
         }
     }
 
-    /// Return the endpoint with fewer in-flight requests.
+    /// The counter cell for `addr`; test observability and seeding.
+    #[cfg(test)]
+    #[expect(clippy::expect_used, reason = "tests only address known endpoints")]
+    pub(crate) fn counter_for(&self, addr: &str) -> &AtomicUsize {
+        self.index_by_addr
+            .get(addr)
+            .and_then(|pos| self.counters.get(*pos))
+            .expect("counter must exist for every endpoint address")
+    }
+
+    /// Return the position with fewer in-flight requests.
     /// Ties broken by higher weight.
-    #[expect(clippy::indexing_slicing, reason = "keyed by endpoints built in new()")]
-    fn less_loaded<'a>(&self, a: &'a WeightedEndpoint, b: &'a WeightedEndpoint) -> &'a WeightedEndpoint {
-        let load_a = self.counters[&*a.address].load(Ordering::Acquire);
-        let load_b = self.counters[&*b.address].load(Ordering::Acquire);
+    #[expect(clippy::indexing_slicing, reason = "positions come from the endpoints scan")]
+    fn less_loaded(&self, a: usize, b: usize) -> usize {
+        let load_a = self.counters[a].load(Ordering::Acquire);
+        let load_b = self.counters[b].load(Ordering::Acquire);
         match load_a.cmp(&load_b) {
             core::cmp::Ordering::Less => a,
             core::cmp::Ordering::Greater => b,
             core::cmp::Ordering::Equal => {
-                if a.weight >= b.weight {
+                if self.endpoints[a].weight >= self.endpoints[b].weight {
                     a
                 } else {
                     b
@@ -139,40 +165,58 @@ impl PowerOfTwoChoices {
         (a, b)
     }
 
-    /// Filter to healthy endpoints, falling back to all on panic mode.
-    #[expect(clippy::indexing_slicing, reason = "bounds checked by ep.index < len()")]
-    fn healthy_candidates(&self, health: Option<&ClusterHealthState>) -> SmallVec<[&WeightedEndpoint; 8]> {
-        if let Some(state) = health {
-            let healthy: SmallVec<[_; 8]> = self
-                .endpoints
-                .iter()
-                .filter(|ep| ep.index < state.endpoints().len() && state.endpoints()[ep.index].is_healthy())
-                .collect();
-            if !healthy.is_empty() {
-                return healthy;
+    /// Map a cumulative-weight slot to a candidate position.
+    #[expect(clippy::indexing_slicing, reason = "positions come from the endpoints scan")]
+    #[expect(clippy::expect_used, reason = "caller guarantees candidates is non-empty")]
+    fn weight_index_pos(&self, candidates: &[usize], slot: usize, total_weight: usize) -> usize {
+        let slot = slot % total_weight;
+        let mut cumulative = 0_usize;
+        for &pos in candidates {
+            cumulative += self.endpoints[pos].weight as usize;
+            if slot < cumulative {
+                return pos;
             }
         }
-        self.endpoints.iter().collect()
+        *candidates.last().expect("candidates must be non-empty")
+    }
+
+    /// Candidate positions in one pass: healthy-and-not-excluded when
+    /// any endpoint is healthy, else all not-excluded (panic mode). The
+    /// old shape collected the healthy set and then re-collected it
+    /// through the exclusion filter — two passes and, past the inline
+    /// capacity, two heap allocations per request.
+    fn candidate_positions(&self, health: Option<&ClusterHealthState>, exclude: &[Arc<str>]) -> SmallVec<[usize; 8]> {
+        if let Some(state) = health {
+            let mut candidates: SmallVec<[usize; 8]> = SmallVec::new();
+            let mut any_healthy = false;
+            for (pos, ep) in self.endpoints.iter().enumerate() {
+                let healthy = state
+                    .endpoints()
+                    .get(ep.index)
+                    .is_some_and(praxis_core::health::EndpointHealth::is_healthy);
+                if healthy {
+                    any_healthy = true;
+                    if !is_excluded(&ep.address, exclude) {
+                        candidates.push(pos);
+                    }
+                }
+            }
+            if any_healthy {
+                return candidates;
+            }
+        }
+        self.endpoints
+            .iter()
+            .enumerate()
+            .filter(|(_, ep)| !is_excluded(&ep.address, exclude))
+            .map(|(pos, _)| pos)
+            .collect()
     }
 }
 
 // -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
-
-/// Map a random slot to an endpoint via cumulative weight buckets.
-#[expect(clippy::expect_used, reason = "total_weight > 0 guaranteed by caller")]
-fn weight_index<'a>(endpoints: &[&'a WeightedEndpoint], slot: usize, total_weight: usize) -> &'a WeightedEndpoint {
-    let slot = slot % total_weight;
-    let mut cumulative = 0_usize;
-    for ep in endpoints {
-        cumulative += ep.weight as usize;
-        if slot < cumulative {
-            return ep;
-        }
-    }
-    endpoints.last().expect("endpoints must be non-empty")
-}
 
 /// Returns `true` if `addr` appears in the exclusion list.
 fn is_excluded(addr: &str, exclude: &[Arc<str>]) -> bool {
@@ -223,16 +267,16 @@ mod tests {
             p2c.release(&addr);
         }
 
-        let c1 = p2c.counters["10.0.0.1:80"].load(Ordering::Relaxed);
-        let c2 = p2c.counters["10.0.0.2:80"].load(Ordering::Relaxed);
-        let c3 = p2c.counters["10.0.0.3:80"].load(Ordering::Relaxed);
+        let c1 = p2c.counter_for("10.0.0.1:80").load(Ordering::Relaxed);
+        let c2 = p2c.counter_for("10.0.0.2:80").load(Ordering::Relaxed);
+        let c3 = p2c.counter_for("10.0.0.3:80").load(Ordering::Relaxed);
         assert_eq!(c1 + c2 + c3, 0, "all counters should be zero after release");
     }
 
     #[test]
     fn prefers_less_loaded() {
         let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1, 0), ep("10.0.0.2:80", 1, 1)]);
-        p2c.counters["10.0.0.1:80"].store(100, Ordering::Relaxed);
+        p2c.counter_for("10.0.0.1:80").store(100, Ordering::Relaxed);
 
         let mut picked_2 = 0_u32;
         for _ in 0..20 {
@@ -298,7 +342,7 @@ mod tests {
         let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 1, 0)]);
         p2c.release("10.0.0.1:80");
         assert_eq!(
-            p2c.counters["10.0.0.1:80"].load(Ordering::Relaxed),
+            p2c.counter_for("10.0.0.1:80").load(Ordering::Relaxed),
             0,
             "release without select should not underflow"
         );
@@ -330,8 +374,8 @@ mod tests {
             h.join().expect("thread should not panic");
         }
 
-        let c1 = p2c.counters["10.0.0.1:80"].load(Ordering::Relaxed);
-        let c2 = p2c.counters["10.0.0.2:80"].load(Ordering::Relaxed);
+        let c1 = p2c.counter_for("10.0.0.1:80").load(Ordering::Relaxed);
+        let c2 = p2c.counter_for("10.0.0.2:80").load(Ordering::Relaxed);
         assert_eq!(c1 + c2, 0, "all counters should be zero after paired select+release");
     }
 
@@ -341,11 +385,7 @@ mod tests {
 
     /// Build a [`WeightedEndpoint`] for testing.
     fn ep(addr: &str, weight: u32, index: usize) -> WeightedEndpoint {
-        WeightedEndpoint {
-            address: Arc::from(addr),
-            weight,
-            index,
-        }
+        WeightedEndpoint::simple(Arc::from(addr), index, weight)
     }
 
     /// Build a [`ClusterHealthState`] with `n` healthy endpoints.

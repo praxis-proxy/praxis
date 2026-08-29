@@ -5,14 +5,32 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Serde default for [`RetryPolicy::configured`]: any deserialized policy is
+/// operator-configured.
+fn configured_true() -> bool {
+    true
+}
+
 /// Default max retries matching the legacy hardcoded behavior.
 pub const DEFAULT_MAX_RETRIES: u32 = 3;
+
+/// Ceiling on effective retries.
+///
+/// Pingora's proxy loop caps total attempts per request at 16
+/// (`ServerConf::max_retries`), so configured values above 15 retries
+/// cannot take effect and are clamped.
+pub const MAX_EFFECTIVE_RETRIES: u32 = 15;
 
 /// Default body replay limit matching Pingora's fixed retry buffer (64 `KiB`).
 pub const DEFAULT_RETRY_BODY_LIMIT_BYTES: u64 = 65_536;
 
-/// Hard upper bound for the retry body buffer (16 MiB).
-pub const MAX_RETRY_BODY_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
+/// Hard upper bound for the retry body buffer.
+///
+/// Matches Pingora's fixed downstream retry buffer: bodies beyond 64 `KiB`
+/// are truncated in the replay buffer, and a truncated buffer disables
+/// retries entirely, so allowing a larger configured limit would only
+/// promise replays that can never happen.
+pub const MAX_RETRY_BODY_LIMIT_BYTES: u64 = 65_536; // 64 KiB
 
 // -----------------------------------------------------------------------------
 // HttpStatusCode
@@ -28,8 +46,8 @@ pub const MAX_RETRY_BODY_LIMIT_BYTES: u64 = 16 * 1024 * 1024;
 /// assert!(HttpStatusCode::try_from(99_u16).is_err());
 /// assert!(HttpStatusCode::try_from(600_u16).is_err());
 /// ```
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "u16")]
 pub struct HttpStatusCode(u16);
 
 impl HttpStatusCode {
@@ -52,21 +70,11 @@ impl TryFrom<u16> for HttpStatusCode {
     }
 }
 
-impl<'de> Deserialize<'de> for HttpStatusCode {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = u16::deserialize(deserializer)?;
-        Self::try_from(value).map_err(serde::de::Error::custom)
-    }
-}
-
 // -----------------------------------------------------------------------------
 // RetryBodyLimit
 // -----------------------------------------------------------------------------
 
-/// Constrained retry body buffer size in bytes (0..=16 MiB).
+/// Constrained retry body buffer size in bytes (0..=64 KiB).
 ///
 /// ```
 /// use praxis_core::config::RetryBodyLimit;
@@ -75,8 +83,8 @@ impl<'de> Deserialize<'de> for HttpStatusCode {
 /// assert_eq!(limit.get(), 65_536);
 /// assert!(RetryBodyLimit::try_from(17 * 1024 * 1024_u64).is_err());
 /// ```
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(try_from = "u64")]
 pub struct RetryBodyLimit(u64);
 
 impl RetryBodyLimit {
@@ -105,21 +113,11 @@ impl TryFrom<u64> for RetryBodyLimit {
     fn try_from(value: u64) -> Result<Self, Self::Error> {
         if value > MAX_RETRY_BODY_LIMIT_BYTES {
             Err(format!(
-                "retry_body_limit_bytes must be <= {MAX_RETRY_BODY_LIMIT_BYTES} (16 MiB), got {value}"
+                "retry_body_limit_bytes must be <= {MAX_RETRY_BODY_LIMIT_BYTES} (64 KiB, the replay buffer cap), got {value}"
             ))
         } else {
             Ok(Self(value))
         }
-    }
-}
-
-impl<'de> Deserialize<'de> for RetryBodyLimit {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = u64::deserialize(deserializer)?;
-        Self::try_from(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -138,8 +136,8 @@ impl<'de> Deserialize<'de> for RetryBodyLimit {
 /// assert!(BudgetPercent::try_from(101.0_f64).is_err());
 /// assert!(BudgetPercent::try_from(f64::NAN).is_err());
 /// ```
-#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
-#[serde(transparent)]
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(try_from = "f64")]
 pub struct BudgetPercent(f64);
 
 impl BudgetPercent {
@@ -161,16 +159,6 @@ impl TryFrom<f64> for BudgetPercent {
             return Err(format!("retry_budget.percent must be in 0.0..=100.0, got {value}"));
         }
         Ok(Self(value))
-    }
-}
-
-impl<'de> Deserialize<'de> for BudgetPercent {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        let value = f64::deserialize(deserializer)?;
-        Self::try_from(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -369,6 +357,15 @@ pub struct RetryPolicy {
     #[serde(default)]
     pub backoff: Option<BackoffConfig>,
 
+    /// Whether this policy came from operator configuration rather than the
+    /// built-in legacy default.
+    ///
+    /// Endpoint reselection on retry is enabled only for configured
+    /// policies; the legacy default preserves the historical
+    /// retry-same-endpoint semantics.
+    #[serde(skip_deserializing, skip_serializing, default = "configured_true")]
+    pub configured: bool,
+
     /// Token-bucket retry budget.
     #[serde(default)]
     pub retry_budget: Option<RetryBudgetConfig>,
@@ -394,6 +391,7 @@ impl RetryPolicy {
             per_try_timeout_ms: None,
             request_timeout_ms: None,
             backoff: None,
+            configured: false,
             retry_budget: None,
             retry_body_limit_bytes: Some(RetryBodyLimit::default_limit()),
             allow_non_idempotent: None,
@@ -401,9 +399,14 @@ impl RetryPolicy {
     }
 
     /// Effective max retries (falls back to the legacy default of 3).
+    ///
+    /// Clamped to [`MAX_EFFECTIVE_RETRIES`]: Pingora's proxy loop stops
+    /// re-attempting past its own per-request cap regardless of policy.
     #[must_use]
     pub fn effective_max_retries(&self) -> u32 {
-        self.max_retries.unwrap_or(DEFAULT_MAX_RETRIES)
+        self.max_retries
+            .unwrap_or(DEFAULT_MAX_RETRIES)
+            .min(MAX_EFFECTIVE_RETRIES)
     }
 
     /// Effective body replay limit in bytes.
@@ -420,6 +423,56 @@ impl RetryPolicy {
         self.allow_non_idempotent.unwrap_or(false)
     }
 
+    /// Validate the per-attempt and overall timeout bounds.
+    ///
+    /// `per_try_timeout_ms: 0` would set zero-duration connect/read/write
+    /// timeouts on every upstream attempt (failing effectively all
+    /// requests on non-loopback upstreams), and `request_timeout_ms: 0`
+    /// makes the overall deadline elapse before the first attempt,
+    /// silently disabling retries. Both are rejected here with the same
+    /// zero/ceiling bounds every other timeout field gets.
+    ///
+    /// `context` names the owning config object for the error message
+    /// (e.g. `cluster 'backend'`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the offending field when either timeout
+    /// is `0` or exceeds the 1-hour ceiling.
+    pub fn validate_timeout_bounds(&self, context: &str) -> Result<(), String> {
+        for (field, value) in [
+            ("retry_policy.per_try_timeout_ms", self.per_try_timeout_ms),
+            ("retry_policy.request_timeout_ms", self.request_timeout_ms),
+        ] {
+            if let Some(0) = value {
+                return Err(format!("{context}: {field} is 0 (must be > 0)"));
+            }
+            if let Some(v) = value
+                && v > super::super::validate::cluster::MAX_TIMEOUT_MS
+            {
+                return Err(format!(
+                    "{context}: {field} ({v} ms) exceeds maximum ({} ms / 1 hour)",
+                    super::super::validate::cluster::MAX_TIMEOUT_MS
+                ));
+            }
+        }
+
+        // The retry budget refills at `min_retries_per_second` tokens/second;
+        // a rate of 0 means the token bucket never refills, so every retry is
+        // denied cluster-wide with no error or log — the configured retry
+        // policy is silently inert. Reject it like the other zero-disables-the-
+        // feature cases above.
+        if let Some(budget) = &self.retry_budget
+            && budget.min_retries_per_second == 0
+        {
+            return Err(format!(
+                "{context}: retry_budget.min_retries_per_second is 0 (must be > 0; \
+                 0 stops the budget refilling and denies every retry)"
+            ));
+        }
+        Ok(())
+    }
+
     /// Merge a route-level override onto this cluster policy.
     ///
     /// Route fields override cluster fields where present. List-typed
@@ -428,6 +481,7 @@ impl RetryPolicy {
     #[must_use]
     pub fn merge_override(&self, route: &Self) -> Self {
         Self {
+            configured: self.configured || route.configured,
             max_retries: route.max_retries.or(self.max_retries),
             retriable_status_codes: if route.retriable_status_codes.is_empty() {
                 self.retriable_status_codes.clone()
@@ -508,7 +562,7 @@ allow_non_idempotent: true
     fn reject_body_limit_above_cap() {
         let yaml = "retry_body_limit_bytes: 20000000";
         let err = serde_yaml::from_str::<RetryPolicy>(yaml).unwrap_err();
-        assert!(err.to_string().contains("16 MiB"), "got: {err}");
+        assert!(err.to_string().contains("64 KiB"), "got: {err}");
     }
 
     #[test]
@@ -558,6 +612,7 @@ backoff:
             max_retries: Some(2),
             allow_non_idempotent: Some(true),
             ..RetryPolicy {
+                configured: true,
                 max_retries: None,
                 retriable_status_codes: Vec::new(),
                 retriable_conditions: Vec::new(),
@@ -583,6 +638,7 @@ backoff:
             ..RetryPolicy::legacy_default()
         };
         let route = RetryPolicy {
+            configured: true,
             allow_non_idempotent: Some(true),
             max_retries: None,
             retriable_status_codes: Vec::new(),
@@ -606,5 +662,58 @@ backoff:
         assert!(policy.retriable_status_codes.is_empty());
         assert!(!policy.allow_non_idempotent());
         assert_eq!(policy.body_limit_bytes(), 65_536);
+    }
+    #[test]
+    fn effective_max_retries_clamps_to_pingora_cap() {
+        let policy = RetryPolicy {
+            max_retries: Some(100),
+            ..RetryPolicy::legacy_default()
+        };
+        assert_eq!(
+            policy.effective_max_retries(),
+            MAX_EFFECTIVE_RETRIES,
+            "values beyond Pingora's per-request attempt cap are clamped"
+        );
+    }
+
+    #[test]
+    fn validate_rejects_zero_min_retries_per_second() {
+        let budget: RetryBudgetConfig = serde_yaml::from_str("percent: 20\nmin_retries_per_second: 0").unwrap();
+        let policy = RetryPolicy {
+            retry_budget: Some(budget),
+            ..RetryPolicy::legacy_default()
+        };
+        let err = policy
+            .validate_timeout_bounds("cluster 'backend'")
+            .expect_err("min_retries_per_second of 0 permanently empties the budget and must be rejected");
+        assert!(
+            err.contains("min_retries_per_second"),
+            "error should name the offending field: {err}"
+        );
+    }
+
+    #[test]
+    fn validate_accepts_nonzero_min_retries_per_second() {
+        let budget: RetryBudgetConfig = serde_yaml::from_str("percent: 20\nmin_retries_per_second: 5").unwrap();
+        let policy = RetryPolicy {
+            retry_budget: Some(budget),
+            ..RetryPolicy::legacy_default()
+        };
+        assert!(
+            policy.validate_timeout_bounds("cluster 'backend'").is_ok(),
+            "a positive min_retries_per_second should pass validation"
+        );
+    }
+
+    #[test]
+    fn configured_flag_distinguishes_operator_policies() {
+        assert!(
+            !RetryPolicy::legacy_default().configured,
+            "the built-in default is not operator-configured"
+        );
+        let parsed: RetryPolicy = serde_yaml::from_str("max_retries: 2").unwrap();
+        assert!(parsed.configured, "any deserialized policy is operator-configured");
+        let merged = RetryPolicy::legacy_default().merge_override(&parsed);
+        assert!(merged.configured, "merging in a configured override keeps the flag");
     }
 }

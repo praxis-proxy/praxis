@@ -3,11 +3,31 @@ name: Release
 # ------------------------------------------------------------------------------
 # Workflow Settings
 # ------------------------------------------------------------------------------
+#
+# Tag-driven release pipeline in two phases:
+#
+#   Phase 1 (version tag push): validate the tag against the workspace
+#   version, run the full test suite, verify crates package cleanly
+#   (publish dry run), then cut a DRAFT pre-release. Nothing is pushed to
+#   any registry yet.
+#
+#   Phase 2 (a maintainer publishes the draft): publishing the draft --
+#   whether left as a pre-release or promoted to a full release -- fires
+#   the `release: published` event, which builds and pushes the container
+#   image to GHCR and publishes the crates to crates.io. crates.io
+#   publishing is a real publish when the RUST_CRATES_PUBLISH_TOKEN secret
+#   is configured, and a dry run otherwise.
+#
+# In other words, cutting the final release stays in human hands: the tag
+# push only prepares a reviewable draft, and no artifacts are emitted until
+# a maintainer publishes it.
 
 on:
   push:
     tags:
       - "v[0-9]+.[0-9]+.[0-9]+"
+  release:
+    types: [published]
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -15,19 +35,26 @@ concurrency:
 
 permissions: {}
 
+env:
+  CARGO_TERM_COLOR: always
+
 jobs:
   # ----------------------------------------------------------------------------
-  # Validate the tag matches Cargo.toml
+  # Phase 1 (tag push): validate the tag matches Cargo.toml
   # ----------------------------------------------------------------------------
 
   validate:
+    if: github.event_name == 'push'
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Extract version from tag
         id: version
@@ -43,16 +70,20 @@ jobs:
           echo "version=$TAG_VERSION" >> "$GITHUB_OUTPUT"
 
   # ----------------------------------------------------------------------------
-  # Run the full test suite
+  # Phase 1 (tag push): run the full test suite
   # ----------------------------------------------------------------------------
 
   test:
+    if: github.event_name == 'push'
     needs: [validate]
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust
         uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
@@ -64,37 +95,104 @@ jobs:
         run: make test
 
   # ----------------------------------------------------------------------------
-  # Build and publish container image
+  # Phase 1 (tag push): verify crates package cleanly (publish dry run)
+  # ----------------------------------------------------------------------------
+
+  publish-dry-run:
+    if: github.event_name == 'push'
+    needs: [validate]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+
+      - name: Publish dry run
+        run: make publish-dry-run
+
+  # ----------------------------------------------------------------------------
+  # Phase 1 (tag push): cut the draft pre-release
+  #
+  # A maintainer must review and publish this draft to trigger Phase 2.
+  # ----------------------------------------------------------------------------
+
+  draft-release:
+    if: github.event_name == 'push'
+    needs: [validate, test, publish-dry-run]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Create draft pre-release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: gh release create "$TAG" --generate-notes --prerelease --draft
+
+  # ----------------------------------------------------------------------------
+  # Phase 2 (draft published): build and publish the container image
   # ----------------------------------------------------------------------------
 
   container:
-    needs: [validate, test]
+    if: github.event_name == 'release'
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.release.tag_name }}
 
       - name: Build and publish container
-        uses: praxis-proxy/conventions/.github/actions/ghcr-publish@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/ghcr-publish@9e4a1eec33475d18854e7ad182d15c98f84fa8b7 # v0.1.0
         with:
           image-name: ${{ github.repository }}
 
   # ----------------------------------------------------------------------------
-  # Create GitHub release
+  # Phase 2 (draft published): publish crates to crates.io
+  #
+  # Real publish when RUST_CRATES_PUBLISH_TOKEN is configured, dry run
+  # otherwise.
   # ----------------------------------------------------------------------------
 
-  github-release:
-    needs: [validate, container]
+  crates-publish:
+    if: github.event_name == 'release'
+    needs: [container]
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
-      contents: write
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.release.tag_name }}
 
-      - name: Generate release notes
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+
+      - name: Publish crates
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" --generate-notes --prerelease
+          CARGO_REGISTRY_TOKEN: ${{ secrets.RUST_CRATES_PUBLISH_TOKEN }}
+        run: |
+          if [ -n "$CARGO_REGISTRY_TOKEN" ]; then
+            echo "RUST_CRATES_PUBLISH_TOKEN detected; publishing to crates.io"
+            make publish
+          else
+            echo "RUST_CRATES_PUBLISH_TOKEN not set; performing publish dry run"
+            make publish-dry-run
+          fi

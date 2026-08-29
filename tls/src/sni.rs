@@ -149,9 +149,193 @@ pub enum SniParseError {
 /// assert!(matches!(parse_sni(b"HTTP"), Err(SniParseError::TooShort)));
 /// ```
 pub fn parse_sni(buf: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
+    // Fast path: the whole ClientHello lives in the first TLS record. This is
+    // the overwhelmingly common case and stays zero-copy.
     let fragment = parse_record_header(buf)?;
-    let hello_body = parse_handshake_header(fragment)?;
-    parse_client_hello(hello_body)
+    match parse_handshake_header(fragment) {
+        Ok(hello_body) => parse_client_hello(hello_body),
+        // A ClientHello may be fragmented across several handshake records
+        // (RFC 8446 §5.1) — e.g. a large ClientHello carrying post-quantum key
+        // shares. The first record alone is then incomplete; reassemble the
+        // handshake bytes across consecutive records before parsing.
+        Err(SniParseError::NeedMoreData) => {
+            let hello_body = reassemble_handshake(buf)?;
+            parse_client_hello(&hello_body)
+        },
+        Err(e) => Err(e),
+    }
+}
+
+/// Reassemble a `ClientHello` handshake message fragmented across consecutive
+/// TLS handshake records, returning the handshake body (after the 4-byte
+/// handshake header).
+///
+/// Only handshake-content-type (22) records are concatenated; the first
+/// non-handshake record ends reassembly. The output is bounded by `buf`, which
+/// the caller caps (the TCP proxy limits its SNI peek buffer), so this cannot
+/// allocate unboundedly.
+fn reassemble_handshake(buf: &[u8]) -> Result<Vec<u8>, SniParseError> {
+    // The 4-byte handshake header accumulates in a stack array so the body
+    // can be returned as-is, without the front-drain memmove of up to the
+    // whole peek buffer the old single-Vec shape paid. The body Vec is
+    // sized once from the caller-capped peek buffer instead of growing by
+    // doubling; this path is attacker-triggerable per read on a fragmented
+    // hello, so its per-invocation cost matters.
+    let mut header = [0_u8; HANDSHAKE_HEADER_LEN];
+    let mut header_filled = 0_usize;
+    let mut body: Vec<u8> = Vec::with_capacity(buf.len().saturating_sub(TLS_RECORD_HEADER_LEN));
+    let mut pos = 0;
+
+    loop {
+        let (mut fragment, next_pos) = handshake_record_fragment(buf, pos)?;
+
+        if header_filled < HANDSHAKE_HEADER_LEN {
+            (fragment, header_filled) = fill_handshake_header(&mut header, header_filled, fragment);
+        }
+        body.extend_from_slice(fragment);
+
+        // Once the 4-byte handshake header is complete, we know the total
+        // ClientHello length and can stop as soon as enough bytes are gathered.
+        if header_filled == HANDSHAKE_HEADER_LEN {
+            if *header.first().ok_or(SniParseError::NeedMoreData)? != HANDSHAKE_TYPE_CLIENT_HELLO {
+                return Err(SniParseError::NotClientHello);
+            }
+            let hs_len = read_u24(&header, 1)? as usize;
+            if body.len() >= hs_len {
+                body.truncate(hs_len);
+                return Ok(body);
+            }
+        }
+
+        pos = next_pos;
+    }
+}
+
+/// Resumable reassembly of a `ClientHello` fragmented across TLS
+/// records, fed in monotonically growing peek buffers.
+///
+/// [`parse_sni`] is stateless: a caller polling a socket re-parses —
+/// and, on the fragmented path, re-reassembles — the entire buffer on
+/// every read, which an attacker trickling a fragmented hello in tiny
+/// segments turns into quadratic work (up to ~134 MB of memcpy against
+/// a 16 KiB peek cap). This form scans each buffered byte once:
+/// [`advance`] walks only the records that completed since the previous
+/// call, accumulating the handshake header and body exactly like the
+/// stateless reassembly and classifying errors identically.
+///
+/// The caller feeds the same buffer, grown; once [`advance`] returns
+/// a terminal result (`Ok(Some(_))` or `Err(_)`) it must not be called
+/// again.
+///
+/// [`advance`]: Self::advance
+pub struct SniReassembler {
+    /// Offset of the first unconsumed record-header byte.
+    pos: usize,
+    /// Handshake-header accumulator (may span records).
+    header: [u8; HANDSHAKE_HEADER_LEN],
+    /// Filled bytes of `header`.
+    header_filled: usize,
+    /// Handshake body accumulated so far.
+    body: Vec<u8>,
+}
+
+impl SniReassembler {
+    /// Create an empty reassembler.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            pos: 0,
+            header: [0_u8; HANDSHAKE_HEADER_LEN],
+            header_filled: 0,
+            body: Vec::new(),
+        }
+    }
+
+    /// Consume any records that completed since the previous call.
+    ///
+    /// Returns `Ok(None)` when more bytes are needed, `Ok(Some(info))`
+    /// on a fully reassembled and parsed `ClientHello`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SniParseError`] exactly as the stateless
+    /// [`parse_sni`] path would on the same grown buffer: a
+    /// non-handshake record ends reassembly, a non-`ClientHello`
+    /// handshake type is rejected, and `ClientHello` body errors come
+    /// from the shared body parser.
+    pub fn advance(&mut self, buf: &[u8]) -> Result<Option<ClientHelloInfo>, SniParseError> {
+        loop {
+            let (mut fragment, next_pos) = match handshake_record_fragment(buf, self.pos) {
+                Ok(parts) => parts,
+                Err(SniParseError::NeedMoreData | SniParseError::TooShort) => return Ok(None),
+                Err(e) => return Err(e),
+            };
+            self.pos = next_pos;
+
+            if self.header_filled < HANDSHAKE_HEADER_LEN {
+                (fragment, self.header_filled) = fill_handshake_header(&mut self.header, self.header_filled, fragment);
+            }
+            self.body.extend_from_slice(fragment);
+
+            if self.header_filled == HANDSHAKE_HEADER_LEN {
+                if *self.header.first().ok_or(SniParseError::NeedMoreData)? != HANDSHAKE_TYPE_CLIENT_HELLO {
+                    return Err(SniParseError::NotClientHello);
+                }
+                let hs_len = read_u24(&self.header, 1)? as usize;
+                if self.body.len() >= hs_len {
+                    self.body.truncate(hs_len);
+                    let body = std::mem::take(&mut self.body);
+                    return parse_client_hello(&body).map(Some);
+                }
+                // Size the accumulator from the claimed total, clamped
+                // to what the current buffer can still supply. The u24
+                // length is attacker-chosen (up to 16 MiB), while the
+                // caller's peek cap bounds real data to a few KiB: a
+                // 9-byte record must not drive a 16 MiB reservation.
+                self.body
+                    .reserve((hs_len - self.body.len()).min(buf.len().saturating_sub(self.pos)));
+            }
+        }
+    }
+}
+
+impl Default for SniReassembler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Parse the TLS record header at `pos` and return the record's handshake
+/// fragment plus the offset of the next record.
+fn handshake_record_fragment(buf: &[u8], pos: usize) -> Result<(&[u8], usize), SniParseError> {
+    let record_header = buf
+        .get(pos..pos + TLS_RECORD_HEADER_LEN)
+        .ok_or(SniParseError::NeedMoreData)?;
+    if *record_header.first().ok_or(SniParseError::NeedMoreData)? != CONTENT_TYPE_HANDSHAKE {
+        return Err(SniParseError::NotHandshake);
+    }
+    let record_len = read_u16(record_header, 3)? as usize;
+    let frag_start = pos + TLS_RECORD_HEADER_LEN;
+    let fragment = buf
+        .get(frag_start..frag_start + record_len)
+        .ok_or(SniParseError::NeedMoreData)?;
+    Ok((fragment, frag_start + record_len))
+}
+
+/// Copy up to the remaining handshake-header bytes from the front of
+/// `fragment` into `header`, returning the body remainder and the new
+/// fill count.
+fn fill_handshake_header<'frag>(
+    header: &mut [u8; HANDSHAKE_HEADER_LEN],
+    filled: usize,
+    fragment: &'frag [u8],
+) -> (&'frag [u8], usize) {
+    let take = fragment.len().min(HANDSHAKE_HEADER_LEN - filled);
+    let (head, rest) = fragment.split_at(take);
+    for (dst, src) in header.iter_mut().skip(filled).zip(head) {
+        *dst = *src;
+    }
+    (rest, filled + take)
 }
 
 // -----------------------------------------------------------------------------
@@ -159,45 +343,37 @@ pub fn parse_sni(buf: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
 // -----------------------------------------------------------------------------
 
 /// Parse the TLS record header, returning the fragment payload.
-#[expect(clippy::indexing_slicing, reason = "bounds checked before access")]
 fn parse_record_header(buf: &[u8]) -> Result<&[u8], SniParseError> {
     if buf.len() < TLS_RECORD_HEADER_LEN {
         return Err(SniParseError::TooShort);
     }
 
-    if buf[0] != CONTENT_TYPE_HANDSHAKE {
+    if *buf.first().ok_or(SniParseError::TooShort)? != CONTENT_TYPE_HANDSHAKE {
         return Err(SniParseError::NotHandshake);
     }
 
     let record_len = read_u16(buf, 3)? as usize;
     let total = TLS_RECORD_HEADER_LEN + record_len;
 
-    if buf.len() < total {
-        return Err(SniParseError::NeedMoreData);
-    }
-
-    Ok(&buf[TLS_RECORD_HEADER_LEN..total])
+    buf.get(TLS_RECORD_HEADER_LEN..total).ok_or(SniParseError::NeedMoreData)
 }
 
 /// Parse the handshake message header, returning the `ClientHello` body.
-#[expect(clippy::indexing_slicing, reason = "bounds checked before access")]
 fn parse_handshake_header(fragment: &[u8]) -> Result<&[u8], SniParseError> {
     if fragment.len() < HANDSHAKE_HEADER_LEN {
         return Err(SniParseError::NeedMoreData);
     }
 
-    if fragment[0] != HANDSHAKE_TYPE_CLIENT_HELLO {
+    if *fragment.first().ok_or(SniParseError::NeedMoreData)? != HANDSHAKE_TYPE_CLIENT_HELLO {
         return Err(SniParseError::NotClientHello);
     }
 
     let hs_len = read_u24(fragment, 1)? as usize;
     let end = HANDSHAKE_HEADER_LEN + hs_len;
 
-    if fragment.len() < end {
-        return Err(SniParseError::NeedMoreData);
-    }
-
-    Ok(&fragment[HANDSHAKE_HEADER_LEN..end])
+    fragment
+        .get(HANDSHAKE_HEADER_LEN..end)
+        .ok_or(SniParseError::NeedMoreData)
 }
 
 // -----------------------------------------------------------------------------
@@ -291,6 +467,8 @@ fn parse_sni_extension(data: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
 
     let mut list = data.get(2..2 + list_len).ok_or(SniParseError::MalformedExtension)?;
 
+    let mut hostname: Option<String> = None;
+
     while list.len() >= 3 {
         let name_type = *list.first().ok_or(SniParseError::MalformedExtension)?;
         let name_len = read_u16(list, 1)? as usize;
@@ -300,26 +478,32 @@ fn parse_sni_extension(data: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
         }
 
         if name_type == SNI_NAME_TYPE_HOST {
+            // RFC 6066 §3: a ServerNameList MUST NOT contain more than one name
+            // of the same name_type. Reject a second host_name rather than
+            // silently taking the first — a duplicate could disagree with a
+            // downstream parser's choice and mislead SNI-based routing.
+            if hostname.is_some() {
+                return Err(SniParseError::MalformedExtension);
+            }
+
             let name_bytes = list.get(3..3 + name_len).ok_or(SniParseError::MalformedExtension)?;
 
             if name_bytes.is_empty() {
                 return Err(SniParseError::EmptyHostname);
             }
 
-            let hostname = std::str::from_utf8(name_bytes).map_err(|_utf8| SniParseError::InvalidHostname)?;
+            let name = std::str::from_utf8(name_bytes).map_err(|_utf8| SniParseError::InvalidHostname)?;
 
-            reject_ip_literal(hostname)?;
-            crate::dns::validate_dns_hostname(hostname).map_err(|_dns| SniParseError::InvalidHostname)?;
+            reject_ip_literal(name)?;
+            crate::dns::validate_dns_hostname(name).map_err(|_dns| SniParseError::InvalidHostname)?;
 
-            return Ok(ClientHelloInfo {
-                sni: Some(hostname.to_owned()),
-            });
+            hostname = Some(name.to_owned());
         }
 
         list = list.get(3 + name_len..).ok_or(SniParseError::MalformedExtension)?;
     }
 
-    Ok(ClientHelloInfo { sni: None })
+    Ok(ClientHelloInfo { sni: hostname })
 }
 
 // -----------------------------------------------------------------------------
@@ -353,12 +537,11 @@ fn reject_ip_literal(hostname: &str) -> Result<(), SniParseError> {
         return Err(SniParseError::InvalidHostname);
     }
 
-    let trimmed = hostname
-        .strip_prefix('[')
-        .and_then(|s| s.strip_suffix(']'))
-        .unwrap_or(hostname);
-
-    if trimmed.parse::<std::net::Ipv6Addr>().is_ok() {
+    // The IpAddr parse above already tried the unbracketed IPv6 form;
+    // a second parse is only needed when brackets were actually stripped.
+    if let Some(trimmed) = hostname.strip_prefix('[').and_then(|s| s.strip_suffix(']'))
+        && trimmed.parse::<std::net::Ipv6Addr>().is_ok()
+    {
         return Err(SniParseError::InvalidHostname);
     }
 
@@ -436,6 +619,20 @@ mod tests {
             parse_sni(&buf),
             Err(SniParseError::NotClientHello),
             "handshake type 2 (ServerHello) should be rejected"
+        );
+    }
+
+    #[test]
+    fn fragmented_non_client_hello_rejected() {
+        // Handshake type 2 (ServerHello) with its 4-byte header split across
+        // two TLS records: the fast path sees an incomplete header and defers
+        // to reassembly, which must still reject the wrong handshake type.
+        let mut buf = vec![22, 3, 3, 0, 2, 2, 0];
+        buf.extend_from_slice(&[22, 3, 3, 0, 2, 0, 0]);
+        assert_eq!(
+            parse_sni(&buf),
+            Err(SniParseError::NotClientHello),
+            "a fragmented non-ClientHello handshake should be rejected"
         );
     }
 
@@ -796,6 +993,42 @@ mod tests {
         ext
     }
 
+    /// Build an SNI extension payload carrying two `host_name` entries, which
+    /// RFC 6066 forbids.
+    #[expect(clippy::cast_possible_truncation, reason = "test hostnames are short")]
+    fn build_sni_extension_two_hosts(a: &str, b: &str) -> Vec<u8> {
+        let entry = |name: &str| {
+            let nb = name.as_bytes();
+            let mut e = Vec::new();
+            e.push(SNI_NAME_TYPE_HOST);
+            e.extend_from_slice(&(nb.len() as u16).to_be_bytes());
+            e.extend_from_slice(nb);
+            e
+        };
+        let mut list = entry(a);
+        list.extend_from_slice(&entry(b));
+
+        let mut ext = Vec::new();
+        ext.extend_from_slice(&0_u16.to_be_bytes());
+        let ext_data_len = (2 + list.len()) as u16;
+        ext.extend_from_slice(&ext_data_len.to_be_bytes());
+        ext.extend_from_slice(&(list.len() as u16).to_be_bytes());
+        ext.extend_from_slice(&list);
+        ext
+    }
+
+    #[test]
+    fn duplicate_host_name_entries_rejected() {
+        let ext = build_sni_extension_two_hosts("a.example.com", "b.example.com");
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
+        let record = wrap_in_record(&hello);
+        assert_eq!(
+            parse_sni(&record),
+            Err(SniParseError::MalformedExtension),
+            "two host_name entries violate RFC 6066 §3 and must be rejected, not silently first-wins"
+        );
+    }
+
     /// Build a non-SNI extension with the given type and data.
     fn build_dummy_extension(ext_type: u16, data: &[u8]) -> Vec<u8> {
         let mut ext = Vec::new();
@@ -855,5 +1088,191 @@ mod tests {
         record.extend_from_slice(&handshake);
 
         record
+    }
+
+    /// Build the raw handshake message bytes (type + 3-byte length + body).
+    #[expect(clippy::cast_possible_truncation, reason = "test payloads are small")]
+    fn build_handshake_message(hello_body: &[u8]) -> Vec<u8> {
+        let mut handshake = Vec::new();
+        handshake.push(HANDSHAKE_TYPE_CLIENT_HELLO);
+        let hs_len = hello_body.len() as u32;
+        handshake.push((hs_len >> 16) as u8);
+        handshake.push((hs_len >> 8) as u8);
+        handshake.push(hs_len as u8);
+        handshake.extend_from_slice(hello_body);
+        handshake
+    }
+
+    /// Wrap raw handshake bytes (which may be a partial fragment) in one TLS record.
+    #[expect(clippy::cast_possible_truncation, reason = "test payloads are small")]
+    fn wrap_fragment_in_record(fragment: &[u8]) -> Vec<u8> {
+        let mut record = Vec::new();
+        record.push(CONTENT_TYPE_HANDSHAKE);
+        record.extend_from_slice(&[0x03, 0x01]);
+        let rec_len = fragment.len() as u16;
+        record.extend_from_slice(&rec_len.to_be_bytes());
+        record.extend_from_slice(fragment);
+        record
+    }
+
+    #[test]
+    fn client_hello_fragmented_across_two_records_parses_sni() {
+        let ext = build_sni_extension("example.com");
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
+        let handshake = build_handshake_message(&hello);
+        let split = handshake.len() / 2;
+        let mut buf = wrap_fragment_in_record(&handshake[..split]);
+        buf.extend_from_slice(&wrap_fragment_in_record(&handshake[split..]));
+        let result = parse_sni(&buf).expect("ClientHello fragmented across records should parse");
+        assert_eq!(
+            result.sni.as_deref(),
+            Some("example.com"),
+            "SNI should be extracted from a multi-record ClientHello"
+        );
+    }
+
+    #[test]
+    fn client_hello_fragmented_across_three_records_parses_sni() {
+        let ext = build_sni_extension("shard.example.net");
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
+        let handshake = build_handshake_message(&hello);
+        let third = handshake.len() / 3;
+        let mut buf = wrap_fragment_in_record(&handshake[..third]);
+        buf.extend_from_slice(&wrap_fragment_in_record(&handshake[third..2 * third]));
+        buf.extend_from_slice(&wrap_fragment_in_record(&handshake[2 * third..]));
+        let result = parse_sni(&buf).expect("ClientHello across three records should parse");
+        assert_eq!(
+            result.sni.as_deref(),
+            Some("shard.example.net"),
+            "SNI should span three records"
+        );
+    }
+
+    #[test]
+    fn client_hello_header_split_across_records_parses_sni() {
+        // The first record carries only half of the 4-byte handshake
+        // header, so reassembly must accumulate the header itself across
+        // record boundaries before it can size the message.
+        let ext = build_sni_extension("split.example.org");
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
+        let handshake = build_handshake_message(&hello);
+        let mut buf = wrap_fragment_in_record(handshake.get(..2).expect("head"));
+        buf.extend_from_slice(&wrap_fragment_in_record(handshake.get(2..).expect("tail")));
+        let result = parse_sni(&buf).expect("ClientHello with a split handshake header should parse");
+        assert_eq!(
+            result.sni.as_deref(),
+            Some("split.example.org"),
+            "SNI should be extracted when the handshake header spans records"
+        );
+    }
+
+    #[test]
+    fn reassembler_trickle_matches_one_shot_parse() {
+        // Feeding the buffer one byte at a time must produce exactly the
+        // one-shot parse_sni result, scanning each byte once.
+        let ext = build_sni_extension("trickle.example.com");
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
+        let handshake = build_handshake_message(&hello);
+        let third = handshake.len() / 3;
+        let mut buf = wrap_fragment_in_record(handshake.get(..third).expect("head"));
+        buf.extend_from_slice(&wrap_fragment_in_record(handshake.get(third..2 * third).expect("mid")));
+        buf.extend_from_slice(&wrap_fragment_in_record(handshake.get(2 * third..).expect("tail")));
+
+        let mut reassembler = SniReassembler::new();
+        let mut result = None;
+        for end in 1..=buf.len() {
+            let step = reassembler
+                .advance(buf.get(..end).expect("prefix"))
+                .expect("trickled reassembly must not error");
+            if let Some(info) = step {
+                result = Some(info);
+                break;
+            }
+        }
+        let expected = parse_sni(&buf).expect("one-shot parse");
+        assert_eq!(
+            result.expect("trickled parse must complete").sni,
+            expected.sni,
+            "trickled reassembly must match the one-shot result"
+        );
+    }
+
+    #[test]
+    fn reassembler_rejects_non_client_hello_like_one_shot() {
+        // Handshake type 2 split across records: the reassembler must
+        // classify it exactly as the stateless path does.
+        let mut buf = wrap_fragment_in_record(&[2, 0]);
+        buf.extend_from_slice(&wrap_fragment_in_record(&[0, 0]));
+        let mut reassembler = SniReassembler::new();
+        assert!(
+            matches!(reassembler.advance(&buf), Err(SniParseError::NotClientHello)),
+            "a fragmented non-ClientHello must be rejected"
+        );
+    }
+
+    #[test]
+    fn reassembler_stops_at_non_handshake_record() {
+        let ext = build_sni_extension("example.com");
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
+        let handshake = build_handshake_message(&hello);
+        let split = handshake.len() / 2;
+        let mut buf = wrap_fragment_in_record(handshake.get(..split).expect("head"));
+        buf.extend_from_slice(&[23, 0x03, 0x01, 0x00, 0x01, 0x00]);
+        let mut reassembler = SniReassembler::new();
+        assert!(
+            matches!(reassembler.advance(&buf), Err(SniParseError::NotHandshake)),
+            "a non-handshake record must end reassembly"
+        );
+    }
+
+    #[test]
+    fn reassembler_reservation_bounded_by_supplied_bytes() {
+        // A 9-byte record claiming the maximum u24 handshake length
+        // (16 MiB) must not drive the accumulator's capacity past the
+        // bytes actually supplied: the length field is attacker-chosen
+        // while the caller's peek cap bounds real data.
+        let buf = [22, 3, 1, 0, 4, HANDSHAKE_TYPE_CLIENT_HELLO, 0xFF, 0xFF, 0xFF];
+        let mut reassembler = SniReassembler::new();
+        assert!(
+            matches!(reassembler.advance(&buf), Ok(None)),
+            "an incomplete hello must ask for more data"
+        );
+        assert!(
+            reassembler.body.capacity() <= buf.len(),
+            "capacity {} must not exceed the {} supplied bytes",
+            reassembler.body.capacity(),
+            buf.len()
+        );
+    }
+
+    #[test]
+    fn client_hello_fragmented_missing_tail_needs_more_data() {
+        let ext = build_sni_extension("example.com");
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
+        let handshake = build_handshake_message(&hello);
+        let split = handshake.len() / 2;
+        // Only the first fragment record is present; the tail has not arrived.
+        let buf = wrap_fragment_in_record(&handshake[..split]);
+        assert_eq!(
+            parse_sni(&buf),
+            Err(SniParseError::NeedMoreData),
+            "an incomplete fragmented ClientHello should request more data, not misparse"
+        );
+    }
+
+    #[test]
+    fn fragmented_reassembly_stops_at_non_handshake_record() {
+        let ext = build_sni_extension("example.com");
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
+        let handshake = build_handshake_message(&hello);
+        let split = handshake.len() / 2;
+        let mut buf = wrap_fragment_in_record(&handshake[..split]);
+        // Follow the partial handshake with an application-data record (type 23).
+        buf.extend_from_slice(&[23, 0x03, 0x01, 0x00, 0x01, 0x00]);
+        assert_eq!(
+            parse_sni(&buf),
+            Err(SniParseError::NotHandshake),
+            "a non-handshake record must end reassembly rather than being concatenated"
+        );
     }
 }

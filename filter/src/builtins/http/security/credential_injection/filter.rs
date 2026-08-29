@@ -45,6 +45,14 @@ struct ClusterCredential {
 /// the cluster name selected by the router filter earlier
 /// in the pipeline.
 ///
+/// Scoping is per-cluster: a request routed to a cluster with no
+/// configured entry is left untouched, so a client-supplied header
+/// (e.g. `Authorization`) is forwarded to that cluster unchanged. This
+/// filter is not a general credential stripper; pair it with an explicit
+/// header-removal filter if every cluster must have client credentials
+/// stripped. The injected secret itself is only ever applied to the
+/// cluster it is configured for.
+///
 /// # YAML configuration
 ///
 /// ```yaml

@@ -468,14 +468,15 @@ mod tests {
             health_registry: None,
             id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
             kv_stores: None,
+            session_stores: None,
             subrequest_client: None,
             may_select_streaming_subrequest_response: false,
             pipeline_extensions: Vec::new(),
             time_source: Arc::new(praxis_core::time::SystemTimeSource),
             request_body_ceiling: None,
             response_body_ceiling: None,
-            request_body_access_by_idx: Vec::new(),
-            response_body_access_by_idx: Vec::new(),
+            request_body_filter_indices: Vec::new(),
+            response_body_filter_indices: Vec::new(),
         }
     }
 

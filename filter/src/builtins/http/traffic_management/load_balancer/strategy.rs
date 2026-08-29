@@ -64,12 +64,14 @@ impl Strategy {
 
     /// Extract the hash key from the HTTP context for hash-based strategies.
     ///
-    /// Consistent-hash and Maglev both hash a configured header (falling back
-    /// to the URI path); other strategies ignore the key.
+    /// Hash-based strategies (consistent-hash, Maglev, ring-hash) hash a
+    /// configured header (falling back to the URI path); other strategies
+    /// ignore the key.
     fn extract_hash_key<'a>(&self, ctx: &'a HttpFilterContext<'_>) -> Option<&'a str> {
         let header = match &self.inner {
             shared::Strategy::ConsistentHash(ch) => ch.header(),
             shared::Strategy::Maglev(m) => m.header(),
+            shared::Strategy::RingHash(rh) => rh.header(),
             _ => return None,
         };
         let key: &str = header

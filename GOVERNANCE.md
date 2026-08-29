@@ -17,6 +17,51 @@ document.
 - **Merit-based.** Influence is earned through
   sustained, high-quality contributions.
 
+## Project vs. Product
+
+Praxis is an open source project, not a product.
+
+No single company owns, controls, or speaks for
+Praxis. The project is governed by this document,
+and its maintainers act on behalf of Praxis and
+its community, not on behalf of any employer.
+
+Companies, including those that employ our
+contributors and maintainers, are welcome and
+encouraged to build commercial products and
+services on top of Praxis, to offer it as a
+hosted or supported service, and to contribute
+the improvements they need back upstream. Those
+commercial offerings are separate and distinct
+from the Praxis project itself:
+
+- **The project is vendor-neutral.** Roadmap,
+  design, and release decisions are made in the
+  open (see [Decision Making](#decision-making))
+  to serve the whole community, and are never set
+  to advantage one vendor's product over another.
+- **The name belongs to the community.** "Praxis"
+  names this open source project. It is not a
+  brand for any company's product, and no vendor
+  may present their offering as "the" Praxis or
+  imply that Praxis requires their product. On
+  acceptance into the CNCF, the Praxis marks will
+  be held by the Linux Foundation.
+- **No preferential treatment.** The project does
+  not endorse, bundle, or grant any commercial
+  product privileged defaults, access, or
+  integration status. A feature earns its place
+  on technical merit and community need, not
+  because a company sells something alongside it.
+- **Contributions stand on their own.** Code is
+  accepted because it is good for Praxis and its
+  users, independent of which company (if any) the
+  author works for.
+
+Adopting Praxis means adopting a community-owned
+project. Any product or service a vendor offers
+around it belongs to that vendor, not to Praxis.
+
 ## Roles
 
 See [MAINTAINERS.md](MAINTAINERS.md) for the

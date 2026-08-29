@@ -1,0 +1,24 @@
+# TCP Connection Metrics
+#
+# Prometheus histogram for TCP connection duration. Each completed
+# connection is recorded in praxis_tcp_connection_duration_seconds
+# with a listener label. Scraped via the admin /metrics endpoint.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/observability/tcp-connection-metrics.yaml
+#
+# Exercise:
+#   echo "hello" | nc localhost 5432
+#   curl -s http://localhost:9901/metrics | grep tcp_connection_duration
+
+admin:
+  address: "127.0.0.1:9901"
+
+insecure_options:
+  allow_private_upstreams: true
+
+listeners:
+  - name: postgres
+    address: "127.0.0.1:5432"
+    protocol: tcp
+    upstream: "127.0.0.1:15432"

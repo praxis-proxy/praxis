@@ -74,7 +74,7 @@ impl HttpFilter for GrpcDetectionFilter {
         ctx.set_metadata("grpc.kind", kind_str);
 
         let results = ctx.filter_results.entry("grpc_detection").or_default();
-        results.set("kind", kind_str.to_owned())?;
+        results.set("kind", kind_str)?;
 
         trace!(grpc_kind = kind_str, "detected gRPC content-type");
 

@@ -62,6 +62,36 @@ pub fn http_get_retry(addr: &str, path: &str, host: Option<&str>) -> (u16, Strin
     http_get(addr, path, host)
 }
 
+/// Send an HTTP PUT with a JSON body and return `(status, body)`.
+pub fn http_put_json(addr: &str, path: &str, body: &str) -> (u16, String) {
+    let raw = http_send(
+        addr,
+        &format!(
+            "PUT {path} HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Content-Type: application/json\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\r\n\
+             {body}",
+            body.len()
+        ),
+    );
+    (parse_status(&raw), parse_body(&raw))
+}
+
+/// Send an HTTP DELETE and return `(status, body)`.
+pub fn http_delete(addr: &str, path: &str) -> (u16, String) {
+    let raw = http_send(
+        addr,
+        &format!(
+            "DELETE {path} HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Connection: close\r\n\r\n"
+        ),
+    );
+    (parse_status(&raw), parse_body(&raw))
+}
+
 /// Send an HTTP POST and return `(status, body)`.
 pub fn http_post(addr: &str, path: &str, body: &str) -> (u16, String) {
     let raw = http_send(
@@ -110,6 +140,94 @@ pub fn json_post(path: &str, body: &str) -> String {
          {body}",
         body.len()
     )
+}
+
+// -----------------------------------------------------------------------------
+// H2C (HTTP/2 Cleartext) Client
+// -----------------------------------------------------------------------------
+
+/// Send an h2c (HTTP/2 cleartext, prior-knowledge) GET and return `(status, body)`.
+///
+/// Connects via plain TCP and performs the HTTP/2 handshake directly
+/// (no upgrade from HTTP/1.1). The `host` parameter sets both the
+/// `:authority` pseudo-header and the `host` header.
+///
+/// # Panics
+///
+/// Panics if the TCP connection, H2 handshake, or response read fails.
+pub fn h2c_get(addr: &str, path: &str, host: Option<&str>) -> (u16, String) {
+    let host_value = host.unwrap_or("localhost");
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime for h2c");
+
+    rt.block_on(async {
+        let tcp = tokio::net::TcpStream::connect(addr).await.expect("TCP connect for h2c");
+
+        let (mut client, h2_conn) = h2::client::handshake(tcp).await.expect("h2c handshake");
+        tokio::spawn(async move {
+            let _result = h2_conn.await;
+        });
+
+        let request = http::Request::get(path)
+            .header("host", host_value)
+            .body(())
+            .expect("build h2c request");
+
+        let (response_fut, _) = client.send_request(request, true).expect("send h2c request");
+        let response = response_fut.await.expect("h2c response");
+        let status = response.status().as_u16();
+        let mut body_stream = response.into_body();
+
+        let mut body = Vec::new();
+        while let Some(chunk) = body_stream.data().await {
+            let data = chunk.expect("h2c body chunk");
+            body.extend_from_slice(&data);
+            drop(body_stream.flow_control().release_capacity(data.len()));
+        }
+
+        (status, String::from_utf8_lossy(&body).into_owned())
+    })
+}
+
+/// Send an h2c GET whose request URI is absolute (explicit `:scheme` and
+/// `:authority` pseudo-headers) and return `(status, body)`.
+///
+/// # Panics
+///
+/// Panics if the connection, handshake, or exchange fails.
+pub fn h2c_get_absolute(addr: &str, absolute_uri: &str) -> (u16, String) {
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("tokio runtime for h2c");
+
+    rt.block_on(async {
+        let tcp = tokio::net::TcpStream::connect(addr).await.expect("TCP connect for h2c");
+
+        let (mut client, h2_conn) = h2::client::handshake(tcp).await.expect("h2c handshake");
+        tokio::spawn(async move {
+            let _result = h2_conn.await;
+        });
+
+        let request = http::Request::get(absolute_uri).body(()).expect("build h2c request");
+
+        let (response_fut, _) = client.send_request(request, true).expect("send h2c request");
+        let response = response_fut.await.expect("h2c response");
+        let status = response.status().as_u16();
+        let mut body_stream = response.into_body();
+
+        let mut body = Vec::new();
+        while let Some(chunk) = body_stream.data().await {
+            let data = chunk.expect("h2c body chunk");
+            body.extend_from_slice(&data);
+            drop(body_stream.flow_control().release_capacity(data.len()));
+        }
+
+        (status, String::from_utf8_lossy(&body).into_owned())
+    })
 }
 
 // -----------------------------------------------------------------------------

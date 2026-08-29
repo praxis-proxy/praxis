@@ -90,7 +90,7 @@ impl FilterPipeline {
                 },
                 HeaderFilterOutcome::TerminalResponse(terminal) => {
                     ctx.executed_filter_indices[idx] = true;
-                    return Ok(FilterAction::TerminalResponse(Box::new(terminal)));
+                    return Ok(FilterAction::TerminalResponse(terminal));
                 },
                 HeaderFilterOutcome::StreamingTerminalResponse(terminal) => {
                     ctx.executed_filter_indices[idx] = true;
@@ -186,7 +186,6 @@ impl FilterPipeline {
     /// Returns [`FilterError`] if any body filter fails.
     ///
     /// [`BodyDone`]: FilterAction::BodyDone
-    #[expect(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
     #[expect(clippy::too_many_lines, reason = "body hook loop with metrics dispatch")]
     pub async fn execute_http_request_body(
         &self,
@@ -198,7 +197,13 @@ impl FilterPipeline {
         accumulate_body_bytes(&mut ctx.request_body_bytes, body.as_ref());
         let request_phase_tracked = request_phase_tracked(ctx, self.filters.len());
         let mut released = false;
-        for (idx, pf) in self.filters.iter().enumerate() {
+        // Walk only filters that declared request-body access; declared
+        // access is a per-filter constant, so non-body filters cost
+        // nothing per chunk.
+        for &idx in &self.request_body_filter_indices {
+            let Some(pf) = self.filters.get(idx) else {
+                continue;
+            };
             if ctx.body_done_indices.get(idx) == Some(&true) {
                 trace!(filter = pf.filter.name(), "skipped body (body_done)");
                 continue;
@@ -210,12 +215,9 @@ impl FilterPipeline {
                 );
                 continue;
             }
-            // Declared body access is a per-filter constant; the pre-computed
-            // flag skips non-body filters without a per-chunk virtual call.
-            if !self.request_body_access_by_idx.get(idx).copied().unwrap_or(true) {
-                continue;
-            }
-            let Some(http_filter) = as_request_body_filter(&pf.filter, &pf.conditions, ctx.request) else {
+            let Some(http_filter) =
+                as_request_body_filter(&pf.filter, &pf.conditions, ctx.request, request_phase_tracked)
+            else {
                 continue;
             };
             ctx.current_filter_id = Some(pf.filter_id);
@@ -233,7 +235,9 @@ impl FilterPipeline {
                 BodyFilterOutcome::Continue => {},
                 BodyFilterOutcome::Released => released = true,
                 BodyFilterOutcome::BodyDone => {
-                    ctx.body_done_indices[idx] = true;
+                    if let Some(done) = ctx.body_done_indices.get_mut(idx) {
+                        *done = true;
+                    }
                 },
                 BodyFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
             }
@@ -276,7 +280,6 @@ impl FilterPipeline {
     /// # Errors
     ///
     /// Returns [`FilterError`] if any body filter fails.
-    #[expect(clippy::indexing_slicing, reason = "idx bounded by filters.len()")]
     #[expect(clippy::too_many_lines, reason = "body hook loop with per-filter skip checks")]
     pub fn execute_http_response_body_with_response_header(
         &self,
@@ -289,7 +292,12 @@ impl FilterPipeline {
         accumulate_body_bytes(&mut ctx.response_body_bytes, body.as_ref());
         let request_phase_tracked = request_phase_tracked(ctx, self.filters.len());
         let mut released = false;
-        for (idx, pf) in self.filters.iter().enumerate().rev() {
+        // Walk only filters that declared response-body access (in
+        // reverse); non-body filters cost nothing per chunk.
+        for &idx in self.response_body_filter_indices.iter().rev() {
+            let Some(pf) = self.filters.get(idx) else {
+                continue;
+            };
             if ctx.body_done_indices.get(idx) == Some(&true) {
                 trace!(filter = pf.filter.name(), "skipped body (body_done)");
                 continue;
@@ -299,11 +307,6 @@ impl FilterPipeline {
                     filter = pf.filter.name(),
                     "skipped response body (not executed in request phase)"
                 );
-                continue;
-            }
-            // Declared body access is a per-filter constant; the pre-computed
-            // flag skips non-body filters without a per-chunk virtual call.
-            if !self.response_body_access_by_idx.get(idx).copied().unwrap_or(true) {
                 continue;
             }
             let Some(http_filter) = as_response_body_filter(&pf.filter, &pf.response_conditions, response_header)
@@ -323,7 +326,11 @@ impl FilterPipeline {
             match outcome? {
                 BodyFilterOutcome::Continue => {},
                 BodyFilterOutcome::Released => released = true,
-                BodyFilterOutcome::BodyDone => ctx.body_done_indices[idx] = true,
+                BodyFilterOutcome::BodyDone => {
+                    if let Some(done) = ctx.body_done_indices.get_mut(idx) {
+                        *done = true;
+                    }
+                },
                 BodyFilterOutcome::Rejected(r) => return Ok(FilterAction::Reject(r)),
             }
         }

@@ -111,6 +111,20 @@ impl InMemoryKvBackend {
         }
         Ok(compiled)
     }
+
+    /// Return the matching entry with the lexicographically-smallest key.
+    ///
+    /// `DashMap` iteration order is unspecified, so a plain "first match"
+    /// would be nondeterministic across process runs when several keys
+    /// match. Selecting the smallest key gives a stable, predictable
+    /// result. This is an O(n) scan of the store.
+    fn min_matching<F: Fn(&str) -> bool>(&self, predicate: F) -> Option<(Arc<str>, Arc<str>)> {
+        self.data
+            .iter()
+            .filter(|e| predicate(e.key()))
+            .min_by(|a, b| a.key().as_ref().cmp(b.key().as_ref()))
+            .map(|e| (Arc::clone(e.key()), Arc::clone(e.value())))
+    }
 }
 
 impl Default for InMemoryKvBackend {
@@ -125,7 +139,14 @@ impl KvBackend for InMemoryKvBackend {
     }
 
     fn set(&self, key: &str, value: Arc<str>) -> bool {
-        if self.data.len() >= MAX_ENTRIES && !self.data.contains_key(key) {
+        // Overwrites need neither the capacity check (the cap only gates
+        // new keys) nor a fresh key allocation; DashMap::len sums every
+        // shard, so only new-key inserts pay that sweep.
+        if let Some(mut existing) = self.data.get_mut(key) {
+            *existing = value;
+            return true;
+        }
+        if self.data.len() >= MAX_ENTRIES {
             tracing::warn!(key, limit = MAX_ENTRIES, "KV store entry limit reached; insert skipped");
             return false;
         }
@@ -150,22 +171,11 @@ impl KvBackend for InMemoryKvBackend {
                 .data
                 .get(pattern)
                 .map(|e| (Arc::clone(e.key()), Arc::clone(e.value())))),
-            MatchType::Prefix => Ok(self.data.iter().find_map(|e| {
-                e.key()
-                    .starts_with(pattern)
-                    .then(|| (Arc::clone(e.key()), Arc::clone(e.value())))
-            })),
-            MatchType::Suffix => Ok(self.data.iter().find_map(|e| {
-                e.key()
-                    .ends_with(pattern)
-                    .then(|| (Arc::clone(e.key()), Arc::clone(e.value())))
-            })),
+            MatchType::Prefix => Ok(self.min_matching(|k| k.starts_with(pattern))),
+            MatchType::Suffix => Ok(self.min_matching(|k| k.ends_with(pattern))),
             MatchType::Regex => {
                 let re = self.get_or_compile_regex(pattern)?;
-                Ok(self.data.iter().find_map(|e| {
-                    re.is_match(e.key())
-                        .then(|| (Arc::clone(e.key()), Arc::clone(e.value())))
-                }))
+                Ok(self.min_matching(|k| re.is_match(k)))
             },
         }
     }
@@ -394,6 +404,60 @@ mod tests {
         assert!(
             store.lookup("users", MatchType::Prefix).unwrap().is_none(),
             "prefix should match start, not substring"
+        );
+    }
+
+    #[test]
+    fn lookup_prefix_returns_smallest_matching_key() {
+        // With many matching keys, the result must be deterministic
+        // (lexicographically smallest), not an arbitrary hash-order entry.
+        // Dozens of keys (inserted largest-first) make an arbitrary-order
+        // implementation near-certain to return a non-smallest key.
+        let store = InMemoryKvBackend::new();
+        for c in ('a'..='z').rev() {
+            let key = format!("route.{c}");
+            store.set(&key, Arc::from(key.as_str()));
+        }
+        let (key, _) = store
+            .lookup("route.", MatchType::Prefix)
+            .unwrap()
+            .expect("a prefixed key should match");
+        assert_eq!(key.as_ref(), "route.a", "the smallest matching key must be returned");
+    }
+
+    #[test]
+    fn lookup_regex_returns_smallest_matching_key() {
+        let store = InMemoryKvBackend::new();
+        for n in (10..=40).rev() {
+            let key = format!("k{n}");
+            store.set(&key, Arc::from(key.as_str()));
+        }
+        let (key, _) = store
+            .lookup("^k[0-9]+$", MatchType::Regex)
+            .unwrap()
+            .expect("a matching key should be found");
+        assert_eq!(key.as_ref(), "k10", "regex lookup must be deterministic");
+    }
+
+    #[test]
+    fn lookup_suffix_returns_smallest_matching_key() {
+        // Determinism guard for the Suffix arm: with many suffix matches the
+        // lexicographically smallest key must win, not an arbitrary hash-order
+        // entry. Keys inserted largest-first make a nondeterministic
+        // implementation near-certain to return a non-smallest key.
+        let store = InMemoryKvBackend::new();
+        for c in ('a'..='z').rev() {
+            let key = format!("{c}.svc");
+            store.set(&key, Arc::from(key.as_str()));
+        }
+        let (key, _) = store
+            .lookup(".svc", MatchType::Suffix)
+            .unwrap()
+            .expect("a suffixed key should match");
+        assert_eq!(
+            key.as_ref(),
+            "a.svc",
+            "the smallest matching suffix key must be returned"
         );
     }
 

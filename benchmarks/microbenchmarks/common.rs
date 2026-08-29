@@ -56,6 +56,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         health_registry: None,
         id_generator: &BENCH_ID_GENERATOR,
         kv_stores: None,
+        session_stores: None,
         subrequest_client: None,
         subrequest_response_mode: praxis_filter::SubRequestResponseMode::Buffered,
         request: req,
@@ -74,6 +75,7 @@ pub(crate) fn make_ctx(req: &Request) -> HttpFilterContext<'_> {
         cluster_retry_state: None,
         cluster_retry_state_released: false,
         endpoint_reselector: None,
+        pinned_endpoint_address: None,
         time_source: &praxis_core::time::SystemTimeSource,
         upstream: None,
     }

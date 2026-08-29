@@ -53,7 +53,10 @@ pub(super) async fn execute(
     super::upstream_response::strip_hop_by_hop_response(upstream_response, is_upgrade_response);
     upstream_response.strip_reserved_internal();
     let mut resp = response_header_from_pingora(upstream_response);
-    let name_fingerprint_before = header_name_fingerprint(&resp.headers);
+    // An empty pipeline cannot reorder headers, so the before/after
+    // fingerprint comparison is unnecessary — skip hashing the whole header
+    // map on every response for listeners with no filters.
+    let name_fingerprint_before = (!pipeline.is_empty()).then(|| header_name_fingerprint(&resp.headers));
     ctx.connection_upgraded = is_upgrade_response;
     ctx.upstream_response_status = Some(upstream_response.status.as_u16());
     let is_bodyless = ctx
@@ -74,8 +77,15 @@ pub(super) async fn execute(
     // header count, so the count alone cannot decide whether the direct
     // write-back is safe. Re-fingerprint and treat any change to the name
     // sequence as a modification, independent of what filters self-reported.
-    let headers_modified =
-        filter_flagged_modification || header_name_fingerprint(&resp.headers) != name_fingerprint_before;
+    let headers_modified = filter_flagged_modification
+        || name_fingerprint_before.is_some_and(|before| header_name_fingerprint(&resp.headers) != before);
+    // Upstream-supplied reserved internal headers were stripped before the
+    // pipeline ran, but a response filter can add one afterwards; re-strip so
+    // the "reserved headers never reach the client" invariant holds after the
+    // pipeline too. An empty pipeline cannot add headers, so skip the pass.
+    if !pipeline.is_empty() {
+        hop_by_hop::strip_reserved_internal_header_map(&mut resp.headers);
+    }
     let should_snapshot_response_header = pipeline.body_capabilities().any_response_body_condition
         && matches!(
             &result,
@@ -113,6 +123,7 @@ async fn run_response_pipeline(
         filter_state,
         executed_indices,
         body_done,
+        attempted_endpoints,
     ) = {
         let mut fctx = ctx.filter_context_for(pipeline, Some(resp)).ok_or_else(|| {
             pingora_core::Error::explain(
@@ -132,6 +143,7 @@ async fn run_response_pipeline(
             fctx.filter_state,
             fctx.executed_filter_indices,
             fctx.body_done_indices,
+            fctx.attempted_endpoints,
         )
     };
     ctx.cluster = cluster;
@@ -142,6 +154,7 @@ async fn run_response_pipeline(
     ctx.filter_state = filter_state;
     ctx.cached_executed_filter_indices = executed_indices;
     ctx.cached_body_done_indices = body_done;
+    ctx.attempted_endpoints = attempted_endpoints;
     Ok((r, headers_modified))
 }
 

@@ -122,6 +122,7 @@ pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>
                 if !ctx.attempted_endpoints.iter().any(|e| e.as_ref() == addr.as_ref()) {
                     ctx.attempted_endpoints.push(Arc::clone(&addr));
                 }
+                ctx.selected_endpoint_index = Some(reselected_endpoint_index(health, &addr));
                 let mut upstream = reselector.build_upstream(addr);
                 apply_per_try_timeout(ctx, &mut upstream);
                 ctx.upstream_for_retry = Some(upstream);
@@ -150,6 +151,18 @@ pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>
     })?;
 
     build_peer(upstream).await
+}
+
+/// Resolve the passive-health endpoint index for a reselected address.
+///
+/// Passive health records the final attempt's outcome against
+/// `selected_endpoint_index`, so after reselection it must name the endpoint
+/// that actually served the request, not the originally selected one.
+/// Mirrors the `load_balancer`'s initial selection: `usize::MAX` (address not
+/// in the registry) makes `record_passive_health` a no-op rather than
+/// crediting or faulting the wrong index.
+fn reselected_endpoint_index(health: Option<&praxis_core::health::ClusterHealthState>, addr: &str) -> usize {
+    health.and_then(|h| h.endpoint_index(addr)).unwrap_or(usize::MAX)
 }
 
 /// Override connection/read timeouts with the policy's per-try timeout when set.
@@ -264,6 +277,7 @@ mod tests {
         };
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
+            authority: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
@@ -291,6 +305,7 @@ mod tests {
     async fn build_peer_without_tls() {
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8080"),
+            authority: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
         };
@@ -307,6 +322,7 @@ mod tests {
         };
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
+            authority: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
@@ -331,6 +347,7 @@ mod tests {
         };
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
+            authority: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
@@ -400,6 +417,43 @@ mod tests {
         assert!(
             build_peer(&make_upstream("127.0.0.1")).await.is_err(),
             "address without port should return error"
+        );
+    }
+
+    #[test]
+    fn reselected_endpoint_index_points_at_new_address() {
+        use praxis_core::health::{ClusterHealthEntry, ClusterHealthState, EndpointHealth};
+
+        let entry = ClusterHealthEntry::new(
+            vec![EndpointHealth::default(), EndpointHealth::default()],
+            vec![Arc::from("127.0.0.1:3001"), Arc::from("127.0.0.1:3002")],
+            Some(3),
+            Some(2),
+        );
+        let health: ClusterHealthState = Arc::new(entry);
+
+        // A reselection to the second endpoint must re-point the
+        // passive-health index at it, or the final outcome is
+        // credited/faulted against the originally selected endpoint.
+        assert_eq!(
+            reselected_endpoint_index(Some(&health), "127.0.0.1:3002"),
+            1,
+            "reselection must resolve the reselected address's index"
+        );
+
+        // An address the registry does not know maps to usize::MAX, which
+        // makes record_passive_health a no-op instead of a wrong attribution.
+        assert_eq!(
+            reselected_endpoint_index(Some(&health), "10.0.0.9:9999"),
+            usize::MAX,
+            "unknown address is a no-op index"
+        );
+
+        // No registry at all also degrades to the no-op index.
+        assert_eq!(
+            reselected_endpoint_index(None, "127.0.0.1:3001"),
+            usize::MAX,
+            "missing registry is a no-op index"
         );
     }
 
@@ -473,6 +527,7 @@ mod tests {
         };
         let upstream = Upstream {
             address: Arc::from("127.0.0.1:8443"),
+            authority: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
@@ -517,6 +572,7 @@ mod tests {
     fn make_upstream(address: &str) -> Upstream {
         Upstream {
             address: Arc::from(address),
+            authority: None,
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
         }

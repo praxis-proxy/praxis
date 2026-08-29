@@ -219,7 +219,9 @@ enum Operation {
     StripQueryParams(HashSet<String>),
 
     /// Append query parameters.
-    AddQueryParams(Vec<(String, String)>),
+    /// Pre-encoded `k=v&k2=v2` suffix, percent-encoded once at config
+    /// load so per-request application is a single sized copy.
+    AddQueryParams(String),
 }
 
 // -----------------------------------------------------------------------------
@@ -244,10 +246,10 @@ fn apply_operations<'a>(
             Operation::StripQueryParams(names) => {
                 query = apply_strip(query, names);
             },
-            Operation::AddQueryParams(pairs) => {
+            Operation::AddQueryParams(encoded) => {
                 let base = query.take().unwrap_or(Cow::Borrowed(""));
-                query = Some(Cow::Owned(append_params(&base, pairs)));
-                trace!(added = ?pairs, "added query params");
+                query = Some(Cow::Owned(append_encoded_params(&base, encoded)));
+                trace!(added = %encoded, "added query params");
             },
         }
     }
@@ -369,8 +371,30 @@ fn compile_strip_query_params(value: &serde_yaml::Value) -> Result<Operation, Fi
 fn compile_add_query_params(value: &serde_yaml::Value) -> Result<Operation, FilterError> {
     let map: BTreeMap<String, String> =
         serde_yaml::from_value(value.clone()).map_err(|e| format!("url_rewrite: add_query_params config: {e}"))?;
-    let pairs: Vec<(String, String)> = map.into_iter().collect();
-    Ok(Operation::AddQueryParams(pairs))
+    Ok(Operation::AddQueryParams(encode_query_pairs(
+        map.iter().map(|(k, v)| (k.as_str(), v.as_str())),
+    )))
+}
+
+/// Percent-encode `pairs` into a ready `k=v&k2=v2` query suffix.
+fn encode_query_pairs<'a>(pairs: impl Iterator<Item = (&'a str, &'a str)>) -> String {
+    use std::fmt::Write as _;
+
+    use percent_encoding::utf8_percent_encode;
+
+    let mut suffix = String::new();
+    for (k, v) in pairs {
+        if !suffix.is_empty() {
+            suffix.push('&');
+        }
+        let _ok = write!(
+            suffix,
+            "{}={}",
+            utf8_percent_encode(k, QUERY_VALUE_ENCODE_SET),
+            utf8_percent_encode(v, QUERY_VALUE_ENCODE_SET)
+        );
+    }
+    suffix
 }
 
 // -----------------------------------------------------------------------------
@@ -392,26 +416,18 @@ fn strip_params(qs: &str, remove: &HashSet<String>) -> String {
         .join("&")
 }
 
-/// Append key-value pairs to a query string, percent-encoding
-/// both keys and values.
-///
-/// Uses [`percent_encoding::utf8_percent_encode`] with a set that
-/// encodes characters unsafe in query components: space, `"`, `#`,
-/// `&`, `+`, and `=`.
-///
-/// [`percent_encoding::utf8_percent_encode`]: percent_encoding::utf8_percent_encode
-fn append_params(qs: &str, pairs: &[(String, String)]) -> String {
-    use percent_encoding::utf8_percent_encode;
-
-    let mut result = qs.to_owned();
-    for (k, v) in pairs {
-        if !result.is_empty() {
-            result.push('&');
-        }
-        result.push_str(&utf8_percent_encode(k, QUERY_VALUE_ENCODE_SET).to_string());
-        result.push('=');
-        result.push_str(&utf8_percent_encode(v, QUERY_VALUE_ENCODE_SET).to_string());
+/// Append a pre-encoded parameter suffix to a query string in one
+/// sized copy (encoding happened once at config load).
+fn append_encoded_params(qs: &str, encoded: &str) -> String {
+    if encoded.is_empty() {
+        return qs.to_owned();
     }
+    let mut result = String::with_capacity(qs.len() + usize::from(!qs.is_empty()) + encoded.len());
+    result.push_str(qs);
+    if !result.is_empty() {
+        result.push('&');
+    }
+    result.push_str(encoded);
     result
 }
 
@@ -1117,9 +1133,7 @@ operations:
                     replacement: (*repl).to_owned(),
                 },
                 Op::StripQuery(names) => Operation::StripQueryParams(names.iter().map(|s| (*s).to_owned()).collect()),
-                Op::AddQuery(pairs) => {
-                    Operation::AddQueryParams(pairs.iter().map(|(k, v)| ((*k).to_owned(), (*v).to_owned())).collect())
-                },
+                Op::AddQuery(pairs) => Operation::AddQueryParams(encode_query_pairs(pairs.iter().copied())),
             })
             .collect();
         UrlRewriteFilter { operations }

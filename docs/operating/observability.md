@@ -16,13 +16,14 @@ admin:
   address: "127.0.0.1:9901"
 ```
 
-The admin listener exposes three endpoints:
+The admin listener exposes these endpoints:
 
 | Path | Purpose |
 | ----------- | ----------------------------------------- |
 | `/healthy` | Liveness probe - returns `200` once the server is accepting connections |
 | `/ready` | Readiness probe - returns cluster health status; `503` when any cluster has zero healthy endpoints |
 | `/metrics` | Prometheus text exposition format |
+| `/api/log-level` | Runtime process log level overlays (`PUT` / `GET` / `HEAD` / `DELETE`) |
 
 Any other path returns `404`. The admin listener
 must bind to a loopback address by default. Binding
@@ -84,11 +85,47 @@ Verbose mode exposes internal topology (cluster
 names, endpoint counts). Keep it off in production
 unless the admin port is network-isolated.
 
+### Runtime log levels (`/api/log-level`)
+
+Adjust process tracing verbosity at runtime without
+restarting. The admin API layers temporary overlays on
+top of the startup baseline (`RUST_LOG` plus
+`runtime.log_overrides`). Overlays auto-revert after
+`duration_secs` (default **300** seconds, maximum
+**86400**).
+
+| Method | Purpose |
+| ------ | ------- |
+| `PUT` | Set a global or per-module overlay |
+| `GET` | Read baseline, active overlays, and effective directive |
+| `HEAD` | Same as `GET` without a body |
+| `DELETE` | Clear overlay(s) before timer expiry (`?module=`, or `?all=true`) |
+
+Example per-module temporary raise:
+
+```http
+PUT /api/log-level
+Content-Type: application/json
+
+{
+  "module": "praxis_filter::pipeline",
+  "level": "trace",
+  "duration_secs": 300
+}
+```
+
+`GET /api/log-level` returns structured JSON including
+`baseline_directive`, `overlays` (with `expires_at` in
+RFC 3339 UTC), and `effective_directive`. Invalid
+levels, empty `module`, and out-of-range durations
+return **400** JSON errors.
+
 ## Metrics Reference
 
-Praxis records two categories of Prometheus metrics:
-HTTP request metrics (always on when admin is
-enabled) and per-filter duration histograms (opt-in).
+Praxis records Prometheus metrics in three
+categories: HTTP request metrics, TCP connection
+metrics (both always on when admin is enabled), and
+per-filter duration histograms (opt-in).
 
 Recorder upkeep runs every five seconds whenever the
 admin endpoint is enabled. It is independent of
@@ -120,6 +157,45 @@ code `0` (no response written) maps to `unknown`.
 Wall-clock duration of completed HTTP requests in
 seconds. Uses the same label set as
 `praxis_http_requests_total`.
+
+### TCP Connection Metrics
+
+These are recorded automatically for every TCP
+connection when the admin endpoint is enabled.
+
+#### `praxis_tcp_connection_duration_seconds` (histogram)
+
+Wall-clock lifetime of a TCP connection from accept
+to close, in seconds.
+
+| Label | Values |
+| ---------- | ---------------------------------------- |
+| `listener` | Listener name from config |
+| `reason` | `completed`, `sni_timeout`, `filter_rejection`, `connect_failure`, `peeked_write_error` |
+
+The `reason` label captures why the connection
+closed:
+
+| Reason | Meaning |
+| --------------------- | ---------------------------------------- |
+| `completed` | Normal forwarding finished |
+| `sni_timeout` | SNI peek timed out before routing |
+| `filter_rejection` | Connect filters rejected the connection |
+| `connect_failure` | Upstream connection failed |
+| `peeked_write_error` | Writing peeked bytes to upstream failed |
+
+#### `praxis_tcp_connections_total` (counter)
+
+Total accepted TCP connections.
+
+| Label | Values |
+| ---------- | ---------------------------------------- |
+| `listener` | Listener name from config |
+
+Incremented once per accepted connection after
+overload checks pass. Use with
+`praxis_connections_active` to derive connection
+rates and concurrency.
 
 ### Filter Duration Histograms
 
@@ -358,6 +434,45 @@ environment variable (defaults to `info`). Overrides
 are additive - they set the level for specific
 modules without changing the base level. Valid
 levels: `error`, `warn`, `info`, `debug`, `trace`.
+
+### Process Logging Destination
+
+`runtime.logging` controls where Praxis writes process
+logs (the `tracing` subscriber backing access logs and
+startup messages). It is separate from
+`runtime.log_overrides`, which only adjusts per-module
+filter levels.
+
+```yaml
+runtime:
+  log_overrides:
+    praxis_filter::pipeline: debug
+  logging:
+    output: stdout        # stdout (default) | stderr | file
+    file_path: /var/log/praxis/proxy.log
+    rotation: daily       # omit for no rotation; or size:100mb
+    max_files: 7
+    non_blocking: true
+    buffer_size: 8192     # buffered lines; default 128000
+```
+
+Defaults keep today's behavior: non-blocking stdout,
+text or JSON via `PRAXIS_LOG_FORMAT`, lossy overflow
+when the buffer is full. File output supports:
+
+- **No rotation** — omit `rotation`; the file at
+  `file_path` grows in place.
+- **Daily rotation** — `rotation: daily`; files are
+  named `{prefix}.{YYYY-MM-DD}{suffix}` in the log
+  directory (for example `proxy.2026-08-17.log`).
+- **Size rotation** — `rotation: size:100mb`; the
+  active file is exactly `file_path`; rolled copies are
+  `proxy.log.1`, `proxy.log.2`, … with oldest archives
+  pruned to `max_files`.
+
+Changing `runtime.logging` requires a process restart;
+reload validates the block but does not re-init the
+subscriber.
 
 ## Full Example
 

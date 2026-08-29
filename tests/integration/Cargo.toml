@@ -41,5 +41,6 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "io-
 tokio-rustls = { workspace = true }
 tokio-stream = { workspace = true }
 tokio-tungstenite = { workspace = true }
+opentelemetry-proto = { workspace = true }
 tonic = { workspace = true }
 tonic-prost = { workspace = true }

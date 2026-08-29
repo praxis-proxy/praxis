@@ -10,7 +10,7 @@
 //! index at `docs/filters/reference.md`.
 
 use std::{
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashSet},
     fmt::Write as _,
     fs,
     path::{Path, PathBuf},
@@ -747,10 +747,14 @@ fn parse_file_items(file: &syn::File, out: &mut ModuleItems) {
         out.module_docs.push(module_docs);
     }
 
+    let manual_deserialize = manual_deserialize_idents(file);
+
     for item in &file.items {
         match item {
             syn::Item::Struct(s) => parse_struct(s, out),
-            syn::Item::Enum(e) if derives_deserialize(&e.attrs) => {
+            syn::Item::Enum(e)
+                if derives_deserialize(&e.attrs) || manual_deserialize.contains(&e.ident.to_string()) =>
+            {
                 let info = extract_enum_info(e);
                 if !info.variants.is_empty() {
                     out.enums.insert(e.ident.to_string(), info);
@@ -759,6 +763,33 @@ fn parse_file_items(file: &syn::File, out: &mut ModuleItems) {
             _ => {},
         }
     }
+}
+
+/// Type names in `file` with a hand-written `impl Deserialize`.
+///
+/// Config enums may implement `Deserialize` by hand (e.g. to preserve
+/// `deny_unknown_fields` diagnostics an untagged derive would swallow);
+/// they are just as config-facing as derived ones and must still render
+/// their YAML alternatives instead of a bare type name.
+fn manual_deserialize_idents(file: &syn::File) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for item in &file.items {
+        if let syn::Item::Impl(imp) = item {
+            let Some((trait_path, _)) = &imp.trait_ else {
+                continue;
+            };
+            let is_deserialize = trait_path.segments.last().is_some_and(|s| s.ident == "Deserialize");
+            if !is_deserialize {
+                continue;
+            }
+            if let syn::Type::Path(tp) = &*imp.self_ty
+                && let Some(seg) = tp.path.segments.last()
+            {
+                out.insert(seg.ident.to_string());
+            }
+        }
+    }
+    out
 }
 
 /// Handle a struct item: check for config struct and filter doc comments.
@@ -2233,6 +2264,35 @@ mod tests {
         "#[derive(Deserialize)] #[serde(untagged)] enum Endpoint ",
         "{ Simple(String), Weighted { address: String, weight: u32 } }",
     );
+
+    #[test]
+    fn manual_deserialize_enum_still_renders_variants() {
+        // An enum whose Deserialize is hand-written (e.g. to preserve
+        // deny_unknown_fields diagnostics) must still be harvested and
+        // render its YAML alternatives, not fall back to the type name.
+        let source = concat!(
+            "#[derive(Serialize)] #[serde(untagged)] enum LoadBalancerStrategy ",
+            "{ Simple(SimpleStrategy), Parameterised(ParameterisedStrategy) }",
+            "impl<'de> Deserialize<'de> for LoadBalancerStrategy { ",
+            "fn deserialize<D>(_d: D) -> Result<Self, D::Error> ",
+            "where D: serde::Deserializer<'de> { unimplemented!() } }",
+            "#[derive(Deserialize)] #[serde(rename_all = \"snake_case\")] enum SimpleStrategy ",
+            "{ RoundRobin, LeastConnections }",
+            "#[derive(Deserialize)] enum ParameterisedStrategy ",
+            "{ #[serde(rename = \"ring_hash\")] RingHash(RingHashOpts) }",
+            "#[derive(Deserialize)] struct RingHashOpts { header: Option<String> }",
+        );
+        let file: syn::File = syn::parse_str(source).unwrap();
+        let mut items = ModuleItems::new();
+        parse_file_items(&file, &mut items);
+
+        let strategy: syn::Type = syn::parse_str("LoadBalancerStrategy").unwrap();
+        assert_eq!(
+            render_type(&strategy, &items.enums),
+            "`round_robin` \\| `least_connections` \\| `ring_hash`",
+            "a manual-Deserialize enum must render its variants"
+        );
+    }
 
     #[test]
     fn untagged_wrapper_enum_types_render_wrapped_yaml_shapes() {

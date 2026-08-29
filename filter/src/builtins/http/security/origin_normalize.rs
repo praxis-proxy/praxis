@@ -24,26 +24,36 @@
 /// [RFC 6454]: https://datatracker.ietf.org/doc/html/rfc6454
 /// [RFC 6454 Section 4]: https://datatracker.ietf.org/doc/html/rfc6454#section-4
 /// [RFC 6454 Section 6.1]: https://datatracker.ietf.org/doc/html/rfc6454#section-6.1
-pub(crate) fn normalize_origin(origin: &str) -> String {
+pub(crate) fn normalize_origin(origin: &str) -> std::borrow::Cow<'_, str> {
+    // The common browser Origin (`https://app.example.com`) is already
+    // normalized: lowercase, non-ws scheme, no default port. Detect that
+    // in one scan and borrow — the owned path below runs only for
+    // uppercase, ws/wss, or default-port inputs.
+    let needs_rewrite = origin.bytes().any(|b| b.is_ascii_uppercase())
+        || origin.starts_with("ws://")
+        || origin.starts_with("wss://")
+        || (origin.starts_with("https://") && origin.ends_with(":443"))
+        || (origin.starts_with("http://") && origin.ends_with(":80"));
+    if !needs_rewrite {
+        return std::borrow::Cow::Borrowed(origin);
+    }
+
     let lowered = origin.to_ascii_lowercase();
-    let normalized = if let Some(rest) = lowered.strip_prefix("wss://") {
+    let mut normalized = if let Some(rest) = lowered.strip_prefix("wss://") {
         format!("https://{rest}")
     } else if let Some(rest) = lowered.strip_prefix("ws://") {
         format!("http://{rest}")
     } else {
         lowered
     };
-    if let Some(stripped) = normalized.strip_prefix("https://")
-        && let Some(without_port) = stripped.strip_suffix(":443")
+    // Strip default ports by truncating in place instead of rebuilding.
+    if (normalized.starts_with("https://") && normalized.ends_with(":443"))
+        || (normalized.starts_with("http://") && normalized.ends_with(":80"))
     {
-        return format!("https://{without_port}");
+        let port_len = if normalized.ends_with(":443") { 4 } else { 3 };
+        normalized.truncate(normalized.len() - port_len);
     }
-    if let Some(stripped) = normalized.strip_prefix("http://")
-        && let Some(without_port) = stripped.strip_suffix(":80")
-    {
-        return format!("http://{without_port}");
-    }
-    normalized
+    std::borrow::Cow::Owned(normalized)
 }
 
 // -----------------------------------------------------------------------------

@@ -341,6 +341,9 @@ mod tests {
                 Endpoint::Weighted {
                     address: "10.0.0.2:80".into(),
                     weight: 3,
+                    metadata: HashMap::default(),
+                    zone: None,
+                    priority: 0,
                 },
             ],
         );

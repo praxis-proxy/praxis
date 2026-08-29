@@ -244,8 +244,8 @@ fn extract_origin_from_origin_header() {
     let mut headers = http::HeaderMap::new();
     headers.insert("origin", "https://example.com".parse().unwrap());
     assert_eq!(
-        extract_origin(&headers),
-        Some("https://example.com".to_owned()),
+        extract_origin(&headers).as_deref(),
+        Some("https://example.com"),
         "should extract from Origin header"
     );
 }
@@ -255,8 +255,8 @@ fn extract_origin_from_referer_fallback() {
     let mut headers = http::HeaderMap::new();
     headers.insert("referer", "https://example.com/path?q=1".parse().unwrap());
     assert_eq!(
-        extract_origin(&headers),
-        Some("https://example.com".to_owned()),
+        extract_origin(&headers).as_deref(),
+        Some("https://example.com"),
         "should extract scheme+host from Referer"
     );
 }
@@ -266,8 +266,8 @@ fn extract_origin_referer_with_port() {
     let mut headers = http::HeaderMap::new();
     headers.insert("referer", "https://example.com:8443/path".parse().unwrap());
     assert_eq!(
-        extract_origin(&headers),
-        Some("https://example.com:8443".to_owned()),
+        extract_origin(&headers).as_deref(),
+        Some("https://example.com:8443"),
         "should preserve port from Referer"
     );
 }
@@ -285,8 +285,8 @@ fn extract_origin_prefers_origin_over_referer() {
     headers.insert("origin", "https://origin.example.com".parse().unwrap());
     headers.insert("referer", "https://referer.example.com/path".parse().unwrap());
     assert_eq!(
-        extract_origin(&headers),
-        Some("https://origin.example.com".to_owned()),
+        extract_origin(&headers).as_deref(),
+        Some("https://origin.example.com"),
         "Origin header should take precedence over Referer"
     );
 }
@@ -586,8 +586,8 @@ fn extract_origin_normalizes_default_port_in_origin_header() {
     let mut headers = http::HeaderMap::new();
     headers.insert("origin", "https://example.com:443".parse().unwrap());
     assert_eq!(
-        extract_origin(&headers),
-        Some("https://example.com".to_owned()),
+        extract_origin(&headers).as_deref(),
+        Some("https://example.com"),
         "Origin header with :443 should normalize"
     );
 }
@@ -597,8 +597,8 @@ fn extract_origin_normalizes_default_port_in_referer() {
     let mut headers = http::HeaderMap::new();
     headers.insert("referer", "http://example.com:80/path".parse().unwrap());
     assert_eq!(
-        extract_origin(&headers),
-        Some("http://example.com".to_owned()),
+        extract_origin(&headers).as_deref(),
+        Some("http://example.com"),
         "Referer with :80 should normalize"
     );
 }

@@ -72,15 +72,10 @@ impl BodyBuffer {
     }
 
     /// Consume the buffer and return a single contiguous `Bytes`.
-    ///
-    /// # Panics
-    ///
-    /// Never actually panics. Internal `expect` is guarded by a length check.
-    #[expect(clippy::expect_used, reason = "guarded by length check")]
     pub fn freeze(self) -> Bytes {
         match self.chunks.len() {
             0 => Bytes::new(),
-            1 => self.chunks.into_iter().next().expect("length checked"),
+            1 => self.chunks.into_iter().next().unwrap_or_default(),
             _ => {
                 let mut combined = Vec::with_capacity(self.total_bytes);
 

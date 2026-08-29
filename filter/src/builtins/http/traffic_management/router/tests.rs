@@ -175,6 +175,76 @@ fn from_config_empty_routes_rejected() {
     );
 }
 
+#[test]
+fn from_config_rejects_route_retry_timeout_of_zero() {
+    // The router builds core Route values via RouterRouteConfigRaw::try_from,
+    // which runs Route::validate_semantics -> RetryPolicy::validate_timeout_bounds.
+    // A route-level retry timeout of 0 (which would zero every upstream attempt's
+    // timeouts, or disable retries) must be rejected at config load just like a
+    // cluster-level retry policy -- the router path must not bypass the bound.
+    let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+        r#"
+            routes:
+              - path_prefix: "/api"
+                cluster: "backend"
+                retry_policy:
+                  per_try_timeout_ms: 0
+            "#,
+    )
+    .unwrap();
+
+    let Err(err) = RouterFilter::from_config(&yaml) else {
+        panic!("a route retry per_try_timeout_ms of 0 must be rejected");
+    };
+    assert!(
+        err.to_string().contains("per_try_timeout_ms"),
+        "error should name the offending field, got: {err}"
+    );
+}
+
+#[test]
+fn from_config_rejects_route_retry_timeout_over_ceiling() {
+    let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+        r#"
+            routes:
+              - path_prefix: "/api"
+                cluster: "backend"
+                retry_policy:
+                  request_timeout_ms: 3600001
+            "#,
+    )
+    .unwrap();
+
+    let Err(err) = RouterFilter::from_config(&yaml) else {
+        panic!("a route retry request_timeout_ms over the 1h ceiling must be rejected");
+    };
+    assert!(
+        err.to_string().contains("request_timeout_ms") || err.to_string().contains("maximum"),
+        "error should reference the over-ceiling timeout, got: {err}"
+    );
+}
+
+#[test]
+fn from_config_accepts_valid_route_retry_timeouts() {
+    let yaml = serde_yaml::from_str::<serde_yaml::Value>(
+        r#"
+            routes:
+              - path_prefix: "/api"
+                cluster: "backend"
+                retry_policy:
+                  per_try_timeout_ms: 1000
+                  request_timeout_ms: 5000
+            "#,
+    )
+    .unwrap();
+    let filter = RouterFilter::from_config(&yaml).expect("valid route retry timeouts must parse");
+    assert_eq!(
+        filter.name(),
+        "router",
+        "valid route retry timeouts should build a router"
+    );
+}
+
 #[tokio::test]
 async fn on_request_sets_cluster_on_match() {
     let router = make_router(vec![prefix_route("/", "default")]);
@@ -560,6 +630,7 @@ fn route_matches_request_path_only_hit() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         route_matches_request(&resolved, "/api/users", None, &HeaderMap::new(), false),
@@ -574,6 +645,7 @@ fn route_matches_request_path_miss() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         !route_matches_request(&resolved, "/other", None, &HeaderMap::new(), false),
@@ -596,6 +668,7 @@ fn route_matches_request_host_hit() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         route_matches_request(&resolved, "/", Some("example.com"), &HeaderMap::new(), false),
@@ -618,6 +691,7 @@ fn route_matches_request_host_miss() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         !route_matches_request(&resolved, "/", Some("other.com"), &HeaderMap::new(), false),
@@ -640,6 +714,7 @@ fn route_matches_request_host_miss_when_no_host() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     assert!(
         !route_matches_request(&resolved, "/", None, &HeaderMap::new(), false),
@@ -662,6 +737,7 @@ fn route_matches_request_header_hit() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-key", HeaderValue::from_static("val"));
@@ -686,6 +762,7 @@ fn route_matches_request_header_miss() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-key", HeaderValue::from_static("wrong"));
@@ -710,6 +787,7 @@ fn route_matches_request_compound() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-ver", HeaderValue::from_static("2"));
@@ -837,6 +915,7 @@ fn route_matches_request_empty_headers_constraint() {
         route,
         metrics_label: ::metrics::SharedString::const_str("/"),
         wildcard_suffix: None,
+        retry_policy: None,
     };
     let mut hdrs = HeaderMap::new();
     hdrs.insert("x-anything", HeaderValue::from_static("whatever"));
@@ -1205,6 +1284,32 @@ async fn on_request_rewritten_path_no_match_still_rejects() {
     assert!(
         ctx.cluster.is_none(),
         "cluster should remain unset when rewritten path matches nothing"
+    );
+}
+
+#[tokio::test]
+async fn on_request_rewritten_path_with_query_matches_exact_route() {
+    // A rewrite filter stores "<path>?<query>" in rewritten_path. The router
+    // must match on the path only; otherwise a query-bearing request misses
+    // the exact route and is silently diverted to the catch-all.
+    let router = make_router(vec![exact_route("/v1/users", "users"), prefix_route("/", "default")]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/api/v1/users?page=2");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.rewritten_path = Some("/v1/users?page=2".to_owned());
+    let action = router.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "query-bearing rewritten path should still match the exact route"
+    );
+    assert_eq!(
+        ctx.cluster.as_deref(),
+        Some("users"),
+        "exact route must be selected despite the trailing query string"
+    );
+    assert_eq!(
+        ctx.rewritten_path.as_deref(),
+        Some("/v1/users?page=2"),
+        "rewritten_path must be left intact for upstream forwarding"
     );
 }
 

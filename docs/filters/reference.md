@@ -11,6 +11,7 @@ Built-in filters organized by protocol and category.
 |--------|---------|-------------|
 | [`access_log`](http/observability/access_log.md) | - | Logs structured access records for each request and response. |
 | [`request_id`](http/observability/request_id.md) | - | Ensures every request carries a correlation ID. |
+| [`trace_context`](http/observability/trace_context.md) | - | Propagates W3C Trace Context headers (`traceparent`, `tracestate`). |
 
 ## HTTP / Payload Processing
 
@@ -47,6 +48,7 @@ Built-in filters organized by protocol and category.
 | [`redirect`](http/traffic_management/redirect.md) | - | Returns a redirect response without contacting any upstream. |
 | [`router`](http/traffic_management/router.md) | - | Routes requests to clusters based on path prefix and host header. |
 | [`static_response`](http/traffic_management/static_response.md) | - | Returns a fixed response without contacting any upstream. |
+| [`sticky_sessions`](http/traffic_management/sticky_sessions.md) | - | Sticky sessions HTTP filter. |
 | [`timeout`](http/traffic_management/timeout.md) | - | Enforces a maximum end-to-end latency from request receipt to response headers. |
 
 ## HTTP / Transformation

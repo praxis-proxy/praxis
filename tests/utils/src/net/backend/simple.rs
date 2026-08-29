@@ -57,6 +57,7 @@ impl Backend {
         ChunkedBackend {
             chunks,
             headers: Vec::new(),
+            chunk_delay: None,
         }
     }
 
@@ -144,6 +145,10 @@ pub struct ChunkedBackend {
 
     /// Extra response headers as `(name, value)` pairs.
     headers: Vec<(String, String)>,
+
+    /// Optional delay written before each chunk, simulating a slow-drip
+    /// streaming upstream.
+    chunk_delay: Option<Duration>,
 }
 
 impl ChunkedBackend {
@@ -151,6 +156,14 @@ impl ChunkedBackend {
     #[must_use]
     pub fn header(mut self, name: &str, value: &str) -> Self {
         self.headers.push((name.to_owned(), value.to_owned()));
+        self
+    }
+
+    /// Sleep `delay` before writing each chunk, simulating a slow-drip
+    /// streaming upstream that never idles out.
+    #[must_use]
+    pub fn chunk_delay(mut self, delay: Duration) -> Self {
+        self.chunk_delay = Some(delay);
         self
     }
 
@@ -162,34 +175,48 @@ impl ChunkedBackend {
     pub fn start_with_shutdown(self) -> BackendGuard {
         let chunks = self.chunks;
         let headers = self.headers;
+        let chunk_delay = self.chunk_delay;
 
         spawn_tcp_server_with_shutdown(move |mut stream| {
             stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
             let _headers = read_until_headers_complete(&mut stream);
 
-            let mut resp =
-                "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nServer: praxis-test-backend\r\n"
-                    .to_owned();
-            for (name, value) in &headers {
-                use std::fmt::Write as _;
-                let _written = write!(resp, "{name}: {value}\r\n");
-            }
-            resp.push_str("\r\n");
-            let _sent = stream.write_all(resp.as_bytes());
+            let _sent = stream.write_all(build_chunked_response_header(&headers).as_bytes());
             let _flushed = stream.flush();
 
             for chunk in &chunks {
+                if let Some(delay) = chunk_delay {
+                    std::thread::sleep(delay);
+                }
                 let hex_len = format!("{:x}\r\n", chunk.len());
                 let _sent = stream.write_all(hex_len.as_bytes());
                 let _sent = stream.write_all(chunk.as_bytes());
                 let _sent = stream.write_all(b"\r\n");
-                let _flushed = stream.flush();
+                if stream.flush().is_err() {
+                    // Client (proxy) closed the stream — e.g. it hit the
+                    // stream-duration cap. Stop dripping.
+                    return;
+                }
             }
 
             let _sent = stream.write_all(b"0\r\n\r\n");
             let _flushed = stream.flush();
         })
     }
+}
+
+/// Build the chunked-response header block (status line, framing headers, and
+/// any extra `headers`) terminated by the blank line.
+fn build_chunked_response_header(headers: &[(String, String)]) -> String {
+    let mut resp =
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\nServer: praxis-test-backend\r\n"
+            .to_owned();
+    for (name, value) in headers {
+        use std::fmt::Write as _;
+        let _written = write!(resp, "{name}: {value}\r\n");
+    }
+    resp.push_str("\r\n");
+    resp
 }
 
 // -----------------------------------------------------------------------------
@@ -453,7 +480,7 @@ fn start_server(mut config: Config) -> u16 {
     }
 
     std::thread::spawn(move || {
-        praxis::run_server(config, None);
+        praxis::run_server(config, None, None);
     });
 
     crate::net::wait::wait_for_http(&addr);

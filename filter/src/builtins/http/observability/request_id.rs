@@ -109,26 +109,35 @@ impl RequestIdFilter {
     /// `on_request`, not from `ctx.request`. The request snapshot
     /// reflects the headers as sent upstream, injected ones included, so
     /// it cannot distinguish "the client sent this" from "we added it".
-    fn resolve_response_id(&self, ctx: &HttpFilterContext<'_>) -> Option<String> {
+    fn resolve_response_id(&self, ctx: &HttpFilterContext<'_>) -> Option<http::header::HeaderValue> {
         let ClientSuppliedId(id) = ctx.get_filter_state::<ClientSuppliedId>()?;
         tracing::trace!(header = %self.header_name, "using client-supplied request ID for response header");
-        Some(id.clone())
+        // Build the HeaderValue directly from the borrowed id: the copy
+        // into the value happens either way, while the old intermediate
+        // String clone existed only to end the state borrow early.
+        match http::header::HeaderValue::from_str(id) {
+            Ok(value) => Some(value),
+            Err(value_err) => {
+                debug!(
+                    header = %self.header_name,
+                    value_err = ?Some(value_err),
+                    "failed to set request ID on response header"
+                );
+                None
+            },
+        }
     }
 
     /// Insert the request ID header into the response.
-    fn insert_response_header(&self, resp: &mut crate::Response, id: &str) {
-        match (
-            http::header::HeaderName::from_bytes(self.header_name.as_bytes()),
-            http::header::HeaderValue::from_str(id),
-        ) {
-            (Ok(header_name), Ok(header_value)) => {
-                resp.headers.insert(header_name, header_value);
+    fn insert_response_header(&self, resp: &mut crate::Response, value: http::header::HeaderValue) {
+        match http::header::HeaderName::from_bytes(self.header_name.as_bytes()) {
+            Ok(header_name) => {
+                resp.headers.insert(header_name, value);
             },
-            (name_result, value_result) => {
+            Err(name_err) => {
                 debug!(
                     header = %self.header_name,
-                    name_err = ?name_result.err(),
-                    value_err = ?value_result.err(),
+                    name_err = ?Some(name_err),
                     "failed to set request ID on response header"
                 );
             },
@@ -174,11 +183,11 @@ impl HttpFilter for RequestIdFilter {
             return Ok(FilterAction::Continue);
         }
 
-        let id = self.resolve_response_id(ctx);
-        if let Some(id) = id
+        let value = self.resolve_response_id(ctx);
+        if let Some(value) = value
             && let Some(resp) = ctx.response_header.as_mut()
         {
-            self.insert_response_header(resp, &id);
+            self.insert_response_header(resp, value);
         }
 
         Ok(FilterAction::Continue)

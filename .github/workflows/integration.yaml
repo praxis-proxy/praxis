@@ -34,6 +34,7 @@ jobs:
 
   test:
     runs-on: ubuntu-24.04
+    timeout-minutes: 45
     permissions:
       contents: read
     strategy:
@@ -47,9 +48,51 @@ jobs:
     name: ${{ matrix.suite.name }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Rust
         uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
 
       - name: ${{ matrix.suite.name }} tests
         run: make ${{ matrix.suite.target }}
+
+  # ----------------------------------------------------------------------------
+  # Non-default feature verification (integration tests)
+  # ----------------------------------------------------------------------------
+
+  experimental-features:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        crate:
+          - praxis-tests-integration
+    name: experimental-features (${{ matrix.crate }})
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+
+      - name: Cache cargo-hack
+        id: cache-hack
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cargo/bin/cargo-hack
+          key: cargo-hack-0.6.45-${{ runner.os }}
+
+      - name: Install cargo-hack
+        if: steps.cache-hack.outputs.cache-hit != 'true'
+        run: cargo install cargo-hack@0.6.45 --locked
+
+      - name: Test non-default features
+        run: >
+          cargo hack test --each-feature
+          --exclude-no-default-features --exclude-features default,no-mac-cert-rotation-tests
+          -p ${{ matrix.crate }}

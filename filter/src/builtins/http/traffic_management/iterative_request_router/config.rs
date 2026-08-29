@@ -90,7 +90,11 @@ pub(crate) struct IterativeRequestRouterConfig {
     /// Named steps, each with filters and transition rules.
     pub(crate) steps: Vec<StepConfig>,
 
-    /// Overall timeout in milliseconds (default 30000).
+    /// Overall timeout in milliseconds (default 30000). This is an
+    /// end-to-end deadline: a streamed final response (e.g. SSE / LLM
+    /// streaming) is also cut when the deadline expires, not only the step
+    /// exchanges — raise it for routes whose streams legitimately outlive
+    /// the default.
     #[serde(default = "default_timeout_ms")]
     pub(crate) timeout_ms: u64,
 }
@@ -234,6 +238,23 @@ pub(crate) fn validate(cfg: &IterativeRequestRouterConfig) -> Result<(), FilterE
                 .to_owned()
                 .into(),
         );
+    }
+
+    if cfg.max_response_bytes == 0 {
+        return Err("iterative_request_router: max_response_bytes must be > 0"
+            .to_owned()
+            .into());
+    }
+
+    if let Some(0) = cfg.step_timeout_ms {
+        return Err("iterative_request_router: step_timeout_ms must be > 0"
+            .to_owned()
+            .into());
+    }
+    if let Some(v) = cfg.step_timeout_ms
+        && v > MAX_TIMEOUT_MS
+    {
+        return Err(format!("iterative_request_router: step_timeout_ms must be <= {MAX_TIMEOUT_MS}, got {v}").into());
     }
 
     if cfg.steps.is_empty() {

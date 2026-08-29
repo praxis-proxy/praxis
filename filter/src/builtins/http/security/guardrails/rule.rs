@@ -61,6 +61,24 @@ pub(super) struct RuleEval {
 }
 
 impl CompiledRule {
+    /// Whether the matcher's pattern text is pure ASCII.
+    ///
+    /// A lossy UTF-8 decode can never synthesize valid ASCII pattern bytes,
+    /// so ASCII-only rules evaluate faithfully over lossily-decoded header
+    /// values. A non-ASCII pattern (e.g. `bäd`) cannot be faithfully matched
+    /// against a value that failed UTF-8 decoding — the replacement character
+    /// destroys the bytes the pattern targets — so the caller must fail
+    /// closed instead. Judged on the pattern *source*: an operator writing a
+    /// non-ASCII byte via an ASCII escape opts out explicitly. Built-in PII
+    /// patterns are ASCII.
+    pub(super) fn is_ascii_only(&self) -> bool {
+        match &self.matcher {
+            RuleMatcher::Contains(needle) => needle.is_ascii(),
+            RuleMatcher::Pattern(re) => re.as_str().is_ascii(),
+            RuleMatcher::Pii(_) => true,
+        }
+    }
+
     /// Evaluate the rule against `haystack`, returning both
     /// the match outcome and any PII kind together.
     ///

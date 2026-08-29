@@ -11,6 +11,7 @@ use crate::{config::Cluster, errors::ProxyError};
 // -----------------------------------------------------------------------------
 
 /// Validates timeout bounds and relational consistency.
+#[expect(clippy::too_many_lines, reason = "sequential per-field timeout checks")]
 pub(super) fn validate_timeouts(cluster: &Cluster) -> Result<(), ProxyError> {
     let name = &cluster.name;
 
@@ -42,6 +43,12 @@ pub(super) fn validate_timeouts(cluster: &Cluster) -> Result<(), ProxyError> {
             "cluster '{name}': connection_timeout_ms ({conn}) exceeds \
              total_connection_timeout_ms ({total})"
         )));
+    }
+
+    if let Some(policy) = &cluster.retry_policy {
+        policy
+            .validate_timeout_bounds(&format!("cluster '{name}'"))
+            .map_err(ProxyError::Config)?;
     }
 
     Ok(())
@@ -240,6 +247,104 @@ clusters:
 "#;
         let err = Config::from_yaml(yaml).unwrap_err();
         assert!(err.to_string().contains("write_timeout_ms is 0"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_zero_retry_per_try_timeout() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:80"]
+    retry_policy:
+      max_retries: 2
+      per_try_timeout_ms: 0
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("per_try_timeout_ms is 0"),
+            "a zero per-try timeout fails every attempt and must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_zero_retry_request_timeout() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:80"]
+    retry_policy:
+      request_timeout_ms: 0
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("request_timeout_ms is 0"),
+            "a zero overall deadline silently disables retries and must be rejected, got: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_retry_timeout_exceeding_maximum() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:80"]
+    retry_policy:
+      per_try_timeout_ms: 3600001
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds maximum"),
+            "retry timeouts get the same 1-hour ceiling as sibling timeouts, got: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_retry_timeouts_at_bounds() {
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: "backend"
+    endpoints: ["10.0.0.1:80"]
+    retry_policy:
+      per_try_timeout_ms: 1
+      request_timeout_ms: 3600000
+"#;
+        Config::from_yaml(yaml).unwrap();
     }
 
     #[test]

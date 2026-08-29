@@ -213,7 +213,10 @@ async fn returns_continue_on_incomplete_json() {
 }
 
 #[tokio::test]
-async fn early_exit_promotes_despite_trailing_junk() {
+async fn incomplete_json_does_not_promote() {
+    // A body that is not (yet) complete valid JSON must not promote: promoting
+    // from an unvalidated prefix desyncs the proxy from a backend that rejects
+    // or reparses the full body.
     let filter = make_filter("model", "X-Model");
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -224,19 +227,17 @@ async fn early_exit_promotes_despite_trailing_junk() {
     let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::BodyDone),
-        "early exit after mapped field must BodyDone without validating unread suffix"
+        matches!(action, FilterAction::Continue),
+        "an incomplete JSON body must not promote; wait for the complete body"
     );
-    assert_eq!(ctx.extra_request_headers.len(), 1, "should promote the model header");
-    assert_eq!(ctx.extra_request_headers[0].0, "X-Model", "header name should match");
-    assert_eq!(
-        ctx.extra_request_headers[0].1, "model-alpha-1",
-        "header value should match first complete field despite trailing junk"
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "no header may be promoted from an unvalidated JSON prefix"
     );
 }
 
 #[tokio::test]
-async fn early_exit_with_large_trailing_unmapped_value() {
+async fn promotes_with_large_trailing_unmapped_value() {
     let filter = make_filter("model", "X-Model");
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -263,7 +264,57 @@ async fn early_exit_with_large_trailing_unmapped_value() {
 }
 
 #[tokio::test]
-async fn first_wins_on_duplicate_keys() {
+async fn trailing_content_after_json_does_not_promote() {
+    // Content after a complete JSON value means the backend would reject the
+    // body (or parse differently); the proxy must not promote a header from it.
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = br#"{"model":"premium"} garbage"#;
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "trailing content after the JSON must not promote"
+    );
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "no header from a body with trailing junk"
+    );
+}
+
+#[tokio::test]
+async fn trailing_whitespace_after_json_still_promotes() {
+    // Newline- or whitespace-terminated JSON is routine from legitimate
+    // producers and parses identically on the backend; only non-whitespace
+    // trailing content must block promotion. Pins the serde_json `end()`
+    // semantics the extractor relies on.
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = b"{\"model\":\"premium\"}\n  \t\r\n";
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "trailing whitespace after the JSON document must still promote"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should promote exactly one header");
+    assert_eq!(ctx.extra_request_headers[0].1, "premium", "model value should match");
+}
+
+#[tokio::test]
+async fn last_wins_on_duplicate_keys() {
+    // Standard JSON parsers (serde_json, Python, JS) take the last value for a
+    // duplicated key. The promoted header must agree with what the backend
+    // parses, or an attacker could route/authorize on one value while the
+    // backend acts on another.
     let filter = make_filter("model", "X-Model");
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -275,17 +326,39 @@ async fn first_wins_on_duplicate_keys() {
 
     assert!(
         matches!(action, FilterAction::BodyDone),
-        "duplicate keys should still return BodyDone on first value"
+        "a complete body with a mapped field should BodyDone"
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "should promote exactly one header");
     assert_eq!(
-        ctx.extra_request_headers[0].1, "a",
-        "first-wins: first duplicate value should be promoted"
+        ctx.extra_request_headers[0].1, "b",
+        "last-wins: the last duplicate value must be promoted, matching the backend"
     );
 }
 
 #[tokio::test]
-async fn multi_field_early_exit_with_trailing_junk() {
+async fn multi_field_promotes_from_complete_body() {
+    let filter = make_multi_filter(&[("model", "X-Model"), ("user_id", "X-User-Id")]);
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let json = br#"{"model":"m1","user_id":"u1","messages":[]}"#;
+    let mut body = Some(Bytes::from_static(json));
+
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "a complete body with all mapped fields should BodyDone"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 2, "both headers should be promoted");
+    assert_eq!(ctx.extra_request_headers[0].0, "X-Model", "first mapping order");
+    assert_eq!(ctx.extra_request_headers[0].1, "m1", "model value");
+    assert_eq!(ctx.extra_request_headers[1].0, "X-User-Id", "second mapping order");
+    assert_eq!(ctx.extra_request_headers[1].1, "u1", "user_id value");
+}
+
+#[tokio::test]
+async fn incomplete_multi_field_body_does_not_promote() {
     let filter = make_multi_filter(&[("model", "X-Model"), ("user_id", "X-User-Id")]);
     let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -296,14 +369,13 @@ async fn multi_field_early_exit_with_trailing_junk() {
     let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
 
     assert!(
-        matches!(action, FilterAction::BodyDone),
-        "all mapped fields complete should return BodyDone despite trailing junk"
+        matches!(action, FilterAction::Continue),
+        "an incomplete body must not promote even when the mapped fields appear complete"
     );
-    assert_eq!(ctx.extra_request_headers.len(), 2, "both headers should be promoted");
-    assert_eq!(ctx.extra_request_headers[0].0, "X-Model", "first mapping order");
-    assert_eq!(ctx.extra_request_headers[0].1, "m1", "model value");
-    assert_eq!(ctx.extra_request_headers[1].0, "X-User-Id", "second mapping order");
-    assert_eq!(ctx.extra_request_headers[1].1, "u1", "user_id value");
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "no header from an incomplete body"
+    );
 }
 
 #[tokio::test]
@@ -826,15 +898,17 @@ async fn repeated_body_hooks_do_not_duplicate_promoted_headers() {
     let mut ctx = crate::test_utils::make_filter_context(&req);
     ctx.current_filter_id = Some(0);
 
-    let mut body = Some(Bytes::from_static(br#"{"model":"gpt-4","messages":"#));
+    // First, a complete body promotes and returns BodyDone.
+    let full = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#;
+    let mut body = Some(Bytes::from_static(full));
     let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
     assert!(
         matches!(action, FilterAction::BodyDone),
-        "mid-stream extract can BodyDone before EOS when mapped field is complete"
+        "a complete body with the mapped field should BodyDone"
     );
     assert_eq!(ctx.extra_request_headers.len(), 1, "first promotion adds one header");
 
-    let full = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#;
+    // A second hook (e.g. the EOS frozen body) must not re-Add a duplicate.
     let mut body = Some(Bytes::from_static(full));
     let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(
@@ -844,7 +918,7 @@ async fn repeated_body_hooks_do_not_duplicate_promoted_headers() {
     assert_eq!(
         ctx.extra_request_headers.len(),
         1,
-        "second body hook after mid-stream BodyDone must not re-Add a duplicate header"
+        "second body hook after promotion must not re-Add a duplicate header"
     );
     assert_eq!(ctx.extra_request_headers[0].1, "gpt-4", "promoted value unchanged");
 }
@@ -886,6 +960,7 @@ fn make_filter(field: &str, header: &str) -> JsonBodyFieldFilter {
     JsonBodyFieldFilter {
         max_body_bytes: crate::body::DEFAULT_JSON_BODY_MAX_BYTES,
         mappings: vec![(field.to_owned(), header.to_owned())],
+        needed: std::iter::once(field.to_owned()).collect(),
     }
 }
 
@@ -897,5 +972,6 @@ fn make_multi_filter(mappings: &[(&str, &str)]) -> JsonBodyFieldFilter {
             .iter()
             .map(|(f, h)| ((*f).to_owned(), (*h).to_owned()))
             .collect(),
+        needed: mappings.iter().map(|(f, _)| (*f).to_owned()).collect(),
     }
 }

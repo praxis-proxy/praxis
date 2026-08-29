@@ -42,7 +42,7 @@ pub fn listener_meta_from_config(config: &Config) -> HashMap<String, ListenerMet
                 ListenerMeta {
                     name: listener.name.clone(),
                     address: listener.address.clone(),
-                    protocol: listener.protocol.clone(),
+                    protocol: listener.protocol,
                     tls: listener.tls.is_some(),
                     chain_names: listener.filter_chains.clone(),
                 },

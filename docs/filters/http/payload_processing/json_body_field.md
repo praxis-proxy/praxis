@@ -7,7 +7,7 @@ Extracts top-level fields from a JSON request body and promotes their values to 
 
 ## Configuration Notes
 
-Uses a map visitor (not a full JSON DOM). Unmapped values are skipped; once every configured field is found, parsing stops (first-wins on duplicate keys). Trailing bytes after early exit are not validated.
+Uses a map visitor (not a full JSON DOM). Unmapped values are skipped; the whole top-level object is scanned so duplicate keys are last-wins (matching `serde_json` and typical backend parsers), and trailing non-whitespace content after the document blocks promotion.
 
 On successful promotion the filter returns [`FilterAction::BodyDone`] so [`StreamBuffer`] pre-read does not re-run extraction on later chunks (including the frozen full body at EOS).
 

@@ -197,7 +197,9 @@ impl RedirectFilter {
         }
 
         Ok(Box::new(Self {
-            allowed_hosts: cfg.allowed_hosts,
+            // Pre-lowercased so per-request matching never re-folds the
+            // config-stable patterns.
+            allowed_hosts: cfg.allowed_hosts.iter().map(|h| h.to_ascii_lowercase()).collect(),
             status: cfg.status,
             location: cfg.location,
         }))
@@ -303,16 +305,26 @@ fn validate_allowed_hosts(hosts: &[String]) -> Result<(), FilterError> {
 /// Supports exact (case-insensitive) matches and wildcard prefixes.
 /// A pattern `*.example.com` matches `sub.example.com` and
 /// `a.b.example.com`, as well as the bare domain `example.com`.
+/// `allowed` entries are pre-lowercased at config load, so matching is a
+/// case-insensitive compare against the raw host with no per-request
+/// allocation (the old shape lowercased the host, every pattern, and
+/// built a dotted-suffix String per wildcard entry on every request).
 fn host_matches_allowlist(host: &str, allowed: &[String]) -> bool {
-    let host_lower = host.to_ascii_lowercase();
     allowed.iter().any(|pattern| {
-        let pattern_lower = pattern.to_ascii_lowercase();
-        if let Some(suffix) = pattern_lower.strip_prefix("*.") {
-            host_lower == suffix || host_lower.ends_with(&format!(".{suffix}"))
+        if let Some(suffix) = pattern.strip_prefix("*.") {
+            host.eq_ignore_ascii_case(suffix) || host_ends_with_dotted(host, suffix)
         } else {
-            host_lower == pattern_lower
+            host.eq_ignore_ascii_case(pattern)
         }
     })
+}
+
+/// Whether `host` case-insensitively ends with `.suffix`.
+fn host_ends_with_dotted(host: &str, suffix: &str) -> bool {
+    host.len() > suffix.len()
+        && host.get(host.len() - suffix.len() - 1..).is_some_and(|tail| {
+            tail.bytes().next() == Some(b'.') && tail.get(1..).is_some_and(|t| t.eq_ignore_ascii_case(suffix))
+        })
 }
 
 /// Check whether a host value is safe for redirect URL substitution.

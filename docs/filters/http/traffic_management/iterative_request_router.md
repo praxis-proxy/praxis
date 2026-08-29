@@ -50,7 +50,7 @@ Streaming steps remain pull-based. Header-safe failover rules run before any byt
 | `steps[].on_result[].transport_error` | `admission_timeout` \| `circuit_open` \| `connect` \| `io` \| `deadline_exceeded` \| `response_too_large` | no | Transport error kind to match: `admission_timeout`, `circuit_open`, `connect`, `io`, `deadline_exceeded`, or `response_too_large`. `circuit_open` requires `runtime.subrequest_circuit_breaker` to be configured. Only meaningful when `origin: transport`. |
 | `steps[].on_result[].value` | string | no | Result value to match. |
 | `steps[].on_result[].done` | bool | no | If true, return the current response to the client. |
-| `timeout_ms` | integer | no | Overall timeout in milliseconds (default 30000). |
+| `timeout_ms` | integer | no | Overall timeout in milliseconds (default 30000). This is an end-to-end deadline: a streamed final response (e.g. SSE / LLM streaming) is also cut when the deadline expires, not only the step exchanges — raise it for routes whose streams legitimately outlive the default. |
 
 ## Example
 

@@ -135,30 +135,35 @@ impl ForwardedHeadersFilter {
     /// [RFC 7239 Section 4]: https://datatracker.ietf.org/doc/html/rfc7239#section-4
     /// [RFC 7239 Section 6]: https://datatracker.ietf.org/doc/html/rfc7239#section-6
     fn inject_standard_forwarded(
-        &self,
         ctx: &mut HttpFilterContext<'_>,
         client_ip: &IpAddr,
         proto: &str,
         host: Option<&str>,
+        trusted: bool,
     ) {
         use std::fmt::Write as _;
 
         tracing::debug!(client_ip = %client_ip, "setting standard Forwarded header");
-        let for_param = format_for_param(client_ip);
-        let mut entry = format!("for={for_param};proto={proto}");
-        if let Some(h) = host {
-            let escaped = quote_forwarded_value(h);
-            let _ok = write!(entry, ";host={escaped}");
-        }
-
-        let value = if self.is_trusted(client_ip)
-            && let Some(existing) = ctx.request.headers.get("forwarded")
-            && let Ok(existing) = existing.to_str()
-        {
-            format!("{existing}, {entry}")
+        // Build the whole entry in one pre-sized buffer: the old shape
+        // staged the for= parameter, grew the entry through format!, and
+        // re-allocated a third time for the trusted-append case.
+        let existing = if trusted {
+            ctx.request.headers.get("forwarded").and_then(|v| v.to_str().ok())
         } else {
-            entry
+            None
         };
+        let mut value = String::with_capacity(existing.map_or(0, |e| e.len() + 2) + 64);
+        if let Some(existing) = existing {
+            value.push_str(existing);
+            value.push_str(", ");
+        }
+        value.push_str("for=");
+        write_for_param(&mut value, client_ip);
+        let _ok = write!(value, ";proto={proto}");
+        if let Some(h) = host {
+            value.push_str(";host=");
+            write_quoted_forwarded_value(&mut value, h);
+        }
 
         ctx.extra_request_headers.push((Cow::Borrowed("Forwarded"), value));
     }
@@ -172,8 +177,8 @@ impl ForwardedHeadersFilter {
     /// untrusted clients and are closed here: a `Forwarded` header when
     /// the standard header is not injected, and `X-Forwarded-Host` when
     /// no usable `Host` header exists to derive a replacement from.
-    fn neutralize_untrusted_forwarding(&self, ctx: &mut HttpFilterContext<'_>, client_ip: &IpAddr, no_host: bool) {
-        if self.is_trusted(client_ip) {
+    fn neutralize_untrusted_forwarding(&self, ctx: &mut HttpFilterContext<'_>, trusted: bool, no_host: bool) {
+        if trusted {
             return;
         }
         if !self.use_standard_header {
@@ -193,16 +198,22 @@ impl ForwardedHeadersFilter {
 // Forwarded Header Formatting
 // -----------------------------------------------------------------------------
 
-/// Format the `for` parameter value per [RFC 7239 Section 6].
+/// Write the `for` parameter value per [RFC 7239 Section 6] into `out`.
 ///
 /// IPv6 addresses require quoting because `:` and `[]` are
 /// not valid `token` characters. IPv4 addresses are bare tokens.
+/// Writing into the caller's buffer avoids staging a String per header.
 ///
 /// [RFC 7239 Section 6]: https://datatracker.ietf.org/doc/html/rfc7239#section-6
-fn format_for_param(ip: &IpAddr) -> String {
+fn write_for_param(out: &mut String, ip: &IpAddr) {
+    use std::fmt::Write as _;
     match ip {
-        IpAddr::V4(v4) => format!("{v4}"),
-        IpAddr::V6(v6) => format!("\"[{v6}]\""),
+        IpAddr::V4(v4) => {
+            let _ok = write!(out, "{v4}");
+        },
+        IpAddr::V6(v6) => {
+            let _ok = write!(out, "\"[{v6}]\"");
+        },
     }
 }
 
@@ -213,8 +224,16 @@ fn format_for_param(ip: &IpAddr) -> String {
 /// Embedded `\` and `"` are backslash-escaped.
 ///
 /// [RFC 7239 Section 4]: https://datatracker.ietf.org/doc/html/rfc7239#section-4
+#[cfg(test)]
 fn quote_forwarded_value(value: &str) -> String {
     let mut out = String::with_capacity(value.len() + 2);
+    write_quoted_forwarded_value(&mut out, value);
+    out
+}
+
+/// Append `value` to `out` as an RFC 7239 quoted-string, backslash-escaping
+/// embedded `"` and `\`.
+fn write_quoted_forwarded_value(out: &mut String, value: &str) {
     out.push('"');
     for ch in value.chars() {
         if ch == '"' || ch == '\\' {
@@ -223,7 +242,6 @@ fn quote_forwarded_value(value: &str) -> String {
         out.push(ch);
     }
     out.push('"');
-    out
 }
 
 #[async_trait]
@@ -240,10 +258,11 @@ impl HttpFilter for ForwardedHeadersFilter {
             return Ok(FilterAction::Continue);
         };
 
-        tracing::debug!(trusted = self.is_trusted(&client_ip), "setting X-Forwarded-For");
-        let xff = if self.is_trusted(&client_ip)
-            && let Some(existing) = ctx.request.headers.get("x-forwarded-for")
-        {
+        // The trust decision cannot change within the request; compute it
+        // once instead of re-scanning the trusted CIDR list per use.
+        let trusted = self.is_trusted(&client_ip);
+        tracing::debug!(trusted, "setting X-Forwarded-For");
+        let xff = if trusted && let Some(existing) = ctx.request.headers.get("x-forwarded-for") {
             if let Ok(existing) = existing.to_str() {
                 let mut val = String::with_capacity(existing.len() + 2 + 45);
                 val.push_str(existing);
@@ -274,17 +293,21 @@ impl HttpFilter for ForwardedHeadersFilter {
             .get(http::header::HOST)
             .and_then(|h| h.to_str().ok())
             .map(str::to_owned);
-        if let Some(host) = &host_value {
-            tracing::debug!(host = %host, "setting X-Forwarded-Host from Host header");
-            ctx.extra_request_headers
-                .push((Cow::Borrowed("X-Forwarded-Host"), host.clone()));
-        }
+        let no_host = host_value.is_none();
 
         if self.use_standard_header {
-            self.inject_standard_forwarded(ctx, &client_ip, proto, host_value.as_deref());
+            Self::inject_standard_forwarded(ctx, &client_ip, proto, host_value.as_deref(), trusted);
+        }
+        // Push after the standard header so the owned Host copy is moved,
+        // not cloned; each injected name is distinct, so the final request
+        // headers are unaffected by push order.
+        if let Some(host) = host_value {
+            tracing::debug!(host = %host, "setting X-Forwarded-Host from Host header");
+            ctx.extra_request_headers
+                .push((Cow::Borrowed("X-Forwarded-Host"), host));
         }
 
-        self.neutralize_untrusted_forwarding(ctx, &client_ip, host_value.is_none());
+        self.neutralize_untrusted_forwarding(ctx, trusted, no_host);
 
         Ok(FilterAction::Continue)
     }
@@ -591,21 +614,17 @@ trusted_proxies:
     #[test]
     fn format_for_param_ipv4() {
         let ip: IpAddr = "192.168.1.1".parse().unwrap();
-        assert_eq!(
-            format_for_param(&ip),
-            "192.168.1.1",
-            "IPv4 for-param should be bare address"
-        );
+        let mut out = String::new();
+        write_for_param(&mut out, &ip);
+        assert_eq!(out, "192.168.1.1", "IPv4 for-param should be bare address");
     }
 
     #[test]
     fn format_for_param_ipv6() {
         let ip: IpAddr = "2001:db8::1".parse().unwrap();
-        assert_eq!(
-            format_for_param(&ip),
-            "\"[2001:db8::1]\"",
-            "IPv6 for-param must be quoted with brackets"
-        );
+        let mut out = String::new();
+        write_for_param(&mut out, &ip);
+        assert_eq!(out, "\"[2001:db8::1]\"", "IPv6 for-param must be quoted with brackets");
     }
 
     #[tokio::test]

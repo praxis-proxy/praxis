@@ -25,6 +25,7 @@ use crate::{
         log_config_change_audit, log_restart_required_changes, warn_insecure_option_escalations,
         warn_stateful_filter_reset,
     },
+    startup_checks::{warn_insecure_key_permissions, warn_insecure_log_file_permissions},
 };
 
 // -----------------------------------------------------------------------------
@@ -55,12 +56,19 @@ pub(crate) fn reload_pipelines(
     listener_meta: &praxis_protocol::http::pingora::health::ListenerMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
+    session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
     subrequest_client: &praxis_core::subrequest::SubRequestClient,
+    log_level: Option<&Arc<praxis_core::logging::LogLevelState>>,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("building new pipelines from reloaded config");
 
     if let Err(e) = praxis_core::logging::validate_log_overrides(new_config) {
         error!(error = %e, "config reload failed: invalid log_overrides");
+        return Err(e.into());
+    }
+
+    if let Err(e) = praxis_core::logging::validate_logging(new_config) {
+        error!(error = %e, "config reload failed: invalid logging config");
         return Err(e.into());
     }
 
@@ -72,7 +80,14 @@ pub(crate) fn reload_pipelines(
         new_ceiling,
     );
 
-    let new_pipelines = match resolve_pipelines(new_config, registry, &health_registry, kv_stores, &updated_client) {
+    let new_pipelines = match resolve_pipelines(
+        new_config,
+        registry,
+        &health_registry,
+        kv_stores,
+        session_stores,
+        &updated_client,
+    ) {
         Ok(p) => p,
         Err(e) => {
             error!(error = %e, "config reload failed: pipeline build error");
@@ -80,27 +95,53 @@ pub(crate) fn reload_pipelines(
         },
     };
 
+    // Emit this reload's change diagnostics under the OLD logging baseline:
+    // refresh_baseline below applies the new config's env-filter immediately,
+    // and a reload that both requires a restart and lowers verbosity must not
+    // swallow the very warnings telling the operator their change was not
+    // applied.
     log_restart_required_changes(old_config, new_config);
     warn_insecure_option_escalations(old_config, new_config);
     warn_stateful_filter_reset(new_config);
     log_config_change_audit(old_config, new_config);
+    // The advisory file-permission warnings belong with the diagnostics
+    // above for the same reason: a reload may introduce a new listener
+    // cert, a cluster mTLS client key, or a new log file path, and a
+    // reload that also lowers verbosity must not swallow the warning
+    // about the insecurely-permissioned file it just brought live.
+    warn_insecure_key_permissions(new_config);
+    warn_insecure_log_file_permissions(new_config);
+
+    // Apply the log-level baseline while a failure can still abort the reload
+    // cleanly. This is the last fallible step; it must run before the
+    // irreversible pipeline swap below so a bad logging baseline does not leave
+    // live traffic already moved onto the new pipelines while the caller sees
+    // Err (which would churn a retry loop that re-swaps every cycle). The
+    // refresh only touches the logging subsystem, and the diagnostics above
+    // are infallible, so ordering it here is safe.
+    if let Some(log_level) = log_level
+        && let Err(error) = log_level.refresh_baseline(new_config)
+    {
+        error!(%error, "config reload failed: log level baseline refresh");
+        return Err(error.into());
+    }
 
     // Copy known-down endpoint state into the new registry BEFORE the
     // swap: afterwards `live` already serves the new pipelines and the
     // old registry is no longer reachable through them.
     carry_over_health_state(live, old_config, new_config, &health_registry);
 
-    let mut swapped = Vec::new();
-    let mut skipped = Vec::new();
+    let mut swapped: Vec<&str> = Vec::new();
+    let mut skipped: Vec<&str> = Vec::new();
 
     for name in new_pipelines.listener_names() {
         if let Some(new_slot) = new_pipelines.get(name) {
             let new_arc = new_slot.load_full();
             if live.get(name).is_some() {
                 live.swap(name, new_arc);
-                swapped.push(name.to_owned());
+                swapped.push(name);
             } else {
-                skipped.push(name.to_owned());
+                skipped.push(name);
             }
         }
     }
@@ -156,11 +197,12 @@ fn carry_over_health_state(
         return;
     };
 
+    let old_by_name: std::collections::HashMap<&str, &praxis_core::config::Cluster> =
+        old_config.clusters.iter().map(|c| (c.name.as_ref(), c)).collect();
     let mut carried: usize = 0;
     for cluster in &new_config.clusters {
-        let unchanged_check = old_config.clusters.iter().any(|old_c| {
-            old_c.name == cluster.name
-                && serde_yaml::to_string(&old_c.health_check).ok() == serde_yaml::to_string(&cluster.health_check).ok()
+        let unchanged_check = old_by_name.get(cluster.name.as_ref()).is_some_and(|old_c| {
+            serde_yaml::to_string(&old_c.health_check).ok() == serde_yaml::to_string(&cluster.health_check).ok()
         });
         if !unchanged_check {
             continue;
@@ -222,11 +264,15 @@ fn respawn_health_checks(
     health_registry: &HealthRegistry,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
 ) {
-    let old_token = {
+    // One critical section swaps in the fresh token and hands back both
+    // generations; re-locking below just to read the new token again
+    // was a needless second round-trip (reloads are serialized on the
+    // watcher thread, so nothing can interleave).
+    let (old_token, new_token) = {
         let mut guard = health_shutdown.lock().expect("health shutdown lock poisoned");
         let old = guard.clone();
         *guard = CancellationToken::new();
-        old
+        (old, guard.clone())
     };
     old_token.cancel();
 
@@ -240,15 +286,39 @@ fn respawn_health_checks(
         return;
     }
 
-    let clusters = config.clusters.clone();
+    // The runner probes only health-checked clusters (and only those in
+    // the registry); cloning every routing-only cluster tree pinned it
+    // in the health thread for the reload generation's lifetime.
+    let clusters: Vec<praxis_core::config::Cluster> = config
+        .clusters
+        .iter()
+        .filter(|c| c.health_check.is_some())
+        .cloned()
+        .collect();
     let registry = Arc::clone(health_registry);
-    let new_token = health_shutdown.lock().expect("health shutdown lock poisoned").clone();
 
+    spawn_health_check_thread(clusters, registry, new_token);
+}
+
+/// Spawn the reloaded health-check probes on a dedicated thread + runtime.
+///
+/// Degrades gracefully on runtime-build failure (e.g. FD/thread exhaustion)
+/// instead of panicking the thread: a successful pipeline swap must not be
+/// followed by a health-check thread panic. Mirrors startup's
+/// `spawn_on_dedicated_runtime`.
+fn spawn_health_check_thread(
+    clusters: Vec<praxis_core::config::Cluster>,
+    registry: HealthRegistry,
+    new_token: CancellationToken,
+) {
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("health check runtime");
+        let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+            Ok(rt) => rt,
+            Err(e) => {
+                error!(error = %e, "failed to start health-check runtime after reload; health checks disabled until next reload");
+                return;
+            },
+        };
         rt.block_on(async {
             praxis_protocol::http::pingora::health::runner::spawn_health_checks(&clusters, &registry, &new_token);
             new_token.cancelled().await;
@@ -308,7 +378,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         );
 
         assert!(result.is_ok(), "valid reload should succeed");
@@ -362,7 +434,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         );
         assert!(result.is_err(), "invalid filter should return Err");
 
@@ -384,7 +458,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -408,7 +484,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -447,7 +525,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         );
         assert!(
             !old_token.is_cancelled(),
@@ -485,7 +565,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         );
         assert!(result.is_ok(), "reload with new listener should succeed");
         assert!(
@@ -1093,6 +1175,7 @@ filter_chains:
             &registry,
             &old_health,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -1111,7 +1194,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -1178,6 +1263,7 @@ filter_chains:
             &registry,
             &stale_health,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -1197,7 +1283,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -1215,7 +1303,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -1236,6 +1326,7 @@ filter_chains:
             &registry,
             &old_health,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -1259,7 +1350,9 @@ filter_chains:
             &meta,
             &shutdown,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
+            None,
         )
         .unwrap();
 
@@ -1308,6 +1401,7 @@ filter_chains:
             &registry,
             &health_registry,
             &empty_kv_stores(),
+            &empty_session_stores(),
             &empty_subrequest_client(),
         )
         .unwrap();
@@ -1321,6 +1415,11 @@ filter_chains:
     /// Empty KV store registry for tests without KV stores.
     fn empty_kv_stores() -> praxis_core::kv::KvStoreRegistry {
         praxis_core::kv::KvStoreRegistry::new()
+    }
+
+    /// Empty session store registry for tests.
+    fn empty_session_stores() -> Arc<praxis_filter::SessionStoreRegistry> {
+        Arc::new(praxis_filter::SessionStoreRegistry::new())
     }
 
     /// Empty sub-request client for tests.

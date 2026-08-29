@@ -13,7 +13,11 @@ use praxis_test_utils::{free_port, http_get, start_backend, start_proxy};
 
 #[test]
 fn virtual_hosts() {
-    let api_port = start_backend("api-host");
+    // The api cluster lists two distinct endpoints; give each its own
+    // backend rather than collapsing them onto one address (a duplicate
+    // endpoint address is rejected by config validation).
+    let api_port_1 = start_backend("api-host");
+    let api_port_2 = start_backend("api-host");
     let web_port = start_backend("web-host");
     let default_port = start_backend("default-host");
     let proxy_port = free_port();
@@ -21,8 +25,8 @@ fn virtual_hosts() {
         "traffic-management/hosts.yaml",
         proxy_port,
         HashMap::from([
-            ("127.0.0.1:3001", api_port),
-            ("127.0.0.1:3002", api_port),
+            ("127.0.0.1:3001", api_port_1),
+            ("127.0.0.1:3002", api_port_2),
             ("127.0.0.1:4000", web_port),
             ("127.0.0.1:5000", default_port),
         ]),

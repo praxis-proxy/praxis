@@ -78,8 +78,29 @@ impl PathMatch {
     /// `path_prefix` are set.
     pub fn from_parts(path: Option<String>, path_prefix: Option<String>) -> Result<Self, String> {
         match (path, path_prefix) {
-            (Some(path), None) => Ok(Self::Exact { path }),
-            (None, Some(path_prefix)) => Ok(Self::Prefix { path_prefix }),
+            (Some(path), None) => {
+                if path.is_empty() {
+                    return Err("route 'path' must not be empty (request paths always begin with '/')".to_owned());
+                }
+                if !path.starts_with('/') {
+                    return Err(format!(
+                        "route 'path' must start with '/' (got '{path}'); request paths always begin with '/', \
+                         so this route can never match"
+                    ));
+                }
+                Ok(Self::Exact { path })
+            },
+            (None, Some(path_prefix)) => {
+                // An empty prefix is the documented match-all; any other
+                // non-'/'-prefixed value can never match a request path.
+                if !path_prefix.is_empty() && !path_prefix.starts_with('/') {
+                    return Err(format!(
+                        "route 'path_prefix' must start with '/' or be empty (got '{path_prefix}'); \
+                         request paths always begin with '/', so this prefix can never match"
+                    ));
+                }
+                Ok(Self::Prefix { path_prefix })
+            },
             (Some(_), Some(_)) => Err("route cannot set both 'path' and 'path_prefix' (use exactly one)".to_owned()),
             (None, None) => Err("route requires either 'path' or 'path_prefix'".to_owned()),
         }
@@ -249,17 +270,54 @@ struct RouteRaw {
     retry_policy: Option<RetryPolicy>,
 }
 
+impl Route {
+    /// Validate cross-field route semantics that the type system does
+    /// not enforce: retry-policy timeout bounds and header-match keys.
+    ///
+    /// Called from every construction path (the [`Route`] deserializer
+    /// and the router filter's own route config) so a route can never
+    /// reach the runtime with an out-of-bounds retry timeout or an empty
+    /// header-match key (which can never match a request).
+    ///
+    /// # Errors
+    ///
+    /// Returns a message naming the offending field.
+    pub fn validate_semantics(&self) -> Result<(), String> {
+        if let Some(policy) = &self.retry_policy {
+            policy.validate_timeout_bounds(&format!("route '{}'", self.path_match.value()))?;
+        }
+        if let Some(headers) = &self.headers
+            && headers.keys().any(String::is_empty)
+        {
+            return Err(format!(
+                "route '{}': header match key must not be empty (an empty header name can never match)",
+                self.path_match.value()
+            ));
+        }
+        if self.host.as_ref().is_some_and(String::is_empty) {
+            return Err(format!(
+                "route '{}': host must not be empty (an empty host can never match; \
+                 omit 'host' to match any host)",
+                self.path_match.value()
+            ));
+        }
+        Ok(())
+    }
+}
+
 impl TryFrom<RouteRaw> for Route {
     type Error = String;
 
     fn try_from(raw: RouteRaw) -> Result<Self, Self::Error> {
-        Ok(Self {
+        let route = Self {
             path_match: PathMatch::from_parts(raw.path, raw.path_prefix)?,
             cluster: raw.cluster,
             headers: raw.headers,
             host: raw.host,
             retry_policy: raw.retry_policy,
-        })
+        };
+        route.validate_semantics()?;
+        Ok(route)
     }
 }
 
@@ -372,6 +430,90 @@ cluster: "backend"
         assert!(
             err.to_string().contains("either 'path' or 'path_prefix'"),
             "a route without a path key must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_prefix_without_leading_slash() {
+        let yaml = r#"
+path_prefix: "api"
+cluster: "backend"
+"#;
+        let err = serde_yaml::from_str::<Route>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("must start with '/'"),
+            "a prefix that can never match a request path must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_exact_path_without_leading_slash() {
+        let yaml = r#"
+path: "health"
+cluster: "backend"
+"#;
+        let err = serde_yaml::from_str::<Route>(yaml).unwrap_err();
+        assert!(err.to_string().contains("must start with '/'"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_empty_exact_path() {
+        let yaml = r#"
+path: ""
+cluster: "backend"
+"#;
+        let err = serde_yaml::from_str::<Route>(yaml).unwrap_err();
+        assert!(err.to_string().contains("must not be empty"), "got: {err}");
+    }
+
+    #[test]
+    fn empty_prefix_is_match_all() {
+        // The documented match-all prefix stays valid.
+        let route: Route = serde_yaml::from_str("path_prefix: \"\"\ncluster: backend\n").unwrap();
+        assert_eq!(route.path_match.value(), "");
+    }
+
+    #[test]
+    fn reject_empty_header_match_key() {
+        let yaml = r#"
+path_prefix: "/api"
+cluster: "backend"
+headers:
+  "": "value"
+"#;
+        let err = serde_yaml::from_str::<Route>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("header match key must not be empty"),
+            "an empty header name can never match and must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_empty_host_match() {
+        let yaml = r#"
+path_prefix: "/api"
+cluster: "backend"
+host: ""
+"#;
+        let err = serde_yaml::from_str::<Route>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("host must not be empty"),
+            "an empty host can never match and must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_route_retry_policy_zero_timeout() {
+        let yaml = r#"
+path_prefix: "/api"
+cluster: "backend"
+retry_policy:
+  per_try_timeout_ms: 0
+"#;
+        let err = serde_yaml::from_str::<Route>(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("per_try_timeout_ms is 0"),
+            "route-level retry overrides get the same timeout bounds as clusters: {err}"
         );
     }
 

@@ -827,12 +827,15 @@ fn rfc9110_via_header_appended_not_replaced() {
     );
 }
 
-/// [RFC 9110 Section 7.6.3]: an H2 client should see `2 praxis`
-/// in the response Via header, reflecting the downstream protocol.
+/// [RFC 9110 Section 7.6.3]: a Via entry's received-protocol is the
+/// protocol of the message as the intermediary received it. The proxy
+/// receives the response from the HTTP/1.1 upstream, so even an H2
+/// client sees `1.1 praxis` in the response Via — the client-facing
+/// protocol is not what Via records on the response path.
 ///
 /// [RFC 9110 Section 7.6.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-7.6.3
 #[test]
-fn rfc9110_via_header_h2_client_gets_2() {
+fn rfc9110_response_via_reflects_upstream_protocol_for_h2_client() {
     let backend_port = start_backend("via-h2-test");
     let proxy_port = free_port();
     let yaml = simple_proxy_yaml(proxy_port, backend_port);
@@ -844,8 +847,8 @@ fn rfc9110_via_header_h2_client_gets_2() {
     let via = response.headers().get("via").and_then(|v| v.to_str().ok());
 
     assert!(
-        via.is_some_and(|v| v.contains("2 praxis")),
-        "H2 client response Via should contain '2 praxis', got: {via:?}"
+        via.is_some_and(|v| v.contains("1.1 praxis") && !v.contains("2 praxis")),
+        "response Via must carry the upstream protocol version (1.1), got: {via:?}"
     );
 }
 

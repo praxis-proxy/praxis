@@ -32,6 +32,26 @@ pub enum CircuitState {
     HalfOpen,
 }
 
+impl CircuitState {
+    /// Encode for the lock-free state cache.
+    const fn to_cache(self) -> u8 {
+        match self {
+            Self::Closed => 0,
+            Self::Open => 1,
+            Self::HalfOpen => 2,
+        }
+    }
+
+    /// Decode from the lock-free state cache.
+    const fn from_cache(value: u8) -> Self {
+        match value {
+            1 => Self::Open,
+            2 => Self::HalfOpen,
+            _ => Self::Closed,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // CircuitCheck / CircuitToken
 // ---------------------------------------------------------------------------
@@ -49,8 +69,14 @@ pub enum CircuitCheck {
 ///
 /// Pass to [`CircuitBreaker::record_success`] or
 /// [`CircuitBreaker::record_failure`] after the exchange completes.
-/// Dropping without recording is a deliberate no-op (used for local
-/// construction errors that are not peer faults).
+///
+/// Every acquired token holds an in-flight slot that only
+/// `record_success`/`record_failure` release. Dropping a token without
+/// recording therefore leaks its in-flight slot for the breaker's
+/// lifetime, which keeps the breaker from ever being evicted; callers
+/// must record an outcome (the sub-request path wraps the token in a
+/// guard that records failure on drop). A no-op drop is acceptable only
+/// where the breaker is discarded in the same step.
 pub struct CircuitToken {
     /// The generation at which this token was issued.
     generation: u64,
@@ -88,6 +114,10 @@ pub struct CircuitBreaker {
     inner: Mutex<CircuitInner>,
     /// Shared configuration.
     config: CircuitBreakerConfig,
+    /// Lock-free mirror of `inner.state`, written inside every mutating
+    /// critical section, so per-request state peeks (`state()`, the
+    /// `precheck` Closed fast path) do not take the mutex.
+    state_cache: std::sync::atomic::AtomicU8,
 }
 
 /// Mutable interior state.
@@ -115,9 +145,9 @@ struct CircuitInner {
 impl CircuitInner {
     /// Issue a token at the current generation, marking a request in
     /// flight and refreshing the idle clock.
-    fn issue_token(&mut self) -> CircuitCheck {
+    fn issue_token(&mut self, now: Instant) -> CircuitCheck {
         self.in_flight = self.in_flight.saturating_add(1);
-        self.last_activity = Instant::now();
+        self.last_activity = now;
         CircuitCheck::Allowed(CircuitToken {
             generation: self.generation,
         })
@@ -133,18 +163,21 @@ impl CircuitInner {
 
     /// Bump the generation and transition to `HalfOpen`, issuing a
     /// probe token.
-    fn transition_to_half_open(&mut self) -> CircuitCheck {
+    fn transition_to_half_open(&mut self, now: Instant) -> CircuitCheck {
         self.generation = self.generation.wrapping_add(1);
         self.state = CircuitState::HalfOpen;
-        self.half_opened_at = Some(Instant::now());
-        self.issue_token()
+        self.half_opened_at = Some(now);
+        self.issue_token(now)
     }
 
     /// If the recovery window has elapsed, transition from `Open` to
     /// `HalfOpen` and issue a probe token. Otherwise reject.
-    fn try_open_to_half_open(&mut self, config: &CircuitBreakerConfig) -> CircuitCheck {
-        if self.opened_at.is_some_and(|t| t.elapsed() >= config.recovery_window) {
-            self.transition_to_half_open()
+    fn try_open_to_half_open(&mut self, config: &CircuitBreakerConfig, now: Instant) -> CircuitCheck {
+        if self
+            .opened_at
+            .is_some_and(|t| now.duration_since(t) >= config.recovery_window)
+        {
+            self.transition_to_half_open(now)
         } else {
             CircuitCheck::Rejected
         }
@@ -152,15 +185,15 @@ impl CircuitInner {
 
     /// If the half-open probe has timed out, reset to `Open` and
     /// re-attempt recovery. Otherwise reject (probe still in flight).
-    fn try_reset_stale_probe(&mut self, config: &CircuitBreakerConfig) -> CircuitCheck {
+    fn try_reset_stale_probe(&mut self, config: &CircuitBreakerConfig, now: Instant) -> CircuitCheck {
         if self
             .half_opened_at
-            .is_some_and(|t| t.elapsed() >= config.half_open_timeout)
+            .is_some_and(|t| now.duration_since(t) >= config.half_open_timeout)
         {
             self.state = CircuitState::Open;
-            self.opened_at = Some(Instant::now());
+            self.opened_at = Some(now);
             self.half_opened_at = None;
-            self.try_open_to_half_open(config)
+            self.try_open_to_half_open(config, now)
         } else {
             CircuitCheck::Rejected
         }
@@ -181,6 +214,7 @@ impl CircuitBreaker {
                 generation: 0,
             }),
             config,
+            state_cache: std::sync::atomic::AtomicU8::new(CircuitState::Closed.to_cache()),
         }
     }
 
@@ -196,6 +230,11 @@ impl CircuitBreaker {
     /// Panics if the internal mutex is poisoned.
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
     pub fn precheck(&self) -> bool {
+        // Closed is the steady state and needs no timestamps: answer it
+        // from the lock-free cache so the common case skips the mutex.
+        if self.cached_state() == CircuitState::Closed {
+            return true;
+        }
         let inner = self.inner.lock().expect("circuit breaker lock poisoned");
         match inner.state {
             CircuitState::Closed => true,
@@ -220,12 +259,20 @@ impl CircuitBreaker {
     /// Panics if the internal mutex is poisoned.
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
     pub fn try_acquire(&self) -> CircuitCheck {
+        let now = Instant::now();
         let mut inner = self.inner.lock().expect("circuit breaker lock poisoned");
-        match inner.state {
-            CircuitState::Closed => inner.issue_token(),
-            CircuitState::Open => inner.try_open_to_half_open(&self.config),
-            CircuitState::HalfOpen => inner.try_reset_stale_probe(&self.config),
-        }
+        // Every acquisition attempt is traffic reaching this peer's breaker,
+        // rejections included — a rejected stream must keep the breaker from
+        // looking idle to the eviction sweep.
+        inner.last_activity = now;
+        let check = match inner.state {
+            CircuitState::Closed => inner.issue_token(now),
+            CircuitState::Open => inner.try_open_to_half_open(&self.config, now),
+            CircuitState::HalfOpen => inner.try_reset_stale_probe(&self.config, now),
+        };
+        self.store_state_cache(&inner);
+        drop(inner);
+        check
     }
 
     /// Record a successful exchange for the given token.
@@ -257,6 +304,8 @@ impl CircuitBreaker {
             },
             CircuitState::Open => {},
         }
+        self.store_state_cache(&inner);
+        drop(inner);
     }
 
     /// Record a failed exchange for the given token.
@@ -270,31 +319,52 @@ impl CircuitBreaker {
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
     #[expect(clippy::needless_pass_by_value, reason = "consumed to prevent double-recording")]
     pub fn record_failure(&self, token: CircuitToken) {
+        let now = Instant::now();
         let mut inner = self.inner.lock().expect("circuit breaker lock poisoned");
         inner.release_token();
         if token.generation != inner.generation {
             return;
         }
-        inner.last_activity = Instant::now();
+        inner.last_activity = now;
         match inner.state {
             CircuitState::Closed => {
                 inner.consecutive_failures = inner.consecutive_failures.saturating_add(1);
                 if inner.consecutive_failures >= self.config.threshold {
                     inner.state = CircuitState::Open;
-                    inner.opened_at = Some(Instant::now());
+                    inner.opened_at = Some(now);
                 }
             },
             CircuitState::HalfOpen => {
                 inner.state = CircuitState::Open;
-                inner.opened_at = Some(Instant::now());
+                inner.opened_at = Some(now);
                 inner.half_opened_at = None;
             },
             CircuitState::Open => {},
         }
+        self.store_state_cache(&inner);
+        drop(inner);
     }
 
-    /// Whether the breaker is `Closed` with no failures, no request
-    /// in flight, and idle for at least `idle_threshold`.
+    /// Whether the breaker has no request in flight and has been idle for
+    /// at least `idle_threshold`, and is therefore safe to evict.
+    ///
+    /// Eviction is keyed on idleness and in-flight count, not on residual
+    /// failures: a breaker with a leftover failure streak, or one left
+    /// `Open`/`HalfOpen` past its recovery window, that has seen no traffic
+    /// for the threshold is safe to drop, because a recreated breaker
+    /// starts `Closed` — the same admission decision an elapsed recovery
+    /// window would produce once traffic resumes. Requiring `Closed` with
+    /// zero failures instead pinned every such breaker forever, so the
+    /// registry grew without bound under upstream DNS churn plus failures.
+    ///
+    /// One state exemption: an `Open` breaker still inside its recovery
+    /// window is never idle. Callers fast-fail on `precheck` without
+    /// reaching `try_acquire`, so an Open breaker rejecting a steady
+    /// request stream records no activity; evicting it mid-window would
+    /// recreate a `Closed` breaker that admits the full stream (not a
+    /// single half-open probe) until the failure threshold re-opens it.
+    /// The `in_flight == 0` guard is retained: an entry with an
+    /// outstanding request must never be evicted.
     ///
     /// # Panics
     ///
@@ -302,23 +372,35 @@ impl CircuitBreaker {
     #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
     fn is_idle(&self, idle_threshold: Duration) -> bool {
         let inner = self.inner.lock().expect("circuit breaker lock poisoned");
-        inner.state == CircuitState::Closed
-            && inner.consecutive_failures == 0
-            && inner.in_flight == 0
-            && inner.last_activity.elapsed() >= idle_threshold
+        let open_in_recovery_window = inner.state == CircuitState::Open
+            && inner
+                .opened_at
+                .is_some_and(|t| t.elapsed() < self.config.recovery_window);
+        inner.in_flight == 0 && !open_in_recovery_window && inner.last_activity.elapsed() >= idle_threshold
     }
 
     /// Returns the current state without side effects.
     ///
     /// Used by filter-layer metrics to publish open/closed gauges
-    /// without duplicating the state machine.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the internal mutex is poisoned.
-    #[expect(clippy::expect_used, reason = "poisoned mutex is unrecoverable")]
+    /// without duplicating the state machine. Reads the lock-free
+    /// mirror written by every mutating critical section, so gauge
+    /// peeks around `try_acquire`/`record_*` do not triple the
+    /// per-request lock count.
     pub fn state(&self) -> CircuitState {
-        self.inner.lock().expect("circuit breaker lock poisoned").state
+        self.cached_state()
+    }
+
+    /// Read the lock-free state mirror.
+    fn cached_state(&self) -> CircuitState {
+        CircuitState::from_cache(self.state_cache.load(std::sync::atomic::Ordering::Acquire))
+    }
+
+    /// Mirror `inner.state` into the lock-free cache; called while the
+    /// mutex is still held so the cache always reflects the most recent
+    /// critical section.
+    fn store_state_cache(&self, inner: &CircuitInner) {
+        self.state_cache
+            .store(inner.state.to_cache(), std::sync::atomic::Ordering::Release);
     }
 }
 
@@ -335,13 +417,14 @@ impl CircuitBreaker {
 pub struct PeerKey {
     /// Socket address of the peer.
     addr: SocketAddr,
-    /// TLS SNI, empty when not applicable.
-    sni: String,
+    /// TLS SNI, empty when not applicable. Shared so the clone the
+    /// registry guard retains is a refcount bump, not a re-allocation.
+    sni: std::sync::Arc<str>,
 }
 
 impl PeerKey {
     /// Create a peer key from an address and optional SNI.
-    pub fn new(addr: SocketAddr, sni: impl Into<String>) -> Self {
+    pub fn new<S: Into<std::sync::Arc<str>>>(addr: SocketAddr, sni: S) -> Self {
         Self { addr, sni: sni.into() }
     }
 }
@@ -390,6 +473,12 @@ impl CircuitBreakerRegistry {
     /// Attempt to acquire a circuit token for a peer. Creates the
     /// breaker on first access.
     pub fn try_acquire(&self, peer: PeerKey) -> CircuitCheck {
+        // Steady state: the breaker already exists — probe under the
+        // shard read lock rather than holding `entry()`'s write lock
+        // across the whole acquisition critical section.
+        if let Some(cb) = self.breakers.get(&peer) {
+            return cb.try_acquire();
+        }
         self.breakers
             .entry(peer)
             .or_insert_with(|| CircuitBreaker::new(self.config.clone()))
@@ -416,17 +505,30 @@ impl CircuitBreakerRegistry {
     /// Returns the number of entries removed. The caller is
     /// responsible for scheduling periodic invocations.
     pub fn evict_idle(&self, idle_threshold: Duration) -> usize {
-        let stale: Vec<PeerKey> = self
+        // Collect candidates first: mutating the map while iterating it can
+        // deadlock on the shard locks.
+        let candidates: Vec<PeerKey> = self
             .breakers
             .iter()
             .filter(|entry| entry.value().is_idle(idle_threshold))
             .map(|entry| entry.key().clone())
             .collect();
-        let count = stale.len();
-        for key in &stale {
-            self.breakers.remove(key);
-        }
-        count
+        // Re-check is_idle atomically under the shard lock at removal time.
+        // Between the collect above and the remove, a concurrent try_acquire
+        // (which serializes on the same shard lock) can take an in-flight
+        // token on one of these breakers; removing it unconditionally would
+        // drop that request's outcome via a generation mismatch against a
+        // recreated breaker. remove_if evaluates the predicate while holding
+        // the lock, so an entry that became busy is left in place. Count only
+        // entries actually removed.
+        candidates
+            .iter()
+            .filter(|key| {
+                self.breakers
+                    .remove_if(key, |_, cb| cb.is_idle(idle_threshold))
+                    .is_some()
+            })
+            .count()
     }
 
     /// Number of tracked peers.
@@ -759,18 +861,54 @@ mod tests {
     }
 
     #[test]
-    fn evict_idle_preserves_active_entries() {
+    fn evict_idle_preserves_recently_active_entries() {
+        // A just-touched breaker is never idle, whatever its state.
         let registry = CircuitBreakerRegistry::new(config(1, 9_999_000, 9_999_000));
         let a = peer("127.0.0.1:8080");
-        let b = peer("127.0.0.1:9090");
         let ta = registry.try_acquire(a.clone());
         record_registry_failure(&registry, &a, ta);
-        let tb = registry.try_acquire(b.clone());
-        record_registry_success(&registry, &b, tb);
-        let evicted = registry.evict_idle(Duration::ZERO);
-        assert_eq!(evicted, 1, "only the healthy idle peer should be evicted");
+        assert!(!registry.precheck(&a), "breaker should be open after the failure");
+
+        let evicted = registry.evict_idle(Duration::from_secs(9_999));
+        assert_eq!(evicted, 0, "a recently-active breaker must be preserved");
         assert_eq!(registry.len(), 1);
-        assert!(!registry.precheck(&a), "open circuit should survive eviction");
+    }
+
+    #[test]
+    fn evict_idle_preserves_open_breaker_inside_recovery_window() {
+        // Callers fast-fail on precheck without reaching try_acquire, so an
+        // Open breaker rejecting a steady stream records no activity. It must
+        // survive its recovery window anyway: evicting it would recreate a
+        // Closed breaker that admits the full stream instead of a single
+        // half-open probe.
+        let registry = CircuitBreakerRegistry::new(config(1, 9_999_000, 9_999_000));
+        let a = peer("127.0.0.1:8080");
+        let ta = registry.try_acquire(a.clone());
+        record_registry_failure(&registry, &a, ta);
+        assert!(!registry.precheck(&a), "breaker should be open after the failure");
+
+        let evicted = registry.evict_idle(Duration::ZERO);
+        assert_eq!(
+            evicted, 0,
+            "an Open breaker inside its recovery window must not be evicted even when idle"
+        );
+        assert_eq!(registry.len(), 1);
+    }
+
+    #[test]
+    fn evict_idle_removes_open_breaker_past_recovery_window() {
+        // Once the recovery window has elapsed, an idle Open breaker is safe
+        // to evict: a recreated Closed breaker makes the same admission
+        // decision an elapsed window would (admit and re-count failures), and
+        // keeping it would leak registry entries forever under peer churn.
+        let registry = CircuitBreakerRegistry::new(config(1, 0, 9_999_000));
+        let a = peer("127.0.0.1:8080");
+        let ta = registry.try_acquire(a.clone());
+        record_registry_failure(&registry, &a, ta);
+
+        let evicted = registry.evict_idle(Duration::ZERO);
+        assert_eq!(evicted, 1, "an idle Open breaker past its recovery window is evictable");
+        assert_eq!(registry.len(), 0);
     }
 
     #[test]
@@ -788,8 +926,14 @@ mod tests {
         assert_eq!(evicted, 0, "an in-flight breaker must not be evicted");
         assert_eq!(registry.len(), 1);
 
+        // With the request completed and no other in-flight request, the
+        // now-idle breaker is evictable regardless of its open state.
         record_registry_failure(&registry, &a, ta);
-        assert_eq!(registry.evict_idle(Duration::ZERO), 0, "open breaker survives");
+        assert_eq!(
+            registry.evict_idle(Duration::ZERO),
+            1,
+            "a completed, idle open breaker is evictable"
+        );
     }
 
     // --- In-flight tracking ---

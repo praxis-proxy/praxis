@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use http::header::HeaderValue;
 use praxis_tls::CachedClusterTls;
 
 use super::ConnectionOptions;
@@ -26,11 +27,13 @@ use super::ConnectionOptions;
 ///
 /// let upstream = Upstream {
 ///     address: Arc::from("127.0.0.1:8080"),
+///     authority: None,
 ///     tls: None,
 ///     connection: Arc::new(ConnectionOptions::default()),
 /// };
 ///
 /// assert_eq!(&*upstream.address, "127.0.0.1:8080");
+/// assert!(upstream.authority.is_none());
 /// assert!(upstream.tls.is_none());
 /// ```
 ///
@@ -39,6 +42,14 @@ use super::ConnectionOptions;
 pub struct Upstream {
     /// Address in `host:port` form.
     pub address: Arc<str>,
+
+    /// Pre-parsed upstream HTTP authority override.
+    ///
+    /// When set, the proxy sends this value as the upstream HTTP/1.1
+    /// `Host` header instead of forwarding the downstream value.
+    /// Parsed at config load time to avoid per-request `HeaderValue`
+    /// conversion.
+    pub authority: Option<HeaderValue>,
 
     /// Connection tuning for this upstream.
     pub connection: Arc<ConnectionOptions>,
@@ -121,6 +132,7 @@ mod tests {
     fn make_upstream(address: &str, tls: Option<CachedClusterTls>) -> Upstream {
         Upstream {
             address: Arc::from(address),
+            authority: None,
             tls,
             connection: Arc::new(ConnectionOptions::default()),
         }

@@ -3,13 +3,9 @@
 
 //! Weighted random endpoint selection.
 
-use std::{
-    borrow::Borrow,
-    sync::{Arc, atomic::AtomicU64},
-};
+use std::sync::{Arc, atomic::AtomicU64};
 
 use praxis_core::health::ClusterHealthState;
-use smallvec::SmallVec;
 
 use super::endpoint::WeightedEndpoint;
 
@@ -55,61 +51,85 @@ impl Random {
             return None;
         }
 
+        // Allocation-free two-pass walk (the round-robin shape): pass 1
+        // sums candidate weight, pass 2 maps the drawn slot to its
+        // cumulative bucket. Collecting candidate SmallVecs heap-allocated
+        // twice per request past 8 endpoints.
         if let Some(state) = health {
-            let healthy: SmallVec<[&WeightedEndpoint; 8]> = self
-                .healthy_candidates(state)
-                .into_iter()
-                .filter(|ep| !is_excluded(&ep.address, exclude))
-                .collect();
-            if let Some(first) = healthy.first() {
-                let total: usize = healthy.iter().map(|ep| ep.weight as usize).sum();
+            let healthy = |ep: &WeightedEndpoint| {
+                state
+                    .endpoints()
+                    .get(ep.index)
+                    .is_some_and(praxis_core::health::EndpointHealth::is_healthy)
+                    && !is_excluded(&ep.address, exclude)
+            };
+            let (first, total) = survey(&self.endpoints, healthy);
+            if let Some(first) = first {
                 if total > 0 {
-                    return Some(pick(&healthy, super::next_random(&self.rng), total));
+                    return pick_where(&self.endpoints, healthy, super::next_random(&self.rng), total);
                 }
                 return Some(Arc::clone(&first.address));
             }
         }
 
-        let candidates: SmallVec<[&WeightedEndpoint; 8]> = self
-            .endpoints
-            .iter()
-            .filter(|ep| !is_excluded(&ep.address, exclude))
-            .collect();
-        let total: usize = candidates.iter().map(|ep| ep.weight as usize).sum();
+        let unexcluded = |ep: &WeightedEndpoint| !is_excluded(&ep.address, exclude);
+        let (_, total) = survey(&self.endpoints, unexcluded);
         if total == 0 {
             return None;
         }
-        Some(pick(&candidates, super::next_random(&self.rng), total))
+        pick_where(&self.endpoints, unexcluded, super::next_random(&self.rng), total)
     }
+}
 
-    /// Filter to healthy endpoints.
-    #[expect(clippy::indexing_slicing, reason = "bounds checked by ep.index < len()")]
-    fn healthy_candidates(&self, state: &ClusterHealthState) -> SmallVec<[&WeightedEndpoint; 8]> {
-        self.endpoints
-            .iter()
-            .filter(|ep| ep.index < state.endpoints().len() && state.endpoints()[ep.index].is_healthy())
-            .collect()
+/// First candidate and total candidate weight in one pass.
+fn survey(
+    endpoints: &[WeightedEndpoint],
+    candidate: impl Fn(&WeightedEndpoint) -> bool,
+) -> (Option<&WeightedEndpoint>, usize) {
+    let mut first = None;
+    let mut total = 0_usize;
+    for ep in endpoints {
+        if candidate(ep) {
+            if first.is_none() {
+                first = Some(ep);
+            }
+            total += ep.weight as usize;
+        }
     }
+    (first, total)
 }
 
 // -----------------------------------------------------------------------------
 // Utilities
 // -----------------------------------------------------------------------------
 
-/// Map a random value to an endpoint via cumulative weight buckets.
+/// Map a random value to a candidate endpoint via cumulative weight
+/// buckets, walking only endpoints that pass `candidate`.
+///
+/// Bucket layout matches the old collect-then-pick shape exactly: the
+/// candidate subsequence keeps endpoint order, so the same draw lands
+/// in the same bucket.
 #[expect(clippy::cast_possible_truncation, reason = "modulo total_weight bounds the result")]
-#[expect(clippy::expect_used, reason = "total_weight > 0 guaranteed by caller")]
-fn pick<E: Borrow<WeightedEndpoint>>(endpoints: &[E], random: u64, total_weight: usize) -> Arc<str> {
+fn pick_where(
+    endpoints: &[WeightedEndpoint],
+    candidate: impl Fn(&WeightedEndpoint) -> bool,
+    random: u64,
+    total_weight: usize,
+) -> Option<Arc<str>> {
     let slot = (random as usize) % total_weight;
     let mut cumulative = 0_usize;
+    let mut last = None;
     for ep in endpoints {
-        let ep = ep.borrow();
+        if !candidate(ep) {
+            continue;
+        }
         cumulative += ep.weight as usize;
         if slot < cumulative {
-            return Arc::clone(&ep.address);
+            return Some(Arc::clone(&ep.address));
         }
+        last = Some(ep);
     }
-    Arc::clone(&endpoints.last().expect("endpoints must be non-empty").borrow().address)
+    last.map(|ep| Arc::clone(&ep.address))
 }
 
 /// Returns `true` if `addr` appears in the exclusion list.
@@ -253,26 +273,35 @@ mod tests {
     #[test]
     fn pick_exact_bucket_boundaries() {
         let endpoints = vec![ep("A", 1, 0), ep("B", 3, 1), ep("C", 1, 2)];
+        let all = |_: &WeightedEndpoint| true;
         // total_weight = 5, buckets: A=[0], B=[1,2,3], C=[4]
-        assert_eq!(&*pick(&endpoints, 0, 5), "A", "slot 0 → A");
-        assert_eq!(&*pick(&endpoints, 1, 5), "B", "slot 1 → B");
-        assert_eq!(&*pick(&endpoints, 2, 5), "B", "slot 2 → B");
-        assert_eq!(&*pick(&endpoints, 3, 5), "B", "slot 3 → B");
-        assert_eq!(&*pick(&endpoints, 4, 5), "C", "slot 4 → C");
+        assert_eq!(&*pick_where(&endpoints, all, 0, 5).unwrap(), "A", "slot 0 → A");
+        assert_eq!(&*pick_where(&endpoints, all, 1, 5).unwrap(), "B", "slot 1 → B");
+        assert_eq!(&*pick_where(&endpoints, all, 2, 5).unwrap(), "B", "slot 2 → B");
+        assert_eq!(&*pick_where(&endpoints, all, 3, 5).unwrap(), "B", "slot 3 → B");
+        assert_eq!(&*pick_where(&endpoints, all, 4, 5).unwrap(), "C", "slot 4 → C");
         // values beyond total_weight wrap via modulo
-        assert_eq!(&*pick(&endpoints, 5, 5), "A", "slot 5 wraps to 0 → A");
-        assert_eq!(&*pick(&endpoints, 9, 5), "C", "slot 9 wraps to 4 → C");
+        assert_eq!(
+            &*pick_where(&endpoints, all, 5, 5).unwrap(),
+            "A",
+            "slot 5 wraps to 0 → A"
+        );
+        assert_eq!(
+            &*pick_where(&endpoints, all, 9, 5).unwrap(),
+            "C",
+            "slot 9 wraps to 4 → C"
+        );
     }
 
     #[test]
-    fn pick_with_borrowed_refs() {
-        let endpoints = [ep("A", 2, 0), ep("B", 2, 1)];
-        let refs: Vec<&WeightedEndpoint> = endpoints.iter().collect();
-        // total_weight = 4, buckets: A=[0,1], B=[2,3]
-        assert_eq!(&*pick(&refs, 0, 4), "A", "slot 0 → A via refs");
-        assert_eq!(&*pick(&refs, 1, 4), "A", "slot 1 → A via refs");
-        assert_eq!(&*pick(&refs, 2, 4), "B", "slot 2 → B via refs");
-        assert_eq!(&*pick(&refs, 3, 4), "B", "slot 3 → B via refs");
+    fn pick_where_skips_non_candidates() {
+        let endpoints = [ep("A", 2, 0), ep("B", 2, 1), ep("C", 2, 2)];
+        let skip_b = |ep: &WeightedEndpoint| &*ep.address != "B";
+        // candidate subsequence A, C: total_weight = 4, buckets: A=[0,1], C=[2,3]
+        assert_eq!(&*pick_where(&endpoints, skip_b, 0, 4).unwrap(), "A", "slot 0 → A");
+        assert_eq!(&*pick_where(&endpoints, skip_b, 1, 4).unwrap(), "A", "slot 1 → A");
+        assert_eq!(&*pick_where(&endpoints, skip_b, 2, 4).unwrap(), "C", "slot 2 → C");
+        assert_eq!(&*pick_where(&endpoints, skip_b, 3, 4).unwrap(), "C", "slot 3 → C");
     }
 
     // -------------------------------------------------------------------------
@@ -280,11 +309,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn ep(addr: &str, weight: u32, index: usize) -> WeightedEndpoint {
-        WeightedEndpoint {
-            address: Arc::from(addr),
-            weight,
-            index,
-        }
+        WeightedEndpoint::simple(Arc::from(addr), index, weight)
     }
 
     fn health_state(n: usize) -> ClusterHealthState {

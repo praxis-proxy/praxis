@@ -13,8 +13,12 @@ use praxis_test_utils::{free_port, http_get, start_backend_with_shutdown, start_
 
 #[test]
 fn path_based_routing() {
-    let api_port_guard = start_backend_with_shutdown("api");
-    let api_port = api_port_guard.port();
+    // The api cluster lists three distinct endpoints; give each its own
+    // backend rather than collapsing them onto one address (a duplicate
+    // endpoint address is rejected by config validation).
+    let api_guard_1 = start_backend_with_shutdown("api");
+    let api_guard_2 = start_backend_with_shutdown("api");
+    let api_guard_3 = start_backend_with_shutdown("api");
     let static_port_guard = start_backend_with_shutdown("static");
     let static_port = static_port_guard.port();
     let default_port_guard = start_backend_with_shutdown("default");
@@ -24,9 +28,9 @@ fn path_based_routing() {
         "traffic-management/path-based-routing.yaml",
         proxy_port,
         HashMap::from([
-            ("127.0.0.1:3001", api_port),
-            ("127.0.0.1:3002", api_port),
-            ("127.0.0.1:3003", api_port),
+            ("127.0.0.1:3001", api_guard_1.port()),
+            ("127.0.0.1:3002", api_guard_2.port()),
+            ("127.0.0.1:3003", api_guard_3.port()),
             ("127.0.0.1:4000", static_port),
             ("127.0.0.1:5000", default_port),
         ]),

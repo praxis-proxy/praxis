@@ -2,6 +2,12 @@
 // Copyright (c) 2024 Praxis Contributors
 
 //! Policy-aware retry decision engine.
+//!
+//! Retry logic lives on the Praxis side of the Pingora boundary: given
+//! an upstream failure outcome, this engine decides whether to retry and
+//! how long to wait, applying the configured [`RetryPolicy`](praxis_core::config::RetryPolicy) (retriable
+//! conditions and backoff) against per-cluster [`ClusterRetryState`](praxis_core::retry::ClusterRetryState) so
+//! that retries cannot amplify upstream load without bound.
 
 use std::time::Duration;
 
@@ -29,6 +35,12 @@ pub(super) enum RetryOutcome {
     RefusedStream,
     /// Upstream returned an HTTP status code.
     StatusCode(u16),
+    /// Any error not covered by an explicit classification.
+    ///
+    /// Never retriable: broadening unknown error types into a retriable
+    /// class would silently retry internal errors, proxy bugs, and other
+    /// conditions no policy opted into.
+    Other,
 }
 
 /// Decision returned by [`should_retry`].
@@ -65,18 +77,20 @@ pub(super) fn is_retriable(policy: &RetryPolicy, outcome: RetryOutcome) -> bool 
                 (500..600).contains(&code) && policy.retriable_conditions.contains(&RetriableCondition::Status5xx);
             in_list || is_5xx
         },
+        RetryOutcome::Other => false,
     }
 }
 
 /// Classify a Pingora error into a [`RetryOutcome`].
 #[must_use]
-#[expect(clippy::match_same_arms, reason = "explicit arms document classification intent")]
 pub(super) fn classify_error(e: &pingora_core::Error) -> RetryOutcome {
     use pingora_core::ErrorType;
     match e.etype() {
         ErrorType::ConnectError
         | ErrorType::ConnectTimedout
         | ErrorType::ConnectRefused
+        | ErrorType::ConnectNoRoute
+        | ErrorType::ConnectProxyFailure
         | ErrorType::TLSHandshakeFailure
         | ErrorType::TLSHandshakeTimedout => RetryOutcome::ConnectFailure,
         ErrorType::ConnectionClosed => RetryOutcome::Reset,
@@ -85,7 +99,7 @@ pub(super) fn classify_error(e: &pingora_core::Error) -> RetryOutcome {
         ErrorType::ReadError | ErrorType::ReadTimedout | ErrorType::WriteError | ErrorType::WriteTimedout => {
             RetryOutcome::Reset
         },
-        _ => RetryOutcome::ConnectFailure,
+        _ => RetryOutcome::Other,
     }
 }
 
@@ -93,7 +107,9 @@ pub(super) fn classify_error(e: &pingora_core::Error) -> RetryOutcome {
 // Decision
 // -----------------------------------------------------------------------------
 
-/// Pure retry decision. Does not mutate `ctx`; caller applies side effects.
+/// Retry decision over `ctx` and `policy`. Does not mutate `ctx`, but a
+/// passing budget check consumes one token from `budget`; callers must not
+/// re-invoke this for the same failure.
 ///
 /// Guards (all must pass):
 /// - outcome is retriable under the policy
@@ -328,5 +344,26 @@ mod tests {
         assert_eq!(cond, RetriableCondition::Status5xx);
         let cond: RetriableCondition = serde_yaml::from_str("status5xx").unwrap();
         assert_eq!(cond, RetriableCondition::Status5xx);
+    }
+    #[test]
+    fn unknown_error_types_are_not_retriable() {
+        let policy = RetryPolicy::legacy_default();
+        assert!(
+            !is_retriable(&policy, RetryOutcome::Other),
+            "unclassified errors must never be retried"
+        );
+        let permissive = RetryPolicy {
+            retriable_conditions: vec![
+                RetriableCondition::ConnectFailure,
+                RetriableCondition::Reset,
+                RetriableCondition::RefusedStream,
+                RetriableCondition::Status5xx,
+            ],
+            ..RetryPolicy::legacy_default()
+        };
+        assert!(
+            !is_retriable(&permissive, RetryOutcome::Other),
+            "even a fully permissive policy must not retry unclassified errors"
+        );
     }
 }

@@ -212,17 +212,22 @@ pub(super) fn extract_host(addr: &str) -> &str {
 
 /// Returns `true` for IP addresses that are SSRF-sensitive.
 ///
-/// Covers loopback and link-local for both IPv4 and IPv6.
-/// [RFC 1918] private ranges (10/8, 172.16/12, 192.168/16) are
-/// intentionally not flagged.
+/// Covers loopback, link-local, and the unspecified / "this host" ranges
+/// (`0.0.0.0/8` and IPv6 `::`) for both families. The unspecified ranges are
+/// included because a `connect()` to `0.0.0.0` (or any `0.x.x.x`) or `::` is
+/// routed to loopback on Linux/BSD, so they reach the same services the
+/// loopback check is meant to block. [RFC 1918] private ranges (10/8,
+/// 172.16/12, 192.168/16) are intentionally not flagged.
 ///
 /// [RFC 1918]: https://datatracker.ietf.org/doc/html/rfc1918
 pub fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
     match ip {
-        IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local(),
+        // `octets()[0] == 0` covers the whole 0.0.0.0/8 "this host" block,
+        // including the unspecified address 0.0.0.0.
+        IpAddr::V4(v4) => v4.is_loopback() || v4.is_link_local() || v4.octets()[0] == 0,
         IpAddr::V6(v6) => {
             let segs = v6.segments();
-            v6.is_loopback() || (segs[0] & 0xFFC0) == 0xFE80
+            v6.is_loopback() || v6.is_unspecified() || (segs[0] & 0xFFC0) == 0xFE80
         },
     }
 }
@@ -600,6 +605,22 @@ clusters:
         assert!(
             super::is_ssrf_sensitive(&"::1".parse().unwrap()),
             "::1 should be flagged"
+        );
+    }
+
+    #[test]
+    fn is_ssrf_sensitive_flags_unspecified_this_host() {
+        assert!(
+            super::is_ssrf_sensitive(&"0.0.0.0".parse().unwrap()),
+            "0.0.0.0 (unspecified) routes to loopback and must be flagged"
+        );
+        assert!(
+            super::is_ssrf_sensitive(&"0.0.0.1".parse().unwrap()),
+            "0.0.0.1 (0.0.0.0/8 this-host block) must be flagged"
+        );
+        assert!(
+            super::is_ssrf_sensitive(&"::".parse().unwrap()),
+            ":: (IPv6 unspecified) routes to loopback and must be flagged"
         );
     }
 

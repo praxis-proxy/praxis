@@ -53,7 +53,25 @@ const H2_FRAME_HEADER_LEN: usize = 9;
 /// # }
 /// ```
 pub async fn http_probe(addr: &str, path: &str, expected_status: u16, timeout: Duration) -> bool {
-    let result = tokio::time::timeout(timeout, http_probe_inner(addr, path, expected_status)).await;
+    http_probe_with_request(addr, &build_http_probe_request(path), expected_status, timeout).await
+}
+
+/// Build the raw HTTP request line for probing `path`.
+///
+/// The request is constant per configured path; the health runner
+/// builds it once per task instead of once per probe.
+pub(crate) fn build_http_probe_request(path: &str) -> String {
+    format!("GET {path} HTTP/1.1\r\nHost: health-check\r\nConnection: close\r\n\r\n")
+}
+
+/// [`http_probe`] over pre-built request bytes.
+pub(crate) async fn http_probe_with_request(
+    addr: &str,
+    request: &str,
+    expected_status: u16,
+    timeout: Duration,
+) -> bool {
+    let result = tokio::time::timeout(timeout, http_probe_inner(addr, request, expected_status)).await;
     if let Ok(ok) = result {
         ok
     } else {
@@ -63,7 +81,7 @@ pub async fn http_probe(addr: &str, path: &str, expected_status: u16, timeout: D
 }
 
 /// Inner HTTP probe logic (no timeout wrapper).
-async fn http_probe_inner(addr: &str, path: &str, expected_status: u16) -> bool {
+async fn http_probe_inner(addr: &str, request: &str, expected_status: u16) -> bool {
     let mut stream = match TcpStream::connect(addr).await {
         Ok(s) => s,
         Err(e) => {
@@ -72,7 +90,6 @@ async fn http_probe_inner(addr: &str, path: &str, expected_status: u16) -> bool 
         },
     };
 
-    let request = format!("GET {path} HTTP/1.1\r\nHost: health-check\r\nConnection: close\r\n\r\n");
     if let Err(e) = stream.write_all(request.as_bytes()).await {
         trace!(addr, error = %e, "health check write failed");
         return false;
@@ -125,14 +142,10 @@ async fn read_status_line(stream: &mut TcpStream, addr: &str) -> Option<String> 
 /// );
 /// assert_eq!(parse_status_code("garbage"), None);
 /// ```
-#[expect(clippy::indexing_slicing, reason = "guarded by length check")]
 pub(crate) fn parse_status_code(response: &str) -> Option<u16> {
     let first_line = response.lines().next()?;
     let parts: Vec<&str> = first_line.splitn(3, ' ').collect();
-    if parts.len() < 2 {
-        return None;
-    }
-    parts[1].parse().ok()
+    parts.get(1)?.parse().ok()
 }
 
 // -----------------------------------------------------------------------------
@@ -245,9 +258,8 @@ async fn h2_close_gracefully(stream: &mut TcpStream) {
 /// let not_settings = &[0, 0, 0, 1, 0, 0, 0, 0, 0];
 /// assert!(!is_settings_frame(not_settings));
 /// ```
-#[expect(clippy::indexing_slicing, reason = "guarded by length check")]
 pub(crate) fn is_settings_frame(buf: &[u8]) -> bool {
-    buf.len() >= H2_FRAME_HEADER_LEN && buf[3] == H2_FRAME_TYPE_SETTINGS
+    buf.len() >= H2_FRAME_HEADER_LEN && buf.get(3) == Some(&H2_FRAME_TYPE_SETTINGS)
 }
 
 // -----------------------------------------------------------------------------

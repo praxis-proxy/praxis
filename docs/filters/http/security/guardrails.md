@@ -10,7 +10,7 @@ Rejects requests matching string, regex, or PII rules against headers and/or bod
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
 | `action` | `reject` \| `flag` | no | What to do when a rule matches (default: reject). |
-| `reject_oversized` | bool | no | Reject requests whose body exceeds the inspection buffer limit (1 MiB) when body rules are active, instead of silently truncating inspection. |
+| `reject_oversized` | bool | no | Reject a body that exactly reaches the inspection buffer limit (1 MiB) instead of inspecting it. Bodies that *exceed* the limit are always rejected with 413 by the streaming buffer regardless of this flag — there is no silent truncation. This flag only governs a body sized exactly at the limit, which is otherwise inspected as-is. |
 | `rules` | RuleConfig[] | yes | List of rules to evaluate. |
 | `rules[].name` | string | no | Header name (required when `target` is [`Header`]). |
 | `rules[].contains` | string \| (`ssn` \| `credit_card` \| `phone` \| `email`)[] | no | Literal substring (case-insensitive) or PII category list. |

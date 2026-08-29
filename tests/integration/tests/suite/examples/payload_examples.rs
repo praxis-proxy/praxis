@@ -59,7 +59,11 @@ fn compression_returns_200_without_accept_encoding() {
 
 #[test]
 fn stream_buffer_routes_process_action() {
+    // The processor cluster lists two distinct endpoints (3001, 3002); give
+    // each its own backend (both returning "processed") rather than collapsing
+    // them onto one address, which config validation rejects as a duplicate.
     let processor_guard = start_backend_with_shutdown("processed");
+    let processor_guard_2 = start_backend_with_shutdown("processed");
     let default_guard = start_backend_with_shutdown("default");
     let proxy_port = free_port();
     let config = load_example_config(
@@ -67,7 +71,7 @@ fn stream_buffer_routes_process_action() {
         proxy_port,
         HashMap::from([
             ("127.0.0.1:3001", processor_guard.port()),
-            ("127.0.0.1:3002", processor_guard.port()),
+            ("127.0.0.1:3002", processor_guard_2.port()),
             ("127.0.0.1:3003", default_guard.port()),
             ("127.0.0.1:3000", default_guard.port()),
         ]),
@@ -90,13 +94,17 @@ fn stream_buffer_routes_process_action() {
 fn stream_buffer_routes_validate_action() {
     let validator_guard = start_backend_with_shutdown("validated");
     let default_guard = start_backend_with_shutdown("default");
+    // The processor cluster (3001, 3002) is not exercised here but its two
+    // endpoints must still map to distinct addresses, since config validation
+    // rejects a duplicate endpoint address within a cluster.
+    let processor_guard = start_backend_with_shutdown("default");
     let proxy_port = free_port();
     let config = load_example_config(
         "payload-processing/stream-buffer.yaml",
         proxy_port,
         HashMap::from([
             ("127.0.0.1:3001", default_guard.port()),
-            ("127.0.0.1:3002", default_guard.port()),
+            ("127.0.0.1:3002", processor_guard.port()),
             ("127.0.0.1:3003", validator_guard.port()),
             ("127.0.0.1:3000", default_guard.port()),
         ]),
@@ -118,13 +126,17 @@ fn stream_buffer_routes_validate_action() {
 #[test]
 fn stream_buffer_routes_unknown_action_to_default() {
     let default_guard = start_backend_with_shutdown("default-hit");
+    // The processor cluster (3001, 3002) is not exercised here but its two
+    // endpoints must still map to distinct addresses, since config validation
+    // rejects a duplicate endpoint address within a cluster.
+    let processor_guard = start_backend_with_shutdown("default-hit");
     let proxy_port = free_port();
     let config = load_example_config(
         "payload-processing/stream-buffer.yaml",
         proxy_port,
         HashMap::from([
             ("127.0.0.1:3001", default_guard.port()),
-            ("127.0.0.1:3002", default_guard.port()),
+            ("127.0.0.1:3002", processor_guard.port()),
             ("127.0.0.1:3003", default_guard.port()),
             ("127.0.0.1:3000", default_guard.port()),
         ]),

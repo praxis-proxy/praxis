@@ -7,6 +7,12 @@ use std::{fmt::Debug, sync::Arc};
 
 use dashmap::DashMap;
 
+/// A matched key-value entry: the stored key and its value.
+pub type KvEntry = (Arc<str>, Arc<str>);
+
+/// Concurrent map of store name to backend.
+type StoreMap = DashMap<Arc<str>, Arc<dyn KvBackend>>;
+
 // -----------------------------------------------------------------------------
 // MatchType
 // -----------------------------------------------------------------------------
@@ -111,8 +117,15 @@ pub trait KvBackend: Send + Sync + Debug {
     /// Return all key-value pairs in the store.
     fn entries(&self) -> Vec<(Arc<str>, Arc<str>)>;
 
-    /// Look up the first entry whose key matches `pattern`
-    /// using the given [`MatchType`].
+    /// Look up an entry whose key matches `pattern` using the given
+    /// [`MatchType`].
+    ///
+    /// For [`Exact`] this is the entry with that key. For [`Prefix`],
+    /// [`Suffix`], and [`Regex`], when several keys match, the entry with
+    /// the lexicographically-smallest key is returned, so the result is
+    /// deterministic across runs; those variants scan the whole store
+    /// (O(n)) and, for [`Regex`], compile `pattern`, so patterns must be
+    /// operator-controlled rather than derived from request data.
     ///
     /// Returns the matching key and its value, or an error if
     /// the pattern is invalid (e.g. malformed regex).
@@ -122,9 +135,11 @@ pub trait KvBackend: Send + Sync + Debug {
     /// Returns an error string if `match_type` is [`Regex`] and
     /// the pattern fails to compile.
     ///
+    /// [`Exact`]: MatchType::Exact
+    /// [`Prefix`]: MatchType::Prefix
+    /// [`Suffix`]: MatchType::Suffix
     /// [`Regex`]: MatchType::Regex
-    #[expect(clippy::type_complexity, reason = "trait return type")]
-    fn lookup(&self, pattern: &str, match_type: MatchType) -> Result<Option<(Arc<str>, Arc<str>)>, String>;
+    fn lookup(&self, pattern: &str, match_type: MatchType) -> Result<Option<KvEntry>, String>;
 
     /// Number of entries in the store.
     fn len(&self) -> usize;
@@ -240,8 +255,7 @@ impl KvLookup {
 #[derive(Clone, Debug)]
 pub struct KvStoreRegistry {
     /// Named store backends.
-    #[expect(clippy::type_complexity, reason = "single-field struct wrapping DashMap")]
-    stores: Arc<DashMap<Arc<str>, Arc<dyn KvBackend>>>,
+    stores: Arc<StoreMap>,
 }
 
 impl KvStoreRegistry {

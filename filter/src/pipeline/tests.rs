@@ -1887,7 +1887,7 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         vec![],
     );
 
-    let pipeline = FilterPipeline {
+    let pipeline = with_body_indices(FilterPipeline {
         body_capabilities: BodyCapabilities::default(),
         compression: None,
         filters: vec![filter_a, filter_b, filter_c],
@@ -1895,15 +1895,16 @@ async fn skip_to_excludes_skipped_filters_from_response() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        session_stores: None,
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
         request_body_ceiling: None,
         response_body_ceiling: None,
-        request_body_access_by_idx: Vec::new(),
-        response_body_access_by_idx: Vec::new(),
-    };
+        request_body_filter_indices: Vec::new(),
+        response_body_filter_indices: Vec::new(),
+    });
 
     let req = crate::test_utils::make_request(Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -1959,7 +1960,7 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
         vec![],
     );
 
-    let pipeline = FilterPipeline {
+    let pipeline = with_body_indices(FilterPipeline {
         body_capabilities: BodyCapabilities::default(),
         compression: None,
         filters: vec![filter_a, filter_b, filter_c],
@@ -1967,15 +1968,16 @@ async fn skip_to_excludes_skipped_filters_from_body_hooks() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        session_stores: None,
         may_select_streaming_subrequest_response: false,
         subrequest_client: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
         request_body_ceiling: None,
         response_body_ceiling: None,
-        request_body_access_by_idx: Vec::new(),
-        response_body_access_by_idx: Vec::new(),
-    };
+        request_body_filter_indices: Vec::new(),
+        response_body_filter_indices: Vec::new(),
+    });
 
     let req = crate::test_utils::make_request(Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -2012,7 +2014,7 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
     // skipped yet, so every eligible filter must still run.
     let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
-    let pipeline = FilterPipeline {
+    let pipeline = with_body_indices(FilterPipeline {
         body_capabilities: BodyCapabilities::default(),
         compression: None,
         filters: vec![
@@ -2039,15 +2041,16 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        session_stores: None,
         may_select_streaming_subrequest_response: false,
         subrequest_client: None,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
         request_body_ceiling: None,
         response_body_ceiling: None,
-        request_body_access_by_idx: Vec::new(),
-        response_body_access_by_idx: Vec::new(),
-    };
+        request_body_filter_indices: Vec::new(),
+        response_body_filter_indices: Vec::new(),
+    });
 
     let req = crate::test_utils::make_request(Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -2075,7 +2078,7 @@ async fn body_hooks_run_for_every_filter_before_the_request_phase() {
 async fn all_executed_filters_run_on_response() {
     let log: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
 
-    let pipeline = FilterPipeline {
+    let pipeline = with_body_indices(FilterPipeline {
         body_capabilities: BodyCapabilities::default(),
         compression: None,
         filters: vec![
@@ -2102,15 +2105,16 @@ async fn all_executed_filters_run_on_response() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        session_stores: None,
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
         request_body_ceiling: None,
         response_body_ceiling: None,
-        request_body_access_by_idx: Vec::new(),
-        response_body_access_by_idx: Vec::new(),
-    };
+        request_body_filter_indices: Vec::new(),
+        response_body_filter_indices: Vec::new(),
+    });
 
     let req = crate::test_utils::make_request(Method::GET, "/");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -2156,7 +2160,7 @@ async fn skipped_filter_skips_its_branches() {
     );
     parent.branches = vec![branch];
 
-    let pipeline = FilterPipeline {
+    let pipeline = with_body_indices(FilterPipeline {
         body_capabilities: BodyCapabilities::default(),
         compression: None,
         filters: vec![parent],
@@ -2164,15 +2168,16 @@ async fn skipped_filter_skips_its_branches() {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        session_stores: None,
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
         request_body_ceiling: None,
         response_body_ceiling: None,
-        request_body_access_by_idx: Vec::new(),
-        response_body_access_by_idx: Vec::new(),
-    };
+        request_body_filter_indices: Vec::new(),
+        response_body_filter_indices: Vec::new(),
+    });
 
     let req = crate::test_utils::make_request(Method::GET, "/other");
     let mut ctx = crate::test_utils::make_filter_context(&req);
@@ -3370,10 +3375,19 @@ impl HttpFilter for StreamBufferBodyDoneFilter {
     }
 }
 
+/// Recompute the precomputed body-filter index lists for a hand-built
+/// pipeline literal, mirroring what [`FilterPipeline::build`] does.
+fn with_body_indices(mut pipeline: FilterPipeline) -> FilterPipeline {
+    let (request, response) = super::body::body_filter_indices(&pipeline.filters);
+    pipeline.request_body_filter_indices = request;
+    pipeline.response_body_filter_indices = response;
+    pipeline
+}
+
 /// Build a [`FilterPipeline`] from pre-built [`PipelineFilter`]s and
 /// explicit body capabilities (defaults everywhere else).
 fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilter>) -> FilterPipeline {
-    FilterPipeline {
+    with_body_indices(FilterPipeline {
         body_capabilities,
         compression: None,
         filters,
@@ -3381,15 +3395,16 @@ fn test_pipeline(body_capabilities: BodyCapabilities, filters: Vec<PipelineFilte
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        session_stores: None,
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
         request_body_ceiling: None,
         response_body_ceiling: None,
-        request_body_access_by_idx: Vec::new(),
-        response_body_access_by_idx: Vec::new(),
-    }
+        request_body_filter_indices: Vec::new(),
+        response_body_filter_indices: Vec::new(),
+    })
 }
 
 /// Build a [`FilterPipeline`] from the given HTTP filters (no conditions).
@@ -3401,7 +3416,7 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 
-    FilterPipeline {
+    with_body_indices(FilterPipeline {
         body_capabilities,
         compression: None,
         filters,
@@ -3409,15 +3424,16 @@ fn make_pipeline(filters: Vec<Box<dyn HttpFilter>>) -> FilterPipeline {
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        session_stores: None,
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
         request_body_ceiling: None,
         response_body_ceiling: None,
-        request_body_access_by_idx: Vec::new(),
-        response_body_access_by_idx: Vec::new(),
-    }
+        request_body_filter_indices: Vec::new(),
+        response_body_filter_indices: Vec::new(),
+    })
 }
 
 /// Build a [`FilterPipeline`] with per-filter request conditions.
@@ -3431,7 +3447,7 @@ fn make_pipeline_with_conditions(
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 
-    FilterPipeline {
+    with_body_indices(FilterPipeline {
         body_capabilities,
         compression: None,
         filters,
@@ -3439,15 +3455,16 @@ fn make_pipeline_with_conditions(
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        session_stores: None,
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
         request_body_ceiling: None,
         response_body_ceiling: None,
-        request_body_access_by_idx: Vec::new(),
-        response_body_access_by_idx: Vec::new(),
-    }
+        request_body_filter_indices: Vec::new(),
+        response_body_filter_indices: Vec::new(),
+    })
 }
 
 /// Build a [`FilterPipeline`] with per-filter response conditions.
@@ -3461,7 +3478,7 @@ fn make_pipeline_with_response_conditions(
         .collect();
     let body_capabilities = compute_body_capabilities(&filters);
 
-    FilterPipeline {
+    with_body_indices(FilterPipeline {
         body_capabilities,
         compression: None,
         filters,
@@ -3469,15 +3486,16 @@ fn make_pipeline_with_response_conditions(
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::with_seed(0)),
         kv_stores: None,
+        session_stores: None,
         subrequest_client: None,
         may_select_streaming_subrequest_response: false,
         pipeline_extensions: Vec::new(),
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
         request_body_ceiling: None,
         response_body_ceiling: None,
-        request_body_access_by_idx: Vec::new(),
-        response_body_access_by_idx: Vec::new(),
-    }
+        request_body_filter_indices: Vec::new(),
+        response_body_filter_indices: Vec::new(),
+    })
 }
 
 /// Build a `When` condition that matches on a path prefix.
@@ -4078,13 +4096,14 @@ fn streaming_capability_not_detected_for_normal_filter() {
 #[test]
 fn streaming_capability_detected_when_filter_declares_it() {
     let streaming_pf = super::test_filters::streaming_capable_filter();
-    let pipeline = FilterPipeline {
+    let pipeline = with_body_indices(FilterPipeline {
         body_capabilities: BodyCapabilities::default(),
         compression: None,
         filters: vec![streaming_pf],
         health_registry: None,
         id_generator: Arc::new(praxis_core::id::IdGenerator::new()),
         kv_stores: None,
+        session_stores: None,
         pipeline_extensions: Vec::new(),
         record_filter_duration_metrics: false,
         subrequest_client: None,
@@ -4092,9 +4111,9 @@ fn streaming_capability_detected_when_filter_declares_it() {
         time_source: Arc::new(praxis_core::time::SystemTimeSource),
         request_body_ceiling: None,
         response_body_ceiling: None,
-        request_body_access_by_idx: Vec::new(),
-        response_body_access_by_idx: Vec::new(),
-    };
+        request_body_filter_indices: Vec::new(),
+        response_body_filter_indices: Vec::new(),
+    });
     assert!(
         pipeline.may_select_streaming_subrequest_response(),
         "pipeline with streaming-capable filter should detect capability"

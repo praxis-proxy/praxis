@@ -121,15 +121,32 @@ fn build_rejection_header(rejection: &Rejection) -> pingora_http::ResponseHeader
             pingora_http::ResponseHeader::build(500, header_count).expect("500 is a valid status code")
         },
     };
+    append_rejection_headers(&mut header, rejection);
+    header
+}
+
+/// Append a rejection's filter-supplied headers, dropping reserved ones.
+///
+/// Reserved internal (x-praxis-* / x-ext-*) headers never reach the client:
+/// the upstream-response and terminal-response paths both strip them, and a
+/// rejection built from filter-supplied headers must hold the same invariant.
+fn append_rejection_headers(header: &mut pingora_http::ResponseHeader, rejection: &Rejection) {
     for (name, value) in &rejection.headers {
+        if praxis_core::reserved_headers::is_reserved(name) {
+            debug!(header = %name, "dropping reserved internal header from rejection response");
+            continue;
+        }
         let _append = header.append_header(name.clone(), value.clone());
     }
     if let Some(headers) = &rejection.header_map {
         for (name, value) in headers.iter() {
+            if praxis_core::reserved_headers::is_reserved(name.as_str()) {
+                debug!(header = %name, "dropping reserved internal header from rejection response");
+                continue;
+            }
             let _append = header.append_header(name.clone(), value.clone());
         }
     }
-    header
 }
 
 // -----------------------------------------------------------------------------
@@ -201,6 +218,65 @@ mod tests {
         assert!(
             resp.headers.is_empty(),
             "headers should be empty when upstream has none"
+        );
+    }
+
+    #[test]
+    fn rejection_header_strips_reserved_internal_headers() {
+        let mut header_map = http::HeaderMap::new();
+        header_map.insert("x-ext-protocol-task", http::HeaderValue::from_static("meta"));
+        header_map.insert("x-request-id", http::HeaderValue::from_static("abc-123"));
+        let mut rejection = Rejection::status(403)
+            .with_header("x-praxis-route", "internal-cluster")
+            .with_header("content-type", "text/plain");
+        rejection.header_map = Some(Box::new(header_map));
+
+        let header = build_rejection_header(&rejection);
+        assert!(
+            header.headers.get("x-praxis-route").is_none(),
+            "reserved x-praxis-* header must never reach the client via a rejection"
+        );
+        assert!(
+            header.headers.get("x-ext-protocol-task").is_none(),
+            "reserved x-ext-* header must never reach the client via a rejection header_map"
+        );
+        assert_eq!(
+            header.headers.get("content-type").map(http::HeaderValue::as_bytes),
+            Some(b"text/plain".as_slice()),
+            "non-reserved rejection headers must be preserved"
+        );
+        assert_eq!(
+            header.headers.get("x-request-id").map(http::HeaderValue::as_bytes),
+            Some(b"abc-123".as_slice()),
+            "non-reserved header_map entries must be preserved"
+        );
+    }
+
+    #[test]
+    fn rejection_header_strips_mixed_case_reserved_from_string_list() {
+        // A filter (static_response, rate_limit, policy, ...) can supply a
+        // response header with arbitrary case via Rejection::with_header, which
+        // lands in the string-list branch. The reserved check must be
+        // case-insensitive so a mixed-case X-Praxis-*/X-Ext-* header cannot
+        // slip past it (pingora preserves original casing on HTTP/1.1).
+        let rejection = Rejection::status(403)
+            .with_header("X-Praxis-Route", "internal-cluster")
+            .with_header("X-Ext-Agent-Task", "meta")
+            .with_header("X-Custom", "keep");
+
+        let header = build_rejection_header(&rejection);
+        assert!(
+            header.headers.get("x-praxis-route").is_none(),
+            "a mixed-case reserved x-praxis-* header must be dropped from a rejection"
+        );
+        assert!(
+            header.headers.get("x-ext-agent-task").is_none(),
+            "a mixed-case reserved x-ext-agent-* header must be dropped from a rejection"
+        );
+        assert_eq!(
+            header.headers.get("x-custom").map(http::HeaderValue::as_bytes),
+            Some(b"keep".as_slice()),
+            "non-reserved rejection headers must still be preserved"
         );
     }
 

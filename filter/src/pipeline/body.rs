@@ -77,22 +77,27 @@ pub(super) fn compute_body_capabilities(filters: &[PipelineFilter]) -> BodyCapab
     caps
 }
 
-/// Precompute each filter's declared body access as index-aligned flags.
+/// Precompute the pipeline indices of filters that declared body access.
 ///
-/// The body-chunk loops run once per chunk per filter; the declared
-/// access is a per-filter constant, so these flags let the loops skip
-/// non-body filters without a per-chunk virtual call.
-pub(super) fn body_access_by_index(filters: &[PipelineFilter]) -> (Vec<bool>, Vec<bool>) {
-    filters
-        .iter()
-        .map(|pf| match &pf.filter {
-            AnyFilter::Http(f) => (
-                f.request_body_access() != BodyAccess::None,
-                f.response_body_access() != BodyAccess::None,
-            ),
-            AnyFilter::Tcp(_) => (false, false),
-        })
-        .unzip()
+/// The body-chunk loops run once per chunk; declared access is a
+/// per-filter constant, so walking only these indices skips every
+/// non-body filter without per-chunk predicate checks or virtual
+/// calls — a pipeline with two body filters among forty no longer
+/// iterates the other thirty-eight on every chunk.
+pub(super) fn body_filter_indices(filters: &[PipelineFilter]) -> (Vec<usize>, Vec<usize>) {
+    let mut request = Vec::new();
+    let mut response = Vec::new();
+    for (idx, pf) in filters.iter().enumerate() {
+        if let AnyFilter::Http(f) = &pf.filter {
+            if f.request_body_access() != BodyAccess::None {
+                request.push(idx);
+            }
+            if f.response_body_access() != BodyAccess::None {
+                response.push(idx);
+            }
+        }
+    }
+    (request, response)
 }
 
 /// Recursively accumulate body capabilities from a slice of pipeline filters.

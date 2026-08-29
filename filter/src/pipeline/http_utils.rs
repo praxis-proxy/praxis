@@ -13,14 +13,13 @@
 
 use bytes::Bytes;
 use praxis_core::config::FailureMode;
-use tracing::{debug, trace, warn};
+use tracing::{Instrument as _, debug, info_span, trace, warn};
 
 use super::check_failure_mode;
 use crate::{
     FilterError,
     actions::{FilterAction, Rejection},
     any_filter::AnyFilter,
-    body::BodyAccess,
     condition::{should_execute, should_execute_response_ref},
     context::{HttpFilterContext, Response},
     metrics::{PHASE_REQUEST, PHASE_RESPONSE, STREAM_BODY, STREAM_HEADERS, record_filter_duration},
@@ -47,19 +46,25 @@ pub(super) fn released_or_continue(released: bool) -> FilterAction {
 }
 
 /// Extract an HTTP filter eligible for request body processing.
+///
+/// `conditions_resolved` says the request phase already evaluated this
+/// filter's conditions (a skipped filter is unmarked in
+/// `executed_filter_indices` and filtered out before this call), so the
+/// per-chunk re-walk of path/method/header conditions is skipped; the
+/// untracked pre-read path still evaluates them here.
 pub(super) fn as_request_body_filter<'a>(
     filter: &'a AnyFilter,
     conditions: &[praxis_core::config::Condition],
     request: &crate::context::Request,
+    conditions_resolved: bool,
 ) -> Option<&'a dyn crate::filter::HttpFilter> {
+    // Callers reach here only via the precomputed body-filter index
+    // lists, which already encode `request_body_access() != None`.
     let http_filter = match filter {
         AnyFilter::Http(f) => f.as_ref(),
         AnyFilter::Tcp(_) => return None,
     };
-    if http_filter.request_body_access() == BodyAccess::None {
-        return None;
-    }
-    if !should_execute(conditions, request) {
+    if !conditions_resolved && !should_execute(conditions, request) {
         trace!(filter = http_filter.name(), "body hook skipped by conditions");
         return None;
     }
@@ -72,13 +77,12 @@ pub(super) fn as_response_body_filter<'a>(
     resp_conditions: &[praxis_core::config::ResponseCondition],
     response_header: Option<&Response>,
 ) -> Option<&'a dyn crate::filter::HttpFilter> {
+    // Callers reach here only via the precomputed body-filter index
+    // lists, which already encode `response_body_access() != None`.
     let http_filter = match filter {
         AnyFilter::Http(f) => f.as_ref(),
         AnyFilter::Tcp(_) => return None,
     };
-    if http_filter.response_body_access() == BodyAccess::None {
-        return None;
-    }
     if skip_by_response_conditions_with_header(http_filter, resp_conditions, response_header) {
         return None;
     }
@@ -124,10 +128,10 @@ pub(super) fn dispatch_body_result(
             Ok(BodyFilterOutcome::Released)
         },
         Ok(FilterAction::Reject(rejection)) => {
-            debug!(
+            warn!(
                 filter = filter_name,
                 status = rejection.status,
-                "filter rejected {phase}"
+                "{phase} rejected by filter"
             );
             Ok(BodyFilterOutcome::Rejected(rejection))
         },
@@ -182,7 +186,9 @@ pub(super) enum HeaderFilterOutcome {
     Rejected(Rejection),
 
     /// Filter produced a complete terminal response (request phase only).
-    TerminalResponse(crate::actions::TerminalResponse),
+    /// Boxed end-to-end so the ~100-byte payload is neither unboxed here
+    /// nor re-boxed by the caller.
+    TerminalResponse(Box<crate::actions::TerminalResponse>),
 
     /// Filter produced a streaming terminal response (request phase only).
     StreamingTerminalResponse(Box<crate::actions::StreamingTerminalResponse>),
@@ -196,29 +202,44 @@ pub(super) async fn run_request_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<HeaderFilterOutcome, FilterError> {
-    trace!(filter = http_filter.name(), "on_request");
-    let request_result = if metrics_enabled {
-        let start = std::time::Instant::now();
-        let result = http_filter.on_request(ctx).await;
-        record_filter_duration(
-            http_filter.name(),
-            PHASE_REQUEST,
-            STREAM_HEADERS,
-            start.elapsed().as_secs_f64(),
-        );
+    let filter_span = info_span!(
+        "filter",
+        "otel.name" = %format_args!("filter:{}:request", http_filter.name()),
+        "filter.name" = http_filter.name(),
+        "filter.phase" = "request",
+        "filter.result" = tracing::field::Empty,
+    );
+    let request_result = async {
+        trace!("on_request");
+        let result = if metrics_enabled {
+            let start = std::time::Instant::now();
+            let result = http_filter.on_request(ctx).await;
+            record_filter_duration(
+                http_filter.name(),
+                PHASE_REQUEST,
+                STREAM_HEADERS,
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        } else {
+            http_filter.on_request(ctx).await
+        };
+        // Recording from inside the instrumented future spares the span
+        // clone (a subscriber clone_span/try_close pair per hook).
+        record_filter_result(&tracing::Span::current(), &result);
         result
-    } else {
-        http_filter.on_request(ctx).await
-    };
+    }
+    .instrument(filter_span)
+    .await;
     match request_result {
         Ok(FilterAction::Continue | FilterAction::Release | FilterAction::BodyDone) => {
             Ok(HeaderFilterOutcome::Continue)
         },
         Ok(FilterAction::Reject(rejection)) => {
-            debug!(
+            warn!(
                 filter = http_filter.name(),
                 status = rejection.status,
-                "filter rejected request"
+                "request rejected by filter"
             );
             Ok(HeaderFilterOutcome::Rejected(rejection))
         },
@@ -228,7 +249,7 @@ pub(super) async fn run_request_filter(
                 status = terminal.status,
                 "filter produced terminal response"
             );
-            Ok(HeaderFilterOutcome::TerminalResponse(*terminal))
+            Ok(HeaderFilterOutcome::TerminalResponse(terminal))
         },
         Ok(FilterAction::StreamingTerminalResponse(terminal)) => {
             debug!(
@@ -255,20 +276,33 @@ pub(super) async fn run_request_body_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<BodyFilterOutcome, FilterError> {
-    trace!(filter = http_filter.name(), "on_request_body");
-    let body_result = if metrics_enabled {
-        let start = std::time::Instant::now();
-        let result = http_filter.on_request_body(ctx, body, end_of_stream).await;
-        record_filter_duration(
-            http_filter.name(),
-            PHASE_REQUEST,
-            STREAM_BODY,
-            start.elapsed().as_secs_f64(),
-        );
+    let filter_span = info_span!(
+        "filter",
+        "otel.name" = %format_args!("filter:{}:request_body", http_filter.name()),
+        "filter.name" = http_filter.name(),
+        "filter.phase" = "request_body",
+        "filter.result" = tracing::field::Empty,
+    );
+    let body_result = async {
+        trace!("on_request_body");
+        let result = if metrics_enabled {
+            let start = std::time::Instant::now();
+            let result = http_filter.on_request_body(ctx, body, end_of_stream).await;
+            record_filter_duration(
+                http_filter.name(),
+                PHASE_REQUEST,
+                STREAM_BODY,
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        } else {
+            http_filter.on_request_body(ctx, body, end_of_stream).await
+        };
+        record_filter_result(&tracing::Span::current(), &result);
         result
-    } else {
-        http_filter.on_request_body(ctx, body, end_of_stream).await
-    };
+    }
+    .instrument(filter_span)
+    .await;
     dispatch_body_result(body_result, http_filter.name(), "request body", failure_mode)
 }
 
@@ -282,7 +316,15 @@ pub(super) fn run_response_body_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<BodyFilterOutcome, FilterError> {
-    trace!(filter = http_filter.name(), "on_response_body");
+    let filter_span = info_span!(
+        "filter",
+        "otel.name" = %format_args!("filter:{}:response_body", http_filter.name()),
+        "filter.name" = http_filter.name(),
+        "filter.phase" = "response_body",
+        "filter.result" = tracing::field::Empty,
+    );
+    let _entered = filter_span.enter();
+    trace!("on_response_body");
     let body_result = if metrics_enabled {
         let start = std::time::Instant::now();
         let result = http_filter.on_response_body(ctx, body, end_of_stream);
@@ -296,6 +338,7 @@ pub(super) fn run_response_body_filter(
     } else {
         http_filter.on_response_body(ctx, body, end_of_stream)
     };
+    record_filter_result(&filter_span, &body_result);
     dispatch_body_result(body_result, http_filter.name(), "response body", failure_mode)
 }
 
@@ -320,20 +363,33 @@ pub(super) async fn run_response_filter(
     failure_mode: FailureMode,
     metrics_enabled: bool,
 ) -> Result<HeaderFilterOutcome, FilterError> {
-    trace!(filter = http_filter.name(), "on_response");
-    let response_result = if metrics_enabled {
-        let start = std::time::Instant::now();
-        let result = http_filter.on_response(ctx).await;
-        record_filter_duration(
-            http_filter.name(),
-            PHASE_RESPONSE,
-            STREAM_HEADERS,
-            start.elapsed().as_secs_f64(),
-        );
+    let filter_span = info_span!(
+        "filter",
+        "otel.name" = %format_args!("filter:{}:response", http_filter.name()),
+        "filter.name" = http_filter.name(),
+        "filter.phase" = "response",
+        "filter.result" = tracing::field::Empty,
+    );
+    let response_result = async {
+        trace!("on_response");
+        let result = if metrics_enabled {
+            let start = std::time::Instant::now();
+            let result = http_filter.on_response(ctx).await;
+            record_filter_duration(
+                http_filter.name(),
+                PHASE_RESPONSE,
+                STREAM_HEADERS,
+                start.elapsed().as_secs_f64(),
+            );
+            result
+        } else {
+            http_filter.on_response(ctx).await
+        };
+        record_filter_result(&tracing::Span::current(), &result);
         result
-    } else {
-        http_filter.on_response(ctx).await
-    };
+    }
+    .instrument(filter_span)
+    .await;
     match response_result {
         Ok(
             FilterAction::Continue
@@ -346,7 +402,7 @@ pub(super) async fn run_response_filter(
             warn!(
                 filter = http_filter.name(),
                 status = rejection.status,
-                "filter rejected response"
+                "response rejected by filter"
             );
             Ok(HeaderFilterOutcome::Rejected(rejection))
         },
@@ -355,6 +411,20 @@ pub(super) async fn run_response_filter(
             Ok(HeaderFilterOutcome::Continue)
         },
     }
+}
+
+/// Record the filter result on the span's `filter.result` field.
+fn record_filter_result(span: &tracing::Span, result: &Result<FilterAction, FilterError>) {
+    let label = match result {
+        Ok(FilterAction::Continue) => "continue",
+        Ok(FilterAction::Release) => "release",
+        Ok(FilterAction::BodyDone) => "body_done",
+        Ok(FilterAction::Reject(_)) => "reject",
+        Ok(FilterAction::TerminalResponse(_)) => "terminal",
+        Ok(FilterAction::StreamingTerminalResponse(_)) => "streaming_terminal",
+        Err(_) => "error",
+    };
+    span.record("filter.result", label);
 }
 
 // -----------------------------------------------------------------------------
@@ -580,6 +650,70 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // Span Event Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn dispatch_body_result_rejection_returns_status() {
+        let rejection = Rejection::status(413);
+        let outcome = dispatch_body_result(
+            Ok(FilterAction::Reject(rejection)),
+            "size_limit",
+            "request body",
+            FailureMode::Closed,
+        )
+        .unwrap();
+        assert!(
+            matches!(&outcome, BodyFilterOutcome::Rejected(r) if r.status == 413),
+            "body rejection should carry status 413 for span event"
+        );
+    }
+
+    #[test]
+    fn dispatch_body_result_response_rejection_returns_status() {
+        let rejection = Rejection::status(500);
+        let outcome = dispatch_body_result(
+            Ok(FilterAction::Reject(rejection)),
+            "transform_filter",
+            "response body",
+            FailureMode::Closed,
+        )
+        .unwrap();
+        assert!(
+            matches!(&outcome, BodyFilterOutcome::Rejected(r) if r.status == 500),
+            "response body rejection should carry status 500 for span event"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_request_filter_rejection_returns_rejected_outcome() {
+        let filter = RejectingFilter(429);
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let outcome = run_request_filter(&filter, &mut ctx, FailureMode::Closed, false)
+            .await
+            .unwrap();
+        assert!(
+            matches!(&outcome, HeaderFilterOutcome::Rejected(r) if r.status == 429),
+            "rejecting filter should produce Rejected outcome with status for span event"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_response_filter_rejection_returns_rejected_outcome() {
+        let filter = ResponseRejectingFilter(503);
+        let req = crate::test_utils::make_request(http::Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        let outcome = run_response_filter(&filter, &mut ctx, FailureMode::Closed, false)
+            .await
+            .unwrap();
+        assert!(
+            matches!(&outcome, HeaderFilterOutcome::Rejected(r) if r.status == 503),
+            "response rejection should produce Rejected outcome with status for span event"
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
 
@@ -594,6 +728,38 @@ mod tests {
 
         async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
             Ok(FilterAction::Continue)
+        }
+    }
+
+    /// HTTP filter that always rejects requests with the given status.
+    struct RejectingFilter(u16);
+
+    #[async_trait::async_trait]
+    impl HttpFilter for RejectingFilter {
+        fn name(&self) -> &'static str {
+            "rejecting_filter"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Reject(Rejection::status(self.0)))
+        }
+    }
+
+    /// HTTP filter that always rejects responses with the given status.
+    struct ResponseRejectingFilter(u16);
+
+    #[async_trait::async_trait]
+    impl HttpFilter for ResponseRejectingFilter {
+        fn name(&self) -> &'static str {
+            "response_rejecting_filter"
+        }
+
+        async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Continue)
+        }
+
+        async fn on_response(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+            Ok(FilterAction::Reject(Rejection::status(self.0)))
         }
     }
 }

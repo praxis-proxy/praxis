@@ -20,33 +20,54 @@ use ppe::praxis_policy_core::cmf::{
 // JSON-RPC id extraction
 // -----------------------------------------------------------------------------
 
-/// Read the JSON-RPC `id` field as a string for use as a CMF
-/// correlation id. JSON-RPC permits string or numeric ids; we
-/// stringify either to a single canonical key. Returns an empty
-/// string when the body is missing or malformed — the correlation
-/// id isn't load-bearing for policy, only for audit linkage.
+/// A JSON-RPC body parsed once per filter phase.
 ///
-/// Delegates to [`json_rpc_id_value`] so the body is parsed by a single
-/// implementation rather than two independent `from_slice` calls.
-pub(super) fn json_rpc_id(body: &Bytes) -> String {
-    match json_rpc_id_value(body) {
-        serde_json::Value::String(s) => s,
-        serde_json::Value::Null => String::new(),
-        other => other.to_string(),
-    }
-}
+/// The request- and response-phase paths each needed the body's `id`
+/// (twice, on deny paths), `params`/`result`, and the rewrite base —
+/// previously each helper re-parsed the full body from bytes, up to
+/// three O(body) DOM materializations per phase. Parsing once and
+/// passing this around removes the repeats; a missing or malformed
+/// body parses to `Null`, reproducing every helper's old independent
+/// fallback exactly.
+pub(super) struct ParsedEnvelope(serde_json::Value);
 
-/// Typed companion to [`json_rpc_id`]. Returns the raw `id` JSON value
-/// from the request body — preserves the original shape (string or
-/// number) so a JSON-RPC error envelope echoes back exactly what the
-/// client sent. Returns `Value::Null` when the body is missing or
-/// malformed; per JSON-RPC 2.0, an error response MAY use `null` when
-/// the original id could not be determined.
-pub(super) fn json_rpc_id_value(body: &Bytes) -> serde_json::Value {
-    serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("id").cloned())
-        .unwrap_or(serde_json::Value::Null)
+impl ParsedEnvelope {
+    /// Parse `body`; malformed or empty input yields a `Null` envelope.
+    pub(super) fn parse(body: &Bytes) -> Self {
+        Self(serde_json::from_slice(body).unwrap_or(serde_json::Value::Null))
+    }
+
+    /// The raw `id` value (`Null` when absent), preserving the original
+    /// shape so error envelopes echo exactly what the client sent.
+    pub(super) fn id_value(&self) -> serde_json::Value {
+        self.0.get("id").cloned().unwrap_or(serde_json::Value::Null)
+    }
+
+    /// The `id` rendered for correlation strings.
+    pub(super) fn id_string(&self) -> String {
+        match self.id_value() {
+            serde_json::Value::String(s) => s,
+            serde_json::Value::Null => String::new(),
+            other => other.to_string(),
+        }
+    }
+
+    /// A top-level field of the envelope, if the body parsed to an
+    /// object carrying it.
+    fn field(&self, name: &str) -> Option<&serde_json::Value> {
+        self.0.get(name)
+    }
+
+    /// Consume the envelope, yielding the parsed DOM for rewriting.
+    ///
+    /// The reserializers mutate the same document this envelope
+    /// already parsed; re-parsing the body bytes for them would be a
+    /// second O(body) pass. A malformed body is `Null` here, and
+    /// `Null.get_mut(..)` short-circuits the rewrite exactly like the
+    /// old failed re-parse did.
+    pub(super) fn into_value(self) -> serde_json::Value {
+        self.0
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -68,17 +89,17 @@ pub(super) fn build_content_for_method(
     method: &str,
     entity_name: &str,
     correlation_id: &str,
-    body: &Bytes,
+    envelope: &ParsedEnvelope,
 ) -> Vec<ContentPart> {
-    let params: serde_json::Value = serde_json::from_slice::<serde_json::Value>(body)
-        .ok()
-        .and_then(|v| v.get("params").cloned())
-        .unwrap_or(serde_json::Value::Null);
+    // Borrow `params` in place: only `arguments` / `uri` are read out
+    // of it, and cloning the whole subtree — most of the body for
+    // typical payloads — per request served nothing.
+    let params = envelope.field("params");
 
     match method {
         "tools/call" => {
             let arguments = params
-                .get("arguments")
+                .and_then(|p| p.get("arguments"))
                 .and_then(|v| v.as_object())
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                 .unwrap_or_default();
@@ -93,7 +114,7 @@ pub(super) fn build_content_for_method(
         },
         "prompts/get" => {
             let arguments = params
-                .get("arguments")
+                .and_then(|p| p.get("arguments"))
                 .and_then(|v| v.as_object())
                 .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
                 .unwrap_or_default();
@@ -112,7 +133,7 @@ pub(super) fn build_content_for_method(
             // protocol classifier filter (it treats `uri` as the "selector"). Carry
             // it through as the `ResourceReference`.
             let uri = params
-                .get("uri")
+                .and_then(|p| p.get("uri"))
                 .and_then(|v| v.as_str())
                 .unwrap_or(entity_name)
                 .to_owned();
@@ -155,8 +176,8 @@ pub(super) fn build_content_for_method(
     clippy::too_many_lines,
     reason = "per-method envelope orchestration; splitting per-method obscures the JSON-RPC shape"
 )]
-pub(super) fn reserialize_json_rpc_body(original: &Bytes, method: &str, message: &Message) -> Option<Bytes> {
-    let mut envelope: serde_json::Value = serde_json::from_slice(original).ok()?;
+pub(super) fn reserialize_json_rpc_body(envelope: serde_json::Value, method: &str, message: &Message) -> Option<Bytes> {
+    let mut envelope = envelope;
     let params = envelope.get_mut("params")?;
     let params_obj = params.as_object_mut()?;
 
@@ -225,16 +246,12 @@ pub(super) fn build_response_content_for_method(
     method: &str,
     entity_name: &str,
     correlation_id: &str,
-    body: &Bytes,
+    envelope: &ParsedEnvelope,
 ) -> Vec<ContentPart> {
     if method != "tools/call" {
         return Vec::new();
     }
-    let envelope: serde_json::Value = match serde_json::from_slice::<serde_json::Value>(body) {
-        Ok(v) => v,
-        Err(_) => return Vec::new(),
-    };
-    let Some(result) = envelope.get("result") else {
+    let Some(result) = envelope.field("result") else {
         return Vec::new();
     };
     let is_error = result
@@ -298,11 +315,15 @@ pub(super) fn build_response_content_for_method(
 /// `result.structuredContent` is mirrored to the same value, but
 /// only when the original response already had it (we don't invent
 /// fields).
-pub(super) fn reserialize_json_rpc_response_body(original: &Bytes, method: &str, message: &Message) -> Option<Bytes> {
+pub(super) fn reserialize_json_rpc_response_body(
+    envelope: serde_json::Value,
+    method: &str,
+    message: &Message,
+) -> Option<Bytes> {
     if method != "tools/call" {
         return None;
     }
-    let mut envelope: serde_json::Value = serde_json::from_slice(original).ok()?;
+    let mut envelope = envelope;
     let result = envelope.get_mut("result")?;
     let result_obj = result.as_object_mut()?;
 

@@ -208,6 +208,18 @@ pub struct RateLimitFilter {
     /// Pre-formatted burst value for the `X-RateLimit-Limit` header.
     pub(self) burst_string: String,
 
+    /// Pre-validated burst value, so the config-stable limit header
+    /// costs a refcount clone per response instead of a re-parse.
+    pub(self) burst_value: http::header::HeaderValue,
+
+    /// Pre-built `X-RateLimit-*` header names, so the response path inserts
+    /// them without re-validating the constant names on every response.
+    pub(self) header_limit: http::header::HeaderName,
+    /// Pre-built `X-RateLimit-Remaining` header name.
+    pub(self) header_remaining: http::header::HeaderName,
+    /// Pre-built `X-RateLimit-Reset` header name.
+    pub(self) header_reset: http::header::HeaderName,
+
     /// Monotonic clock reference; all timestamps are offsets from this.
     pub(self) epoch: Instant,
 }
@@ -263,13 +275,19 @@ impl RateLimitFilter {
             RateLimitMode::PerIp => RateLimitState::PerIp(PerIpState::new()),
         };
 
-        #[expect(clippy::cast_possible_truncation, clippy::cast_sign_loss, reason = "burst fits u64")]
-        let burst_string = (burst as u64).to_string();
+        let burst_string = cfg.burst.to_string();
         Ok(Box::new(Self {
             state,
             rate: cfg.rate,
             burst,
             burst_string,
+            burst_value: http::header::HeaderValue::from(u64::from(cfg.burst)),
+            // Lowercase literals: HeaderName::from_static panics on uppercase,
+            // and HeaderMap stores names lowercased anyway, matching the wire
+            // output of the previous from_bytes(HEADER_RATELIMIT_*) path.
+            header_limit: http::header::HeaderName::from_static("x-ratelimit-limit"),
+            header_remaining: http::header::HeaderName::from_static("x-ratelimit-remaining"),
+            header_reset: http::header::HeaderName::from_static("x-ratelimit-reset"),
             epoch: Instant::now(),
         }))
     }
@@ -302,17 +320,18 @@ impl HttpFilter for RateLimitFilter {
 
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let remaining = self.current_remaining(ctx.client_addr);
-        let (headers, _retry_secs) = self.rate_limit_headers(remaining, ctx.time_source);
+        let (remaining_int, reset_unix, _retry_secs) = self.rate_limit_numbers(remaining, ctx.time_source);
 
         if let Some(ref mut resp) = ctx.response_header {
-            for (name, value) in &headers {
-                if let Ok(hv) = value.parse()
-                    && let Ok(hn) = http::header::HeaderName::from_bytes(name.as_bytes())
-                {
-                    resp.headers.insert(hn, hv);
-                    ctx.response_headers_modified = true;
-                }
-            }
+            // The limit value is config-stable and pre-validated; the
+            // numeric values convert straight to HeaderValue with no
+            // intermediate String and no re-validation byte scan.
+            resp.headers.insert(&self.header_limit, self.burst_value.clone());
+            resp.headers
+                .insert(&self.header_remaining, http::header::HeaderValue::from(remaining_int));
+            resp.headers
+                .insert(&self.header_reset, http::header::HeaderValue::from(reset_unix));
+            ctx.response_headers_modified = true;
         }
 
         Ok(FilterAction::Continue)

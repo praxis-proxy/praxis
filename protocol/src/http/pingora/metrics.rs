@@ -235,6 +235,9 @@ pub(crate) struct RequestMetricLabels {
 
 /// Record HTTP request metrics for a completed request.
 pub(crate) fn record_request_metrics(labels: RequestMetricLabels, duration_secs: f64) {
+    if !is_recorder_installed() {
+        return;
+    }
     let cluster = labels.cluster;
     let route = labels.route;
     counter!(
@@ -263,6 +266,9 @@ pub(crate) fn record_body_size_metrics(
     request_body_bytes: u64,
     response_body_bytes: u64,
 ) {
+    if !is_recorder_installed() {
+        return;
+    }
     #[expect(
         clippy::cast_precision_loss,
         reason = "body byte counts as histogram observations; exact integer precision not required"
@@ -373,9 +379,9 @@ pub(crate) fn set_upstream_endpoint_gauges(cluster: SharedString, healthy: usize
 ///
 /// Prometheus does not drop series automatically; clearing removed clusters
 /// prevents stale `healthy`/`total` values from lingering after config change.
-pub fn clear_stale_upstream_health_gauges<'a>(
-    previous_health_clusters: impl IntoIterator<Item = &'a str>,
-    current_health_clusters: impl IntoIterator<Item = &'a str>,
+pub fn clear_stale_upstream_health_gauges<'a, P: IntoIterator<Item = &'a str>, C: IntoIterator<Item = &'a str>>(
+    previous_health_clusters: P,
+    current_health_clusters: C,
 ) {
     if !is_recorder_installed() {
         return;

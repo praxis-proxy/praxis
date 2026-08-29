@@ -141,7 +141,7 @@ fn build_listener_view(
     Some(ListenerPipelineView {
         name: name.to_owned(),
         address: m.address.clone(),
-        protocol: m.protocol.clone(),
+        protocol: m.protocol,
         tls: m.tls,
         chain_names: m.chain_names.clone(),
         filter_count,

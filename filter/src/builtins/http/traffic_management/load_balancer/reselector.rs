@@ -5,6 +5,7 @@
 
 use std::sync::Arc;
 
+use http::header::HeaderValue;
 use praxis_core::{
     config::{CachedClusterTls, RetryPolicy},
     connectivity::{ConnectionOptions, Upstream},
@@ -27,6 +28,10 @@ pub struct EndpointReselector {
     opts: Arc<ConnectionOptions>,
     /// Optional TLS configuration for the cluster.
     tls: Option<CachedClusterTls>,
+    /// Pre-parsed upstream authority override, carried so a retry to a
+    /// reselected endpoint keeps rewriting `Host` instead of silently
+    /// reverting to the downstream value.
+    authority: Option<HeaderValue>,
     /// Hash key captured at first selection (for consistent-hash).
     hash_key: Option<Arc<str>>,
     /// Resolved retry policy for this cluster.
@@ -46,6 +51,7 @@ impl EndpointReselector {
         strategy: Arc<Strategy>,
         opts: Arc<ConnectionOptions>,
         tls: Option<CachedClusterTls>,
+        authority: Option<HeaderValue>,
         hash_key: Option<Arc<str>>,
         retry_policy: Arc<RetryPolicy>,
         retry_state: Arc<ClusterRetryState>,
@@ -54,6 +60,7 @@ impl EndpointReselector {
             strategy,
             opts,
             tls,
+            authority,
             hash_key,
             retry_policy,
             retry_state,
@@ -70,6 +77,7 @@ impl EndpointReselector {
     pub fn build_upstream(&self, addr: Arc<str>) -> Upstream {
         Upstream {
             address: addr,
+            authority: self.authority.clone(),
             connection: Arc::clone(&self.opts),
             tls: self.tls.clone(),
         }

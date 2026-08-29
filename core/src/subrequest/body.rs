@@ -101,12 +101,16 @@ impl SubResponseBody {
             return Ok(None);
         }
 
-        // Check stream deadline before reading.
-        if let Some(deadline) = self.stream_deadline
-            && tokio::time::Instant::now() >= deadline
-        {
-            self.shutdown_and_done("deadline_exceeded").await;
-            return Err(SubRequestError::DeadlineExceeded);
+        // Check the stream deadline before reading; one clock reading
+        // serves both the check and the remaining-budget computation.
+        let mut deadline_remaining = None;
+        if let Some(deadline) = self.stream_deadline {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                self.shutdown_and_done("deadline_exceeded").await;
+                return Err(SubRequestError::DeadlineExceeded);
+            }
+            deadline_remaining = Some(remaining);
         }
 
         let session = self.session.as_mut().expect("session must be present when not done");
@@ -116,12 +120,7 @@ impl SubResponseBody {
         if let Some(rt) = self.read_timeout {
             effective_timeout = effective_timeout.min(rt);
         }
-        if let Some(deadline) = self.stream_deadline {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                self.shutdown_and_done("deadline_exceeded").await;
-                return Err(SubRequestError::DeadlineExceeded);
-            }
+        if let Some(remaining) = deadline_remaining {
             effective_timeout = effective_timeout.min(remaining);
         }
 
@@ -204,7 +203,7 @@ impl SubResponseBody {
     /// the cleanup future leaves the body in a valid terminal state.
     /// The permit is moved into the boxed future so cancellation
     /// releases it immediately.
-    async fn shutdown_and_done(&mut self, termination: &str) {
+    async fn shutdown_and_done(&mut self, termination: &'static str) {
         debug!(
             termination,
             duration_s = self.stream_started_at.elapsed().as_secs_f64(),
@@ -272,11 +271,11 @@ impl SubResponseBody {
     }
 
     /// Record stream termination metrics.
-    fn record_stream_metrics(&self, termination: &str) {
+    fn record_stream_metrics(&self, termination: &'static str) {
         let elapsed = self.stream_started_at.elapsed().as_secs_f64();
         counter!(
             SUBREQUEST_STREAMS_TOTAL,
-            "termination" => termination.to_owned(),
+            "termination" => termination,
         )
         .increment(1);
         histogram!(SUBREQUEST_STREAM_DURATION_SECONDS).record(elapsed);

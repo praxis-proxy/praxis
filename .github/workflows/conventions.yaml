@@ -23,6 +23,7 @@ jobs:
   pr-size-check:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Generate token
         id: app-token
@@ -60,6 +61,7 @@ jobs:
   pr-description-check:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Generate token
         id: app-token
@@ -93,6 +95,7 @@ jobs:
   dep-version-check:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Generate token
         id: app-token
@@ -168,6 +171,7 @@ jobs:
       !startsWith(github.head_ref, 'release-notes/pr-') ||
       github.event.pull_request.user.login != 'github-actions[bot]'
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Generate token
         id: app-token
@@ -204,6 +208,7 @@ jobs:
   commit-message-check:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Generate token
         id: app-token
@@ -250,6 +255,7 @@ jobs:
   authorship-check:
     if: ${{ !github.event.pull_request.draft }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     steps:
       - name: Generate token
         id: app-token

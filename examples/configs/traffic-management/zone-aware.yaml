@@ -1,0 +1,48 @@
+# Zone-Aware Load Balancing
+#
+# Prefers same-zone endpoints to reduce cross-zone network costs and
+# latency. When the local zone's healthy capacity drops below the
+# configured threshold, traffic spills to all endpoints.
+#
+# In this example, the proxy is in zone "us-east-1a" and prefers
+# endpoints in that zone. If fewer than 70% of local endpoints are
+# healthy, traffic spills to all zones.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/zone-aware.yaml
+#   curl http://localhost:8080/
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            load_balancer_strategy:
+              zone_aware:
+                local_zone: "us-east-1a"
+                inner_strategy: round_robin
+                min_local_healthy_pct: 70
+            endpoints:
+              - address: "127.0.0.1:3001"
+                zone: "us-east-1a"
+              - address: "127.0.0.1:3002"
+                zone: "us-east-1a"
+              - address: "127.0.0.1:3003"
+                zone: "us-east-1b"
+              - address: "127.0.0.1:3004"
+                zone: "us-west-2a"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

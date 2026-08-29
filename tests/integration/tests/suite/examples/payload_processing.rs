@@ -17,8 +17,13 @@ use praxis_test_utils::{
 
 #[test]
 fn multi_field_extraction_extracts_both_fields() {
+    // alpha_cluster lists two distinct endpoints (10.0.1.1, 10.0.1.2); give
+    // each its own header-echo backend rather than collapsing them onto one
+    // address (a duplicate endpoint address is rejected by config validation).
     let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();
+    let backend_guard_2 = start_header_echo_backend();
+    let backend_port_2 = backend_guard_2.port();
     let proxy_port = free_port();
 
     let config = load_example_config(
@@ -26,7 +31,7 @@ fn multi_field_extraction_extracts_both_fields() {
         proxy_port,
         HashMap::from([
             ("10.0.1.1:8080", backend_port),
-            ("10.0.1.2:8080", backend_port),
+            ("10.0.1.2:8080", backend_port_2),
             ("10.0.2.1:8080", backend_port),
             ("10.0.3.1:8080", backend_port),
         ]),
@@ -52,8 +57,14 @@ fn multi_field_extraction_extracts_both_fields() {
 
 #[test]
 fn multi_field_extraction_routes_by_model() {
+    // alpha_cluster lists two distinct endpoints (10.0.1.1, 10.0.1.2); give
+    // each its own backend rather than collapsing them onto one address (a
+    // duplicate endpoint address is rejected by config validation). Both share
+    // the "alpha-backend" body so the routing assertion holds either way.
     let alpha_port_guard = start_backend_with_shutdown("alpha-backend");
     let alpha_port = alpha_port_guard.port();
+    let alpha_port_guard_2 = start_backend_with_shutdown("alpha-backend");
+    let alpha_port_2 = alpha_port_guard_2.port();
     let default_port_guard = start_backend_with_shutdown("default-backend");
     let default_port = default_port_guard.port();
     let proxy_port = free_port();
@@ -63,7 +74,7 @@ fn multi_field_extraction_routes_by_model() {
         proxy_port,
         HashMap::from([
             ("10.0.1.1:8080", alpha_port),
-            ("10.0.1.2:8080", alpha_port),
+            ("10.0.1.2:8080", alpha_port_2),
             ("10.0.2.1:8080", default_port),
             ("10.0.3.1:8080", default_port),
         ]),
@@ -144,6 +155,11 @@ fn conditional_field_extraction_skips_on_non_v1_path() {
 fn field_extraction_access_control_routes_acme() {
     let acme_port_guard = start_backend_with_shutdown("acme-backend");
     let acme_port = acme_port_guard.port();
+    // acme lists two distinct endpoints (10.0.1.1, 10.0.1.2); give each its own
+    // backend rather than collapsing them onto one address (a duplicate
+    // endpoint address is rejected by config validation).
+    let acme_port_guard_2 = start_backend_with_shutdown("acme-backend");
+    let acme_port_2 = acme_port_guard_2.port();
     let globex_port_guard = start_backend_with_shutdown("globex-backend");
     let globex_port = globex_port_guard.port();
     let default_port_guard = start_backend_with_shutdown("default-backend");
@@ -155,7 +171,7 @@ fn field_extraction_access_control_routes_acme() {
         proxy_port,
         HashMap::from([
             ("10.0.1.1:8080", acme_port),
-            ("10.0.1.2:8080", acme_port),
+            ("10.0.1.2:8080", acme_port_2),
             ("10.0.2.1:8080", globex_port),
             ("10.0.3.1:8080", default_port),
         ]),
@@ -178,6 +194,11 @@ fn field_extraction_access_control_routes_acme() {
 fn field_extraction_access_control_routes_globex() {
     let acme_port_guard = start_backend_with_shutdown("acme-backend");
     let acme_port = acme_port_guard.port();
+    // acme lists two distinct endpoints (10.0.1.1, 10.0.1.2); give each its own
+    // backend rather than collapsing them onto one address (a duplicate
+    // endpoint address is rejected by config validation).
+    let acme_port_guard_2 = start_backend_with_shutdown("acme-backend");
+    let acme_port_2 = acme_port_guard_2.port();
     let globex_port_guard = start_backend_with_shutdown("globex-backend");
     let globex_port = globex_port_guard.port();
     let default_port_guard = start_backend_with_shutdown("default-backend");
@@ -189,7 +210,7 @@ fn field_extraction_access_control_routes_globex() {
         proxy_port,
         HashMap::from([
             ("10.0.1.1:8080", acme_port),
-            ("10.0.1.2:8080", acme_port),
+            ("10.0.1.2:8080", acme_port_2),
             ("10.0.2.1:8080", globex_port),
             ("10.0.3.1:8080", default_port),
         ]),
@@ -212,6 +233,11 @@ fn field_extraction_access_control_routes_globex() {
 fn field_extraction_access_control_unknown_tenant_to_default() {
     let acme_port_guard = start_backend_with_shutdown("acme-backend");
     let acme_port = acme_port_guard.port();
+    // acme lists two distinct endpoints (10.0.1.1, 10.0.1.2); give each its own
+    // backend rather than collapsing them onto one address (a duplicate
+    // endpoint address is rejected by config validation).
+    let acme_port_guard_2 = start_backend_with_shutdown("acme-backend");
+    let acme_port_2 = acme_port_guard_2.port();
     let globex_port_guard = start_backend_with_shutdown("globex-backend");
     let globex_port = globex_port_guard.port();
     let default_port_guard = start_backend_with_shutdown("default-backend");
@@ -223,7 +249,7 @@ fn field_extraction_access_control_unknown_tenant_to_default() {
         proxy_port,
         HashMap::from([
             ("10.0.1.1:8080", acme_port),
-            ("10.0.1.2:8080", acme_port),
+            ("10.0.1.2:8080", acme_port_2),
             ("10.0.2.1:8080", globex_port),
             ("10.0.3.1:8080", default_port),
         ]),

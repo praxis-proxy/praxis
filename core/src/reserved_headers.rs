@@ -38,15 +38,27 @@
 // scope and additive vs override semantics.
 pub const RESERVED_HEADER_PREFIXES: &[&str] = &["x-praxis-", "x-ext-protocol-", "x-ext-agent-"];
 
-/// Return whether a lowercased header name matches any reserved prefix.
+/// Return whether a header name matches any reserved prefix.
+///
+/// The comparison is ASCII case-insensitive. Every current caller passes an
+/// [`http::HeaderName`] string, which is already lowercase, but matching
+/// case-insensitively means a future caller handing this a raw config or user
+/// string (e.g. `"X-Praxis-Route"`) cannot slip a reserved header past the
+/// check.
 ///
 /// ```
 /// assert!(praxis_core::reserved_headers::is_reserved("x-praxis-route"));
+/// assert!(praxis_core::reserved_headers::is_reserved("X-Praxis-Route"));
 /// assert!(praxis_core::reserved_headers::is_reserved(
 ///     "x-ext-agent-task"
 /// ));
 /// assert!(!praxis_core::reserved_headers::is_reserved("authorization"));
 /// ```
 pub fn is_reserved(name: &str) -> bool {
-    RESERVED_HEADER_PREFIXES.iter().any(|prefix| name.starts_with(prefix))
+    let bytes = name.as_bytes();
+    RESERVED_HEADER_PREFIXES.iter().any(|prefix| {
+        bytes
+            .get(..prefix.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(prefix.as_bytes()))
+    })
 }
