@@ -5,7 +5,7 @@
 [![Conformance](https://github.com/praxis-proxy/praxis/actions/workflows/conformance.yaml/badge.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/conformance.yaml)
 [![Coverage: ≥96%](https://img.shields.io/badge/Coverage-≥96%25-brightgreen.svg)](https://github.com/praxis-proxy/praxis/actions/workflows/coverage.yaml)
 [![MSRV: 1.96](https://img.shields.io/badge/MSRV-1.96-brightgreen.svg)](https://blog.rust-lang.org/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 
 Praxis is a high-performance, security-first **proxy framework**
 built on a composable filter pipeline. Use it for ingress or
