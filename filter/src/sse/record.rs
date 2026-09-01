@@ -437,17 +437,6 @@ mod tests {
         );
     }
 
-    fn assert_invalid_unknown_name(name: &[u8], msg: &str) {
-        let err = SseRecord::builder()
-            .field(SseField::Unknown {
-                name: Bytes::copy_from_slice(name),
-                value: Bytes::from_static(b"v"),
-            })
-            .build()
-            .unwrap_err();
-        assert_eq!(err, SseBuildError::InvalidFieldName, "{msg}");
-    }
-
     #[test]
     fn builder_rejects_bad_unknown_names() {
         assert_invalid_unknown_name(b"", "empty unknown name is invalid");
@@ -467,5 +456,20 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(record.fields().len(), 2, "valid unknown and NUL-in-id are accepted");
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    fn assert_invalid_unknown_name(name: &[u8], msg: &str) {
+        let err = SseRecord::builder()
+            .field(SseField::Unknown {
+                name: Bytes::copy_from_slice(name),
+                value: Bytes::from_static(b"v"),
+            })
+            .build()
+            .unwrap_err();
+        assert_eq!(err, SseBuildError::InvalidFieldName, "{msg}");
     }
 }

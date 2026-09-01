@@ -462,52 +462,6 @@ mod tests {
         let _boxed: Box<dyn std::error::Error + Send + Sync> = err.into();
     }
 
-    // ----- Test Utilities -----
-
-    // Module-scoped BOM constant for the tests below.
-    const BOM_BYTES: &[u8] = &[0xEF, 0xBB, 0xBF];
-
-    // Push one chunk, assert no error, return the completed records.
-    fn push_ok(decoder: &mut SseDecoder, chunk: &[u8]) -> Vec<SseRecord> {
-        let batch = decoder.push(chunk);
-        assert_eq!(batch.error, None, "unexpected decode error");
-        batch.records
-    }
-
-    // Decode the whole input in one push then finish; return all records.
-    fn decode_whole(input: &[u8]) -> Vec<SseRecord> {
-        let mut decoder = SseDecoder::new();
-        let mut records = decoder.push(input).records;
-        records.extend(decoder.finish().records);
-        records
-    }
-
-    // Decode the input split at byte offsets a and b; return all records.
-    fn decode_split(input: &[u8], a: usize, b: usize) -> Vec<SseRecord> {
-        let mut decoder = SseDecoder::new();
-        let mut records = Vec::new();
-        for part in [&input[..a], &input[a..b], &input[b..]] {
-            records.extend(decoder.push(part).records);
-        }
-        records.extend(decoder.finish().records);
-        records
-    }
-
-    // Assert every 3-way split of the input decodes identically to the whole.
-    fn assert_all_splits_match(input: &[u8]) {
-        let expected = decode_whole(input);
-        let len = input.len();
-        for a in 0..=len {
-            for b in a..=len {
-                assert_eq!(
-                    decode_split(input, a, b),
-                    expected,
-                    "split ({a},{b}) diverged for {input:?}"
-                );
-            }
-        }
-    }
-
     #[test]
     fn single_record() {
         let mut decoder = SseDecoder::new();
@@ -959,6 +913,54 @@ mod tests {
         ];
         for input in corpus {
             assert_all_splits_match(input);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    // Module-scoped BOM constant for the tests below.
+    const BOM_BYTES: &[u8] = &[0xEF, 0xBB, 0xBF];
+
+    // Push one chunk, assert no error, return the completed records.
+    fn push_ok(decoder: &mut SseDecoder, chunk: &[u8]) -> Vec<SseRecord> {
+        let batch = decoder.push(chunk);
+        assert_eq!(batch.error, None, "unexpected decode error");
+        batch.records
+    }
+
+    // Decode the whole input in one push then finish; return all records.
+    fn decode_whole(input: &[u8]) -> Vec<SseRecord> {
+        let mut decoder = SseDecoder::new();
+        let mut records = decoder.push(input).records;
+        records.extend(decoder.finish().records);
+        records
+    }
+
+    // Decode the input split at byte offsets a and b; return all records.
+    fn decode_split(input: &[u8], a: usize, b: usize) -> Vec<SseRecord> {
+        let mut decoder = SseDecoder::new();
+        let mut records = Vec::new();
+        for part in [&input[..a], &input[a..b], &input[b..]] {
+            records.extend(decoder.push(part).records);
+        }
+        records.extend(decoder.finish().records);
+        records
+    }
+
+    // Assert every 3-way split of the input decodes identically to the whole.
+    fn assert_all_splits_match(input: &[u8]) {
+        let expected = decode_whole(input);
+        let len = input.len();
+        for a in 0..=len {
+            for b in a..=len {
+                assert_eq!(
+                    decode_split(input, a, b),
+                    expected,
+                    "split ({a},{b}) diverged for {input:?}"
+                );
+            }
         }
     }
 }
