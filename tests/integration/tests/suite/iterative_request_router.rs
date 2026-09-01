@@ -2201,10 +2201,21 @@ steps:
     );
 
     assert_eq!(parse_status(&raw), 200, "streaming response should succeed");
+    // `test_per_chunk_emission` emits "local|" before each non-final upstream
+    // body chunk. Upstream chunk framing is non-deterministic, so the "local|"
+    // markers and the upstream bytes interleave differently run to run (e.g.
+    // "local|upstream" or "local|upstreamlocal|"). Assert the contract robustly:
+    // a local emission leads the stream (it is not delayed to completion) and,
+    // with the markers removed, the upstream body is intact and in order.
+    let body = parse_body(&raw);
+    assert!(
+        body.starts_with("local|"),
+        "a local emission must lead the stream, not be delayed to completion, got: {body:?}"
+    );
     assert_eq!(
-        parse_body(&raw),
-        "local|upstream",
-        "a callback's local emissions must not be delayed until stream completion"
+        body.replace("local|", ""),
+        "upstream",
+        "removing the local emissions must leave the upstream body intact, got: {body:?}"
     );
 }
 

@@ -385,7 +385,7 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "benchmarks"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "chrono",
  "criterion",
@@ -3225,7 +3225,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "cargo_metadata",
  "clap",
@@ -3246,7 +3246,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-core"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "bytes",
  "chrono",
@@ -3279,7 +3279,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-filter"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3319,7 +3319,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-protocol"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3348,7 +3348,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-proxy-tls"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "arc-swap",
  "notify",
@@ -3366,7 +3366,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-test-utils"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3392,7 +3392,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-conformance"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "h2",
  "http",
@@ -3405,7 +3405,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-integration"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -3435,7 +3435,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-resilience"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "async-trait",
  "benchmarks",
@@ -3451,7 +3451,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-schema"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "async-trait",
  "bytes",
@@ -3466,7 +3466,7 @@ dependencies = [
 
 [[package]]
 name = "praxis-tests-security"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "praxis-proxy-core",
  "praxis-proxy-filter",
@@ -4740,9 +4740,9 @@ checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
 
 [[package]]
 name = "smallvec"
-version = "1.15.2"
+version = "1.16.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8ed6a63f02c8539c91a8685a86f4099661ba3da017932f6ebbea6de3f0fa7c90"
+checksum = "b9be42f50aa861c555654aa3a37f52f4b1074bacf4e48fe0ef7fa584e80f1f0f"
 
 [[package]]
 name = "smol_str"
@@ -4907,7 +4907,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",
@@ -5953,7 +5953,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.5.3"
+version = "0.5.4"
 dependencies = [
  "benchmarks",
  "chrono",

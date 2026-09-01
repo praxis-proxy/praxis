@@ -400,3 +400,71 @@ clusters:
         "error must name the invalid value: {err}"
     );
 }
+
+#[tokio::test]
+async fn strips_injected_credential_from_response() {
+    let f = from_yaml(
+        r#"
+clusters:
+  - name: provider-a
+    header: Authorization
+    value: "sk-test-key"
+    header_prefix: "Bearer "
+"#,
+    );
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("provider-a"));
+
+    // Upstream echoes the injected credential back in its response.
+    let mut resp = crate::test_utils::make_response();
+    resp.headers
+        .insert(http::header::AUTHORIZATION, "Bearer sk-test-key".parse().unwrap());
+    resp.headers
+        .insert(http::header::CONTENT_TYPE, "application/json".parse().unwrap());
+    ctx.response_header = Some(&mut resp);
+
+    let action = f.on_response(&mut ctx).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue), "on_response should continue");
+
+    assert!(
+        !resp.headers.contains_key(http::header::AUTHORIZATION),
+        "the injected credential must be stripped from the upstream response (#850)"
+    );
+    assert!(
+        resp.headers.contains_key(http::header::CONTENT_TYPE),
+        "unrelated response headers must be preserved"
+    );
+}
+
+#[tokio::test]
+async fn response_untouched_for_cluster_without_credential() {
+    let f = from_yaml(
+        r#"
+clusters:
+  - name: provider-a
+    header: Authorization
+    value: "sk-test-key"
+"#,
+    );
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    // Routed to a cluster this filter has no entry for: leave the response
+    // alone, even if it carries an Authorization header of its own.
+    ctx.cluster = Some(Arc::from("other-cluster"));
+
+    let mut resp = crate::test_utils::make_response();
+    resp.headers
+        .insert(http::header::AUTHORIZATION, "client-owned".parse().unwrap());
+    ctx.response_header = Some(&mut resp);
+
+    drop(f.on_response(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        resp.headers
+            .get(http::header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok()),
+        Some("client-owned"),
+        "responses for unconfigured clusters must not be modified"
+    );
+}

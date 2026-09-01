@@ -13,6 +13,8 @@ Credentials are resolved at construction time (inline values or environment vari
 
 Scoping is per-cluster: a request routed to a cluster with no configured entry is left untouched, so a client-supplied header (e.g. `Authorization`) is forwarded to that cluster unchanged. This filter is not a general credential stripper; pair it with an explicit header-removal filter if every cluster must have client credentials stripped. The injected secret itself is only ever applied to the cluster it is configured for.
 
+On the response path the injected header is stripped before the response reaches the client, so a gateway-managed credential never leaks even if the upstream echoes it back.
+
 ## Configuration
 
 | Field | Type | Required | Description |

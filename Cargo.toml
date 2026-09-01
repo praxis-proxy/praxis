@@ -24,7 +24,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 rust-version = "1.96"
 authors = ["Shane Utt <shaneutt@linux.com>"]
@@ -73,14 +73,14 @@ plotters = { version = "0.3.7", default-features = false, features = ["svg_backe
 proptest = "1.11.0"
 quote = "1.0.47"
 praxis = { path = "server", package = "praxis-proxy" }
-praxis-core = { version = "0.5.3", path = "core", package = "praxis-proxy-core" }
-praxis-filter = { version = "0.5.3", path = "filter", package = "praxis-proxy-filter" }
-praxis-protocol = { version = "0.5.3", path = "protocol", package = "praxis-proxy-protocol" }
-praxis-tls = { version = "0.5.3", path = "tls", package = "praxis-proxy-tls" }
+praxis-core = { version = "0.5.4", path = "core", package = "praxis-proxy-core" }
+praxis-filter = { version = "0.5.4", path = "filter", package = "praxis-proxy-filter" }
+praxis-protocol = { version = "0.5.4", path = "protocol", package = "praxis-proxy-protocol" }
+praxis-tls = { version = "0.5.4", path = "tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
-smallvec = "1.15.2"
+smallvec = "1.16.0"
 serde_json = "1.0.151"
 sha2 = "0.11.0"
 subtle = "2.6.1"
@@ -123,6 +123,9 @@ lto = false
 opt-level = 2
 
 [workspace.lints.rust]
+# `coverage` is set by cargo-llvm-cov; declare it so `#[cfg(coverage)]` gates
+# don't trip the unexpected_cfgs lint under `-D warnings`.
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(coverage)'] }
 dead_code = "deny"
 unsafe_code = "forbid"
 missing_docs = "deny"

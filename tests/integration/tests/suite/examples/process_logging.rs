@@ -38,6 +38,15 @@ fn stop_child(mut child: std::process::Child) {
 // -----------------------------------------------------------------------------
 
 #[test]
+// Spawns the `praxis` binary and waits for it to exit. Under cargo-llvm-cov the
+// spawned binary is instrumented and can deadlock on exit (coverage flush) on
+// constrained runners, hanging child.wait(). The logging paths are covered by
+// unit and schema tests, so skip this end-to-end spawn test under coverage; it
+// still runs in `make test`.
+#[cfg_attr(
+    coverage,
+    ignore = "spawns the praxis binary; deadlocks on exit under llvm-cov instrumentation"
+)]
 fn process_logging_writes_to_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let log_path = dir.path().join("praxis-process.log");

@@ -53,6 +53,10 @@ struct ClusterCredential {
 /// stripped. The injected secret itself is only ever applied to the
 /// cluster it is configured for.
 ///
+/// On the response path the injected header is stripped before the response
+/// reaches the client, so a gateway-managed credential never leaks even if the
+/// upstream echoes it back.
+///
 /// # YAML configuration
 ///
 /// ```yaml
@@ -169,6 +173,37 @@ impl HttpFilter for CredentialInjectionFilter {
         // exploitation requires a memory-read primitive on the proxy process.
         ctx.extra_request_headers
             .push((Cow::Owned(cred.header.clone()), cred.header_value.as_str().to_owned()));
+
+        Ok(FilterAction::Continue)
+    }
+
+    async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        // Strip the injected credential header from the upstream response so the
+        // gateway-managed secret never reaches the client, even if the upstream
+        // echoes it back (#850). Mirror on_request: use the header configured for
+        // the request's selected cluster.
+        let Some(cluster) = ctx.cluster.clone() else {
+            return Ok(FilterAction::Continue);
+        };
+        let Some(cred) = self.credentials.get(&cluster) else {
+            return Ok(FilterAction::Continue);
+        };
+        // The header name was validated at construction (see resolve_credential).
+        let Ok(header_name) = http::HeaderName::from_bytes(cred.header.as_bytes()) else {
+            return Ok(FilterAction::Continue);
+        };
+        let removed = ctx
+            .response_header
+            .as_mut()
+            .is_some_and(|resp| resp.headers.remove(&header_name).is_some());
+        if removed {
+            ctx.response_headers_modified = true;
+            tracing::debug!(
+                cluster = %cluster,
+                header = %cred.header,
+                "stripped injected credential from upstream response"
+            );
+        }
 
         Ok(FilterAction::Continue)
     }
