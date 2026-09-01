@@ -14,6 +14,17 @@ use super::record::{SseField, SseRecord};
 /// UTF-8 byte order mark, stripped once at stream start.
 const BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 
+/// Default for `SseLimits::max_line_bytes`.
+const DEFAULT_MAX_LINE_BYTES: usize = 1_048_576; // 1 MiB
+/// Default for `SseLimits::max_record_bytes`.
+const DEFAULT_MAX_RECORD_BYTES: usize = 10_485_760; // 10 MiB
+/// Default for `SseLimits::max_fields_per_record`.
+const DEFAULT_MAX_FIELDS_PER_RECORD: usize = 4096; // far above any real record
+
+// -----------------------------------------------------------------------------
+// DecoderState
+// -----------------------------------------------------------------------------
+
 /// Lifecycle state of an `SseDecoder`.
 #[derive(Clone, Copy, Debug)]
 enum DecoderState {
@@ -25,14 +36,24 @@ enum DecoderState {
     Poisoned(SseDecodeError),
 }
 
+// -----------------------------------------------------------------------------
+// SseLimits
+// -----------------------------------------------------------------------------
+
 /// Bounds on retained memory. Enforced continuously as bytes accumulate.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SseLimits {
     /// Max bytes for a single field line held across chunks.
     pub max_line_bytes: usize,
-    /// Max total retained bytes for one in-progress record: the sum of every
-    /// field's value plus every `Unknown` field name, so large unknown names
-    /// cannot bypass the limit.
+    /// Max bytes retained for the committed fields of one in-progress record:
+    /// the sum of every field's value, plus the name of every `Unknown` field
+    /// so large unknown names cannot bypass the limit. Resets when the record
+    /// is dispatched.
+    ///
+    /// The line currently being accumulated is *not* counted until it commits;
+    /// it is bounded separately by `max_line_bytes`. Peak memory the decoder
+    /// can hold for a single record is therefore
+    /// `max_record_bytes + max_line_bytes`.
     pub max_record_bytes: usize,
     /// Max number of fields in one record (bounds per-field allocations so many
     /// tiny fields cannot evade `max_record_bytes`).
@@ -42,12 +63,16 @@ pub struct SseLimits {
 impl Default for SseLimits {
     fn default() -> Self {
         Self {
-            max_line_bytes: 10_485_760,   // 10 MiB
-            max_record_bytes: 10_485_760, // 10 MiB
-            max_fields_per_record: 4096,  // far above any real record
+            max_line_bytes: DEFAULT_MAX_LINE_BYTES,
+            max_record_bytes: DEFAULT_MAX_RECORD_BYTES,
+            max_fields_per_record: DEFAULT_MAX_FIELDS_PER_RECORD,
         }
     }
 }
+
+// -----------------------------------------------------------------------------
+// SseBatch
+// -----------------------------------------------------------------------------
 
 /// Result of one `SseDecoder::push` or `SseDecoder::finish`.
 ///
@@ -63,6 +88,10 @@ pub struct SseBatch {
     /// The error that stopped decoding this call, if any.
     pub error: Option<SseDecodeError>,
 }
+
+// -----------------------------------------------------------------------------
+// SseDecodeError
+// -----------------------------------------------------------------------------
 
 /// Decode-time errors. The three limit violations poison the decoder (the error
 /// is re-reported until `reset`); `Finished` is not a poison.
@@ -97,6 +126,10 @@ pub enum SseDecodeError {
     #[error("SSE decoder push called after finish")]
     Finished,
 }
+
+// -----------------------------------------------------------------------------
+// SseDecoder
+// -----------------------------------------------------------------------------
 
 /// Bounded, incremental SSE record decoder.
 ///
@@ -440,7 +473,7 @@ mod tests {
     #[test]
     fn default_limits_match_spec() {
         let limits = SseLimits::default();
-        assert_eq!(limits.max_line_bytes, 10_485_760, "default line limit is 10 MiB");
+        assert_eq!(limits.max_line_bytes, 1_048_576, "default line limit is 1 MiB");
         assert_eq!(limits.max_record_bytes, 10_485_760, "default record limit is 10 MiB");
         assert_eq!(limits.max_fields_per_record, 4096, "default field cap is 4096");
     }
