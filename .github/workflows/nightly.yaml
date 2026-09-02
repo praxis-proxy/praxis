@@ -34,7 +34,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust (stable + nightly fmt)
-        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@465a493e9f18776294940c9912935eb7e68fb03b # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@bcfaea95ff4e6746587d54f6b6d6a62cfc5aa0e4 # v0.1.0
 
       - name: Install cargo-machete
         run: cargo install cargo-machete --locked
