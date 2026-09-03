@@ -58,6 +58,7 @@ mod pipeline;
 mod registry;
 mod results;
 mod tcp_filter;
+mod trace_context;
 
 pub use actions::{FilterAction, Rejection, StreamingResponseBody, StreamingTerminalResponse, TerminalResponse};
 pub use any_filter::AnyFilter;
@@ -101,6 +102,7 @@ pub use praxis_tls::TlsPeerIdentity;
 pub use registry::{FilterRegistry, SecurityClass};
 pub use results::{FilterResultSet, matches_filter_result};
 pub use tcp_filter::{TcpFilter, TcpFilterContext};
+pub use trace_context::TraceContext;
 
 // -----------------------------------------------------------------------------
 // Custom Filter Registration

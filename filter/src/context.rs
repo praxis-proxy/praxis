@@ -559,9 +559,93 @@ impl HttpFilterContext<'_> {
         self.filter_metadata.get(key).map(String::as_str)
     }
 
-    /// X-Request-ID header value, if present and valid UTF-8.
+    /// Request-scoped [`TraceContext`] id, else inbound `x-request-id`.
+    ///
+    /// [`TraceContext`]: crate::trace_context::TraceContext
     pub fn request_id(&self) -> Option<&str> {
+        if let Some(tc) = self.extensions.get::<crate::trace_context::TraceContext>() {
+            return Some(tc.request_id());
+        }
         self.request.headers.get("x-request-id").and_then(|v| v.to_str().ok())
+    }
+
+    /// Inject hop `x-request-id` and `traceparent` when [`TraceContext`] is present.
+    ///
+    /// [`TraceContext`]: crate::trace_context::TraceContext
+    pub fn apply_trace_propagation(&self, framework_headers: &mut praxis_core::subrequest::FrameworkHeaders) {
+        let Some(tc) = self.extensions.get::<crate::trace_context::TraceContext>() else {
+            return;
+        };
+        for (name, value) in &self.extra_request_headers {
+            if name.eq_ignore_ascii_case("x-request-id") && value != tc.request_id() {
+                tracing::warn!(
+                    existing = %value,
+                    expected = %tc.request_id(),
+                    "competing x-request-id pending alongside TraceContext during sub-request propagation"
+                );
+            }
+        }
+        if let Err(error) = tc.inject_into(framework_headers, self.id_generator, self.time_source) {
+            tracing::warn!(%error, "failed to inject trace correlation into framework headers");
+        }
+    }
+
+    /// Execute a buffered sub-request, injecting correlation when present.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubRequestError`] if the client is missing or the exchange fails.
+    ///
+    /// [`SubRequestError`]: praxis_core::subrequest::SubRequestError
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors SubRequestClient::execute including framework headers"
+    )]
+    pub async fn execute_subrequest(
+        &self,
+        peer: &pingora_core::upstreams::peer::HttpPeer,
+        request: &praxis_core::subrequest::SubRequest,
+        max_response_bytes: usize,
+        timeout: std::time::Duration,
+        mut framework_headers: praxis_core::subrequest::FrameworkHeaders,
+    ) -> Result<praxis_core::subrequest::SubResponse, praxis_core::subrequest::SubRequestError> {
+        let client = self.subrequest_client().ok_or_else(|| {
+            praxis_core::subrequest::SubRequestError::InvalidRequest(
+                "sub-request client is not available on this filter context".to_owned(),
+            )
+        })?;
+        self.apply_trace_propagation(&mut framework_headers);
+        let fw = (!framework_headers.is_empty()).then_some(&framework_headers);
+        Box::pin(client.execute(peer, request, max_response_bytes, timeout, fw)).await
+    }
+
+    /// Send a streaming sub-request, injecting correlation when present.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SubRequestError`] if the client is missing or the exchange fails.
+    ///
+    /// [`SubRequestError`]: praxis_core::subrequest::SubRequestError
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "mirrors SubRequestClient::send_streaming including framework headers"
+    )]
+    pub async fn send_streaming_subrequest(
+        &self,
+        peer: &pingora_core::upstreams::peer::HttpPeer,
+        request: &praxis_core::subrequest::SubRequest,
+        timeout: std::time::Duration,
+        limits: praxis_core::subrequest::StreamLimits,
+        mut framework_headers: praxis_core::subrequest::FrameworkHeaders,
+    ) -> Result<praxis_core::subrequest::StreamingSubResponse, praxis_core::subrequest::SubRequestError> {
+        let client = self.subrequest_client().ok_or_else(|| {
+            praxis_core::subrequest::SubRequestError::InvalidRequest(
+                "sub-request client is not available on this filter context".to_owned(),
+            )
+        })?;
+        self.apply_trace_propagation(&mut framework_headers);
+        let fw = (!framework_headers.is_empty()).then_some(&framework_headers);
+        Box::pin(client.send_streaming(peer, request, timeout, limits, fw)).await
     }
 
     /// Write a durable metadata value that persists across all phases.
@@ -1052,6 +1136,150 @@ mod tests {
             Some("abc-123"),
             "request ID should return header value"
         );
+    }
+
+    #[tokio::test]
+    async fn execute_subrequest_returns_error_without_client() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        let peer = pingora_core::upstreams::peer::HttpPeer::new("127.0.0.1:9".to_owned(), false, String::new());
+        let subrequest = praxis_core::subrequest::SubRequest {
+            method: Method::GET,
+            uri: "/sub".parse().unwrap(),
+            headers: HeaderMap::new(),
+            body: bytes::Bytes::new(),
+        };
+
+        let result = ctx
+            .execute_subrequest(
+                &peer,
+                &subrequest,
+                1024,
+                std::time::Duration::from_secs(1),
+                praxis_core::subrequest::FrameworkHeaders::new(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(praxis_core::subrequest::SubRequestError::InvalidRequest(message)) if message.contains("not available")),
+            "missing subrequest client should return InvalidRequest"
+        );
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "asserting error result without polling stream"
+    )]
+    async fn send_streaming_subrequest_returns_error_without_client() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        let peer = pingora_core::upstreams::peer::HttpPeer::new("127.0.0.1:9".to_owned(), false, String::new());
+        let subrequest = praxis_core::subrequest::SubRequest {
+            method: Method::GET,
+            uri: "/sub".parse().unwrap(),
+            headers: HeaderMap::new(),
+            body: bytes::Bytes::new(),
+        };
+        let limits = praxis_core::subrequest::StreamLimits {
+            idle_timeout: std::time::Duration::from_secs(1),
+            max_stream_duration: None,
+            max_total_bytes: None,
+        };
+
+        let result = ctx
+            .send_streaming_subrequest(
+                &peer,
+                &subrequest,
+                std::time::Duration::from_secs(1),
+                limits,
+                praxis_core::subrequest::FrameworkHeaders::new(),
+            )
+            .await;
+
+        assert!(
+            matches!(result, Err(praxis_core::subrequest::SubRequestError::InvalidRequest(message)) if message.contains("not available")),
+            "missing subrequest client should return InvalidRequest"
+        );
+    }
+
+    async fn capture_subrequest_headers() -> String {
+        use praxis_core::subrequest::{FrameworkHeaders, SubRequestClient, SubRequestConnector};
+
+        use crate::trace_context::TraceContext;
+
+        let (addr, server) = start_header_capture_server().await;
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.extensions.insert(TraceContext::new(
+            "req-from-context".into(),
+            "4bf92f3577b34da6a3ce929d0e0e4736".into(),
+            "01".into(),
+        ));
+        let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+        ctx.subrequest_client = Some(&client);
+
+        let peer = pingora_core::upstreams::peer::HttpPeer::new(addr, false, "localhost".into());
+        let response = ctx
+            .execute_subrequest(
+                &peer,
+                &get_subrequest(),
+                1024,
+                std::time::Duration::from_secs(5),
+                FrameworkHeaders::new(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status, 200);
+        server.await.unwrap()
+    }
+
+    async fn start_header_capture_server() -> (std::net::SocketAddr, tokio::task::JoinHandle<String>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move { read_observed_request(listener).await });
+        (addr, server)
+    }
+
+    async fn read_observed_request(listener: tokio::net::TcpListener) -> String {
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0; 4096];
+        let n = stream.read(&mut buf).await.unwrap();
+        let observed = String::from_utf8_lossy(&buf[..n]).to_string();
+        stream
+            .write_all(
+                b"HTTP/1.1 200 OK
+content-length: 0
+
+",
+            )
+            .await
+            .unwrap();
+        observed
+    }
+
+    fn get_subrequest() -> praxis_core::subrequest::SubRequest {
+        praxis_core::subrequest::SubRequest {
+            method: Method::GET,
+            uri: "/sub".parse().unwrap(),
+            headers: HeaderMap::new(),
+            body: bytes::Bytes::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn execute_subrequest_propagates_request_id() {
+        let observed = capture_subrequest_headers().await;
+        assert!(observed.contains("x-request-id: req-from-context"), "{observed}");
+    }
+
+    #[tokio::test]
+    async fn execute_subrequest_propagates_traceparent() {
+        let observed = capture_subrequest_headers().await;
+        assert!(observed.contains("traceparent: 00-"), "{observed}");
+        assert!(observed.contains("4bf92f3577b34da6a3ce929d0e0e4736"), "{observed}");
     }
 
     #[test]
