@@ -36,7 +36,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust (MSRV)
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@bcfaea95ff4e6746587d54f6b6d6a62cfc5aa0e4 # v0.1.0
         with:
           cache-suffix: msrv
 

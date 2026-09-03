@@ -59,7 +59,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@bcfaea95ff4e6746587d54f6b6d6a62cfc5aa0e4 # v0.1.0
         with:
           cache-suffix: doc
 
@@ -81,7 +81,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@bcfaea95ff4e6746587d54f6b6d6a62cfc5aa0e4 # v0.1.0
 
       - name: Unit tests
         run: make test-unit
@@ -101,7 +101,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@bcfaea95ff4e6746587d54f6b6d6a62cfc5aa0e4 # v0.1.0
 
       - name: Integration tests
         run: make test-integration
@@ -121,7 +121,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@bcfaea95ff4e6746587d54f6b6d6a62cfc5aa0e4 # v0.1.0
 
       - name: Install Tools
         run: make target/praxis-binutils/h2spec

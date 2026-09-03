@@ -138,7 +138,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@bcfaea95ff4e6746587d54f6b6d6a62cfc5aa0e4 # v0.1.0
 
       - name: Install h2spec
         run: make target/praxis-binutils/h2spec
@@ -166,7 +166,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@bcfaea95ff4e6746587d54f6b6d6a62cfc5aa0e4 # v0.1.0
 
       - name: Publish dry run
         run: make publish-dry-run
@@ -252,7 +252,7 @@ jobs:
           ref: ${{ github.event.release.tag_name }}
 
       - name: Set up Rust
-        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@bcfaea95ff4e6746587d54f6b6d6a62cfc5aa0e4 # v0.1.0
 
       - name: Publish crates
         env:
