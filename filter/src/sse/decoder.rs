@@ -32,7 +32,8 @@ enum DecoderState {
     Active,
     /// `finish` has been called; `push` reports `Finished`.
     Finished,
-    /// A limit violation occurred; the stored error is re-reported until reset.
+    /// A limit violation occurred; the stored error is re-reported on every
+    /// subsequent call for the rest of the decoder's life.
     Poisoned(SseDecodeError),
 }
 
@@ -104,7 +105,7 @@ pub struct SseBatch {
 // -----------------------------------------------------------------------------
 
 /// Decode-time errors. The three limit violations poison the decoder (the error
-/// is re-reported until `reset`); `Finished` is not a poison.
+/// is re-reported on every subsequent call); `Finished` is not a poison.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SseDecodeError {
     /// A single field line exceeded `max_line_bytes`. Poisons.
@@ -327,17 +328,6 @@ impl SseDecoder {
         self.line_buf = Vec::new();
         self.fields = Vec::new();
         self.record_bytes = 0;
-    }
-
-    /// Reset to `Active`, clearing buffers and any `Finished`/`Poisoned` state.
-    pub fn reset(&mut self) {
-        self.line_buf.clear();
-        self.fields.clear();
-        self.record_bytes = 0;
-        self.prev_cr = false;
-        self.state = DecoderState::Active;
-        self.bom_len = 0;
-        self.bom_resolved = false;
     }
 
     /// `true` only in the `Finished` state (after `finish`).
@@ -965,24 +955,6 @@ mod tests {
     }
 
     #[test]
-    fn reset_resumes_after_finish() {
-        let mut decoder = SseDecoder::new();
-        assert!(
-            decoder.finish().records.is_empty(),
-            "finish on empty stream yields nothing"
-        );
-        assert!(decoder.is_finished(), "finished before reset");
-        decoder.reset();
-        assert!(!decoder.is_finished(), "reset clears Finished");
-        let records = push_ok(&mut decoder, b"data: again\n\n");
-        assert_eq!(
-            records[0].data(),
-            Bytes::from_static(b"again"),
-            "decoding resumes after reset"
-        );
-    }
-
-    #[test]
     fn bom_stripped_at_stream_start() {
         let mut decoder = SseDecoder::new();
         let mut chunk = BOM_BYTES.to_vec();
@@ -1032,21 +1004,6 @@ mod tests {
                 value: Bytes::new()
             },
             "mid-stream BOM bytes are data, not stripped"
-        );
-    }
-
-    #[test]
-    fn bom_stripped_again_after_reset() {
-        let mut decoder = SseDecoder::new();
-        assert!(decoder.finish().records.is_empty(), "empty finish");
-        decoder.reset();
-        let mut chunk = BOM_BYTES.to_vec();
-        chunk.extend_from_slice(b"data: fresh\n\n");
-        let records = push_ok(&mut decoder, &chunk);
-        assert_eq!(
-            records[0].data(),
-            Bytes::from_static(b"fresh"),
-            "reset re-arms BOM stripping"
         );
     }
 
