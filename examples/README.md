@@ -123,6 +123,7 @@ page.
 | [guardrails.yaml](configs/security/guardrails.yaml) | Reject requests that match header or body inspection rules |
 | [ip-acl.yaml](configs/security/ip-acl.yaml) | Allow or deny requests by source IP/CIDR |
 | [peer-identity-trust.yaml](configs/security/peer-identity-trust.yaml) | Validates downstream mTLS peer identity against a set of trusted peers |
+| [policy-assertions.yaml](configs/security/policy-assertions.yaml) | Tells the upstream what policy decided, as request headers it can read |
 | [policy-http.yaml](configs/security/policy-http.yaml) | Generic-HTTP authorization for non-MCP traffic using the Praxis Policy Engine |
 | [policy.yaml](configs/security/policy.yaml) | Embeds the Praxis Policy Engine in-process to enforce multi-source JWT identity, APL route policy, RFC 8693 OAuth 2.0 token exchange, PII scanning, audit emission, and (under `body_access: read_write`) request / response body rewriting |
 

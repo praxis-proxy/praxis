@@ -1,0 +1,69 @@
+# Policy fixture for the `security/policy-assertions.yaml` example
+# integration test. The example points `config_path` at an
+# operator-supplied deployment path; the test rewrites that to this
+# file.
+#
+# One HS256 identity plugin and a `global` block that admits every
+# authenticated request, so the test's subject is assertions rather
+# than authorization. HS256 with an inline secret keeps this offline:
+# no JWKS endpoint, so the plugin needs no `perform_http`.
+
+plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks: [identity.resolve]
+    mode: sequential
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "https://idp.example.com"
+          audiences: ["praxis-policy-example"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT"
+          leeway_seconds: 60
+      claim_mapper: standard
+
+global:
+  authentication:
+    - jwt-user
+
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"
+
+  # What reaches the upstream. Four entries, one per shape an entry has.
+  assertions:
+    request:
+      headers:
+        # A slot source. `on_missing: deny` because this policy admits only
+        # authenticated requests, so an absent subject is a bug rather than an
+        # anonymous caller to pass along.
+        - name: x-auth-user-id
+          from: subject.id
+          on_missing: deny
+
+        # A claim source, taken by name.
+        - name: x-auth-tenant
+          from: claim.tenant
+
+        # A collection MUST declare an encoding: a set arriving in a shape
+        # nobody chose is a shape nobody can rely on. Renders sorted.
+        - name: x-auth-roles
+          from: subject.roles
+          encode: csv
+
+        # `members:` renders one JSON object under operator-chosen keys, with
+        # the keys sorted so one identity produces identical header bytes.
+        - name: x-auth-context
+          members:
+            teams: subject.teams
+
+      # Removes names no entry above targets. `authorization` is deliberately
+      # absent from the request protocol floor precisely so withholding the
+      # caller's own credential from the upstream is expressible.
+      strip:
+        - authorization
+        - x-internal-hint

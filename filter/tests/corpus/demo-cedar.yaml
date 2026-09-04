@@ -16,16 +16,19 @@
 # realm's JWKS URL so the resolver fetches the active public key at
 # init time (no manual PEM paste).
 
-plugin_settings:
-  routing_enabled: true
+engine_settings:
+  dispatch: policy
 
 plugins:
   # User identity. Carries the human's roles + permissions claims.
   - name: jwt-user
+    capabilities:
+      # PPE performs no outbound HTTP of its own, so a plugin that reaches an
+      # IdP declares this or the engine refuses to start.
+      - perform_http
     kind: identity/jwt
     hooks: [identity.resolve]
     mode: sequential
-    priority: 10
     on_error: fail
     config:
       role: user
@@ -43,10 +46,13 @@ plugins:
 
   # Client identity. Carries the agent's client_id / azp.
   - name: jwt-client
+    capabilities:
+      # PPE performs no outbound HTTP of its own, so a plugin that reaches an
+      # IdP declares this or the engine refuses to start.
+      - perform_http
     kind: identity/jwt
     hooks: [identity.resolve]
     mode: sequential
-    priority: 20
     on_error: fail
     config:
       role: client
@@ -72,9 +78,11 @@ plugins:
     kind: delegator/oauth
     hooks: [token.delegate]
     mode: sequential
-    priority: 30
     on_error: fail
     capabilities:
+      # PPE performs no outbound HTTP of its own, so a plugin that reaches an
+      # IdP declares this or the engine refuses to start.
+      - perform_http
       - read_inbound_credentials
       - write_delegated_tokens
     config:
@@ -102,7 +110,6 @@ plugins:
     kind: validator/pii-scan
     hooks: [cmf.tool_pre_invoke]
     mode: sequential
-    priority: 25
     on_error: fail
     config:
       detect:
@@ -115,17 +122,20 @@ plugins:
   # ----------------------------------------------------------------
   # Emits one JSON line per dispatched request capturing subject,
   # client, entity, tool args, and any delegation outcomes. Never
-  # blocks — observation only. Wired on every CMF entity hook so
-  # the audit trail covers all tool / prompt / resource traffic.
+  # blocks — observation only.
+  #
+  # One hook, because this demo declares only `tool:` routes. Under
+  # `dispatch: policy` a plugin runs where a `run(name)` step names it, so
+  # declaring the prompt and resource hooks too would leave two of the three
+  # uncovered and the load would say so.
   - name: audit-log
     kind: audit/logger
     hooks:
       - cmf.tool_pre_invoke
-      - cmf.prompt_pre_invoke
-      - cmf.resource_pre_fetch
     mode: sequential
-    priority: 90    # fires AFTER policy / delegate so the record
-                    # reflects the final decision + minted tokens
+    # Ordering is the order the document writes the steps: a `run(name)`
+    # step invokes the one plugin it names, so this records the final
+    # decision and the minted tokens by sitting last.
     on_error: ignore  # observation failures don't halt traffic
     capabilities:
       - read_subject
@@ -148,9 +158,11 @@ plugins:
     kind: delegator/oauth
     hooks: [token.delegate]
     mode: sequential
-    priority: 31
     on_error: fail
     capabilities:
+      # PPE performs no outbound HTTP of its own, so a plugin that reaches an
+      # IdP declares this or the engine refuses to start.
+      - perform_http
       - read_inbound_credentials
       - write_delegated_tokens
     config:
@@ -174,10 +186,13 @@ plugins:
   # tell the user "awaiting sign-off" and retry — it never blocks.
   # Registered under the name `manager-approver`; the route names it.
   - name: manager-approver
+    capabilities:
+      # PPE performs no outbound HTTP of its own, so a plugin that reaches an
+      # IdP declares this or the engine refuses to start.
+      - perform_http
     kind: elicitation/ciba
     hooks: [elicit]
     mode: sequential
-    priority: 40
     on_error: fail
     config:
       backchannel_endpoint: "http://localhost:8081/realms/cpex-demo/protocol/openid-connect/ext/ciba/auth"
@@ -249,45 +264,49 @@ global:
 
 routes:
   - tool: get_compensation
-    pre_invocation:
-      - "require(role.hr)"
-      - "delegate(workday-oauth, target: workday-api, audience: workday-api, permissions: [read_compensation])"
-      - "taint(secret, session)"
-      - "run(audit-log)"
+    authorization:
+      pre_invocation:
+        - "require(role.hr)"
+        - "delegate(workday-oauth, target: workday-api, audience: workday-api, permissions: [read_compensation])"
+        - "taint(secret, session)"
+        - "run(audit-log)"
     args:
       ssn: "str | redact(!perm.view_ssn)"
     result:
       ssn: "str | redact(!perm.view_ssn)"
 
   - tool: search_repos
-    pre_invocation:
-      - "require(team.engineering | team.security)"
-      - cedar:
-          action: 'Action::"read"'
-          resource:
-            type: Repo
-            id: ${args.repo_name}
-            attributes:
-              visibility: ${args.visibility}
-      - "delegate(github-oauth, target: github-api, audience: github-api, permissions: [repo:read:internal])"
-      - "!(delegation.granted.permissions contains 'repo:read:internal'): deny"
-      - "run(audit-log)"
+    authorization:
+      pre_invocation:
+        - "require(team.engineering | team.security)"
+        - cedar:
+            action: 'Action::"read"'
+            resource:
+              type: Repo
+              id: ${args.repo_name}
+              attributes:
+                visibility: ${args.visibility}
+        - "delegate(github-oauth, target: github-api, audience: github-api, permissions: [repo:read:internal])"
+        - "!(delegation.granted.permissions contains 'repo:read:internal'): deny"
+        - "run(audit-log)"
 
   - tool: send_email
-    pre_invocation:
-      - "require(perm.email_send)"
-      - "run(audit-log)"
-      - "run(pii-scan)"
-      - "security.labels contains \"secret\": deny('external email blocked: this session accessed secret data', 'session_tainted_secret')"
+    authorization:
+      pre_invocation:
+        - "require(perm.email_send)"
+        - "run(audit-log)"
+        - "run(pii-scan)"
+        - "security.labels contains \"secret\": deny('external email blocked: this session accessed secret data', 'session_tainted_secret')"
 
   # Sensitive mutating action. Small changes go straight through; an
   # adjustment over $10K requires the requester's manager to approve
   # out-of-band (CIBA), and the approval is bound to the live amount
   # (`scope`) so it can't be replayed against a larger change.
   - tool: adjust_compensation
-    pre_invocation:
-      - "require(role.hr)"
-      - when: "args.amount > 10000"
-        do:
-          - "require_approval(manager-approver, from: claim.manager, channel: \"ciba\", scope: \"args.amount <= 25000\", purpose: \"Approve a compensation adjustment\", timeout: 24h)"
-      - "run(audit-log)"
+    authorization:
+      pre_invocation:
+        - "require(role.hr)"
+        - when: "args.amount > 10000"
+          do:
+            - "require_approval(manager-approver, from: claim.manager, channel: \"ciba\", scope: \"args.amount <= 25000\", purpose: \"Approve a compensation adjustment\", timeout: 24h)"
+        - "run(audit-log)"

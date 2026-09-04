@@ -90,12 +90,19 @@ impl AuthenticatedIdentity {
     /// Provider-mapped custom claims from the validated identity.
     ///
     /// Registered JWT claims and claims promoted to the typed fields above are
-    /// excluded by the policy engine claim mapper. Values use the policy
-    /// engine's normalized string representation rather than exposing the raw
-    /// decoded JWT claim set: string-typed JWT claims are passed through
-    /// as-is, while non-string values (objects, arrays, numbers, booleans)
-    /// are JSON-serialized into their compact string form (e.g.
-    /// `{"tier":"gold"}` for a nested object).
+    /// excluded by the policy engine claim mapper. Values use a normalized
+    /// string representation rather than exposing the raw decoded JWT claim
+    /// set: string-typed JWT claims are passed through as-is, while non-string
+    /// values (objects, arrays, numbers, booleans) are JSON-serialized into
+    /// their compact string form (e.g. `{"tier":"gold"}` for a nested object).
+    ///
+    /// The policy engine preserves each claim's JSON shape as of 0.2.0, so the
+    /// flattening happens in this crate now rather than upstream. The rendering
+    /// is unchanged, and it is deliberately not a JSON value: this type is the
+    /// stable identity contract for filters that consume an authenticated
+    /// principal, and widening it would break every one of them for shape
+    /// fidelity none of them asked for.
+    ///
     /// Wire adapters must explicitly allowlist and bound claims before
     /// serializing them outside Praxis.
     pub fn custom_claims(&self) -> &BTreeMap<String, String> {

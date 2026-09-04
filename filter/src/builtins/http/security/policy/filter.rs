@@ -14,13 +14,15 @@ use ppe::praxis_policy_core::{
     cmf::{
         CmfHook, Message, MessagePayload, Role,
         constants::{
-            HOOK_CMF_HTTP_REQUEST, HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_PRE_INVOKE,
+            ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_PROMPT_PRE_INVOKE, HOOK_CMF_RESOURCE_PRE_FETCH,
+            HOOK_CMF_TOOL_PRE_INVOKE,
         },
     },
     engine::PolicyEngine,
     error::{PluginError, PluginViolation},
     extensions::MetaExtension,
     hooks::Extensions,
+    http_hook::{HOOK_HTTP_REQUEST, HttpHook, HttpPayload},
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
 };
 
@@ -118,7 +120,7 @@ pub struct PolicyFilter {
     /// borrowing `&self`.
     mgr: Arc<PolicyEngine>,
     /// Derived from the loaded policy at construction: the `global` policy
-    /// wired the entity-less HTTP path (`cmf.http_request`). When true and
+    /// wired the entity-less HTTP path (`http.request`). When true and
     /// `entity_routes` is false, the filter is a pure L7 policy evaluated at
     /// `on_request` over `http.*` + identity — no classifier, no body.
     http_global: bool,
@@ -169,6 +171,28 @@ impl PolicyFilter {
 
         let mgr = Arc::new(PolicyEngine::default());
         ppe::install_builtins(&mgr);
+
+        // The engine performs no outbound HTTP of its own, so the plugins that
+        // reach an IdP borrow a transport the host installs. Without one, an
+        // issuer configured with `jwks_url`, an OAuth token exchange and a CIBA
+        // dispatch each fail at `initialize()` below rather than at load.
+        //
+        // This is the bundled hyper transport, behind ppe's `http-hyper`
+        // feature. It builds its connection pool on first use, which is what
+        // makes it safe to install here: init runs on the short-lived runtime
+        // below and that runtime is gone before the first request arrives, so a
+        // pool built eagerly would be bound to a dead reactor.
+        //
+        // Lending praxis's own pingora client would give the process one pool and
+        // one egress path. Tracked separately.
+        if !Self::install_http_transport(&mgr, cfg.allow_private_idp) {
+            // Set-once, and this manager was just constructed, so a refusal
+            // means the engine changed under us rather than a double install.
+            tracing::warn!(
+                target: "policy.filter",
+                "policy: an HTTP transport was already installed on a fresh engine"
+            );
+        }
 
         // Host-supplied factories, for `kind:` values the engine does not
         // bundle. After the builtins on purpose: the factory registry is
@@ -244,7 +268,7 @@ impl PolicyFilter {
         // Derive the evaluation shape from the loaded policy so the filter
         // needs no operator-set mode. `has_hooks_for` reports whether a hook
         // was wired by the policy (registered handler or route annotation).
-        let http_global = mgr.has_hooks_for(HOOK_CMF_HTTP_REQUEST);
+        let http_global = mgr.has_hooks_for(HOOK_HTTP_REQUEST);
         let entity_routes = mgr.has_hooks_for(HOOK_CMF_TOOL_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_PROMPT_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_RESOURCE_PRE_FETCH);
@@ -402,15 +426,41 @@ impl PolicyFilter {
         Self::publish_identity_projection(ctx, Self::authenticated_identity(identity));
     }
 
+    /// Install the bundled transport, widening its egress when configured.
+    ///
+    /// The engine refuses private and loopback destinations by default. A local
+    /// or in-cluster `IdP` needs the wider transport, which is why
+    /// `install_default_http_transport` is not enough on its own.
+    ///
+    /// Returns false only if a transport was already installed.
+    fn install_http_transport(mgr: &Arc<PolicyEngine>, allow_private: bool) -> bool {
+        if allow_private {
+            tracing::info!(
+                target: "policy.filter",
+                "policy: allowing the engine to reach private and loopback IdP addresses"
+            );
+            return mgr.set_http_transport(Arc::new(ppe::HyperTransport::new().with_allow_private_destinations()));
+        }
+        ppe::install_default_http_transport(mgr)
+    }
+
     /// Build the public raw-credential-free projection from PPE's private
     /// validated payload.
+    ///
+    /// PPE preserves each claim's JSON shape as of 0.2.0, where it used to hand
+    /// over strings it had already flattened. `AuthenticatedIdentity` is a stable
+    /// contract for filters that consume an authenticated principal, so the
+    /// flattening moves here rather than widening that type to a JSON value.
     fn authenticated_identity(identity: &IdentityPayload) -> Option<AuthenticatedIdentity> {
         identity.subject.as_ref().and_then(|subject| {
             AuthenticatedIdentity::new(
                 subject.id.clone()?,
                 subject.roles.iter().cloned(),
                 subject.teams.iter().cloned(),
-                subject.claims.iter().map(|(name, value)| (name.clone(), value.clone())),
+                subject
+                    .claims
+                    .iter()
+                    .map(|(name, value)| (name.clone(), flatten_claim(value))),
             )
         })
     }
@@ -476,17 +526,33 @@ impl PolicyFilter {
 
     /// Run the unscoped identity hook and return only its raw-credential-free
     /// projection. Route-aware callers defer publication until classification.
+    ///
+    /// "Unscoped" is the reserved entity-less pair, not absent metadata. The gate
+    /// runs before classification, so it has no entity to name, and those two
+    /// constants are what the engine documents for exactly that request: they
+    /// resolve the global `authentication:` layer. Passing no `meta` at all is
+    /// denied as `unidentified_request`, and rightly so, since a config whose
+    /// authentication lives only on routes would otherwise resolve an empty list
+    /// here and admit the request with no identity at all.
     #[expect(clippy::large_stack_frames, reason = "async PPE identity payload")]
     async fn resolve_gated_identity(
         &self,
         ctx: &HttpFilterContext<'_>,
     ) -> Result<Option<AuthenticatedIdentity>, Rejection> {
+        let gate_ext = Extensions {
+            meta: Some(Arc::new(MetaExtension {
+                entity_type: Some(ENTITY_HTTP.to_owned()),
+                entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        };
         let (result, _bg) = self
             .mgr
             .invoke_named::<IdentityHook>(
                 HOOK_IDENTITY_RESOLVE,
                 Self::identity_payload(Self::snapshot_headers(ctx)),
-                Extensions::default(),
+                gate_ext,
                 None,
             )
             .await;
@@ -555,7 +621,7 @@ impl PolicyFilter {
 
     /// Generic-HTTP (L7) authorization: resolve identity, populate the
     /// HTTP request line + headers into the attribute bag, and evaluate the
-    /// `global` policy via the `cmf.http_request` hook. A deny maps to a
+    /// `global` policy via the `http.request` hook. A deny maps to a
     /// plain HTTP response ([`super::error::http_authz_rejection`]); an
     /// identity failure is the usual 401. Authorization runs here (not the
     /// body phase) because it needs no request body.
@@ -565,8 +631,6 @@ impl PolicyFilter {
         reason = "async handler over large CMF types; linear resolve/authz/delegate flow"
     )]
     async fn on_request_http_authz(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
-        use ppe::praxis_policy_core::cmf::constants::{ENTITY_HTTP, ENTITY_NAME_GLOBAL};
-
         let headers = Self::snapshot_headers(ctx);
         let identity = match self
             .resolve_identity(headers.clone(), ENTITY_HTTP, ENTITY_NAME_GLOBAL)
@@ -583,21 +647,25 @@ impl PolicyFilter {
         // scanning) can be CPU-intensive for complex rule sets or large
         // input data. Offload to the blocking thread pool so the async
         // runtime stays responsive to other concurrent requests.
-        let payload = MessagePayload {
-            message: Message::text(Role::User, ""),
-        };
+        //
+        // `HttpPayload` carries no fields, and that is the point: generic HTTP
+        // has no LLM chat message, so this used to pass an empty `MessagePayload`
+        // that a content-inspecting plugin would scan and report clean on. The
+        // engine gives the two HTTP hooks their own family so nothing on this
+        // path pretends to hold content; what a handler reads is the extensions.
+        let payload = HttpPayload;
         let mgr = Arc::clone(&self.mgr);
         let handle = tokio::runtime::Handle::current();
         let result = tokio::task::spawn_blocking(move || {
             handle.block_on(async {
                 let (r, _bg) = mgr
-                    .invoke_named::<CmfHook>(HOOK_CMF_HTTP_REQUEST, payload, extensions, None)
+                    .invoke_named::<HttpHook>(HOOK_HTTP_REQUEST, payload, extensions, None)
                     .await;
                 r
             })
         })
         .await
-        .map_err(|e| -> FilterError { format!("policy: CMF request-phase hook task failed: {e}").into() })?;
+        .map_err(|e| -> FilterError { format!("policy: HTTP request-phase hook task failed: {e}").into() })?;
 
         if !result.continue_processing {
             tracing::debug!(target: "policy.filter", "http authz deny (on_request)");
@@ -614,6 +682,16 @@ impl PolicyFilter {
                 target: "policy.filter",
                 count = attached,
                 "attached delegated tokens to upstream request (L7 authz)",
+            );
+        }
+        // After the tokens, so a `strip:` naming a credential header runs against
+        // what delegation just set rather than before it.
+        let (set, removed) = apply_request_assertions(ctx, result.modified_extensions.as_ref());
+        if set > 0 || removed > 0 {
+            tracing::debug!(
+                target: "policy.filter",
+                set, removed,
+                "applied request assertions to upstream request (L7 authz)",
             );
         }
         tracing::trace!(target: "policy.filter", "http authz allow (on_request)");
@@ -649,6 +727,17 @@ impl PolicyFilter {
         };
         ext.http = Some(Arc::new(http));
     }
+}
+
+/// Render one validated claim into the flat string `AuthenticatedIdentity`
+/// exposes.
+///
+/// A string claim passes through as-is, so `as_str()` rather than `to_string()`:
+/// the latter would render it quoted and change every existing consumer's value.
+/// Everything else renders as compact JSON, which keeps a structured claim
+/// distinguishable from a string that happens to spell the same text.
+fn flatten_claim(value: &serde_json::Value) -> String {
+    value.as_str().map_or_else(|| value.to_string(), str::to_owned)
 }
 
 /// Request-scoped carrier for the identity resolved in the request phase,
@@ -744,7 +833,10 @@ impl HttpFilter for PolicyFilter {
         // gate. Saves the per-request body-buffer cost on un-auth'd traffic —
         // if there's no valid token, we never reach `on_request_body` and the
         // body never gets buffered.
-        let action = self.identity_gate(ctx).await?;
+        // Boxed for the same reason as the L7 arm above: the gate resolves an
+        // identity payload, and leaving that future inline inflates this
+        // method's frame past the stack-size gate.
+        let action = Box::pin(self.identity_gate(ctx)).await?;
         if !self.entity_routes && matches!(action, FilterAction::Continue) {
             Self::mark_admission_complete(ctx);
         }
@@ -908,6 +1000,16 @@ impl HttpFilter for PolicyFilter {
                 target: "policy.filter",
                 count = attached,
                 "attached delegated tokens to upstream request",
+            );
+        }
+        // After the tokens, so a `strip:` naming a credential header runs against
+        // what delegation just set rather than before it.
+        let (set, removed) = apply_request_assertions(ctx, cmf_result.modified_extensions.as_ref());
+        if set > 0 || removed > 0 {
+            tracing::debug!(
+                target: "policy.filter",
+                set, removed,
+                "applied request assertions to upstream request",
             );
         }
 
@@ -1195,6 +1297,82 @@ fn missing_protocol_metadata_rejection() -> Rejection {
 // -----------------------------------------------------------------------------
 // attach_delegated_tokens
 // -----------------------------------------------------------------------------
+
+/// Apply the engine's request assertions to the upstream request.
+///
+/// The `assertions:` block is the only thing that tells an upstream what policy
+/// decided. The engine renders it into the `http` slot's `request_headers` on the
+/// result rather than onto any wire: it holds no socket, so a host is what puts
+/// the map on one. This is that step, and without it the block loads, validates,
+/// and reaches nothing.
+///
+/// Diffed against the headers the request arrived with, because the engine hands
+/// back the whole map and praxis mutates a live request:
+///
+/// - a name the map no longer carries is removed, which covers `strip:` and the unconditional removal an entry does
+///   before injecting;
+/// - a name whose value differs is set, which covers injection and the case that matters most, a client that sent the
+///   asserted name itself and must not have it forwarded.
+///
+/// Returns `(set, removed)` for the caller's log line.
+///
+/// A header the engine rendered that praxis cannot represent is skipped with a
+/// warning rather than dropping the request: the engine already refused CR, LF
+/// and NUL in a rendered value, so reaching this is a name no `HeaderName`
+/// accepts, which is a policy-authoring fault and not traffic to fail closed on.
+#[expect(
+    clippy::too_many_lines,
+    reason = "two linear passes over one header map, set then remove"
+)]
+pub(super) fn apply_request_assertions(
+    ctx: &mut HttpFilterContext<'_>,
+    extensions: Option<&Extensions>,
+) -> (usize, usize) {
+    let Some(asserted) = extensions.and_then(|ext| ext.http.as_ref()) else {
+        return (0, 0);
+    };
+    let inbound = PolicyFilter::snapshot_headers(ctx);
+    let mut set = 0;
+    let mut removed = 0;
+
+    for (name, value) in &asserted.request_headers {
+        let lc = name.to_ascii_lowercase();
+        if inbound.get(&lc).is_some_and(|had| had == value) {
+            continue;
+        }
+        let (Ok(header), Ok(header_value)) = (
+            http::header::HeaderName::try_from(lc.as_str()),
+            http::header::HeaderValue::try_from(value.as_str()),
+        ) else {
+            tracing::warn!(
+                target: "policy.filter",
+                header = %name,
+                "asserted header is not representable on the wire; skipping",
+            );
+            continue;
+        };
+        ctx.request_headers_to_set.push((header, header_value));
+        set += 1;
+    }
+
+    // A name the request arrived with and the returned map no longer carries was
+    // removed by the contract. That comparison is only sound because
+    // `attach_http_attributes` seeds the map from the inbound request on both
+    // paths, so the engine received every header praxis holds and the map it
+    // hands back is the same map minus what the contract took out.
+    for lc in inbound.keys() {
+        if asserted.request_headers.contains_key(lc) {
+            continue;
+        }
+        if let Ok(header) = http::header::HeaderName::try_from(lc.as_str()) {
+            ctx.request_headers_to_remove.push(header);
+            removed += 1;
+        }
+    }
+
+    (set, removed)
+}
+
 
 /// Walk the minted delegated tokens on the resolved `Extensions` and
 /// push them as upstream request headers. Returns the count attached

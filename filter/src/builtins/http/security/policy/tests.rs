@@ -66,6 +66,7 @@ fn agent_claims(client_id: &str) -> serde_json::Value {
 }
 
 /// Write a single-plugin policy document referencing the HS256 test secret.
+#[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
 fn write_single_plugin_config() -> (TempDir, String) {
     let dir = TempDir::new().expect("create tempdir");
     let cfg_path = dir.path().join("cpex.yaml");
@@ -77,7 +78,6 @@ fn write_single_plugin_config() -> (TempDir, String) {
     hooks:
       - identity.resolve
     mode: sequential
-    priority: 10
     on_error: fail
     config:
       header: Authorization
@@ -90,6 +90,11 @@ fn write_single_plugin_config() -> (TempDir, String) {
             secret: "{TEST_SECRET}"
           leeway_seconds: 60
       claim_mapper: standard
+global:
+  # Under `dispatch: policy` a plugin runs only where a policy names it, so an
+  # identity plugin no `authentication:` list reaches fails the load.
+  authentication:
+    - jwt-user
 "#
     );
 
@@ -108,6 +113,7 @@ fn write_tool_route_config() -> (TempDir, String) {
 
 /// Variant used to prove that temporary gate results stay isolated when a
 /// pipeline contains multiple policy instances with different credentials.
+#[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
 fn write_tool_route_config_for_header(header: &str) -> (TempDir, String) {
     let dir = TempDir::new().expect("create tempdir");
     let cfg_path = dir.path().join("cpex.yaml");
@@ -131,9 +137,14 @@ fn write_tool_route_config_for_header(header: &str) -> (TempDir, String) {
       claim_mapper: standard
 routes:
   - tool: echo
-    apl:
+    authorization:
       pre_invocation:
         - "require(authenticated)"
+global:
+  # Under `dispatch: policy` a plugin runs only where a policy names it, so an
+  # identity plugin no `authentication:` list reaches fails the load.
+  authentication:
+    - jwt-user
 "#
     );
     std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
@@ -170,12 +181,16 @@ fn write_http_entity_config() -> (TempDir, String) {
           leeway_seconds: 60
       claim_mapper: standard
 global:
-  apl:
-    pdp:
-      - kind: cel
+  # Under `dispatch: policy` a plugin runs only where a policy names it, so an
+  # identity plugin no `authentication:` list reaches fails the load. This is
+  # the list that reaches it.
+  authentication:
+    - jwt-user
+  pdp:
+    - kind: cel
 routes:
   - tool: echo
-    apl:
+    authorization:
       pre_invocation:
         - cel:
             expr: |
@@ -270,7 +285,7 @@ global:
     - kind: cel
 routes:
   - tool: echo
-    apl:
+    authorization:
       pre_invocation:
         - cel:
             expr: |
@@ -301,7 +316,6 @@ fn write_cel_policy_config() -> (TempDir, String) {
     hooks:
       - identity.resolve
     mode: sequential
-    priority: 10
     on_error: fail
     config:
       header: Authorization
@@ -315,12 +329,16 @@ fn write_cel_policy_config() -> (TempDir, String) {
           leeway_seconds: 60
       claim_mapper: standard
 global:
-  apl:
-    pdp:
-      - kind: cel
+  # Under `dispatch: policy` a plugin runs only where a policy names it, so an
+  # identity plugin no `authentication:` list reaches fails the load. This is
+  # the list that reaches it.
+  authentication:
+    - jwt-user
+  pdp:
+    - kind: cel
 routes:
   - tool: echo
-    apl:
+    authorization:
       pre_invocation:
         - cel:
             expr: |
@@ -380,7 +398,6 @@ fn write_taint_config() -> (TempDir, String) {
     hooks:
       - identity.resolve
     mode: sequential
-    priority: 10
     on_error: fail
     config:
       header: Authorization
@@ -395,13 +412,18 @@ fn write_taint_config() -> (TempDir, String) {
       claim_mapper: standard
 routes:
   - tool: read-secret
-    apl:
+    authorization:
       pre_invocation:
         - "taint(secret, session)"
   - tool: send-out
-    apl:
+    authorization:
       pre_invocation:
         - "security.labels contains \"secret\": deny('session accessed secret data', 'session_tainted_secret')"
+global:
+  # Under `dispatch: policy` a plugin runs only where a policy names it, so an
+  # identity plugin no `authentication:` list reaches fails the load.
+  authentication:
+    - jwt-user
 "#
     );
 
@@ -456,7 +478,6 @@ fn write_multi_source_config() -> (TempDir, String) {
     hooks:
       - identity.resolve
     mode: sequential
-    priority: 10
     on_error: fail
     config:
       header: Authorization
@@ -474,7 +495,6 @@ fn write_multi_source_config() -> (TempDir, String) {
     hooks:
       - identity.resolve
     mode: sequential
-    priority: 20
     on_error: fail
     config:
       header: X-Agent-Token
@@ -487,6 +507,12 @@ fn write_multi_source_config() -> (TempDir, String) {
             kind: secret
             secret: "{TEST_SECRET}"
       claim_mapper: standard
+global:
+  # Under `dispatch: policy` a plugin runs only where a policy names it, so an
+  # identity plugin no `authentication:` list reaches fails the load.
+  authentication:
+    - jwt-user
+    - jwt-agent
 "#
     );
 
@@ -513,16 +539,15 @@ fn write_route_scoped_identity_config() -> (TempDir, String) {
     let cfg_path = dir.path().join("cpex.yaml");
 
     let yaml = format!(
-        r#"plugin_settings:
+        r#"engine_settings:
   # Route-scoped dispatch only engages when routing is enabled.
-  routing_enabled: true
+  dispatch: policy
 plugins:
   - name: id-global
     kind: identity/jwt
     hooks:
       - identity.resolve
     mode: sequential
-    priority: 10
     on_error: fail
     config:
       header: Authorization
@@ -540,7 +565,6 @@ plugins:
     hooks:
       - identity.resolve
     mode: sequential
-    priority: 20
     on_error: fail
     config:
       header: X-Route-Token
@@ -560,7 +584,7 @@ routes:
   # `apl` is required for a route to run identity/policy at all — without
   # a policy the body phase treats the route as passthrough.
   - tool: open-tool
-    apl:
+    authorization:
       pre_invocation:
         - "require(authenticated)"
   - tool: scoped-tool
@@ -568,7 +592,7 @@ routes:
       replace_inherited: true
       steps:
         - id-route
-    apl:
+    authorization:
       pre_invocation:
         - "require(authenticated)"
 "#
@@ -750,7 +774,6 @@ fn write_valkey_session_store_config() -> (TempDir, String) {
     hooks:
       - identity.resolve
     mode: sequential
-    priority: 10
     on_error: fail
     config:
       header: Authorization
@@ -764,12 +787,17 @@ fn write_valkey_session_store_config() -> (TempDir, String) {
           leeway_seconds: 60
       claim_mapper: standard
 global:
+  # Under `dispatch: policy` a plugin runs only where a policy names it, so an
+  # identity plugin no `authentication:` list reaches fails the load. This is
+  # the list that reaches it.
+  authentication:
+    - jwt-user
   session_store:
     kind: valkey
     endpoint: localhost:6379
 routes:
   - tool: read-secret
-    apl:
+    authorization:
       pre_invocation:
         - "taint(secret, session)"
 "#
@@ -787,6 +815,7 @@ routes:
 fn build_filter(config_path: String) -> PolicyFilter {
     let cfg = PolicyFilterConfig {
         config_path,
+        allow_private_idp: false,
         body_access: super::config::BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -1022,6 +1051,7 @@ fn rejects_zero_max_buffer_bytes() {
     // The check runs before the config_path read, so a bogus path is fine.
     let cfg = PolicyFilterConfig {
         config_path: "/nonexistent/policy.yaml".to_owned(),
+        allow_private_idp: false,
         body_access: super::config::BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -1038,6 +1068,7 @@ fn rejects_zero_max_buffer_bytes() {
 fn rejects_oversized_max_buffer_bytes() {
     let cfg = PolicyFilterConfig {
         config_path: "/nonexistent/policy.yaml".to_owned(),
+        allow_private_idp: false,
         body_access: super::config::BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -1093,6 +1124,265 @@ fn config_requires_config_path() {
 async fn filter_constructs_from_valid_yaml() {
     let (_dir, path) = write_single_plugin_config();
     let _filter = build_filter(path);
+}
+
+
+/// Write a policy document whose issuer resolves its keys from a `jwks_url`.
+///
+/// The URL points at a closed port on purpose. Fetching it is what the test is
+/// about, and the two failure kinds are what discriminate: no transport (or no
+/// `perform_http`) never leaves the process and is fatal, so `initialize()`
+/// refuses to start, while a transport that dials and is refused is recoverable
+/// and boots with the keystore empty. So construction succeeding here means the
+/// call was actually attempted.
+fn write_jwks_url_config(capabilities: &str) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    mode: sequential
+    on_error: fail
+{capabilities}    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["RS256"]
+          decoding_key:
+            kind: jwks_url
+            url: "http://127.0.0.1:1/jwks.json"
+            insecure_http: true
+          leeway_seconds: 60
+      claim_mapper: standard
+
+global:
+  authentication:
+    - jwt-user
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
+    (dir, path_str)
+}
+
+/// A `jwks_url` issuer reaches its endpoint, which means the engine was handed
+/// an HTTP transport. PPE performs no outbound HTTP of its own since 0.2.0, so
+/// without `install_default_http_transport` the fetch never leaves the process
+/// and `initialize()` refuses to start.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_jwks_issuer_reaches_its_endpoint_through_the_installed_transport() {
+    let (_dir, path) = write_jwks_url_config("    capabilities:\n      - perform_http\n");
+    if let Err(e) = try_build_filter_allowing_private(path, true) {
+        panic!("a refused connection is recoverable and must still boot; got {e}");
+    }
+}
+
+/// The transport is gated on the plugin declaring `perform_http`, so a config
+/// that omits it fails the load naming the capability rather than booting a
+/// resolver that denies every token from that issuer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_jwks_issuer_without_perform_http_fails_to_construct() {
+    let (_dir, path) = write_jwks_url_config("");
+    let err = try_build_filter_allowing_private(path, true)
+        .err()
+        .expect("a withheld capability must refuse to start");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("perform_http"),
+        "the error must name the capability to add; got {msg}"
+    );
+}
+
+/// Without `allow_private_idp`, a loopback `IdP` is refused before any socket is
+/// opened. Construction still succeeds, because a refused destination is
+/// recoverable and the resolver retries per request, but no key is ever fetched.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_loopback_idp_is_refused_unless_allowed() {
+    let (_dir, path) = write_jwks_url_config("    capabilities:\n      - perform_http\n");
+    if let Err(e) = try_build_filter_allowing_private(path, false) {
+        panic!("a refused destination is recoverable and must still boot; got {e}");
+    }
+}
+
+/// A config on inline keys performs no egress, so it must not be made to declare
+/// `perform_http` for a call it never makes.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_inline_key_config_needs_no_egress_capability() {
+    let (_dir, path) = write_single_plugin_config();
+    let _filter = build_filter(path);
+}
+
+
+/// Write a policy whose `global.assertions.request:` block asserts the subject
+/// onto an upstream header, composes one members object, and strips a header the
+/// client sent.
+#[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
+fn write_assertions_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    mode: sequential
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+
+global:
+  authentication:
+    - jwt-user
+  assertions:
+    request:
+      headers:
+        - name: x-auth-user-id
+          from: subject.id
+        - name: x-auth-roles
+          from: subject.roles
+          encode: csv
+        - name: x-auth-context
+          members:
+            tenant: claim.tenant
+      strip:
+        - x-drop-me
+
+routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// The engine renders `assertions:` into the result's `http` slot; it holds no
+/// socket, so the filter is what puts the map on the wire. These assert on
+/// `request_headers_to_set` / `_to_remove`, which is what praxis applies to the
+/// upstream request.
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "linear assertion contract coverage")]
+async fn request_assertions_reach_the_upstream_request() {
+    let (_dir, path) = write_assertions_config();
+    let filter = build_filter(path);
+
+    let mut claims = standard_claims("alice");
+    claims["roles"] = json!(["admin", "writer"]);
+    claims["tenant"] = json!("acme");
+    let token = mint_jwt(&claims);
+
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    // The laundering case: a client naming an asserted header itself.
+    req.headers.insert("x-auth-user-id", HeaderValue::from_static("root"));
+    // And a header the contract strips.
+    req.headers.insert("x-drop-me", HeaderValue::from_static("secret"));
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+
+    let mut body = Some(bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
+    ));
+    let action = filter
+        .on_request_body(&mut ctx, &mut body, true)
+        .await
+        .expect("body phase ran");
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "the route allows, and the body phase signals that with BodyDone; got {action:?}"
+    );
+
+    let set: std::collections::HashMap<String, String> = ctx
+        .request_headers_to_set
+        .iter()
+        .map(|(n, v)| (n.as_str().to_owned(), v.to_str().unwrap_or_default().to_owned()))
+        .collect();
+
+    assert_eq!(
+        set.get("x-auth-user-id").map(String::as_str),
+        Some("alice"),
+        "the client sent `root` under this name and must not have it forwarded: \
+         an entry removes its target before injecting"
+    );
+    assert_eq!(
+        set.get("x-auth-roles").map(String::as_str),
+        Some("admin,writer"),
+        "a collection renders under its declared encoding, sorted"
+    );
+    assert_eq!(
+        set.get("x-auth-context").map(String::as_str),
+        Some(r#"{"tenant":"acme"}"#),
+        "a members entry renders one JSON object with the operator's keys"
+    );
+
+    let removed: Vec<&str> = ctx
+        .request_headers_to_remove
+        .iter()
+        .map(http::header::HeaderName::as_str)
+        .collect();
+    assert!(
+        removed.contains(&"x-drop-me"),
+        "a `strip:` entry removes a name no header entry targets; got {removed:?}"
+    );
+    assert!(
+        !removed.contains(&"authorization"),
+        "nothing here strips the credential, and praxis must not invent removals: \
+         got {removed:?}"
+    );
+}
+
+/// A policy with no `assertions:` block sets and removes nothing, so the feature
+/// costs a deployment that does not use it exactly nothing on the wire.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_policy_without_assertions_touches_no_upstream_header() {
+    let (_dir, path) = write_tool_route_config();
+    let filter = build_filter(path);
+
+    let token = mint_jwt(&standard_claims("alice"));
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+
+    let mut body = Some(bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
+    ));
+    drop(
+        filter
+            .on_request_body(&mut ctx, &mut body, true)
+            .await
+            .expect("body phase ran"),
+    );
+
+    assert!(
+        ctx.request_headers_to_remove.is_empty(),
+        "no contract means no removals; got {:?}",
+        ctx.request_headers_to_remove
+    );
 }
 
 /// A config selecting the Valkey session store (`global.session_store`,
@@ -1189,6 +1479,14 @@ async fn valid_hs256_jwt_continues() {
     claims["tenant"] = json!("acme");
     claims["profile"] = json!({"tier": "gold"});
     claims["authorization"] = json!("custom-value");
+    // One claim of every remaining JSON kind, so the flattening contract is
+    // closed rather than sampled: the engine hands these over with their shape
+    // intact and this crate is what renders them.
+    claims["projects"] = json!(["alpha", "beta"]);
+    claims["seat_count"] = json!(7);
+    claims["ratio"] = json!(1.5);
+    claims["is_admin"] = json!(true);
+    claims["absent"] = json!(null);
     let token = mint_jwt(&claims);
     let mut req = make_request(Method::POST, "/");
     req.headers.insert(
@@ -1225,6 +1523,21 @@ async fn valid_hs256_jwt_continues() {
         identity.custom_claims().get("profile").map(String::as_str),
         Some(r#"{"tier":"gold"}"#),
     );
+    // A string renders bare, everything else as compact JSON. `as_str()` is
+    // what keeps the string arm unquoted; `to_string()` would render `"acme"`.
+    for (claim, want) in [
+        ("projects", r#"["alpha","beta"]"#),
+        ("seat_count", "7"),
+        ("ratio", "1.5"),
+        ("is_admin", "true"),
+        ("absent", "null"),
+    ] {
+        assert_eq!(
+            identity.custom_claims().get(claim).map(String::as_str),
+            Some(want),
+            "claim `{claim}` must render as its compact JSON form",
+        );
+    }
     for excluded in ["iss", "aud", "sub", "exp", "iat", "roles", "teams"] {
         assert!(
             !identity.custom_claims().contains_key(excluded),
@@ -1580,6 +1893,7 @@ async fn missing_protocol_metadata_passes_when_not_required() {
     let (_dir, path) = write_tool_route_config();
     let cfg = PolicyFilterConfig {
         config_path: path,
+        allow_private_idp: false,
         body_access: super::config::BodyAccessMode::ReadOnly,
         require_protocol_metadata: false,
         init_timeout_secs: 30,
@@ -2523,6 +2837,7 @@ async fn response_phase_without_request_identity_fails_closed() {
     let (_dir, path) = write_tool_route_config();
     let cfg = PolicyFilterConfig {
         config_path: path,
+        allow_private_idp: false,
         body_access: super::config::BodyAccessMode::ReadWrite,
         require_protocol_metadata: true,
         init_timeout_secs: 30,
@@ -2765,7 +3080,11 @@ fn write_config_naming_kind(kind: &str) -> (TempDir, String) {
     let dir = TempDir::new().expect("create tempdir");
     let cfg_path = dir.path().join("cpex.yaml");
     let yaml = format!(
-        "plugins:\n  - name: host-plugin\n    kind: {kind}\n    hooks:\n      - cmf.tool_pre_invoke\n    mode: sequential\n    priority: 50\n    on_error: fail\n"
+        // The route naming the plugin is what reaches it: under
+        // `dispatch: policy` a declared plugin no step names fails the load, and
+        // these fixtures are about the `kind:` resolving to a factory at all.
+        "plugins:\n  - name: host-plugin\n    kind: {kind}\n    hooks:\n      - cmf.tool_pre_invoke\n    mode: sequential\n    on_error: fail\n\
+         routes:\n  - tool: echo\n    authorization:\n      pre_invocation:\n        - \"run(host-plugin)\"\n"
     );
     std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
     let path_str = cfg_path.to_str().expect("utf8 path").to_owned();
@@ -2778,8 +3097,19 @@ fn parse_dom(bytes: &bytes::Bytes) -> serde_json::Value {
 }
 
 fn try_build_filter(config_path: String) -> Result<PolicyFilter, crate::FilterError> {
+    try_build_filter_allowing_private(config_path, false)
+}
+
+/// `try_build_filter` with the engine's egress widened to loopback. The
+/// `jwks_url` fixtures need it: their endpoint is refused before dialling
+/// otherwise, and those tests are about the call leaving the process.
+fn try_build_filter_allowing_private(
+    config_path: String,
+    allow_private_idp: bool,
+) -> Result<PolicyFilter, crate::FilterError> {
     PolicyFilter::new(PolicyFilterConfig {
         config_path,
+        allow_private_idp,
         body_access: super::config::BodyAccessMode::ReadOnly,
         require_protocol_metadata: true,
         init_timeout_secs: 30,

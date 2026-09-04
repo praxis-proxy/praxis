@@ -1,0 +1,51 @@
+# Identity assertions at the upstream boundary (experimental)
+#
+# Tells the upstream what policy decided, as request headers it can read. The
+# `policy` filter loads a policy whose `assertions:` block renders
+# engine-derived identity onto the upstream request: the resolved subject, its
+# roles under a declared encoding, and a composed JSON object. It also strips
+# the caller's own credential header, so an upstream running on a delegated
+# credential never sees the client's.
+#
+# The headers are unsigned. An upstream believes them because it believes
+# nothing between this proxy and itself can set them; if that is not true of
+# your network, this is not what makes it true. What makes them trustworthy at
+# all is that a client cannot forge them: every header an entry targets is
+# removed before injection, whether or not the source resolved, so a caller who
+# sends `x-auth-user-id` himself has it replaced rather than forwarded.
+#
+# Requires building with the `policy-engine` feature, which is off
+# by default:
+#
+# Usage:
+#   cargo run -p praxis-proxy --features policy-engine -- -c examples/configs/security/policy-assertions.yaml
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      # `config_path` points at the policy document, which is where the
+      # `assertions:` block lives. This example's policy declares only a
+      # `global` HTTP policy, so the filter authorizes at the HTTP layer and
+      # needs no protocol classifier ahead of it.
+      - filter: policy
+        config_path: /etc/praxis/assertions-policy.yaml
+
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: backend
+
+      - filter: load_balancer
+        clusters:
+          - name: backend
+            endpoints:
+              - "127.0.0.1:3000"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to local backends

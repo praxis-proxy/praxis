@@ -49,6 +49,8 @@ mod pipeline;
 #[cfg(feature = "policy-engine")]
 mod policy;
 #[cfg(feature = "policy-engine")]
+mod policy_assertions;
+#[cfg(feature = "policy-engine")]
 mod policy_http;
 mod priority_lb;
 mod process_logging;

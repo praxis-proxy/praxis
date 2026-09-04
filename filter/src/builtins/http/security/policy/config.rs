@@ -67,6 +67,20 @@ pub(crate) struct PolicyFilterConfig {
     #[serde(default = "default_max_buffer_bytes")]
     pub max_buffer_bytes: usize,
 
+    /// Allow the policy engine to reach a private or loopback `IdP`.
+    ///
+    /// The engine refuses loopback, RFC 1918, link-local (cloud metadata)
+    /// and CGNAT destinations by default, because a `jwks_url` or token
+    /// endpoint in a policy document is an SSRF primitive whenever anyone
+    /// but the operator can influence it.
+    ///
+    /// Set this when the `IdP` runs on the same host or inside the cluster,
+    /// which is the common Kubernetes shape. It only widens the policy
+    /// engine's outbound calls; praxis upstreams are governed by
+    /// `insecure_options.allow_private_endpoints`.
+    #[serde(default)]
+    pub allow_private_idp: bool,
+
     /// Fail-closed policy gate for misconfigured chains. When `true`
     /// (default), `on_request_body` rejects any request that reaches
     /// it without `mcp.method` filter-metadata. The metadata is set

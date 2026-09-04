@@ -47,7 +47,15 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # The umbrella is bundled extensions only. Anything else a policy document names
 # comes from the host via `register_policy_plugin_factory`; see the policy
 # filter's `host_plugins` module.
-ppe = { version = "0.1.0", package = "praxis-policy", features = ["builtins"] }
+# `http-hyper` supplies the outbound HTTP transport the engine performs no HTTP
+# without: since 0.2.0 the JWT, OAuth and CIBA plugins borrow a host-installed
+# transport, and with none installed a `jwks_url` issuer fails at
+# `PolicyEngine::initialize()`. The policy filter installs it; see
+# `PolicyFilter::new`.
+ppe = { version = "0.2.0", package = "praxis-policy", features = [
+    "builtins",
+    "http-hyper",
+] }
 clap = { version = "4.6.6", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.2.1"

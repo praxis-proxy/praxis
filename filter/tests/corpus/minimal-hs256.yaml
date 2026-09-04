@@ -18,7 +18,6 @@ plugins:
     kind: identity/jwt
     hooks: [identity.resolve]
     mode: sequential
-    priority: 10
     on_error: fail
     config:
       header: Authorization
@@ -31,3 +30,9 @@ plugins:
             secret: "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT"
           leeway_seconds: 60
       claim_mapper: standard
+
+global:
+  # Under `dispatch: policy` a plugin runs only where a policy names it, so an
+  # identity plugin no `authentication:` list reaches fails the load.
+  authentication:
+    - jwt-user
