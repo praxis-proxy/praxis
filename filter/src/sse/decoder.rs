@@ -221,7 +221,7 @@ impl SseDecoder {
                 error: None,
             },
             Err(err) => {
-                self.state = DecoderState::Poisoned(err);
+                self.poison(err);
                 SseBatch {
                     records,
                     trailing: None,
@@ -266,7 +266,7 @@ impl SseDecoder {
                 }
             },
             Err(err) => {
-                self.state = DecoderState::Poisoned(err);
+                self.poison(err);
                 SseBatch {
                     records: Vec::new(),
                     trailing: None,
@@ -307,6 +307,21 @@ impl SseDecoder {
         }
         self.record_bytes = 0;
         Ok(Some(SseRecord::from_fields(std::mem::take(&mut self.fields))))
+    }
+
+    /// Transition to the poisoned state, releasing the retained buffers.
+    ///
+    /// A limit violation exists to bound retained memory, so the offending
+    /// allocation must be dropped, not merely cleared — `Vec::clear` keeps the
+    /// capacity, so an over-limit buffer would sit for the life of a decoder
+    /// held in a per-connection context. Reassigning empty vecs frees it. The
+    /// buffers are never read again while poisoned: `push` and `finish`
+    /// short-circuit on the stored error.
+    fn poison(&mut self, err: SseDecodeError) {
+        self.state = DecoderState::Poisoned(err);
+        self.line_buf = Vec::new();
+        self.fields = Vec::new();
+        self.record_bytes = 0;
     }
 
     /// Reset to `Active`, clearing buffers and any `Finished`/`Poisoned` state.
@@ -842,6 +857,33 @@ mod tests {
             "poisoned decoder re-reports the same error"
         );
         assert!(decoder.is_poisoned(), "stays poisoned");
+    }
+
+    #[test]
+    fn poisoning_releases_retained_buffers() {
+        let limits = SseLimits {
+            max_record_bytes: 6,
+            ..SseLimits::default()
+        };
+        let mut decoder = SseDecoder::with_limits(limits);
+        // The first field commits (allocating `fields`) and the second line is
+        // still buffered in `line_buf` when the record-size limit trips.
+        let batch = decoder.push(b"data: aaaa\ndata: bbbb\n\n");
+        assert!(
+            matches!(batch.error, Some(SseDecodeError::RecordTooLarge { .. })),
+            "over-limit record poisons"
+        );
+        assert!(decoder.is_poisoned(), "decoder is poisoned");
+        assert_eq!(
+            decoder.line_buf.capacity(),
+            0,
+            "poisoning releases the line buffer, not merely clears its capacity"
+        );
+        assert_eq!(
+            decoder.fields.capacity(),
+            0,
+            "poisoning releases the field buffer, not merely clears its capacity"
+        );
     }
 
     #[test]
