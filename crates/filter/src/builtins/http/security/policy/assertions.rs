@@ -17,6 +17,10 @@ use ppe::praxis_policy_core::{
 use super::filter::PolicyFilter;
 use crate::filter::HttpFilterContext;
 
+// -----------------------------------------------------------------------------
+// GovernedNames
+// -----------------------------------------------------------------------------
+
 /// Header names governed by one direction's assertion blocks.
 ///
 /// This is a conservative union across policy levels because the engine returns
@@ -83,6 +87,10 @@ impl GovernedNames {
         out
     }
 }
+
+// -----------------------------------------------------------------------------
+// Request-side: queue the upstream mutations
+// -----------------------------------------------------------------------------
 
 /// Drop queued request mutations for a case-insensitive header name.
 fn purge_pending_request(ctx: &mut HttpFilterContext<'_>, lowercase: &str) -> bool {
@@ -235,6 +243,10 @@ fn diff_request(
     (set, removed)
 }
 
+// -----------------------------------------------------------------------------
+// Response-side: write the downstream headers
+// -----------------------------------------------------------------------------
+
 /// Snapshot response headers into the engine's case-normalized map.
 pub(super) fn snapshot_response_headers(headers: &http::HeaderMap) -> HashMap<String, String> {
     headers
@@ -352,6 +364,10 @@ fn diff_response(
     }
     (set, removed)
 }
+
+// -----------------------------------------------------------------------------
+// Load-time: a response contract praxis cannot apply
+// -----------------------------------------------------------------------------
 
 /// Return response assertion levels unreachable from the response-header hook.
 ///
