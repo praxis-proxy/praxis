@@ -7,7 +7,7 @@ authors.workspace = true
 description = "TLS configuration types and validation for Praxis"
 license.workspace = true
 repository.workspace = true
-readme = "../README.md"
+readme = "../../README.md"
 publish = true
 
 [lib]

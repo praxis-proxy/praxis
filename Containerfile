@@ -20,30 +20,30 @@ WORKDIR /src
 # See: https://shaneutt.com/blog/rust-fast-small-docker-image-builds/
 
 COPY Cargo.toml Cargo.lock ./
-COPY core/Cargo.toml core/Cargo.toml
-COPY filter/Cargo.toml filter/Cargo.toml
-COPY protocol/Cargo.toml protocol/Cargo.toml
-COPY tls/Cargo.toml tls/Cargo.toml
-COPY server/Cargo.toml server/Cargo.toml
+COPY crates/core/Cargo.toml crates/core/Cargo.toml
+COPY crates/filter/Cargo.toml crates/filter/Cargo.toml
+COPY crates/protocol/Cargo.toml crates/protocol/Cargo.toml
+COPY crates/tls/Cargo.toml crates/tls/Cargo.toml
+COPY crates/server/Cargo.toml crates/server/Cargo.toml
 
 # The server crate has a build.rs that discovers external filter
 # crates via cargo metadata for build-time auto-registration.
-COPY server/build.rs server/build.rs
+COPY crates/server/build.rs crates/server/build.rs
 
 # Strip workspace members not needed for the praxis binary
 # so we don't need their Cargo.toml files.
 RUN sed -i '/xtask/d; /benchmarks/d; /tests\//d' Cargo.toml
-RUN mkdir -p core/src \
-    filter/src \
-    protocol/src \
-    tls/src \
-    server/src \
-    && echo '//! stub' > core/src/lib.rs \
-    && echo '//! stub' > filter/src/lib.rs \
-    && echo '//! stub' > protocol/src/lib.rs \
-    && echo '//! stub' > tls/src/lib.rs \
-    && echo '//! stub' > server/src/lib.rs \
-    && printf '//! stub\nfn main() {}\n' > server/src/main.rs
+RUN mkdir -p crates/core/src \
+    crates/filter/src \
+    crates/protocol/src \
+    crates/tls/src \
+    crates/server/src \
+    && echo '//! stub' > crates/core/src/lib.rs \
+    && echo '//! stub' > crates/filter/src/lib.rs \
+    && echo '//! stub' > crates/protocol/src/lib.rs \
+    && echo '//! stub' > crates/tls/src/lib.rs \
+    && echo '//! stub' > crates/server/src/lib.rs \
+    && printf '//! stub\nfn main() {}\n' > crates/server/src/main.rs
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/src/target \
@@ -55,17 +55,17 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
 
 # Replace stubs with real source, then rebuild. Only the
 # project crates recompile; all dependencies are cached.
-COPY core/src core/src
-COPY filter/src filter/src
-COPY protocol/src protocol/src
-COPY tls/src tls/src
-COPY server/src server/src
+COPY crates/core/src crates/core/src
+COPY crates/filter/src crates/filter/src
+COPY crates/protocol/src crates/protocol/src
+COPY crates/tls/src crates/tls/src
+COPY crates/server/src crates/server/src
 COPY examples examples
 
 # Touch the lib/main files so cargo sees them as newer than
 # the cached stub artifacts.
-RUN find core/src filter/src \
-    protocol/src tls/src server/src \
+RUN find crates/core/src crates/filter/src \
+    crates/protocol/src crates/tls/src crates/server/src \
     -name '*.rs' -exec touch {} +
 
 # ------------------------------------------------------------------------------

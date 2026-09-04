@@ -38,19 +38,19 @@ contributors and filter developers.
 Pingora accepts the TCP connection on the listener's
 bound address. If TLS is configured, Praxis resolves
 the certificate via SNI using `ReloadableCertResolver`
-(`tls/src/`), which supports hot-reload via `ArcSwap`.
+(`crates/tls/src/`), which supports hot-reload via `ArcSwap`.
 
 Relevant files:
-- `tls/src/sni.rs` — SNI resolution
-- `tls/src/reload.rs` — certificate hot-reload
-- `protocol/src/http/pingora/handler/` — HTTP handler
+- `crates/tls/src/sni.rs` — SNI resolution
+- `crates/tls/src/reload.rs` — certificate hot-reload
+- `crates/protocol/src/http/pingora/handler/` — HTTP handler
 
 ## Step 2: Protocol Detection
 
 The listener's `protocol` field (default: `http`)
 determines which protocol adapter handles the
 connection. Each adapter implements the `Protocol`
-trait (`protocol/src/lib.rs`) and translates
+trait (`crates/protocol/src/lib.rs`) and translates
 Pingora callbacks into pipeline invocations.
 
 ```text
@@ -75,12 +75,12 @@ pointer, while requests already holding a guard
 continue on the old pipeline.
 
 Relevant files:
-- `protocol/src/pipelines.rs` — `ListenerPipelines`
-- `server/src/reload.rs` — reload orchestration
+- `crates/protocol/src/pipelines.rs` — `ListenerPipelines`
+- `crates/server/src/reload.rs` — reload orchestration
 
 ## Step 4: Request Filter Execution
 
-The pipeline executor (`filter/src/pipeline/http.rs`)
+The pipeline executor (`crates/filter/src/pipeline/http.rs`)
 runs a while-loop over the flat filter list:
 
 ```text
@@ -118,7 +118,7 @@ For each filter:
 Filter results are cleared after branch evaluation
 at each filter.
 
-Relevant file: `filter/src/pipeline/http.rs`
+Relevant file: `crates/filter/src/pipeline/http.rs`
 
 ## Step 5: Request Body Processing
 
@@ -138,7 +138,7 @@ Body delivery depends on `BodyMode`:
 Body filters run in forward order. Filters that
 returned `BodyDone` are skipped on subsequent chunks.
 
-Relevant file: `filter/src/pipeline/http.rs`
+Relevant file: `crates/filter/src/pipeline/http.rs`
 
 ## Step 6: Upstream Selection
 
@@ -174,7 +174,7 @@ Retry logic handles idempotent failures based on
 the cluster's retry configuration.
 
 Relevant file:
-`protocol/src/http/pingora/handler/upstream_peer.rs`
+`crates/protocol/src/http/pingora/handler/upstream_peer.rs`
 
 ## Step 8: Response Filter Execution
 
@@ -192,7 +192,7 @@ Response conditions (`response_conditions` on the
 filter entry) can further gate execution based on
 response status or headers.
 
-Relevant file: `filter/src/pipeline/http.rs`
+Relevant file: `crates/filter/src/pipeline/http.rs`
 
 ## Step 9: Response Body Processing
 

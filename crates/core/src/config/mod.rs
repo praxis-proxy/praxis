@@ -563,7 +563,7 @@ filter_chains:
 
     #[test]
     fn all_example_configs_parse() {
-        let root = format!("{}/../examples/configs", env!("CARGO_MANIFEST_DIR"));
+        let root = format!("{}/../../examples/configs", env!("CARGO_MANIFEST_DIR"));
         let mut count = 0;
         for entry in walkdir(&root) {
             Config::from_file(&entry).unwrap_or_else(|e| panic!("{}: {e}", entry.display()));

@@ -7,7 +7,7 @@ authors.workspace = true
 description = "Configuration, error types, and server factory for Praxis"
 license.workspace = true
 repository.workspace = true
-readme = "../README.md"
+readme = "../../README.md"
 publish = true
 
 [lib]

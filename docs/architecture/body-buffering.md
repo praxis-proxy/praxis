@@ -60,7 +60,7 @@ is larger than any finite value). This ensures every
 filter in the pipeline gets enough buffer to operate.
 
 ```rust
-// merge_body_mode in filter/src/pipeline/body.rs
+// merge_body_mode in crates/filter/src/pipeline/body.rs
 match filter_mode {
     StreamBuffer { max_bytes } => {
         *current = match *current {

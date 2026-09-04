@@ -3,7 +3,7 @@
 
 //! Generate and lint per-filter documentation files.
 //!
-//! Parses Rust source files under `filter/src/builtins/` with [`syn`] to
+//! Parses Rust source files under `crates/filter/src/builtins/` with [`syn`] to
 //! extract config structs, field metadata, YAML examples, and filter
 //! descriptions. Produces one markdown file per filter at
 //! `docs/filters/{protocol}/{category}/{filter_name}.md` and a reference
@@ -324,7 +324,7 @@ impl FilterInfo {
 /// Parse shared config types that built-in filters reference.
 fn parse_shared_config_items(root: &Path) -> ModuleItems {
     let mut items = ModuleItems::new();
-    for dir in &[root.join("core/src/config"), root.join("tls/src/config")] {
+    for dir in &[root.join("crates/core/src/config"), root.join("crates/tls/src/config")] {
         for path in collect_rs_files(dir) {
             let Ok(source) = fs::read_to_string(&path) else {
                 continue;
@@ -344,7 +344,7 @@ fn parse_shared_config_items(root: &Path) -> ModuleItems {
 
 /// Discover all filters across all protocols and categories.
 fn discover_all_filters(root: &Path, shared_items: &ModuleItems) -> Vec<FilterEntry> {
-    let builtins = root.join("filter/src/builtins");
+    let builtins = root.join("crates/filter/src/builtins");
     let feature_requirements = discover_feature_requirements(root);
     let mut entries = Vec::new();
 
@@ -474,7 +474,7 @@ fn merge_filter_variants(filters: Vec<FilterInfo>) -> Vec<FilterInfo> {
 
 /// Discover feature-gated built-in filter registrations from the registry.
 fn discover_feature_requirements(root: &Path) -> BTreeMap<String, String> {
-    let registry = root.join("filter/src/registry.rs");
+    let registry = root.join("crates/filter/src/registry.rs");
     let Ok(source) = fs::read_to_string(registry) else {
         return BTreeMap::new();
     };
@@ -2515,7 +2515,7 @@ mod tests {
     #[test]
     fn discover_feature_requirements_reads_registry_cfg() {
         let root = workspace_root();
-        let registry = root.join("filter/src/registry.rs");
+        let registry = root.join("crates/filter/src/registry.rs");
         if !registry.is_file() {
             return;
         }
@@ -2572,7 +2572,7 @@ mod tests {
     #[test]
     fn extract_filters_from_real_codebase() {
         let root = workspace_root();
-        let timeout_dir = root.join("filter/src/builtins/http/traffic_management");
+        let timeout_dir = root.join("crates/filter/src/builtins/http/traffic_management");
         if !timeout_dir.is_dir() {
             return;
         }
@@ -2592,7 +2592,7 @@ mod tests {
     #[test]
     fn discover_anchors_finds_nested_filters() {
         let root = workspace_root();
-        let pp_dir = root.join("filter/src/builtins/http/payload_processing");
+        let pp_dir = root.join("crates/filter/src/builtins/http/payload_processing");
         if !pp_dir.is_dir() {
             return;
         }
@@ -2608,7 +2608,7 @@ mod tests {
     #[test]
     fn json_body_field_docs_include_one_of_note() {
         let root = workspace_root();
-        let dir = root.join("filter/src/builtins/http/payload_processing");
+        let dir = root.join("crates/filter/src/builtins/http/payload_processing");
         if !dir.is_dir() {
             return;
         }
@@ -2634,7 +2634,7 @@ mod tests {
     #[test]
     fn json_body_field_docs_include_specific_yaml_examples() {
         let root = workspace_root();
-        let dir = root.join("filter/src/builtins/http/payload_processing");
+        let dir = root.join("crates/filter/src/builtins/http/payload_processing");
         if !dir.is_dir() {
             return;
         }
@@ -2659,7 +2659,7 @@ mod tests {
     #[test]
     fn static_response_uses_correct_config() {
         let root = workspace_root();
-        let tm_dir = root.join("filter/src/builtins/http/traffic_management");
+        let tm_dir = root.join("crates/filter/src/builtins/http/traffic_management");
         if !tm_dir.is_dir() {
             return;
         }
