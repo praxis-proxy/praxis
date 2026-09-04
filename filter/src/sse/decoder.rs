@@ -83,8 +83,18 @@ impl Default for SseLimits {
 #[derive(Debug, Default, PartialEq, Eq)]
 #[must_use]
 pub struct SseBatch {
-    /// Records completed by this call, in order.
+    /// Records completed by this call, in order. Each was terminated by a blank
+    /// line, so it is a fully dispatched event.
     pub records: Vec<SseRecord>,
+    /// A final event block left buffered at end of stream without its
+    /// terminating blank line. Only `finish` ever sets this; `push` always
+    /// leaves it `None`.
+    ///
+    /// Per the WHATWG event-stream spec an incomplete event at EOF is discarded,
+    /// not dispatched, so it is kept here — apart from `records` — rather than
+    /// handed back as a completed record. Consumers that follow the spec ignore
+    /// it; consumers that can salvage a truncated tail may read it deliberately.
+    pub trailing: Option<SseRecord>,
     /// The error that stopped decoding this call, if any.
     pub error: Option<SseDecodeError>,
 }
@@ -192,22 +202,29 @@ impl SseDecoder {
         if let DecoderState::Finished = self.state {
             return SseBatch {
                 records: Vec::new(),
+                trailing: None,
                 error: Some(SseDecodeError::Finished),
             };
         }
         if let DecoderState::Poisoned(err) = self.state {
             return SseBatch {
                 records: Vec::new(),
+                trailing: None,
                 error: Some(err),
             };
         }
         let mut records = Vec::new();
         match self.parse(chunk, &mut records) {
-            Ok(()) => SseBatch { records, error: None },
+            Ok(()) => SseBatch {
+                records,
+                trailing: None,
+                error: None,
+            },
             Err(err) => {
                 self.state = DecoderState::Poisoned(err);
                 SseBatch {
                     records,
+                    trailing: None,
                     error: Some(err),
                 }
             },
@@ -222,60 +239,74 @@ impl SseDecoder {
 
     /// Signal end of stream, transitioning `Active` to `Finished`.
     ///
-    /// Processes any buffered partial line as if terminated and, if the
-    /// in-progress block accumulated any field, returns it as a single trailing
-    /// record. Idempotent: a second call returns an empty batch. While poisoned,
-    /// re-reports the limit error.
+    /// If the stream ended mid-event — bytes buffered without the terminating
+    /// blank line — that block is returned in [`SseBatch::trailing`], never in
+    /// `records`: per the WHATWG event-stream spec an incomplete event at EOF is
+    /// discarded, not dispatched, so the caller decides whether to ignore or
+    /// salvage it. `records` is therefore always empty here. Idempotent: a second
+    /// call returns an empty batch. While poisoned, re-reports the limit error.
     pub fn finish(&mut self) -> SseBatch {
         if let DecoderState::Poisoned(err) = self.state {
             return SseBatch {
                 records: Vec::new(),
+                trailing: None,
                 error: Some(err),
             };
         }
         if let DecoderState::Finished = self.state {
             return SseBatch::default();
         }
-        let mut records = Vec::new();
-        match self.flush(&mut records) {
-            Ok(()) => {
+        match self.flush() {
+            Ok(trailing) => {
                 self.state = DecoderState::Finished;
-                SseBatch { records, error: None }
+                SseBatch {
+                    records: Vec::new(),
+                    trailing,
+                    error: None,
+                }
             },
             Err(err) => {
                 self.state = DecoderState::Poisoned(err);
                 SseBatch {
-                    records,
+                    records: Vec::new(),
+                    trailing: None,
                     error: Some(err),
                 }
             },
         }
     }
 
-    /// Flush a trailing partial line and dispatch any accumulated fields.
-    fn flush(&mut self, records: &mut Vec<SseRecord>) -> Result<(), SseDecodeError> {
+    /// Flush any buffered end-of-stream state into a single trailing record.
+    ///
+    /// Returns the in-progress block as an unterminated trailing record, or
+    /// `None` when nothing was buffered. The record is deliberately *not*
+    /// dispatched: per the WHATWG spec an incomplete event at EOF is discarded,
+    /// so `finish` hands it back separately for the caller to ignore or salvage.
+    fn flush(&mut self) -> Result<Option<SseRecord>, SseDecodeError> {
         if !self.bom_resolved && self.bom_len > 0 {
             let prior = self.bom_len;
             self.bom_resolved = true;
             self.bom_len = 0;
-            self.feed(BOM.get(..prior).unwrap_or_default(), records)?;
+            // Replay buffered BOM-prefix bytes as data. They hold no line
+            // terminator, so `feed` completes no records; the scratch vec stays
+            // empty and only `line_buf` grows.
+            let mut scratch = Vec::new();
+            self.feed(BOM.get(..prior).unwrap_or_default(), &mut scratch)?;
         }
         if !self.line_buf.is_empty() {
-            // `process_line` returns `Some` only for an empty `line_buf` (a blank
-            // line ends a record); here the buffer is non-empty (BOM replay above
-            // only pushes bytes, never a terminator), so it commits the trailing
-            // line as a field and returns `None` — the record is emitted by the
-            // `!self.fields.is_empty()` block below. The `Some` arm is defensive.
-            if let Some(record) = self.process_line()? {
-                records.push(record);
-            }
+            // Commit the trailing partial line as a field. `process_line` returns
+            // `Some` only for an empty `line_buf` (a blank line ends a record);
+            // the buffer is non-empty here (BOM replay only appends bytes, never a
+            // terminator), so it commits a field and returns `None`. The trailing
+            // record is built from the accumulated fields below.
+            self.process_line()?;
             self.line_buf.clear();
         }
-        if !self.fields.is_empty() {
-            records.push(SseRecord::from_fields(std::mem::take(&mut self.fields)));
-            self.record_bytes = 0;
+        if self.fields.is_empty() {
+            return Ok(None);
         }
-        Ok(())
+        self.record_bytes = 0;
+        Ok(Some(SseRecord::from_fields(std::mem::take(&mut self.fields))))
     }
 
     /// Reset to `Active`, clearing buffers and any `Finished`/`Poisoned` state.
@@ -499,6 +530,7 @@ mod tests {
     fn batch_default_is_empty() {
         let batch = SseBatch::default();
         assert!(batch.records.is_empty(), "default batch has no records");
+        assert!(batch.trailing.is_none(), "default batch has no trailing record");
         assert_eq!(batch.error, None, "default batch has no error");
     }
 
@@ -826,12 +858,12 @@ mod tests {
         assert!(push_ok(&mut decoder, b"data: tail\n").is_empty(), "no blank line yet");
         let batch = decoder.finish();
         assert_eq!(batch.error, None, "clean finish");
-        assert_eq!(batch.records.len(), 1, "trailing record flushed");
-        assert_eq!(
-            batch.records[0].data(),
-            Bytes::from_static(b"tail"),
-            "trailing data correct"
+        assert!(
+            batch.records.is_empty(),
+            "an unterminated tail is not a dispatched record"
         );
+        let trailing = batch.trailing.expect("trailing record surfaced separately");
+        assert_eq!(trailing.data(), Bytes::from_static(b"tail"), "trailing data correct");
         assert!(decoder.is_finished(), "finish transitions to Finished");
         assert!(!decoder.is_poisoned(), "clean finish is not poison");
     }
@@ -841,10 +873,11 @@ mod tests {
         let mut decoder = SseDecoder::new();
         assert!(push_ok(&mut decoder, b"data: tail").is_empty(), "no terminator at all");
         let batch = decoder.finish();
+        assert!(batch.records.is_empty(), "unterminated line is not dispatched");
         assert_eq!(
-            batch.records[0].data(),
+            batch.trailing.expect("trailing record").data(),
             Bytes::from_static(b"tail"),
-            "unterminated line flushed"
+            "unterminated line surfaces as the trailing record"
         );
     }
 
@@ -855,6 +888,7 @@ mod tests {
         assert_eq!(records.len(), 1, "record before finish");
         let first = decoder.finish();
         assert!(first.records.is_empty(), "nothing pending to flush");
+        assert!(first.trailing.is_none(), "nothing pending as a trailing record");
         assert_eq!(first.error, None, "first finish is clean");
 
         let second = decoder.finish();
@@ -879,6 +913,7 @@ mod tests {
         let err = decoder.push(b"data: toolong\n\n").error.unwrap();
         let batch = decoder.finish();
         assert_eq!(batch.error, Some(err), "finish re-reports the poison error");
+        assert!(batch.trailing.is_none(), "a poisoned finish yields no trailing record");
         assert!(decoder.is_poisoned(), "still poisoned after finish");
     }
 
@@ -926,7 +961,7 @@ mod tests {
         assert!(push_ok(&mut decoder, &[0x41]).is_empty(), "divergent byte buffered");
         let batch = decoder.finish();
         assert_eq!(
-            batch.records[0].fields()[0],
+            batch.trailing.expect("trailing record").fields()[0],
             SseField::Unknown {
                 name: Bytes::copy_from_slice(&[0xEF, 0x41]),
                 value: Bytes::new()
@@ -979,6 +1014,11 @@ mod tests {
             &[0xEF, 0xBB, 0xBF, b'd', b'a', b't', b'a', b':', b' ', b'z', b'\n', b'\n'],
             b"data: a\rid: 1\r\r",
             &[b'd', b'a', b't', b'a', b':', b' ', 0xFF, 0xFE, b'\n', b'\n'],
+            // Unterminated inputs: finish yields a trailing record, exercising
+            // the records-vs-trailing split-invariance the change introduced.
+            b"data: hello",
+            b"event: e\ndata: a\ndata: b",
+            b"data: first\n\ndata: second",
         ];
         for input in corpus {
             assert_all_splits_match(input);
@@ -999,23 +1039,25 @@ mod tests {
         batch.records
     }
 
-    // Decode the whole input in one push then finish; return all records.
-    fn decode_whole(input: &[u8]) -> Vec<SseRecord> {
+    // Decode the whole input in one push then finish; return the dispatched
+    // records and any unterminated trailing record separately, so the property
+    // test checks the records-vs-trailing classification is split-invariant, not
+    // just a flattened record sequence. `finish` never adds to `records`.
+    fn decode_whole(input: &[u8]) -> (Vec<SseRecord>, Option<SseRecord>) {
         let mut decoder = SseDecoder::new();
-        let mut records = decoder.push(input).records;
-        records.extend(decoder.finish().records);
-        records
+        let records = decoder.push(input).records;
+        (records, decoder.finish().trailing)
     }
 
-    // Decode the input split at byte offsets a and b; return all records.
-    fn decode_split(input: &[u8], a: usize, b: usize) -> Vec<SseRecord> {
+    // Decode the input split at byte offsets a and b; return the dispatched
+    // records and any unterminated trailing record separately.
+    fn decode_split(input: &[u8], a: usize, b: usize) -> (Vec<SseRecord>, Option<SseRecord>) {
         let mut decoder = SseDecoder::new();
         let mut records = Vec::new();
         for part in [&input[..a], &input[a..b], &input[b..]] {
             records.extend(decoder.push(part).records);
         }
-        records.extend(decoder.finish().records);
-        records
+        (records, decoder.finish().trailing)
     }
 
     // Assert every 3-way split of the input decodes identically to the whole.

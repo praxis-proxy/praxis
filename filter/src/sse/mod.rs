@@ -16,7 +16,7 @@
 //! use praxis_filter::sse::{SseBatch, SseDecoder};
 //!
 //! let mut decoder = SseDecoder::new();
-//! let SseBatch { records, error } = decoder.push(b"data: {\"n\":1}\n\ndata: {");
+//! let SseBatch { records, error, .. } = decoder.push(b"data: {\"n\":1}\n\ndata: {");
 //! assert!(error.is_none());
 //! assert_eq!(records.len(), 1);
 //! assert_eq!(records[0].data().as_ref(), br#"{"n":1}"#);
@@ -25,9 +25,10 @@
 //! let batch = decoder.push(b"\"n\":2}\n\n");
 //! assert_eq!(batch.records[0].data().as_ref(), br#"{"n":2}"#);
 //!
-//! // at end of stream
+//! // at end of stream: the stream ended on a blank line, so nothing is left over
 //! let tail = decoder.finish();
 //! assert!(tail.records.is_empty());
+//! assert!(tail.trailing.is_none());
 //! ```
 //!
 //! # Encode locally generated records
@@ -114,8 +115,9 @@
 //!             if let Some(err) = tail.error {
 //!                 return Err(err.into()); // finish re-reports a poisoned decoder
 //!             }
-//!             // A trailing record with no blank-line terminator surfaces here.
-//!             let _final_events = tail.records.iter().filter(|r| r.is_event()).count();
+//!             // WHATWG discards an incomplete event at EOF; a truncated tail, if
+//!             // any, surfaces in `tail.trailing` to ignore or deliberately salvage.
+//!             let _truncated = tail.trailing.filter(|r| r.is_event());
 //!         }
 //!         Ok(FilterAction::Continue)
 //!     }
