@@ -4,11 +4,11 @@ Review the [HTTP filter tutorial](../filters/http-filter-tutorial.md)
 and [extensions guide](../filters/extensions.md) first.
 
 1. Create the filter module under
-   `filter/src/builtins/<protocol>/<category>/`.
+   `crates/filter/src/builtins/<protocol>/<category>/`.
 2. Implement `HttpFilter` (or `TcpFilter` for TCP-level
    filters). Add a `from_config` factory that deserializes
    a `serde_yaml::Value` into your config struct.
-3. Register it in `filter/src/registry.rs`
+3. Register it in `crates/filter/src/registry.rs`
    alongside the existing built-ins.
 4. Add unit tests and doctests.
 5. Add an example config in the appropriate category under

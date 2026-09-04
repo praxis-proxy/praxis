@@ -50,7 +50,7 @@ YAML config
       filter_chains: [security, routing]
 
         |
-        |  resolve_pipelines()   (server/src/pipelines.rs)
+        |  resolve_pipelines()   (crates/server/src/pipelines.rs)
         v
 
 FilterPipeline.filters = [ip_acl, cors, router, load_balancer]
@@ -66,7 +66,7 @@ This flattening has two important consequences:
    because both are in the same flat list.
 
 The construction sequence
-(`server/src/pipelines.rs`):
+(`crates/server/src/pipelines.rs`):
 
 1. Build a chain lookup table from `filter_chains`
 2. For each listener, concatenate its chains into a

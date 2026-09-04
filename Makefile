@@ -259,6 +259,7 @@ test-unit:
 		--exclude praxis-tests-integration \
 		--exclude praxis-tests-conformance \
 		--exclude praxis-test-utils \
+		--exclude praxis-tests-benches \
 		$(_NOCAPTURE)
 
 test-schema:
@@ -273,6 +274,7 @@ test-integration:
 		-p praxis-tests-resilience \
 		-p praxis-tests-integration \
 		$(_NOCAPTURE)
+	cargo build --benches --all-features -p praxis-tests-benches
 
 test-conformance: $(H2SPEC)
 	PATH="$(BINUTILS_PATH):$(PATH)" cargo test -p praxis-tests-conformance $(_NOCAPTURE)
@@ -305,7 +307,7 @@ test-container-run: test-container
 # -------------------------------------------------------------------
 
 bench: $(VEGETA) $(FORTIO_DEP)
-	PATH="$(BINUTILS_PATH):$(PATH)" cargo bench -p benchmarks
+	PATH="$(BINUTILS_PATH):$(PATH)" cargo bench -p praxis-tests-benches
 
 # -------------------------------------------------------------------
 # Quality
@@ -373,7 +375,7 @@ coverage:
 		--exclude benchmarks \
 		--exclude praxis-tests-conformance \
 		--exclude xtask \
-		--ignore-filename-regex '(target/|tests/|server/src/main\.rs)' \
+		--ignore-filename-regex '(target/|tests/|crates/server/src/main\.rs)' \
 		--fail-under-lines 96
 
 coverage-check:
@@ -381,7 +383,7 @@ coverage-check:
 		--exclude benchmarks \
 		--exclude praxis-tests-conformance \
 		--exclude xtask \
-		--ignore-filename-regex '(target/|tests/|server/src/main\.rs)' \
+		--ignore-filename-regex '(target/|tests/|crates/server/src/main\.rs)' \
 		--fail-under-lines 96 \
 		--output-path coverage.json
 

@@ -144,11 +144,11 @@ configured variants.
 See `docs/filters/extensions.md` for the full guide.
 
 1. Create module under
-   `filter/src/builtins/<protocol>/<category>/`
+   `crates/filter/src/builtins/<protocol>/<category>/`
 2. Implement `HttpFilter` or `TcpFilter` with a
    `from_config` factory (`fn(&serde_yaml::Value)
    -> Result<Box<dyn HttpFilter>, FilterError>`)
-3. Register in `filter/src/registry.rs`
+3. Register in `crates/filter/src/registry.rs`
 4. Add unit tests and doctests
 5. Add example config in `examples/configs/<category>/`
 6. Add functional integration test in
@@ -157,24 +157,24 @@ See `docs/filters/extensions.md` for the full guide.
 
 ## Adding a Protocol
 
-1. Implement `Protocol` trait under `protocol/src/`
+1. Implement `Protocol` trait under `crates/protocol/src/`
 2. Add variant to `ProtocolKind` in
-   `core/src/config/listener.rs`
-3. Wire in `server/src/server.rs`
+   `crates/core/src/config/listener.rs`
+3. Wire in `crates/server/src/server.rs`
 
 ## Branch Chains
 
 Conditional branching in filter pipelines based on
 filter results. Key files:
 
-- `core/src/config/branch_chain.rs`: config types
-- `core/src/config/chain_ref.rs`: `ChainRef` enum
-- `core/src/config/validate/branch_chain.rs`: validation
-- `filter/src/results.rs`: `FilterResultSet` type
-- `filter/src/pipeline/filter.rs`: `PipelineFilter`
-- `filter/src/pipeline/branch.rs`: runtime types
-- `filter/src/pipeline/build_branch.rs`: resolution
-- `filter/src/pipeline/evaluate.rs`: execution
+- `crates/core/src/config/branch_chain.rs`: config types
+- `crates/core/src/config/chain_ref.rs`: `ChainRef` enum
+- `crates/core/src/config/validate/branch_chain.rs`: validation
+- `crates/filter/src/results.rs`: `FilterResultSet` type
+- `crates/filter/src/pipeline/filter.rs`: `PipelineFilter`
+- `crates/filter/src/pipeline/branch.rs`: runtime types
+- `crates/filter/src/pipeline/build_branch.rs`: resolution
+- `crates/filter/src/pipeline/evaluate.rs`: execution
 
 Filters write results to `FilterResultSet` without
 knowing about branches. The pipeline executor reads
@@ -235,7 +235,7 @@ These two concepts are distinct, take care to not conflate them.
 ## Filter Organization
 
 Filters live under
-`filter/src/builtins/<protocol>/<category>/`.
+`crates/filter/src/builtins/<protocol>/<category>/`.
 See `docs/filters/README.md` for the filter system
 documentation and `docs/filters/reference.md`
 for built-in filter configurations.

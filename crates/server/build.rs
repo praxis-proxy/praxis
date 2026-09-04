@@ -192,7 +192,7 @@ fn write_generated_file(code: &str) {
 /// when there are uncommitted changes. Falls back to the plain package version
 /// when git is unavailable.
 fn emit_version_env() {
-    let git_dir = std::path::Path::new("../.git");
+    let git_dir = std::path::Path::new("../../.git");
     let head_path = git_dir.join("HEAD");
     println!("cargo:rerun-if-changed={}", head_path.display());
 
@@ -233,8 +233,8 @@ fn git_version_suffix() -> Option<String> {
 /// Tell Cargo when to re-run this build script.
 fn emit_rerun_directives(metadata: &Metadata) {
     println!("cargo:rerun-if-changed=Cargo.toml");
-    println!("cargo:rerun-if-changed=../Cargo.toml");
-    println!("cargo:rerun-if-changed=../Cargo.lock");
+    println!("cargo:rerun-if-changed=../../Cargo.toml");
+    println!("cargo:rerun-if-changed=../../Cargo.lock");
     println!("cargo:rerun-if-changed=build.rs");
 
     for manifest_path in direct_runtime_dependency_manifest_paths(metadata) {

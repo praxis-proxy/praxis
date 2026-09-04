@@ -30,8 +30,10 @@
 - **rustdoc**: Generate the API documentation
 - **cargo xtask**: Developer task runner for benchmarks,
   flamegraphs, and debug utilities
-- **benchmarks**: Criterion microbenchmarks and
-  scenario-based load tests ([Fortio], [Vegeta])
+- **benchmarks**: Scenario-based load tests
+  ([Fortio], [Vegeta])
+- **praxis-tests-benches**: Criterion microbenchmarks
+  (`tests/benches`)
 
 [Fortio]: https://github.com/fortio/fortio
 [Vegeta]: https://github.com/tsenart/vegeta

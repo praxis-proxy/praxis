@@ -7,7 +7,7 @@ authors.workspace = true
 description = "Cloud-native proxy server"
 license.workspace = true
 repository.workspace = true
-readme = "../README.md"
+readme = "../../README.md"
 
 [lib]
 name = "praxis"

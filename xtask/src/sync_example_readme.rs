@@ -41,7 +41,7 @@ const SKIP_PREFIXES: &[&str] = &[
 const SPECIAL_ENTRIES: &[(&str, &str, &str, &str)] = &[(
     "pipeline",
     "default.yaml",
-    "../core/src/config/default.yaml",
+    "../crates/core/src/config/default.yaml",
     "Built-in default config (static JSON on /)",
 )];
 

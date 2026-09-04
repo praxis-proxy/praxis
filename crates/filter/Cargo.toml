@@ -7,7 +7,7 @@ authors.workspace = true
 description = "Filter pipeline engine and built-in filters for Praxis"
 license.workspace = true
 repository.workspace = true
-readme = "../README.md"
+readme = "../../README.md"
 publish = true
 
 [lib]

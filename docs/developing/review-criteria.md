@@ -29,8 +29,8 @@ versions change.
 - Check the Praxis-owned invariants end to end: hop-by-hop
   stripping on both paths, `Host` validation, `x-praxis-*`
   reserved-header rejection and stripping in *both*
-  directions (`core/src/reserved_headers.rs`,
-  `protocol/src/http/`).
+  directions (`crates/core/src/reserved_headers.rs`,
+  `crates/protocol/src/http/`).
 - Retry logic must never replay a request after bytes were
   written upstream, and only for idempotent methods.
 - For each RFC-specified behavior, does a conformance test
@@ -43,8 +43,8 @@ versions change.
 
 ## 2. Hot-Path Performance
 
-The request path (`filter/src/pipeline/evaluate.rs`,
-`filter/src/pipeline/http.rs`, `protocol/src/http/`)
+The request path (`crates/filter/src/pipeline/evaluate.rs`,
+`crates/filter/src/pipeline/http.rs`, `crates/protocol/src/http/`)
 runs on every request; the config path runs once. Review
 them to different standards.
 
@@ -54,7 +54,7 @@ them to different standards.
 - Work that belongs at build time: regexes, path matchers,
   lowercased header names, and route tables must be
   compiled when the pipeline is built
-  (`filter/src/pipeline/build.rs`), never per request.
+  (`crates/filter/src/pipeline/build.rs`), never per request.
 - Locks and shared state: anything `Mutex`/`RwLock` on the
   request path is suspect; prefer per-request context or
   atomics. `ArcSwap::load` once per request, not per
@@ -73,10 +73,10 @@ needs an explicit bound and a defined behavior at the
 bound.
 
 - Body buffering: every `BodyMode::Buffer` user must
-  respect `core/src/config/body_limits.rs`; verify the
+  respect `crates/core/src/config/body_limits.rs`; verify the
   limit is enforced *while streaming in*, not after
-  assembly (`filter/src/body/`).
-- Unbounded growth: KV stores (`core/src/kv/`), rate-limit
+  assembly (`crates/filter/src/body/`).
+- Unbounded growth: KV stores (`crates/core/src/kv/`), rate-limit
   and circuit-breaker state, health registries, metrics
   label sets. What evicts entries? What is the cardinality
   under hostile input (e.g. per-IP keys from spoofable
@@ -100,7 +100,7 @@ creep in through convenience.
 
 - Grep payload-processing filters for full-body assembly
   on paths that should be `BodyMode::Stream`
-  (`filter/src/builtins/http/payload_processing/`).
+  (`crates/filter/src/builtins/http/payload_processing/`).
 - Chunk-boundary correctness: filters that inspect or
   rewrite bodies must handle tokens split across chunks
   (the `json_body_field` stream extraction is the model).
@@ -122,16 +122,16 @@ control of client traffic, backend responses, and
   reads `X-Forwarded-*` before trust is established.
 - Injection surfaces: header values flowing into logs,
   error responses, or rewritten paths
-  (`filter/src/builtins/http/value_safety.rs` is the
+  (`crates/filter/src/builtins/http/value_safety.rs` is the
   chokepoint; find writes that bypass it).
 - TLS: SNI resolution including wildcard precedence
-  (`tls/src/sni.rs`), client-auth enforcement, cert
-  hot-reload atomicity (`tls/src/reload.rs`), and what
+  (`crates/tls/src/sni.rs`), client-auth enforcement, cert
+  hot-reload atomicity (`crates/tls/src/reload.rs`), and what
   happens when a reload delivers a broken cert.
 - Error responses and admin endpoints must not leak
   internals (paths, versions, upstream addresses) to
   clients; admin surfaces need explicit exposure review
-  (`protocol/src/` admin, `server/src/dump.rs`).
+  (`crates/protocol/src/` admin, `crates/server/src/dump.rs`).
 - Do denied-by-default postures hold? New config knobs
   that widen behavior (`insecure_options.rs`) must be
   opt-in and named accordingly.
@@ -142,12 +142,12 @@ Invalid states should be unrepresentable, and every
 invariant that can be checked at startup must not be
 deferred to request time.
 
-- Audit `core/src/config/` against
+- Audit `crates/core/src/config/` against
   [Type Design](type-design.md): stray `String` where an
   enum belongs, `Option<T>` + `unwrap_or` where
   `#[serde(default)]` belongs, maps where structs belong,
   missing `deny_unknown_fields`.
-- Cross-field invariants live in `core/src/config/validate/`;
+- Cross-field invariants live in `crates/core/src/config/validate/`;
   for each config feature, ask "what nonsensical combination
   parses today?" (e.g. a branch chain referencing a chain
   that buffers bodies, a cluster with zero endpoints, a
@@ -165,7 +165,7 @@ deferred to request time.
 Reload is the most concurrency-sensitive subsystem:
 `ArcSwap` swaps, watcher debounce, task respawn, and
 in-flight drain all interact
-(`server/src/reload.rs`, `server/src/watcher.rs`).
+(`crates/server/src/reload.rs`, `crates/server/src/watcher.rs`).
 
 - Snapshot discipline: a request must observe exactly one
   pipeline generation end to end. Any second `load()` mid
@@ -177,7 +177,7 @@ in-flight drain all interact
 - Non-reloadable changes (listener topology, protocol,
   TLS toggle) must be *detected* by the diff and warned;
   review the diff logic for new config fields it silently
-  misses (`server/src/reload_diagnostics.rs`).
+  misses (`crates/server/src/reload_diagnostics.rs`).
 - Failure atomicity: a config that fails validation, or a
   cert that fails to load, must leave the old state fully
   intact — including partially-applied side effects.
@@ -187,7 +187,7 @@ in-flight drain all interact
 
 ## 8. Error Taxonomy and Failure Modes
 
-- Error enums (`core/src/errors.rs`, `FilterError`) should
+- Error enums (`crates/core/src/errors.rs`, `FilterError`) should
   distinguish operator errors (bad config), client errors
   (4xx), and upstream/internal errors (5xx); review any
   variant that conflates them, and any `map_err` that
@@ -212,7 +212,7 @@ invariants are easy to break from a distance.
   right hooks — including body hooks on early responses.
 - Branch chains: rejoin targets, iteration limits, and the
   `on_request`-only restriction
-  (`filter/src/pipeline/branch.rs`,
+  (`crates/filter/src/pipeline/branch.rs`,
   `build_branch.rs`, `evaluate.rs`). Ask what a config can
   express that the executor does not handle (cycles,
   branch-into-branch, rejoining past a terminal filter).
@@ -268,7 +268,7 @@ correctness. Review what the suite would *fail to notice*.
 - The `HttpFilter`/`TcpFilter` traits and
   `FilterRegistry` are the extension contract: review each
   trait change for what it forces on downstream
-  implementors, and keep `filter/src/extensions.rs`
+  implementors, and keep `crates/filter/src/extensions.rs`
   ergonomic for the tutorial path.
 - Public surface minimalism: anything `pub` that no
   external consumer needs should be `pub(crate)`;

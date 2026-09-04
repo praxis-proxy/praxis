@@ -57,7 +57,7 @@ version used by your Praxis server.
 
 ## 2. Implement the filter
 
-Replace `extensions/require-header-filter/src/lib.rs` with:
+Replace `extensions/require-header-crates/filter/src/lib.rs` with:
 
 ```rust
 use async_trait::async_trait;
@@ -178,7 +178,7 @@ live check below proves the request behavior end to end.
 
 Auto-discovery scans the `praxis-proxy` server's direct runtime
 dependencies. Add this entry under `[dependencies]` in
-`server/Cargo.toml`:
+`crates/server/Cargo.toml`:
 
 ```toml
 require-header-filter = { path = "../extensions/require-header-filter" }

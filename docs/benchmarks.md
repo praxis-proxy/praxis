@@ -23,7 +23,7 @@ Praxis has two benchmark systems:
 
 ## Microbenchmarks
 
-Location: `benchmarks/microbenchmarks/`
+Location: `tests/benches/benches/`
 
 | Benchmark | What it measures |
 | --- | --- |
@@ -37,13 +37,13 @@ Location: `benchmarks/microbenchmarks/`
 Run all microbenchmarks:
 
 ```console
-cargo bench -p benchmarks
+cargo bench -p praxis-tests-benches
 ```
 
 Run a single suite:
 
 ```console
-cargo bench -p benchmarks --bench router_lookup
+cargo bench -p praxis-tests-benches --bench router_lookup
 ```
 
 Results land in `target/criterion/` with HTML reports.

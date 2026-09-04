@@ -7,7 +7,7 @@ authors.workspace = true
 description = "HTTP, TCP, and protocol adapters for Praxis"
 license.workspace = true
 repository.workspace = true
-readme = "../README.md"
+readme = "../../README.md"
 publish = true
 
 [lib]

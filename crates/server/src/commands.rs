@@ -221,6 +221,6 @@ filter_chains:
     // -------------------------------------------------------------------------
 
     fn example_config_path(filename: &str) -> String {
-        format!("{}/../examples/configs/{filename}", env!("CARGO_MANIFEST_DIR"),)
+        format!("{}/../../examples/configs/{filename}", env!("CARGO_MANIFEST_DIR"),)
     }
 }

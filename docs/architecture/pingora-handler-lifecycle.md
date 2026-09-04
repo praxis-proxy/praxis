@@ -9,7 +9,7 @@ HTTP lifecycle into the Praxis filter pipeline.
 Pingora exposes the reverse-proxy lifecycle as a
 sequence of trait methods ("hooks") on `ProxyHttp`.
 Praxis implements these hooks in per-file submodules
-under `protocol/src/http/pingora/handler/`. Each hook
+under `crates/protocol/src/http/pingora/handler/`. Each hook
 delegates to the filter pipeline via an
 `HttpFilterContext` built from the shared
 `PingoraRequestCtx`.

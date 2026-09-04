@@ -74,7 +74,7 @@ page.
 
 | File | Description |
 | ------ | ------------- |
-| [default.yaml](../core/src/config/default.yaml) | Built-in default config (static JSON on /) |
+| [default.yaml](../crates/core/src/config/default.yaml) | Built-in default config (static JSON on /) |
 | [branch-chains.yaml](configs/pipeline/branch-chains.yaml) | Filters write structured results to FilterResultSet |
 | [composed-chains.yaml](configs/pipeline/composed-chains.yaml) | Multiple named chains are composed per listener |
 | [conditional-filters.yaml](configs/pipeline/conditional-filters.yaml) | Filters support `conditions` (request phase) and `response_conditions` (response phase) to gate execution |

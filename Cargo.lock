@@ -360,10 +360,6 @@ name = "benchmarks"
 version = "0.5.4"
 dependencies = [
  "chrono",
- "criterion",
- "http",
- "praxis-proxy-core",
- "praxis-proxy-filter",
  "serde",
  "serde_json",
  "tempfile",
@@ -3327,6 +3323,18 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "tracing",
+ "yaml_serde",
+]
+
+[[package]]
+name = "praxis-tests-benches"
+version = "0.5.4"
+dependencies = [
+ "criterion",
+ "http",
+ "praxis-proxy-core",
+ "praxis-proxy-filter",
+ "tokio",
  "yaml_serde",
 ]
 

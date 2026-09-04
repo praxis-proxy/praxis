@@ -12,7 +12,7 @@ pipeline.
 
 ### 1. Implement `Protocol`
 
-Create a module under `protocol/src/` and implement
+Create a module under `crates/protocol/src/` and implement
 the [`Protocol`] trait:
 
 ```rust
@@ -34,14 +34,14 @@ keeps them alive until server shutdown.
 
 **Reference implementations:**
 
-- **HTTP**: `protocol/src/http/pingora/mod.rs`
+- **HTTP**: `crates/protocol/src/http/pingora/mod.rs`
   (`PingoraHttp`)
-- **TCP**: `protocol/src/tcp/mod.rs` (`PingoraTcp`)
+- **TCP**: `crates/protocol/src/tcp/mod.rs` (`PingoraTcp`)
 
 ### 2. Add `ProtocolKind` variant
 
 Add a variant to `ProtocolKind` in
-`core/src/config/listener.rs`:
+`crates/core/src/config/listener.rs`:
 
 ```rust
 #[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
@@ -59,7 +59,7 @@ YAML values (e.g. `protocol: tcp`) to enum variants.
 
 ### 3. Wire in `server.rs`
 
-In `server/src/server.rs`, add a branch to
+In `crates/server/src/server.rs`, add a branch to
 `register_protocols` that checks for listeners using
 the new protocol kind and registers the implementation:
 
@@ -76,7 +76,7 @@ if config.listeners.iter().any(|l| l.protocol == ProtocolKind::NewProtocol) {
 
 If the protocol uses a different filter trait than
 `HttpFilter` or `TcpFilter`, define the new trait in
-`filter/src/` and ensure the pipeline engine can
+`crates/filter/src/` and ensure the pipeline engine can
 dispatch to it.
 
 ### 5. Test and document
@@ -87,4 +87,4 @@ dispatch to it.
 - Update `examples/README.md`
 - Update `docs/features.md` with the new protocol
 
-[`Protocol`]: ../../protocol/src/lib.rs
+[`Protocol`]: ../../crates/protocol/src/lib.rs
