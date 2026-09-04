@@ -336,11 +336,27 @@ impl SseDecoder {
         self.prev_cr = false;
         while let Some(&b) = bytes.get(i) {
             match b {
-                b'\n' => self.end_line(records)?,
-                b'\r' => self.handle_cr(bytes, &mut i, records)?,
-                _ => self.push_byte(b)?,
+                b'\n' => {
+                    self.end_line(records)?;
+                    i += 1;
+                },
+                b'\r' => {
+                    self.handle_cr(bytes, &mut i, records)?;
+                    i += 1;
+                },
+                _ => {
+                    // Streaming hot path: append the whole run of data bytes up
+                    // to the next terminator with one length check, instead of
+                    // one push plus one check per byte.
+                    let rest = bytes.get(i..).unwrap_or_default();
+                    let run = rest
+                        .iter()
+                        .position(|&c| c == b'\n' || c == b'\r')
+                        .unwrap_or(rest.len());
+                    self.extend_line(rest.get(..run).unwrap_or_default())?;
+                    i += run;
+                },
             }
-            i += 1;
         }
         Ok(())
     }
@@ -357,9 +373,10 @@ impl SseDecoder {
         Ok(())
     }
 
-    /// Append a data byte to the current line, enforcing `max_line_bytes`.
-    fn push_byte(&mut self, b: u8) -> Result<(), SseDecodeError> {
-        self.line_buf.push(b);
+    /// Append a run of data bytes to the current line, enforcing
+    /// `max_line_bytes` with a single length check for the whole run.
+    fn extend_line(&mut self, run: &[u8]) -> Result<(), SseDecodeError> {
+        self.line_buf.extend_from_slice(run);
         if self.line_buf.len() > self.limits.max_line_bytes {
             return Err(SseDecodeError::LineTooLong {
                 size: self.line_buf.len(),
@@ -637,6 +654,25 @@ mod tests {
             matches!(batch.error, Some(SseDecodeError::LineTooLong { size, limit }) if size > limit),
             "over-long line reports LineTooLong"
         );
+    }
+
+    #[test]
+    fn line_too_long_accumulates_across_chunks() {
+        let limits = SseLimits {
+            max_line_bytes: 8,
+            ..SseLimits::default()
+        };
+        let mut decoder = SseDecoder::with_limits(limits);
+        assert!(
+            push_ok(&mut decoder, b"data: ab").is_empty(),
+            "line at the cap so far yields nothing"
+        );
+        let batch = decoder.push(b"cdefgh\n\n");
+        assert!(
+            matches!(batch.error, Some(SseDecodeError::LineTooLong { size, limit }) if size > limit),
+            "run-based check catches an overflow that only crosses the cap in a later chunk"
+        );
+        assert!(decoder.is_poisoned(), "cross-chunk overflow poisons the decoder");
     }
 
     #[test]
