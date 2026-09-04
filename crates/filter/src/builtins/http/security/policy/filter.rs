@@ -716,6 +716,83 @@ impl PolicyFilter {
         Ok(FilterAction::Continue)
     }
 
+    /// The extensions a response-phase invocation carries: the identity admitted
+    /// on the way in, the request line, and the upstream's headers and status.
+    ///
+    /// Reuses the admitted identity rather than resolving again, so a token that
+    /// expired mid-exchange cannot deny an already-authorized response.
+    fn response_extensions(
+        ctx: &HttpFilterContext<'_>,
+        response_headers: std::collections::HashMap<String, String>,
+        status: u16,
+    ) -> Extensions {
+        let request_headers = Self::snapshot_headers(ctx);
+        let mut extensions = if let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() {
+            Self::extensions_from_identity(&request_headers, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL)
+        } else {
+            tracing::debug!(
+                target: "policy.filter",
+                "no request-phase identity stashed for the response half; \
+                 an entry sourced from it renders nothing",
+            );
+            Self::entity_less_extensions()
+        };
+        // Keep the request line, so a response contract resolves the same route
+        // the request half did.
+        Self::attach_http_attributes(ctx, &mut extensions, request_headers);
+        let mut http = extensions.http.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
+        http.response_headers = response_headers;
+        http.status = Some(status);
+        extensions.http = Some(Arc::new(http));
+        extensions
+    }
+
+    /// The reserved entity-less coordinates and nothing else.
+    fn entity_less_extensions() -> Extensions {
+        Extensions {
+            meta: Some(Arc::new(MetaExtension {
+                entity_type: Some(ENTITY_HTTP.to_owned()),
+                entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
+                ..Default::default()
+            })),
+            ..Default::default()
+        }
+    }
+
+    /// Dispatch the response hook off the async runtime, as the request half does.
+    async fn dispatch_response_hook(
+        &self,
+        hook: &'static str,
+        extensions: Extensions,
+    ) -> Result<ppe::praxis_policy_core::executor::PipelineResult, FilterError> {
+        let mgr = Arc::clone(&self.mgr);
+        let handle = tokio::runtime::Handle::current();
+        tokio::task::spawn_blocking(move || {
+            handle.block_on(async {
+                let (r, _bg) = mgr.invoke_named::<HttpHook>(hook, HttpPayload, extensions, None).await;
+                r
+            })
+        })
+        .await
+        .map_err(|e| -> FilterError { format!("policy: HTTP response-phase hook task failed: {e}").into() })
+    }
+
+    /// Put the rendered response contract on the response the client receives.
+    fn write_response_assertions(&self, ctx: &mut HttpFilterContext<'_>, extensions: Option<&Extensions>) {
+        let Some(response) = ctx.response_header.as_mut() else {
+            return;
+        };
+        let (set, removed) = apply_response_assertions(&mut response.headers, extensions, &self.response_assertions);
+        if set > 0 || removed > 0 {
+            ctx.response_headers_modified = true;
+            tracing::debug!(
+                target: "policy.filter",
+                set, removed,
+                "applied response assertions to the downstream response",
+            );
+        }
+    }
+
     /// Populate `ext.http` with the request line + headers so CEL/APL
     /// predicates over `http.method` / `http.path` / `http.host` /
     /// `http.request_headers.*` evaluate. `host` is sourced from the parsed
@@ -1065,10 +1142,6 @@ impl HttpFilter for PolicyFilter {
         Ok(FilterAction::BodyDone)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "linear response-phase flow: rebuild identity, dispatch, apply the contract"
-    )]
     async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let Some(hook) = self.response_hook else {
             return Ok(FilterAction::Continue);
@@ -1076,47 +1149,13 @@ impl HttpFilter for PolicyFilter {
         let Some(response) = ctx.response_header.as_ref() else {
             return Ok(FilterAction::Continue);
         };
+        let extensions = Self::response_extensions(
+            ctx,
+            snapshot_response_headers(&response.headers),
+            response.status.as_u16(),
+        );
 
-        let response_headers = snapshot_response_headers(&response.headers);
-        let status = response.status.as_u16();
-
-        // Reuse admitted identity without revalidating a token mid-exchange.
-        let request_headers = Self::snapshot_headers(ctx);
-        let mut extensions = if let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() {
-            Self::extensions_from_identity(&request_headers, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL)
-        } else {
-            tracing::debug!(
-                target: "policy.filter",
-                "no request-phase identity stashed for the response half; \
-                 an entry sourced from it renders nothing",
-            );
-            Extensions {
-                meta: Some(Arc::new(MetaExtension {
-                    entity_type: Some(ENTITY_HTTP.to_owned()),
-                    entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
-                    ..Default::default()
-                })),
-                ..Default::default()
-            }
-        };
-        Self::attach_http_attributes(ctx, &mut extensions, request_headers);
-        // Preserve request coordinates so response assertions resolve the same route.
-        let mut http = extensions.http.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
-        http.response_headers = response_headers;
-        http.status = Some(status);
-        extensions.http = Some(Arc::new(http));
-
-        let mgr = Arc::clone(&self.mgr);
-        let handle = tokio::runtime::Handle::current();
-        let result = tokio::task::spawn_blocking(move || {
-            handle.block_on(async {
-                let (r, _bg) = mgr.invoke_named::<HttpHook>(hook, HttpPayload, extensions, None).await;
-                r
-            })
-        })
-        .await
-        .map_err(|e| -> FilterError { format!("policy: HTTP response-phase hook task failed: {e}").into() })?;
-
+        let result = self.dispatch_response_hook(hook, extensions).await?;
         if !result.continue_processing {
             tracing::warn!(
                 target: "policy.filter",
@@ -1128,22 +1167,7 @@ impl HttpFilter for PolicyFilter {
             )));
         }
 
-        let Some(response) = ctx.response_header.as_mut() else {
-            return Ok(FilterAction::Continue);
-        };
-        let (set, removed) = apply_response_assertions(
-            &mut response.headers,
-            result.modified_extensions.as_ref(),
-            &self.response_assertions,
-        );
-        if set > 0 || removed > 0 {
-            ctx.response_headers_modified = true;
-            tracing::debug!(
-                target: "policy.filter",
-                set, removed,
-                "applied response assertions to the downstream response",
-            );
-        }
+        self.write_response_assertions(ctx, result.modified_extensions.as_ref());
         Ok(FilterAction::Continue)
     }
 
