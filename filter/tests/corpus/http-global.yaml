@@ -35,9 +35,7 @@ plugins:
       claim_mapper: standard
 
 global:
-  # Canonical block form: `authentication:` + `authorization:` under
-  # `global:`. The `apl:` wrapper and the legacy `policy:` / `identity:` keys are
-  # unknown keys now, at every scope.
+  # Authentication and authorization are direct `global:` keys.
   authentication:
     - jwt-user
   authorization:

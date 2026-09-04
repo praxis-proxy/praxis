@@ -1126,15 +1126,7 @@ async fn filter_constructs_from_valid_yaml() {
     let _filter = build_filter(path);
 }
 
-
-/// Write a policy document whose issuer resolves its keys from a `jwks_url`.
-///
-/// The URL points at a closed port on purpose. Fetching it is what the test is
-/// about, and the two failure kinds are what discriminate: no transport (or no
-/// `perform_http`) never leaves the process and is fatal, so `initialize()`
-/// refuses to start, while a transport that dials and is refused is recoverable
-/// and boots with the keystore empty. So construction succeeding here means the
-/// call was actually attempted.
+/// Write a policy whose issuer uses a loopback `jwks_url`.
 fn write_jwks_url_config(capabilities: &str) -> (TempDir, String) {
     let dir = TempDir::new().expect("create tempdir");
     let cfg_path = dir.path().join("cpex.yaml");
@@ -1169,21 +1161,14 @@ global:
     (dir, path_str)
 }
 
-/// A `jwks_url` issuer reaches its endpoint, which means the engine was handed
-/// an HTTP transport. PPE performs no outbound HTTP of its own since 0.2.0, so
-/// without `install_default_http_transport` the fetch never leaves the process
-/// and `initialize()` refuses to start.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_jwks_issuer_reaches_its_endpoint_through_the_installed_transport() {
+async fn a_jwks_issuer_constructs_with_the_installed_transport() {
     let (_dir, path) = write_jwks_url_config("    capabilities:\n      - perform_http\n");
     if let Err(e) = try_build_filter_allowing_private(path, true) {
         panic!("a refused connection is recoverable and must still boot; got {e}");
     }
 }
 
-/// The transport is gated on the plugin declaring `perform_http`, so a config
-/// that omits it fails the load naming the capability rather than booting a
-/// resolver that denies every token from that issuer.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_jwks_issuer_without_perform_http_fails_to_construct() {
     let (_dir, path) = write_jwks_url_config("");
@@ -1197,29 +1182,21 @@ async fn a_jwks_issuer_without_perform_http_fails_to_construct() {
     );
 }
 
-/// Without `allow_private_idp`, a loopback `IdP` is refused before any socket is
-/// opened. Construction still succeeds, because a refused destination is
-/// recoverable and the resolver retries per request, but no key is ever fetched.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_loopback_idp_is_refused_unless_allowed() {
+async fn a_loopback_idp_policy_constructs_when_private_access_is_disabled() {
     let (_dir, path) = write_jwks_url_config("    capabilities:\n      - perform_http\n");
     if let Err(e) = try_build_filter_allowing_private(path, false) {
         panic!("a refused destination is recoverable and must still boot; got {e}");
     }
 }
 
-/// A config on inline keys performs no egress, so it must not be made to declare
-/// `perform_http` for a call it never makes.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_inline_key_config_needs_no_egress_capability() {
     let (_dir, path) = write_single_plugin_config();
     let _filter = build_filter(path);
 }
 
-
-/// Write a policy whose `global.assertions.request:` block asserts the subject
-/// onto an upstream header, composes one members object, and strips a header the
-/// client sent.
+/// Write a policy covering the supported request assertion shapes.
 #[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
 fn write_assertions_config() -> (TempDir, String) {
     let dir = TempDir::new().expect("create tempdir");
@@ -1272,10 +1249,6 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
-/// The engine renders `assertions:` into the result's `http` slot; it holds no
-/// socket, so the filter is what puts the map on the wire. These assert on
-/// `request_headers_to_set` / `_to_remove`, which is what praxis applies to the
-/// upstream request.
 #[tokio::test(flavor = "multi_thread")]
 #[expect(clippy::too_many_lines, reason = "linear assertion contract coverage")]
 async fn request_assertions_reach_the_upstream_request() {
@@ -1292,9 +1265,7 @@ async fn request_assertions_reach_the_upstream_request() {
         "Authorization",
         HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
     );
-    // The laundering case: a client naming an asserted header itself.
     req.headers.insert("x-auth-user-id", HeaderValue::from_static("root"));
-    // And a header the contract strips.
     req.headers.insert("x-drop-me", HeaderValue::from_static("secret"));
     let mut ctx = make_filter_context(&req);
     ctx.set_metadata("mcp.method", "tools/call");
@@ -1351,8 +1322,6 @@ async fn request_assertions_reach_the_upstream_request() {
     );
 }
 
-/// A policy with no `assertions:` block sets and removes nothing, so the feature
-/// costs a deployment that does not use it exactly nothing on the wire.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_policy_without_assertions_touches_no_upstream_header() {
     let (_dir, path) = write_tool_route_config();
@@ -1479,9 +1448,6 @@ async fn valid_hs256_jwt_continues() {
     claims["tenant"] = json!("acme");
     claims["profile"] = json!({"tier": "gold"});
     claims["authorization"] = json!("custom-value");
-    // One claim of every remaining JSON kind, so the flattening contract is
-    // closed rather than sampled: the engine hands these over with their shape
-    // intact and this crate is what renders them.
     claims["projects"] = json!(["alpha", "beta"]);
     claims["seat_count"] = json!(7);
     claims["ratio"] = json!(1.5);
@@ -1523,8 +1489,6 @@ async fn valid_hs256_jwt_continues() {
         identity.custom_claims().get("profile").map(String::as_str),
         Some(r#"{"tier":"gold"}"#),
     );
-    // A string renders bare, everything else as compact JSON. `as_str()` is
-    // what keeps the string arm unquoted; `to_string()` would render `"acme"`.
     for (claim, want) in [
         ("projects", r#"["alpha","beta"]"#),
         ("seat_count", "7"),
@@ -3080,9 +3044,6 @@ fn write_config_naming_kind(kind: &str) -> (TempDir, String) {
     let dir = TempDir::new().expect("create tempdir");
     let cfg_path = dir.path().join("cpex.yaml");
     let yaml = format!(
-        // The route naming the plugin is what reaches it: under
-        // `dispatch: policy` a declared plugin no step names fails the load, and
-        // these fixtures are about the `kind:` resolving to a factory at all.
         "plugins:\n  - name: host-plugin\n    kind: {kind}\n    hooks:\n      - cmf.tool_pre_invoke\n    mode: sequential\n    on_error: fail\n\
          routes:\n  - tool: echo\n    authorization:\n      pre_invocation:\n        - \"run(host-plugin)\"\n"
     );
@@ -3100,9 +3061,7 @@ fn try_build_filter(config_path: String) -> Result<PolicyFilter, crate::FilterEr
     try_build_filter_allowing_private(config_path, false)
 }
 
-/// `try_build_filter` with the engine's egress widened to loopback. The
-/// `jwks_url` fixtures need it: their endpoint is refused before dialling
-/// otherwise, and those tests are about the call leaving the process.
+/// Build a filter with the configured private-destination policy.
 fn try_build_filter_allowing_private(
     config_path: String,
     allow_private_idp: bool,

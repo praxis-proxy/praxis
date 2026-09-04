@@ -47,11 +47,7 @@ chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
 # The umbrella is bundled extensions only. Anything else a policy document names
 # comes from the host via `register_policy_plugin_factory`; see the policy
 # filter's `host_plugins` module.
-# `http-hyper` supplies the outbound HTTP transport the engine performs no HTTP
-# without: since 0.2.0 the JWT, OAuth and CIBA plugins borrow a host-installed
-# transport, and with none installed a `jwks_url` issuer fails at
-# `PolicyEngine::initialize()`. The policy filter installs it; see
-# `PolicyFilter::new`.
+# `http-hyper` provides the transport required by network-capable PPE plugins.
 ppe = { version = "0.2.0", package = "praxis-policy", features = [
     "builtins",
     "http-hyper",

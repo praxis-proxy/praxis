@@ -1,25 +1,7 @@
-//! Reference behavior recorded before the engine dependency is swapped.
+//! Structural regression tests for checked-in policy documents.
 //!
-//! There is exactly one window in which this can be captured: the swap removes
-//! the current engine and no interval exists where both are present. The values
-//! below were recorded from a run, not asserted from expectation, and the same
-//! test must pass unchanged against the ported engine. A difference afterward is
-//! a port defect rather than drift, because the baseline comes from the same
-//! engine revision the port was extracted from and not from the older published
-//! release, which differs by a fix that changes emitted payload output.
-//!
-//! The corpus is four real policy documents rather than synthetic ones: both demo
-//! policies and the two fixtures the example integration tests load. Fixtures are
-//! checked in and parsing is offline, so this needs no identity provider, no
-//! container, and no network.
-//!
-//! What this does not capture: the fingerprint is the parsed document's shape, so
-//! it catches a change to plugin names, plugin kind strings, route counts, or
-//! routing activation. It does not catch a change in how a policy *evaluates*.
-//! Notably the two demo documents produce identical fingerprints, because the
-//! decision point they differ on is named in the policy expressions rather than
-//! registered as a plugin. Evaluation behavior is covered by the engine's own
-//! suite and, end to end, by the acceptance demo.
+//! Fingerprints cover dispatch mode, plugin identity, and route count. Policy
+//! evaluation is covered by the engine and end-to-end suites.
 
 #![cfg(feature = "policy-engine")]
 // Integration tests carry the same suppressions the crate's in-module tests do:
@@ -83,10 +65,6 @@ fn demo_cel_policy_is_unchanged() {
 #[test]
 fn minimal_hs256_fixture_is_unchanged() {
     let (policy_dispatch, plugins, routes) = fingerprint(include_str!("corpus/minimal-hs256.yaml"));
-    // Recorded as off before the swap, when a boolean `routing_enabled` defaulted
-    // false and this document wrote none. `dispatch:` defaults to `policy` now,
-    // and a document declaring `global:` was always asking for it, so the
-    // fingerprint records the mode rather than a flag the document omits.
     assert!(policy_dispatch, "recorded: policy dispatch governs");
     assert_eq!(
         plugins,
@@ -107,8 +85,3 @@ fn http_global_fixture_is_unchanged() {
     );
     assert_eq!(routes, 0, "recorded: global policy, no per-entity routes");
 }
-
-// The violation envelope's shape is equally part of the contract, but its helper
-// is crate-private and is already covered by an in-crate unit test that has
-// access. Widening the crate's public surface to serve a corpus test would be a
-// worse trade than leaving that assertion where it already lives.

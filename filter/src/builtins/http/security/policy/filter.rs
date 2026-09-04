@@ -172,19 +172,7 @@ impl PolicyFilter {
         let mgr = Arc::new(PolicyEngine::default());
         ppe::install_builtins(&mgr);
 
-        // The engine performs no outbound HTTP of its own, so the plugins that
-        // reach an IdP borrow a transport the host installs. Without one, an
-        // issuer configured with `jwks_url`, an OAuth token exchange and a CIBA
-        // dispatch each fail at `initialize()` below rather than at load.
-        //
-        // This is the bundled hyper transport, behind ppe's `http-hyper`
-        // feature. It builds its connection pool on first use, which is what
-        // makes it safe to install here: init runs on the short-lived runtime
-        // below and that runtime is gone before the first request arrives, so a
-        // pool built eagerly would be bound to a dead reactor.
-        //
-        // Lending praxis's own pingora client would give the process one pool and
-        // one egress path. Tracked separately.
+        // The lazy connection pool must not bind to the temporary init runtime.
         if !Self::install_http_transport(&mgr, cfg.allow_private_idp) {
             // Set-once, and this manager was just constructed, so a refusal
             // means the engine changed under us rather than a double install.
@@ -426,13 +414,7 @@ impl PolicyFilter {
         Self::publish_identity_projection(ctx, Self::authenticated_identity(identity));
     }
 
-    /// Install the bundled transport, widening its egress when configured.
-    ///
-    /// The engine refuses private and loopback destinations by default. A local
-    /// or in-cluster `IdP` needs the wider transport, which is why
-    /// `install_default_http_transport` is not enough on its own.
-    ///
-    /// Returns false only if a transport was already installed.
+    /// Install the bundled transport with the configured destination policy.
     fn install_http_transport(mgr: &Arc<PolicyEngine>, allow_private: bool) -> bool {
         if allow_private {
             tracing::info!(
@@ -444,13 +426,7 @@ impl PolicyFilter {
         ppe::install_default_http_transport(mgr)
     }
 
-    /// Build the public raw-credential-free projection from PPE's private
-    /// validated payload.
-    ///
-    /// PPE preserves each claim's JSON shape as of 0.2.0, where it used to hand
-    /// over strings it had already flattened. `AuthenticatedIdentity` is a stable
-    /// contract for filters that consume an authenticated principal, so the
-    /// flattening moves here rather than widening that type to a JSON value.
+    /// Build the public string-valued identity projection from a validated payload.
     fn authenticated_identity(identity: &IdentityPayload) -> Option<AuthenticatedIdentity> {
         identity.subject.as_ref().and_then(|subject| {
             AuthenticatedIdentity::new(
@@ -524,16 +500,10 @@ impl PolicyFilter {
             .map_or(GatedIdentity::NotRun, |state| std::mem::take(&mut state.gated_identity))
     }
 
-    /// Run the unscoped identity hook and return only its raw-credential-free
-    /// projection. Route-aware callers defer publication until classification.
+    /// Resolve the global identity gate without publishing route-scoped state.
     ///
-    /// "Unscoped" is the reserved entity-less pair, not absent metadata. The gate
-    /// runs before classification, so it has no entity to name, and those two
-    /// constants are what the engine documents for exactly that request: they
-    /// resolve the global `authentication:` layer. Passing no `meta` at all is
-    /// denied as `unidentified_request`, and rightly so, since a config whose
-    /// authentication lives only on routes would otherwise resolve an empty list
-    /// here and admit the request with no identity at all.
+    /// Reserved entity-less coordinates select global authentication; absent
+    /// coordinates would be rejected as an unidentified request.
     #[expect(clippy::large_stack_frames, reason = "async PPE identity payload")]
     async fn resolve_gated_identity(
         &self,
@@ -647,12 +617,7 @@ impl PolicyFilter {
         // scanning) can be CPU-intensive for complex rule sets or large
         // input data. Offload to the blocking thread pool so the async
         // runtime stays responsive to other concurrent requests.
-        //
-        // `HttpPayload` carries no fields, and that is the point: generic HTTP
-        // has no LLM chat message, so this used to pass an empty `MessagePayload`
-        // that a content-inspecting plugin would scan and report clean on. The
-        // engine gives the two HTTP hooks their own family so nothing on this
-        // path pretends to hold content; what a handler reads is the extensions.
+        // Generic HTTP handlers read request data from extensions, not a body payload.
         let payload = HttpPayload;
         let mgr = Arc::clone(&self.mgr);
         let handle = tokio::runtime::Handle::current();
@@ -684,8 +649,7 @@ impl PolicyFilter {
                 "attached delegated tokens to upstream request (L7 authz)",
             );
         }
-        // After the tokens, so a `strip:` naming a credential header runs against
-        // what delegation just set rather than before it.
+        // Apply assertions after delegation so strip rules govern delegated headers.
         let (set, removed) = apply_request_assertions(ctx, result.modified_extensions.as_ref());
         if set > 0 || removed > 0 {
             tracing::debug!(
@@ -729,22 +693,16 @@ impl PolicyFilter {
     }
 }
 
-/// Render one validated claim into the flat string `AuthenticatedIdentity`
-/// exposes.
+/// Render a validated claim into the identity projection's string format.
 ///
-/// A string claim passes through as-is, so `as_str()` rather than `to_string()`:
-/// the latter would render it quoted and change every existing consumer's value.
-/// Everything else renders as compact JSON, which keeps a structured claim
-/// distinguishable from a string that happens to spell the same text.
+/// Strings remain unquoted; other values use compact JSON.
 fn flatten_claim(value: &serde_json::Value) -> String {
     value.as_str().map_or_else(|| value.to_string(), str::to_owned)
 }
 
-/// Request-scoped carrier for the identity resolved in the request phase,
-/// stashed in [`HttpFilterContext::extensions`] so the response phase can
-/// rebuild `Extensions` without re-validating the (possibly-expired)
-/// token. Held as typed state rather than serialized metadata so the
-/// inbound credentials never land in a plaintext string.
+/// Request-scoped identity reused during response processing.
+///
+/// Typed storage avoids serializing credentials and revalidating expired tokens.
 pub(super) struct ResolvedIdentity(pub(super) IdentityPayload);
 
 #[async_trait]
@@ -833,9 +791,7 @@ impl HttpFilter for PolicyFilter {
         // gate. Saves the per-request body-buffer cost on un-auth'd traffic —
         // if there's no valid token, we never reach `on_request_body` and the
         // body never gets buffered.
-        // Boxed for the same reason as the L7 arm above: the gate resolves an
-        // identity payload, and leaving that future inline inflates this
-        // method's frame past the stack-size gate.
+        // Boxing keeps the identity payload out of this method's stack frame.
         let action = Box::pin(self.identity_gate(ctx)).await?;
         if !self.entity_routes && matches!(action, FilterAction::Continue) {
             Self::mark_admission_complete(ctx);
@@ -1002,8 +958,7 @@ impl HttpFilter for PolicyFilter {
                 "attached delegated tokens to upstream request",
             );
         }
-        // After the tokens, so a `strip:` naming a credential header runs against
-        // what delegation just set rather than before it.
+        // Apply assertions after delegation so strip rules govern delegated headers.
         let (set, removed) = apply_request_assertions(ctx, cmf_result.modified_extensions.as_ref());
         if set > 0 || removed > 0 {
             tracing::debug!(

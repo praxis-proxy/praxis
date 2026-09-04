@@ -8,7 +8,7 @@
 //! `ppe::install_builtins`. Anything else — an organisation's own PII detector,
 //! an audit sink that writes to their SIEM, a validator for a house-specific
 //! identifier — has to come from the process embedding the filter, because
-//! `PolicyFilter` builds its own [`PolicyEngine`] and nothing else can reach it.
+//! `PolicyFilter` builds its own [`ppe::PolicyEngine`] and nothing else can reach it.
 //!
 //! A host registers before starting the server:
 //!
