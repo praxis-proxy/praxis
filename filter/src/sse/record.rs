@@ -130,14 +130,6 @@ impl SseRecord {
     }
 }
 
-/// Parse an SSE `retry` value: all-ASCII-digit `u64`, else `None`.
-fn parse_retry(value: &[u8]) -> Option<u64> {
-    if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    std::str::from_utf8(value).ok()?.parse::<u64>().ok()
-}
-
 /// Validated construction for local generation / encoding. Setters are
 /// infallible (they accumulate fields); validation happens in `build`.
 #[derive(Debug, Default)]
@@ -208,6 +200,33 @@ impl SseRecordBuilder {
     }
 }
 
+/// Build-time validation errors for `SseRecordBuilder::build`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum SseBuildError {
+    /// A field value contained a raw CR or LF, which would break framing.
+    #[error("SSE field value contains a raw CR or LF")]
+    NewlineInValue,
+    /// An `Unknown` field name was empty, contained `:`/CR/LF, or equaled a
+    /// known field name.
+    #[error("SSE unknown field name is empty, contains ':'/CR/LF, or is a known name")]
+    InvalidFieldName,
+    /// The record had no fields; empty records cannot be represented.
+    #[error("SSE record has no fields")]
+    EmptyRecord,
+}
+
+// -----------------------------------------------------------------------------
+// Private helpers
+// -----------------------------------------------------------------------------
+
+/// Parse an SSE `retry` value: all-ASCII-digit `u64`, else `None`.
+fn parse_retry(value: &[u8]) -> Option<u64> {
+    if value.is_empty() || !value.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(value).ok()?.parse::<u64>().ok()
+}
+
 /// Whether the slice contains a raw CR or LF (which would break framing).
 fn has_newline(bytes: &[u8]) -> bool {
     bytes.iter().any(|&b| matches!(b, b'\r' | b'\n'))
@@ -242,21 +261,6 @@ fn validate_field(field: &SseField) -> Result<(), SseBuildError> {
         },
     }
     Ok(())
-}
-
-/// Build-time validation errors for `SseRecordBuilder::build`.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub enum SseBuildError {
-    /// A field value contained a raw CR or LF, which would break framing.
-    #[error("SSE field value contains a raw CR or LF")]
-    NewlineInValue,
-    /// An `Unknown` field name was empty, contained `:`/CR/LF, or equaled a
-    /// known field name.
-    #[error("SSE unknown field name is empty, contains ':'/CR/LF, or is a known name")]
-    InvalidFieldName,
-    /// The record had no fields; empty records cannot be represented.
-    #[error("SSE record has no fields")]
-    EmptyRecord,
 }
 
 #[cfg(test)]
