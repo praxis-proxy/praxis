@@ -3337,3 +3337,222 @@ routes:
         "the gate must dispatch the route's list for a path it covers; got {action:?}",
     );
 }
+
+/// Write an assertion fixture with caller-selected header casing.
+#[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
+fn write_assertions_config_named(asserted: &str) -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  assertions:
+    request:
+      headers:
+        - name: {asserted}
+          from: subject.id
+      strip:
+        - x-drop-me
+routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Request header mutations queued by the policy filter.
+struct Queued {
+    set: std::collections::HashMap<String, String>,
+    removed: Vec<String>,
+    extra: Vec<(String, String)>,
+}
+
+/// Run the `echo` policy and collect upstream header mutations.
+#[expect(clippy::too_many_lines, reason = "one linear dispatch plus three queue projections")]
+async fn queued_for_echo(filter: &PolicyFilter, ctx: &mut crate::HttpFilterContext<'_>) -> Queued {
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let mut body = Some(bytes::Bytes::from_static(
+        br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo","arguments":{}}}"#,
+    ));
+    let action = filter
+        .on_request_body(ctx, &mut body, true)
+        .await
+        .expect("body phase ran");
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "the route allows, so the body phase signals BodyDone; got {action:?}"
+    );
+    Queued {
+        set: ctx
+            .request_headers_to_set
+            .iter()
+            .map(|(n, v)| (n.as_str().to_owned(), v.to_str().unwrap_or_default().to_owned()))
+            .collect(),
+        removed: ctx
+            .request_headers_to_remove
+            .iter()
+            .map(|n| n.as_str().to_owned())
+            .collect(),
+        extra: ctx
+            .extra_request_headers
+            .iter()
+            .map(|(n, v)| (n.to_string(), v.clone()))
+            .collect(),
+    }
+}
+
+/// Build a request authenticated as `alice`.
+fn request_for_alice() -> crate::Request {
+    let mut req = make_request(Method::POST, "/");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {}", mint_jwt(&standard_claims("alice")))).expect("header value"),
+    );
+    req
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_duplicated_asserted_header_is_replaced_not_diffed() {
+    let (_dir, path) = write_assertions_config_named("x-auth-user-id");
+    let filter = build_filter(path);
+
+    let mut req = request_for_alice();
+    req.headers.append("x-auth-user-id", HeaderValue::from_static("root"));
+    req.headers.append("x-auth-user-id", HeaderValue::from_static("alice"));
+    let mut ctx = make_filter_context(&req);
+    let queued = queued_for_echo(&filter, &mut ctx).await;
+
+    assert_eq!(
+        queued.set.get("x-auth-user-id").map(String::as_str),
+        Some("alice"),
+        "the asserted name must be set unconditionally, so the duplicate the \
+         client sent cannot survive beside it; got {:?}",
+        queued.set,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_mixed_case_assertion_is_not_read_as_a_removal() {
+    let (_dir, path) = write_assertions_config_named("X-Auth-User-Id");
+    let filter = build_filter(path);
+
+    let mut req = request_for_alice();
+    req.headers.insert("x-auth-user-id", HeaderValue::from_static("alice"));
+    let mut ctx = make_filter_context(&req);
+    let queued = queued_for_echo(&filter, &mut ctx).await;
+
+    assert_eq!(
+        queued.set.get("x-auth-user-id").map(String::as_str),
+        Some("alice"),
+        "the entry asserts this name, so it is set whatever the request carried; got {:?}",
+        queued.set,
+    );
+    assert!(
+        !queued.removed.contains(&"x-auth-user-id".to_owned()),
+        "and it is not also removed: an asserted name reaching the upstream absent \
+         is the upstream losing the identity it authorizes on; got {:?}",
+        queued.removed,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_promoted_header_cannot_append_to_an_asserted_name() {
+    let (_dir, path) = write_assertions_config_named("x-auth-user-id");
+    let filter = build_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.extra_request_headers
+        .push((std::borrow::Cow::Borrowed("X-Auth-User-Id"), "root".to_owned()));
+    let queued = queued_for_echo(&filter, &mut ctx).await;
+
+    assert!(
+        queued.extra.is_empty(),
+        "a promotion under an asserted name is dropped, since it would otherwise \
+         be applied last; got {:?}",
+        queued.extra,
+    );
+    assert_eq!(
+        queued.set.get("x-auth-user-id").map(String::as_str),
+        Some("alice"),
+        "and the contract's own value is what reaches the upstream; got {:?}",
+        queued.set,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pending_set_cannot_survive_a_strip() {
+    let (_dir, path) = write_assertions_config_named("x-auth-user-id");
+    let filter = build_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.request_headers_to_set.push((
+        "x-drop-me".parse().expect("header name"),
+        HeaderValue::from_static("sneaky"),
+    ));
+    let queued = queued_for_echo(&filter, &mut ctx).await;
+
+    assert!(
+        !queued.set.contains_key("x-drop-me"),
+        "a `strip:` is the last word on the name, so the queued set is dropped; got {:?}",
+        queued.set,
+    );
+    assert!(
+        queued.removed.contains(&"x-drop-me".to_owned()),
+        "and the removal is queued even though the request never carried the \
+         header itself; got {:?}",
+        queued.removed,
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_name_no_level_governs_keeps_its_pending_mutations() {
+    let (_dir, path) = write_assertions_config_named("x-auth-user-id");
+    let filter = build_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.request_headers_to_set.push((
+        "x-upstream-authorization".parse().expect("header name"),
+        HeaderValue::from_static("Bearer minted"),
+    ));
+    ctx.extra_request_headers
+        .push((std::borrow::Cow::Borrowed("x-forwarded-for"), "203.0.113.7".to_owned()));
+    let queued = queued_for_echo(&filter, &mut ctx).await;
+
+    assert_eq!(
+        queued.set.get("x-upstream-authorization").map(String::as_str),
+        Some("Bearer minted"),
+        "nothing asserts or strips this name, so the contract has no claim on it; got {:?}",
+        queued.set,
+    );
+    assert_eq!(
+        queued.extra,
+        vec![("x-forwarded-for".to_owned(), "203.0.113.7".to_owned())],
+        "and a promotion under an ungoverned name still reaches the upstream",
+    );
+}

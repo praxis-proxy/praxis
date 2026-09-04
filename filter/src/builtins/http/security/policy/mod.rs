@@ -132,6 +132,7 @@
 //! - The HR demo in the praxis-demos repository for an end-to-end walkthrough (identity, Cedar and CEL PDPs,
 //!   delegation, redaction, PII scanning, session taint).
 
+mod assertions;
 mod common_message_format;
 mod config;
 mod error;

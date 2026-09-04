@@ -11,6 +11,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use ppe::praxis_policy_core::{
+    assertions::Direction,
     cmf::{
         CmfHook, Message, MessagePayload, Role,
         constants::{
@@ -27,6 +28,7 @@ use ppe::praxis_policy_core::{
 };
 
 use super::{
+    assertions::{GovernedNames, apply_request_assertions},
     common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post},
     config::{BodyAccessMode, PolicyFilterConfig},
     error::{VIOLATION_HEADER, auth_rejection, json_rpc_error_envelope_bytes, json_rpc_error_rejection},
@@ -129,6 +131,8 @@ pub struct PolicyFilter {
     /// phase after classification, and a missing `mcp.method` fails
     /// closed (the classifier is required).
     entity_routes: bool,
+    /// Header names governed by request assertions.
+    request_assertions: GovernedNames,
 }
 
 impl PolicyFilter {
@@ -280,11 +284,23 @@ impl PolicyFilter {
             );
         }
 
+        // Re-parse because the engine does not retain the loaded document.
+        let policy_config =
+            ppe::praxis_policy_core::config::parse_config(&yaml).map_err(|e: Box<PluginError>| -> FilterError {
+                format!(
+                    "policy: the engine accepted {} but praxis could not re-read it for the \
+                     assertions contract: {e}",
+                    cfg.config_path
+                )
+                .into()
+            })?;
+        let request_assertions = GovernedNames::from_config(&policy_config, Direction::Request);
         Ok(Self {
             cfg,
             mgr,
             http_global,
             entity_routes,
+            request_assertions,
         })
     }
 
@@ -316,7 +332,7 @@ impl PolicyFilter {
     /// case-insensitive (RFC 7230 §3.2) but the `HashMap` lookup is
     /// case-sensitive; plugins lowercase their configured header
     /// before lookup to match.
-    fn snapshot_headers(ctx: &HttpFilterContext<'_>) -> std::collections::HashMap<String, String> {
+    pub(super) fn snapshot_headers(ctx: &HttpFilterContext<'_>) -> std::collections::HashMap<String, String> {
         ctx.request
             .headers
             .iter()
@@ -652,7 +668,8 @@ impl PolicyFilter {
             );
         }
         // Apply assertions after delegation so strip rules govern delegated headers.
-        let (set, removed) = apply_request_assertions(ctx, result.modified_extensions.as_ref());
+        let (set, removed) =
+            apply_request_assertions(ctx, result.modified_extensions.as_ref(), &self.request_assertions);
         if set > 0 || removed > 0 {
             tracing::debug!(
                 target: "policy.filter",
@@ -964,7 +981,8 @@ impl HttpFilter for PolicyFilter {
             );
         }
         // Apply assertions after delegation so strip rules govern delegated headers.
-        let (set, removed) = apply_request_assertions(ctx, cmf_result.modified_extensions.as_ref());
+        let (set, removed) =
+            apply_request_assertions(ctx, cmf_result.modified_extensions.as_ref(), &self.request_assertions);
         if set > 0 || removed > 0 {
             tracing::debug!(
                 target: "policy.filter",
@@ -1257,82 +1275,6 @@ fn missing_protocol_metadata_rejection() -> Rejection {
 // -----------------------------------------------------------------------------
 // attach_delegated_tokens
 // -----------------------------------------------------------------------------
-
-/// Apply the engine's request assertions to the upstream request.
-///
-/// The `assertions:` block is the only thing that tells an upstream what policy
-/// decided. The engine renders it into the `http` slot's `request_headers` on the
-/// result rather than onto any wire: it holds no socket, so a host is what puts
-/// the map on one. This is that step, and without it the block loads, validates,
-/// and reaches nothing.
-///
-/// Diffed against the headers the request arrived with, because the engine hands
-/// back the whole map and praxis mutates a live request:
-///
-/// - a name the map no longer carries is removed, which covers `strip:` and the unconditional removal an entry does
-///   before injecting;
-/// - a name whose value differs is set, which covers injection and the case that matters most, a client that sent the
-///   asserted name itself and must not have it forwarded.
-///
-/// Returns `(set, removed)` for the caller's log line.
-///
-/// A header the engine rendered that praxis cannot represent is skipped with a
-/// warning rather than dropping the request: the engine already refused CR, LF
-/// and NUL in a rendered value, so reaching this is a name no `HeaderName`
-/// accepts, which is a policy-authoring fault and not traffic to fail closed on.
-#[expect(
-    clippy::too_many_lines,
-    reason = "two linear passes over one header map, set then remove"
-)]
-pub(super) fn apply_request_assertions(
-    ctx: &mut HttpFilterContext<'_>,
-    extensions: Option<&Extensions>,
-) -> (usize, usize) {
-    let Some(asserted) = extensions.and_then(|ext| ext.http.as_ref()) else {
-        return (0, 0);
-    };
-    let inbound = PolicyFilter::snapshot_headers(ctx);
-    let mut set = 0;
-    let mut removed = 0;
-
-    for (name, value) in &asserted.request_headers {
-        let lc = name.to_ascii_lowercase();
-        if inbound.get(&lc).is_some_and(|had| had == value) {
-            continue;
-        }
-        let (Ok(header), Ok(header_value)) = (
-            http::header::HeaderName::try_from(lc.as_str()),
-            http::header::HeaderValue::try_from(value.as_str()),
-        ) else {
-            tracing::warn!(
-                target: "policy.filter",
-                header = %name,
-                "asserted header is not representable on the wire; skipping",
-            );
-            continue;
-        };
-        ctx.request_headers_to_set.push((header, header_value));
-        set += 1;
-    }
-
-    // A name the request arrived with and the returned map no longer carries was
-    // removed by the contract. That comparison is only sound because
-    // `attach_http_attributes` seeds the map from the inbound request on both
-    // paths, so the engine received every header praxis holds and the map it
-    // hands back is the same map minus what the contract took out.
-    for lc in inbound.keys() {
-        if asserted.request_headers.contains_key(lc) {
-            continue;
-        }
-        if let Ok(header) = http::header::HeaderName::try_from(lc.as_str()) {
-            ctx.request_headers_to_remove.push(header);
-            removed += 1;
-        }
-    }
-
-    (set, removed)
-}
-
 
 /// Walk the minted delegated tokens on the resolved `Extensions` and
 /// push them as upstream request headers. Returns the count attached
