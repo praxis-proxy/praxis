@@ -57,6 +57,7 @@ pub(crate) mod path_match;
 mod pipeline;
 mod registry;
 mod results;
+pub mod sse;
 mod tcp_filter;
 
 pub use actions::{FilterAction, Rejection, StreamingResponseBody, StreamingTerminalResponse, TerminalResponse};
