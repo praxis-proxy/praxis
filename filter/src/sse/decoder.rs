@@ -198,7 +198,12 @@ impl SseDecoder {
 
     /// Feed one body chunk; returns the records it completed and an optional
     /// error.
-    pub fn push(&mut self, chunk: &[u8]) -> SseBatch {
+    ///
+    /// Takes the chunk as [`Bytes`] — the type Pingora hands body filters — so a
+    /// later revision can return field values as zero-copy `slice_ref`s into the
+    /// chunk without another public signature change. The current implementation
+    /// still copies field values out of the byte slice.
+    pub fn push(&mut self, chunk: &Bytes) -> SseBatch {
         if let DecoderState::Finished = self.state {
             return SseBatch {
                 records: Vec::new(),
@@ -214,7 +219,7 @@ impl SseDecoder {
             };
         }
         let mut records = Vec::new();
-        match self.parse(chunk, &mut records) {
+        match self.parse(chunk.as_ref(), &mut records) {
             Ok(()) => SseBatch {
                 records,
                 trailing: None,
@@ -696,7 +701,7 @@ mod tests {
             ..SseLimits::default()
         };
         let mut decoder = SseDecoder::with_limits(limits);
-        let batch = decoder.push(b"data: toolong\n\n");
+        let batch = decoder.push(&to_bytes(b"data: toolong\n\n"));
         assert!(
             matches!(batch.error, Some(SseDecodeError::LineTooLong { size, limit }) if size > limit),
             "over-long line reports LineTooLong"
@@ -714,7 +719,7 @@ mod tests {
             push_ok(&mut decoder, b"data: ab").is_empty(),
             "line at the cap so far yields nothing"
         );
-        let batch = decoder.push(b"cdefgh\n\n");
+        let batch = decoder.push(&to_bytes(b"cdefgh\n\n"));
         assert!(
             matches!(batch.error, Some(SseDecodeError::LineTooLong { size, limit }) if size > limit),
             "run-based check catches an overflow that only crosses the cap in a later chunk"
@@ -729,7 +734,7 @@ mod tests {
             ..SseLimits::default()
         };
         let mut decoder = SseDecoder::with_limits(limits);
-        let batch = decoder.push(b"data: 1\ndata: 2\ndata: 3\n\n");
+        let batch = decoder.push(&to_bytes(b"data: 1\ndata: 2\ndata: 3\n\n"));
         assert!(
             matches!(batch.error, Some(SseDecodeError::TooManyFields { count, limit }) if count > limit),
             "exceeding field cap reports TooManyFields"
@@ -788,7 +793,7 @@ mod tests {
             ..SseLimits::default()
         };
         let mut decoder = SseDecoder::with_limits(limits);
-        let batch = decoder.push(b"data: aaaa\ndata: bbbb\n\n");
+        let batch = decoder.push(&to_bytes(b"data: aaaa\ndata: bbbb\n\n"));
         assert!(
             matches!(batch.error, Some(SseDecodeError::RecordTooLarge { size, limit }) if size > limit),
             "summed data values over the cap report RecordTooLarge"
@@ -802,7 +807,7 @@ mod tests {
             ..SseLimits::default()
         };
         let mut decoder = SseDecoder::with_limits(limits);
-        let batch = decoder.push(b"aaaaa\nbbbbb\n\n");
+        let batch = decoder.push(&to_bytes(b"aaaaa\nbbbbb\n\n"));
         assert!(
             matches!(batch.error, Some(SseDecodeError::RecordTooLarge { .. })),
             "unknown-field names must count toward max_record_bytes"
@@ -827,7 +832,7 @@ mod tests {
             ..SseLimits::default()
         };
         let mut decoder = SseDecoder::with_limits(limits);
-        let batch = decoder.push(b"data: ok\n\ndata: waytoolong\n\n");
+        let batch = decoder.push(&to_bytes(b"data: ok\n\ndata: waytoolong\n\n"));
         assert_eq!(batch.records.len(), 1, "record completed before the overflow is kept");
         assert_eq!(
             batch.records[0].data(),
@@ -848,8 +853,8 @@ mod tests {
             ..SseLimits::default()
         };
         let mut decoder = SseDecoder::with_limits(limits);
-        let first_err = decoder.push(b"data: toolong\n\n").error.unwrap();
-        let second = decoder.push(b"data: x\n\n");
+        let first_err = decoder.push(&to_bytes(b"data: toolong\n\n")).error.unwrap();
+        let second = decoder.push(&to_bytes(b"data: x\n\n"));
         assert!(second.records.is_empty(), "poisoned decoder yields no records");
         assert_eq!(
             second.error,
@@ -868,7 +873,7 @@ mod tests {
         let mut decoder = SseDecoder::with_limits(limits);
         // The first field commits (allocating `fields`) and the second line is
         // still buffered in `line_buf` when the record-size limit trips.
-        let batch = decoder.push(b"data: aaaa\ndata: bbbb\n\n");
+        let batch = decoder.push(&to_bytes(b"data: aaaa\ndata: bbbb\n\n"));
         assert!(
             matches!(batch.error, Some(SseDecodeError::RecordTooLarge { .. })),
             "over-limit record poisons"
@@ -936,7 +941,7 @@ mod tests {
         let second = decoder.finish();
         assert_eq!(second, SseBatch::default(), "second finish is an empty batch");
 
-        let after = decoder.push(b"data: y\n\n");
+        let after = decoder.push(&to_bytes(b"data: y\n\n"));
         assert!(after.records.is_empty(), "push after finish yields nothing");
         assert_eq!(
             after.error,
@@ -952,7 +957,7 @@ mod tests {
             ..SseLimits::default()
         };
         let mut decoder = SseDecoder::with_limits(limits);
-        let err = decoder.push(b"data: toolong\n\n").error.unwrap();
+        let err = decoder.push(&to_bytes(b"data: toolong\n\n")).error.unwrap();
         let batch = decoder.finish();
         assert_eq!(batch.error, Some(err), "finish re-reports the poison error");
         assert!(batch.trailing.is_none(), "a poisoned finish yields no trailing record");
@@ -1074,9 +1079,14 @@ mod tests {
     // Module-scoped BOM constant for the tests below.
     const BOM_BYTES: &[u8] = &[0xEF, 0xBB, 0xBF];
 
+    // Wrap a byte slice as `Bytes` — the decoder's public input type.
+    fn to_bytes(slice: &[u8]) -> Bytes {
+        Bytes::copy_from_slice(slice)
+    }
+
     // Push one chunk, assert no error, return the completed records.
     fn push_ok(decoder: &mut SseDecoder, chunk: &[u8]) -> Vec<SseRecord> {
-        let batch = decoder.push(chunk);
+        let batch = decoder.push(&to_bytes(chunk));
         assert_eq!(batch.error, None, "unexpected decode error");
         batch.records
     }
@@ -1087,7 +1097,7 @@ mod tests {
     // just a flattened record sequence. `finish` never adds to `records`.
     fn decode_whole(input: &[u8]) -> (Vec<SseRecord>, Option<SseRecord>) {
         let mut decoder = SseDecoder::new();
-        let records = decoder.push(input).records;
+        let records = decoder.push(&to_bytes(input)).records;
         (records, decoder.finish().trailing)
     }
 
@@ -1097,7 +1107,7 @@ mod tests {
         let mut decoder = SseDecoder::new();
         let mut records = Vec::new();
         for part in [&input[..a], &input[a..b], &input[b..]] {
-            records.extend(decoder.push(part).records);
+            records.extend(decoder.push(&to_bytes(part)).records);
         }
         (records, decoder.finish().trailing)
     }

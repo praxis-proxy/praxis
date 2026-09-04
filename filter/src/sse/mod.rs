@@ -13,16 +13,18 @@
 //! Feed each Pingora body chunk to the decoder:
 //!
 //! ```
+//! use bytes::Bytes;
 //! use praxis_filter::sse::{SseBatch, SseDecoder};
 //!
 //! let mut decoder = SseDecoder::new();
-//! let SseBatch { records, error, .. } = decoder.push(b"data: {\"n\":1}\n\ndata: {");
+//! let SseBatch { records, error, .. } =
+//!     decoder.push(&Bytes::from_static(b"data: {\"n\":1}\n\ndata: {"));
 //! assert!(error.is_none());
 //! assert_eq!(records.len(), 1);
 //! assert_eq!(records[0].data().as_ref(), br#"{"n":1}"#);
 //!
 //! // the second record completes on a later chunk
-//! let batch = decoder.push(b"\"n\":2}\n\n");
+//! let batch = decoder.push(&Bytes::from_static(b"\"n\":2}\n\n"));
 //! assert_eq!(batch.records[0].data().as_ref(), br#"{"n":2}"#);
 //!
 //! // at end of stream: the stream ended on a blank line, so nothing is left over
