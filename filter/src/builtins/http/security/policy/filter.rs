@@ -336,21 +336,17 @@ impl PolicyFilter {
         IdentityPayload::new(String::new(), TokenSource::Bearer).with_headers(headers)
     }
 
-    /// Resolve identity by invoking the identity hook chain. Returns the
-    /// resolved [`IdentityPayload`] (subject / client / workload / raw
-    /// credentials / delegation) or a rejection when no identity
-    /// continues. Cheap — the JWT verifier hits its in-process key cache.
-    #[expect(clippy::large_stack_frames, reason = "async handler over large CMF/pipeline types")]
-    async fn resolve_identity(
-        &self,
+    /// Build identity extensions with route coordinates and request attributes.
+    ///
+    /// Both are required to select route-scoped authentication; omitting the
+    /// request line could silently fall back to the global authenticator.
+    fn identity_extensions(
+        ctx: &HttpFilterContext<'_>,
         headers: std::collections::HashMap<String, String>,
         entity_type: &str,
         entity_name: &str,
-    ) -> Result<IdentityPayload, Rejection> {
-        // Route coordinates must be on the Extensions or the identity hook
-        // can't tell which route this is and silently runs every registered
-        // resolver instead of the route's `authentication:` list.
-        let route_ext = Extensions {
+    ) -> Extensions {
+        let mut ext = Extensions {
             meta: Some(Arc::new(MetaExtension {
                 entity_type: Some(entity_type.to_owned()),
                 entity_name: Some(entity_name.to_owned()),
@@ -358,6 +354,23 @@ impl PolicyFilter {
             })),
             ..Default::default()
         };
+        Self::attach_http_attributes(ctx, &mut ext, headers);
+        ext
+    }
+
+    /// Resolve identity by invoking the identity hook chain. Returns the
+    /// resolved [`IdentityPayload`] (subject / client / workload / raw
+    /// credentials / delegation) or a rejection when no identity
+    /// continues. Cheap — the JWT verifier hits its in-process key cache.
+    #[expect(clippy::large_stack_frames, reason = "async handler over large CMF/pipeline types")]
+    async fn resolve_identity(
+        &self,
+        ctx: &HttpFilterContext<'_>,
+        headers: std::collections::HashMap<String, String>,
+        entity_type: &str,
+        entity_name: &str,
+    ) -> Result<IdentityPayload, Rejection> {
+        let route_ext = Self::identity_extensions(ctx, headers.clone(), entity_type, entity_name);
 
         let (id_result, _bg) = self
             .mgr
@@ -509,22 +522,11 @@ impl PolicyFilter {
         &self,
         ctx: &HttpFilterContext<'_>,
     ) -> Result<Option<AuthenticatedIdentity>, Rejection> {
-        let gate_ext = Extensions {
-            meta: Some(Arc::new(MetaExtension {
-                entity_type: Some(ENTITY_HTTP.to_owned()),
-                entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
-                ..Default::default()
-            })),
-            ..Default::default()
-        };
+        let headers = Self::snapshot_headers(ctx);
+        let gate_ext = Self::identity_extensions(ctx, headers.clone(), ENTITY_HTTP, ENTITY_NAME_GLOBAL);
         let (result, _bg) = self
             .mgr
-            .invoke_named::<IdentityHook>(
-                HOOK_IDENTITY_RESOLVE,
-                Self::identity_payload(Self::snapshot_headers(ctx)),
-                gate_ext,
-                None,
-            )
+            .invoke_named::<IdentityHook>(HOOK_IDENTITY_RESOLVE, Self::identity_payload(headers), gate_ext, None)
             .await;
 
         if !result.continue_processing {
@@ -603,7 +605,7 @@ impl PolicyFilter {
     async fn on_request_http_authz(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
         let headers = Self::snapshot_headers(ctx);
         let identity = match self
-            .resolve_identity(headers.clone(), ENTITY_HTTP, ENTITY_NAME_GLOBAL)
+            .resolve_identity(ctx, headers.clone(), ENTITY_HTTP, ENTITY_NAME_GLOBAL)
             .await
         {
             Ok(id) => id,
@@ -882,7 +884,10 @@ impl HttpFilter for PolicyFilter {
 
         // Resolve identity once here, then stash it so the response phase
         // can rebuild `Extensions` without re-validating the token.
-        let identity = match self.resolve_identity(headers.clone(), entity_type, &entity_name).await {
+        let identity = match self
+            .resolve_identity(ctx, headers.clone(), entity_type, &entity_name)
+            .await
+        {
             Ok(id) => id,
             Err(rej) => return Ok(FilterAction::Reject(rej)),
         };

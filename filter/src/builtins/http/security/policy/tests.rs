@@ -3154,3 +3154,186 @@ fn a_host_registration_replaces_a_bundled_kind() {
         "the host's factory must have replaced the bundled one"
     );
 }
+
+/// Signing secret for the route-scoped identity fixture.
+const ROUTE_SECRET: &str = "praxis-cpex-route-secret-not-for-production-use";
+/// Issuer for the route-scoped identity fixture.
+const ROUTE_ISSUER: &str = "https://route-idp.test.local";
+
+/// Mint an HS256 JWT signed with [`ROUTE_SECRET`], for [`ROUTE_ISSUER`].
+fn mint_route_jwt(subject: &str) -> String {
+    let claims = json!({
+        "iss": ROUTE_ISSUER,
+        "aud": TEST_AUDIENCE,
+        "sub": subject,
+        "exp": now_unix() + 300,
+        "iat": now_unix(),
+    });
+    encode(
+        &Header::new(Algorithm::HS256),
+        &claims,
+        &EncodingKey::from_secret(ROUTE_SECRET.as_bytes()),
+    )
+    .expect("sign route JWT")
+}
+
+/// Return identity plugins that trust distinct global and route issuers.
+#[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
+fn two_issuer_plugins() -> String {
+    format!(
+        r#"plugins:
+  - name: global-jwt
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+  - name: route-jwt
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{ROUTE_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{ROUTE_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+"#
+    )
+}
+
+/// Write an L7 policy with route-scoped authentication.
+fn write_http_route_authentication_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"{plugins}
+global:
+  authentication:
+    - global-jwt
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"
+routes:
+  - http:
+      path_prefix: /v1/files
+    authentication:
+      replace_inherited: true
+      steps:
+        - route-jwt
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+"#,
+        plugins = two_issuer_plugins()
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+/// Run L7 policy for a path and bearer token.
+async fn l7_action(filter: &PolicyFilter, path: &str, token: &str) -> FilterAction {
+    let mut req = make_request(Method::GET, path);
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {token}")).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    filter.on_request(&mut ctx).await.expect("header phase ran")
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_http_route_authentication_list_governs_its_own_path() {
+    let (_dir, path) = write_http_route_authentication_config();
+    let filter = build_filter(path);
+    assert_eq!(
+        filter.derived_shape(),
+        (true, false),
+        "the fixture is the pure-L7 shape, which authorizes at the header phase",
+    );
+
+    let route_token = mint_route_jwt("alice");
+    let global_token = mint_jwt(&standard_claims("alice"));
+
+    let covered = l7_action(&filter, "/v1/files/q3.pdf", &route_token).await;
+    assert!(
+        matches!(covered, FilterAction::Continue),
+        "only the route's own list trusts this issuer, so admitting the request \
+         is what witnesses that the list ran; got {covered:?}",
+    );
+
+    let uncovered = l7_action(&filter, "/elsewhere", &route_token).await;
+    assert!(
+        matches!(uncovered, FilterAction::Reject(_)),
+        "no route covers this path, so the global list runs and does not trust \
+         the route issuer; got {uncovered:?}",
+    );
+
+    let replaced = l7_action(&filter, "/v1/files/q3.pdf", &global_token).await;
+    assert!(
+        matches!(replaced, FilterAction::Reject(_)),
+        "`replace_inherited: true` drops the global list, so a token only that \
+         list trusts must not authenticate on the route; got {replaced:?}",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
+async fn the_early_identity_gate_honors_an_http_route_authentication_list() {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"{plugins}
+global:
+  authentication:
+    - global-jwt
+routes:
+  - tool: echo
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+  - http:
+      path_prefix: /mcp
+    authentication:
+      replace_inherited: true
+      steps:
+        - route-jwt
+"#,
+        plugins = two_issuer_plugins()
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    let filter = build_filter(cfg_path.to_str().expect("utf8 path").to_owned());
+    assert_eq!(
+        filter.derived_shape(),
+        (false, true),
+        "the fixture is entity-routed, which takes the early-gate path",
+    );
+
+    let mut req = make_request(Method::POST, "/mcp/rpc");
+    req.headers.insert(
+        "Authorization",
+        HeaderValue::from_str(&format!("Bearer {}", mint_route_jwt("alice"))).expect("header value"),
+    );
+    let mut ctx = make_filter_context(&req);
+    let action = filter.on_request(&mut ctx).await.expect("header phase ran");
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "the gate must dispatch the route's list for a path it covers; got {action:?}",
+    );
+}
