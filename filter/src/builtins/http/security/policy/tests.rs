@@ -3556,3 +3556,195 @@ async fn a_name_no_level_governs_keeps_its_pending_mutations() {
         "and a promotion under an ungoverned name still reaches the upstream",
     );
 }
+
+/// Write an L7 policy with response assertions.
+#[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
+fn write_response_assertions_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+  authorization:
+    pre_invocation:
+      - "require(authenticated)"
+  assertions:
+    response:
+      headers:
+        - name: x-decided-for
+          from: subject.id
+      strip:
+        - server
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "linear response-contract coverage")]
+async fn response_assertions_reach_the_downstream_response() {
+    let (_dir, path) = write_response_assertions_config();
+    let filter = build_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    let action = filter.on_request(&mut ctx).await.expect("header phase ran");
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "the global policy admits an authenticated GET; got {action:?}"
+    );
+
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static("application/json"));
+    response.headers.insert("server", HeaderValue::from_static("gunicorn"));
+    response
+        .headers
+        .insert("x-decided-for", HeaderValue::from_static("root"));
+    ctx.response_header = Some(&mut response);
+
+    let action = filter.on_response(&mut ctx).await.expect("response phase ran");
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "nothing here denies on the way out; got {action:?}"
+    );
+    assert!(
+        ctx.response_headers_modified,
+        "the filter edited the response headers and must say so",
+    );
+
+    let headers = &response.headers;
+    assert_eq!(
+        headers.get("x-decided-for").and_then(|v| v.to_str().ok()),
+        Some("alice"),
+        "the entry renders the resolved subject, replacing what the upstream sent",
+    );
+    assert!(
+        !headers.contains_key("server"),
+        "a `strip:` entry removes the name on the response half too",
+    );
+    assert_eq!(
+        headers.get("content-type").and_then(|v| v.to_str().ok()),
+        Some("application/json"),
+        "and a header no level governs is left exactly as the upstream returned it",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+#[expect(clippy::too_many_lines, reason = "test fixture: the YAML literal is the bulk")]
+async fn an_entity_route_response_contract_is_refused_at_load() {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+routes:
+  - tool: echo
+    assertions:
+      response:
+        strip:
+          - server
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    let cfg = PolicyFilterConfig {
+        config_path: cfg_path.to_str().expect("utf8 path").to_owned(),
+        allow_private_idp: false,
+        body_access: super::config::BodyAccessMode::ReadOnly,
+        require_protocol_metadata: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+    };
+    let err = PolicyFilter::new(cfg)
+        .err()
+        .expect("an unappliable response contract must refuse to start");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("tool: echo") && msg.contains("assertions.response"),
+        "the error must name the level to move; got {msg}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_policy_without_a_response_contract_touches_no_response_header() {
+    let (_dir, path) = write_tool_route_config();
+    let filter = build_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    let mut response = crate::test_utils::make_response();
+    response.headers.insert("server", HeaderValue::from_static("gunicorn"));
+    ctx.response_header = Some(&mut response);
+
+    drop(filter.on_response(&mut ctx).await.expect("response phase ran"));
+    assert!(!ctx.response_headers_modified, "no contract means no edit",);
+    assert!(
+        response.headers.contains_key("server"),
+        "and the upstream's headers reach the client unchanged",
+    );
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn the_response_half_is_gated_on_the_policy_declaring_one() {
+    let (_dir, path) = write_l7_global_config();
+    assert_eq!(
+        build_filter(path).response_hook(),
+        None,
+        "a `pre_invocation`-only global policy has no response half",
+    );
+
+    let (_dir, path) = write_tool_route_config();
+    assert_eq!(
+        build_filter(path).response_hook(),
+        None,
+        "nor does an entity-routed policy with no response contract",
+    );
+
+    let (_dir, path) = write_response_assertions_config();
+    assert_eq!(
+        build_filter(path).response_hook(),
+        Some("http.response"),
+        "a declared response contract opens the half; the engine applies a \
+         contract at every return site of the hook, registered handler or not",
+    );
+}

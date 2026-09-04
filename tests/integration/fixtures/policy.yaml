@@ -34,7 +34,6 @@ plugins:
       claim_mapper: standard
 
 global:
-  # Under `dispatch: policy` a plugin runs only where a policy names it, so an
-  # identity plugin no `authentication:` list reaches fails the load.
+  # Policy dispatch requires each plugin to be referenced.
   authentication:
     - jwt-user

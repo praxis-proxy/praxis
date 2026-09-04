@@ -14,6 +14,6 @@ pub use simple::{
 };
 pub use specialized::{
     BackendGuard, ReusedConnectionLog, start_hop_by_hop_response_backend, start_reserved_header_response_backend,
-    start_reused_connection_kill_backend, start_slow_backend, start_stateful_backend,
+    start_response_header_backend, start_reused_connection_kill_backend, start_slow_backend, start_stateful_backend,
 };
 pub use websocket::{WsBackendGuard, start_websocket_echo_backend};

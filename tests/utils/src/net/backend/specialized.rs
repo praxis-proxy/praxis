@@ -80,6 +80,37 @@ pub fn start_reserved_header_response_backend() -> u16 {
     })
 }
 
+/// Start a backend that returns the caller's chosen response headers.
+///
+/// # Panics
+///
+/// Panics if the server fails to bind or accept connections.
+pub fn start_response_header_backend(headers: Vec<(String, String)>) -> BackendGuard {
+    spawn_tcp_server_with_shutdown(move |mut stream| {
+        stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let _request = read_until_headers_complete(&mut stream);
+
+        let body = "response-header-test";
+        let extra = headers.iter().fold(String::new(), |mut acc, (name, value)| {
+            acc.push_str(name);
+            acc.push_str(": ");
+            acc.push_str(value);
+            acc.push_str("\r\n");
+            acc
+        });
+        let response = format!(
+            "HTTP/1.1 200 OK\r\n\
+             Content-Length: {}\r\n\
+             Connection: close\r\n\
+             {extra}\
+             \r\n\
+             {body}",
+            body.len()
+        );
+        let _sent = stream.write_all(response.as_bytes());
+    })
+}
+
 /// Start a backend that waits `delay` before responding.
 #[expect(clippy::disallowed_methods, reason = "blocking thread, not async")]
 pub fn start_slow_backend(body: &str, delay: Duration) -> u16 {

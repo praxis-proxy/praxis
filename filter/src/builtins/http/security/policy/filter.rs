@@ -23,12 +23,15 @@ use ppe::praxis_policy_core::{
     error::{PluginError, PluginViolation},
     extensions::MetaExtension,
     hooks::Extensions,
-    http_hook::{HOOK_HTTP_REQUEST, HttpHook, HttpPayload},
+    http_hook::{HOOK_HTTP_REQUEST, HOOK_HTTP_RESPONSE, HttpHook, HttpPayload},
     identity::{HOOK_IDENTITY_RESOLVE, IdentityHook, IdentityPayload, TokenSource},
 };
 
 use super::{
-    assertions::{GovernedNames, apply_request_assertions},
+    assertions::{
+        GovernedNames, apply_request_assertions, apply_response_assertions, snapshot_response_headers,
+        unreachable_response_levels,
+    },
     common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post},
     config::{BodyAccessMode, PolicyFilterConfig},
     error::{VIOLATION_HEADER, auth_rejection, json_rpc_error_envelope_bytes, json_rpc_error_rejection},
@@ -133,6 +136,10 @@ pub struct PolicyFilter {
     entity_routes: bool,
     /// Header names governed by request assertions.
     request_assertions: GovernedNames,
+    /// Header names governed by response assertions.
+    response_assertions: GovernedNames,
+    /// Response hook to dispatch when the policy has response work.
+    response_hook: Option<&'static str>,
 }
 
 impl PolicyFilter {
@@ -295,13 +302,39 @@ impl PolicyFilter {
                 .into()
             })?;
         let request_assertions = GovernedNames::from_config(&policy_config, Direction::Request);
+        let response_assertions = GovernedNames::from_config(&policy_config, Direction::Response);
+
+        // Reject controls that cannot reach the writable response-header phase.
+        let unreachable = unreachable_response_levels(&policy_config);
+        if !unreachable.is_empty() {
+            return Err(format!(
+                "policy: {} declares `assertions.response:` that praxis cannot apply. A response \
+                 contract is applied at the response header phase, which carries the entity-less \
+                 HTTP coordinates, so only `global:`, `global.defaults.http:` and an `http:` route \
+                 can reach one. Move the block to one of those, or drop it.",
+                unreachable.join(", "),
+            )
+            .into());
+        }
+
+        let response_hook =
+            (mgr.has_hooks_for(HOOK_HTTP_RESPONSE) || !response_assertions.is_empty()).then_some(HOOK_HTTP_RESPONSE);
+
         Ok(Self {
             cfg,
             mgr,
             http_global,
             entity_routes,
             request_assertions,
+            response_assertions,
+            response_hook,
         })
+    }
+
+    /// Test accessor for the hook the response half dispatches, if any.
+    #[cfg(test)]
+    pub(super) fn response_hook(&self) -> Option<&'static str> {
+        self.response_hook
     }
 
     /// Test accessor for the shape derived from the loaded policy:
@@ -677,6 +710,8 @@ impl PolicyFilter {
                 "applied request assertions to upstream request (L7 authz)",
             );
         }
+        // Reuse the admitted identity so mid-exchange token expiry cannot cause a late deny.
+        ctx.extensions.insert(ResolvedIdentity(identity));
         tracing::trace!(target: "policy.filter", "http authz allow (on_request)");
         Ok(FilterAction::Continue)
     }
@@ -1028,6 +1063,88 @@ impl HttpFilter for PolicyFilter {
         );
         Self::mark_admission_complete(ctx);
         Ok(FilterAction::BodyDone)
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear response-phase flow: rebuild identity, dispatch, apply the contract"
+    )]
+    async fn on_response(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        let Some(hook) = self.response_hook else {
+            return Ok(FilterAction::Continue);
+        };
+        let Some(response) = ctx.response_header.as_ref() else {
+            return Ok(FilterAction::Continue);
+        };
+
+        let response_headers = snapshot_response_headers(&response.headers);
+        let status = response.status.as_u16();
+
+        // Reuse admitted identity without revalidating a token mid-exchange.
+        let request_headers = Self::snapshot_headers(ctx);
+        let mut extensions = if let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() {
+            Self::extensions_from_identity(&request_headers, identity, ENTITY_HTTP, ENTITY_NAME_GLOBAL)
+        } else {
+            tracing::debug!(
+                target: "policy.filter",
+                "no request-phase identity stashed for the response half; \
+                 an entry sourced from it renders nothing",
+            );
+            Extensions {
+                meta: Some(Arc::new(MetaExtension {
+                    entity_type: Some(ENTITY_HTTP.to_owned()),
+                    entity_name: Some(ENTITY_NAME_GLOBAL.to_owned()),
+                    ..Default::default()
+                })),
+                ..Default::default()
+            }
+        };
+        Self::attach_http_attributes(ctx, &mut extensions, request_headers);
+        // Preserve request coordinates so response assertions resolve the same route.
+        let mut http = extensions.http.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
+        http.response_headers = response_headers;
+        http.status = Some(status);
+        extensions.http = Some(Arc::new(http));
+
+        let mgr = Arc::clone(&self.mgr);
+        let handle = tokio::runtime::Handle::current();
+        let result = tokio::task::spawn_blocking(move || {
+            handle.block_on(async {
+                let (r, _bg) = mgr.invoke_named::<HttpHook>(hook, HttpPayload, extensions, None).await;
+                r
+            })
+        })
+        .await
+        .map_err(|e| -> FilterError { format!("policy: HTTP response-phase hook task failed: {e}").into() })?;
+
+        if !result.continue_processing {
+            tracing::warn!(
+                target: "policy.filter",
+                violation = ?result.violation,
+                "http response deny; replacing the upstream response",
+            );
+            return Ok(FilterAction::Reject(super::error::http_authz_rejection(
+                result.violation.as_ref(),
+            )));
+        }
+
+        let Some(response) = ctx.response_header.as_mut() else {
+            return Ok(FilterAction::Continue);
+        };
+        let (set, removed) = apply_response_assertions(
+            &mut response.headers,
+            result.modified_extensions.as_ref(),
+            &self.response_assertions,
+        );
+        if set > 0 || removed > 0 {
+            ctx.response_headers_modified = true;
+            tracing::debug!(
+                target: "policy.filter",
+                set, removed,
+                "applied response assertions to the downstream response",
+            );
+        }
+        Ok(FilterAction::Continue)
     }
 
     #[expect(

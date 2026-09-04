@@ -1,26 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (c) 2026 Praxis Contributors
 
-//! Functional integration test for the experimental identity-assertions
-//! example (`examples/configs/security/policy-assertions.yaml`).
+//! End-to-end coverage for the identity-assertions example.
 //!
-//! The policy engine renders an `assertions:` contract into the result it hands
-//! back rather than onto any wire, because it holds no socket. The `policy`
-//! filter is what puts the map on the upstream request, so this is the test that
-//! the two halves meet: without the filter's half the block loads, validates,
-//! and reaches nothing.
-//!
-//! A header-echoing backend reflects what it received, so every assertion below
-//! is about the request that left the proxy rather than about the policy's own
-//! bookkeeping:
-//!
-//! * **Injection** — the resolved subject, a claim, a collection under its declared encoding, and a composed members
-//!   object all arrive.
-//! * **No forgery** — a caller who sends `x-auth-user-id` himself has it replaced with the resolved subject, because an
-//!   entry removes its target before injecting.
-//! * **`strip:`** — the caller's own credential header and a named extra do not reach the upstream.
-//! * **No contract, no effect** — covered by the sibling `policy_http` example, whose policy declares none and whose
-//!   backend sees the request unchanged.
+//! The tests verify request assertions at the upstream boundary and response
+//! assertions at the client boundary.
 
 use std::{
     collections::HashMap,
@@ -31,6 +15,7 @@ use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use praxis_core::config::Config;
 use praxis_test_utils::{
     example_config_path, free_port, http_send, parse_status, patch_yaml, start_header_echo_backend, start_proxy,
+    start_response_header_backend,
 };
 
 // Identity parameters mirrored from
@@ -39,8 +24,7 @@ const FIXTURE_ISSUER: &str = "https://idp.example.com";
 const FIXTURE_AUDIENCE: &str = "praxis-policy-example";
 const FIXTURE_SECRET: &str = "REPLACE-WITH-A-PROPERLY-RANDOM-SHARED-SECRET-DO-NOT-COMMIT";
 
-/// Mint an HS256 JWT accepted by the fixture's `jwt-user` plugin, carrying the
-/// claims the contract asserts from.
+/// Mint an HS256 JWT accepted by the assertion fixture.
 fn mint_fixture_jwt(subject: &str) -> String {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -52,7 +36,6 @@ fn mint_fixture_jwt(subject: &str) -> String {
         "sub": subject,
         "iat": now,
         "exp": now + 300,
-        // Sources for the contract: a promoted set and a custom claim.
         "roles": ["writer", "admin"],
         "teams": ["platform"],
         "tenant": "acme",
@@ -65,8 +48,7 @@ fn mint_fixture_jwt(subject: &str) -> String {
     .expect("sign fixture JWT")
 }
 
-/// Load the assertions example, rewrite the operator `config_path` to the
-/// in-repo fixture, and patch ports.
+/// Load the assertions example with test paths and ports.
 #[expect(clippy::needless_pass_by_value, reason = "callers construct the map inline")]
 fn load_example(proxy_port: u16, port_map: HashMap<&str, u16>) -> Config {
     let praxis_yaml_path = example_config_path("security/policy-assertions.yaml");
@@ -82,8 +64,7 @@ fn backend_map(port: u16) -> HashMap<&'static str, u16> {
     HashMap::from([("127.0.0.1:3000", port)])
 }
 
-/// The headers the backend reports having received, lowercased and keyed by
-/// name. The echo backend writes one `Name: value` per line into the body.
+/// Parse the headers reported by the echo backend.
 fn upstream_headers(raw: &str) -> HashMap<String, String> {
     let body = raw.split_once("\r\n\r\n").map_or("", |(_, b)| b);
     body.lines()
@@ -147,8 +128,6 @@ fn a_caller_cannot_forge_an_asserted_header() {
     let config = load_example(proxy_port, backend_map(backend.port()));
     let proxy = start_proxy(&config);
 
-    // The caller names a header the contract also targets. An entry removes its
-    // target before injecting, so the upstream must see the resolved subject.
     let token = mint_fixture_jwt("alice");
     let raw = http_send(
         proxy.addr(),
@@ -206,9 +185,68 @@ fn stripped_headers_do_not_reach_the_upstream() {
         !seen.contains_key("x-internal-hint"),
         "a named `strip:` entry removes a header no header entry targets;\n{raw}"
     );
-    // The floor is what keeps `strip:` from breaking the message itself.
     assert!(
         seen.contains_key("host"),
         "`host` is in the request protocol floor and must survive;\n{raw}"
+    );
+}
+
+/// Parse the headers received by the client.
+fn client_headers(raw: &str) -> HashMap<String, String> {
+    let head = raw.split_once("\r\n\r\n").map_or(raw, |(h, _)| h);
+    head.lines()
+        .skip(1)
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+        .collect()
+}
+
+#[test]
+fn response_assertions_reach_the_client() {
+    let backend = start_response_header_backend(vec![
+        ("X-Decided-For".to_owned(), "root".to_owned()),
+        ("Server".to_owned(), "gunicorn/20.1".to_owned()),
+        ("X-Upstream-Internal".to_owned(), "shard-7".to_owned()),
+        ("X-Kept".to_owned(), "untouched".to_owned()),
+    ]);
+    let proxy_port = free_port();
+    let config = load_example(proxy_port, backend_map(backend.port()));
+    let proxy = start_proxy(&config);
+
+    let token = mint_fixture_jwt("alice");
+    let raw = http_send(
+        proxy.addr(),
+        &format!(
+            "GET /widgets HTTP/1.1\r\n\
+             Host: localhost\r\n\
+             Authorization: Bearer {token}\r\n\
+             Connection: close\r\n\
+             \r\n",
+        ),
+    );
+
+    assert_eq!(parse_status(&raw), 200, "the exchange completes;\n{raw}");
+    let seen = client_headers(&raw);
+    assert_eq!(
+        seen.get("x-decided-for").map(String::as_str),
+        Some("alice"),
+        "the entry renders the resolved subject over what the upstream sent;\n{raw}"
+    );
+    assert!(
+        !seen.contains_key("server"),
+        "a `strip:` entry removes the upstream's banner;\n{raw}"
+    );
+    assert!(
+        !seen.contains_key("x-upstream-internal"),
+        "and a second named entry;\n{raw}"
+    );
+    assert_eq!(
+        seen.get("x-kept").map(String::as_str),
+        Some("untouched"),
+        "a header no level governs reaches the client as the upstream sent it;\n{raw}"
+    );
+    assert!(
+        seen.contains_key("content-length") || seen.contains_key("transfer-encoding"),
+        "response framing survives the contract;\n{raw}"
     );
 }

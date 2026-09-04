@@ -3,10 +3,7 @@
 # operator-supplied deployment path; the test rewrites that to this
 # file.
 #
-# One HS256 identity plugin and a `global` block that admits every
-# authenticated request, so the test's subject is assertions rather
-# than authorization. HS256 with an inline secret keeps this offline:
-# no JWKS endpoint, so the plugin needs no `perform_http`.
+# An inline HS256 key keeps the assertion test independent of network services.
 
 plugins:
   - name: jwt-user
@@ -34,36 +31,37 @@ global:
     pre_invocation:
       - "require(authenticated)"
 
-  # What reaches the upstream. Four entries, one per shape an entry has.
   assertions:
     request:
       headers:
-        # A slot source. `on_missing: deny` because this policy admits only
-        # authenticated requests, so an absent subject is a bug rather than an
-        # anonymous caller to pass along.
+        # An admitted request must have a subject.
         - name: x-auth-user-id
           from: subject.id
           on_missing: deny
 
-        # A claim source, taken by name.
         - name: x-auth-tenant
           from: claim.tenant
 
-        # A collection MUST declare an encoding: a set arriving in a shape
-        # nobody chose is a shape nobody can rely on. Renders sorted.
+        # Collections require an explicit wire encoding.
         - name: x-auth-roles
           from: subject.roles
           encode: csv
 
-        # `members:` renders one JSON object under operator-chosen keys, with
-        # the keys sorted so one identity produces identical header bytes.
         - name: x-auth-context
           members:
             teams: subject.teams
 
-      # Removes names no entry above targets. `authorization` is deliberately
-      # absent from the request protocol floor precisely so withholding the
-      # caller's own credential from the upstream is expressible.
+      # Withhold the caller's credential and internal hints from the upstream.
       strip:
         - authorization
         - x-internal-hint
+
+    response:
+      headers:
+        # Replace an upstream value with the gateway's decision.
+        - name: x-decided-for
+          from: subject.id
+      # Withhold upstream implementation details from the client.
+      strip:
+        - server
+        - x-upstream-internal

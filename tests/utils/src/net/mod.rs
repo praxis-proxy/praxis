@@ -14,8 +14,8 @@ pub mod wait;
 pub use backend::{
     Backend, BackendGuard, ReusedConnectionLog, RoutedBackend, WsBackendGuard, start_backend, start_backend_v6,
     start_backend_with_shutdown, start_echo_backend, start_header_echo_backend, start_hop_by_hop_response_backend,
-    start_reserved_header_response_backend, start_reused_connection_kill_backend, start_slow_backend,
-    start_stateful_backend, start_uri_echo_backend, start_websocket_echo_backend,
+    start_reserved_header_response_backend, start_response_header_backend, start_reused_connection_kill_backend,
+    start_slow_backend, start_stateful_backend, start_uri_echo_backend, start_websocket_echo_backend,
 };
 pub use http_client::{
     h2c_get, h2c_get_absolute, http_delete, http_get, http_get_retry, http_get_v6, http_post, http_put_json, http_send,
