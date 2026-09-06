@@ -334,6 +334,9 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
     let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
         praxis_protocol::http::pingora::health::listener_meta_from_config(config),
     );
+    let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
+        praxis_protocol::http::pingora::health::cluster_meta_from_config(config),
+    );
 
     let mut runtime = praxis_core::PingoraServerRuntime::new(config);
 
@@ -356,8 +359,14 @@ fn build_full_server_with_registry(config: &Config, registry: &FilterRegistry) -
             praxis_protocol::http::pingora::health::AdminEndpointOptions {
                 health_registry: Some(Arc::clone(&health_registry)),
                 kv_registry: Some(kv_stores),
-                pipelines: Some((Arc::clone(&pipelines), listener_meta)),
+                pipelines: Some((Arc::clone(&pipelines), Arc::clone(&listener_meta))),
                 log_level: None,
+                stats: Some(praxis_protocol::http::pingora::health::StatsAdminState {
+                    started_at: std::time::Instant::now(),
+                    version: praxis::process_version_info(),
+                    listener_meta,
+                    cluster_meta,
+                }),
                 verbose: config.admin.verbose,
             },
         );

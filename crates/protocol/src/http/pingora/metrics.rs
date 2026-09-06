@@ -217,6 +217,133 @@ pub(crate) fn is_recorder_installed() -> bool {
 }
 
 // -----------------------------------------------------------------------------
+// Stats snapshot (`GET /api/stats`)
+// -----------------------------------------------------------------------------
+
+/// Parsed operational counters for [`collect_stats_metrics`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StatsMetricsSnapshot {
+    /// In-flight HTTP requests per listener (`praxis_http_active_requests`).
+    pub http_active_by_listener: std::collections::HashMap<String, u64>,
+    /// Aggregate in-flight HTTP requests when the listener label is disabled.
+    pub http_active_aggregate: Option<u64>,
+    /// Open TCP sessions per listener (`praxis_tcp_active_connections`).
+    pub tcp_active_by_listener: std::collections::HashMap<String, u64>,
+    /// Aggregate open TCP sessions when the listener label is disabled.
+    pub tcp_active_aggregate: Option<u64>,
+    /// Upstream requests grouped by cluster (`praxis_upstream_requests_total`).
+    pub upstream_requests_by_cluster: std::collections::HashMap<String, u64>,
+    /// Aggregate upstream requests when the cluster label is disabled.
+    pub upstream_requests_aggregate: Option<u64>,
+    /// Upstream connect failures grouped by cluster.
+    pub connect_failures_by_cluster: std::collections::HashMap<String, u64>,
+    /// Aggregate upstream connect failures when the cluster label is disabled.
+    pub connect_failures_aggregate: Option<u64>,
+}
+
+/// Extract operational counters needed by `/api/stats` from Prometheus text.
+#[expect(clippy::too_many_lines, reason = "metric name dispatch table")]
+pub fn collect_stats_metrics(prometheus_text: &str) -> StatsMetricsSnapshot {
+    let mut snapshot = StatsMetricsSnapshot::default();
+    for line in prometheus_text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let Some((name, labels, value)) = parse_prometheus_sample(line) else {
+            continue;
+        };
+        match name {
+            HTTP_ACTIVE_REQUESTS => {
+                if let Some(listener) = labels.get("listener") {
+                    snapshot.http_active_by_listener.insert(listener.clone(), value);
+                } else {
+                    snapshot.http_active_aggregate = Some(value);
+                }
+            },
+            "praxis_tcp_active_connections" => {
+                if let Some(listener) = labels.get("listener") {
+                    snapshot.tcp_active_by_listener.insert(listener.clone(), value);
+                } else {
+                    snapshot.tcp_active_aggregate = Some(value);
+                }
+            },
+            UPSTREAM_REQUESTS_TOTAL => {
+                if let Some(cluster) = labels.get("cluster") {
+                    *snapshot
+                        .upstream_requests_by_cluster
+                        .entry(cluster.clone())
+                        .or_insert(0) += value;
+                } else {
+                    snapshot.upstream_requests_aggregate =
+                        Some(snapshot.upstream_requests_aggregate.unwrap_or(0) + value);
+                }
+            },
+            UPSTREAM_CONNECT_FAILURES_TOTAL => {
+                if let Some(cluster) = labels.get("cluster") {
+                    *snapshot.connect_failures_by_cluster.entry(cluster.clone()).or_insert(0) += value;
+                } else {
+                    snapshot.connect_failures_aggregate =
+                        Some(snapshot.connect_failures_aggregate.unwrap_or(0) + value);
+                }
+            },
+            _ => {},
+        }
+    }
+    snapshot
+}
+
+/// Parsed Prometheus sample: metric name, label map, and integer value.
+type PrometheusSample<'a> = (&'a str, std::collections::HashMap<String, String>, u64);
+
+/// Parse one Prometheus text sample line into metric name, labels, and value.
+fn parse_prometheus_sample(line: &str) -> Option<PrometheusSample<'_>> {
+    let (name_and_labels, value_str) = line.rsplit_once(' ')?;
+    #[expect(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "Prometheus counter/gauge values are non-negative integers"
+    )]
+    let value = {
+        let parsed = value_str.parse::<f64>().ok()?;
+        parsed.round() as u64
+    };
+    let (name, labels) = if let Some((name, label_blob)) = name_and_labels.split_once('{') {
+        let label_blob = label_blob.strip_suffix('}')?;
+        (name, parse_prometheus_labels(label_blob))
+    } else {
+        (name_and_labels, std::collections::HashMap::new())
+    };
+    Some((name, labels, value))
+}
+
+/// Parse `{key="value",...}` label sets from Prometheus text exposition.
+fn parse_prometheus_labels(input: &str) -> std::collections::HashMap<String, String> {
+    let mut labels = std::collections::HashMap::new();
+    let mut rest = input;
+    while !rest.is_empty() {
+        let Some((pair, tail)) = rest.split_once(',') else {
+            if let Some((key, value)) = parse_prometheus_label_pair(rest) {
+                labels.insert(key, value);
+            }
+            break;
+        };
+        if let Some((key, value)) = parse_prometheus_label_pair(pair) {
+            labels.insert(key, value);
+        }
+        rest = tail;
+    }
+    labels
+}
+
+/// Parse one `key="value"` pair from a Prometheus label set fragment.
+fn parse_prometheus_label_pair(pair: &str) -> Option<(String, String)> {
+    let (key, value) = pair.split_once('=')?;
+    let value = value.strip_prefix('"')?.strip_suffix('"')?;
+    Some((key.to_owned(), value.to_owned()))
+}
+
+// -----------------------------------------------------------------------------
 // Status Class
 // -----------------------------------------------------------------------------
 
@@ -993,6 +1120,57 @@ mod tests {
         assert!(
             body.contains("praxis_upstream_healthy_endpoints{cluster=\"kept-cluster\"} 1"),
             "kept cluster should retain its value:\n{body}"
+        );
+    }
+
+    #[test]
+    fn collect_stats_metrics_sums_cluster_counters() {
+        let text = r#"
+praxis_http_active_requests{listener="web"} 2
+praxis_tcp_active_connections{listener="tcp-in"} 1
+praxis_upstream_requests_total{cluster="backend",endpoint="127.0.0.1:1",status_class="2xx"} 3
+praxis_upstream_requests_total{cluster="backend",endpoint="127.0.0.1:2",status_class="5xx"} 1
+praxis_upstream_connect_failures_total{cluster="backend"} 2
+"#;
+        let snap = collect_stats_metrics(text);
+        assert_eq!(
+            snap.http_active_by_listener.get("web"),
+            Some(&2),
+            "HTTP active per listener should parse"
+        );
+        assert_eq!(
+            snap.tcp_active_by_listener.get("tcp-in"),
+            Some(&1),
+            "TCP active per listener should parse"
+        );
+        assert_eq!(
+            snap.upstream_requests_by_cluster.get("backend"),
+            Some(&4),
+            "upstream requests should sum by cluster"
+        );
+        assert_eq!(
+            snap.connect_failures_by_cluster.get("backend"),
+            Some(&2),
+            "connect failures should parse by cluster"
+        );
+    }
+
+    #[test]
+    fn collect_stats_metrics_parses_unlabeled_upstream_counters() {
+        let text = r#"
+praxis_upstream_requests_total{status_class="2xx"} 5
+praxis_upstream_connect_failures_total 2
+"#;
+        let snap = collect_stats_metrics(text);
+        assert_eq!(
+            snap.upstream_requests_aggregate,
+            Some(5),
+            "unlabeled upstream requests should aggregate"
+        );
+        assert_eq!(
+            snap.connect_failures_aggregate,
+            Some(2),
+            "unlabeled connect failures should aggregate"
         );
     }
 
