@@ -348,6 +348,19 @@ impl ClusterHealthEntry {
         (healthy, total)
     }
 
+    /// Per-endpoint address and health snapshot for admin APIs.
+    ///
+    /// Returns one row per configured address, sorted by address string.
+    pub fn endpoint_statuses(&self) -> Vec<(Arc<str>, bool)> {
+        let mut rows: Vec<_> = self
+            .index
+            .iter()
+            .filter_map(|(addr, &idx)| self.endpoints.get(idx).map(|ep| (Arc::clone(addr), ep.is_healthy())))
+            .collect();
+        rows.sort_by(|a, b| a.0.cmp(&b.0));
+        rows
+    }
+
     /// Passive healthy threshold, if configured.
     pub fn passive_healthy_threshold(&self) -> Option<u32> {
         self.passive_healthy_threshold

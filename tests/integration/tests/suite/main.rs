@@ -81,6 +81,7 @@ mod route_templates;
 mod routing;
 mod security;
 mod sni_router;
+mod stats_admin;
 mod stream_buffer_adapter;
 mod streaming_terminal_response;
 mod tcp_access_log;

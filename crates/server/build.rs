@@ -204,7 +204,18 @@ fn emit_version_env() {
     println!("cargo:rerun-if-changed={}", git_dir.join("index").display());
 
     let pkg_version = std::env::var("CARGO_PKG_VERSION").unwrap_or_default();
-    let version = match git_version_suffix() {
+    println!("cargo:rustc-env=PRAXIS_VERSION_SEMVER={pkg_version}");
+    let git_suffix = git_version_suffix();
+    if let Some(suffix) = &git_suffix {
+        let dirty = suffix.ends_with("-dirty");
+        let sha = suffix.strip_suffix("-dirty").unwrap_or(suffix.as_str());
+        println!("cargo:rustc-env=PRAXIS_GIT_SHA={sha}");
+        println!(
+            "cargo:rustc-env=PRAXIS_GIT_DIRTY={}",
+            if dirty { "true" } else { "false" }
+        );
+    }
+    let version = match git_suffix {
         Some(suffix) => format!("{pkg_version} ({suffix})"),
         None => pkg_version,
     };
