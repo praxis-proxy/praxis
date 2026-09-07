@@ -3,6 +3,7 @@
 
 //! Cluster validation: endpoints, weights, SNI hostnames, timeouts, and health check addresses.
 
+mod application;
 mod authority;
 mod endpoints;
 mod health_check;
@@ -62,6 +63,7 @@ pub(in crate::config::validate) fn validate_clusters(
         }
         super::validate_name_chars(&cluster.name, "cluster")?;
         cluster.validate_authority()?;
+        application::validate_application_metadata(cluster)?;
         endpoints::validate_endpoints(cluster, insecure_options)?;
         tls::validate_tls_settings(cluster, insecure_options)?;
         timeouts::validate_timeouts(cluster)?;
@@ -334,5 +336,71 @@ clusters:
     max_connections: 1000000
 "#;
         Config::from_yaml(yaml).unwrap();
+    }
+
+    #[test]
+    fn accept_cluster_application_metadata() {
+        config_with_http_block("      application_protocol: openai_chat_completions\n      application_provider: vllm")
+            .expect("valid application metadata should be accepted");
+    }
+
+    #[test]
+    fn accept_cluster_application_protocol_alone() {
+        config_with_http_block("      application_protocol: openai_responses")
+            .expect("application_protocol without provider should be accepted");
+    }
+
+    #[test]
+    fn reject_cluster_invalid_application_protocol() {
+        let err = config_with_http_block("      application_protocol: OpenAI").unwrap_err();
+        assert!(
+            err.to_string().contains("application_protocol"),
+            "should reject invalid application_protocol: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_cluster_invalid_application_provider() {
+        let err = config_with_http_block("      application_provider: \"vllm!\"").unwrap_err();
+        assert!(
+            err.to_string().contains("application_provider"),
+            "should reject invalid application_provider: {err}"
+        );
+    }
+
+    #[test]
+    fn reject_cluster_empty_application_protocol() {
+        let err = config_with_http_block("      application_protocol: \"\"").unwrap_err();
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "should reject empty application_protocol: {err}"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Test Utilities
+    // -------------------------------------------------------------------------
+
+    // Build a config with one cluster carrying the given `http:` block.
+    fn config_with_http_block(http_block: &str) -> Result<Config, crate::errors::ProxyError> {
+        let yaml = format!(
+            r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+clusters:
+  - name: api
+    endpoints: ["10.0.0.1:443"]
+    http:
+{http_block}
+"#
+        );
+        Config::from_yaml(&yaml)
     }
 }

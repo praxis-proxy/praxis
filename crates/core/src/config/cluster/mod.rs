@@ -50,6 +50,27 @@ pub struct ClusterHttpOptions {
     /// schemes, paths, userinfo, and fragments are rejected.
     #[serde(default)]
     pub authority: Option<Arc<str>>,
+
+    /// Opaque application protocol the upstream cluster expects.
+    ///
+    /// Declares the wire representation of the request body (for
+    /// example `openai_chat_completions` or `openai_responses`). The
+    /// value stays opaque to Praxis core — consuming filters interpret
+    /// it; Praxis defines no enum of known protocols. Validated as a
+    /// bounded, canonical identifier: 1–64 bytes of lowercase ASCII
+    /// letters, digits, `.`, `_`, or `-`, starting and ending with a
+    /// letter or digit.
+    #[serde(default)]
+    pub application_protocol: Option<Arc<str>>,
+
+    /// Opaque application provider refining `application_protocol`.
+    ///
+    /// Distinguishes provider-specific semantics (for example `openai`
+    /// or `vllm`) independent of the deployed cluster, whose identity
+    /// is already the cluster name. Stays opaque to Praxis core and
+    /// follows the same identifier rules as `application_protocol`.
+    #[serde(default)]
+    pub application_provider: Option<Arc<str>>,
 }
 
 /// A named group of upstream endpoints.
@@ -377,5 +398,40 @@ tls:
     fn no_tls_by_default() {
         let cluster = Cluster::with_defaults("web", vec!["10.0.0.1:80".into()]);
         assert!(cluster.tls.is_none(), "tls should be None by default");
+    }
+
+    #[test]
+    fn parse_cluster_application_metadata() {
+        let yaml = r#"
+name: "backend"
+endpoints: ["10.0.0.1:8080"]
+http:
+  application_protocol: openai_chat_completions
+  application_provider: vllm
+"#;
+        let cluster: Cluster = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            cluster.http.application_protocol.as_deref(),
+            Some("openai_chat_completions"),
+            "application_protocol mismatch"
+        );
+        assert_eq!(
+            cluster.http.application_provider.as_deref(),
+            Some("vllm"),
+            "application_provider mismatch"
+        );
+    }
+
+    #[test]
+    fn application_metadata_defaults_to_none() {
+        let cluster = Cluster::with_defaults("web", vec!["10.0.0.1:80".into()]);
+        assert!(
+            cluster.http.application_protocol.is_none(),
+            "application_protocol should default to None"
+        );
+        assert!(
+            cluster.http.application_provider.is_none(),
+            "application_provider should default to None"
+        );
     }
 }
