@@ -34,6 +34,19 @@ fn counter_value(body: &str, endpoint: &str) -> Option<f64> {
         .and_then(|value| value.parse::<f64>().ok())
 }
 
+fn wait_for_counter_value(admin: &str, endpoint: &str, expected: f64) -> String {
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    let mut last = String::new();
+    while std::time::Instant::now() < deadline {
+        last = http_get(admin, "/metrics", None).1;
+        if counter_value(&last, endpoint).is_some_and(|value| value >= expected) {
+            return last;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    last
+}
+
 fn proxy_yaml(proxy_port: u16, admin_port: u16, backend_port: u16) -> String {
     format!(
         r#"
@@ -79,7 +92,7 @@ fn upstream_requests_total_carries_cluster_endpoint_and_status_class() {
     assert_eq!(status, 200, "proxy request should succeed");
 
     let endpoint = format!("127.0.0.1:{}", backend.port());
-    let body = wait_for_metric(&admin, &format!("endpoint=\"{endpoint}\""));
+    let body = wait_for_counter_value(&admin, &endpoint, before + 4.0);
     for needle in [
         "cluster=\"backend\"",
         &format!("endpoint=\"{endpoint}\""),
