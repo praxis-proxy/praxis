@@ -429,6 +429,7 @@ fn sub_filter_context_inherits_parent_runtime_resources() {
             health_registry: Some(&health_registry),
             id_generator: &id_generator,
             kv_stores: Some(&kv_stores),
+            session_stores: None,
             peer_identity: None,
             request_start: std::time::Instant::now(),
             subrequest_client: Some(&client),
@@ -507,4 +508,1117 @@ async fn build_peer_rejects_hostname_resolving_to_private_address() {
     super::transport::build_peer(&upstream, true)
         .await
         .expect("allow_private_upstreams must permit the same upstream");
+}
+
+// ---------------------------------------------------------------------------
+// Public callout entry point (run)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn run_returns_buffered_for_locally_produced_response() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+
+    // A bound outbound chain that terminates locally with a fixed response, so
+    // the executor never has to contact a real upstream.
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(
+        "
+- filter: static_response
+  status: 200
+  body: hello from outbound
+",
+    )
+    .unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    // Construct the executor through the deliberately small public surface an
+    // application callout uses.
+    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor = crate::FilteredSubrequestExecutor::for_callout(
+        client,
+        downstream,
+        0,         // depth
+        1_048_576, // 1 MiB per-response ceiling
+        Duration::from_secs(5),
+    );
+
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let response = match executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("run should return the locally-produced response")
+    {
+        crate::CalloutResponse::Buffered(response) => response,
+        crate::CalloutResponse::Streaming { .. } => {
+            panic!("a locally-produced static response must be buffered, not streaming")
+        },
+    };
+
+    assert_eq!(
+        response.status, 200,
+        "the outbound chain's static status must be returned"
+    );
+    assert_eq!(
+        response.body,
+        bytes::Bytes::from_static(b"hello from outbound"),
+        "the outbound chain's static body must be returned buffered"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test Utilities: session-store propagation recorder
+// ---------------------------------------------------------------------------
+
+// Records whether the sub-request filter context carried the session-store
+// registry at the moment each hook ran, so propagation of the parent pipeline's
+// session stores into the executor's sub-request context can be asserted
+// end-to-end.
+struct SessionStoreRecorderFilter {
+    saw_on_request: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    saw_on_response_body: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for SessionStoreRecorderFilter {
+    fn name(&self) -> &'static str {
+        "test_session_store_recorder"
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        self.saw_on_request
+            .store(ctx.session_stores.is_some(), std::sync::atomic::Ordering::SeqCst);
+        Ok(crate::FilterAction::Continue)
+    }
+
+    fn response_body_access(&self) -> crate::BodyAccess {
+        crate::BodyAccess::ReadWrite
+    }
+
+    fn on_response_body(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<bytes::Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        self.saw_on_response_body
+            .store(ctx.session_stores.is_some(), std::sync::atomic::Ordering::SeqCst);
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+// Register `test_session_store_recorder` over the builtins, wired to the given
+// observation flags.
+fn recorder_registry(
+    saw_on_request: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    saw_on_response_body: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> crate::FilterRegistry {
+    let saw_on_request = std::sync::Arc::clone(saw_on_request);
+    let saw_on_response_body = std::sync::Arc::clone(saw_on_response_body);
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_session_store_recorder",
+            crate::FilterFactory::Http(std::sync::Arc::new(move |_| {
+                Ok(Box::new(SessionStoreRecorderFilter {
+                    saw_on_request: std::sync::Arc::clone(&saw_on_request),
+                    saw_on_response_body: std::sync::Arc::clone(&saw_on_response_body),
+                }))
+            })),
+        )
+        .unwrap();
+    registry
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn buffered_subrequest_context_inherits_parent_session_stores() {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+
+    let saw_on_request = Arc::new(AtomicBool::new(false));
+    let saw_on_response_body = Arc::new(AtomicBool::new(false));
+    let registry = recorder_registry(&saw_on_request, &saw_on_response_body);
+
+    // The recorder observes the context, then a static response terminates the
+    // chain locally so the executor never contacts an upstream.
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(
+        "
+- filter: test_session_store_recorder
+- filter: static_response
+  status: 200
+  body: hello from outbound
+",
+    )
+    .unwrap();
+    let mut pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
+    pipeline.set_session_stores(Arc::new(crate::SessionStoreRegistry::new()));
+    let pipeline = Arc::new(pipeline);
+
+    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("run should return the locally-produced response");
+
+    assert!(
+        saw_on_request.load(Ordering::SeqCst),
+        "a filter in a bound outbound chain must see the parent pipeline's session stores"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn subrequest_binds_credentials_to_logical_authority_not_transport() {
+    use std::{
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (addr, backend) =
+        spawn_capturing_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", Arc::clone(&captured)).await;
+
+    // The upstream's logical authority (`api.internal`) differs from its
+    // transport endpoint (`127.0.0.1:<port>`). A credential bound to the logical
+    // authority must be delivered; one bound to the transport host must not.
+    let chain = format!(
+        "
+- filter: router
+  routes:
+    - path_prefix: \"/\"
+      cluster: backend
+- filter: load_balancer
+  clusters:
+    - name: backend
+      endpoints:
+        - \"{addr}\"
+      http:
+        authority: api.internal
+"
+    );
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&chain).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let mut pending = crate::PendingCredentials::new();
+    pending.push(
+        crate::DeferredCredential::new_host_wildcard(
+            "api.internal",
+            http::HeaderName::from_static("x-cred-logical"),
+            "logical-secret",
+        )
+        .unwrap(),
+    );
+    pending.push(
+        crate::DeferredCredential::new_host_wildcard(
+            "127.0.0.1",
+            http::HeaderName::from_static("x-cred-transport"),
+            "transport-secret",
+        )
+        .unwrap(),
+    );
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(pending);
+
+    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    executor
+        .run(&pipeline, &request, extensions, deadline)
+        .await
+        .expect("buffered callout should return a response");
+    backend.abort();
+
+    let received = String::from_utf8(captured.lock().unwrap().clone())
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(
+        received.contains("x-cred-logical"),
+        "a credential bound to the logical authority must be injected: {received:?}"
+    );
+    assert!(
+        !received.contains("x-cred-transport"),
+        "a credential bound to the transport host must NOT be injected: {received:?}"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn subrequest_sends_logical_authority_as_host_not_transport() {
+    use std::{
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (addr, backend) =
+        spawn_capturing_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", Arc::clone(&captured)).await;
+
+    // The cluster overrides the logical authority (`api.internal`); its transport
+    // endpoint is `127.0.0.1:<port>`. Mirroring the normal proxy path's authority
+    // override, the upstream must receive the logical authority as its Host — not
+    // the transport address, and not a stale inbound Host.
+    let chain = format!(
+        "
+- filter: router
+  routes:
+    - path_prefix: \"/\"
+      cluster: backend
+- filter: load_balancer
+  clusters:
+    - name: backend
+      endpoints:
+        - \"{addr}\"
+      http:
+        authority: api.internal
+"
+    );
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&chain).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+
+    // A stale inbound Host must not survive an authority override.
+    let mut headers = HeaderMap::new();
+    headers.insert(http::header::HOST, http::HeaderValue::from_static("stale.example.com"));
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers,
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("buffered callout should return a response");
+    backend.abort();
+
+    let received = String::from_utf8(captured.lock().unwrap().clone())
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(
+        received.contains("host: api.internal"),
+        "the upstream must receive the logical authority override as its Host: {received:?}"
+    );
+    assert!(
+        !received.contains(&addr.to_string()),
+        "the transport address must not leak into the upstream Host: {received:?}"
+    );
+    assert!(
+        !received.contains("stale.example.com"),
+        "a stale inbound Host must be replaced by the authority override: {received:?}"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn subrequest_credential_injection_pins_host_to_credential_authority() {
+    use std::{
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (addr, backend) =
+        spawn_capturing_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", Arc::clone(&captured)).await;
+
+    // No authority override: the credential is authorized against the transport
+    // endpoint. A stale inbound Host must NOT survive to the upstream, or a
+    // shared-vhost endpoint could route the injected secret to a different vhost
+    // than the one the credential was authorized for.
+    let chain = format!(
+        "
+- filter: router
+  routes:
+    - path_prefix: \"/\"
+      cluster: backend
+- filter: load_balancer
+  clusters:
+    - name: backend
+      endpoints:
+        - \"{addr}\"
+"
+    );
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&chain).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let transport_host = addr.ip().to_string();
+    let mut pending = crate::PendingCredentials::new();
+    pending.push(
+        crate::DeferredCredential::new_host_wildcard(
+            &transport_host,
+            http::HeaderName::from_static("x-cred-transport"),
+            "transport-secret",
+        )
+        .unwrap(),
+    );
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(pending);
+
+    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::HOST,
+        http::HeaderValue::from_static("shared-vhost.example"),
+    );
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers,
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    executor
+        .run(&pipeline, &request, extensions, deadline)
+        .await
+        .expect("buffered callout should return a response");
+    backend.abort();
+
+    let received = String::from_utf8(captured.lock().unwrap().clone())
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(
+        received.contains("x-cred-transport"),
+        "a credential bound to the transport authority must be injected: {received:?}"
+    );
+    assert!(
+        received.contains(&format!("host: {addr}")),
+        "when a credential is injected the Host must equal the credential's authority (the transport): {received:?}"
+    );
+    assert!(
+        !received.contains("shared-vhost.example"),
+        "a stale inbound Host must not carry the injected secret to a divergent vhost: {received:?}"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn subrequest_unmatched_staged_credential_preserves_custom_host() {
+    use std::{
+        sync::{Arc, Mutex},
+        time::{Duration, Instant},
+    };
+
+    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let (addr, backend) =
+        spawn_capturing_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok", Arc::clone(&captured)).await;
+
+    // No authority override: the logical authority equals the transport endpoint.
+    // A credential is staged, but bound to a *different* authority that never
+    // matches this destination, so nothing is injected. A caller-set Host that
+    // selects a virtual host must survive untouched — pinning the Host to the
+    // transport only when a secret is actually delivered, never for a staged
+    // credential that matched nothing.
+    let chain = format!(
+        "
+- filter: router
+  routes:
+    - path_prefix: \"/\"
+      cluster: backend
+- filter: load_balancer
+  clusters:
+    - name: backend
+      endpoints:
+        - \"{addr}\"
+"
+    );
+    let registry = crate::FilterRegistry::with_builtins();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&chain).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let mut pending = crate::PendingCredentials::new();
+    pending.push(
+        crate::DeferredCredential::new_host_wildcard(
+            "other.example",
+            http::HeaderName::from_static("x-cred-other"),
+            "other-secret",
+        )
+        .unwrap(),
+    );
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(pending);
+
+    let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    let executor =
+        crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, 1_048_576, Duration::from_secs(5));
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::HOST,
+        http::HeaderValue::from_static("custom-vhost.example"),
+    );
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers,
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    executor
+        .run(&pipeline, &request, extensions, deadline)
+        .await
+        .expect("buffered callout should return a response");
+    backend.abort();
+
+    let received = String::from_utf8(captured.lock().unwrap().clone())
+        .unwrap()
+        .to_ascii_lowercase();
+    assert!(
+        !received.contains("x-cred-other"),
+        "a credential bound to a non-matching authority must not be injected: {received:?}"
+    );
+    assert!(
+        received.contains("host: custom-vhost.example"),
+        "an unmatched staged credential must not retarget a caller-set Host: {received:?}"
+    );
+    assert!(
+        !received.contains(&format!("host: {addr}")),
+        "the transport endpoint must not overwrite the Host when no credential is injected: {received:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Test Utilities: streaming callout harness
+// ---------------------------------------------------------------------------
+
+// A filter that selects a streaming sub-request response, so the executor
+// dispatches the outbound chain in streaming mode.
+struct StreamingSelectorFilter;
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for StreamingSelectorFilter {
+    fn name(&self) -> &'static str {
+        "test_streaming_selector"
+    }
+
+    fn may_select_streaming_subrequest_response(&self) -> bool {
+        true
+    }
+
+    async fn on_request(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        ctx.set_subrequest_response_mode(crate::SubRequestResponseMode::Streaming);
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+// A response-body filter that emits a terminal marker at end-of-stream, the way
+// an SSE aggregator closes a stream. This output is produced only by the
+// completion lifecycle, so it proves the streaming body flushes completion
+// output rather than dropping it at upstream EOF.
+struct TerminalEventFilter;
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for TerminalEventFilter {
+    fn name(&self) -> &'static str {
+        "test_terminal_event"
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+
+    fn response_body_access(&self) -> crate::BodyAccess {
+        crate::BodyAccess::ReadWrite
+    }
+
+    fn on_response_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        if end_of_stream && body.is_none() {
+            *body = Some(bytes::Bytes::from_static(b"data: [DONE]\n\n"));
+        }
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+// A response-body filter that rejects at end-of-stream, so the streaming body's
+// completion lifecycle (run by both EOF draining and `suppress`) fails. Models a
+// guardrail that blocks the final aggregated frame.
+struct RejectOnCompletionFilter;
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for RejectOnCompletionFilter {
+    fn name(&self) -> &'static str {
+        "test_reject_on_completion"
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+
+    fn response_body_access(&self) -> crate::BodyAccess {
+        crate::BodyAccess::ReadWrite
+    }
+
+    fn on_response_body(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<bytes::Bytes>,
+        end_of_stream: bool,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        if end_of_stream {
+            return Ok(crate::FilterAction::Reject(crate::Rejection::status(503)));
+        }
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+// A caller-injected extension type, used to prove the parent's extensions survive
+// the streaming body's inner->held transition even when completion fails.
+#[derive(Debug, PartialEq, Eq)]
+struct CalloutParentMarker(&'static str);
+
+// Build a registry with the builtins plus the streaming callout test filters.
+fn callout_registry() -> crate::FilterRegistry {
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_streaming_selector",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(StreamingSelectorFilter)))),
+        )
+        .unwrap();
+    registry
+        .register(
+            "test_terminal_event",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(TerminalEventFilter)))),
+        )
+        .unwrap();
+    registry
+        .register(
+            "test_reject_on_completion",
+            crate::FilterFactory::Http(std::sync::Arc::new(|_| Ok(Box::new(RejectOnCompletionFilter)))),
+        )
+        .unwrap();
+    registry
+}
+
+// Spawn a raw TCP backend that replies with a fixed response for each accept.
+async fn spawn_raw_backend(response: &'static str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0_u8; 8192];
+            let _bytes_read = socket.read(&mut buf).await;
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+        }
+    });
+    (addr, handle)
+}
+
+// Spawn a raw TCP backend that captures the first request it receives into
+// `captured`, then replies with a fixed response for each accept.
+async fn spawn_capturing_backend(
+    response: &'static str,
+    captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let handle = tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let mut buf = vec![0_u8; 8192];
+            let bytes_read = socket.read(&mut buf).await.unwrap_or(0);
+            {
+                let mut slot = captured.lock().unwrap();
+                if slot.is_empty()
+                    && let Some(request) = buf.get(..bytes_read)
+                {
+                    slot.extend_from_slice(request);
+                }
+            }
+            socket.write_all(response.as_bytes()).await.unwrap();
+            socket.flush().await.unwrap();
+        }
+    });
+    (addr, handle)
+}
+
+// Route the outbound chain to a real backend address.
+fn routed_chain_yaml(addr: std::net::SocketAddr, extra: &str) -> String {
+    format!(
+        "
+- filter: test_streaming_selector
+- filter: router
+  routes:
+    - path_prefix: \"/\"
+      cluster: backend
+- filter: load_balancer
+  clusters:
+    - name: backend
+      endpoints:
+        - \"{addr}\"
+{extra}"
+    )
+}
+
+// Build a streaming callout executor over a fresh client.
+fn streaming_executor(max_response_bytes: usize) -> crate::FilteredSubrequestExecutor {
+    use std::time::{Duration, Instant};
+
+    use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+
+    let client = SubRequestClient::new(SubRequestConnector::new(4, None));
+    let downstream = crate::SubrequestRuntime::new(None, false, None, Instant::now());
+    crate::FilteredSubrequestExecutor::for_callout(client, downstream, 0, max_response_bytes, Duration::from_secs(5))
+}
+
+// Drain a streaming body to completion, returning the concatenated payload.
+async fn drain(body: &mut Box<dyn crate::StreamingResponseBody>) -> Result<Vec<u8>, crate::FilterError> {
+    let mut out = Vec::new();
+    while let Some(chunk) = body.next_chunk().await? {
+        out.extend_from_slice(&chunk);
+    }
+    Ok(out)
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn run_streaming_flushes_completion_output_after_upstream_eof() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let registry = callout_registry();
+    let mut entries: Vec<crate::FilterEntry> =
+        serde_yaml::from_str(&routed_chain_yaml(addr, "- filter: test_terminal_event\n")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let executor = streaming_executor(1_048_576);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let mut body = match executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("streaming callout should open")
+    {
+        crate::CalloutResponse::Streaming { response, body } => {
+            assert_eq!(response.status, 200, "the transition-time status must be surfaced");
+            body
+        },
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+
+    let payload = drain(&mut body).await.expect("streaming body should drain cleanly");
+    backend.abort();
+
+    assert_eq!(
+        payload, b"hellodata: [DONE]\n\n",
+        "the streaming body must yield the upstream chunk AND the completion output"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn run_streaming_yields_upstream_chunks_for_clean_eof() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let registry = callout_registry();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&routed_chain_yaml(addr, "")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let executor = streaming_executor(1_048_576);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let mut body = match executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("streaming callout should open")
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+
+    let payload = drain(&mut body).await.expect("streaming body should drain cleanly");
+    backend.abort();
+
+    assert_eq!(payload, b"hello", "the upstream chunk must be delivered on a clean EOF");
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn run_streaming_enforces_response_byte_ceiling() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let registry = callout_registry();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&routed_chain_yaml(addr, "")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    // A ceiling below the upstream chunk size forces the body to reject it.
+    let executor = streaming_executor(3);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let mut body = match executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("streaming callout should open")
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+
+    let result = drain(&mut body).await;
+    backend.abort();
+
+    assert!(
+        result.is_err_and(|error| error.to_string().contains("exceeds configured body limit")),
+        "a chunk beyond the response ceiling must surface as an error"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn run_streaming_surfaces_unhandled_upstream_termination() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    // Chunked framing that promises a large chunk, then closes mid-payload.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let backend = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let mut buf = vec![0_u8; 8192];
+        let _bytes_read = socket.read(&mut buf).await;
+        socket
+            .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nff\r\npartial")
+            .await
+            .unwrap();
+        socket.flush().await.unwrap();
+        drop(socket);
+    });
+    let registry = callout_registry();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&routed_chain_yaml(addr, "")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let executor = streaming_executor(1_048_576);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let mut body = match executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("streaming callout should open")
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+
+    let mut errored = false;
+    loop {
+        match body.next_chunk().await {
+            Ok(Some(_)) => {},
+            Ok(None) => break,
+            Err(_) => {
+                errored = true;
+                break;
+            },
+        }
+    }
+    backend.abort();
+
+    assert!(
+        errored,
+        "an unhandled mid-stream upstream failure must surface as an error, not a clean end"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn run_streaming_cancel_discards_upstream() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let registry = callout_registry();
+    let mut entries: Vec<crate::FilterEntry> = serde_yaml::from_str(&routed_chain_yaml(addr, "")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let executor = streaming_executor(1_048_576);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let mut body = match executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("streaming callout should open")
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+
+    body.cancel().await;
+    backend.abort();
+
+    assert!(
+        body.next_chunk().await.unwrap().is_none(),
+        "a cancelled streaming body must yield no further chunks"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn run_streaming_suppress_error_preserves_parent_extensions() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+    let registry = callout_registry();
+    // The completion filter rejects at end-of-stream, so `suppress` (which runs
+    // the completion lifecycle) fails.
+    let mut entries: Vec<crate::FilterEntry> =
+        serde_yaml::from_str(&routed_chain_yaml(addr, "- filter: test_reject_on_completion")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    let executor = streaming_executor(1_048_576);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let mut extensions = crate::RequestExtensions::default();
+    extensions.insert(CalloutParentMarker("preserved"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let mut body = match executor
+        .run(&pipeline, &request, extensions, deadline)
+        .await
+        .expect("streaming callout should open")
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+
+    // Suppressing the body runs the completion lifecycle, which the guardrail
+    // rejects, so `suppress` surfaces an error.
+    let suppressed = body.suppress().await;
+    assert!(
+        suppressed.is_err(),
+        "a completion-phase rejection must surface from suppress: {suppressed:?}"
+    );
+
+    // Despite the error, the caller-injected extension must survive the body's
+    // inner->held transition so the parent request context can recover it.
+    let mut parent = crate::RequestExtensions::default();
+    body.swap_extensions(&mut parent);
+    backend.abort();
+
+    assert_eq!(
+        parent.get::<CalloutParentMarker>(),
+        Some(&CalloutParentMarker("preserved")),
+        "the parent extension must survive a suppress completion error"
+    );
+    assert!(
+        body.next_chunk().await.unwrap().is_none(),
+        "a suppressed body must terminate cleanly, not surface a spurious source error"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn streaming_response_body_context_inherits_parent_session_stores() {
+    use std::{
+        sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        },
+        time::{Duration, Instant},
+    };
+
+    let (addr, backend) =
+        spawn_raw_backend("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n").await;
+
+    let saw_on_request = Arc::new(AtomicBool::new(false));
+    let saw_on_response_body = Arc::new(AtomicBool::new(false));
+
+    // The streaming harness needs the streaming selector plus the recorder.
+    let mut registry = callout_registry();
+    {
+        let saw_on_request = Arc::clone(&saw_on_request);
+        let saw_on_response_body = Arc::clone(&saw_on_response_body);
+        registry
+            .register(
+                "test_session_store_recorder",
+                crate::FilterFactory::Http(Arc::new(move |_| {
+                    Ok(Box::new(SessionStoreRecorderFilter {
+                        saw_on_request: Arc::clone(&saw_on_request),
+                        saw_on_response_body: Arc::clone(&saw_on_response_body),
+                    }))
+                })),
+            )
+            .unwrap();
+    }
+
+    let mut entries: Vec<crate::FilterEntry> =
+        serde_yaml::from_str(&routed_chain_yaml(addr, "- filter: test_session_store_recorder\n")).unwrap();
+    let mut pipeline = crate::FilterPipeline::build(&mut entries, &registry).unwrap();
+    pipeline.set_session_stores(Arc::new(crate::SessionStoreRegistry::new()));
+    let pipeline = Arc::new(pipeline);
+
+    let executor = streaming_executor(1_048_576);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let mut body = match executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("streaming callout should open")
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+
+    drain(&mut body).await.expect("streaming body should drain cleanly");
+    backend.abort();
+
+    assert!(
+        saw_on_response_body.load(Ordering::SeqCst),
+        "a response-body filter in a streaming outbound chain must see the parent pipeline's session stores"
+    );
 }

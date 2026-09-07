@@ -116,7 +116,11 @@ pub(super) fn check_conditional_security(names: &[&str], filters: &[PipelineFilt
 
 /// Security filters with `failure_mode: open` (bypass risk on error).
 ///
-/// When `allow` is `true`, the error is demoted to a warning.
+/// When `allow` is `true`, the error is demoted to a warning. Walks branch
+/// sub-chains recursively, so a security filter buried inside a branch is held
+/// to the same guardrail as a top-level one rather than silently escaping it —
+/// matching [`check_skip_to_bypasses_security`] and
+/// [`check_terminal_rejoin_bypasses_security`].
 pub(super) fn check_open_security_filters(
     names: &[&str],
     filters: &[PipelineFilter],
@@ -124,21 +128,49 @@ pub(super) fn check_open_security_filters(
     errors: &mut Vec<String>,
 ) {
     for (i, (name, pf)) in names.iter().zip(filters).enumerate() {
-        if pf.is_security && pf.failure_mode == FailureMode::Open {
-            let msg = format!(
-                "security filter '{name}' at position {i} has \
-                 failure_mode: open; runtime errors will bypass \
-                 security enforcement"
-            );
-            if allow {
-                warn!(
-                    filter = %name,
-                    "{msg}; allowed by insecure_options.allow_open_security_filters"
-                );
-            } else {
-                errors.push(msg);
-            }
+        report_open_security_filter(name, pf, &format!("position {i}"), allow, errors);
+        for branch in &pf.branches {
+            check_open_security_in_branch(&branch.filters, &branch.name, allow, errors);
         }
+    }
+}
+
+/// Apply the `failure_mode: open` guardrail to every filter inside one branch
+/// sub-chain, recursing through nested branches.
+fn check_open_security_in_branch(filters: &[PipelineFilter], branch_name: &str, allow: bool, errors: &mut Vec<String>) {
+    let location = format!("branch '{branch_name}'");
+    for pf in filters {
+        report_open_security_filter(pf.filter.name(), pf, &location, allow, errors);
+        for branch in &pf.branches {
+            check_open_security_in_branch(&branch.filters, &branch.name, allow, errors);
+        }
+    }
+}
+
+/// Emit the `failure_mode: open` diagnostic for one filter: an error, or a
+/// warning when `allow` demotes it via `insecure_options`.
+fn report_open_security_filter(
+    name: &str,
+    filter: &PipelineFilter,
+    location: &str,
+    allow: bool,
+    errors: &mut Vec<String>,
+) {
+    if !filter.is_security || filter.failure_mode != FailureMode::Open {
+        return;
+    }
+    let msg = format!(
+        "security filter '{name}' at {location} has \
+         failure_mode: open; runtime errors will bypass \
+         security enforcement"
+    );
+    if allow {
+        warn!(
+            filter = %name,
+            "{msg}; allowed by insecure_options.allow_open_security_filters"
+        );
+    } else {
+        errors.push(msg);
     }
 }
 
@@ -907,6 +939,68 @@ mod tests {
         let mut errors = Vec::new();
         check_open_security_filters(&names, &filters, false, &mut errors);
         assert!(errors.is_empty(), "open non-security filter should not error");
+    }
+
+    #[test]
+    fn open_security_filter_nested_in_branch_errors() {
+        // A security filter with failure_mode: open buried inside a branch
+        // sub-chain must be held to the same guardrail as a top-level one; branch
+        // nesting must not silently defeat the check.
+        let names = vec!["headers"];
+        let mut nested = security_noop_filter("ip_acl", vec![]);
+        nested.failure_mode = FailureMode::Open;
+        let filters = vec![host_with_branch(vec![nested])];
+        let mut errors = Vec::new();
+        check_open_security_filters(&names, &filters, false, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "branch-nested open security filter should error: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("failure_mode: open") && errors[0].contains("ip_acl"),
+            "error should mention ip_acl with failure_mode: open: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn open_security_filter_nested_in_branch_allowed_demotes_to_warning() {
+        // The insecure_options opt-out must apply to branch-nested security
+        // filters exactly as it does at the top level.
+        let names = vec!["headers"];
+        let mut nested = security_noop_filter("ip_acl", vec![]);
+        nested.failure_mode = FailureMode::Open;
+        let filters = vec![host_with_branch(vec![nested])];
+        let mut errors = Vec::new();
+        check_open_security_filters(&names, &filters, true, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "allow flag should demote branch-nested open security filter to warning: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn open_security_filter_nested_two_levels_deep_errors() {
+        // The recursion must reach a security filter buried inside a branch of a
+        // branch, not just a first-level branch.
+        let names = vec!["headers"];
+        let mut deep = security_noop_filter("ip_acl", vec![]);
+        deep.failure_mode = FailureMode::Open;
+        let inner_host = host_with_branch(vec![deep]);
+        let filters = vec![host_with_branch(vec![inner_host])];
+        let mut errors = Vec::new();
+        check_open_security_filters(&names, &filters, false, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "open security filter two branch levels deep should error: {errors:?}"
+        );
+        assert!(
+            errors[0].contains("failure_mode: open") && errors[0].contains("ip_acl"),
+            "error should mention ip_acl with failure_mode: open: {}",
+            errors[0]
+        );
     }
 
     #[test]

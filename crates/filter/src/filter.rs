@@ -119,6 +119,23 @@ pub trait HttpFilter: Send + Sync {
         false
     }
 
+    /// Whether this filter may return a terminal [`FilterAction`] — one that
+    /// short-circuits the request phase with a response and no upstream
+    /// (`TerminalResponse` / `StreamingTerminalResponse`).
+    ///
+    /// Pipeline validation uses this declaration to reject terminal filters from
+    /// outbound chains bound into a filtered sub-request: that executor forwards
+    /// to a resolved upstream and cannot surface such a response, so it would
+    /// drop the action and then error that no upstream resolved. Any filter that
+    /// can return a terminal action must override this, so detection is not
+    /// limited to the hard-coded builtin terminal names in [`TERMINAL_FILTERS`].
+    ///
+    /// [`FilterAction`]: crate::FilterAction
+    /// [`TERMINAL_FILTERS`]: praxis_core::config::TERMINAL_FILTERS
+    fn produces_terminal_response(&self) -> bool {
+        false
+    }
+
     /// Visit pipelines owned by this filter.
     ///
     /// Framework filters that embed nested pipelines override this hook so

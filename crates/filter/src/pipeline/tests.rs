@@ -1283,7 +1283,13 @@ fn build_with_chains_stamps_is_security_on_branch_filter() {
         ..named_noop_entry("request_id", FailureMode::default())
     }];
     let chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
-    let pipeline = FilterPipeline::build_with_chains(&mut entries, &registry, &chains).unwrap();
+    let pipeline = FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &chains,
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .unwrap();
     assert_eq!(
         pipeline.filters.len(),
         1,
@@ -4845,4 +4851,139 @@ mod filter_duration_metrics_tests {
         pipeline.set_time_source(source);
         let _time_source = pipeline.time_source();
     }
+}
+
+// -----------------------------------------------------------------------------
+// Runtime Resource Propagation
+// -----------------------------------------------------------------------------
+
+// A filter that owns a nested pipeline and exposes it through
+// `visit_nested_pipelines`, so recursion of runtime-resource setters can be
+// observed without depending on the outbound-callout filter.
+struct NestedPipelineFilter {
+    nested: FilterPipeline,
+}
+
+#[async_trait]
+impl HttpFilter for NestedPipelineFilter {
+    fn name(&self) -> &'static str {
+        "nested_pipeline_filter"
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+
+    fn visit_nested_pipelines(&mut self, visitor: &mut dyn FnMut(&mut FilterPipeline)) {
+        visitor(&mut self.nested);
+    }
+}
+
+#[test]
+fn set_session_stores_propagates_into_nested_pipelines() {
+    let parent_filter = NestedPipelineFilter {
+        nested: make_pipeline(vec![]),
+    };
+    let mut parent = make_pipeline(vec![Box::new(parent_filter)]);
+
+    parent.set_session_stores(Arc::new(crate::SessionStoreRegistry::new()));
+
+    let mut nested_has_stores = false;
+    parent.visit_nested_pipelines(&mut |pipeline| {
+        nested_has_stores = pipeline.session_stores().is_some();
+    });
+    assert!(
+        nested_has_stores,
+        "set_session_stores must reach nested outbound pipelines like set_kv_stores does"
+    );
+}
+
+// A terminal-filter stand-in that declares the terminal-response capability yet
+// no body access. It models a terminal filter the branch body-access check would
+// NOT reject (unlike the real IRR, which always declares body access), so
+// terminal detection must recurse into branch sub-chains on its own to catch it.
+struct TerminalDouble;
+
+#[async_trait]
+impl HttpFilter for TerminalDouble {
+    fn name(&self) -> &'static str {
+        "iterative_request_router"
+    }
+
+    fn produces_terminal_response(&self) -> bool {
+        true
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
+}
+
+#[test]
+fn terminal_filters_detects_filter_nested_in_branch() {
+    // A terminal filter buried inside a branch sub-chain must be reported. The
+    // top-level-only scan would miss it, letting it activate and drop its
+    // terminal response at runtime inside an outbound chain.
+    let mut parent = make_pipeline(vec![Box::new(CountingFilter {
+        counter: Arc::new(AtomicUsize::new(0)),
+    })]);
+    parent.filters[0].branches = vec![ResolvedBranch {
+        condition: None,
+        filters: vec![PipelineFilter::new(
+            10,
+            AnyFilter::Http(Box::new(TerminalDouble)),
+            vec![],
+            vec![],
+        )],
+        max_iterations: None,
+        name: Arc::from("br"),
+        rejoin: RejoinTarget::Next,
+    }];
+
+    assert!(
+        parent.terminal_filters().contains(&"iterative_request_router"),
+        "terminal_filters must find a terminal filter nested inside a branch sub-chain"
+    );
+}
+
+#[test]
+fn set_session_stores_propagates_into_branch_nested_pipelines() {
+    // A nested-pipeline filter placed INSIDE a branch sub-chain, not at the top
+    // level. Runtime-resource setters route through `visit_nested_pipelines`,
+    // which must descend into branch sub-chains so a branch-contained callout's
+    // bound outbound pipeline receives resources too — not just top-level ones.
+    let branch_filter = NestedPipelineFilter {
+        nested: make_pipeline(vec![]),
+    };
+    let mut parent = make_pipeline(vec![Box::new(CountingFilter {
+        counter: Arc::new(AtomicUsize::new(0)),
+    })]);
+    parent.filters[0].branches = vec![ResolvedBranch {
+        condition: None,
+        filters: vec![PipelineFilter::new(
+            10,
+            AnyFilter::Http(Box::new(branch_filter)),
+            vec![],
+            vec![],
+        )],
+        max_iterations: None,
+        name: Arc::from("br"),
+        rejoin: RejoinTarget::Next,
+    }];
+
+    parent.set_session_stores(Arc::new(crate::SessionStoreRegistry::new()));
+
+    // Observe the branch-nested embedded pipeline directly — reach into the
+    // branch filter and query its own nested pipeline — so the assertion does
+    // not depend on the very traversal under test.
+    let mut nested_has_stores = false;
+    if let AnyFilter::Http(filter) = &mut parent.filters[0].branches[0].filters[0].filter {
+        filter.visit_nested_pipelines(&mut |pipeline| {
+            nested_has_stores = pipeline.session_stores().is_some();
+        });
+    }
+    assert!(
+        nested_has_stores,
+        "set_session_stores must reach pipelines embedded by filters inside branch sub-chains"
+    );
 }

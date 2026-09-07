@@ -17,7 +17,7 @@
 use std::{collections::HashMap, mem, sync::Arc};
 
 use praxis_core::{
-    config::{FilterEntry, SkipPipelineChecks},
+    config::{FilterEntry, InsecureOptions, SkipPipelineChecks},
     id::IdGenerator,
     time::SystemTimeSource,
 };
@@ -80,6 +80,12 @@ impl FilterPipeline {
     /// configurations. The actual filters for this pipeline come
     /// from `entries`.
     ///
+    /// `insecure_options` is the operator's declared security posture. It is
+    /// threaded into outbound chain binding so that inline clusters reachable
+    /// only through a chain-binding filter's outbound chain are gated by the
+    /// same SSRF and insecure-TLS rules as top-level `clusters:`, instead of
+    /// silently bypassing them.
+    ///
     /// # Errors
     ///
     /// Returns [`FilterError`] if any filter fails to instantiate
@@ -90,13 +96,14 @@ impl FilterPipeline {
         entries: &mut [FilterEntry],
         registry: &FilterRegistry,
         chains: &HashMap<&str, &[FilterEntry]>,
+        insecure_options: &InsecureOptions,
     ) -> Result<Self, FilterError> {
-        let filters = super::build_branch::resolve_chain_filters(entries, registry, chains, 0)?;
+        let filters = super::build_branch::resolve_chain_filters(entries, registry, chains, 0, insecure_options)?;
         Ok(Self::from_filters(filters))
     }
 
     /// Create a pipeline from an already-resolved filter list.
-    fn from_filters(filters: Vec<PipelineFilter>) -> Self {
+    pub(crate) fn from_filters(filters: Vec<PipelineFilter>) -> Self {
         let body_capabilities = compute_body_capabilities(&filters);
         let compression = extract_compression_config(&filters);
         let may_select_streaming_subrequest_response = filters_may_select_streaming_subrequest_response(&filters);

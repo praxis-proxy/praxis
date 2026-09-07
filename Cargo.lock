@@ -3177,6 +3177,7 @@ dependencies = [
 name = "praxis-proxy"
 version = "0.5.4"
 dependencies = [
+ "async-trait",
  "cargo_metadata",
  "clap",
  "nix",

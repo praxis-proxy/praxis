@@ -33,7 +33,7 @@
 pub(crate) mod body;
 pub(crate) mod branch;
 mod build;
-mod build_branch;
+pub(crate) mod build_branch;
 mod checks;
 mod clusters;
 pub(crate) mod evaluate;
@@ -306,6 +306,58 @@ impl FilterPipeline {
             .collect()
     }
 
+    /// Names of filters in this pipeline that operate below the HTTP layer.
+    ///
+    /// Unlike [`filters_unsupported_by`], which honors a listener's protocol
+    /// stack (an HTTP listener legitimately runs TCP-level filters at the
+    /// connection layer), this reports filters that a *filtered sub-request*
+    /// cannot run: that executor drives only the HTTP request phase, so any
+    /// filter whose protocol level is not [`ProtocolKind::Http`] is never
+    /// invoked. Binding one into an outbound chain is a silent runtime no-op;
+    /// this surfaces it at build time.
+    ///
+    /// [`filters_unsupported_by`]: Self::filters_unsupported_by
+    /// [`ProtocolKind::Http`]: praxis_core::config::ProtocolKind::Http
+    pub fn non_http_filters(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        for_each_pipeline_filter(&self.filters, &mut |pf| {
+            if pf.filter.protocol_level() != praxis_core::config::ProtocolKind::Http {
+                names.push(pf.filter.name());
+            }
+        });
+        names
+    }
+
+    /// Names of terminal filters in this pipeline, recursively including those
+    /// nested inside branch sub-chains.
+    ///
+    /// A terminal filter short-circuits the request phase with a response and no
+    /// upstream. The HTTP filtered sub-request executor forwards to a resolved
+    /// upstream and cannot surface such a response, so a terminal filter bound
+    /// into an outbound chain — at the top level or buried in a branch — must be
+    /// rejected at build time rather than silently activate and drop its response
+    /// at runtime.
+    ///
+    /// Detection is capability-based
+    /// ([`HttpFilter::produces_terminal_response`]), not a match against the
+    /// hard-coded builtin names in [`TERMINAL_FILTERS`], so a custom filter that
+    /// can return a terminal action is caught even though its name is unknown to
+    /// the builtin list.
+    ///
+    /// [`HttpFilter::produces_terminal_response`]: crate::HttpFilter::produces_terminal_response
+    /// [`TERMINAL_FILTERS`]: praxis_core::config::TERMINAL_FILTERS
+    pub fn terminal_filters(&self) -> Vec<&'static str> {
+        let mut names = Vec::new();
+        for_each_pipeline_filter(&self.filters, &mut |pf| {
+            if let crate::any_filter::AnyFilter::Http(filter) = &pf.filter
+                && filter.produces_terminal_response()
+            {
+                names.push(filter.name());
+            }
+        });
+        names
+    }
+
     /// Whether any filter of `type_name` has request conditions matching
     /// `request` (an unconditional entry always matches).
     ///
@@ -386,6 +438,7 @@ impl FilterPipeline {
 
     /// Set the shared [`crate::SessionStoreRegistry`] for this pipeline.
     pub fn set_session_stores(&mut self, stores: Arc<crate::SessionStoreRegistry>) {
+        self.visit_nested_pipelines(&mut |pipeline| pipeline.set_session_stores(Arc::clone(&stores)));
         self.session_stores = Some(stores);
     }
 
@@ -449,20 +502,16 @@ impl FilterPipeline {
     /// Without this, a filter that loads an external document never picks up edits
     /// to it, because the reload gate only ever sees the main config's bytes.
     ///
-    /// Mirrors [`Self::apply_insecure_options`], including its limitation: only
-    /// top-level filters are walked, not filters nested inside branch chains. A
-    /// document referenced solely from a branch is therefore not observed. That is
-    /// the same blind spot the insecure-options walk already has, and widening both
-    /// belongs in one change rather than half of one here.
+    /// Walks branch sub-chains recursively, so a document referenced solely from
+    /// a filter inside a branch is observed too.
     pub fn referenced_files(&self) -> Vec<std::path::PathBuf> {
-        self.filters
-            .iter()
-            .filter_map(|pf| match &pf.filter {
-                crate::any_filter::AnyFilter::Http(f) => Some(f.referenced_files()),
-                crate::any_filter::AnyFilter::Tcp(_) => None,
-            })
-            .flatten()
-            .collect()
+        let mut files = Vec::new();
+        for_each_pipeline_filter(&self.filters, &mut |pf| {
+            if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {
+                files.extend(f.referenced_files());
+            }
+        });
+        files
     }
 
     /// Whether upstream hostnames are allowed to resolve to private or
@@ -486,26 +535,57 @@ impl FilterPipeline {
 
     /// Apply [`InsecureOptions`] to all filters in the pipeline.
     ///
-    /// Delegates to each filter's [`apply_insecure_options`] method.
-    /// Filters that support insecure overrides (e.g. CSRF log-only
-    /// mode) handle the relevant flags; others ignore the call.
+    /// Delegates to each filter's [`apply_insecure_options`] method, recursing
+    /// into branch sub-chains so a filter buried in a branch honors the override
+    /// too. Filters that support insecure overrides (e.g. CSRF log-only mode)
+    /// handle the relevant flags; others ignore the call.
     ///
     /// [`apply_insecure_options`]: crate::HttpFilter::apply_insecure_options
     /// [`InsecureOptions`]: praxis_core::config::InsecureOptions
     pub fn apply_insecure_options(&self, options: &InsecureOptions) {
-        for pf in &self.filters {
+        for_each_pipeline_filter(&self.filters, &mut |pf| {
             if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {
                 f.apply_insecure_options(options);
             }
-        }
+        });
     }
 
-    /// Apply a mutation to every pipeline directly embedded by a filter.
+    /// Apply a mutation to every pipeline directly embedded by a filter,
+    /// including filters nested inside branch sub-chains.
     fn visit_nested_pipelines(&mut self, visitor: &mut dyn FnMut(&mut FilterPipeline)) {
-        for pf in &mut self.filters {
-            if let crate::any_filter::AnyFilter::Http(filter) = &mut pf.filter {
-                filter.visit_nested_pipelines(visitor);
-            }
+        visit_branch_nested_pipelines(&mut self.filters, visitor);
+    }
+}
+
+/// Visit every filter in `filters` and, recursively, every filter nested inside
+/// their branch sub-chains.
+///
+/// The shared read-only walk behind the pipeline-wide scans (non-HTTP filter
+/// detection, terminal-filter detection, referenced-file discovery, insecure
+/// option application) so a filter buried in a branch is treated exactly like a
+/// top-level one rather than silently skipped.
+fn for_each_pipeline_filter(filters: &[PipelineFilter], visit: &mut dyn FnMut(&PipelineFilter)) {
+    for pf in filters {
+        visit(pf);
+        for branch in &pf.branches {
+            for_each_pipeline_filter(&branch.filters, visit);
+        }
+    }
+}
+
+/// Invoke each filter's [`visit_nested_pipelines`], descending recursively into
+/// branch sub-chains so pipelines embedded by branch-contained filters (for
+/// example an outbound chain bound by a callout placed inside a branch) receive
+/// the same mutation as top-level ones.
+///
+/// [`visit_nested_pipelines`]: crate::HttpFilter::visit_nested_pipelines
+fn visit_branch_nested_pipelines(filters: &mut [PipelineFilter], visitor: &mut dyn FnMut(&mut FilterPipeline)) {
+    for pf in filters {
+        if let crate::any_filter::AnyFilter::Http(filter) = &mut pf.filter {
+            filter.visit_nested_pipelines(visitor);
+        }
+        for branch in &mut pf.branches {
+            visit_branch_nested_pipelines(&mut branch.filters, visitor);
         }
     }
 }

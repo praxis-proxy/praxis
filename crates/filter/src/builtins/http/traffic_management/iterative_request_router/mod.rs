@@ -312,6 +312,14 @@ impl HttpFilter for IterativeRequestRouterFilter {
         "iterative_request_router"
     }
 
+    fn produces_terminal_response(&self) -> bool {
+        // IRR resolves a sub-request and returns its response as a terminal
+        // action, so it can never run inside a filtered sub-request's outbound
+        // chain. Declaring the capability lets bind-time validation reject it
+        // without relying on a name match.
+        true
+    }
+
     fn request_body_access(&self) -> crate::body::BodyAccess {
         crate::body::BodyAccess::ReadOnly
     }

@@ -117,7 +117,8 @@ pub fn resolve_pipelines(
 
         validate_terminal_position(&entries, &listener.name)?;
 
-        let mut pipeline = FilterPipeline::build_with_chains(&mut entries, registry, &chains)?;
+        let mut pipeline =
+            FilterPipeline::build_with_chains(&mut entries, registry, &chains, &config.insecure_options)?;
         configure_pipeline(
             &mut pipeline,
             config,

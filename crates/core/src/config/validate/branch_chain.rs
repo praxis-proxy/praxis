@@ -73,6 +73,112 @@ pub(crate) fn validate_branch_chains(chains: &[FilterChainConfig]) -> Result<(),
     Ok(())
 }
 
+/// Validate branch-chain constraints for a single chain's filter entries.
+///
+/// This is the entry-level slice of the whole-config `validate_branch_chains`
+/// pass: it enforces filter-name uniqueness, the per-filter branch cap, the
+/// re-entrant [`MAX_ITERATIONS_CEILING`], the inline nesting [`MAX_BRANCH_DEPTH`],
+/// the total-branch ceiling (`MAX_TOTAL_BRANCHES`), and chain-reference
+/// resolution over one list of [`FilterEntry`]. It exists so outbound chains
+/// bound at pipeline-build time — which never appear in `Config::filter_chains`
+/// — are held to the same branch-chain limits (notably the `max_iterations`
+/// ceiling that bounds re-entrant request loops) as top-level chains instead of
+/// bypassing them.
+///
+/// `known_chains` names the top-level filter chains a [`ChainRef::Named`] branch
+/// reference may resolve against; a bound chain with no reachable named chains
+/// passes an empty set.
+///
+/// `prior_branch_count` is the number of branch definitions already counted
+/// toward the total-branch ceiling elsewhere in the same build — the branches
+/// present configuration-wide and in any previously bound inline outbound chains.
+/// The ceiling bounds config complexity across the whole build, not each chain in
+/// isolation, so this chain's own branch count is added to `prior_branch_count`
+/// and the cumulative total is checked. The cumulative total is returned so a
+/// caller can thread it into the next bound chain's check; seed the first call
+/// with [`count_build_branches`] over the listener entries and every named chain
+/// so branches already present anywhere in the configuration are counted.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] if a filter or branch name duplicates, a
+/// re-entrant branch exceeds `max_iterations`, inline nesting exceeds
+/// [`MAX_BRANCH_DEPTH`], a chain reference is malformed or dangling, or the
+/// cumulative branch total exceeds the maximum (`MAX_TOTAL_BRANCHES`).
+pub fn validate_chain_entries_branch_chains(
+    chain_name: &str,
+    entries: &[FilterEntry],
+    known_chains: &HashSet<&str>,
+    prior_branch_count: usize,
+) -> Result<usize, ProxyError> {
+    validate_filter_names_unique(entries, chain_name)?;
+    let initial_count = known_chains.len();
+    let mut all_names: HashSet<String> = known_chains.iter().map(|s| (*s).to_owned()).collect();
+    collect_branch_names(entries, &mut all_names, known_chains, 0)?;
+
+    let branch_count = all_names.len() - initial_count;
+    let total = prior_branch_count + branch_count;
+    if total > MAX_TOTAL_BRANCHES {
+        return Err(ProxyError::Config(format!(
+            "total branch count ({total}) exceeds maximum ({MAX_TOTAL_BRANCHES})"
+        )));
+    }
+
+    Ok(total)
+}
+
+/// Count the branch definitions across a whole pipeline build: the listener's
+/// own `entries` plus every named chain in `chains`, deduplicated by name
+/// exactly as the whole-config `validate_branch_chains` pass counts them.
+///
+/// `validate_branch_chains` enforces the total-branch ceiling only over
+/// `Config::filter_chains`; outbound chains bound at pipeline-build time never
+/// appear there. Seeding a build's shared branch budget with this
+/// configuration-wide count — rather than the listener's entries alone — makes
+/// the ceiling span the whole configuration: a named outbound chain the listener
+/// never references still counts toward the budget that later-bound *inline*
+/// chains accumulate on top of, so the config-wide pool and the inline pool
+/// cannot each sit under the ceiling while exceeding it together. In production
+/// the listener `entries` are a concatenation of chains already in `chains`, so
+/// counting both merely deduplicates; a caller that passes entries not present in
+/// `chains` (a direct build) still has those branches counted.
+///
+/// Named refs resolve to chains counted here, so they are ignored inside branch
+/// chains; `known_chains` seeds the name set so a branch or inline name colliding
+/// with a chain name is not double counted. This is a pure counter: unlike the
+/// validating pass it emits no config-typo warnings and enforces no limits, so
+/// seeding a build's budget does not re-warn about entries the whole-config pass
+/// already validated.
+pub fn count_build_branches(entries: &[FilterEntry], chains: &[&[FilterEntry]], known_chains: &HashSet<&str>) -> usize {
+    let initial_count = known_chains.len();
+    let mut all_names: HashSet<String> = known_chains.iter().map(|s| (*s).to_owned()).collect();
+    count_branch_names(entries, &mut all_names);
+    for &chain in chains {
+        count_branch_names(chain, &mut all_names);
+    }
+    all_names.len().saturating_sub(initial_count)
+}
+
+/// Recursively insert branch and inline-chain names into `all_names`, ignoring
+/// named references. The pure counting counterpart to [`collect_branch_names`],
+/// with no validation, typo warnings, or limit checks.
+fn count_branch_names(entries: &[FilterEntry], all_names: &mut HashSet<String>) {
+    for entry in entries {
+        let Some(branches) = &entry.branch_chains else {
+            continue;
+        };
+        for branch in branches {
+            all_names.insert(branch.name.clone());
+            for chain_ref in &branch.chains {
+                if let ChainRef::Inline { name, filters } = chain_ref {
+                    all_names.insert(name.clone());
+                    count_branch_names(filters, all_names);
+                }
+            }
+        }
+    }
+}
+
 /// Validate that filter names within a chain are unique.
 fn validate_filter_names_unique(filters: &[FilterEntry], chain_name: &str) -> Result<(), ProxyError> {
     let mut seen = HashSet::new();
@@ -1128,5 +1234,177 @@ filter_chains:
         status: 200
 "#;
         Config::from_yaml(yaml).unwrap();
+    }
+
+    // -------------------------------------------------------------------------
+    // Entry-level validation (validate_chain_entries_branch_chains)
+    //
+    // The whole-config pass (validate_branch_chains) is reached through
+    // Config::from_yaml above. Outbound chains bound at pipeline-build time never
+    // appear in Config::filter_chains, so they are held to the same branch limits
+    // through validate_chain_entries_branch_chains instead. These exercise that
+    // function directly.
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn chain_entries_reject_total_branch_count_over_ceiling() {
+        use std::collections::HashSet;
+
+        use crate::config::FilterEntry;
+
+        // 17 filters x 16 branches = 272 uniquely-named branches, each pointing
+        // at a known named chain so only branch names count toward the total.
+        // This exceeds MAX_TOTAL_BRANCHES; the entry-level validator must reject
+        // it exactly as the whole-config pass does, so an outbound chain cannot
+        // bypass the ceiling by never appearing in Config::filter_chains.
+        let mut yaml = String::new();
+        let mut n = 0;
+        for _ in 0..17 {
+            yaml.push_str("- filter: headers\n  branch_chains:\n");
+            for _ in 0..16 {
+                writeln!(yaml, "    - name: br_{n}\n      chains: [utility]").unwrap();
+                n += 1;
+            }
+        }
+        let entries: Vec<FilterEntry> = serde_yaml::from_str(&yaml).unwrap();
+        let known: HashSet<&str> = HashSet::from(["utility"]);
+
+        let err = super::validate_chain_entries_branch_chains("outbound", &entries, &known, 0).unwrap_err();
+        assert!(
+            err.to_string().contains("total branch count")
+                && err.to_string().contains(&super::MAX_TOTAL_BRANCHES.to_string()),
+            "an outbound chain whose branch total exceeds the ceiling must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn chain_entries_reject_branches_over_per_filter_cap() {
+        use std::collections::HashSet;
+
+        use crate::config::FilterEntry;
+
+        // A single filter with 17 branch chains exceeds MAX_BRANCHES_PER_FILTER.
+        // Already enforced via collect_branch_names; this documents that the
+        // per-filter cardinality cap is not bypassed on the entry-level path.
+        let mut yaml = String::from("- filter: headers\n  branch_chains:\n");
+        for n in 0..17 {
+            writeln!(yaml, "    - name: br_{n}\n      chains: [utility]").unwrap();
+        }
+        let entries: Vec<FilterEntry> = serde_yaml::from_str(&yaml).unwrap();
+        let known: HashSet<&str> = HashSet::from(["utility"]);
+
+        let err = super::validate_chain_entries_branch_chains("outbound", &entries, &known, 0).unwrap_err();
+        assert!(
+            err.to_string().contains("branch chains") && err.to_string().contains("16"),
+            "a filter exceeding the per-filter branch cap must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn chain_entries_reject_invalid_on_result_condition() {
+        use std::collections::HashSet;
+
+        use crate::config::FilterEntry;
+
+        // A branch whose on_result declares an empty filter is rejected via
+        // validate_branch. This documents that the on_result condition checks are
+        // not bypassed on the entry-level path.
+        let entries: Vec<FilterEntry> = serde_yaml::from_str(
+            "
+- filter: headers
+  branch_chains:
+    - name: br
+      on_result:
+        filter: \"\"
+        result: hit
+      chains: [utility]
+",
+        )
+        .unwrap();
+        let known: HashSet<&str> = HashSet::from(["utility"]);
+
+        let err = super::validate_chain_entries_branch_chains("outbound", &entries, &known, 0).unwrap_err();
+        assert!(
+            err.to_string().contains("on_result.filter must not be empty"),
+            "a branch with an empty on_result filter must be rejected: {err}"
+        );
+    }
+
+    #[test]
+    fn count_build_branches_counts_entries_and_named_chains_ignoring_named_refs() {
+        use std::collections::HashSet;
+
+        use crate::config::FilterEntry;
+
+        // The listener entries define two branches: one resolving against a known
+        // named chain (contributes only its branch name) and one with an inline
+        // sub-chain (contributes both the branch name and the inline name). Named
+        // refs resolve to already-counted top-level chains, so they are not counted.
+        let entries: Vec<FilterEntry> = serde_yaml::from_str(
+            "
+- filter: headers
+  branch_chains:
+    - name: br_named
+      chains: [utility]
+    - name: br_inline
+      chains:
+        - name: sub
+          filters:
+            - filter: headers
+",
+        )
+        .unwrap();
+        // A named chain that itself defines a branch: config-wide counting must
+        // count it too, on top of the listener's own branches.
+        let utility: Vec<FilterEntry> = serde_yaml::from_str(
+            "
+- filter: headers
+  branch_chains:
+    - name: u_br
+      chains: [utility]
+",
+        )
+        .unwrap();
+        let chains: [&[FilterEntry]; 1] = [utility.as_slice()];
+        let known: HashSet<&str> = HashSet::from(["utility"]);
+
+        // br_named + br_inline + sub (entries) + u_br (named chain) = 4; the chain
+        // name `utility` is not counted, and named refs are ignored.
+        assert_eq!(
+            super::count_build_branches(&entries, &chains, &known),
+            4,
+            "config-wide counting must count entries and named chains, but not named refs"
+        );
+    }
+
+    #[test]
+    fn chain_entries_branch_count_accumulates_prior_and_returns_total() {
+        use std::collections::HashSet;
+
+        use crate::config::FilterEntry;
+
+        // A chain defining 10 branches. On its own (prior 0) it passes and the
+        // cumulative total is returned. With enough prior branches from elsewhere
+        // in the same build, the same chain pushes the cumulative total past the
+        // ceiling and is rejected — proving the ceiling bounds the whole build, not
+        // each chain in isolation.
+        let mut yaml = String::from("- filter: headers\n  branch_chains:\n");
+        for n in 0..10 {
+            writeln!(yaml, "    - name: br_{n}\n      chains: [utility]").unwrap();
+        }
+        let entries: Vec<FilterEntry> = serde_yaml::from_str(&yaml).unwrap();
+        let known: HashSet<&str> = HashSet::from(["utility"]);
+
+        let total = super::validate_chain_entries_branch_chains("outbound", &entries, &known, 0).unwrap();
+        assert_eq!(total, 10, "the cumulative total must include this chain's 10 branches");
+
+        let err =
+            super::validate_chain_entries_branch_chains("outbound", &entries, &known, super::MAX_TOTAL_BRANCHES - 5)
+                .unwrap_err();
+        assert!(
+            err.to_string().contains("total branch count")
+                && err.to_string().contains(&(super::MAX_TOTAL_BRANCHES + 5).to_string()),
+            "prior branch count must accumulate into the cumulative total: {err}"
+        );
     }
 }

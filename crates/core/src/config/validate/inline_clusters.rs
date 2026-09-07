@@ -35,9 +35,33 @@ pub(super) fn validate_inline_clusters(
     insecure_options: &InsecureOptions,
 ) -> Result<(), ProxyError> {
     for chain in chains {
-        for entry in &chain.filters {
-            validate_entry(&chain.name, entry, insecure_options)?;
-        }
+        validate_chain_entries_inline_clusters(&chain.name, &chain.filters, insecure_options)?;
+    }
+    Ok(())
+}
+
+/// Validate inline `clusters:` lists in a single chain's filter entries.
+///
+/// This is the entry-level slice of the whole-config `validate_inline_clusters`
+/// pass: it gates one list of [`FilterEntry`] under a given logical chain name,
+/// recursing into
+/// inline branch chains and `iterative_request_router` steps exactly as the
+/// whole-config pass does. It exists so outbound chains bound at pipeline-build
+/// time — which never appear in `Config::filter_chains` — are held to the same
+/// SSRF and insecure-TLS rules as top-level `clusters:` instead of bypassing
+/// them.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] if any inline cluster is malformed, names a
+/// duplicate, or fails endpoint/TLS validation under `insecure_options`.
+pub fn validate_chain_entries_inline_clusters(
+    chain_name: &str,
+    entries: &[FilterEntry],
+    insecure_options: &InsecureOptions,
+) -> Result<(), ProxyError> {
+    for entry in entries {
+        validate_entry(chain_name, entry, insecure_options)?;
     }
     Ok(())
 }

@@ -180,6 +180,15 @@ fn empty_predicate_error(chain_name: &str, filter: &str, idx: usize, field: &str
 
 /// Filter types that must be the last filter in their chain and in
 /// the flattened listener pipeline.
+///
+/// This name list drives the config-time "terminal filter must be last"
+/// ordering check, which runs on `FilterEntry` values before any filter is
+/// instantiated and so has no trait object to query. The runtime outbound-chain
+/// rejection instead uses the `HttpFilter::produces_terminal_response`
+/// capability (filter crate). The two live at different layers and must stay in
+/// sync: any new builtin that produces a terminal response must be added here
+/// *and* override `produces_terminal_response`, or it will be enforced by only
+/// one of the two checks.
 pub const TERMINAL_FILTERS: &[&str] = &["iterative_request_router"];
 
 /// Reject terminal filters that are not last in their chain.
@@ -194,6 +203,48 @@ fn validate_terminal_filters(chains: &[FilterChainConfig]) -> Result<(), ProxyEr
                 )));
             }
         }
+    }
+    Ok(())
+}
+
+/// Reject a bound chain whose own entries exceed the per-chain filter cap.
+///
+/// A bound outbound chain never appears in `Config::filter_chains`, so the
+/// whole-config `validate_chain_cardinality` walk never sees it. This applies
+/// the same `MAX_FILTERS_PER_CHAIN` limit to a bound chain's top-level entries,
+/// so a runaway outbound chain cannot build unbounded.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] if `entries` exceeds `MAX_FILTERS_PER_CHAIN`.
+pub fn validate_chain_entries_cardinality(chain_name: &str, entries: &[FilterEntry]) -> Result<(), ProxyError> {
+    if entries.len() > MAX_FILTERS_PER_CHAIN {
+        return Err(ProxyError::Config(format!(
+            "filter chain '{chain_name}' has too many filters ({}, max \
+             {MAX_FILTERS_PER_CHAIN})",
+            entries.len()
+        )));
+    }
+    Ok(())
+}
+
+/// Reject empty condition predicates on a bound chain's entries, recursing into
+/// inline branch chains and iterative-router steps.
+///
+/// A bound outbound chain never appears in `Config::filter_chains`, so the
+/// whole-config `validate_conditions` walk never sees it. This applies the same
+/// empty-`when`/`unless` rejection (see `validate_entry_conditions`) to a bound
+/// chain's entries, so an accidental match-everything predicate cannot silently
+/// disable a filter inside an outbound chain.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] if any entry — including one nested in an
+/// inline branch chain or an iterative-router step — carries an empty or
+/// unmatchable condition predicate.
+pub fn validate_chain_entries_conditions(chain_name: &str, entries: &[FilterEntry]) -> Result<(), ProxyError> {
+    for entry in entries {
+        validate_entry_conditions(chain_name, entry)?;
     }
     Ok(())
 }

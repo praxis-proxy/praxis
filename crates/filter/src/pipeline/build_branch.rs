@@ -33,13 +33,15 @@
 //! [`build`]: super::build
 //! [`pipeline_filter_type_names`]: BuildContext::pipeline_filter_type_names
 
-use std::{collections::HashMap, mem, sync::Arc};
+use std::{cell::Cell, collections::HashMap, mem, sync::Arc};
 
-use praxis_core::config::{BranchChainConfig, BranchCondition, ChainRef, FilterEntry, MAX_BRANCH_DEPTH};
+use praxis_core::config::{
+    BranchChainConfig, BranchCondition, ChainRef, FilterEntry, InsecureOptions, MAX_BRANCH_DEPTH, count_build_branches,
+};
 use tracing::debug;
 
-/// Hard ceiling on the total number of filter instances a single pipeline
-/// may materialize during branch resolution.
+/// Hard ceiling on the total number of filter instances one build may
+/// materialize across branch resolution and outbound binding combined.
 ///
 /// Branch chains expand named references recursively, so the instance count
 /// is the *product* of per-branch reference counts across the nesting depth,
@@ -47,15 +49,21 @@ use tracing::debug;
 /// validator bounds branch and filter counts individually, but neither bounds
 /// that product: a small config (e.g. 8 named references per branch, 10 levels
 /// deep) expands to ~10^9 filter instances, exhausting memory at startup or on
-/// hot reload. Counting materialized instances against this ceiling fails such
-/// a config fast instead.
+/// hot reload. Outbound binding recurses through the same expansion, so the
+/// budget is shared across the whole build — not reset per bound pipeline —
+/// and counting materialized instances against this ceiling fails such a
+/// config fast instead.
 const MAX_PIPELINE_FILTER_INSTANCES: usize = 100_000;
 
 use super::{
     branch::{RejoinTarget, ResolvedBranch, ResolvedBranchCondition},
     filter::PipelineFilter,
 };
-use crate::{FilterError, registry::FilterRegistry};
+use crate::{
+    FilterError,
+    binding::{ChainBindingContext, ResolutionStack},
+    registry::FilterRegistry,
+};
 
 // -----------------------------------------------------------------------------
 // BuildContext
@@ -80,6 +88,32 @@ struct BuildContext<'a> {
 
     /// Filter registry for instantiating filters.
     registry: &'a FilterRegistry,
+
+    /// Operator's declared insecure posture, threaded so outbound chains bound
+    /// from inside a branch are gated by the same rules as top-level chains.
+    insecure: &'a InsecureOptions,
+
+    /// Shared cycle-detection stack, threaded through nested resolution so a
+    /// chain reference that re-enters an in-progress chain is rejected.
+    stack: &'a ResolutionStack,
+
+    /// Build-wide count of materialized filter instances, checked against
+    /// [`MAX_PIPELINE_FILTER_INSTANCES`]. Shared across branch resolution and
+    /// outbound binding so the ceiling bounds the whole build, not each pipeline.
+    budget: &'a Cell<usize>,
+
+    /// Build-wide count of branch *definitions* seen so far, checked against the
+    /// core total-branch ceiling. Distinct from `budget` (materialized instances):
+    /// this counts config-text branch definitions and is shared across the listener
+    /// pipeline and every bound outbound chain so bindings cannot each reset it and
+    /// evade the ceiling collectively.
+    branch_budget: &'a Cell<usize>,
+
+    /// Outbound nesting depth of the pipeline being resolved, forwarded into
+    /// each [`ChainBindingContext`] so a chain-binding filter reached through
+    /// branch resolution binds at the correct outbound depth rather than
+    /// inheriting the branch depth.
+    outbound_depth: usize,
 }
 
 // -----------------------------------------------------------------------------
@@ -98,29 +132,79 @@ pub(super) fn resolve_chain_filters(
     registry: &FilterRegistry,
     chains: &HashMap<&str, &[FilterEntry]>,
     depth: usize,
+    insecure: &InsecureOptions,
 ) -> Result<Vec<PipelineFilter>, FilterError> {
     let mut next_filter_id: usize = 0;
-    resolve_chain_filters_with_counter(entries, registry, chains, depth, &mut next_filter_id)
+    let stack = ResolutionStack::new();
+    let budget = Cell::new(0);
+    // Seed the shared branch budget with the configuration-wide branch count —
+    // this pipeline's own entries plus every named chain — so bound outbound
+    // chains are counted on top of the whole configuration rather than each
+    // starting from zero. A named outbound chain the listener never references
+    // still materializes when bound and is already counted config-wide by
+    // `validate_branch_chains`, so seeding config-wide (not listener-scoped)
+    // keeps the named pool and the later-accumulated inline pool from each
+    // sitting under the ceiling while exceeding it together. `Named` refs resolve
+    // to chains counted here, so they are not counted again when bound.
+    let known: std::collections::HashSet<&str> = chains.keys().copied().collect();
+    let chain_slices: Vec<&[FilterEntry]> = chains.values().copied().collect();
+    let branch_budget = Cell::new(count_build_branches(entries, &chain_slices, &known));
+    resolve_chain_filters_with_stack(
+        entries,
+        registry,
+        chains,
+        depth,
+        &mut next_filter_id,
+        insecure,
+        &stack,
+        &budget,
+        &branch_budget,
+        0,
+    )
 }
 
-/// Inner implementation that threads a shared counter for unique filter IDs.
-fn resolve_chain_filters_with_counter(
+/// Inner implementation that threads a shared filter-ID counter and a shared
+/// cycle-detection stack through all recursive resolution.
+///
+/// The stack lets outbound-chain binding (via [`ChainBindingContext`]) and
+/// branch resolution share one view of the chains currently being expanded, so
+/// a cycle is rejected regardless of which path re-enters an in-progress chain.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "threads shared filter-ID and cycle-detection state through recursive resolution"
+)]
+pub(crate) fn resolve_chain_filters_with_stack(
     entries: &mut [FilterEntry],
     registry: &FilterRegistry,
     chains: &HashMap<&str, &[FilterEntry]>,
     depth: usize,
     next_filter_id: &mut usize,
+    insecure: &InsecureOptions,
+    stack: &ResolutionStack,
+    budget: &Cell<usize>,
+    branch_budget: &Cell<usize>,
+    outbound_depth: usize,
 ) -> Result<Vec<PipelineFilter>, FilterError> {
     if depth > MAX_BRANCH_DEPTH {
         return Err(format!("branch nesting depth exceeds maximum ({MAX_BRANCH_DEPTH})").into());
     }
-    let (mut filters, branch_configs) = build_filters(entries, registry, next_filter_id)?;
+    // Branch depth and outbound depth are tracked independently: `depth` bounds
+    // branch nesting within this pipeline, while `outbound_depth` bounds how many
+    // outbound bindings deep we are. The binding context carries only the latter.
+    let binding_ctx =
+        ChainBindingContext::new(registry, chains, stack, outbound_depth, insecure, budget, branch_budget);
+    let (mut filters, branch_configs) = build_filters(entries, next_filter_id, &binding_ctx, budget)?;
     let pipeline_filter_type_names: Vec<&str> = filters.iter().map(|pf| pf.filter.name()).collect();
     let mut bctx = BuildContext {
         chains,
         next_filter_id,
         pipeline_filter_type_names,
         registry,
+        insecure,
+        stack,
+        budget,
+        branch_budget,
+        outbound_depth,
     };
     let name_index = build_name_index(&filters);
     attach_branches(&mut filters, branch_configs, &mut bctx, &name_index, depth)?;
@@ -141,13 +225,16 @@ type BranchConfigs = Vec<Option<Vec<BranchChainConfig>>>;
 #[expect(clippy::too_many_lines, reason = "per-entry filter construction is linear")]
 fn build_filters(
     entries: &mut [FilterEntry],
-    registry: &FilterRegistry,
     next_filter_id: &mut usize,
+    binding_ctx: &ChainBindingContext<'_>,
+    budget: &Cell<usize>,
 ) -> Result<(Vec<PipelineFilter>, BranchConfigs), FilterError> {
     let mut filters = Vec::with_capacity(entries.len());
     let mut branch_configs: BranchConfigs = Vec::with_capacity(entries.len());
     for entry in entries.iter_mut() {
-        let filter = registry.create(&entry.filter_type, &entry.config)?;
+        let filter = binding_ctx
+            .registry()
+            .create_with_binding(&entry.filter_type, &entry.config, binding_ctx)?;
         let has_conditions = !entry.conditions.is_empty() || !entry.response_conditions.is_empty();
         debug!(
             filter = filter.name(),
@@ -156,11 +243,15 @@ fn build_filters(
         );
         let filter_id = *next_filter_id;
         *next_filter_id += 1;
-        if *next_filter_id > MAX_PIPELINE_FILTER_INSTANCES {
+        // Count against the build-wide budget so a fan-out that spans branch
+        // resolution and outbound binding cannot evade the ceiling by resetting
+        // a per-pipeline counter at each binding boundary.
+        budget.set(budget.get() + 1);
+        if budget.get() > MAX_PIPELINE_FILTER_INSTANCES {
             return Err(format!(
-                "branch resolution exceeded {MAX_PIPELINE_FILTER_INSTANCES} filter instances; \
-                 a branch chain likely fans out over named references (reduce references per branch \
-                 or nesting depth)"
+                "pipeline build exceeded {MAX_PIPELINE_FILTER_INSTANCES} filter instances; \
+                 a branch or outbound chain likely fans out over named references (reduce \
+                 references per branch or nesting depth)"
             )
             .into());
         }
@@ -171,7 +262,7 @@ fn build_filters(
             mem::take(&mut entry.response_conditions),
         );
         pf.failure_mode = entry.failure_mode;
-        pf.is_security = registry.is_security_filter(&entry.filter_type);
+        pf.is_security = binding_ctx.registry().is_security_filter(&entry.filter_type);
         pf.name = entry.name.as_ref().map(|n| Arc::from(n.as_str()));
         branch_configs.push(entry.branch_chains.take());
         filters.push(pf);
@@ -323,20 +414,32 @@ fn resolve_chain_refs(
 ) -> Result<Vec<PipelineFilter>, FilterError> {
     let mut filters = Vec::new();
     for chain_ref in refs {
-        let mut entries = match chain_ref {
-            ChainRef::Named(name) => bctx
-                .chains
-                .get(name.as_str())
-                .ok_or_else(|| FilterError::from(format!("branch references unknown chain '{name}'")))?
-                .to_vec(),
-            ChainRef::Inline { filters: f, .. } => f.clone(),
+        let (name, mut entries) = match chain_ref {
+            ChainRef::Named(name) => {
+                let entries = bctx
+                    .chains
+                    .get(name.as_str())
+                    .ok_or_else(|| FilterError::from(format!("branch references unknown chain '{name}'")))?
+                    .to_vec();
+                (Some(name.as_str()), entries)
+            },
+            ChainRef::Inline { filters: f, .. } => (None, f.clone()),
         };
-        filters.append(&mut resolve_chain_filters_with_counter(
+        // Track named-chain expansion on the shared stack so a chain that
+        // re-enters itself (directly or through outbound binding) is rejected
+        // with a cycle error rather than hitting the depth/instance backstops.
+        let _guard = name.map(|n| bctx.stack.enter(n)).transpose()?;
+        filters.append(&mut resolve_chain_filters_with_stack(
             &mut entries,
             bctx.registry,
             bctx.chains,
             depth,
             bctx.next_filter_id,
+            bctx.insecure,
+            bctx.stack,
+            bctx.budget,
+            bctx.branch_budget,
+            bctx.outbound_depth,
         )?);
     }
     Ok(filters)
@@ -423,7 +526,13 @@ mod tests {
             make_entry("request_id", Some("first")),
             make_entry("request_id", Some("second")),
         ];
-        let (filters, _) = build_filters(&mut entries, &registry, &mut 0).unwrap();
+        let chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
+        let stack = ResolutionStack::new();
+        let insecure = InsecureOptions::default();
+        let budget = Cell::new(0);
+        let branch_budget = Cell::new(0);
+        let ctx = ChainBindingContext::new(&registry, &chains, &stack, 0, &insecure, &budget, &branch_budget);
+        let (filters, _) = build_filters(&mut entries, &mut 0, &ctx, &budget).unwrap();
         let index = build_name_index(&filters);
         assert_eq!(index.get("first"), Some(&vec![0]), "first filter at index 0");
         assert_eq!(index.get("second"), Some(&vec![1]), "second filter at index 1");
@@ -433,7 +542,13 @@ mod tests {
     fn build_name_index_unnamed_skipped() {
         let registry = FilterRegistry::with_builtins();
         let mut entries = vec![make_entry("request_id", None), make_entry("request_id", Some("named"))];
-        let (filters, _) = build_filters(&mut entries, &registry, &mut 0).unwrap();
+        let chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
+        let stack = ResolutionStack::new();
+        let insecure = InsecureOptions::default();
+        let budget = Cell::new(0);
+        let branch_budget = Cell::new(0);
+        let ctx = ChainBindingContext::new(&registry, &chains, &stack, 0, &insecure, &budget, &branch_budget);
+        let (filters, _) = build_filters(&mut entries, &mut 0, &ctx, &budget).unwrap();
         let index = build_name_index(&filters);
         assert_eq!(index.len(), 1, "only named filters should appear");
         assert_eq!(index.get("named"), Some(&vec![1]), "named filter at index 1");
@@ -458,7 +573,7 @@ mod tests {
 ";
         let mut entries: Vec<FilterEntry> = serde_yaml::from_str(yaml).unwrap();
         let chains = HashMap::new();
-        let err = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap_err();
+        let err = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap_err();
         assert!(
             err.to_string().contains("ambiguous") && err.to_string().contains("shared"),
             "a rejoin targeting a duplicated name must fail the build: {err}"
@@ -476,7 +591,7 @@ mod tests {
 ";
         let mut entries: Vec<FilterEntry> = serde_yaml::from_str(yaml).unwrap();
         let chains = HashMap::new();
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
         assert_eq!(
             filters.len(),
             2,
@@ -491,7 +606,13 @@ mod tests {
             make_entry("request_id", Some("shared")),
             make_entry("request_id", Some("shared")),
         ];
-        let (filters, _) = build_filters(&mut entries, &registry, &mut 0).unwrap();
+        let chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
+        let stack = ResolutionStack::new();
+        let insecure = InsecureOptions::default();
+        let budget = Cell::new(0);
+        let branch_budget = Cell::new(0);
+        let ctx = ChainBindingContext::new(&registry, &chains, &stack, 0, &insecure, &budget, &branch_budget);
+        let (filters, _) = build_filters(&mut entries, &mut 0, &ctx, &budget).unwrap();
         let index = build_name_index(&filters);
         assert_eq!(
             index.get("shared"),
@@ -625,7 +746,7 @@ mod tests {
         ]);
         // ~20^4 = 160k instances, over the 100k ceiling.
         let mut top = fanout_chain("c3", 20, "b0");
-        let err = resolve_chain_filters(&mut top, &registry, &chains, 0).unwrap_err();
+        let err = resolve_chain_filters(&mut top, &registry, &chains, 0, &InsecureOptions::default()).unwrap_err();
         assert!(
             err.to_string().contains("filter instances"),
             "an unbounded named-reference fan-out must fail the build: {err}"
@@ -647,7 +768,7 @@ mod tests {
             }]),
             ..make_entry("request_id", None)
         }];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
         assert_eq!(filters.len(), 1, "should have 1 main filter");
         assert_eq!(filters[0].branches.len(), 1, "should have 1 branch");
         assert_eq!(filters[0].branches[0].filters.len(), 1, "branch should have 1 filter");
@@ -678,7 +799,7 @@ mod tests {
             }]),
             ..make_entry("request_id", None)
         }];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
         assert_eq!(
             filters[0].branches[0].filters.len(),
             1,
@@ -706,7 +827,7 @@ mod tests {
             },
             make_entry("request_id", Some("target")),
         ];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
         assert!(
             matches!(filters[0].branches[0].rejoin, RejoinTarget::SkipTo(1)),
             "rejoin should be SkipTo(1)"
@@ -718,11 +839,20 @@ mod tests {
         let registry = FilterRegistry::with_builtins();
         let chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
         let mut next_id: usize = 0;
+        let stack = ResolutionStack::new();
+        let insecure = InsecureOptions::default();
+        let budget = Cell::new(0);
+        let branch_budget = Cell::new(0);
         let mut bctx = BuildContext {
             chains: &chains,
             next_filter_id: &mut next_id,
             pipeline_filter_type_names: vec![],
             registry: &registry,
+            insecure: &insecure,
+            stack: &stack,
+            budget: &budget,
+            branch_budget: &branch_budget,
+            outbound_depth: 0,
         };
         let refs = vec![ChainRef::Named("nonexistent".to_owned())];
         let err = resolve_chain_refs(&refs, &mut bctx, 0).unwrap_err();
@@ -737,7 +867,14 @@ mod tests {
         let registry = FilterRegistry::with_builtins();
         let chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
         let mut entries = vec![make_entry("request_id", None)];
-        let err = resolve_chain_filters(&mut entries, &registry, &chains, MAX_BRANCH_DEPTH + 1).unwrap_err();
+        let err = resolve_chain_filters(
+            &mut entries,
+            &registry,
+            &chains,
+            MAX_BRANCH_DEPTH + 1,
+            &InsecureOptions::default(),
+        )
+        .unwrap_err();
         assert!(
             err.to_string().contains("nesting depth"),
             "should report depth exceeded: {err}"
@@ -765,7 +902,7 @@ mod tests {
             }]),
             ..make_entry("request_id", None)
         }];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
         let branch = &filters[0].branches[0];
         assert!(branch.condition.is_some(), "branch should have a condition");
         let cond = branch.condition.as_ref().unwrap();
@@ -796,7 +933,7 @@ mod tests {
             },
             make_entry("request_id", None),
         ];
-        let err = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap_err();
+        let err = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap_err();
         assert!(
             err.to_string().contains("max_iterations"),
             "backward rejoin without max_iterations should be rejected: {err}"
@@ -823,7 +960,7 @@ mod tests {
             },
             make_entry("request_id", None),
         ];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
         assert!(
             matches!(filters[0].branches[0].rejoin, RejoinTarget::ReEnter(0)),
             "backward rejoin with max_iterations should be accepted"
@@ -880,7 +1017,7 @@ mod tests {
             }]),
             ..make_entry("request_id", None)
         }];
-        let err = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap_err();
+        let err = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap_err();
         assert!(
             err.to_string()
                 .contains("must name the filter the branch is attached to"),
@@ -910,7 +1047,7 @@ mod tests {
             },
             make_entry("request_id", None),
         ];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
         let ids = collect_ids(&filters);
         let unique: std::collections::HashSet<usize> = ids.iter().copied().collect();
         assert_eq!(
@@ -947,7 +1084,7 @@ mod tests {
             }]),
             ..make_entry("request_id", None)
         }];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
         let ids = collect_ids(&filters);
         let unique: std::collections::HashSet<usize> = ids.iter().copied().collect();
         assert_eq!(ids.len(), 3, "should have top-level + branch + nested branch filters");
@@ -985,7 +1122,7 @@ mod tests {
                 ..make_entry("request_id", None)
             },
         ];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
         let ids = collect_ids(&filters);
         let unique: std::collections::HashSet<usize> = ids.iter().copied().collect();
         assert_eq!(ids.len(), 4, "2 top-level + 2 branch filters");
@@ -1015,7 +1152,7 @@ mod tests {
             },
             make_entry("request_id", None),
         ];
-        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0).unwrap();
+        let filters = resolve_chain_filters(&mut entries, &registry, &chains, 0, &InsecureOptions::default()).unwrap();
         let ids = collect_ids(&filters);
         let unique: std::collections::HashSet<usize> = ids.iter().copied().collect();
         assert_eq!(ids.len(), 5, "3 top-level + 2 branch filters");

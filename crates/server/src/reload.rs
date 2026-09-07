@@ -413,6 +413,185 @@ filter_chains:
     }
 
     #[test]
+    fn reload_rebinds_outbound_chain_and_reinjects_runtime_resources() {
+        use async_trait::async_trait;
+        use praxis_core::config::ChainRef;
+        use praxis_filter::{
+            ChainBindingContext, FilterAction, FilterError, FilterPipeline, HttpFilter, HttpFilterContext,
+        };
+
+        // Per-configuration snapshot of what the framework injected into the
+        // bound outbound pipeline: whether the KV registry landed, and the
+        // identity (pointer) of the session-store registry that reached it.
+        type Injection = (bool, Option<usize>);
+
+        // A reference chain-binding callout: it binds an outbound chain once and
+        // owns the resulting pipeline, delegating `visit_nested_pipelines` so the
+        // bound pipeline participates in runtime-resource propagation. After each
+        // visit it records what the nested pipeline now holds, so a test can prove
+        // the *server's* configure/reload path reaches the outbound chain.
+        struct ObservingCallout {
+            outbound: Arc<FilterPipeline>,
+            injections: Arc<Mutex<Vec<Injection>>>,
+        }
+
+        #[async_trait]
+        impl HttpFilter for ObservingCallout {
+            fn name(&self) -> &'static str {
+                "observing_callout"
+            }
+
+            fn visit_nested_pipelines(&mut self, visitor: &mut dyn FnMut(&mut FilterPipeline)) {
+                if let Some(pipeline) = Arc::get_mut(&mut self.outbound) {
+                    visitor(pipeline);
+                    let snapshot = (
+                        pipeline.kv_stores().is_some(),
+                        pipeline.session_stores().map(|stores| Arc::as_ptr(stores).addr()),
+                    );
+                    self.injections.lock().unwrap().push(snapshot);
+                }
+            }
+
+            async fn on_request(&self, _ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+                Ok(FilterAction::Continue)
+            }
+        }
+
+        let injections: Arc<Mutex<Vec<Injection>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut registry = FilterRegistry::with_builtins();
+        let factory_injections = Arc::clone(&injections);
+        registry
+            .register_chain_binding(
+                "observing_callout",
+                Arc::new(move |config: &serde_yaml::Value, ctx: &ChainBindingContext<'_>| {
+                    let raw = config
+                        .get("outbound_chain")
+                        .cloned()
+                        .ok_or_else(|| FilterError::from("missing outbound_chain"))?;
+                    let chain_ref: ChainRef = serde_yaml::from_value(raw)
+                        .map_err(|e| FilterError::from(format!("bad outbound_chain: {e}")))?;
+                    let outbound = ctx.bind_chain(&chain_ref)?;
+                    let filter: Box<dyn HttpFilter> = Box::new(ObservingCallout {
+                        outbound: Arc::new(outbound),
+                        injections: Arc::clone(&factory_injections),
+                    });
+                    Ok(filter)
+                }),
+            )
+            .expect("register observing_callout");
+
+        let session_stores = empty_session_stores();
+        let expected_session_ptr = Arc::as_ptr(&session_stores).addr();
+        let kv_stores = empty_kv_stores();
+        let health_registry: HealthRegistry = Arc::new(HashMap::new());
+        let subrequest_client = empty_subrequest_client();
+
+        // v1: a one-filter outbound chain behind the chain-binding callout.
+        let old_config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: observing_callout
+        outbound_chain:
+          name: outbound
+          filters:
+            - filter: request_id
+"#,
+        )
+        .unwrap();
+
+        let live = resolve_pipelines(
+            &old_config,
+            &registry,
+            &health_registry,
+            &kv_stores,
+            &session_stores,
+            &subrequest_client,
+        )
+        .unwrap();
+
+        // The initial build must already have driven the KV and session
+        // registries into the bound outbound pipeline.
+        let after_build = injections.lock().unwrap().clone();
+        let build_count = after_build.len();
+        assert!(
+            after_build
+                .iter()
+                .any(|(kv, session)| *kv && *session == Some(expected_session_ptr)),
+            "resolve_pipelines must inject KV and session stores into the bound outbound pipeline"
+        );
+
+        let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+
+        // v2 (a reload): the outbound chain gains a second filter, forcing a
+        // genuine re-bind of a freshly constructed outbound pipeline.
+        let new_config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: observing_callout
+        outbound_chain:
+          name: outbound
+          filters:
+            - filter: request_id
+            - filter: headers
+"#,
+        )
+        .unwrap();
+
+        let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&old_config),
+        );
+        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
+            praxis_protocol::http::pingora::health::cluster_meta_from_config(&old_config),
+        );
+
+        reload_pipelines(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &kv_stores,
+            &session_stores,
+            &subrequest_client,
+            None,
+        )
+        .unwrap();
+
+        // The ArcSwap swap installed a rebuilt pipeline...
+        let new_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+        assert_ne!(old_ptr, new_ptr, "reload must swap in a rebuilt pipeline");
+
+        // ...and the reload's configure pass re-injected KV and session stores
+        // into the newly bound outbound pipeline, not just the top-level one.
+        let after_reload = injections.lock().unwrap().clone();
+        assert!(
+            after_reload.len() > build_count,
+            "reload must re-run configuration over the rebuilt outbound pipeline"
+        );
+        assert!(
+            after_reload[build_count..]
+                .iter()
+                .any(|(kv, session)| *kv && *session == Some(expected_session_ptr)),
+            "reload must re-inject KV and session stores into the rebuilt bound outbound pipeline"
+        );
+    }
+
+    #[test]
     fn invalid_filter_returns_err_old_pipeline_untouched() {
         let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
         let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());

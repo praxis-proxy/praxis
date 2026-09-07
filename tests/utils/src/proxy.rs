@@ -104,7 +104,8 @@ fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &Fi
         entries.extend_from_slice(filters);
     }
 
-    let mut pipeline = FilterPipeline::build_with_chains(&mut entries, registry, &chains).unwrap();
+    let mut pipeline =
+        FilterPipeline::build_with_chains(&mut entries, registry, &chains, &config.insecure_options).unwrap();
     pipeline
         .apply_body_limits(
             config.body_limits.max_request_bytes,

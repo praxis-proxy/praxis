@@ -41,5 +41,11 @@ fn access_log_fields_example_builds_pipeline() {
             .unwrap_or_else(|| panic!("unknown chain {chain_name}"));
         entries.extend_from_slice(filters);
     }
-    FilterPipeline::build_with_chains(&mut entries, &registry, &chains).expect("pipeline should build");
+    FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &chains,
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .expect("pipeline should build");
 }

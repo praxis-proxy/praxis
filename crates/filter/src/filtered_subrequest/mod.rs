@@ -11,11 +11,15 @@
 //! either buffered or streaming mode, and captures a
 //! [`FilteredSubrequestContinuation`] the caller drives to completion.
 //!
-//! The executor is caller-agnostic. It owns three transient extension
-//! mechanisms end-to-end — [`RetainedFilterResults`], [`PendingStreamChunks`],
-//! and [`StreamTermination`] — and never inspects caller-injected extension
-//! types. Callers that stash their own state in the request extensions recover
-//! it from [`FilteredSubrequestError::into_parts`],
+//! The executor owns three transient extension mechanisms end-to-end —
+//! [`RetainedFilterResults`], [`PendingStreamChunks`], and
+//! [`StreamTermination`] — and recognizes one framework-defined caller-staged
+//! channel, [`PendingCredentials`]: it drains that channel and materializes each
+//! authority-bound secret only after resolving the destination (see
+//! [`DeferredCredential`](crate::DeferredCredential)). It otherwise never
+//! inspects caller-injected extension types. Callers that stash their own state
+//! in the request extensions recover it from
+//! [`FilteredSubrequestError::into_parts`],
 //! [`FilteredSubrequestContinuation::into_parent_extensions`], or
 //! [`FilteredSubrequestContinuation::into_completion`], and strip it themselves.
 //!
@@ -57,7 +61,7 @@ use self::{
     context::{SubrequestRuntimeResources, build_sub_filter_context},
     sanitize::{
         apply_pre_read_header_mutations, apply_request_header_mutations, body_exceeds_limit, ensure_destination_host,
-        response_body_exceeds_limits, sanitize_subrequest_headers, sanitize_subresponse_headers,
+        response_body_exceeds_limits, sanitize_subrequest_headers, sanitize_subresponse_headers, set_authority_host,
         streaming_transport_limit, strip_reserved_headers, subresponse_from_rejection,
     },
     transport::{build_peer, classify_transport_failure, stream_termination_cause},
@@ -65,12 +69,16 @@ use self::{
 pub(crate) use self::{
     continuation::{FilteredSubrequestContinuation, SubrequestCompletion},
     sanitize::normalize_response_status,
-    streaming::FilteredStreamingBody,
+    streaming::{CalloutStreamingBody, FilteredStreamingBody},
 };
 use crate::{
     FilterAction, FilterError, FilterPipeline, StreamTermination, StreamTerminationCause, SubRequest,
-    SubRequestResponseMode, SubResponse, actions::Rejection, context::PendingStreamChunks,
-    extensions::RequestExtensions, results::RetainedFilterResults,
+    SubRequestResponseMode, SubResponse,
+    actions::Rejection,
+    context::PendingStreamChunks,
+    credentials::{PendingCredentials, ResolvedDestination},
+    extensions::RequestExtensions,
+    results::RetainedFilterResults,
 };
 
 /// Idle timeout applied to a streaming sub-request transport.
@@ -118,9 +126,14 @@ pub(crate) enum TransportFailure {
     ResponseTooLarge,
 }
 
-/// Owned downstream request attributes needed after the outer hook returns.
+/// Owned downstream request attributes carried into a filtered sub-request.
+///
+/// A chain-binding callout builds this from its request context so the nested
+/// pipeline sees the real client identity, transport security, and request
+/// clock — the inputs security and observability filters in an outbound chain
+/// depend on.
 #[derive(Clone)]
-pub(crate) struct SubrequestRuntime {
+pub struct SubrequestRuntime {
     /// Original downstream client address.
     pub(crate) client_addr: Option<std::net::IpAddr>,
     /// Whether the original downstream uses TLS.
@@ -129,6 +142,29 @@ pub(crate) struct SubrequestRuntime {
     pub(crate) peer_identity: Option<Arc<praxis_tls::TlsPeerIdentity>>,
     /// Start time of the logical client request.
     pub(crate) request_start: Instant,
+}
+
+impl SubrequestRuntime {
+    /// Capture the downstream attributes to forward into a filtered sub-request.
+    ///
+    /// `client_addr`, `downstream_tls`, and `peer_identity` come from the
+    /// originating client connection; `request_start` is the instant the logical
+    /// client request began, used for consistent duration accounting across the
+    /// sub-request.
+    #[must_use]
+    pub fn new(
+        client_addr: Option<std::net::IpAddr>,
+        downstream_tls: bool,
+        peer_identity: Option<Arc<praxis_tls::TlsPeerIdentity>>,
+        request_start: Instant,
+    ) -> Self {
+        Self {
+            client_addr,
+            downstream_tls,
+            peer_identity,
+            request_start,
+        }
+    }
 }
 
 /// A captured sub-response together with its origin classification.
@@ -225,8 +261,46 @@ pub(crate) struct FilteredSubrequestInput<'a> {
     pub(crate) extensions: RequestExtensions,
 }
 
+/// The response an outbound chain produced for a callout.
+///
+/// The outbound chain — not the calling method — decides whether the response
+/// is delivered whole or streamed, by whether a filter selects a streaming
+/// sub-request response. [`run`](FilteredSubrequestExecutor::run) surfaces that
+/// choice so the caller handles each shape explicitly, mirroring the epic's
+/// "one buffered or streaming subrequest" contract.
+pub enum CalloutResponse {
+    /// The complete response, fully filtered through the response-body phase.
+    Buffered(SubResponse),
+    /// Transition-time headers now, with the body pulled through the outbound
+    /// chain's response-body filters as it flows.
+    Streaming {
+        /// Status and headers after the response-header phase; the body field
+        /// is empty because the payload is delivered through `body`.
+        response: SubResponse,
+        /// Pull-based response body. Each [`next_chunk`] applies the outbound
+        /// chain's response-body filters and, after upstream EOF, flushes any
+        /// completion output the chain emits before yielding `None`. An
+        /// upstream failure the chain did not convert into a valid terminal
+        /// sequence surfaces as an error after buffered chunks drain.
+        ///
+        /// [`next_chunk`]: crate::StreamingResponseBody::next_chunk
+        body: Box<dyn crate::StreamingResponseBody>,
+    },
+}
+
+/// No-op retained-state accounting for callers that keep no cross-sub-request
+/// state, so the callout entry point never has to expose the
+/// [`RetainedStateAccounting`] hook.
+struct NoRetainedState;
+
+impl RetainedStateAccounting for NoRetainedState {
+    fn exceeds_limit(&self, _extensions: &RequestExtensions) -> bool {
+        false
+    }
+}
+
 /// Executes exactly one filtered sub-request and returns owned continuation state.
-pub(crate) struct FilteredSubrequestExecutor {
+pub struct FilteredSubrequestExecutor {
     /// Caller-supplied retained-state ceiling accounting.
     accounting: Box<dyn RetainedStateAccounting + Send + Sync>,
     /// Shared transport client.
@@ -266,6 +340,168 @@ impl FilteredSubrequestExecutor {
             max_response_bytes,
             max_state_bytes,
             step_timeout,
+        }
+    }
+
+    /// Build an executor for an application callout that runs a single bound
+    /// outbound chain and keeps no cross-sub-request retained state.
+    ///
+    /// This is the small constructor a chain-binding filter (for example an AI
+    /// provider callout) uses together with [`run`]. `client` is the
+    /// shared sub-request transport (available from
+    /// `HttpFilterContext::subrequest_client`); `downstream` carries the
+    /// originating client attributes; `depth` is the current sub-request nesting
+    /// depth; `max_response_bytes` caps the response (the buffered body, or the
+    /// cumulative bytes emitted by a streaming body); `step_timeout` bounds the
+    /// sub-request's own duration within the caller's deadline.
+    ///
+    /// [`run`]: Self::run
+    #[must_use]
+    pub fn for_callout(
+        client: praxis_core::subrequest::SubRequestClient,
+        downstream: SubrequestRuntime,
+        depth: u8,
+        max_response_bytes: usize,
+        step_timeout: Duration,
+    ) -> Self {
+        // A callout retains no state across sub-requests, so the response ceiling
+        // doubles as the stream-chunk emission ceiling.
+        Self::new(
+            Box::new(NoRetainedState),
+            client,
+            depth,
+            downstream,
+            max_response_bytes,
+            max_response_bytes,
+            step_timeout,
+        )
+    }
+
+    /// Run `request` through `pipeline` as a filtered sub-request and return the
+    /// response the outbound chain produced — buffered or streaming.
+    ///
+    /// This is the deliberately small entry point for application callout
+    /// filters that bound an outbound chain via
+    /// [`ChainBindingContext::bind_chain`]. It runs the request, request-body,
+    /// response, and (for buffered responses) response-body phases; enforces the
+    /// resolved destination authority, DNS/SSRF, TLS/SNI, Host, deadline, and
+    /// transport limits; and materializes any staged [`PendingCredentials`] only
+    /// after the destination is resolved. `extensions` is the caller-staged
+    /// projection moved into the isolated child context.
+    ///
+    /// The outbound chain decides the response shape: a filter that selects a
+    /// streaming sub-request response yields [`CalloutResponse::Streaming`] with
+    /// the transition-time headers and a pull-based body that keeps applying the
+    /// chain's response-body filters as chunks flow; otherwise the fully
+    /// filtered response is returned as [`CalloutResponse::Buffered`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if a filter phase errors or the deadline is
+    /// exceeded before the response transition. For a streaming response, errors
+    /// that occur while pulling the body surface from
+    /// [`StreamingResponseBody::next_chunk`](crate::StreamingResponseBody::next_chunk)
+    /// instead.
+    ///
+    /// # Examples
+    ///
+    /// A callout drives its prebuilt outbound chain to a response. In production
+    /// the pipeline comes from [`ChainBindingContext::bind_chain`] at
+    /// construction and the shared client from the filter's
+    /// [`HttpFilterContext`]; here both are built directly so the example runs,
+    /// and a `static_response` filter answers locally so no upstream is needed.
+    ///
+    /// ```
+    /// use std::{
+    ///     sync::Arc,
+    ///     time::{Duration, Instant},
+    /// };
+    ///
+    /// use praxis_core::subrequest::{SubRequestClient, SubRequestConnector};
+    /// use praxis_filter::{
+    ///     CalloutResponse, FilterEntry, FilterPipeline, FilterRegistry, FilteredSubrequestExecutor,
+    ///     RequestExtensions, SubRequest, SubrequestRuntime,
+    /// };
+    ///
+    /// let rt = tokio::runtime::Builder::new_current_thread()
+    ///     .enable_all()
+    ///     .build()
+    ///     .unwrap();
+    /// rt.block_on(async {
+    ///     // The outbound chain a callout binds once at construction.
+    ///     let registry = FilterRegistry::with_builtins();
+    ///     let mut chain: Vec<FilterEntry> = serde_yaml::from_str(
+    ///         "- filter: static_response\n  status: 200\n  body: hello from the outbound chain\n",
+    ///     )
+    ///     .unwrap();
+    ///     let outbound = Arc::new(FilterPipeline::build(&mut chain, &registry).unwrap());
+    ///
+    ///     // At request time the callout builds an executor from the shared client
+    ///     // and the downstream attributes it reads off its `HttpFilterContext`.
+    ///     let client = SubRequestClient::new(SubRequestConnector::new(1, None));
+    ///     let downstream = SubrequestRuntime::new(None, false, None, Instant::now());
+    ///     let executor = FilteredSubrequestExecutor::for_callout(
+    ///         client,
+    ///         downstream,
+    ///         0,                      // sub-request nesting depth
+    ///         1 << 20,                // 1 MiB response ceiling
+    ///         Duration::from_secs(5), // per-sub-request step timeout
+    ///     );
+    ///
+    ///     let request = SubRequest {
+    ///         method: http::Method::GET,
+    ///         uri: http::Uri::from_static("/"),
+    ///         headers: http::HeaderMap::new(),
+    ///         body: bytes::Bytes::new(),
+    ///     };
+    ///     let deadline = Instant::now() + Duration::from_secs(5);
+    ///     let response = match executor
+    ///         .run(&outbound, &request, RequestExtensions::default(), deadline)
+    ///         .await
+    ///         .expect("the outbound chain produces a response")
+    ///     {
+    ///         CalloutResponse::Buffered(response) => response,
+    ///         CalloutResponse::Streaming { .. } => unreachable!("static_response is buffered"),
+    ///     };
+    ///
+    ///     assert_eq!(response.status, 200);
+    ///     assert_eq!(&response.body[..], b"hello from the outbound chain");
+    /// });
+    /// ```
+    ///
+    /// [`ChainBindingContext::bind_chain`]: crate::ChainBindingContext::bind_chain
+    /// [`HttpFilterContext`]: crate::HttpFilterContext
+    #[expect(clippy::large_futures, reason = "delegates to the full step future")]
+    #[expect(
+        clippy::large_stack_frames,
+        reason = "delegates to execute, which reconstructs a full filter context"
+    )]
+    pub async fn run(
+        &self,
+        pipeline: &Arc<FilterPipeline>,
+        request: &SubRequest,
+        extensions: RequestExtensions,
+        deadline: Instant,
+    ) -> Result<CalloutResponse, FilterError> {
+        let input = FilteredSubrequestInput {
+            pipeline,
+            request,
+            label: "callout",
+            iteration: 0,
+            deadline,
+            extensions,
+        };
+        let OpenedSubrequest { continuation, kind } =
+            self.execute(input).await.map_err(|error| error.into_parts().0)?;
+        match kind {
+            OpenedResponse::Complete(outcome) => Ok(CalloutResponse::Buffered(outcome.response)),
+            OpenedResponse::Streaming { body, outcome } => Ok(CalloutResponse::Streaming {
+                response: outcome.response,
+                body: Box::new(CalloutStreamingBody::new(
+                    FilteredStreamingBody::new(body, continuation),
+                    self.max_response_bytes,
+                )),
+            }),
         }
     }
 
@@ -320,6 +556,7 @@ impl FilteredSubrequestExecutor {
             health_registry: pipeline.health_registry(),
             id_generator: pipeline.id_generator(),
             kv_stores: pipeline.kv_stores(),
+            session_stores: pipeline.session_stores(),
             peer_identity: self.downstream.peer_identity.as_ref(),
             request_start: self.downstream.request_start,
             subrequest_client: Some(&self.client),
@@ -336,7 +573,7 @@ impl FilteredSubrequestExecutor {
         let in_transport = Arc::new(AtomicBool::new(false));
         let in_transport_inner = Arc::clone(&in_transport);
 
-        let step_span = tracing::info_span!("iterative_subrequest", step = label, iteration = iteration);
+        let step_span = tracing::info_span!("filtered_subrequest", step = label, iteration = iteration);
 
         let timed: Result<Result<RawResponse, FilterError>, tokio::time::error::Elapsed> =
             tokio::time::timeout(step_budget, async {
@@ -393,11 +630,62 @@ impl FilteredSubrequestExecutor {
             let upstream = filter_ctx.upstream.as_ref().ok_or_else(|| -> FilterError {
                 format!("filtered_subrequest: step '{label}' did not resolve an upstream").into()
             })?;
+            let destination_authority = Arc::clone(&upstream.address);
+            // The credential-matching key and upstream Host are the *logical*
+            // authority the operator configured for this upstream (`authority`
+            // override), not the transport endpoint bytes travel to. Derived
+            // from trusted config, never the client-influenced Host header.
+            let authority_override: Option<Arc<str>> = upstream
+                .authority
+                .as_ref()
+                .and_then(|value| value.to_str().ok())
+                .map(Arc::from);
+            // Fall back to the transport only when no override is set.
+            let logical_authority: Arc<str> = authority_override
+                .clone()
+                .unwrap_or_else(|| Arc::clone(&destination_authority));
             in_transport_inner.store(true, Ordering::Release);
             let peer = build_peer(upstream, pipeline.allow_private_upstreams()).await;
             apply_request_header_mutations(&mut sub_headers, &filter_ctx);
-            ensure_destination_host(&mut sub_headers, &upstream.address)?;
+            // Mirror the normal proxy path (`apply_authority_override`): a
+            // configured authority override becomes the upstream Host,
+            // replacing any prior step's or caller's Host. Without an override,
+            // default the Host to the transport endpoint only when absent.
+            match authority_override.as_deref() {
+                Some(authority) => set_authority_host(&mut sub_headers, authority)?,
+                None => ensure_destination_host(&mut sub_headers, &destination_authority)?,
+            }
             sanitize_subrequest_headers(&mut sub_headers);
+            // Destination-bound credential injection: only now that the upstream
+            // authority is resolved do we materialize staged secrets, and only
+            // into a request bound for the authority each credential was issued
+            // for. Injecting after sanitization keeps the credential header from
+            // being stripped as hop-by-hop/framing.
+            if let Some(pending) = filter_ctx.extensions.remove::<PendingCredentials>() {
+                let destination = ResolvedDestination {
+                    authority: &logical_authority,
+                    transport: &destination_authority,
+                };
+                let injected = pending.inject_authorized(&destination, &mut sub_headers);
+                if injected > 0 {
+                    // A credential was authorized against `logical_authority`, so
+                    // the upstream must see exactly that authority as its Host. Pin
+                    // it here — replacing any step- or caller-set Host the
+                    // no-override path preserved — so a secret can never be
+                    // delivered under a divergent Host to a shared-vhost endpoint.
+                    // (With an override the Host already equals `logical_authority`;
+                    // this keeps that true.) A staged credential that matched
+                    // nothing injects no secret, so it must not retarget the Host —
+                    // doing so would silently change virtual-host routing.
+                    set_authority_host(&mut sub_headers, &logical_authority)?;
+                    tracing::debug!(
+                        authority = %logical_authority,
+                        transport = %destination_authority,
+                        injected,
+                        "materialized destination-bound credentials"
+                    );
+                }
+            }
             let request = SubRequest {
                 method: current_request.method.clone(),
                 uri: filter_ctx.rewritten_path.as_ref().map_or_else(
@@ -481,7 +769,7 @@ impl FilteredSubrequestExecutor {
                         },
                         Err(error) => {
                             let (status, kind) = classify_transport_failure(&error);
-                            warn!(step = label, %error, status, "IRR streaming transport failure");
+                            warn!(step = label, %error, status, "filtered sub-request streaming transport failure");
                             let response = SubResponse { status, headers: HeaderMap::new(), body: Bytes::new() };
                             response_header.status = http::StatusCode::from_u16(status)
                                 .map_err(|source| -> FilterError { source.into() })?;
@@ -522,7 +810,7 @@ impl FilteredSubrequestExecutor {
                             Ok(response) => (response, ResponseOrigin::Upstream, None),
                             Err(error) => {
                                 let (status, kind) = classify_transport_failure(&error);
-                                warn!(step = label, %error, status, "IRR buffered transport failure");
+                                warn!(step = label, %error, status, "filtered sub-request buffered transport failure");
                                 (
                                     SubResponse { status, headers: HeaderMap::new(), body: Bytes::new() },
                                     ResponseOrigin::Transport,
@@ -531,7 +819,7 @@ impl FilteredSubrequestExecutor {
                             },
                         },
                         Err(error) => {
-                            warn!(step = label, %error, status = 502_u16, "IRR buffered transport failure");
+                            warn!(step = label, %error, status = 502_u16, "filtered sub-request buffered transport failure");
                             (
                                 SubResponse { status: 502, headers: HeaderMap::new(), body: Bytes::new() },
                                 ResponseOrigin::Transport,

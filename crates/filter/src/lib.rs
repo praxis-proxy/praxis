@@ -43,10 +43,12 @@
 
 mod actions;
 mod any_filter;
+mod binding;
 pub mod body;
 pub mod builtins;
 mod condition;
 mod context;
+mod credentials;
 mod error_response;
 mod extensions;
 mod factory;
@@ -63,6 +65,7 @@ mod tcp_filter;
 
 pub use actions::{FilterAction, Rejection, StreamingResponseBody, StreamingTerminalResponse, TerminalResponse};
 pub use any_filter::AnyFilter;
+pub use binding::{ChainBindingContext, ChainBindingHttpFactory};
 pub use body::{BodyAccess, BodyBuffer, BodyBufferOverflow, BodyCapabilities, BodyMode};
 #[cfg(feature = "basic-auth-filter")]
 pub use builtins::BasicAuthFilter;
@@ -81,6 +84,7 @@ pub use context::{
     HttpFilterContext, PendingHeaderResult, Request, Response, StreamTermination, StreamTerminationCause,
     SubRequestResponseMode, TrustedHeaderMutation,
 };
+pub use credentials::{DeferredCredential, PendingCredentials};
 pub use error_response::{
     ErrorResponseContext, ErrorResponseFormatter, ErrorResponseFormatterHandle, FormattedErrorResponse,
 };
@@ -90,6 +94,7 @@ pub use factory::{
     tcp_builtin,
 };
 pub use filter::{Filter, FilterContext, FilterError, HttpFilter};
+pub use filtered_subrequest::{CalloutResponse, FilteredSubrequestExecutor, SubrequestRuntime};
 pub use pipeline::{
     FilterPipeline, PipelineExtension,
     introspection::{BodyAccessInfo, BranchConditionInfo, BranchIntrospection, FilterIntrospection},

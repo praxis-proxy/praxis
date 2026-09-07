@@ -7,6 +7,7 @@ use std::collections::HashMap;
 
 use crate::{
     any_filter::AnyFilter,
+    binding::{ChainBindingContext, ChainBindingHttpFactory},
     factory::{FilterFactory, HttpFilterFactoryFn, TcpFilterFactoryFn, http_builtin, tcp_builtin},
     filter::FilterError,
 };
@@ -57,6 +58,10 @@ enum RegisteredFilterFactory {
 
     /// A built-in HTTP factory that resolves nested filters.
     HttpWithRegistry(RegistryHttpFilterFactory),
+
+    /// An application HTTP factory that binds an outbound subrequest chain at
+    /// construction time via a [`ChainBindingContext`].
+    ChainBinding(ChainBindingHttpFactory),
 }
 
 /// Factory for a built-in HTTP filter that resolves nested filters
@@ -65,11 +70,38 @@ type RegistryHttpFilterFactory =
     fn(&serde_yaml::Value, &FilterRegistry) -> Result<Box<dyn crate::filter::HttpFilter>, FilterError>;
 
 impl RegisteredFilterFactory {
-    /// Instantiate the registered filter.
+    /// Instantiate the registered filter without an outbound-chain binding
+    /// context.
+    ///
+    /// A [`ChainBinding`](Self::ChainBinding) factory cannot resolve its
+    /// outbound chain without a [`ChainBindingContext`], so this path rejects
+    /// it and directs callers to [`FilterPipeline::build_with_chains`], which
+    /// supplies one.
+    ///
+    /// [`FilterPipeline::build_with_chains`]: crate::FilterPipeline::build_with_chains
     fn create(&self, config: &serde_yaml::Value, registry: &FilterRegistry) -> Result<AnyFilter, FilterError> {
         match self {
             Self::Standard(factory) => factory.create(config),
             Self::HttpWithRegistry(factory) => Ok(AnyFilter::Http(factory(config, registry)?)),
+            Self::ChainBinding(_) => Err(FilterError::from(
+                "this filter binds an outbound subrequest chain and must be built via \
+                 FilterPipeline::build_with_chains",
+            )),
+        }
+    }
+
+    /// Instantiate the registered filter, supplying an outbound-chain binding
+    /// context to [`ChainBinding`](Self::ChainBinding) factories.
+    fn create_with_binding(
+        &self,
+        config: &serde_yaml::Value,
+        registry: &FilterRegistry,
+        ctx: &ChainBindingContext<'_>,
+    ) -> Result<AnyFilter, FilterError> {
+        match self {
+            Self::Standard(factory) => factory.create(config),
+            Self::HttpWithRegistry(factory) => Ok(AnyFilter::Http(factory(config, registry)?)),
+            Self::ChainBinding(factory) => Ok(AnyFilter::Http(factory(config, ctx)?)),
         }
     }
 }
@@ -164,6 +196,134 @@ impl FilterRegistry {
         Ok(())
     }
 
+    /// Registers an application HTTP filter that binds an outbound subrequest
+    /// chain at construction time, with [`SecurityClass::Standard`].
+    ///
+    /// The factory receives a [`ChainBindingContext`] and resolves its
+    /// configured outbound chain into a prebuilt [`FilterPipeline`]. This is
+    /// the mechanism application callout filters (e.g. Praxis AI) use to bind
+    /// reusable outbound chains against the active registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the name is already registered.
+    ///
+    /// # Examples
+    ///
+    /// Register an application callout that binds its `outbound_chain` once at
+    /// construction. Building — or hot-reloading — a pipeline that names the
+    /// callout resolves and prebuilds the outbound chain against the active
+    /// registry, so a missing filter, a reference cycle, or excessive nesting
+    /// fails the build instead of a request:
+    ///
+    /// ```
+    /// use std::{collections::HashMap, sync::Arc};
+    ///
+    /// use async_trait::async_trait;
+    /// use praxis_core::config::{ChainRef, FilterEntry, InsecureOptions};
+    /// use praxis_filter::{
+    ///     ChainBindingContext, FilterAction, FilterError, FilterPipeline, FilterRegistry, HttpFilter,
+    ///     HttpFilterContext,
+    /// };
+    ///
+    /// // The application filter owns the prebuilt outbound pipeline.
+    /// struct AiCallout {
+    ///     outbound: Arc<FilterPipeline>,
+    /// }
+    ///
+    /// #[async_trait]
+    /// impl HttpFilter for AiCallout {
+    ///     fn name(&self) -> &'static str {
+    ///         "ai_callout"
+    ///     }
+    ///
+    ///     // Delegate the framework's nesting hooks so the bound pipeline joins
+    ///     // runtime-resource propagation, hot-reload file discovery, and
+    ///     // insecure-option application.
+    ///     fn visit_nested_pipelines(&mut self, visitor: &mut dyn FnMut(&mut FilterPipeline)) {
+    ///         if let Some(pipeline) = Arc::get_mut(&mut self.outbound) {
+    ///             visitor(pipeline);
+    ///         }
+    ///     }
+    ///     fn referenced_files(&self) -> Vec<std::path::PathBuf> {
+    ///         self.outbound.referenced_files()
+    ///     }
+    ///     fn apply_insecure_options(&self, options: &InsecureOptions) {
+    ///         self.outbound.apply_insecure_options(options);
+    ///     }
+    ///
+    ///     async fn on_request(
+    ///         &self,
+    ///         _ctx: &mut HttpFilterContext<'_>,
+    ///     ) -> Result<FilterAction, FilterError> {
+    ///         Ok(FilterAction::Continue)
+    ///     }
+    /// }
+    ///
+    /// let mut registry = FilterRegistry::with_builtins();
+    /// registry
+    ///     .register_chain_binding(
+    ///         "ai_callout",
+    ///         Arc::new(|config: &serde_yaml::Value, ctx: &ChainBindingContext<'_>| {
+    ///             let raw = config
+    ///                 .get("outbound_chain")
+    ///                 .cloned()
+    ///                 .ok_or_else(|| FilterError::from("ai_callout: missing outbound_chain"))?;
+    ///             let chain_ref: ChainRef = serde_yaml::from_value(raw)
+    ///                 .map_err(|e| FilterError::from(format!("ai_callout: bad outbound_chain: {e}")))?;
+    ///             // Resolve + prebuild the outbound chain against the active registry.
+    ///             let outbound = ctx.bind_chain(&chain_ref)?;
+    ///             let filter: Box<dyn HttpFilter> = Box::new(AiCallout {
+    ///                 outbound: Arc::new(outbound),
+    ///             });
+    ///             Ok(filter)
+    ///         }),
+    ///     )
+    ///     .unwrap();
+    ///
+    /// // Building a pipeline that uses the callout binds its outbound chain now,
+    /// // before any request is served; a hot reload rebuilds it the same way.
+    /// let mut top: Vec<FilterEntry> = serde_yaml::from_str(
+    ///     "- filter: ai_callout\n  outbound_chain:\n    name: outbound\n    filters:\n      - filter: request_id\n",
+    /// )
+    /// .unwrap();
+    /// let chains: HashMap<&str, &[FilterEntry]> = HashMap::new();
+    /// FilterPipeline::build_with_chains(&mut top, &registry, &chains, &InsecureOptions::default())
+    ///     .expect("the outbound chain is validated and bound at build time");
+    /// ```
+    ///
+    /// [`ChainBindingContext`]: crate::ChainBindingContext
+    /// [`FilterPipeline`]: crate::FilterPipeline
+    pub fn register_chain_binding(&mut self, name: &str, factory: ChainBindingHttpFactory) -> Result<(), FilterError> {
+        self.register_chain_binding_with_class(name, factory, SecurityClass::Standard)
+    }
+
+    /// Registers a chain-binding filter with an explicit [`SecurityClass`].
+    ///
+    /// See [`register_chain_binding`](Self::register_chain_binding).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the name is already registered.
+    pub fn register_chain_binding_with_class(
+        &mut self,
+        name: &str,
+        factory: ChainBindingHttpFactory,
+        security_class: SecurityClass,
+    ) -> Result<(), FilterError> {
+        if self.filters.contains_key(name) {
+            return Err(format!("duplicate filter name: '{name}'").into());
+        }
+        self.filters.insert(
+            name.to_owned(),
+            FilterRegistration {
+                factory: RegisteredFilterFactory::ChainBinding(factory),
+                security_class,
+            },
+        );
+        Ok(())
+    }
+
     /// Instantiates a filter by type name and config.
     ///
     /// ```
@@ -192,6 +352,29 @@ impl FilterRegistry {
             .get(name)
             .ok_or_else(|| -> FilterError { format!("unknown filter type: '{name}'").into() })?;
         registration.factory.create(config, self)
+    }
+
+    /// Instantiates a filter, supplying a [`ChainBindingContext`] so
+    /// chain-binding filters can bind their outbound chains.
+    ///
+    /// Used by the branch-aware pipeline builder. Non-binding filters ignore
+    /// the context and behave exactly as under [`create`](Self::create).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if the filter type is unknown or instantiation
+    /// fails.
+    pub(crate) fn create_with_binding(
+        &self,
+        name: &str,
+        config: &serde_yaml::Value,
+        ctx: &ChainBindingContext<'_>,
+    ) -> Result<AnyFilter, FilterError> {
+        let registration = self
+            .filters
+            .get(name)
+            .ok_or_else(|| -> FilterError { format!("unknown filter type: '{name}'").into() })?;
+        registration.factory.create_with_binding(config, self, ctx)
     }
 
     /// Returns the names of all registered filter types.

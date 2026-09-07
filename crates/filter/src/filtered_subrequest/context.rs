@@ -29,6 +29,9 @@ pub(super) struct SubrequestRuntimeResources<'a> {
     /// Named runtime key-value stores.
     pub(super) kv_stores: Option<&'a praxis_core::kv::KvStoreRegistry>,
 
+    /// Shared sticky-session store registry.
+    pub(super) session_stores: Option<&'a Arc<crate::SessionStoreRegistry>>,
+
     /// Verified downstream mTLS identity.
     pub(super) peer_identity: Option<&'a Arc<praxis_tls::TlsPeerIdentity>>,
 
@@ -67,7 +70,7 @@ pub(super) fn build_sub_filter_context<'a>(
         health_registry: runtime.health_registry,
         id_generator: runtime.id_generator,
         kv_stores: runtime.kv_stores,
-        session_stores: None,
+        session_stores: runtime.session_stores,
         metrics_route: None,
         peer_identity: runtime.peer_identity.cloned(),
         prior_pre_read_mutations: Vec::new(),

@@ -123,6 +123,18 @@ pub(super) fn ensure_destination_host(headers: &mut HeaderMap, address: &str) ->
     Ok(())
 }
 
+/// Force the upstream `Host` to the configured logical authority, replacing any
+/// inbound value. Mirrors the normal proxy path's `apply_authority_override`:
+/// when an operator configures `authority` on the upstream, that is the Host the
+/// upstream must see — regardless of what a prior step or the caller supplied.
+pub(super) fn set_authority_host(headers: &mut HeaderMap, authority: &str) -> Result<(), FilterError> {
+    let value = http::HeaderValue::from_str(authority).map_err(|error| -> FilterError {
+        format!("filtered_subrequest: invalid upstream authority Host: {error}").into()
+    })?;
+    headers.insert(http::header::HOST, value);
+    Ok(())
+}
+
 /// Remove connection-scoped and proxy-internal response metadata.
 pub(super) fn sanitize_subresponse_headers(headers: &mut HeaderMap) {
     strip_hop_by_hop_headers(headers, RESPONSE_HOP_BY_HOP);
