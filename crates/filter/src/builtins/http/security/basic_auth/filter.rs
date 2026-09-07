@@ -15,7 +15,7 @@ use subtle::ConstantTimeEq as _;
 
 use super::config::{BasicAuthConfig, CredentialSourceConfig, InlineCredential};
 use crate::{
-    FilterAction, FilterError, Rejection,
+    AuthenticatedIdentity, FilterAction, FilterError, Rejection,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -97,7 +97,8 @@ impl CredentialSource {
 ///
 /// Extracts credentials from the `Authorization: Basic` header,
 /// validates against a configurable credential source (inline
-/// list or runtime KV store), and returns 401 with
+/// list or runtime KV store), publishes the verified username as an
+/// [`AuthenticatedIdentity`], and returns 401 with
 /// `WWW-Authenticate: Basic realm="..."` on failure.
 ///
 /// # YAML configuration
@@ -174,6 +175,15 @@ impl HttpFilter for BasicAuthFilter {
         }
 
         tracing::debug!(username = %username, "authentication successful");
+
+        let identity = AuthenticatedIdentity::new(
+            username.to_owned(),
+            std::iter::empty(),
+            std::iter::empty(),
+            std::iter::empty(),
+        )
+        .ok_or("basic_auth: verified username must not be empty")?;
+        ctx.extensions.insert(identity);
 
         if self.strip_authorization {
             ctx.request_headers_to_remove.push(http::header::AUTHORIZATION);
