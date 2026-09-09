@@ -73,6 +73,9 @@ fn detect_listener_topology_changes_with(old: &Config, new: &Config, old_by_name
 }
 
 /// Detect protocol changes (e.g. HTTP to TCP).
+///
+/// The reload also refuses to swap these listeners' pipelines, since the
+/// handler bound at startup would skip every filter of the other protocol.
 fn detect_protocol_changes_with(new: &Config, old_by_name: &ListenersByName<'_>) {
     for new_l in &new.listeners {
         if let Some(old_l) = old_by_name.get(new_l.name.as_str())
@@ -82,7 +85,7 @@ fn detect_protocol_changes_with(new: &Config, old_by_name: &ListenersByName<'_>)
                 listener = %new_l.name,
                 old_protocol = ?old_l.protocol,
                 new_protocol = ?new_l.protocol,
-                "protocol changed; requires restart"
+                "protocol changed; requires restart (listener keeps its previous pipeline)"
             );
         }
     }

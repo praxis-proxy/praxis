@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::reload::reload_pipelines;
+use crate::{bound_listeners::BoundListeners, reload::reload_pipelines};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -70,6 +70,13 @@ pub(crate) struct WatcherParams {
 
     /// Live pipeline storage, swapped atomically on reload.
     pub(crate) pipelines: Arc<ListenerPipelines>,
+
+    /// Bind identity of the listener sockets, captured at startup.
+    ///
+    /// Reload compares restart-only listener settings against this rather
+    /// than against the previous config, which a refused change would
+    /// otherwise poison for every later reload.
+    pub(crate) bound_listeners: BoundListeners,
 
     /// Documents the configured filters read, beyond the main config.
     ///
@@ -204,6 +211,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: WatcherParams) {
         &mut content_hash,
         &params.registry,
         &params.pipelines,
+        &params.bound_listeners,
         &params.listener_meta,
         &params.cluster_meta,
         &params.health_shutdown,
@@ -252,6 +260,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: WatcherParams) {
             &mut content_hash,
             &params.registry,
             &params.pipelines,
+            &params.bound_listeners,
             &params.listener_meta,
             &params.cluster_meta,
             &params.health_shutdown,
@@ -305,6 +314,7 @@ fn handle_reload(
     content_hash: &mut u64,
     registry: &FilterRegistry,
     pipelines: &ListenerPipelines,
+    bound: &BoundListeners,
     listener_meta: &praxis_protocol::http::pingora::health::ListenerMetaStore,
     cluster_meta: &praxis_protocol::http::pingora::health::ClusterMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
@@ -359,6 +369,7 @@ fn handle_reload(
         current_config,
         registry,
         pipelines,
+        bound,
         listener_meta,
         cluster_meta,
         health_shutdown,
@@ -943,6 +954,8 @@ mod tests {
             praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
         );
 
+        let bound = BoundListeners::from_config(&config);
+
         let original_hash = composite_hash(VALID_YAML, &[]);
         let mut hash = original_hash;
 
@@ -955,6 +968,7 @@ mod tests {
             &mut hash,
             &registry,
             &pipelines,
+            &bound,
             &listener_meta,
             &cluster_meta,
             &health_shutdown,
@@ -980,6 +994,7 @@ mod tests {
             &mut hash,
             &registry,
             &pipelines,
+            &bound,
             &listener_meta,
             &cluster_meta,
             &health_shutdown,
@@ -1025,6 +1040,7 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             pipelines,
+            bound_listeners: BoundListeners::from_config(&config),
             referenced_files: Vec::new(),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
@@ -1082,6 +1098,7 @@ mod tests {
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             pipelines: Arc::clone(&pipelines),
+            bound_listeners: BoundListeners::from_config(&config),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
             ),
@@ -1146,6 +1163,7 @@ mod tests {
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             pipelines: Arc::clone(&pipelines),
+            bound_listeners: BoundListeners::from_config(&config),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
             ),
@@ -1239,6 +1257,7 @@ mod tests {
             kv_stores,
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             pipelines,
+            bound_listeners: BoundListeners::from_config(&config),
             referenced_files: Vec::new(),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
@@ -1316,6 +1335,7 @@ mod tests {
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             pipelines: Arc::clone(&pipelines),
+            bound_listeners: BoundListeners::from_config(&config),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
             ),
@@ -1394,6 +1414,7 @@ mod tests {
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             pipelines: Arc::clone(&pipelines),
+            bound_listeners: BoundListeners::from_config(&config),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
             ),
@@ -1471,6 +1492,7 @@ mod tests {
             referenced_files: Vec::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             pipelines: Arc::clone(&pipelines),
+            bound_listeners: BoundListeners::from_config(&config),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
             ),
@@ -1642,6 +1664,7 @@ mod tests {
             kv_stores: praxis_core::kv::KvStoreRegistry::new(),
             session_stores: Arc::new(praxis_filter::SessionStoreRegistry::new()),
             pipelines: Arc::clone(&pipelines),
+            bound_listeners: BoundListeners::from_config(&config),
             referenced_files: Vec::new(),
             listener_meta: praxis_protocol::http::pingora::health::new_listener_meta_store(
                 praxis_protocol::http::pingora::health::listener_meta_from_config(&config),

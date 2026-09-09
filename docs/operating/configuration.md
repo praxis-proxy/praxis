@@ -98,6 +98,25 @@ continues serving with the old config.
 - The `admin` section (the admin endpoint binds at
   startup)
 
+A listener whose `protocol` changed in place keeps its
+previous pipeline until the process restarts: the
+protocol handler and its socket are bound once at
+startup, so a pipeline built for the other protocol
+would have every filter skipped behind it. The rest of
+the reload still applies, and the warning repeats on
+every reload for as long as the config asks for a
+protocol the running process cannot serve, including
+reloads that change nothing else about that listener.
+
+Because those settings cannot change without a restart,
+admin `/api/pipelines` reports each listener's
+`address`, `protocol`, and `tls` as the running socket
+was bound with them, not as the config now asks for
+them; the `chains` it reports are the ones actually
+installed, so a protocol-blocked listener keeps showing
+its previous chains while every other listener shows
+the chains the reload just applied.
+
 Stateful filters (rate limiter, circuit breaker) reset
 their state on reload. Operators should expect a brief
 burst window for rate limiters and a closed circuit for

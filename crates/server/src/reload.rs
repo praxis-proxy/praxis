@@ -3,7 +3,10 @@
 
 //! Hot config reload: validate, build, and atomically swap filter pipelines.
 
-use std::sync::{Arc, Mutex};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 use praxis_core::{
     config::Config,
@@ -12,7 +15,7 @@ use praxis_core::{
 use praxis_filter::FilterRegistry;
 use praxis_protocol::ListenerPipelines;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[cfg(test)]
 use crate::reload_diagnostics::{
@@ -20,6 +23,7 @@ use crate::reload_diagnostics::{
     is_stateful_recursive,
 };
 use crate::{
+    bound_listeners::BoundListeners,
     pipelines::resolve_pipelines,
     reload_diagnostics::{
         log_config_change_audit, log_restart_required_changes, warn_insecure_option_escalations,
@@ -39,6 +43,10 @@ use crate::{
 /// On failure, logs the error and returns `Err` without modifying any
 /// live state.
 ///
+/// Listeners whose configured protocol no longer matches the handler
+/// `bound` records their socket being created with keep their live
+/// pipeline and their live metadata; only a restart can apply that change.
+///
 /// # Errors
 ///
 /// Returns an error if the new config fails validation or pipeline
@@ -53,6 +61,7 @@ pub(crate) fn reload_pipelines(
     old_config: &Config,
     registry: &FilterRegistry,
     live: &ListenerPipelines,
+    bound: &BoundListeners,
     listener_meta: &praxis_protocol::http::pingora::health::ListenerMetaStore,
     cluster_meta: &praxis_protocol::http::pingora::health::ClusterMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
@@ -127,15 +136,28 @@ pub(crate) fn reload_pipelines(
         return Err(error.into());
     }
 
+    // Both sets are measured against the generation the sockets were bound
+    // for, never against the previous reload's config: a reload that
+    // declines a protocol change still succeeds, so the watcher adopts the
+    // refused config as its next baseline and an old-versus-new diff would
+    // wave the same change through one reload later.
+    let restart_blocked = restart_blocked_listeners(bound, new_config);
+    let frozen = bound.protocol_mismatches(old_config);
+
     // Copy known-down endpoint state into the new registry BEFORE the
     // swap: afterwards `live` already serves the new pipelines and the
     // old registry is no longer reachable through them.
-    carry_over_health_state(live, old_config, new_config, &health_registry);
+    carry_over_health_state(live, old_config, new_config, &health_registry, &frozen);
 
     let mut swapped: Vec<&str> = Vec::new();
     let mut skipped: Vec<&str> = Vec::new();
+    let mut blocked: Vec<&str> = Vec::new();
 
     for name in new_pipelines.listener_names() {
+        if restart_blocked.contains(name) {
+            blocked.push(name);
+            continue;
+        }
         if let Some(new_slot) = new_pipelines.get(name) {
             let new_arc = new_slot.load_full();
             if live.get(name).is_some() {
@@ -147,9 +169,8 @@ pub(crate) fn reload_pipelines(
         }
     }
 
-    listener_meta.store(Arc::new(
-        praxis_protocol::http::pingora::health::listener_meta_from_config(new_config),
-    ));
+    let next_meta = live_listener_meta(bound, &listener_meta.load(), new_config, &restart_blocked);
+    listener_meta.store(Arc::new(next_meta));
     cluster_meta.store(Arc::new(
         praxis_protocol::http::pingora::health::cluster_meta_from_config(new_config),
     ));
@@ -159,10 +180,82 @@ pub(crate) fn reload_pipelines(
     info!(
         swapped = ?swapped,
         skipped = ?skipped,
+        restart_blocked = ?blocked,
         "config reload complete"
     );
 
     Ok(())
+}
+
+// -----------------------------------------------------------------------------
+// Restart-Blocked Listeners
+// -----------------------------------------------------------------------------
+
+/// Listeners the reload must not swap, warning about each one.
+///
+/// Computing the set and reporting it are one step on purpose: the gate and
+/// the operator's notice must never drift apart, and the swap gate below is
+/// covered by tests that would fail if this returned the wrong set.
+///
+/// [`log_restart_required_changes`] reports only the reload that introduces
+/// the change, because it diffs the new config against the previous one and
+/// the previous one is whatever the last successful reload adopted,
+/// including a config whose protocol change was refused. Re-stating the
+/// mismatch here keeps the operator's signal alive for as long as the
+/// config asks for something the running process cannot serve.
+fn restart_blocked_listeners<'cfg>(bound: &BoundListeners, new_config: &'cfg Config) -> HashSet<&'cfg str> {
+    let blocked = bound.protocol_mismatches(new_config);
+    for listener in &new_config.listeners {
+        if let Some(bound_listener) = bound
+            .get(listener.name.as_str())
+            .filter(|_| blocked.contains(listener.name.as_str()))
+        {
+            warn!(
+                listener = %listener.name,
+                bound_protocol = ?bound_listener.protocol,
+                configured_protocol = ?listener.protocol,
+                "listener protocol differs from the bound handler; keeping its live pipeline \
+                 and health-check generation until restart"
+            );
+        }
+    }
+    blocked
+}
+
+/// Listener metadata describing what the reload actually left running.
+///
+/// Admin `GET /api/pipelines` documents live state, so every property the
+/// running socket owns is reported from the generation it was bound with
+/// rather than from the config awaiting a restart: `address`, `protocol`
+/// and `tls` come from `bound`, and a restart-blocked listener also keeps
+/// the `chain_names` of the pipeline that is still installed, carried over
+/// from `live_meta` (the entry the previous reload left in the store).
+///
+/// Listeners with no bind identity were never bound, a reload added them
+/// and only a restart can create their socket, so they are reported as the
+/// config declares them, alongside the "requires restart to bind" warning.
+fn live_listener_meta(
+    bound: &BoundListeners,
+    live_meta: &std::collections::HashMap<String, praxis_protocol::http::pingora::health::ListenerMeta>,
+    new_config: &Config,
+    restart_blocked: &HashSet<&str>,
+) -> std::collections::HashMap<String, praxis_protocol::http::pingora::health::ListenerMeta> {
+    let mut meta = praxis_protocol::http::pingora::health::listener_meta_from_config(new_config);
+    for listener in &new_config.listeners {
+        let name = listener.name.as_str();
+        let (Some(bound_listener), Some(entry)) = (bound.get(name), meta.get_mut(name)) else {
+            continue;
+        };
+        entry.address.clone_from(&bound_listener.address);
+        entry.protocol = bound_listener.protocol;
+        entry.tls = bound_listener.tls;
+        if restart_blocked.contains(name)
+            && let Some(live_entry) = live_meta.get(name)
+        {
+            entry.chain_names.clone_from(&live_entry.chain_names);
+        }
+    }
+    meta
 }
 
 // -----------------------------------------------------------------------------
@@ -171,15 +264,24 @@ pub(crate) fn reload_pipelines(
 
 /// The health registry pinned by the currently live pipelines.
 ///
-/// Only listeners present in the previous config are considered:
-/// `ListenerPipelines` keeps its startup key set forever, so a listener
-/// removed or renamed in an earlier reload still holds an old-generation
-/// pipeline pinned to a registry whose probe tasks were cancelled. Reading
-/// from that frozen registry would carry over stale health verdicts.
-fn live_health_registry(live: &ListenerPipelines, old_config: &Config) -> Option<HealthRegistry> {
+/// Two kinds of listener are skipped, because both still hold an
+/// old-generation pipeline pinned to a registry whose probe tasks were
+/// cancelled, and reading from a frozen registry would carry over stale
+/// health verdicts:
+///
+/// - listeners absent from the previous config: `ListenerPipelines` keeps its startup key set forever, so one removed
+///   or renamed in an earlier reload keeps its last pipeline;
+/// - `frozen` listeners, whose protocol did not match the handler they were bound for at the previous reload, so that
+///   reload declined to swap them.
+fn live_health_registry(
+    live: &ListenerPipelines,
+    old_config: &Config,
+    frozen: &HashSet<&str>,
+) -> Option<HealthRegistry> {
     old_config
         .listeners
         .iter()
+        .filter(|listener| !frozen.contains(listener.name.as_str()))
         .filter_map(|listener| live.get(&listener.name))
         .find_map(|slot| slot.load().health_registry().cloned())
 }
@@ -196,8 +298,9 @@ fn carry_over_health_state(
     old_config: &Config,
     new_config: &Config,
     new_registry: &HealthRegistry,
+    frozen: &HashSet<&str>,
 ) {
-    let Some(old_registry) = live_health_registry(live, old_config) else {
+    let Some(old_registry) = live_health_registry(live, old_config, frozen) else {
         return;
     };
 
@@ -352,7 +455,7 @@ mod tests {
 
     #[test]
     fn valid_reload_swaps_pipeline() {
-        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta, cluster_meta, bound) = setup_live_pipelines();
         let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
         assert_eq!(
             meta.load().get("web").unwrap().address,
@@ -379,6 +482,7 @@ filter_chains:
             &old_config,
             &registry,
             &live,
+            &bound,
             &meta,
             &cluster_meta,
             &shutdown,
@@ -393,17 +497,16 @@ filter_chains:
         assert_ne!(old_ptr, new_ptr, "pipeline pointer should change after reload");
 
         let loaded = meta.load();
-        let expected_names: std::collections::HashSet<&str> =
-            new_config.listeners.iter().map(|l| l.name.as_str()).collect();
-        let actual_names: std::collections::HashSet<&str> = loaded.keys().map(String::as_str).collect();
+        let expected_names: HashSet<&str> = new_config.listeners.iter().map(|l| l.name.as_str()).collect();
+        let actual_names: HashSet<&str> = loaded.keys().map(String::as_str).collect();
         assert_eq!(
             actual_names, expected_names,
             "meta listener names should match reload config"
         );
         assert_eq!(
             loaded.get("web").unwrap().address,
-            "127.0.0.1:9090",
-            "meta should reflect reloaded listener address"
+            "127.0.0.1:8080",
+            "meta must report the address the socket is still bound to, not the pending rebind"
         );
         assert_eq!(
             loaded.get("web").unwrap().chain_names,
@@ -413,8 +516,581 @@ filter_chains:
     }
 
     #[test]
+    fn in_place_protocol_change_does_not_swap_pipeline_or_meta() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta, bound) = setup_live_pipelines();
+        let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+
+        // `web` switches from HTTP to TCP in place with a TCP-only chain,
+        // which resolve_pipelines validates against the *new* protocol and
+        // therefore accepts. The HTTP handler bound at startup would skip
+        // every one of those filters, so the swap must not happen.
+        let new_config = Config::from_yaml(TCP_WEB_CONFIG).unwrap();
+
+        let result = reload_pipelines(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &bound,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        );
+
+        assert!(result.is_ok(), "protocol change should not fail the whole reload");
+        assert_eq!(
+            old_ptr,
+            Arc::as_ptr(&live.get("web").unwrap().load()),
+            "protocol-mismatched pipeline must not be swapped behind the live HTTP handler"
+        );
+
+        let loaded = meta.load();
+        let web = loaded.get("web").unwrap();
+        assert_eq!(
+            web.protocol,
+            praxis_core::config::ProtocolKind::Http,
+            "meta must report the protocol the live socket still honors"
+        );
+        assert_eq!(
+            web.chain_names,
+            ["main"],
+            "meta must report the chains of the still-live pipeline"
+        );
+        assert_eq!(
+            web.address, "127.0.0.1:8080",
+            "meta must report the address the live socket is still bound to"
+        );
+    }
+
+    #[test]
+    fn protocol_change_blocks_only_the_changed_listener() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta, bound) = setup_live_pipelines_with(
+            Config::from_yaml(
+                r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+  - name: api
+    address: "127.0.0.1:8081"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+            )
+            .unwrap(),
+        );
+        let web_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+        let api_ptr = Arc::as_ptr(&live.get("api").unwrap().load());
+
+        let new_config = Config::from_yaml(
+            r#"
+insecure_options:
+  allow_private_upstreams: true
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    protocol: tcp
+    upstream: "127.0.0.1:15432"
+    filter_chains: [tcp_main]
+  - name: api
+    address: "127.0.0.1:8081"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 204
+  - name: tcp_main
+    filters:
+      - filter: tcp_access_log
+"#,
+        )
+        .unwrap();
+
+        reload_pipelines(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &bound,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            web_ptr,
+            Arc::as_ptr(&live.get("web").unwrap().load()),
+            "the protocol-changed listener keeps its live pipeline"
+        );
+        assert_ne!(
+            api_ptr,
+            Arc::as_ptr(&live.get("api").unwrap().load()),
+            "an unchanged listener still picks up the reloaded pipeline"
+        );
+
+        let loaded = meta.load();
+        assert_eq!(
+            loaded.get("web").unwrap().protocol,
+            praxis_core::config::ProtocolKind::Http,
+            "blocked listener meta stays on the live protocol"
+        );
+        assert_eq!(
+            loaded.get("api").unwrap().protocol,
+            praxis_core::config::ProtocolKind::Http,
+            "unblocked listener meta reflects the new config"
+        );
+    }
+
+    #[test]
+    fn blocked_protocol_change_stays_blocked_on_later_reloads() {
+        let (live, startup_config, registry, shutdown, meta, cluster_meta, bound) = setup_live_pipelines();
+        let startup_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+
+        // Reload 1: the refused protocol change. The watcher adopts every
+        // config that reloads without error as its next baseline, so the
+        // refused config becomes `old_config` for reload 2 below.
+        let refused = Config::from_yaml(TCP_WEB_CONFIG).unwrap();
+        reload_pipelines(
+            &refused,
+            &startup_config,
+            &registry,
+            &live,
+            &bound,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        // Reload 2: an unrelated edit that leaves `web` on TCP. Comparing
+        // the new config against the previous one sees tcp -> tcp and no
+        // change at all; only the bound generation still says HTTP.
+        let refused_again = Config::from_yaml(TCP_WEB_CONFIG_V2).unwrap();
+        reload_pipelines(
+            &refused_again,
+            &refused,
+            &registry,
+            &live,
+            &bound,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            startup_ptr,
+            Arc::as_ptr(&live.get("web").unwrap().load()),
+            "a second reload must not swap the TCP pipeline behind the bound HTTP handler"
+        );
+        let loaded = meta.load();
+        let web = loaded.get("web").unwrap();
+        assert_eq!(
+            web.protocol,
+            praxis_core::config::ProtocolKind::Http,
+            "meta must keep reporting the protocol the socket was bound with"
+        );
+        assert_eq!(
+            web.chain_names,
+            ["main"],
+            "meta must keep reporting the chains of the still-installed pipeline"
+        );
+    }
+
+    #[test]
+    fn reverting_to_the_bound_protocol_applies_the_reload() {
+        let (live, startup_config, registry, shutdown, meta, cluster_meta, bound) = setup_live_pipelines();
+        let startup_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+
+        let refused = Config::from_yaml(TCP_WEB_CONFIG).unwrap();
+        reload_pipelines(
+            &refused,
+            &startup_config,
+            &registry,
+            &live,
+            &bound,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        // The operator reverts to HTTP and revises the chain. Diffing
+        // against the previous config sees tcp -> http and would refuse the
+        // very pipeline the live HTTP handler needs, freezing the listener
+        // for the life of the process.
+        let reverted = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [revised]
+filter_chains:
+  - name: revised
+    filters:
+      - filter: static_response
+        status: 204
+"#,
+        )
+        .unwrap();
+        reload_pipelines(
+            &reverted,
+            &refused,
+            &registry,
+            &live,
+            &bound,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        assert_ne!(
+            startup_ptr,
+            Arc::as_ptr(&live.get("web").unwrap().load()),
+            "reverting to the bound protocol must apply the corrected pipeline"
+        );
+        let loaded = meta.load();
+        let web = loaded.get("web").unwrap();
+        assert_eq!(
+            web.protocol,
+            praxis_core::config::ProtocolKind::Http,
+            "meta must report the bound protocol, not the refused one"
+        );
+        assert_eq!(
+            web.chain_names,
+            ["revised"],
+            "meta must report the chains of the newly applied pipeline"
+        );
+    }
+
+    #[test]
+    fn tcp_listener_blocks_an_in_place_http_change() {
+        let (live, startup_config, registry, shutdown, meta, cluster_meta, bound) =
+            setup_live_pipelines_with(Config::from_yaml(TCP_WEB_CONFIG).unwrap());
+        let startup_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+
+        // The mirror of the HTTP -> TCP case: a TCP-bound socket cannot run
+        // an HTTP pipeline either, and the TCP handler skips every HTTP
+        // filter just as silently.
+        let to_http = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap();
+        reload_pipelines(
+            &to_http,
+            &startup_config,
+            &registry,
+            &live,
+            &bound,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            startup_ptr,
+            Arc::as_ptr(&live.get("web").unwrap().load()),
+            "an HTTP pipeline must not be swapped behind the bound TCP handler"
+        );
+        let loaded = meta.load();
+        let web = loaded.get("web").unwrap();
+        assert_eq!(
+            web.protocol,
+            praxis_core::config::ProtocolKind::Tcp,
+            "meta must keep reporting the bound TCP protocol"
+        );
+        assert_eq!(
+            web.chain_names,
+            ["tcp_main"],
+            "meta must keep reporting the still-installed TCP chain"
+        );
+    }
+
+    #[test]
+    fn blocked_listener_meta_keeps_every_bound_bind_setting() {
+        let (live, startup_config, registry, shutdown, meta, cluster_meta, bound) = setup_live_pipelines();
+
+        // The refused edit moves the listener's protocol *and* its address.
+        let refused = Config::from_yaml(
+            r#"
+insecure_options:
+  allow_private_upstreams: true
+listeners:
+  - name: web
+    address: "127.0.0.1:9090"
+    protocol: tcp
+    upstream: "127.0.0.1:15432"
+    tls:
+      certificates:
+        - cert_path: "/nonexistent/praxis-test.pem"
+          key_path: "/nonexistent/praxis-test-key.pem"
+    filter_chains: [tcp_main]
+filter_chains:
+  - name: tcp_main
+    filters:
+      - filter: tcp_access_log
+"#,
+        )
+        .unwrap();
+        reload_pipelines(
+            &refused,
+            &startup_config,
+            &registry,
+            &live,
+            &bound,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        let loaded = meta.load();
+        let web = loaded.get("web").unwrap();
+        assert_eq!(
+            web.address, "127.0.0.1:8080",
+            "meta must report the address the socket is bound to"
+        );
+        assert!(!web.tls, "meta must report the plaintext socket that is actually bound");
+        assert_eq!(
+            web.protocol,
+            praxis_core::config::ProtocolKind::Http,
+            "meta must report the bound protocol"
+        );
+    }
+
+    #[test]
+    fn restart_only_bind_settings_are_reported_from_the_bound_socket() {
+        let (live, startup_config, registry, shutdown, meta, cluster_meta, bound) = setup_live_pipelines();
+        let startup_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
+
+        // Rebinding and enabling TLS both require a restart, but neither
+        // stops the pipeline swap: the listener stays HTTP, so its filters
+        // still run. Only the metadata must not claim the new socket.
+        let new_config = Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:9090"
+    tls:
+      certificates:
+        - cert_path: "/nonexistent/praxis-test.pem"
+          key_path: "/nonexistent/praxis-test-key.pem"
+    filter_chains: [revised]
+filter_chains:
+  - name: revised
+    filters:
+      - filter: static_response
+        status: 204
+"#,
+        )
+        .unwrap();
+        reload_pipelines(
+            &new_config,
+            &startup_config,
+            &registry,
+            &live,
+            &bound,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        assert_ne!(
+            startup_ptr,
+            Arc::as_ptr(&live.get("web").unwrap().load()),
+            "a bind-only change must still apply the reloaded pipeline"
+        );
+        let loaded = meta.load();
+        let web = loaded.get("web").unwrap();
+        assert_eq!(
+            web.address, "127.0.0.1:8080",
+            "meta must report the bound address, not the pending rebind"
+        );
+        assert!(
+            !web.tls,
+            "meta must not advertise TLS while the bound socket still accepts plaintext"
+        );
+        assert_eq!(
+            web.chain_names,
+            ["revised"],
+            "the chains of a swapped pipeline are live and must be reported"
+        );
+    }
+
+    #[test]
+    fn blocked_listener_does_not_freeze_health_carry_over() {
+        let startup = health_checked_config_web_and_api();
+        let registry = FilterRegistry::with_builtins();
+        let frozen_health = build_health_registry(&startup.clusters);
+        let live = resolve_pipelines(
+            &startup,
+            &registry,
+            &frozen_health,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+        )
+        .unwrap();
+        let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&startup),
+        );
+        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
+            praxis_protocol::http::pingora::health::cluster_meta_from_config(&startup),
+        );
+        let bound = BoundListeners::from_config(&startup);
+
+        // Reload 1 refuses `web` (declared first, so it is the one a
+        // config-order scan finds) and swaps `api` onto a fresh registry.
+        // `web` keeps the first generation, whose probes are now cancelled.
+        let web_on_tcp = health_checked_config_web_on_tcp();
+        reload_pipelines(
+            &web_on_tcp,
+            &startup,
+            &registry,
+            &live,
+            &bound,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+        assert!(
+            Arc::ptr_eq(
+                &live.get("web").unwrap().load().health_registry().cloned().unwrap(),
+                &frozen_health
+            ),
+            "the blocked listener must still pin the first-generation registry"
+        );
+
+        // A verdict recorded after the probes were cancelled can never be
+        // revised, so it must never be carried forward.
+        frozen_health.get("backend").unwrap().endpoints()[0].mark_unhealthy();
+
+        reload_pipelines(
+            &web_on_tcp,
+            &web_on_tcp,
+            &registry,
+            &live,
+            &bound,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        let current = live.get("api").unwrap().load().health_registry().cloned().unwrap();
+        assert!(
+            current.get("backend").unwrap().endpoints()[0].is_healthy(),
+            "a stale verdict from a blocked listener's frozen registry must not be carried over"
+        );
+    }
+
+    #[test]
+    fn protocol_mismatch_warns_against_the_bound_generation() {
+        let startup_config = valid_config();
+        let bound = BoundListeners::from_config(&startup_config);
+        let refused = Config::from_yaml(TCP_WEB_CONFIG).unwrap();
+
+        let mut blocked = HashSet::new();
+        let warnings = capture_warnings(|| blocked = restart_blocked_listeners(&bound, &refused));
+        assert_eq!(
+            blocked,
+            ["web"].into_iter().collect::<HashSet<&str>>(),
+            "the blocked set and the warning come from one step"
+        );
+        assert_eq!(warnings.len(), 1, "one blocked listener warns once: {warnings:?}");
+        assert!(
+            warnings[0].contains("differs from the bound handler")
+                && warnings[0].contains("listener=web")
+                && warnings[0].contains("bound_protocol=Http")
+                && warnings[0].contains("configured_protocol=Tcp"),
+            "the warning must name the listener and both protocols: {warnings:?}"
+        );
+
+        // From the second reload onwards the refused config is the watcher's
+        // baseline, so the old-versus-new diagnostic sees tcp -> tcp and
+        // goes silent. The warning above is then the operator's only signal,
+        // which is why it is anchored on the bound generation instead.
+        let diffed = capture_warnings(|| log_restart_required_changes(&refused, &refused));
+        assert!(
+            diffed.is_empty(),
+            "the old-versus-new diagnostic cannot see a persisting mismatch: {diffed:?}"
+        );
+
+        // A config that agrees with the bound generation warns about nothing.
+        let mut matching = HashSet::new();
+        let quiet = capture_warnings(|| matching = restart_blocked_listeners(&bound, &startup_config));
+        assert!(matching.is_empty(), "a matching protocol blocks nothing");
+        assert!(quiet.is_empty(), "a matching protocol must not warn: {quiet:?}");
+    }
+
+    #[test]
     fn invalid_filter_returns_err_old_pipeline_untouched() {
-        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta, cluster_meta, bound) = setup_live_pipelines();
         let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
 
         let bad_config = Config::from_yaml(
@@ -436,6 +1112,7 @@ filter_chains:
             &old_config,
             &registry,
             &live,
+            &bound,
             &meta,
             &cluster_meta,
             &shutdown,
@@ -452,7 +1129,7 @@ filter_chains:
 
     #[test]
     fn old_cancellation_token_cancelled_on_success() {
-        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta, cluster_meta, bound) = setup_live_pipelines();
         let old_token = shutdown.lock().unwrap().clone();
 
         let new_config = valid_config();
@@ -461,6 +1138,7 @@ filter_chains:
             &old_config,
             &registry,
             &live,
+            &bound,
             &meta,
             &cluster_meta,
             &shutdown,
@@ -479,7 +1157,7 @@ filter_chains:
 
     #[test]
     fn new_cancellation_token_created_on_success() {
-        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta, cluster_meta, bound) = setup_live_pipelines();
         let old_token = shutdown.lock().unwrap().clone();
 
         let new_config = valid_config();
@@ -488,6 +1166,7 @@ filter_chains:
             &old_config,
             &registry,
             &live,
+            &bound,
             &meta,
             &cluster_meta,
             &shutdown,
@@ -508,7 +1187,7 @@ filter_chains:
 
     #[test]
     fn health_checks_not_cancelled_on_failure() {
-        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta, cluster_meta, bound) = setup_live_pipelines();
         let old_token = shutdown.lock().unwrap().clone();
 
         let bad_config = Config::from_yaml(
@@ -530,6 +1209,7 @@ filter_chains:
             &old_config,
             &registry,
             &live,
+            &bound,
             &meta,
             &cluster_meta,
             &shutdown,
@@ -546,7 +1226,7 @@ filter_chains:
 
     #[test]
     fn new_listener_in_config_is_skipped() {
-        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta, cluster_meta, bound) = setup_live_pipelines();
 
         let new_config = Config::from_yaml(
             r#"
@@ -571,6 +1251,7 @@ filter_chains:
             &old_config,
             &registry,
             &live,
+            &bound,
             &meta,
             &cluster_meta,
             &shutdown,
@@ -1197,6 +1878,7 @@ filter_chains:
             praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
         );
 
+        let bound = BoundListeners::from_config(&config);
         old_health.get("backend").unwrap().endpoints()[1].mark_unhealthy();
 
         reload_pipelines(
@@ -1204,6 +1886,7 @@ filter_chains:
             &config,
             &registry,
             &live,
+            &bound,
             &meta,
             &cluster_meta,
             &shutdown,
@@ -1289,6 +1972,8 @@ filter_chains:
             praxis_protocol::http::pingora::health::cluster_meta_from_config(&two),
         );
 
+        let bound = BoundListeners::from_config(&two);
+
         // First reload (new=one, old=two) removes the 'legacy' listener;
         // its pipeline stays pinned to the now probe-less first-generation
         // registry while 'web' swaps to a fresh one.
@@ -1297,6 +1982,7 @@ filter_chains:
             &two,
             &registry,
             &live,
+            &bound,
             &meta,
             &cluster_meta,
             &shutdown,
@@ -1318,6 +2004,7 @@ filter_chains:
             &one,
             &registry,
             &live,
+            &bound,
             &meta,
             &cluster_meta,
             &shutdown,
@@ -1357,6 +2044,7 @@ filter_chains:
             praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
         );
 
+        let bound = BoundListeners::from_config(&config);
         old_health.get("backend").unwrap().endpoints()[1].mark_unhealthy();
 
         let mut new_config = health_checked_config();
@@ -1369,6 +2057,7 @@ filter_chains:
             &config,
             &registry,
             &live,
+            &bound,
             &meta,
             &cluster_meta,
             &shutdown,
@@ -1390,6 +2079,136 @@ filter_chains:
     // Test Utilities
     // -------------------------------------------------------------------------
 
+    /// `web` moved to TCP in place, keeping its name and address, with a
+    /// chain that is valid only at the TCP protocol level.
+    const TCP_WEB_CONFIG: &str = r#"
+insecure_options:
+  allow_private_upstreams: true
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    protocol: tcp
+    upstream: "127.0.0.1:15432"
+    filter_chains: [tcp_main]
+filter_chains:
+  - name: tcp_main
+    filters:
+      - filter: tcp_access_log
+"#;
+
+    /// A second TCP shape for `web`, differing from [`TCP_WEB_CONFIG`] only
+    /// in its upstream: an edit that leaves the refused protocol in place.
+    const TCP_WEB_CONFIG_V2: &str = r#"
+insecure_options:
+  allow_private_upstreams: true
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    protocol: tcp
+    upstream: "127.0.0.1:15433"
+    filter_chains: [tcp_main]
+filter_chains:
+  - name: tcp_main
+    filters:
+      - filter: tcp_access_log
+"#;
+
+    /// Two health-checked HTTP listeners, `web` declared first so a scan in
+    /// config order reaches it before `api`.
+    fn health_checked_config_web_and_api() -> Config {
+        Config::from_yaml(HEALTH_CHECKED_WEB_AND_API).unwrap()
+    }
+
+    /// [`health_checked_config_web_and_api`] with `web` moved to TCP in
+    /// place, which a reload must refuse to apply.
+    fn health_checked_config_web_on_tcp() -> Config {
+        Config::from_yaml(&HEALTH_CHECKED_WEB_AND_API.replace(
+            r#"  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]"#,
+            r#"  - name: web
+    address: "127.0.0.1:8080"
+    protocol: tcp
+    upstream: "127.0.0.1:15432"
+    filter_chains: [tcp_main]"#,
+        ))
+        .unwrap()
+    }
+
+    /// Base config for the health-registry generation tests.
+    const HEALTH_CHECKED_WEB_AND_API: &str = r#"
+insecure_options:
+  allow_private_upstreams: true
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+  - name: api
+    address: "127.0.0.1:8081"
+    filter_chains: [main]
+clusters:
+  - name: backend
+    endpoints: ["10.0.0.1:80", "10.0.0.2:80"]
+    health_check:
+      type: tcp
+      interval_ms: 60000
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "backend"
+      - filter: load_balancer
+        clusters:
+          - name: "backend"
+            endpoints:
+              - "10.0.0.1:80"
+              - "10.0.0.2:80"
+  - name: tcp_main
+    filters:
+      - filter: tcp_access_log
+"#;
+
+    /// Run `f` with a subscriber that records every `WARN` event as its
+    /// message followed by `field=value` pairs.
+    fn capture_warnings<F: FnOnce()>(f: F) -> Vec<String> {
+        use tracing_subscriber::layer::SubscriberExt as _;
+
+        let messages = Arc::new(Mutex::new(Vec::<String>::new()));
+        let subscriber = tracing_subscriber::registry().with(WarningCapture(Arc::clone(&messages)));
+        tracing::subscriber::with_default(subscriber, f);
+        std::mem::take(&mut *messages.lock().unwrap())
+    }
+
+    /// Layer backing [`capture_warnings`].
+    struct WarningCapture(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for WarningCapture {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: tracing_subscriber::layer::Context<'_, S>) {
+            if *event.metadata().level() == tracing::Level::WARN {
+                let mut visitor = FieldVisitor(String::new());
+                event.record(&mut visitor);
+                self.0.lock().unwrap().push(visitor.0);
+            }
+        }
+    }
+
+    /// Flattens an event's message and fields into one searchable string.
+    struct FieldVisitor(String);
+
+    impl tracing::field::Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            let name = field.name();
+            let rendered = if name == "message" {
+                format!("{value:?} ")
+            } else {
+                format!("{name}={value:?} ")
+            };
+            self.0.push_str(&rendered);
+        }
+    }
+
     /// Minimal valid config for reload tests.
     fn valid_config() -> Config {
         Config::from_yaml(
@@ -1409,15 +2228,25 @@ filter_chains:
     }
 
     /// Set up live pipelines, registry, and shutdown token for reload tests.
-    fn setup_live_pipelines() -> (
+    fn setup_live_pipelines() -> LivePipelines {
+        setup_live_pipelines_with(valid_config())
+    }
+
+    /// The startup state a reload test drives: pipelines and listener
+    /// metadata as a freshly booted process would hold them, plus the bind
+    /// identity `register_protocols` would have captured.
+    type LivePipelines = (
         ListenerPipelines,
         Config,
         FilterRegistry,
         Arc<Mutex<CancellationToken>>,
         praxis_protocol::http::pingora::health::ListenerMetaStore,
         praxis_protocol::http::pingora::health::ClusterMetaStore,
-    ) {
-        let config = valid_config();
+        BoundListeners,
+    );
+
+    /// Set up live pipelines from an explicit starting config.
+    fn setup_live_pipelines_with(config: Config) -> LivePipelines {
         let registry = FilterRegistry::with_builtins();
         let health_registry: HealthRegistry = Arc::new(HashMap::new());
         let pipelines = resolve_pipelines(
@@ -1436,7 +2265,8 @@ filter_chains:
         let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
             praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
         );
-        (pipelines, config, registry, shutdown, meta, cluster_meta)
+        let bound = BoundListeners::from_config(&config);
+        (pipelines, config, registry, shutdown, meta, cluster_meta, bound)
     }
 
     /// Empty KV store registry for tests without KV stores.
