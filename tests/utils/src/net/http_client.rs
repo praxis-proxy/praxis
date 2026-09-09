@@ -39,7 +39,11 @@ pub fn http_send(addr: &str, request: &str) -> String {
 /// read timeout whenever the proxy kept a keep-alive connection open after the
 /// response was already fully received, adding seconds to every such test. The
 /// read timeout set by the caller remains a backstop for misbehaving peers.
-fn read_full_response(stream: &mut TcpStream) -> String {
+///
+/// Public so tests that own their socket - keep-alive tests that must not let
+/// the connection close between requests - can read one response without
+/// handing the socket to [`http_send`].
+pub fn read_full_response(stream: &mut TcpStream) -> String {
     let mut data = Vec::new();
 
     // Accumulate until the header terminator is seen (or the stream ends).

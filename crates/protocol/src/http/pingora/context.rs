@@ -8,8 +8,9 @@ use std::{collections::VecDeque, net::IpAddr, sync::Arc, time::Instant};
 use bytes::Bytes;
 use praxis_core::connectivity::Upstream;
 use praxis_filter::{BodyBuffer, BodyMode, FilterPipeline, Request, Response, TrustedHeaderMutation};
-use tokio::sync::OwnedSemaphorePermit;
 use tracing::Span;
+
+use crate::connections::ConnectionPermits;
 
 // -----------------------------------------------------------------------------
 // PingoraRequestCtx
@@ -28,17 +29,21 @@ use tracing::Span;
 /// ```
 #[expect(clippy::struct_excessive_bools, reason = "lifecycle flags")]
 pub struct PingoraRequestCtx {
-    /// Connection permit from the per-listener semaphore.
+    /// Per-listener and process-wide admission permits for the
+    /// downstream connection this request arrived on.
     ///
-    /// Held for the lifetime of the request. RAII drop
-    /// releases the permit when the context is dropped,
-    /// including error and timeout paths.
-    pub _connection_permit: Option<OwnedSemaphorePermit>,
-
-    /// Permit from the process-wide connection semaphore.
+    /// Acquired once, by the first request on the connection, and
+    /// carried across HTTP/1.x keep-alive requests by
+    /// `persist_connection_context` / `on_connection_reuse` so the
+    /// limit counts connections rather than in-flight requests.
+    /// RAII drop releases the permits once the connection is gone,
+    /// including error and timeout paths. `None` when neither
+    /// `max_connections` limit is configured.
     ///
-    /// Present only when `runtime.max_connections` is configured.
-    pub _global_connection_permit: Option<OwnedSemaphorePermit>,
+    /// HTTP/2 has no such per-connection hooks in Pingora, so each
+    /// stream holds its own bundle; see
+    /// `docs/operating/configuration.md`.
+    pub connection_permits: Option<Arc<ConnectionPermits>>,
 
     /// Downstream client IP address.
     pub client_addr: Option<IpAddr>,
@@ -536,8 +541,7 @@ impl Default for PingoraRequestCtx {
     )]
     fn default() -> Self {
         Self {
-            _connection_permit: None,
-            _global_connection_permit: None,
+            connection_permits: None,
             cached_body_done_indices: Vec::new(),
             cached_executed_filter_indices: Vec::new(),
             client_addr: None,

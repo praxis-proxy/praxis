@@ -11,7 +11,7 @@
 //!
 //! [`BodyCapabilities`]: praxis_filter::body::BodyCapabilities
 
-use std::{sync::Arc, time::Duration};
+use std::{any::Any, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
 use async_trait::async_trait;
@@ -32,7 +32,10 @@ use super::{
     release_retry_state, request_body_filter, request_filter, response_body_filter, response_filter, upstream_peer,
     upstream_request, via,
 };
-use crate::http::pingora::{context::PingoraRequestCtx, metrics};
+use crate::{
+    connections::ConnectionPermits,
+    http::pingora::{context::PingoraRequestCtx, metrics},
+};
 
 // -----------------------------------------------------------------------------
 // PingoraHttpHandler
@@ -110,6 +113,36 @@ impl PingoraHttpHandler {
             pipeline,
         }
     }
+
+    /// Acquire this connection's admission permits, or reject with 503.
+    ///
+    /// A no-op when `ctx` already carries the permits, which is the case for
+    /// every keep-alive request after the first on the same connection: the
+    /// connection was admitted once and must not consume a second slot.
+    async fn admit_connection(&self, session: &mut Session, ctx: &mut PingoraRequestCtx) -> Result<()> {
+        if ctx.connection_permits.is_some() {
+            return Ok(());
+        }
+
+        let (exceeded, global_permit) = crate::connections::try_acquire_global();
+        if exceeded {
+            metrics::record_overload_reject(metrics::OVERLOAD_REASON_GLOBAL_CONNECTIONS);
+            return reject_503(session, "1", "global max connections exceeded").await;
+        }
+
+        let Ok(listener_permit) = self
+            .connection_semaphore
+            .as_ref()
+            .map(|sem| Arc::clone(sem).try_acquire_owned())
+            .transpose()
+        else {
+            metrics::record_overload_reject(metrics::OVERLOAD_REASON_LISTENER_CONNECTIONS);
+            return reject_503(session, "1", "max connections exceeded").await;
+        };
+
+        ctx.connection_permits = ConnectionPermits::bundle(global_permit, listener_permit);
+        Ok(())
+    }
 }
 
 /// Resolve retry safety for a stale (`ReusedOnly`) upstream connection.
@@ -152,6 +185,15 @@ impl ProxyHttp for PingoraHttpHandler {
         }
     }
 
+    /// Admission control, run before any filter logic.
+    ///
+    /// The connection permits are acquired only when the context does not
+    /// already carry them: a keep-alive request on a connection that was
+    /// admitted earlier reuses that connection's permits (restored by
+    /// [`on_connection_reuse`]) instead of taking a second slot, so the
+    /// limit counts connections rather than in-flight requests.
+    ///
+    /// [`on_connection_reuse`]: Self::on_connection_reuse
     async fn early_request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<()>
     where
         Self::CTX: Send + Sync,
@@ -161,21 +203,7 @@ impl ProxyHttp for PingoraHttpHandler {
             return reject_503(session, "5", "memory pressure exceeded").await;
         }
 
-        let (exceeded, permit) = crate::connections::try_acquire_global();
-        ctx._global_connection_permit = permit;
-        if exceeded {
-            metrics::record_overload_reject(metrics::OVERLOAD_REASON_GLOBAL_CONNECTIONS);
-            return reject_503(session, "1", "global max connections exceeded").await;
-        }
-
-        if let Some(sem) = &self.connection_semaphore {
-            if let Ok(permit) = Arc::clone(sem).try_acquire_owned() {
-                ctx._connection_permit = Some(permit);
-            } else {
-                metrics::record_overload_reject(metrics::OVERLOAD_REASON_LISTENER_CONNECTIONS);
-                return reject_503(session, "1", "max connections exceeded").await;
-            }
-        }
+        self.admit_connection(session, ctx).await?;
 
         ctx._active_request = Some(metrics::ActiveRequestGuard::acquire(self.listener_name.clone()));
 
@@ -187,6 +215,34 @@ impl ProxyHttp for PingoraHttpHandler {
             session.set_read_timeout(Some(timeout));
         }
         Ok(())
+    }
+
+    /// Park this connection's admission permits on the connection so the
+    /// next keep-alive request inherits them.
+    ///
+    /// Pingora hands the context out by shared reference here, so the
+    /// permits cannot be moved: the shared [`ConnectionPermits`] handle is
+    /// cloned instead. The permits therefore stay held for the whole
+    /// keep-alive connection, including while it sits idle between
+    /// requests, and are released when the connection is dropped without
+    /// being reused.
+    ///
+    /// Pingora calls this for HTTP/1.x keep-alive connections only.
+    fn persist_connection_context(&self, _session: &Session, ctx: &Self::CTX) -> Option<Box<dyn Any + Send + Sync>> {
+        let permits = ctx.connection_permits.clone()?;
+        Some(Box::new(permits))
+    }
+
+    /// Restore the permits parked by [`persist_connection_context`] onto the
+    /// new request's context.
+    ///
+    /// Runs before [`early_request_filter`], which then skips acquisition
+    /// because the context already carries the connection's permits.
+    ///
+    /// [`persist_connection_context`]: Self::persist_connection_context
+    /// [`early_request_filter`]: Self::early_request_filter
+    fn on_connection_reuse(&self, _session: &mut Session, ctx: &mut Self::CTX, prev_ctx: Box<dyn Any + Send + Sync>) {
+        ctx.connection_permits = prev_ctx.downcast::<Arc<ConnectionPermits>>().ok().map(|boxed| *boxed);
     }
 
     async fn request_filter(&self, session: &mut Session, ctx: &mut Self::CTX) -> Result<bool> {

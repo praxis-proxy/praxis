@@ -91,9 +91,16 @@ fields and their lifecycle:
 | `retries` | `fail_to_connect` | retry logic |
 | `response_phase_done` | `response_filter` | `logging` cleanup |
 
-The context also holds RAII connection permits
-(`_connection_permit`, `_global_connection_permit`)
-that release automatically when the context drops.
+The context also holds the downstream connection's
+RAII admission permits (`connection_permits`). Unlike
+the fields above they are connection-scoped, not
+request-scoped: the first request on a connection
+acquires them, `persist_connection_context` parks the
+shared handle on the connection, and
+`on_connection_reuse` restores it onto the next
+keep-alive request's context. They release
+automatically once the last holder drops, which is
+when the connection goes away.
 
 ## Hook Details
 
@@ -108,6 +115,17 @@ Rejects with 503 and `Retry-After` when:
    semaphore exhausted.
 3. **Per-listener connection limit** - listener-scoped
    semaphore exhausted.
+
+The two connection permits are acquired only when the
+context does not already carry them, so a keep-alive
+request on an already-admitted connection reuses that
+connection's permits instead of taking a second slot.
+Pingora reads the request header before this hook runs
+and offers no accept-time hook, so a connection that
+sends no header holds no permit; on HTTP/2 the
+per-connection hooks do not fire at all and each stream
+is admitted separately. See
+[configuration.md](../operating/configuration.md).
 
 Also applies the downstream read timeout if configured.
 

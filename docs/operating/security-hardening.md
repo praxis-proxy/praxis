@@ -101,7 +101,17 @@ ambiguous configuration:
 - **Connection limits**: Set `max_connections` on
   listeners to cap concurrent connections. HTTP
   listeners reject excess requests with 503 and
-  `Retry-After`; TCP listeners close immediately.
+  `Retry-After`; TCP listeners close immediately. On
+  HTTP the slot is taken once the connection's first
+  request header has been read and held until the
+  connection closes, so the limit does not bound
+  sockets that connect and stay silent - use OS
+  file-descriptor limits or a rate limiter in front of
+  the proxy for that. Every HTTP listener is HTTP/2
+  capable, and on HTTP/2 the limit counts concurrent
+  streams rather than transport connections, so a
+  single client connection can consume many slots.
+  See [Max Connections](configuration.md#max-connections).
 - **Path-based gating is not a boundary against
   normalizing upstreams**: filter conditions
   (`when: { path_prefix: … }`) and `router` route

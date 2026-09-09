@@ -308,8 +308,12 @@ listeners:
     filter_chains: [main]
 ```
 
-Pingora applies its own 60s default for initial request
-header reads on fresh connections. This setting controls
+Pingora applies its own 60s default for downstream
+reads on fresh connections. That default is a per-read
+idle timeout - any byte the client sends restarts it -
+so it does not cap how long a client may take to
+deliver a complete request header. This setting is
+installed after the header has been read and controls
 body read timeouts within an active request.
 
 ### Max Connections
@@ -327,11 +331,56 @@ listeners:
     filter_chains: [main]
 ```
 
-The limit is enforced via a per-listener semaphore.
-Permits are held for the request lifetime (HTTP) or
-connection lifetime (TCP) and released automatically on
-completion, error, or timeout. Each listener has an
+The limit is enforced via a per-listener semaphore. A
+permit is taken once per connection and released
+automatically when that connection ends, errors, or
+times out - HTTP/1.1 keep-alive connections keep their
+permit while idle between requests, rather than handing
+it back after each one. Each listener has an
 independent limit.
+
+Three properties of the HTTP path are worth knowing
+when sizing the limit:
+
+- **The slot is taken after the first request header,
+  not at accept.** That is the earliest point the proxy
+  runtime exposes. A client that connects and then
+  sends nothing holds no slot, so the limit does not on
+  its own bound open sockets or file descriptors.
+  Pingora's 60s downstream timeout does not close that
+  gap: it is a per-read idle timeout, restarted by
+  every byte the client sends, so it only reaps fully
+  silent sockets. A client that dribbles header bytes
+  keeps a file descriptor until it trips Pingora's
+  1 MiB request header cap, and
+  `downstream_read_timeout_ms` does not apply because
+  it is installed only after the header has been read.
+  Bound slow-loris with OS file-descriptor limits or
+  connection rate limiting in front of the proxy.
+- **Every HTTP listener is HTTP/2 capable, and the
+  client picks.** h2c is enabled unconditionally on
+  plaintext HTTP listeners and TLS listeners advertise
+  `h2` in ALPN; there is no per-listener switch.
+  HTTP/2 has no per-connection hook, so each concurrent
+  stream is admitted separately and consumes its own
+  slot. One transport connection can therefore hold up
+  to `min(128, max_connections)` slots, 128 being the
+  server's `MAX_CONCURRENT_STREAMS`. Size the limit
+  with that in mind even on a listener you expect to
+  serve HTTP/1.1.
+- **A keep-alive connection holds its slot while
+  idle.** It is released when the connection closes,
+  which for an idle HTTP/1.1 connection is up to
+  Pingora's 60s downstream idle timeout after the last
+  response; praxis exposes no knob to shorten it. Size
+  `max_connections` against peak concurrent client
+  connections, idle ones included, not against peak
+  in-flight requests - a browser typically holds six
+  connections per origin.
+
+TCP listeners take the permit at accept time and hold
+it for the connection, so the first two caveats do not
+apply there.
 
 See [max-connections.yaml] for an example.
 
@@ -514,7 +563,10 @@ runtime:
   connections across all listeners. When set, new
   connections beyond this limit are rejected.
   `Option<u32>`, defaults to `None` (disabled).
-  Distinct from per-listener `max_connections`.
+  Distinct from per-listener `max_connections`, and
+  counted the same way; see
+  [Max Connections](#max-connections) for how HTTP
+  listeners count a connection.
 - `max_memory_bytes`: process-wide RSS memory limit for
   load shedding. When set, the proxy monitors resident
   memory and rejects new requests with `503 Service

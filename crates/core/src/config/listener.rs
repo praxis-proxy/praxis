@@ -66,6 +66,17 @@ pub struct Listener {
     /// rejected: HTTP returns 503, TCP closes the socket.
     /// `None` means unlimited.
     ///
+    /// TCP counts a connection from accept until close.
+    /// HTTP counts it from the moment its first request
+    /// header has been read until the connection closes,
+    /// keep-alive idle time included. Every HTTP
+    /// listener is HTTP/2 capable and the client
+    /// chooses the protocol; HTTP/2 has no
+    /// per-connection hook, so a client that speaks it
+    /// has each of its concurrent streams counted
+    /// separately. See
+    /// `docs/operating/configuration.md`.
+    ///
     /// ```
     /// use praxis_core::config::Listener;
     ///

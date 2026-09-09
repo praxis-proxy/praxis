@@ -151,6 +151,11 @@ pub struct RuntimeConfig {
     /// before filter pipeline execution. `None` (the default)
     /// means no global limit.
     ///
+    /// Connections are counted exactly as the per-listener
+    /// [`Listener::max_connections`] limit counts them.
+    ///
+    /// [`Listener::max_connections`]: super::Listener::max_connections
+    ///
     /// ```
     /// use praxis_core::config::RuntimeConfig;
     ///
