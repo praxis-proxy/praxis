@@ -351,6 +351,12 @@ clusters:
     }
 
     #[test]
+    fn accept_cluster_application_provider_alone() {
+        config_with_http_block("      application_provider: vllm")
+            .expect("application_provider without protocol should be accepted");
+    }
+
+    #[test]
     fn reject_cluster_invalid_application_protocol() {
         let err = config_with_http_block("      application_protocol: OpenAI").unwrap_err();
         assert!(
