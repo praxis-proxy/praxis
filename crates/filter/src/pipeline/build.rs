@@ -223,7 +223,9 @@ impl FilterPipeline {
 
     /// Check for non-fatal ordering advisories.
     ///
-    /// Currently detects: all routers conditional with no fallback.
+    /// Currently detects: a router with no load balancer, all routers
+    /// conditional with no fallback, and security filters reachable only
+    /// through a conditional branch.
     ///
     /// ```
     /// use praxis_filter::{FailureMode, FilterEntry, FilterPipeline, FilterRegistry};
@@ -260,6 +262,7 @@ impl FilterPipeline {
 
         super::checks::check_router_without_lb(&names, &mut warnings);
         super::checks::check_all_routers_conditional(&names, &self.filters, &mut warnings);
+        super::checks::check_security_filter_in_conditional_branch(&self.filters, &mut warnings);
 
         warnings
     }
