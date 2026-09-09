@@ -201,6 +201,7 @@ private/reserved ranges:
 - Current network (`0.0.0.0/8`)
 - CGNAT (`100.64.0.0/10`, RFC 6598)
 - IPv6 loopback (`::1`)
+- IPv6 unspecified (`::`)
 - IPv6 link-local (`fe80::/10`)
 - IPv6 unique local (`fc00::/7`)
 

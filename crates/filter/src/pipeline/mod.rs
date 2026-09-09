@@ -99,6 +99,10 @@ use crate::{
 /// let pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
 /// assert!(pipeline.is_empty());
 /// ```
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent server-injected runtime toggles, not a state machine"
+)]
 pub struct FilterPipeline {
     /// Pre-computed body processing capabilities for this pipeline.
     body_capabilities: BodyCapabilities,
@@ -151,6 +155,12 @@ pub struct FilterPipeline {
 
     /// Indices into `filters` of filters declaring response-body access.
     response_body_filter_indices: Vec<usize>,
+
+    /// Whether upstream hostnames may resolve to private or reserved IPs.
+    ///
+    /// Mirrors `insecure_options.allow_private_upstreams`; consumed by the
+    /// upstream peer builders when they resolve a hostname.
+    allow_private_upstreams: bool,
 }
 
 #[expect(
@@ -453,6 +463,25 @@ impl FilterPipeline {
             })
             .flatten()
             .collect()
+    }
+
+    /// Whether upstream hostnames are allowed to resolve to private or
+    /// reserved IP addresses.
+    ///
+    /// Mirrors `insecure_options.allow_private_upstreams`. Defaults to
+    /// `false`, so a pipeline that was never configured fails closed.
+    pub fn allow_private_upstreams(&self) -> bool {
+        self.allow_private_upstreams
+    }
+
+    /// Set the runtime private-upstream override, including for nested pipelines.
+    ///
+    /// Called once per (re)configuration from
+    /// `insecure_options.allow_private_upstreams`, so a hot reload that
+    /// flips the flag takes effect with the swapped-in pipeline.
+    pub fn set_allow_private_upstreams(&mut self, allow: bool) {
+        self.visit_nested_pipelines(&mut |pipeline| pipeline.set_allow_private_upstreams(allow));
+        self.allow_private_upstreams = allow;
     }
 
     /// Apply [`InsecureOptions`] to all filters in the pipeline.

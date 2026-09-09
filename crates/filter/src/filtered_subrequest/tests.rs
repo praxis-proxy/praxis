@@ -463,7 +463,7 @@ async fn build_peer_applies_tls_with_explicit_sni() {
         authority: None,
     };
 
-    let peer = super::transport::build_peer(&upstream).await.unwrap();
+    let peer = super::transport::build_peer(&upstream, false).await.unwrap();
     assert_eq!(peer.sni, "backend.example", "the configured SNI must be applied");
 }
 
@@ -478,6 +478,33 @@ async fn build_peer_derives_sni_from_hostname_address() {
         authority: None,
     };
 
-    let peer = super::transport::build_peer(&upstream).await.unwrap();
+    let peer = super::transport::build_peer(&upstream, true).await.unwrap();
     assert_eq!(peer.sni, "localhost", "the SNI must derive from the address hostname");
+}
+
+#[tokio::test]
+async fn build_peer_rejects_hostname_resolving_to_private_address() {
+    // A sub-request upstream is as exposed to DNS rebinding as the main
+    // upstream path: the resolved address must be checked, not trusted.
+    let upstream = praxis_core::connectivity::Upstream {
+        address: std::sync::Arc::from("localhost:9444"),
+        connection: std::sync::Arc::new(praxis_core::connectivity::ConnectionOptions::default()),
+        tls: None,
+        authority: None,
+    };
+
+    let err = super::transport::build_peer(&upstream, false)
+        .await
+        .expect_err("a hostname resolving to loopback must be refused by default");
+    assert!(
+        matches!(
+            err,
+            praxis_core::connectivity::peer::AddressResolutionError::PrivateAddress { .. }
+        ),
+        "expected PrivateAddress, got: {err}"
+    );
+
+    super::transport::build_peer(&upstream, true)
+        .await
+        .expect("allow_private_upstreams must permit the same upstream");
 }

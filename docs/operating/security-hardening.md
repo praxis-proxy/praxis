@@ -27,6 +27,14 @@ ambiguous configuration:
   traversal (`..`).
 - Health check targets reject loopback, link-local,
   and cloud metadata addresses (SSRF protection).
+- Upstream hostnames that resolve to private or
+  reserved addresses are refused at connection time on
+  both the TCP and HTTP data planes, so a DNS record
+  that rebinds after startup cannot steer traffic to
+  loopback, RFC 1918, or `169.254.169.254`. Set
+  `insecure_options.allow_private_upstreams` when
+  upstream DNS names legitimately resolve into private
+  space.
 - Root execution (UID 0) rejected by default.
 - Supply chain audited via `cargo audit` and
   `cargo deny`.

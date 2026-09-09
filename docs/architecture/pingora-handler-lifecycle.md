@@ -234,6 +234,18 @@ saved copy without cloning.
 Hostname resolution runs on `spawn_blocking` to avoid
 blocking the async runtime.
 
+**Runtime SSRF check.** A hostname that resolves into a
+private or reserved range is refused with a 502 unless
+`insecure_options.allow_private_upstreams` is set. The
+check runs on every request, so a cached answer is
+re-validated rather than trusted for the whole TTL; a
+rebind is therefore visible within one TTL. Literal
+`SocketAddr` upstreams skip the check, they cannot be
+substituted by a resolver, and are gated at config time
+by `insecure_options.allow_private_endpoints`. The same
+check applies to sub-requests issued by
+`iterative_request_router` steps.
+
 **TLS configuration** applies pre-cached DER
 certificates, client cert/key pairs, SNI derivation,
 and verification toggles from `CachedClusterTls`.

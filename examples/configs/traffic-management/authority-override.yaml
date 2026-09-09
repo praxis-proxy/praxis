@@ -37,3 +37,4 @@ filter_chains:
 
 insecure_options:
   allow_private_endpoints: true # example proxies to local backends
+  allow_private_upstreams: true # "localhost" resolves to loopback at connection time

@@ -150,7 +150,15 @@ pub(super) async fn execute(ctx: &mut PingoraRequestCtx) -> Result<Box<HttpPeer>
         )
     })?;
 
-    build_peer(upstream).await
+    // `allow_private_upstreams` is carried on the pipeline pinned for this
+    // request, so a hot reload that flips the flag applies with the swapped
+    // pipeline and cannot change mid-request. An unpinned pipeline fails closed.
+    let allow_private = ctx
+        .pinned_pipeline
+        .as_ref()
+        .is_some_and(|pipeline| pipeline.allow_private_upstreams());
+
+    build_peer(upstream, allow_private).await
 }
 
 /// Resolve the passive-health endpoint index for a reselected address.
@@ -190,10 +198,14 @@ fn apply_per_try_timeout(ctx: &PingoraRequestCtx, upstream: &mut Upstream) {
 /// When `sni` is `None`, derives it from the upstream address hostname
 /// (unless it is an IP address).
 ///
+/// `allow_private` mirrors `insecure_options.allow_private_upstreams`:
+/// when it is `false`, an upstream hostname that resolves into a private
+/// or reserved range is refused instead of connected to.
+///
 /// [`HttpPeer`]: pingora_core::upstreams::peer::HttpPeer
 /// [`CachedClusterTls`]: praxis_tls::CachedClusterTls
-async fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
-    let addr: SocketAddr = resolve_address(&upstream.address).await?;
+async fn build_peer(upstream: &Upstream, allow_private: bool) -> Result<Box<HttpPeer>> {
+    let addr: SocketAddr = resolve_address(&upstream.address, allow_private).await?;
 
     let tls_enabled = upstream.tls.is_some();
     let sni = upstream
@@ -222,7 +234,8 @@ async fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
 // Resolution
 // -----------------------------------------------------------------------------
 
-/// Resolve an upstream address to a [`SocketAddr`] with caching.
+/// Resolve an upstream address to a [`SocketAddr`] with caching and a
+/// private/reserved-range check.
 ///
 /// Tries direct [`SocketAddr`] parsing first (no allocation, no I/O).
 /// For hostname addresses, checks a process-wide cache (60 s TTL)
@@ -231,12 +244,26 @@ async fn build_peer(upstream: &Upstream) -> Result<Box<HttpPeer>> {
 /// When DNS returns multiple records, prefers IPv4 to avoid
 /// connectivity issues in dual-stack environments.
 ///
+/// A resolved (as opposed to literal) address in a private or reserved
+/// range is rejected unless `allow_private` is set, which is the runtime
+/// half of the DNS-rebinding / SSRF control. The check runs per request,
+/// so a cached answer is re-validated rather than trusted for its TTL.
+///
 /// [`SocketAddr`]: std::net::SocketAddr
 /// [`spawn_blocking`]: tokio::task::spawn_blocking
-async fn resolve_address(address: &str) -> Result<SocketAddr> {
-    peer_utils::resolve_address(address)
+async fn resolve_address(address: &str, allow_private: bool) -> Result<SocketAddr> {
+    peer_utils::resolve_address_checked(address, allow_private)
         .await
-        .map_err(|error| pingora_core::Error::explain(pingora_core::ErrorType::InternalError, error.to_string()))
+        .map_err(|error| {
+            // A refused private/reserved address is an upstream reachability
+            // verdict, not a proxy fault, so it surfaces as 502 rather than
+            // the 500 every other resolution failure maps to.
+            let etype = match error {
+                peer_utils::AddressResolutionError::PrivateAddress { .. } => pingora_core::ErrorType::ConnectError,
+                _ => pingora_core::ErrorType::InternalError,
+            };
+            pingora_core::Error::explain(etype, error.to_string())
+        })
 }
 
 // -----------------------------------------------------------------------------
@@ -264,7 +291,7 @@ mod tests {
     #[tokio::test]
     async fn valid_address_builds_peer() {
         assert!(
-            build_peer(&make_upstream("127.0.0.1:8080")).await.is_ok(),
+            build_peer(&make_upstream("127.0.0.1:8080"), false).await.is_ok(),
             "valid address should build peer"
         );
     }
@@ -281,7 +308,7 @@ mod tests {
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
-        let peer = build_peer(&upstream).await.expect("should build TLS peer");
+        let peer = build_peer(&upstream, false).await.expect("should build TLS peer");
         assert!(!peer.sni.is_empty(), "TLS peer should have a non-empty SNI");
         assert_eq!(peer.sni, "api.example.com", "peer SNI should match configured value");
     }
@@ -309,7 +336,7 @@ mod tests {
             connection: Arc::new(ConnectionOptions::default()),
             tls: None,
         };
-        let peer = build_peer(&upstream).await.expect("should build plain peer");
+        let peer = build_peer(&upstream, false).await.expect("should build plain peer");
         assert_eq!(peer.sni, "", "plain peer should have empty SNI");
     }
 
@@ -326,7 +353,7 @@ mod tests {
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
-        let peer = build_peer(&upstream)
+        let peer = build_peer(&upstream, false)
             .await
             .expect("should build peer with verification disabled");
         assert!(
@@ -351,7 +378,7 @@ mod tests {
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
-        let peer = build_peer(&upstream)
+        let peer = build_peer(&upstream, false)
             .await
             .expect("should build peer with verification enabled");
         assert!(
@@ -366,7 +393,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_address_parses_socket_addr() {
-        let addr = resolve_address("127.0.0.1:8080")
+        let addr = resolve_address("127.0.0.1:8080", false)
             .await
             .expect("socket addr should parse");
         assert_eq!(addr.port(), 8080, "port should match");
@@ -378,7 +405,7 @@ mod tests {
             eprintln!("skipping: localhost did not resolve in this environment");
             return;
         }
-        let addr = resolve_address("localhost:8080")
+        let addr = resolve_address("localhost:8080", true)
             .await
             .expect("localhost should resolve");
         assert_eq!(addr.port(), 8080, "port should match");
@@ -387,7 +414,7 @@ mod tests {
     #[tokio::test]
     async fn resolve_address_fails_for_no_port() {
         assert!(
-            resolve_address("127.0.0.1").await.is_err(),
+            resolve_address("127.0.0.1", false).await.is_err(),
             "address without port should return error"
         );
     }
@@ -399,15 +426,74 @@ mod tests {
             return;
         }
         assert!(
-            build_peer(&make_upstream("localhost:8080")).await.is_ok(),
+            build_peer(&make_upstream("localhost:8080"), true).await.is_ok(),
             "hostname address should build peer via DNS resolution"
         );
     }
 
     #[tokio::test]
+    async fn build_peer_rejects_hostname_resolving_to_private_address() {
+        if !localhost_resolution_available() {
+            eprintln!("skipping: localhost did not resolve in this environment");
+            return;
+        }
+        // The config-time check passes a hostname that resolved publicly;
+        // this is the runtime half that must refuse the rebound answer.
+        let err = build_peer(&make_upstream("localhost:8080"), false)
+            .await
+            .expect_err("a hostname resolving to loopback must be refused by default");
+        let message = err.to_string();
+        assert!(
+            message.contains("private/reserved IP address"),
+            "the error must explain the SSRF rejection: {message}"
+        );
+        assert!(
+            message.contains("allow_private_upstreams"),
+            "the error must name the override flag: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_private_upstream_without_pinned_override() {
+        if !localhost_resolution_available() {
+            eprintln!("skipping: localhost did not resolve in this environment");
+            return;
+        }
+        // No pinned pipeline means no override, so the check must fail closed.
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.upstream = Some(make_upstream("localhost:8080"));
+        let err = execute(&mut ctx)
+            .await
+            .expect_err("an unconfigured pipeline must not permit private upstreams");
+        assert!(
+            err.to_string().contains("private/reserved IP address"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn execute_allows_private_upstream_when_pipeline_permits_it() {
+        if !localhost_resolution_available() {
+            eprintln!("skipping: localhost did not resolve in this environment");
+            return;
+        }
+        let mut pipeline =
+            praxis_filter::FilterPipeline::build(&mut [], &praxis_filter::FilterRegistry::with_builtins())
+                .expect("an empty pipeline should build");
+        pipeline.set_allow_private_upstreams(true);
+
+        let mut ctx = PingoraRequestCtx::default();
+        ctx.pinned_pipeline = Some(Arc::new(pipeline));
+        ctx.upstream = Some(make_upstream("localhost:8080"));
+        execute(&mut ctx)
+            .await
+            .expect("allow_private_upstreams must permit a loopback resolution");
+    }
+
+    #[tokio::test]
     async fn invalid_address_returns_error() {
         assert!(
-            build_peer(&make_upstream("invalid host:8080")).await.is_err(),
+            build_peer(&make_upstream("invalid host:8080"), false).await.is_err(),
             "syntactically invalid address should return error"
         );
     }
@@ -415,7 +501,7 @@ mod tests {
     #[tokio::test]
     async fn missing_port_returns_error() {
         assert!(
-            build_peer(&make_upstream("127.0.0.1")).await.is_err(),
+            build_peer(&make_upstream("127.0.0.1"), false).await.is_err(),
             "address without port should return error"
         );
     }
@@ -531,7 +617,9 @@ mod tests {
             connection: Arc::new(ConnectionOptions::default()),
             tls: Some(CachedClusterTls::try_from_config(&tls).unwrap()),
         };
-        let peer = build_peer(&upstream).await.expect("should build peer with cached CA");
+        let peer = build_peer(&upstream, false)
+            .await
+            .expect("should build peer with cached CA");
         assert!(peer.options.ca.is_some(), "peer should have custom CA set from cache");
     }
 
