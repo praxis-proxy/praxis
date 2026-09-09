@@ -175,6 +175,13 @@ pub fn run_server_with_registry(
 struct ServerState {
     /// Resolved filter pipelines per listener.
     pipelines: Arc<ListenerPipelines>,
+    /// Bind identity of every listener socket registered at startup.
+    ///
+    /// Hot reload measures restart-only listener changes against this
+    /// snapshot, which stays accurate for the process's lifetime because
+    /// sockets and protocol handlers are registered exactly once.
+    #[cfg(feature = "config-reload")]
+    bound_listeners: crate::bound_listeners::BoundListeners,
     /// Hot-swappable listener metadata for admin `/api/pipelines`.
     listener_meta: praxis_protocol::http::pingora::health::ListenerMetaStore,
     /// Hot-swappable cluster metadata for admin `/api/stats`.
@@ -235,6 +242,8 @@ fn build_server_state(
 
     ServerState {
         pipelines: Arc::new(pipelines),
+        #[cfg(feature = "config-reload")]
+        bound_listeners: crate::bound_listeners::BoundListeners::from_config(config),
         listener_meta,
         cluster_meta,
         kv_stores,
@@ -302,6 +311,7 @@ fn spawn_watcher(
         cluster_meta: state.cluster_meta,
         session_stores: state.session_stores,
         pipelines: state.pipelines,
+        bound_listeners: state.bound_listeners,
         referenced_files,
         registry: Arc::new(registry),
         shutdown: CancellationToken::new(),

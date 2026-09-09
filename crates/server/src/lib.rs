@@ -27,6 +27,8 @@
 //!
 //! [`FilterPipeline`]: praxis_filter::FilterPipeline
 
+#[cfg(feature = "config-reload")]
+pub(crate) mod bound_listeners;
 pub(crate) mod pipelines;
 #[cfg(feature = "config-reload")]
 pub(crate) mod reload;
