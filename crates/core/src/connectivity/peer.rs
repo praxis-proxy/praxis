@@ -67,6 +67,18 @@ pub enum AddressResolutionError {
         /// Message from the cached failure.
         message: String,
     },
+
+    /// DNS resolved the hostname to a private or reserved address.
+    #[error(
+        "upstream address '{address}' resolved to private/reserved IP address {ip}; \
+         set insecure_options.allow_private_upstreams to allow"
+    )]
+    PrivateAddress {
+        /// Hostname being resolved.
+        address: String,
+        /// The private or reserved address DNS returned.
+        ip: std::net::IpAddr,
+    },
 }
 
 /// Cached DNS resolution result: the preferred address, or the failure
@@ -119,7 +131,7 @@ fn dns_inflight() -> &'static DashMap<String, Arc<tokio::sync::Mutex<()>>> {
 /// Returns [`AddressResolutionError`] when resolution fails or returns no
 /// usable addresses.
 pub async fn resolve_address(address: &str) -> Result<SocketAddr, AddressResolutionError> {
-    if let Ok(addr) = address.parse::<SocketAddr>() {
+    if let Some(addr) = literal_socket_addr(address) {
         return Ok(addr);
     }
     if let Some(cached) = lookup_cached(address) {
@@ -149,6 +161,75 @@ pub async fn resolve_address(address: &str) -> Result<SocketAddr, AddressResolut
     );
     dns_inflight().remove(address);
     outcome
+}
+
+/// Resolve an upstream address, rejecting DNS answers that point at a
+/// private or reserved range.
+///
+/// Wraps [`resolve_address`] with the runtime SSRF / DNS-rebinding control
+/// documented for `insecure_options.allow_private_upstreams`: a hostname
+/// that resolves into loopback, RFC 1918, link-local (including
+/// `169.254.169.254`), CGNAT, the unspecified address, or IPv6
+/// unique-local space is refused unless `allow_private` is `true`.
+///
+/// Literal socket addresses bypass the check. They are not forgeable,
+/// the operator wrote the exact address Praxis connects to, and they are
+/// already gated at config time by `insecure_options.allow_private_endpoints`.
+/// Only DNS answers can change under the operator's feet, which is the
+/// rebinding case this guards.
+///
+/// The check runs on every call, so a cached resolution
+/// ([`resolve_address`] caches positive answers for 60 s) is re-validated
+/// per request rather than trusted for the life of the entry.
+///
+/// # Errors
+///
+/// Returns [`AddressResolutionError::PrivateAddress`] when a resolved
+/// address is private or reserved and `allow_private` is `false`, or any
+/// [`AddressResolutionError`] [`resolve_address`] returns.
+///
+/// ```
+/// use praxis_core::connectivity::peer::resolve_address_checked;
+///
+/// tokio::runtime::Runtime::new()
+///     .expect("runtime")
+///     .block_on(async {
+///         // A literal private address is the operator's own choice, not a
+///         // DNS answer, so it is not subject to the rebinding check.
+///         let addr = resolve_address_checked("127.0.0.1:8080", false)
+///             .await
+///             .expect("literal addresses bypass the private-IP check");
+///         assert_eq!(addr, "127.0.0.1:8080".parse().unwrap());
+///     });
+/// ```
+pub async fn resolve_address_checked(address: &str, allow_private: bool) -> Result<SocketAddr, AddressResolutionError> {
+    if let Some(literal) = literal_socket_addr(address) {
+        return Ok(literal);
+    }
+
+    let resolved = resolve_address(address).await?;
+    let ip = resolved.ip();
+    if !allow_private && crate::connectivity::is_private_ip(&ip) {
+        tracing::warn!(
+            upstream = %address,
+            resolved_ip = %ip,
+            "upstream hostname resolved to private/reserved IP address; \
+             set insecure_options.allow_private_upstreams to allow"
+        );
+        return Err(AddressResolutionError::PrivateAddress {
+            address: address.to_owned(),
+            ip,
+        });
+    }
+    Ok(resolved)
+}
+
+/// Parse `address` as a literal `host:port` socket address, if it is one.
+///
+/// A hit means no DNS was consulted, so the address cannot have been
+/// substituted by a resolver.
+fn literal_socket_addr(address: &str) -> Option<SocketAddr> {
+    address.parse::<SocketAddr>().ok()
 }
 
 /// Run the blocking resolver and select the preferred address.
@@ -349,6 +430,64 @@ mod tests {
     #[tokio::test]
     async fn resolve_address_rejects_missing_port() {
         resolve_address("127.0.0.1").await.unwrap_err();
+    }
+
+    #[tokio::test]
+    async fn checked_resolution_rejects_private_dns_answer() {
+        let err = resolve_address_checked("localhost:8125", false)
+            .await
+            .expect_err("a hostname resolving to loopback must be rejected by default");
+        let AddressResolutionError::PrivateAddress { address, ip } = &err else {
+            unreachable!("expected PrivateAddress, got: {err}")
+        };
+        assert_eq!(address, "localhost:8125", "the error must name the configured address");
+        assert!(ip.is_loopback(), "the error must carry the rejected IP, got {ip}");
+    }
+
+    #[tokio::test]
+    async fn checked_resolution_allows_private_dns_answer_with_override() {
+        let addr = resolve_address_checked("localhost:8126", true)
+            .await
+            .expect("allow_private must permit a loopback resolution");
+        assert!(addr.ip().is_loopback(), "localhost must resolve to loopback");
+    }
+
+    #[tokio::test]
+    async fn checked_resolution_allows_literal_private_address() {
+        // Literal addresses cannot be substituted by a resolver, and are
+        // gated at config time instead; the runtime check must not break
+        // the ordinary `127.0.0.1:port` upstream.
+        let addr = resolve_address_checked("127.0.0.1:8080", false)
+            .await
+            .expect("a literal address must bypass the private-IP check");
+        assert_eq!(addr, "127.0.0.1:8080".parse().unwrap());
+    }
+
+    #[tokio::test]
+    async fn checked_resolution_rechecks_the_cached_answer() {
+        // The positive DNS cache pins an answer for its TTL, so the check
+        // must run per call rather than only on a cache miss.
+        resolve_address("localhost:8127")
+            .await
+            .expect("localhost must resolve via the hosts file");
+        let err = resolve_address_checked("localhost:8127", false)
+            .await
+            .expect_err("a cached private answer must still be rejected");
+        assert!(
+            matches!(err, AddressResolutionError::PrivateAddress { .. }),
+            "expected PrivateAddress, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn checked_resolution_propagates_resolver_failures() {
+        let err = resolve_address_checked("does-not-exist.praxis-checked-test.invalid:80", false)
+            .await
+            .expect_err(".invalid hostnames must fail to resolve");
+        assert!(
+            !matches!(err, AddressResolutionError::PrivateAddress { .. }),
+            "a resolver failure must not be reported as a private address: {err}"
+        );
     }
 
     #[test]

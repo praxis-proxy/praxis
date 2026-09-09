@@ -108,6 +108,7 @@ impl FilterPipeline {
             filters,
             request_body_filter_indices,
             response_body_filter_indices,
+            allow_private_upstreams: false,
             health_registry: None,
             id_generator: Arc::clone(&id_generator),
             kv_stores: None,

@@ -162,7 +162,13 @@ pub struct InsecureOptions {
     /// addresses at runtime. Without this flag, DNS-resolved upstream
     /// addresses in RFC 1918, loopback, link-local, CGNAT, and IPv6
     /// unique-local ranges are rejected to prevent DNS rebinding and
-    /// SSRF attacks.
+    /// SSRF attacks, on the TCP and HTTP data planes alike.
+    ///
+    /// Literal `host:port` upstreams are not affected: they cannot be
+    /// substituted by a resolver, and are gated at config time by
+    /// [`allow_private_endpoints`].
+    ///
+    /// [`allow_private_endpoints`]: InsecureOptions::allow_private_endpoints
     pub allow_private_upstreams: bool,
 
     /// Allow admin endpoint on non-loopback addresses (`0.0.0.0`, LAN IPs, etc.).

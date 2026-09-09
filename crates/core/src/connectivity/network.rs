@@ -54,6 +54,7 @@ pub fn normalize_mapped_ipv4(ip: IpAddr) -> IpAddr {
 /// - IPv4 current network (`0.0.0.0/8`)
 /// - IPv4 CGNAT / shared address space (`100.64.0.0/10`)
 /// - IPv6 loopback (`::1`)
+/// - IPv6 unspecified (`::`)
 /// - IPv6 link-local (`fe80::/10`)
 /// - IPv6 unique local (`fc00::/7`)
 /// - IPv4-mapped IPv6 variants of all above
@@ -71,6 +72,7 @@ pub fn normalize_mapped_ipv4(ip: IpAddr) -> IpAddr {
 /// assert!(is_private_ip(&"0.0.0.0".parse().unwrap()));
 /// assert!(is_private_ip(&"100.64.0.1".parse().unwrap()));
 /// assert!(is_private_ip(&"::1".parse().unwrap()));
+/// assert!(is_private_ip(&"::".parse().unwrap()));
 /// assert!(is_private_ip(&"fe80::1".parse().unwrap()));
 /// assert!(is_private_ip(&"fc00::1".parse().unwrap()));
 /// assert!(is_private_ip(&"::ffff:10.0.0.1".parse().unwrap()));
@@ -86,7 +88,11 @@ pub fn is_private_ip(ip: &IpAddr) -> bool {
         },
         IpAddr::V6(v6) => {
             let seg0 = v6.segments()[0];
-            v6.is_loopback() || (seg0 & 0xFFC0) == 0xFE80 || (seg0 & 0xFE00) == 0xFC00
+            // `::` is included for the same reason config-time validation
+            // flags it (`is_ssrf_sensitive`): connect(2) to the unspecified
+            // address is routed to loopback, so it reaches exactly the
+            // services the loopback check exists to block.
+            v6.is_loopback() || v6.is_unspecified() || (seg0 & 0xFFC0) == 0xFE80 || (seg0 & 0xFE00) == 0xFC00
         },
     }
 }
@@ -493,6 +499,16 @@ mod tests {
     #[test]
     fn is_private_ip_loopback_v6() {
         assert!(is_private_ip(&"::1".parse().unwrap()), "::1 is IPv6 loopback");
+    }
+
+    #[test]
+    fn is_private_ip_unspecified_v6() {
+        // `::` must match the config-time `is_ssrf_sensitive` verdict:
+        // connecting to it lands on loopback.
+        assert!(
+            is_private_ip(&"::".parse().unwrap()),
+            ":: is the IPv6 unspecified address"
+        );
     }
 
     #[test]

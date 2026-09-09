@@ -10,7 +10,11 @@
 #   curl http://localhost:8080/
 #
 # The request is forwarded to the backend resolved from the
-# hostname endpoint.
+# hostname endpoint. Because a hostname can be rebound between
+# config load and connection time, a resolved private or reserved
+# address is refused unless insecure_options.allow_private_upstreams
+# is set - which this example needs, since "localhost" resolves to
+# loopback.
 
 listeners:
   - name: default
@@ -32,3 +36,4 @@ filter_chains:
 
 insecure_options:
   allow_private_endpoints: true # example proxies to local backends
+  allow_private_upstreams: true # "localhost" resolves to loopback at connection time

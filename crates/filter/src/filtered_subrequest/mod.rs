@@ -394,7 +394,7 @@ impl FilteredSubrequestExecutor {
                 format!("filtered_subrequest: step '{label}' did not resolve an upstream").into()
             })?;
             in_transport_inner.store(true, Ordering::Release);
-            let peer = build_peer(upstream).await;
+            let peer = build_peer(upstream, pipeline.allow_private_upstreams()).await;
             apply_request_header_mutations(&mut sub_headers, &filter_ctx);
             ensure_destination_host(&mut sub_headers, &upstream.address)?;
             sanitize_subrequest_headers(&mut sub_headers);

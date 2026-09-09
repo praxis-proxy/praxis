@@ -116,6 +116,9 @@ fn resolve_listener_pipeline(config: &Config, listener: &Listener, registry: &Fi
     pipeline.set_route_templates(Arc::new(praxis_core::config::RouteTemplates::compile(
         &config.metrics.route_templates,
     )));
+    // Mirrors `configure_pipeline` in the server: without it a hostname
+    // upstream is refused at connection time even when the config opts in.
+    pipeline.set_allow_private_upstreams(config.insecure_options.allow_private_upstreams);
     Arc::new(pipeline)
 }
 

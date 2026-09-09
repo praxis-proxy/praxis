@@ -183,6 +183,9 @@ fn configure_pipeline(
     // what lets session bindings survive config reloads.
     pipeline.set_session_stores(Arc::clone(session_stores));
     pipeline.set_subrequest_client(subrequest_client.clone());
+    // Runtime SSRF / DNS-rebinding control for the HTTP upstream path: the
+    // peer builders read this off the pipeline when they resolve a hostname.
+    pipeline.set_allow_private_upstreams(config.insecure_options.allow_private_upstreams);
     pipeline.apply_insecure_options(&config.insecure_options);
     Ok(())
 }
