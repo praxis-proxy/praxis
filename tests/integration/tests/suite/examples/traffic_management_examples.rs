@@ -111,3 +111,21 @@ fn rate_limiting_example_returns_rate_limit_headers() {
     }
     panic!("rate limiter should have returned 429 within 50 requests");
 }
+
+#[test]
+fn cluster_application_metadata_example_proxies_request() {
+    let backend_guard = start_backend_with_shutdown("llm");
+    let proxy_port = free_port();
+    let config = super::load_example_config(
+        "traffic-management/cluster-application-metadata.yaml",
+        proxy_port,
+        HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
+    );
+    let proxy = start_proxy(&config);
+
+    // A cluster tagged with opaque application metadata is accepted and still
+    // proxies traffic normally — the metadata rides along with the cluster.
+    let (status, body) = http_get(proxy.addr(), "/v1/chat/completions", None);
+    assert_eq!(status, 200, "request to the tagged cluster should be proxied");
+    assert_eq!(body, "llm", "response body should come from the tagged backend");
+}

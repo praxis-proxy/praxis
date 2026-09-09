@@ -1,0 +1,40 @@
+# Cluster Application Metadata
+#
+# Tags an upstream cluster with opaque application metadata:
+# `application_protocol` (the wire format the upstream body speaks) and
+# `application_provider` (the provider-specific flavor). Both stay
+# opaque to Praxis core — consuming filters interpret them — and are
+# validated only as bounded, canonical identifiers. Traffic is proxied
+# normally; the metadata simply travels with the cluster definition.
+#
+# Usage:
+#   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/cluster-application-metadata.yaml
+#   curl -s http://localhost:8080/v1/chat/completions
+
+listeners:
+  - name: default
+    address: "127.0.0.1:8080"
+    filter_chains:
+      - main
+
+filter_chains:
+  - name: main
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: llm_backend
+
+      - filter: load_balancer
+        clusters:
+          - name: llm_backend
+            http:
+              # Opaque identifiers, not enums — interpreted by consuming
+              # filters, validated here only as canonical identifiers.
+              application_protocol: openai_chat_completions
+              application_provider: vllm
+            endpoints:
+              - "127.0.0.1:3001"
+
+insecure_options:
+  allow_private_endpoints: true # example proxies to a local backend

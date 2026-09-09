@@ -60,6 +60,10 @@ pub struct ClusterHttpOptions {
     /// bounded, canonical identifier: 1–64 bytes of lowercase ASCII
     /// letters, digits, `.`, `_`, or `-`, starting and ending with a
     /// letter or digit.
+    ///
+    /// The open string type is deliberate: the protocol set is
+    /// open-ended and owned by consuming filters, so keep this a string
+    /// — do not convert it to an enum.
     #[serde(default)]
     pub application_protocol: Option<Arc<str>>,
 
@@ -68,7 +72,8 @@ pub struct ClusterHttpOptions {
     /// Distinguishes provider-specific semantics (for example `openai`
     /// or `vllm`) independent of the deployed cluster, whose identity
     /// is already the cluster name. Stays opaque to Praxis core and
-    /// follows the same identifier rules as `application_protocol`.
+    /// follows the same identifier rules — and the same enum-free
+    /// rationale — as `application_protocol`.
     #[serde(default)]
     pub application_provider: Option<Arc<str>>,
 }

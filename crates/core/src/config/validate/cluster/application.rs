@@ -10,7 +10,7 @@
 //! identifiers — it deliberately does not know any protocol or provider
 //! name.
 
-use crate::errors::ProxyError;
+use crate::{config::Cluster, errors::ProxyError};
 
 /// Maximum length, in bytes, of an application metadata identifier.
 const MAX_IDENTIFIER_LEN: usize = 64;
@@ -20,7 +20,7 @@ const MAX_IDENTIFIER_LEN: usize = 64;
 /// Both fields are independently optional; an absent field is always
 /// valid. A present field must be a canonical identifier per
 /// [`validate_identifier`].
-pub(super) fn validate_application_metadata(cluster: &crate::config::Cluster) -> Result<(), ProxyError> {
+pub(super) fn validate_application_metadata(cluster: &Cluster) -> Result<(), ProxyError> {
     if let Some(protocol) = cluster.http.application_protocol.as_deref() {
         validate_identifier(protocol, "application_protocol", &cluster.name)?;
     }
@@ -79,7 +79,6 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use crate::config::Cluster;
 
     #[test]
     fn accept_canonical_identifiers() {
@@ -122,6 +121,16 @@ mod tests {
         assert!(err("open ai").contains("lowercase ASCII"), "space");
         assert!(err("openai!").contains("lowercase ASCII"), "punctuation");
         assert!(err("openai/v1").contains("lowercase ASCII"), "slash");
+    }
+
+    #[test]
+    fn reject_non_ascii_identifiers() {
+        // The byte-wise check already rejects multi-byte UTF-8; asserting it
+        // explicitly documents the intent and guards against a future
+        // refactor that loosens the identifier to Unicode.
+        assert!(err("café").contains("lowercase ASCII"), "accented latin");
+        assert!(err("模型").contains("lowercase ASCII"), "cjk");
+        assert!(err("openai🚀").contains("lowercase ASCII"), "emoji");
     }
 
     #[test]

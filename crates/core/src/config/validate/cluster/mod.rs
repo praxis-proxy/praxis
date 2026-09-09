@@ -383,6 +383,33 @@ clusters:
         );
     }
 
+    #[test]
+    fn reject_inline_load_balancer_cluster_invalid_application_protocol() {
+        // Clusters declared inline in a load_balancer filter run through the
+        // same validation as top-level clusters, so an invalid
+        // application_protocol must be rejected there too.
+        let yaml = r#"
+listeners:
+  - name: web
+    address: "0.0.0.0:80"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: load_balancer
+        clusters:
+          - name: api
+            endpoints: ["10.0.0.1:443"]
+            http:
+              application_protocol: OpenAI
+"#;
+        let err = Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("application_protocol"),
+            "inline load-balancer cluster must reject an invalid application_protocol: {err}"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
