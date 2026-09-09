@@ -164,18 +164,14 @@ pub fn parse_json_rpc_envelope(
     input: &[u8],
     config: &JsonRpcConfig,
 ) -> Result<Option<JsonRpcEnvelope>, JsonRpcParseError> {
-    use serde::de::DeserializeSeed as _;
-
     // Stream the body through an envelope-field visitor instead of
     // materializing the whole document as a Value: serde still scans and
     // validates every byte (trailing content included, via `end()`), but
     // the `params` subtree — nearly the entire body for LLM payloads —
-    // is consumed without allocating a DOM.
-    let mut de = serde_json::Deserializer::from_slice(input);
-    let top = raw_envelope::TopSeed
-        .deserialize(&mut de)
-        .and_then(|top| de.end().map(|()| top))
-        .map_err(|e| JsonRpcParseError::InvalidJson(e.to_string()))?;
+    // is consumed without allocating a DOM. Batch captures are capped by
+    // the configured policy and limit, so an over-sized batch is
+    // rejected without ever being held in full.
+    let top = raw_envelope::capture_top(input, config).map_err(|e| JsonRpcParseError::InvalidJson(e.to_string()))?;
 
     match top {
         raw_envelope::RawTop::Message(message) => match message_to_envelope(&message) {
@@ -183,7 +179,7 @@ pub fn parse_json_rpc_envelope(
             Err(JsonRpcParseError::MissingVersion) => handle_non_json_rpc(config),
             Err(e) => Err(e),
         },
-        raw_envelope::RawTop::Batch(items) => parse_raw_batch(&items, config),
+        raw_envelope::RawTop::Batch { items, len } => parse_raw_batch(&items, len, config),
         raw_envelope::RawTop::Other => handle_non_json_rpc(config),
     }
 }
@@ -202,25 +198,35 @@ fn raw_id_to_parts(id: &raw_envelope::RawId) -> Result<(Option<String>, JsonRpcI
 
 /// Batch handling over captured items, mirroring [`parse_batch`]'s
 /// policy, size, and first-valid semantics exactly.
+///
+/// `len` is the array's true element count; `items` holds only the
+/// captures the configured policy can use (see [`RawTop::Batch`]),
+/// which under [`BatchPolicy::Reject`] is none at all. Every decision
+/// below is therefore made on `len`, and `items` is only iterated on
+/// the [`BatchPolicy::First`] path once `len <= max_batch_size` has
+/// proven it complete.
+///
+/// [`RawTop::Batch`]: raw_envelope::RawTop::Batch
 fn parse_raw_batch(
     items: &[Option<raw_envelope::RawMessage>],
+    len: usize,
     config: &JsonRpcConfig,
 ) -> Result<Option<JsonRpcEnvelope>, JsonRpcParseError> {
-    if items.is_empty() {
+    if len == 0 {
         return Err(JsonRpcParseError::EmptyBatch);
     }
     match config.batch_policy {
         BatchPolicy::Reject => Err(JsonRpcParseError::UnsupportedBatch),
         BatchPolicy::First => {
-            if items.len() > config.max_batch_size {
-                return Err(JsonRpcParseError::BatchTooLarge(items.len(), config.max_batch_size));
+            if len > config.max_batch_size {
+                return Err(JsonRpcParseError::BatchTooLarge(len, config.max_batch_size));
             }
             for item in items {
                 if let Some(message) = item
                     && let Ok(mut envelope) = message_to_envelope(message)
                 {
                     envelope.kind = JsonRpcKind::Batch;
-                    envelope.batch_len = Some(items.len());
+                    envelope.batch_len = Some(len);
                     return Ok(Some(envelope));
                 }
             }

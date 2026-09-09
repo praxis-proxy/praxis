@@ -8,7 +8,7 @@ use bytes::Bytes;
 use super::{
     super::OnInvalidBehavior,
     JsonRpcFilter,
-    config::{BatchPolicy, DEFAULT_MAX_BATCH_SIZE, JsonRpcHeaders},
+    config::{BatchPolicy, DEFAULT_MAX_BATCH_SIZE, JsonRpcHeaders, MAX_BATCH_SIZE},
     envelope::{JsonRpcIdKind, JsonRpcKind, parse_json_rpc_envelope},
 };
 use crate::{FilterAction, HttpFilter as _};
@@ -123,6 +123,27 @@ fn reject_zero_max_batch_size() {
         err.to_string().contains("must be greater than 0"),
         "error should mention max_batch_size constraint"
     );
+}
+
+#[test]
+fn reject_max_batch_size_above_ceiling() {
+    // The limit is also the parser's per-request capture retention
+    // bound, so an unbounded value would put peak memory in the hands
+    // of whoever wrote the config. Reject it at config time.
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!("max_batch_size: {}", MAX_BATCH_SIZE + 1)).unwrap();
+    let err = JsonRpcFilter::from_config(&yaml)
+        .err()
+        .expect("above-ceiling max_batch_size should fail");
+    assert!(
+        err.to_string().contains("exceeds maximum"),
+        "error should mention the max_batch_size ceiling, got: {err}"
+    );
+}
+
+#[test]
+fn accept_max_batch_size_at_ceiling() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(&format!("max_batch_size: {MAX_BATCH_SIZE}")).unwrap();
+    JsonRpcFilter::from_config(&yaml).expect("max_batch_size exactly at the ceiling should be accepted");
 }
 
 #[test]
@@ -467,6 +488,161 @@ fn batch_exceeding_max_size_rejected() {
 }
 
 #[test]
+fn oversized_batch_reports_exact_count_without_retaining_items() {
+    // A batch far larger than max_batch_size must be rejected with the
+    // true element count, and the parser must not retain a capture per
+    // element on the way there: `[0,0,...]` is ~2 bytes per element but
+    // each retained capture is an order of magnitude larger, so an
+    // unbounded push amplifies the buffered body into a much larger
+    // transient allocation for a request that is rejected anyway.
+    let config = make_config_with_batch_limit(1);
+    let body = scalar_batch_body(OVERSIZED_BATCH_ITEMS);
+
+    let err = parse_json_rpc_envelope(body.as_bytes(), &config).expect_err("oversized batch must be rejected");
+    assert!(
+        matches!(
+            err,
+            super::envelope::JsonRpcParseError::BatchTooLarge(actual, max)
+                if actual == OVERSIZED_BATCH_ITEMS && max == 1
+        ),
+        "oversized batch must report the exact element count and limit: got {err:?}"
+    );
+
+    // Structural half of the guard: the capture the rejection is made
+    // from holds at most max_batch_size items regardless of array size.
+    let (items, len) = capture_batch(&body, &config);
+    assert_eq!(len, OVERSIZED_BATCH_ITEMS, "the true element count must be preserved");
+    assert_eq!(
+        items, config.max_batch_size,
+        "captured items must stay bounded by max_batch_size, not by the element count"
+    );
+}
+
+#[test]
+fn batch_capture_is_bounded_at_every_limit() {
+    // The bound holds for any limit, and an in-limit batch is still
+    // captured in full so the first-valid scan has every item.
+    for max_batch_size in [1, 2, 4, 5, 6, 10] {
+        let config = make_config_with_batch_limit(max_batch_size);
+        let (items, len) = capture_batch(&scalar_batch_body(5), &config);
+        assert_eq!(
+            len, 5,
+            "the true element count must be preserved (limit {max_batch_size})"
+        );
+        assert_eq!(
+            items,
+            std::cmp::min(5, max_batch_size),
+            "captures must be min(elements, max_batch_size) (limit {max_batch_size})"
+        );
+    }
+}
+
+#[test]
+fn reject_policy_retains_no_batch_captures() {
+    // BatchPolicy::Reject decides on the element count alone and never
+    // reads a capture, so retaining any is pure attacker-controlled
+    // memory cost, the very amplification this guard exists to stop.
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Reject);
+    let (items, len) = capture_batch(&scalar_batch_body(OVERSIZED_BATCH_ITEMS), &config);
+
+    assert_eq!(len, OVERSIZED_BATCH_ITEMS, "the true element count must be preserved");
+    assert_eq!(
+        items, 0,
+        "the reject policy reads no captures, so none may be retained (max_batch_size was {})",
+        config.max_batch_size
+    );
+}
+
+#[test]
+fn reject_policy_still_rejects_batches_without_captures() {
+    // Retaining nothing must not change what the reject policy does:
+    // a non-empty batch is still UnsupportedBatch and an empty one is
+    // still EmptyBatch, both decided on the element count.
+    let config = make_config(BatchPolicy::Reject, OnInvalidBehavior::Reject);
+
+    let err = parse_json_rpc_envelope(br#"[{"jsonrpc":"2.0","method":"a","id":1}]"#, &config)
+        .expect_err("a batch must be rejected under the reject policy");
+    assert!(
+        matches!(err, super::envelope::JsonRpcParseError::UnsupportedBatch),
+        "a non-empty batch must still be UnsupportedBatch: got {err:?}"
+    );
+
+    let err = parse_json_rpc_envelope(b"[]", &config).expect_err("an empty batch must be rejected");
+    assert!(
+        matches!(err, super::envelope::JsonRpcParseError::EmptyBatch),
+        "an empty batch must still be EmptyBatch: got {err:?}"
+    );
+}
+
+#[test]
+fn batch_at_exact_max_size_keeps_its_last_item() {
+    // Behavioural boundary for the retention bound: at exactly
+    // max_batch_size the LAST capture is the one an off-by-one drops,
+    // so make it the only valid JSON-RPC message in the batch. A test
+    // whose first item is valid short-circuits at index 0 and cannot
+    // see a dropped tail.
+    const LIMIT: usize = 8;
+    let config = make_config_with_batch_limit(LIMIT);
+
+    let mut body = String::from("[");
+    for _ in 0..LIMIT - 1 {
+        body.push_str(r#"{"not":"jsonrpc"},"#);
+    }
+    body.push_str(r#"{"jsonrpc":"2.0","method":"last","id":9}]"#);
+
+    let envelope = parse_json_rpc_envelope(body.as_bytes(), &config)
+        .expect("a batch at exactly the limit must be accepted")
+        .expect("the trailing valid message must be found");
+
+    assert_eq!(
+        envelope.method,
+        Some("last".to_owned()),
+        "the item at index max_batch_size - 1 must still be captured"
+    );
+    assert_eq!(envelope.id, Some("9".to_owned()), "the last item's id must be promoted");
+    assert_eq!(envelope.kind, JsonRpcKind::Batch, "kind should be batch");
+    assert_eq!(envelope.batch_len, Some(LIMIT), "batch_len must be the true count");
+}
+
+#[test]
+fn oversized_batch_of_objects_is_rejected_by_count() {
+    // The bound must not depend on item shape: nested objects and
+    // arrays past the cap are drained rather than retained, and the
+    // element count stays exact.
+    let config = make_config_with_batch_limit(2);
+    let item = r#"{"jsonrpc":"2.0","method":"m","id":1,"params":{"a":[1,2,{"b":3}]}}"#;
+    let body = format!("[{}]", vec![item; 50].join(","));
+
+    let err = parse_json_rpc_envelope(body.as_bytes(), &config).expect_err("oversized batch must be rejected");
+    assert!(
+        matches!(
+            err,
+            super::envelope::JsonRpcParseError::BatchTooLarge(actual, max) if actual == 50 && max == 2
+        ),
+        "nested batch items must be counted exactly and not retained: got {err:?}"
+    );
+
+    let (items, len) = capture_batch(&body, &config);
+    assert_eq!(len, 50, "every nested item must be counted");
+    assert_eq!(items, 2, "only max_batch_size nested items may be retained");
+}
+
+#[test]
+fn oversized_batch_with_trailing_content_is_still_invalid_json() {
+    // Draining past the cap must keep scanning every byte: trailing
+    // content after the array is still caught by `de.end()`, so a
+    // truncating short-circuit cannot smuggle a malformed body through.
+    let config = make_config_with_batch_limit(1);
+    let body = format!("{} trailing", scalar_batch_body(64));
+
+    let err = parse_json_rpc_envelope(body.as_bytes(), &config).expect_err("trailing content must be rejected");
+    assert!(
+        matches!(err, super::envelope::JsonRpcParseError::InvalidJson(_)),
+        "trailing content after an over-sized batch must still be invalid JSON: got {err:?}"
+    );
+}
+
+#[test]
 fn batch_too_large_error_includes_counts() {
     let config = make_config_with_batch_limit(1);
     let json = br#"[
@@ -781,6 +957,41 @@ fn body_mode_is_stream_buffer() {
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// Element count for the oversized-batch regression bodies: far above
+/// any plausible `max_batch_size`, small enough to stay a fast unit test.
+const OVERSIZED_BATCH_ITEMS: usize = 100_000;
+
+/// A batch body of `count` scalar elements: `[0,0,...,0]`.
+fn scalar_batch_body(count: usize) -> String {
+    let mut body = String::with_capacity(count * 2 + 2); // "0," per item, plus brackets
+    body.push('[');
+    for i in 0..count {
+        if i > 0 {
+            body.push(',');
+        }
+        body.push('0');
+    }
+    body.push(']');
+    body
+}
+
+/// Capture `body` as a batch under `config` and report
+/// `(retained captures, true element count)`.
+///
+/// Goes through [`capture_top`], the same entry point
+/// [`parse_json_rpc_envelope`] uses, so these assertions cover how the
+/// configuration is turned into the retention bound and not just the
+/// visitor that applies it.
+///
+/// [`capture_top`]: super::raw_envelope::capture_top
+fn capture_batch(body: &str, config: &super::config::JsonRpcConfig) -> (usize, usize) {
+    let top = super::raw_envelope::capture_top(body.as_bytes(), config).expect("batch body must deserialize");
+    match top {
+        super::raw_envelope::RawTop::Batch { items, len } => (items.len(), len),
+        other => panic!("expected a batch capture, got {other:?}"),
+    }
+}
 
 fn make_config(batch_policy: BatchPolicy, on_invalid: OnInvalidBehavior) -> super::config::JsonRpcConfig {
     super::config::JsonRpcConfig {

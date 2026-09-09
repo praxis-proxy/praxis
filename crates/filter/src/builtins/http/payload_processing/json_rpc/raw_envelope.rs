@@ -21,6 +21,8 @@
 
 use serde::de::{DeserializeSeed, Deserializer, Error as _, IgnoredAny, MapAccess, SeqAccess, Visitor};
 
+use super::config::{BatchPolicy, JsonRpcConfig};
+
 // -----------------------------------------------------------------------------
 // Depth-bounded ignore
 // -----------------------------------------------------------------------------
@@ -190,11 +192,67 @@ pub(super) enum RawTop {
     /// A single message object.
     Message(RawMessage),
     /// A batch array of per-item captures (`None` for non-object
-    /// items). Memory stays bounded by the old DOM shape: each capture
-    /// holds only the envelope fields, never the item's `params`.
-    Batch(Vec<Option<RawMessage>>),
+    /// items).
+    ///
+    /// Each capture holds only the envelope fields, never the item's
+    /// `params`, and at most [`retained_batch_items`] of them are
+    /// retained: peak memory is bounded by the configured batch limit
+    /// instead of by the body size, so an over-sized batch is never
+    /// materialized before it is rejected. `len` is the true element
+    /// count of the array, so `items` is the complete capture exactly
+    /// when `len` is within that retention bound.
+    Batch {
+        /// The retained per-item captures, at most
+        /// [`retained_batch_items`] of them.
+        items: Vec<Option<RawMessage>>,
+        /// Number of array elements seen, retained or not.
+        len: usize,
+    },
     /// Any other root value (string, number, bool, null).
     Other,
+}
+
+// -----------------------------------------------------------------------------
+// Capture entry point
+// -----------------------------------------------------------------------------
+
+/// Capture the JSON root of `input` under `config`.
+///
+/// This is the only place a [`JsonRpcConfig`] becomes the
+/// deserializer's batch retention bound, so the bound cannot drift
+/// away from the configuration it is supposed to follow. Trailing
+/// content is rejected via [`Deserializer::end`], matching the DOM
+/// parser this replaced.
+///
+/// # Errors
+///
+/// Returns the [`serde_json::Error`] from malformed JSON, over-deep
+/// nesting (see [`MAX_ENVELOPE_DEPTH`]), or trailing content.
+///
+/// [`Deserializer::end`]: serde_json::Deserializer::end
+pub(super) fn capture_top(input: &[u8], config: &JsonRpcConfig) -> Result<RawTop, serde_json::Error> {
+    let mut de = serde_json::Deserializer::from_slice(input);
+    let top = TopSeed {
+        max_batch_size: retained_batch_items(config),
+    }
+    .deserialize(&mut de)?;
+    de.end()?;
+    Ok(top)
+}
+
+/// Number of batch item captures worth retaining under `config`.
+///
+/// [`BatchPolicy::First`] scans the retained captures for the first
+/// valid message, so it needs every item a batch may legally contain.
+/// [`BatchPolicy::Reject`] refuses every batch on its element count
+/// alone and never reads a capture, so retaining any would be pure
+/// attacker-controlled memory cost. Either way the peak is bounded by
+/// configuration rather than by the body size.
+fn retained_batch_items(config: &JsonRpcConfig) -> usize {
+    match config.batch_policy {
+        BatchPolicy::Reject => 0,
+        BatchPolicy::First => config.max_batch_size,
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -202,7 +260,10 @@ pub(super) enum RawTop {
 // -----------------------------------------------------------------------------
 
 /// Seed for the JSON root.
-pub(super) struct TopSeed;
+struct TopSeed {
+    /// Number of batch items to retain; see [`retained_batch_items`].
+    max_batch_size: usize,
+}
 
 impl<'de> DeserializeSeed<'de> for TopSeed {
     type Value = RawTop;
@@ -211,12 +272,17 @@ impl<'de> DeserializeSeed<'de> for TopSeed {
     where
         D: Deserializer<'de>,
     {
-        deserializer.deserialize_any(TopVisitor)
+        deserializer.deserialize_any(TopVisitor {
+            max_batch_size: self.max_batch_size,
+        })
     }
 }
 
 /// Visitor dispatching on the root value kind.
-struct TopVisitor;
+struct TopVisitor {
+    /// Number of batch items to retain; see [`retained_batch_items`].
+    max_batch_size: usize,
+}
 
 impl<'de> Visitor<'de> for TopVisitor {
     type Value = RawTop;
@@ -236,11 +302,21 @@ impl<'de> Visitor<'de> for TopVisitor {
     where
         A: SeqAccess<'de>,
     {
+        // Retain only as many captures as a batch may legally contain,
+        // but keep pulling elements so serde still scans and validates
+        // every byte (and `len` stays exact for the too-large error).
+        // Over-sized batches are rejected downstream, so their captures
+        // would only be dropped: holding them would let a body of tiny
+        // array elements amplify into a far larger transient allocation.
         let mut items = Vec::new();
+        let mut len = 0;
         while let Some(item) = seq.next_element_seed(ItemSeed)? {
-            items.push(item);
+            len += 1;
+            if items.len() < self.max_batch_size {
+                items.push(item);
+            }
         }
-        Ok(RawTop::Batch(items))
+        Ok(RawTop::Batch { items, len })
     }
 
     // Scalar roots: consumed by serde already; classify as Other.

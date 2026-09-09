@@ -20,7 +20,7 @@ Writes `json_rpc.*` entries to the filter result set for branch chain conditions
 | `headers.id` | string | no | Header name for JSON-RPC id (e.g., `X-Json-Rpc-Id`). |
 | `headers.kind` | string | no | Header name for JSON-RPC kind (e.g., `X-Json-Rpc-Kind`). |
 | `headers.method` | string | no | Header name for JSON-RPC method (e.g., `X-Json-Rpc-Method`). |
-| `max_batch_size` | integer | no | Maximum number of items allowed in a JSON-RPC batch array. Only enforced when [`batch_policy`] is [`First`]. Requests exceeding this limit are rejected with HTTP 400. This prevents a single HTTP request from multiplexing an excessive number of JSON-RPC calls, which could bypass per-request rate limits. Default: [`DEFAULT_MAX_BATCH_SIZE`] (100). |
+| `max_batch_size` | integer | no | Maximum number of items allowed in a JSON-RPC batch array. Only enforced when [`batch_policy`] is [`First`]. Requests exceeding this limit are rejected with HTTP 400. This prevents a single HTTP request from multiplexing an excessive number of JSON-RPC calls, which could bypass per-request rate limits. Under [`First`] this value is also how many batch item captures the parser retains while deserializing the body, so it bounds peak parse memory as well as the accepted batch length: raising it raises both. Under [`Reject`] nothing is retained and the value has no effect at all. Default: [`DEFAULT_MAX_BATCH_SIZE`] (100). Must be between 1 and [`MAX_BATCH_SIZE`] (10,000). |
 | `max_body_bytes` | integer | no | Maximum body size in bytes for `StreamBuffer`. |
 | `on_invalid` | `continue` \| `reject` \| `error` | no | Invalid input handling behavior. |
 

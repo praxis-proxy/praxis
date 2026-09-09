@@ -22,9 +22,25 @@ pub const DEFAULT_MAX_BODY_BYTES: usize = 1_048_576; // 1 MiB
 ///
 /// Applies only when [`BatchPolicy::First`] is active. A single HTTP
 /// request carrying a large batch can bypass per-request rate limits,
-/// so this cap provides a safety net. The default (100) is
-/// conservative enough for legitimate use while preventing abuse.
+/// so this cap provides a safety net. Under that policy it doubles as
+/// the parser's retention bound (see [`max_batch_size`]). The default
+/// (100) is conservative enough for legitimate use while preventing
+/// abuse.
+///
+/// [`max_batch_size`]: JsonRpcConfig::max_batch_size
 pub const DEFAULT_MAX_BATCH_SIZE: usize = 100;
+
+/// Ceiling for [`max_batch_size`].
+///
+/// Under [`BatchPolicy::First`] the limit is also how many item
+/// captures the parser retains while deserializing, so an unbounded
+/// value would leave peak memory to be chosen by whoever wrote the
+/// config rather than bounded by the filter. 10,000 is a hundred times
+/// [`DEFAULT_MAX_BATCH_SIZE`] and far beyond any legitimate batch,
+/// while keeping worst-case retention small.
+///
+/// [`max_batch_size`]: JsonRpcConfig::max_batch_size
+pub const MAX_BATCH_SIZE: usize = 10_000; // 100x the default
 
 // -----------------------------------------------------------------------------
 // BatchPolicy
@@ -131,10 +147,18 @@ pub struct JsonRpcConfig {
     /// a single HTTP request from multiplexing an excessive number of
     /// JSON-RPC calls, which could bypass per-request rate limits.
     ///
-    /// Default: [`DEFAULT_MAX_BATCH_SIZE`] (100).
+    /// Under [`First`] this value is also how many batch item captures
+    /// the parser retains while deserializing the body, so it bounds
+    /// peak parse memory as well as the accepted batch length: raising
+    /// it raises both. Under [`Reject`] nothing is retained and the
+    /// value has no effect at all.
+    ///
+    /// Default: [`DEFAULT_MAX_BATCH_SIZE`] (100). Must be between 1 and
+    /// [`MAX_BATCH_SIZE`] (10,000).
     ///
     /// [`batch_policy`]: JsonRpcConfig::batch_policy
     /// [`First`]: BatchPolicy::First
+    /// [`Reject`]: BatchPolicy::Reject
     #[serde(default = "default_max_batch_size")]
     pub max_batch_size: usize,
 
@@ -177,10 +201,22 @@ pub fn build_config(cfg: JsonRpcConfig) -> Result<(usize, JsonRpcConfig), Filter
     Ok((cfg.max_body_bytes, cfg))
 }
 
-/// Validate that `max_batch_size` is at least 1.
+/// Validate that `max_batch_size` is between 1 and [`MAX_BATCH_SIZE`].
+///
+/// The upper bound matters beyond the accepted batch length: under
+/// [`BatchPolicy::First`] the limit is also the parser's per-request
+/// capture retention bound, so leaving it unbounded would leave peak
+/// memory unbounded too.
 fn validate_max_batch_size(cfg: &JsonRpcConfig) -> Result<(), FilterError> {
     if cfg.max_batch_size == 0 {
         return Err("json_rpc: max_batch_size must be greater than 0".into());
+    }
+    if cfg.max_batch_size > MAX_BATCH_SIZE {
+        return Err(format!(
+            "json_rpc: max_batch_size ({}) exceeds maximum ({MAX_BATCH_SIZE})",
+            cfg.max_batch_size
+        )
+        .into());
     }
     Ok(())
 }
