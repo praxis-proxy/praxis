@@ -169,7 +169,7 @@ jobs:
           ref: ${{ github.event.repository.default_branch || 'main' }}
 
       - name: Review PR
-        uses: anthropics/claude-code-action@9d7150bc8a3dae8149739a88019d192b579ad90c # v1.0.193
+        uses: anthropics/claude-code-action@9c5ddab2e6d17b83ea679153b31f1d5f023cf636 # v1.0.217
         with:
           use_vertex: "true"
           github_token: ${{ steps.app-token.outputs.token }}
