@@ -271,6 +271,12 @@ hooks have default implementations that pass through.
 - `BodyDone` : signal that this filter has finished body
   processing; subsequent body chunks skip this filter
   while other filters continue normally
+- `TerminalResponse(response)` /
+  `StreamingTerminalResponse(response)` : return a complete
+  response and run the response phase for filters that already
+  ran; valid only from `on_request`. Returned from a body hook
+  they are a filter error, because the exchange is already
+  committed and no response can be substituted for it
 
 ```rust
 FilterAction::Reject(Rejection::status(429)
@@ -462,6 +468,10 @@ condition are ANDed; all conditions must pass.
 | `methods`     | Method in list               |
 | `headers`     | All listed headers match     |
 
+A header may arrive on several field lines. `headers` matches a
+listed value against every one of them, so a repeated header
+matches when any of its lines carries the value.
+
 ```yaml
 filter_chains:
   - name: main
@@ -495,7 +505,11 @@ Skipped on request = skipped on response and on body hooks.
 
 Use `response_conditions` to gate `on_response` execution.
 Response predicates: `status` (list of status codes),
-`headers`.
+`headers`. Status codes must be in the HTTP range
+100-599 and header names must be valid HTTP header
+names; a predicate no response could ever satisfy is
+rejected at startup rather than silently disabling
+(`when`) or un-gating (`unless`) its filter.
 
 ```yaml
 - filter: headers
@@ -506,6 +520,12 @@ Response predicates: `status` (list of status codes),
     - name: "Cache-Control"
       value: "public, max-age=60"
 ```
+
+`content-type` is compared as a media type: parameters on the
+response are ignored unless the condition lists parameters of its
+own, and then both sides are compared as an unordered set with
+case-insensitive parameter names (and `charset` values). Every
+other header is compared byte for byte.
 
 A filter can have both `conditions` (request phase) and
 `response_conditions` (response phase).

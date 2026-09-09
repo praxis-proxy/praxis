@@ -80,6 +80,20 @@ pub use builtins::{
 #[cfg(feature = "policy-engine")]
 pub use builtins::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
 pub use condition::{should_execute, should_execute_response, should_execute_response_ref};
+
+/// Content digest of a referenced document's bytes.
+///
+/// Used both when a filter records what it loaded
+/// ([`HttpFilter::referenced_file_digests`]) and when the watcher re-reads a
+/// document to detect changes, so the two are directly comparable and an edit
+/// landing between those two reads is never masked.
+#[must_use]
+pub fn referenced_file_content_digest(bytes: &[u8]) -> u64 {
+    use std::hash::Hasher as _;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hasher.write(bytes);
+    hasher.finish()
+}
 pub use context::{
     HttpFilterContext, PendingHeaderResult, Request, Response, StreamTermination, StreamTerminationCause,
     SubRequestResponseMode, TrustedHeaderMutation,

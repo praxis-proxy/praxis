@@ -11,6 +11,7 @@ use tracing::debug;
 
 use crate::{
     FilterAction, FilterError,
+    builtins::http::payload_processing::config_validation::validate_header_name,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
 };
@@ -77,13 +78,19 @@ struct ClientSuppliedId(String);
 impl RequestIdFilter {
     /// Create a request ID filter from parsed YAML config.
     ///
+    /// `header_name` is parsed as an HTTP header name here, so a name that
+    /// cannot identify a header is rejected at config time instead of
+    /// silently dropping every request ID at the protocol boundary.
+    ///
     /// # Errors
     ///
-    /// Returns [`FilterError`] if the YAML config is malformed.
+    /// Returns [`FilterError`] if the YAML config is malformed or
+    /// `header_name` is not a valid HTTP header name.
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: RequestIdFilterConfig = parse_filter_config("request_id", config)?;
+        validate_header_name("request_id", "'header_name'", Some(&cfg.header_name))?;
 
         Ok(Box::new(Self {
             header_name: Arc::from(cfg.header_name.as_str()),
@@ -314,6 +321,35 @@ mod tests {
             filter.name(),
             "request_id",
             "empty config should use default header name"
+        );
+    }
+
+    #[test]
+    fn from_config_rejects_header_name_with_space() {
+        let config: serde_yaml::Value = serde_yaml::from_str("header_name: bad header").unwrap();
+        let err = RequestIdFilter::from_config(&config).err().expect("should reject");
+        assert!(
+            err.to_string().contains("not a valid HTTP header name"),
+            "a header name that cannot be sent must be rejected at config time, got: {err}"
+        );
+    }
+
+    #[test]
+    fn from_config_rejects_empty_header_name() {
+        let config: serde_yaml::Value = serde_yaml::from_str("header_name: ''").unwrap();
+        let err = RequestIdFilter::from_config(&config).err().expect("should reject");
+        assert!(
+            err.to_string().contains("must not be empty"),
+            "an empty header name must be rejected at config time, got: {err}"
+        );
+    }
+
+    #[test]
+    fn from_config_accepts_valid_custom_header_name() {
+        let config: serde_yaml::Value = serde_yaml::from_str("header_name: X-Correlation-ID").unwrap();
+        assert!(
+            RequestIdFilter::from_config(&config).is_ok(),
+            "a valid header name must still be accepted"
         );
     }
 

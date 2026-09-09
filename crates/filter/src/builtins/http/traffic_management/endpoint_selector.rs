@@ -146,8 +146,9 @@ struct EndpointSelectorConfig {
 
     /// HTTP status code for required-mode routing failures.
     ///
-    /// Only used when `required: true`. Defaults to 500.
-    /// Compositions with required external processing typically set 503.
+    /// Only used when `required: true`. Must be a final status (200..=599).
+    /// Defaults to 500. Compositions with required external processing
+    /// typically set 503.
     #[serde(default = "default_status_on_required_failure")]
     status_on_required_failure: u16,
 
@@ -264,10 +265,10 @@ impl EndpointSelectorFilter {
             .parse()
             .map_err(|e| format!("endpoint_selector: invalid source_header: {e}"))?;
 
-        if !(100..=599).contains(&cfg.status_on_required_failure) {
+        if !(200..=599).contains(&cfg.status_on_required_failure) {
             let code = cfg.status_on_required_failure;
             return Err(format!(
-                "endpoint_selector: status_on_required_failure {code} is not a valid HTTP status code (must be 100..=599)"
+                "endpoint_selector: status_on_required_failure {code} is not a valid final HTTP status code (must be 200..=599)"
             )
             .into());
         }
@@ -510,7 +511,22 @@ mod tests {
         let config: serde_yaml::Value =
             serde_yaml::from_str("source_header: x-dest\nrequired: true\nstatus_on_required_failure: 99").unwrap();
         let result = EndpointSelectorFilter::from_config(&config);
-        assert!(result.is_err(), "status codes below 100 must be rejected");
+        assert!(result.is_err(), "status codes below 200 must be rejected");
+    }
+
+    /// A 1xx cannot be the final response to a routing failure, and reaching
+    /// the request path with one would panic in `Rejection::status`.
+    #[test]
+    fn parse_informational_failure_status_errors() {
+        let config: serde_yaml::Value =
+            serde_yaml::from_str("source_header: x-dest\nrequired: true\nstatus_on_required_failure: 100").unwrap();
+        let Err(err) = EndpointSelectorFilter::from_config(&config) else {
+            panic!("an informational status must be rejected");
+        };
+        assert!(
+            err.to_string().contains("must be 200..=599"),
+            "error should name the accepted range, got: {err}"
+        );
     }
 
     #[test]

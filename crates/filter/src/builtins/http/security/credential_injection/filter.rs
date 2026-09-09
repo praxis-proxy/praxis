@@ -43,7 +43,9 @@ struct ClusterCredential {
 /// Credentials are resolved at construction time (inline
 /// values or environment variables). The filter matches on
 /// the cluster name selected by the router filter earlier
-/// in the pipeline.
+/// in the pipeline. Each cluster may carry at most one rule:
+/// a second rule naming the same cluster is rejected at
+/// startup rather than silently replacing the first.
 ///
 /// Scoping is per-cluster: a request routed to a cluster with no
 /// configured entry is left untouched, so a client-supplied header
@@ -123,6 +125,7 @@ impl CredentialInjectionFilter {
     ///
     /// Returns [`FilterError`] if:
     /// - `clusters` is empty
+    /// - Two rules name the same cluster
     /// - Both `value` and `env_var` are set (or neither)
     /// - An `env_var` is not set in the environment
     ///
@@ -137,6 +140,18 @@ impl CredentialInjectionFilter {
         let mut credentials = HashMap::with_capacity(cfg.clusters.len());
 
         for cluster_cfg in &cfg.clusters {
+            // Rules are keyed by cluster name, so a second rule for a cluster
+            // would silently replace the first: the proxy would then send a
+            // different secret, or send it under a different header name, than
+            // the operator's first rule asked for. Reject at construction
+            // instead of picking a winner.
+            if credentials.contains_key(cluster_cfg.name.as_str()) {
+                return Err(format!(
+                    "credential_injection: cluster '{}' has more than one rule (each cluster may appear at most once)",
+                    cluster_cfg.name
+                )
+                .into());
+            }
             let credential = resolve_credential(cluster_cfg)?;
             credentials.insert(Arc::<str>::from(cluster_cfg.name.as_str()), credential);
         }

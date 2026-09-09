@@ -21,9 +21,16 @@ use super::{
 // -----------------------------------------------------------------------------
 
 /// Routes requests to the highest-priority (lowest number) tier that has
-/// sufficient healthy capacity. Spills to the next tier when the current
-/// tier's healthy weight falls below `100 / overprovisioning_factor` of
-/// its total weight.
+/// sufficient healthy capacity. Spills to the next tier when the share of
+/// the tier's endpoints that are healthy falls below
+/// `100 / overprovisioning_factor`.
+///
+/// Capacity is counted per endpoint, not per unit of weight. Weights
+/// shape the distribution *within* a tier through the inner strategy but
+/// do not contribute to the spill decision, so a primary tier of one
+/// weight-9 and one weight-1 endpoint spills as soon as either one is
+/// unhealthy, at 50% healthy endpoints, even when the 90% of tier
+/// weight that a weighted measure would credit is still serving.
 pub(crate) struct PriorityLevels {
     /// Ordered tiers from highest priority (0) to lowest.
     tiers: Vec<PriorityTier>,
@@ -110,6 +117,8 @@ impl PriorityLevels {
 
     /// A tier has capacity if its healthy endpoint ratio exceeds the
     /// overprovisioning threshold: `healthy% >= 100 / overprovisioning_factor`.
+    ///
+    /// Endpoints are counted, not weighed; see the type-level note.
     fn tier_has_capacity(&self, tier: &PriorityTier, health: Option<&ClusterHealthState>) -> bool {
         let total_count = tier.indices.len();
         if total_count == 0 {
@@ -298,6 +307,31 @@ mod tests {
     }
 
     #[test]
+    fn capacity_counts_endpoints_not_weight() {
+        // Pins the documented trade-off: the primary tier holds a
+        // weight-9 and a weight-1 endpoint, and only the weight-1 one is
+        // unhealthy. A weight-based measure would credit 90% of the
+        // tier's capacity and stay put; the endpoint count is 1 of 2,
+        // which is below 100/140, so traffic spills to the failover tier.
+        let endpoints = vec![
+            weighted_ep("10.0.0.1:80", 0, 0, 9),
+            weighted_ep("10.0.0.2:80", 1, 0, 1),
+            weighted_ep("10.0.0.3:80", 2, 1, 1),
+        ];
+        let pl = PriorityLevels::new(endpoints, &SimpleStrategy::RoundRobin, 140);
+        let state = health_state(3);
+        state.endpoints()[1].mark_unhealthy();
+
+        for _ in 0..10 {
+            assert_eq!(
+                &*pl.select(None, Some(&state), &[]).unwrap(),
+                "10.0.0.3:80",
+                "a 1-of-2 healthy primary tier must spill regardless of endpoint weight"
+            );
+        }
+    }
+
+    #[test]
     fn empty_endpoints_returns_none() {
         let pl = PriorityLevels::new(Vec::new(), &SimpleStrategy::RoundRobin, 140);
         assert!(pl.select(None, None, &[]).is_none());
@@ -308,10 +342,14 @@ mod tests {
     // -------------------------------------------------------------------------
 
     fn ep(addr: &str, index: usize, priority: u32) -> WeightedEndpoint {
+        weighted_ep(addr, index, priority, 1)
+    }
+
+    fn weighted_ep(addr: &str, index: usize, priority: u32, weight: u32) -> WeightedEndpoint {
         WeightedEndpoint {
             address: Arc::from(addr),
             index,
-            weight: 1,
+            weight,
             metadata: std::collections::HashMap::new(),
             priority,
             zone: None,

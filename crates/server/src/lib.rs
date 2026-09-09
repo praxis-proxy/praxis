@@ -17,7 +17,8 @@
 //! the Pingora runtime.
 //!
 //! Responsibilities:
-//! - Configuration loading and config-path resolution ([`load_config`], [`resolve_config_path`]).
+//! - Configuration loading and config-path resolution ([`load_config_with_source`], [`load_config`],
+//!   [`resolve_config_path`]).
 //! - Registry assembly with built-in and auto-discovered external filters ([`build_full_registry`]); external filter
 //!   crates are discovered at build time via `[package.metadata.praxis-filters]`.
 //! - Pipeline resolution: named chains are concatenated into per-listener [`FilterPipeline`]s at startup
@@ -36,6 +37,8 @@ pub(crate) mod reload;
 pub(crate) mod reload_diagnostics;
 mod server;
 pub(crate) mod startup_checks;
+#[cfg(test)]
+pub(crate) mod test_support;
 #[cfg(feature = "admin-api")]
 mod version;
 #[cfg(feature = "config-reload")]
@@ -45,7 +48,9 @@ pub use praxis_core::{
     config::load_config,
     logging::{TracingGuard, init_tracing},
 };
-pub use server::{check_root_privilege, fatal, resolve_config_path, run_server, run_server_with_registry};
+pub use server::{
+    check_root_privilege, fatal, load_config_with_source, resolve_config_path, run_server, run_server_with_registry,
+};
 #[cfg(feature = "admin-api")]
 pub use version::process_version_info;
 

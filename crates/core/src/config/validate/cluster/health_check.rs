@@ -146,7 +146,10 @@ fn validate_passive_thresholds(hc: &crate::config::HealthCheckConfig, cluster_na
 // Health Check SSRF Prevention Validation
 // -----------------------------------------------------------------------------
 
-/// Reject health check endpoints that resolve to SSRF-sensitive addresses.
+/// Reject health check endpoints whose host is SSRF-sensitive.
+///
+/// Best-effort: exact for IP literals, lexical for hostnames. See
+/// [`is_sensitive_host`] for what that does and does not catch.
 pub(super) fn validate_health_check_ssrf(
     cluster: &Cluster,
     insecure_options: &InsecureOptions,
@@ -172,11 +175,7 @@ pub(super) fn validate_health_check_ssrf(
 /// Check a single host for SSRF sensitivity, emitting an error or
 /// warning depending on the override flag.
 fn check_ssrf_host(host: &str, cluster_name: &str, addr_str: &str, allowed: bool) -> Result<(), ProxyError> {
-    let sensitive = match host.parse::<IpAddr>() {
-        Ok(raw) => is_ssrf_sensitive(&normalize_mapped_ipv4(raw)),
-        Err(_) => is_ssrf_sensitive_hostname(host),
-    };
-    if !sensitive {
+    if !is_sensitive_host(host) {
         return Ok(());
     }
     if allowed {
@@ -230,6 +229,31 @@ pub fn is_ssrf_sensitive(ip: &IpAddr) -> bool {
             v6.is_loopback() || v6.is_unspecified() || (segs[0] & 0xFFC0) == 0xFE80
         },
     }
+}
+
+/// Whether an endpoint host is SSRF-sensitive.
+///
+/// A single trailing dot is the fully-qualified spelling of the same
+/// name, `localhost.` and `127.0.0.1.` reach exactly what `localhost`
+/// and `127.0.0.1` do, so it is stripped before both the IP-literal
+/// parse and the hostname check. Without that, the dot alone walked
+/// straight past this gate.
+///
+/// # Limitations
+///
+/// Only IP literals are checked exactly. Any other host is matched
+/// against the lexical list in [`is_ssrf_sensitive_hostname`]:
+/// validation never resolves names, so an ordinary-looking hostname
+/// whose address record points at loopback or a metadata service, or
+/// one that only starts to after startup (DNS rebinding), is not
+/// caught here. Restrict egress at the network level where that
+/// matters.
+pub(super) fn is_sensitive_host(host: &str) -> bool {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    host.parse::<IpAddr>().map_or_else(
+        |_| is_ssrf_sensitive_hostname(host),
+        |raw| is_ssrf_sensitive(&normalize_mapped_ipv4(raw)),
+    )
 }
 
 /// Returns `true` for hostnames that commonly resolve to
@@ -328,6 +352,48 @@ fn parse_flexible_octet(s: &str) -> Option<u8> {
 mod tests {
     use super::super::validate_clusters;
     use crate::config::{Cluster, Config, InsecureOptions};
+
+    /// A cluster with one endpoint and an active HTTP health check.
+    fn health_checked_cluster(address: &str) -> Cluster {
+        Cluster {
+            health_check: Some(crate::config::HealthCheckConfig {
+                check_type: crate::config::HealthCheckType::Http,
+                expected_status: 200,
+                healthy_threshold: 2,
+                interval_ms: 5000,
+                passive_healthy_threshold: None,
+                passive_unhealthy_threshold: None,
+                path: "/health".to_owned(),
+                timeout_ms: 2000,
+                unhealthy_threshold: 3,
+            }),
+            ..Cluster::with_defaults("web", vec![address.into()])
+        }
+    }
+
+    #[test]
+    fn reject_fully_qualified_sensitive_health_check_hosts() {
+        // A single trailing dot is the same name, fully qualified, and
+        // resolves identically, it used to walk straight past this gate.
+        for addr in ["localhost.:8080", "127.0.0.1.:8080", "metadata.google.internal.:80"] {
+            let clusters = vec![health_checked_cluster(addr)];
+            let err = validate_clusters(&clusters, &InsecureOptions::default())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("sensitive address"),
+                "the fully-qualified form of '{addr}' must be rejected too: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn accept_fully_qualified_public_health_check_host() {
+        // The trailing dot must not make an ordinary name sensitive.
+        let clusters = vec![health_checked_cluster("api.example.com.:443")];
+        let result = validate_clusters(&clusters, &InsecureOptions::default());
+        assert!(result.is_ok(), "a public fully-qualified host must pass: {result:?}");
+    }
 
     #[test]
     fn accept_valid_http_health_check() {

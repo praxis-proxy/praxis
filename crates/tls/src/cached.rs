@@ -14,6 +14,7 @@ use std::{
     sync::{Arc, OnceLock},
 };
 
+use rustls::pki_types::PrivateKeyDer;
 use zeroize::Zeroizing;
 
 use crate::TlsError;
@@ -234,17 +235,24 @@ impl CachedClientCert {
 
     /// Read and parse PEM cert + key files into cached DER data.
     ///
+    /// The identity is validated before it is cached: the end-entity
+    /// certificate must parse as X.509 and the private key must match
+    /// it. A malformed or mismatched identity is therefore rejected at
+    /// config time instead of failing every upstream handshake.
+    ///
     /// # Errors
     ///
     /// Returns [`TlsError`] if either file cannot be read, contains
-    /// no valid PEM data, or the key file has no private key.
+    /// no valid PEM data, the key file has no private key, or the
+    /// certificate and key do not form a usable client identity.
     ///
     /// [`TlsError`]: crate::TlsError
     pub fn from_pem_files(cert_path: &str, key_path: &str) -> Result<Self, TlsError> {
         let cert_der = load_and_validate_certs(cert_path, "client cert")?;
-        let key_der = parse_key_pem(key_path)?;
+        let key = parse_key_pem(key_path)?;
+        validate_client_identity(cert_path, key_path, &cert_der, &key)?;
         tracing::info!(cert_path, "cached client certificate");
-        Ok(Self::new(cert_der, key_der))
+        Ok(Self::new(cert_der, Zeroizing::new(key.secret_der().to_vec())))
     }
 }
 
@@ -381,12 +389,20 @@ fn parse_cert_pem(cert_path: &str) -> Result<Vec<Vec<u8>>, TlsError> {
         })
 }
 
-/// Read a PEM private key file and return the DER-encoded key bytes.
-fn parse_key_pem(key_path: &str) -> Result<Zeroizing<Vec<u8>>, TlsError> {
-    use rustls::pki_types::{PrivateKeyDer, pem::PemObject as _};
+/// Read a PEM private key file and return the parsed private key.
+///
+/// Parsing allocates a fresh copy of the secret DER that this function
+/// owns and drops once the bytes have been copied into the cache, so
+/// the parsed key is wrapped in [`Zeroizing`] to scrub that copy
+/// instead of releasing it intact.
+///
+/// [`Zeroizing`]: zeroize::Zeroizing
+fn parse_key_pem(key_path: &str) -> Result<Zeroizing<PrivateKeyDer<'static>>, TlsError> {
+    use rustls::pki_types::pem::PemObject as _;
 
     let pem = read_pem_file(key_path)?;
     PrivateKeyDer::from_pem_slice(&pem)
+        .map(Zeroizing::new)
         .map_err(|e| TlsError::FileLoadError {
             path: key_path.to_owned(),
             detail: if matches!(e, rustls::pki_types::pem::Error::NoItemsFound) {
@@ -395,7 +411,44 @@ fn parse_key_pem(key_path: &str) -> Result<Zeroizing<Vec<u8>>, TlsError> {
                 e.to_string()
             },
         })
-        .map(|k| Zeroizing::new(k.secret_der().to_vec()))
+}
+
+/// Check that a client certificate and private key form a usable identity.
+///
+/// Loads the key through the active crypto provider (rejecting key
+/// types no provider can sign with), parses the end-entity certificate
+/// as X.509, and compares its subject public key with the key's. This
+/// mirrors the gate the listener path applies in
+/// [`load_certified_key`], so an unusable cluster identity fails at
+/// config time rather than on every upstream connection.
+///
+/// Intermediate certificates in the chain are not verified here: the
+/// upstream handshake is what validates the chain itself.
+///
+/// [`load_certified_key`]: crate::setup::loader::load_certified_key
+fn validate_client_identity(
+    cert_path: &str,
+    key_path: &str,
+    cert_der: &[Vec<u8>],
+    key: &PrivateKeyDer<'static>,
+) -> Result<(), TlsError> {
+    use rustls::{pki_types::CertificateDer, sign::CertifiedKey};
+
+    let signing_key = crate::setup::default_crypto_provider()
+        .key_provider
+        .load_private_key(key.clone_key())
+        .map_err(|e| TlsError::FileLoadError {
+            path: key_path.to_owned(),
+            detail: format!("unsupported private key type: {e}"),
+        })?;
+
+    let certs = cert_der.iter().cloned().map(CertificateDer::from).collect();
+    CertifiedKey::new(certs, signing_key)
+        .keys_match()
+        .map_err(|e| TlsError::FileLoadError {
+            path: cert_path.to_owned(),
+            detail: format!("client certificate is not a valid X.509 certificate matching the private key: {e}"),
+        })
 }
 
 /// Read a file into a zeroizing byte vector, mapping I/O errors
@@ -532,6 +585,89 @@ mod tests {
                 .expect("valid cert+key PEM should parse");
         assert!(!cached.cert_der().is_empty(), "should parse at least one cert");
         assert!(!cached.key_der().is_empty(), "key DER should not be empty");
+    }
+
+    #[test]
+    fn parsed_private_key_is_returned_in_a_scrubbing_wrapper() {
+        use zeroize::Zeroize as _;
+
+        let identity = gen_test_certs();
+        // The annotation pins the contract: the parsed key must come back in a
+        // wrapper that scrubs the secret DER it owns when it is dropped, not as
+        // a bare `PrivateKeyDer` whose buffer is released intact.
+        let mut key: Zeroizing<PrivateKeyDer<'static>> =
+            parse_key_pem(identity.key_path.to_str().unwrap()).expect("valid key PEM should parse");
+
+        let before = key.secret_der().to_vec();
+        assert!(
+            before.iter().any(|b| *b != 0),
+            "the parsed key should hold secret bytes"
+        );
+
+        key.zeroize();
+        assert_ne!(
+            key.secret_der(),
+            before.as_slice(),
+            "the secret DER must not survive zeroization"
+        );
+        assert!(
+            key.secret_der().iter().all(|b| *b == 0),
+            "any remaining key bytes must be cleared"
+        );
+    }
+
+    #[test]
+    fn client_cert_with_mismatched_key_rejected() {
+        let identity = gen_test_certs();
+        let other = gen_test_certs();
+
+        let err =
+            CachedClientCert::from_pem_files(identity.cert_path.to_str().unwrap(), other.key_path.to_str().unwrap())
+                .expect_err("a key from a different identity must be rejected");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("matching the private key"),
+            "error should report the cert/key mismatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn client_cert_with_malformed_certificate_rejected() {
+        let identity = gen_test_certs();
+        let dir = tempfile::TempDir::new().unwrap();
+        let cert_path = dir.path().join("garbage.pem");
+        // A well-formed PEM frame whose payload is not an X.509 certificate:
+        // base64 decoding alone accepts it, X.509 parsing must not.
+        std::fs::write(
+            &cert_path,
+            "-----BEGIN CERTIFICATE-----\nbm90IGEgY2VydGlmaWNhdGU=\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+
+        let err = CachedClientCert::from_pem_files(cert_path.to_str().unwrap(), identity.key_path.to_str().unwrap())
+            .expect_err("a PEM block that is not an X.509 certificate must be rejected");
+
+        let msg = err.to_string();
+        assert!(
+            msg.contains("valid X.509 certificate"),
+            "error should report the invalid certificate: {msg}"
+        );
+    }
+
+    #[test]
+    fn client_cert_chain_with_leaf_first_accepted() {
+        let identity = gen_test_certs();
+        let dir = tempfile::TempDir::new().unwrap();
+        let chain_path = dir.path().join("chain.pem");
+        let leaf = std::fs::read_to_string(&identity.cert_path).unwrap();
+        let issuer = std::fs::read_to_string(&identity.ca_cert_path).unwrap();
+        std::fs::write(&chain_path, format!("{leaf}{issuer}")).unwrap();
+
+        let cached =
+            CachedClientCert::from_pem_files(chain_path.to_str().unwrap(), identity.key_path.to_str().unwrap())
+                .expect("a leaf-first chain with its matching key must stay accepted");
+        assert_eq!(cached.cert_der().len(), 2, "both chain certificates should be cached");
     }
 
     #[test]

@@ -114,6 +114,23 @@ impl ListenerPipelines {
         seen.into_iter().collect()
     }
 
+    /// Content digests of every referenced document the live pipelines loaded,
+    /// keyed and de-duplicated by path in the same sorted order as
+    /// [`referenced_files`], so the watcher can hash exactly what is running.
+    ///
+    /// [`referenced_files`]: Self::referenced_files
+    pub fn referenced_file_digests(&self) -> Vec<(std::path::PathBuf, u64)> {
+        let mut seen = std::collections::BTreeMap::new();
+        for name in self.listener_names() {
+            if let Some(slot) = self.get(name) {
+                for (path, digest) in slot.load().referenced_file_digests() {
+                    seen.insert(path, digest);
+                }
+            }
+        }
+        seen.into_iter().collect()
+    }
+
     /// Returns an iterator over listener names.
     pub fn listener_names(&self) -> impl Iterator<Item = &str> {
         self.pipelines.keys().map(String::as_str)

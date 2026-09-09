@@ -349,6 +349,39 @@ fn nominated_tokens_match_case_insensitively() {
     );
 }
 
+#[test]
+fn nominated_tokens_survive_a_non_utf8_connection_value() {
+    // A header value may legally carry obs-text bytes. Decoding the whole
+    // value as UTF-8 before splitting it dropped every nomination in that
+    // value, forwarding the nominated headers across the boundary.
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        "connection",
+        http::HeaderValue::from_bytes(b"x-nominated, \xffgarbage").unwrap(),
+    );
+    headers.insert("x-nominated", "internal".parse().unwrap());
+    headers.insert("x-safe", "kept".parse().unwrap());
+
+    assert_eq!(
+        surviving_request_headers(&headers),
+        vec!["x-safe".to_owned()],
+        "a valid nomination must strip even when a sibling token is not UTF-8"
+    );
+}
+
+#[test]
+fn non_utf8_nominated_token_matches_no_header() {
+    // The unmatchable token must not become a wildcard: only names the
+    // Connection value actually nominates may be stripped.
+    let mut headers = HeaderMap::new();
+    headers.insert("connection", http::HeaderValue::from_bytes(b"\xffgarbage").unwrap());
+    let nominated = connection_nominated_tokens(&headers);
+    assert!(
+        !is_request_stripped(&"x-safe".parse().unwrap(), &nominated),
+        "a token that is not a valid header name must match nothing"
+    );
+}
+
 // -- Helpers ------------------------------------------------------------
 
 #[test]

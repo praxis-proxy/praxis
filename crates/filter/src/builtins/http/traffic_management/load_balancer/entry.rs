@@ -67,7 +67,7 @@ pub(super) struct ClusterEntry {
 }
 
 impl ClusterEntry {
-    /// Build an [`Upstream`] from a selected address and request context.
+    /// Resolve this cluster's TLS material for one request.
     ///
     /// When TLS is configured and no explicit SNI is set, falls back
     /// to the `Host` header from the request. The port is stripped
@@ -75,8 +75,8 @@ impl ClusterEntry {
     /// per [RFC 6066].
     ///
     /// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066
-    pub(super) fn build_upstream(&self, addr: Arc<str>, ctx: &HttpFilterContext<'_>) -> Upstream {
-        let tls = self.tls.clone().map(|mut t| {
+    pub(super) fn request_tls(&self, ctx: &HttpFilterContext<'_>) -> Option<CachedClusterTls> {
+        self.tls.clone().map(|mut t| {
             if t.sni().is_none()
                 && let Some(host) = ctx
                     .request
@@ -87,7 +87,27 @@ impl ClusterEntry {
                 t.set_sni(strip_host_port(host));
             }
             t
-        });
+        })
+    }
+
+    /// Whether this cluster's TLS material depends on the per-request
+    /// `Host`-derived SNI fallback.
+    ///
+    /// Such a cluster has no single cluster-wide TLS value, so state
+    /// cached across requests, the shared [`Self::default_reselector`],
+    /// cannot carry its TLS material.
+    pub(super) fn tls_needs_request_sni(&self) -> bool {
+        self.tls.as_ref().is_some_and(|t| t.sni().is_none())
+    }
+
+    /// Build an [`Upstream`] from a selected address and request context.
+    pub(super) fn build_upstream(&self, addr: Arc<str>, ctx: &HttpFilterContext<'_>) -> Upstream {
+        self.upstream_with_tls(addr, self.request_tls(ctx))
+    }
+
+    /// Build an [`Upstream`] from a selected address and already-resolved
+    /// per-request TLS material.
+    pub(super) fn upstream_with_tls(&self, addr: Arc<str>, tls: Option<CachedClusterTls>) -> Upstream {
         Upstream {
             address: addr,
             authority: self.authority.clone(),
@@ -115,23 +135,36 @@ impl ClusterEntry {
         merged
     }
 
-    /// The shared reselector for requests with no hash key and the
-    /// cluster's own retry policy (the dominant case).
+    /// The shared reselector for requests with no hash key, the cluster's
+    /// own retry policy, and cluster-wide TLS material (the dominant case).
+    ///
+    /// Only valid when [`Self::tls_needs_request_sni`] is `false`: a
+    /// cluster whose SNI comes from the request `Host` header needs a
+    /// per-request reselector so a retry offers the same SNI the initial
+    /// attempt did.
     pub(super) fn default_reselector(&self) -> &Arc<EndpointReselector> {
-        self.default_reselector
-            .get_or_init(|| Arc::new(self.reselector_with_policy(None, Arc::clone(&self.retry_policy))))
+        self.default_reselector.get_or_init(|| {
+            Arc::new(self.reselector_with_policy(None, Arc::clone(&self.retry_policy), self.tls.clone()))
+        })
     }
 
-    /// Capture a reselector with an already-merged retry policy.
+    /// Capture a reselector with an already-merged retry policy and the
+    /// TLS material resolved for this request.
+    ///
+    /// The reselector builds the upstream for an alternate-host retry, so
+    /// it must carry the same material the initial attempt used, including
+    /// the `Host`-derived SNI fallback, which is not part of the cluster's
+    /// cached TLS.
     pub(super) fn reselector_with_policy(
         &self,
         hash_key: Option<Arc<str>>,
         retry_policy: Arc<RetryPolicy>,
+        tls: Option<CachedClusterTls>,
     ) -> EndpointReselector {
         EndpointReselector::new(
             Arc::clone(&self.strategy),
             Arc::clone(&self.opts),
-            self.tls.clone(),
+            tls,
             self.authority.clone(),
             hash_key,
             retry_policy,

@@ -36,6 +36,11 @@ const H2_FRAME_TYPE_SETTINGS: u8 = 0x04;
 /// Minimum H2 frame header size (9 bytes).
 const H2_FRAME_HEADER_LEN: usize = 9;
 
+/// Length of an [RFC 9112] `status-code`: exactly three digits.
+///
+/// [RFC 9112]: https://datatracker.ietf.org/doc/html/rfc9112#section-4
+const STATUS_CODE_LEN: usize = 3;
+
 // -----------------------------------------------------------------------------
 // HTTP Probe
 // -----------------------------------------------------------------------------
@@ -132,6 +137,12 @@ async fn read_status_line(stream: &mut TcpStream, addr: &str) -> Option<String> 
 
 /// Extract the HTTP status code from a response status line.
 ///
+/// The line must be a well-formed [RFC 9112 status-line]: an
+/// `HTTP/<major>.<minor>` version token, a space, then a three-digit
+/// status code. Greetings from non-HTTP services that happen to carry a
+/// number in the second position (`SMTP 200 ready`) are rejected, so an
+/// HTTP health check cannot mark a plain TCP service healthy.
+///
 /// ```ignore
 /// use praxis_protocol::http::pingora::health::probe::parse_status_code;
 ///
@@ -141,11 +152,32 @@ async fn read_status_line(stream: &mut TcpStream, addr: &str) -> Option<String> 
 ///     Some(503)
 /// );
 /// assert_eq!(parse_status_code("garbage"), None);
+/// assert_eq!(parse_status_code("SMTP 200 ready\r\n"), None);
 /// ```
+///
+/// [RFC 9112 status-line]: https://datatracker.ietf.org/doc/html/rfc9112#section-4
 pub(crate) fn parse_status_code(response: &str) -> Option<u16> {
     let first_line = response.lines().next()?;
-    let parts: Vec<&str> = first_line.splitn(3, ' ').collect();
-    parts.get(1)?.parse().ok()
+    let mut parts = first_line.splitn(3, ' ');
+    let version = parts.next()?;
+    let code = parts.next()?;
+    is_http_version(version)
+        .then_some(code)
+        .filter(|c| c.len() == STATUS_CODE_LEN && c.bytes().all(|b| b.is_ascii_digit()))?
+        .parse()
+        .ok()
+}
+
+/// Whether `token` is an [RFC 9112 `HTTP-version`]: the literal `HTTP/`,
+/// a single digit, `.`, and a single digit.
+///
+/// [RFC 9112 `HTTP-version`]: https://datatracker.ietf.org/doc/html/rfc9112#section-2.3
+fn is_http_version(token: &str) -> bool {
+    matches!(
+        token.as_bytes(),
+        [b'H', b'T', b'T', b'P', b'/', major, b'.', minor]
+            if major.is_ascii_digit() && minor.is_ascii_digit()
+    )
 }
 
 // -----------------------------------------------------------------------------
@@ -217,21 +249,29 @@ async fn h2_send_preface(stream: &mut TcpStream, addr: &str) -> bool {
 }
 
 /// Read the server's response and verify it contains a SETTINGS frame.
+///
+/// TCP preserves neither write nor frame boundaries, so the nine-byte
+/// frame header may arrive across several reads. Reads are repeated
+/// until the header is complete; the caller's timeout bounds the wait.
+#[expect(clippy::indexing_slicing, reason = "bounded by filled counter")]
 async fn h2_read_settings(stream: &mut TcpStream, addr: &str) -> bool {
     let mut buf = [0_u8; 64];
-    let n = match stream.read(&mut buf).await {
-        Ok(n) if n >= H2_FRAME_HEADER_LEN => n,
-        Ok(n) => {
-            trace!(addr, bytes = n, "h2 health check response too short");
-            return false;
-        },
-        Err(e) => {
-            trace!(addr, error = %e, "h2 health check read failed");
-            return false;
-        },
-    };
+    let mut filled = 0;
+    while filled < H2_FRAME_HEADER_LEN {
+        match stream.read(&mut buf[filled..]).await {
+            Ok(0) => {
+                trace!(addr, bytes = filled, "h2 health check response too short");
+                return false;
+            },
+            Ok(n) => filled += n,
+            Err(e) => {
+                trace!(addr, error = %e, "h2 health check read failed");
+                return false;
+            },
+        }
+    }
 
-    if !is_settings_frame(buf.get(..n).unwrap_or_default()) {
+    if !is_settings_frame(buf.get(..filled).unwrap_or_default()) {
         trace!(addr, "h2 health check did not receive SETTINGS frame");
         return false;
     }
@@ -367,6 +407,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn parse_status_without_reason_phrase() {
+        assert_eq!(
+            parse_status_code("HTTP/1.1 204\r\n"),
+            Some(204),
+            "an empty reason phrase is a valid status line"
+        );
+    }
+
+    #[test]
+    fn parse_status_rejects_non_http_greeting() {
+        assert_eq!(
+            parse_status_code("SMTP 200 ready\r\n"),
+            None,
+            "an SMTP greeting must not be read as an HTTP 200"
+        );
+        assert_eq!(
+            parse_status_code("garbage 200 anything\r\n"),
+            None,
+            "arbitrary text must not be read as an HTTP status line"
+        );
+    }
+
+    #[test]
+    fn parse_status_rejects_malformed_version_token() {
+        assert_eq!(
+            parse_status_code("HTTP/ 200 OK\r\n"),
+            None,
+            "missing version digits must be rejected"
+        );
+        assert_eq!(
+            parse_status_code("HTTP/1.1x 200 OK\r\n"),
+            None,
+            "trailing junk on the version token must be rejected"
+        );
+        assert_eq!(
+            parse_status_code("http/1.1 200 OK\r\n"),
+            None,
+            "the version token is case-sensitive"
+        );
+    }
+
+    #[test]
+    fn parse_status_rejects_non_three_digit_code() {
+        assert_eq!(
+            parse_status_code("HTTP/1.1 20 OK\r\n"),
+            None,
+            "a two-digit code is not a status-code"
+        );
+        assert_eq!(
+            parse_status_code("HTTP/1.1 2000 OK\r\n"),
+            None,
+            "a four-digit code is not a status-code"
+        );
+        assert_eq!(
+            parse_status_code("HTTP/1.1 +20 OK\r\n"),
+            None,
+            "a signed number is not a status-code"
+        );
+    }
+
     #[tokio::test]
     async fn tcp_probe_refuses_nonexistent() {
         let result = tcp_probe("127.0.0.1:1", Duration::from_millis(100)).await;
@@ -496,6 +597,68 @@ mod tests {
             !result,
             "should fail when server responds with HTTP/1.1 instead of SETTINGS"
         );
+    }
+
+    #[tokio::test]
+    async fn http_probe_fails_on_non_http_greeting() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let probe_addr = addr.clone();
+        let probe = tokio::spawn(async move { http_probe(&probe_addr, "/healthz", 200, Duration::from_secs(2)).await });
+
+        let (mut socket, _peer) = listener.accept().await.unwrap();
+        let mut buf = [0_u8; 512];
+        let _ = socket.read(&mut buf).await.unwrap();
+        socket.write_all(b"SMTP 200 ready\r\n").await.unwrap();
+        socket.shutdown().await.unwrap();
+
+        let result = probe.await.unwrap();
+        assert!(!result, "a non-HTTP service must never be marked healthy");
+    }
+
+    #[tokio::test]
+    async fn h2_probe_succeeds_when_settings_header_is_split_across_reads() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let probe_addr = addr.clone();
+        let probe = tokio::spawn(async move { h2_probe(&probe_addr, Duration::from_secs(2)).await });
+
+        let (mut socket, _peer) = listener.accept().await.unwrap();
+        let mut buf = [0_u8; 512];
+        let _ = socket.read(&mut buf).await.unwrap();
+
+        // TCP preserves no write boundaries: deliver the nine-byte
+        // SETTINGS header in two segments, forcing a short first read.
+        let (head, tail) = H2_SETTINGS.split_at(4);
+        socket.write_all(head).await.unwrap();
+        socket.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        socket.write_all(tail).await.unwrap();
+        socket.write_all(H2_SETTINGS_ACK).await.unwrap();
+        socket.shutdown().await.unwrap();
+
+        let result = probe.await.unwrap();
+        assert!(result, "a SETTINGS frame split across reads is still a valid handshake");
+    }
+
+    #[tokio::test]
+    async fn h2_probe_fails_when_peer_closes_before_full_frame_header() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+
+        let probe_addr = addr.clone();
+        let probe = tokio::spawn(async move { h2_probe(&probe_addr, Duration::from_secs(2)).await });
+
+        let (mut socket, _peer) = listener.accept().await.unwrap();
+        let mut buf = [0_u8; 512];
+        let _ = socket.read(&mut buf).await.unwrap();
+        socket.write_all(&H2_SETTINGS[..4]).await.unwrap();
+        socket.shutdown().await.unwrap();
+
+        let result = probe.await.unwrap();
+        assert!(!result, "a truncated frame header must fail the probe");
     }
 
     #[tokio::test]

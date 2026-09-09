@@ -15,6 +15,15 @@ use tracing_appender::non_blocking::DEFAULT_BUFFERED_LINES_LIMIT;
 /// Default non-blocking queue capacity in lines when `buffer_size` is omitted.
 pub const DEFAULT_BUFFER_SIZE_LINES: usize = DEFAULT_BUFFERED_LINES_LIMIT;
 
+/// Maximum configurable non-blocking queue capacity in lines.
+///
+/// The queue is bounded and sized up front, and each slot holds a
+/// formatted log line, so the ceiling is a memory ceiling: an
+/// unconstrained `u32` (up to ~4.3 billion lines) asks the allocator for
+/// tens of gigabytes at subscriber init. 1 Mi lines is roughly eight
+/// times the default and far past any real buffering need.
+pub const MAX_BUFFER_SIZE_LINES: u32 = 1_048_576; // 1 Mi lines
+
 // -----------------------------------------------------------------------------
 // LoggingConfig
 // -----------------------------------------------------------------------------
@@ -35,7 +44,8 @@ pub struct LoggingConfig {
     /// Use a background thread for log I/O.
     #[serde(default = "default_non_blocking")]
     pub non_blocking: bool,
-    /// Non-blocking queue capacity in lines.
+    /// Non-blocking queue capacity in lines
+    /// (1..=[`MAX_BUFFER_SIZE_LINES`]).
     pub buffer_size: Option<u32>,
 }
 
@@ -63,9 +73,12 @@ impl LoggingConfig {
     /// Returns a human-readable message when the configuration is invalid.
     pub fn validate(&self) -> Result<(), String> {
         if let Some(buffer_size) = self.buffer_size
-            && buffer_size == 0
+            && !(1..=MAX_BUFFER_SIZE_LINES).contains(&buffer_size)
         {
-            return Err("runtime.logging.buffer_size must be > 0 when set".to_owned());
+            return Err(format!(
+                "runtime.logging.buffer_size must be > 0 and at most \
+                 {MAX_BUFFER_SIZE_LINES} lines when set, got {buffer_size}"
+            ));
         }
 
         match self.output {
@@ -90,10 +103,18 @@ impl LoggingConfig {
         Ok(())
     }
 
-    /// Effective non-blocking queue capacity in lines.
+    /// Effective non-blocking queue capacity in lines, never above
+    /// [`MAX_BUFFER_SIZE_LINES`].
+    ///
+    /// [`validate`] rejects anything larger, but the fields are public
+    /// and this value sizes an allocation, so the ceiling is applied
+    /// here as well rather than trusted.
+    ///
+    /// [`validate`]: LoggingConfig::validate
     #[must_use]
     pub fn effective_buffer_size_lines(&self) -> usize {
-        self.buffer_size.map_or(DEFAULT_BUFFER_SIZE_LINES, |n| n as usize)
+        self.buffer_size
+            .map_or(DEFAULT_BUFFER_SIZE_LINES, |n| n.min(MAX_BUFFER_SIZE_LINES) as usize)
     }
 }
 
@@ -152,6 +173,45 @@ mod tests {
         };
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("buffer_size must be > 0"), "{err}");
+    }
+
+    #[test]
+    fn buffer_size_above_the_ceiling_rejected() {
+        // An unconstrained u32 asks the non-blocking writer to preallocate
+        // billions of queue slots at subscriber init.
+        let cfg = LoggingConfig {
+            buffer_size: Some(MAX_BUFFER_SIZE_LINES + 1),
+            ..LoggingConfig::default()
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("at most"), "{err}");
+    }
+
+    #[test]
+    fn buffer_size_at_the_ceiling_accepted() {
+        let cfg = LoggingConfig {
+            buffer_size: Some(MAX_BUFFER_SIZE_LINES),
+            ..LoggingConfig::default()
+        };
+        cfg.validate().expect("exactly the ceiling must be accepted");
+        assert_eq!(
+            cfg.effective_buffer_size_lines(),
+            MAX_BUFFER_SIZE_LINES as usize,
+            "the ceiling itself must be used as configured"
+        );
+    }
+
+    #[test]
+    fn effective_buffer_size_clamps_an_unvalidated_value() {
+        let cfg = LoggingConfig {
+            buffer_size: Some(u32::MAX),
+            ..LoggingConfig::default()
+        };
+        assert_eq!(
+            cfg.effective_buffer_size_lines(),
+            MAX_BUFFER_SIZE_LINES as usize,
+            "a value that never passed validate() must still be capped"
+        );
     }
 
     #[test]

@@ -227,6 +227,33 @@ fn rejects_empty_clusters() {
 }
 
 #[test]
+fn rejects_duplicate_cluster_rules() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        r#"
+clusters:
+  - name: provider-a
+    header: Authorization
+    value: "first-secret"
+  - name: provider-a
+    header: x-api-key
+    value: "second-secret"
+"#,
+    )
+    .unwrap();
+    let err = CredentialInjectionFilter::from_config(&yaml)
+        .err()
+        .expect("two rules for one cluster must be rejected");
+    assert!(
+        err.to_string().contains("has more than one rule"),
+        "duplicate cluster rules should fail: {err}"
+    );
+    assert!(
+        err.to_string().contains("provider-a"),
+        "the error should name the duplicated cluster: {err}"
+    );
+}
+
+#[test]
 fn rejects_both_value_and_env_var() {
     let yaml: serde_yaml::Value = serde_yaml::from_str(
         r#"

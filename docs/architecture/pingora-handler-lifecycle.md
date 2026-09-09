@@ -209,7 +209,7 @@ Async (Pingora allows `.await` here).
 |------|----------|
 | `SizeLimit` | Tracks bytes; rejects with 413 if limit exceeded |
 | `StreamBuffer` (not released) | Buffers chunks; at EOS freezes buffer and delivers to pipeline |
-| `StreamBuffer` (released) or `Stream` | Passes chunks through to pipeline directly |
+| `StreamBuffer` (released) or `Stream` | Counts bytes against the global body ceiling, then passes chunks through to the pipeline directly |
 
 **Pipeline result handling:**
 

@@ -29,7 +29,7 @@ struct StaticResponseConfig {
     #[serde(default)]
     headers: Vec<HeaderEntry>,
 
-    /// HTTP status code to return.
+    /// HTTP status code to return. Must be a final status (200..=599).
     status: u16,
 }
 
@@ -91,8 +91,12 @@ impl StaticResponseFilter {
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
         let cfg: StaticResponseConfig = parse_filter_config("static_response", config)?;
 
-        if !(100..=599).contains(&cfg.status) {
-            return Err(format!("static_response: status must be 100..=599, got {}", cfg.status).into());
+        if !(200..=599).contains(&cfg.status) {
+            return Err(format!(
+                "static_response: status must be 200..=599 (1xx is informational, not final), got {}",
+                cfg.status
+            )
+            .into());
         }
 
         Ok(Box::new(Self {
@@ -175,11 +179,23 @@ body: '{"ok": true}'
     fn from_config_rejects_invalid_status() {
         let below = serde_yaml::from_str::<serde_yaml::Value>("status: 99").unwrap();
         let err = StaticResponseFilter::from_config(&below);
-        assert!(err.is_err(), "status 99 is below 100 and should be rejected");
+        assert!(err.is_err(), "status 99 is below 200 and should be rejected");
 
         let above = serde_yaml::from_str::<serde_yaml::Value>("status: 600").unwrap();
         let err = StaticResponseFilter::from_config(&above);
         assert!(err.is_err(), "status 600 is above 599 and should be rejected");
+    }
+
+    /// A 1xx is informational, not a final response: accepting one at config
+    /// time only defers the failure to the request path.
+    #[test]
+    fn from_config_rejects_informational_status() {
+        let yaml = serde_yaml::from_str::<serde_yaml::Value>("status: 100").unwrap();
+        let err = StaticResponseFilter::from_config(&yaml).err().expect("1xx must fail");
+        assert!(
+            err.to_string().contains("must be 200..=599"),
+            "error should name the accepted range, got: {err}"
+        );
     }
 
     #[tokio::test]

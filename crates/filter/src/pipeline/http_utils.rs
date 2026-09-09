@@ -128,6 +128,17 @@ pub(super) enum BodyFilterOutcome {
 ///
 /// When `failure_mode` is [`FailureMode::Open`], errors are logged as
 /// warnings and the filter is treated as if it returned `Continue`.
+///
+/// [`TerminalResponse`] and [`StreamingTerminalResponse`] are request-header
+/// phase actions. Once the body phase is running the exchange is already
+/// committed, request chunks may be in flight upstream and response headers
+/// may already be on the wire, so the pipeline cannot substitute a response.
+/// Treating such a return as a filter error surfaces the misuse and, under the
+/// default [`FailureMode::Closed`], stops a filter that meant to end the
+/// exchange from silently letting it proceed.
+///
+/// [`TerminalResponse`]: FilterAction::TerminalResponse
+/// [`StreamingTerminalResponse`]: FilterAction::StreamingTerminalResponse
 pub(super) fn dispatch_body_result(
     result: Result<FilterAction, FilterError>,
     filter_name: &str,
@@ -135,8 +146,9 @@ pub(super) fn dispatch_body_result(
     failure_mode: FailureMode,
 ) -> Result<BodyFilterOutcome, FilterError> {
     match result {
-        Ok(FilterAction::Continue | FilterAction::TerminalResponse(_) | FilterAction::StreamingTerminalResponse(_)) => {
-            Ok(BodyFilterOutcome::Continue)
+        Ok(FilterAction::Continue) => Ok(BodyFilterOutcome::Continue),
+        Ok(FilterAction::TerminalResponse(_) | FilterAction::StreamingTerminalResponse(_)) => {
+            body_phase_terminal_response(filter_name, phase, failure_mode)
         },
         Ok(FilterAction::Release) => {
             debug!(filter = filter_name, "filter released body");
@@ -159,6 +171,27 @@ pub(super) fn dispatch_body_result(
             Ok(BodyFilterOutcome::Continue)
         },
     }
+}
+
+/// Report a terminal response returned from a body hook.
+///
+/// Under [`FailureMode::Open`] the misuse is logged and the pipeline
+/// continues; under [`FailureMode::Closed`] it aborts the request.
+fn body_phase_terminal_response(
+    filter_name: &str,
+    phase: &str,
+    failure_mode: FailureMode,
+) -> Result<BodyFilterOutcome, FilterError> {
+    check_failure_mode(
+        filter_name,
+        FilterError::from(
+            "terminal responses are only valid in the request header phase; \
+             the body-phase response was discarded",
+        ),
+        phase,
+        failure_mode,
+    )?;
+    Ok(BodyFilterOutcome::Continue)
 }
 
 /// Returns `true` if the filter should be skipped due to
@@ -540,6 +573,56 @@ mod tests {
         assert!(
             matches!(outcome, BodyFilterOutcome::BodyDone),
             "Ok(BodyDone) should produce BodyFilterOutcome::BodyDone"
+        );
+    }
+
+    #[test]
+    fn dispatch_body_result_terminal_response_fails_closed() {
+        let action = FilterAction::TerminalResponse(Box::new(crate::actions::TerminalResponse::new(200)));
+        let err = dispatch_body_result(Ok(action), "test", "request body", FailureMode::Closed)
+            .expect_err("a body-phase terminal response must not be silently discarded");
+        assert!(
+            err.to_string().contains("terminal responses are only valid"),
+            "error should name the misuse, got: {err}"
+        );
+    }
+
+    #[test]
+    fn dispatch_body_result_terminal_response_failure_mode_open_continues() {
+        let action = FilterAction::TerminalResponse(Box::new(crate::actions::TerminalResponse::new(200)));
+        let outcome = dispatch_body_result(Ok(action), "test", "request body", FailureMode::Open).unwrap();
+        assert!(
+            matches!(outcome, BodyFilterOutcome::Continue),
+            "failure_mode: open should downgrade the misuse to a warning and continue"
+        );
+    }
+
+    #[test]
+    fn dispatch_body_result_streaming_terminal_response_fails_closed() {
+        struct EmptyBody;
+
+        #[async_trait::async_trait]
+        impl crate::actions::StreamingResponseBody for EmptyBody {
+            async fn next_chunk(&mut self) -> Result<Option<Bytes>, FilterError> {
+                Ok(None)
+            }
+
+            async fn suppress(&mut self) -> Result<(), FilterError> {
+                Ok(())
+            }
+
+            async fn cancel(&mut self) {}
+        }
+
+        let action = FilterAction::StreamingTerminalResponse(Box::new(crate::actions::StreamingTerminalResponse::new(
+            200,
+            Box::new(EmptyBody),
+        )));
+        let err = dispatch_body_result(Ok(action), "test", "response body", FailureMode::Closed)
+            .expect_err("a body-phase streaming terminal response must not be silently discarded");
+        assert!(
+            err.to_string().contains("terminal responses are only valid"),
+            "error should name the misuse, got: {err}"
         );
     }
 

@@ -2069,6 +2069,23 @@ fn http_authz_rejection_clamps_out_of_range_status() {
     assert_eq!(rej.status, 403, "an out-of-range denyWith status falls back to 403");
 }
 
+/// An informational `denyWith` status is not a final response, so it falls back
+/// to 403 instead of reaching `Rejection::status`, which panics on one.
+#[test]
+fn http_authz_rejection_falls_back_on_informational_status() {
+    use std::collections::HashMap;
+
+    use ppe::praxis_policy_core::error::PluginViolation;
+
+    use super::error::http_authz_rejection;
+
+    let mut details = HashMap::new();
+    details.insert("http.status".to_owned(), serde_json::json!(100));
+    let violation = PluginViolation::new("policy.deny", "denied").with_details(details);
+    let rej = http_authz_rejection(Some(&violation));
+    assert_eq!(rej.status, 403, "an informational denyWith status falls back to 403");
+}
+
 /// Header names/values carrying CR/LF/NUL are dropped (response-splitting
 /// defense) while sibling safe headers still attach.
 #[test]
@@ -2494,6 +2511,45 @@ fn deny_envelope_fits_committed_length() {
         fitted.len(),
         original_len,
         "deny envelope must be padded to exactly the committed length",
+    );
+}
+
+/// The other half of the sizing story, and the one the docs now spell out:
+/// when the committed `Content-Length` is *shorter* than the deny envelope,
+/// a small upstream result is easily under the ~100 bytes an envelope needs,
+/// the envelope is truncated and the client receives bytes that do not parse
+/// as JSON. Pins that trade-off so a change to it has to change the
+/// documentation on `fit_to_original_length` with it.
+#[test]
+fn deny_envelope_is_truncated_when_committed_length_is_shorter() {
+    use ppe::praxis_policy_core::error::PluginViolation;
+
+    use super::{error::json_rpc_error_envelope_bytes, filter::fit_to_original_length};
+
+    // A perfectly ordinary short JSON-RPC result.
+    let upstream = br#"{"jsonrpc":"2.0","id":1,"result":{}}"#;
+    let violation = PluginViolation::new("policy.result_denied", "denied by result pipeline");
+    let envelope = json_rpc_error_envelope_bytes(Some(&violation), &serde_json::json!(1));
+    assert!(
+        envelope.len() > upstream.len(),
+        "the premise: a deny envelope ({}) outgrows a short upstream result ({})",
+        envelope.len(),
+        upstream.len(),
+    );
+
+    let fitted = fit_to_original_length(envelope, upstream.len(), "tools/call", "post-phase deny");
+    assert_eq!(
+        fitted.len(),
+        upstream.len(),
+        "framing wins: the body must be exactly the committed Content-Length",
+    );
+    assert!(
+        serde_json::from_slice::<serde_json::Value>(&fitted).is_err(),
+        "the truncated envelope is not parseable JSON; that is the accepted cost",
+    );
+    assert!(
+        !fitted.ends_with(b"}"),
+        "sanity: the envelope really was cut mid-structure, not coincidentally fitted",
     );
 }
 

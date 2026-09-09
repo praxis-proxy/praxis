@@ -184,12 +184,39 @@ async fn watch_loop(
                     );
                 }
             }
-            result = shutdown.changed() => {
-                if result.is_ok() && *shutdown.borrow() {
-                    tracing::info!("certificate file watcher shutting down");
-                    return;
-                }
+            () = wait_for_shutdown(&mut shutdown) => {
+                tracing::info!("certificate file watcher shutting down");
+                return;
             }
+            else => {
+                tracing::warn!("certificate file watcher event channel closed, stopping");
+                return;
+            }
+        }
+    }
+}
+
+/// Resolve once shutdown is actually requested, and never otherwise.
+///
+/// [`Receiver::changed`] resolves for every notification, including a
+/// `false` one, and resolves with `Err` immediately and forever once
+/// every [`Sender`] has been dropped. Awaiting it directly in a
+/// [`tokio::select`] arm therefore leaves a permanently ready branch
+/// that spins the loop at full speed as soon as the caller drops its
+/// sender - which the watcher documents as "keep running
+/// indefinitely". Parking on [`pending`] in that case retires the
+/// branch instead: the loop keeps serving filesystem events and stops
+/// polling a receiver that can never carry a request again.
+///
+/// [`Receiver::changed`]: tokio::sync::watch::Receiver::changed
+/// [`Sender`]: tokio::sync::watch::Sender
+/// [`pending`]: std::future::pending
+async fn wait_for_shutdown(shutdown: &mut tokio::sync::watch::Receiver<bool>) {
+    loop {
+        match shutdown.changed().await {
+            Ok(()) if *shutdown.borrow() => return,
+            Ok(()) => {},
+            Err(_closed) => std::future::pending().await,
         }
     }
 }
@@ -252,11 +279,7 @@ async fn drain_and_debounce(
     tokio::pin!(sleep);
     tokio::select! {
         () = &mut sleep => {},
-        result = shutdown.changed() => {
-            if result.is_ok() && *shutdown.borrow() {
-                return true;
-            }
-        },
+        () = wait_for_shutdown(shutdown) => return true,
     }
     while rx.try_recv().is_ok() {}
     false
@@ -422,6 +445,66 @@ mod tests {
             !is_relevant_event(EventKind::Access(notify::event::AccessKind::Read)),
             "Access events should not be relevant"
         );
+    }
+
+    #[tokio::test]
+    async fn wait_for_shutdown_stays_pending_when_every_sender_is_dropped() {
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        drop(shutdown_tx);
+
+        let parked = tokio::time::timeout(Duration::from_millis(50), wait_for_shutdown(&mut shutdown_rx)).await;
+        assert!(
+            parked.is_err(),
+            "a closed shutdown channel must never resolve, or the select branch spins"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_for_shutdown_resolves_when_shutdown_is_requested() {
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let sent = shutdown_tx.send(true);
+        assert!(sent.is_ok(), "shutdown request should be delivered");
+
+        let requested = tokio::time::timeout(Duration::from_millis(500), wait_for_shutdown(&mut shutdown_rx)).await;
+        assert!(requested.is_ok(), "a shutdown request must resolve the wait");
+    }
+
+    #[tokio::test]
+    async fn wait_for_shutdown_ignores_a_false_notification() {
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let sent = shutdown_tx.send(false);
+        assert!(sent.is_ok(), "notification should be delivered");
+
+        let parked = tokio::time::timeout(Duration::from_millis(50), wait_for_shutdown(&mut shutdown_rx)).await;
+        assert!(parked.is_err(), "a `false` notification is not a shutdown request");
+    }
+
+    #[tokio::test]
+    async fn debounce_runs_its_full_window_when_every_shutdown_sender_is_dropped() {
+        let (_tx, mut rx) = mpsc::channel::<()>(4);
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        drop(shutdown_tx);
+
+        let start = std::time::Instant::now();
+        let requested = drain_and_debounce(&mut rx, 200, &mut shutdown_rx).await;
+
+        assert!(!requested, "a dropped sender is not a shutdown request");
+        assert!(
+            start.elapsed() >= Duration::from_millis(150),
+            "the debounce window must not be cut short by a closed shutdown channel, took {:?}",
+            start.elapsed()
+        );
+    }
+
+    #[tokio::test]
+    async fn debounce_returns_early_on_shutdown_request() {
+        let (_tx, mut rx) = mpsc::channel::<()>(4);
+        let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+        let sent = shutdown_tx.send(true);
+        assert!(sent.is_ok(), "shutdown request should be delivered");
+
+        let requested = drain_and_debounce(&mut rx, 10_000, &mut shutdown_rx).await;
+        assert!(requested, "a real shutdown request must still cut the debounce short");
     }
 
     #[test]

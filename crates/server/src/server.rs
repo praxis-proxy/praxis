@@ -11,7 +11,8 @@ use std::{
 
 use praxis_core::{
     PingoraServerRuntime,
-    config::{Config, ProtocolKind},
+    config::{Config, DEFAULT_CONFIG, ProtocolKind},
+    errors::ProxyError,
     health::{HealthRegistry, build_health_registry},
     logging::LogLevelState,
 };
@@ -57,6 +58,9 @@ const CIRCUIT_EVICTION_INTERVAL: Duration = Duration::from_secs(300); // 5 min
 /// How long a healthy breaker must sit idle before eviction.
 const CIRCUIT_IDLE_THRESHOLD: Duration = Duration::from_secs(600); // 10 min
 
+/// Config file looked up in the working directory when no path is given.
+const DEFAULT_CONFIG_FILE: &str = "praxis.yaml";
+
 // -----------------------------------------------------------------------------
 // Config Path Resolution
 // -----------------------------------------------------------------------------
@@ -67,6 +71,10 @@ const CIRCUIT_IDLE_THRESHOLD: Duration = Duration::from_secs(600); // 10 min
 /// exists in the working directory. Returns `None` when using the
 /// built-in default (no file to watch).
 ///
+/// Callers that also need the configuration itself should use
+/// [`load_config_with_source`], which resolves and loads from one
+/// filesystem lookup rather than two independent ones.
+///
 /// ```
 /// let path = praxis::resolve_config_path(None);
 /// // Returns None if ./praxis.yaml doesn't exist.
@@ -75,8 +83,41 @@ pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
     if let Some(path) = explicit {
         return Some(PathBuf::from(path));
     }
-    let default_path = PathBuf::from("praxis.yaml");
+    let default_path = PathBuf::from(DEFAULT_CONFIG_FILE);
     default_path.exists().then_some(default_path)
+}
+
+/// Load the configuration and report the file it was loaded from.
+///
+/// The path is `None` when the built-in default was used, meaning there is no
+/// file to watch.
+///
+/// Discovery and loading deliberately share a single lookup. Resolving the path
+/// and then loading the config through a second, independent lookup lets the two
+/// disagree whenever `praxis.yaml` appears or disappears in between: the server
+/// would either run a file-backed config that no watcher was registered for
+/// (hot reload silently dead), or run the built-in default while watching a file
+/// it never read, so that file's first edit "reloads" a configuration the
+/// process never started from. Deciding the source once removes both.
+///
+/// # Errors
+///
+/// Returns [`ProxyError::Config`] if the resolved source cannot be read or is
+/// invalid.
+///
+/// ```no_run
+/// let (config, source) = praxis::load_config_with_source(None).unwrap();
+/// assert!(!config.listeners.is_empty());
+/// // `source` is None when the built-in default was used.
+/// ```
+///
+/// [`ProxyError::Config`]: praxis_core::errors::ProxyError::Config
+pub fn load_config_with_source(explicit: Option<&str>) -> Result<(Config, Option<PathBuf>), ProxyError> {
+    let Some(path) = resolve_config_path(explicit) else {
+        info!("no config file found, using built-in default");
+        return Config::from_yaml(DEFAULT_CONFIG).map(|config| (config, None));
+    };
+    Config::from_file(&path).map(|config| (config, Some(path)))
 }
 
 // -----------------------------------------------------------------------------
@@ -300,7 +341,7 @@ fn spawn_watcher(
     // event after startup would see a hash mismatch that is an artifact of the two
     // being computed differently.
     let initial_content_hash =
-        std::fs::read_to_string(&path).map_or(0, |c| crate::watcher::composite_hash(&c, &referenced_files));
+        std::fs::read_to_string(&path).map_or(0, |c| crate::watcher::recorded_content_hash(&c, &state.pipelines));
     let handle = crate::watcher::spawn_config_watcher(crate::watcher::WatcherParams {
         config_path: path,
         health_shutdown: state.health_shutdown,
@@ -552,6 +593,102 @@ mod tests {
             assert!(path.is_none(), "should return None when praxis.yaml does not exist");
         }
     }
+
+    // -------------------------------------------------------------------------
+    // load_config_with_source
+    // -------------------------------------------------------------------------
+
+    /// The reported source must be the file the config was actually read from,
+    /// not a second, independent guess at where the config lives.
+    #[test]
+    fn load_config_with_source_reports_the_explicit_file_it_read() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("custom.yaml");
+        std::fs::write(&path, CUSTOM_YAML).expect("write config");
+
+        let (config, source) =
+            load_config_with_source(Some(&path.to_string_lossy())).expect("explicit config should load");
+
+        assert_eq!(
+            source.as_ref(),
+            Some(&path),
+            "the source must name the file that was read"
+        );
+        assert_eq!(
+            config.listeners[0].address, "127.0.0.1:8081",
+            "the config must come from that same file"
+        );
+    }
+
+    /// With no config file anywhere, the built-in default is used and there is
+    /// no source to watch. The two must be reported together: a `Some` path
+    /// here would make the watcher wait on a file the config never came from.
+    #[test]
+    fn load_config_with_source_reports_no_source_for_the_built_in_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let _cwd = crate::test_support::CwdGuard::new(dir.path());
+
+        let (config, source) = load_config_with_source(None).expect("built-in default should load");
+
+        assert!(
+            source.is_none(),
+            "the built-in default has no file behind it, so there is nothing to watch"
+        );
+        assert!(!config.listeners.is_empty(), "the built-in default defines a listener");
+    }
+
+    /// An implicit `praxis.yaml` is loaded from the same lookup that reports it
+    /// as the source.
+    #[test]
+    fn load_config_with_source_loads_the_implicit_file_it_reports() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        std::fs::write(dir.path().join(DEFAULT_CONFIG_FILE), CUSTOM_YAML).expect("write config");
+        let _cwd = crate::test_support::CwdGuard::new(dir.path());
+
+        let (config, source) = load_config_with_source(None).expect("implicit config should load");
+
+        assert_eq!(
+            source,
+            Some(PathBuf::from(DEFAULT_CONFIG_FILE)),
+            "the implicit file must be reported as the source"
+        );
+        assert_eq!(
+            config.listeners[0].address, "127.0.0.1:8081",
+            "the config must come from that file, not from the built-in default"
+        );
+    }
+
+    /// A `praxis.yaml` that cannot be read is an error, not a silent fallback
+    /// to the built-in default: falling back would run a configuration the
+    /// operator never wrote while the watcher waits on the file they did.
+    #[test]
+    fn load_config_with_source_fails_when_the_implicit_file_is_unreadable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // A directory is readable as a path but never a valid config file.
+        std::fs::create_dir(dir.path().join(DEFAULT_CONFIG_FILE)).expect("create dir");
+        let _cwd = crate::test_support::CwdGuard::new(dir.path());
+
+        let result = load_config_with_source(None);
+
+        assert!(
+            result.is_err(),
+            "an unreadable praxis.yaml must fail loudly, not fall back to the default"
+        );
+    }
+
+    /// Config used by the `load_config_with_source` tests; distinguishable from
+    /// the built-in default by its listener address.
+    const CUSTOM_YAML: &str = r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8081"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#;
 
     // -------------------------------------------------------------------------
     // insecure_warn

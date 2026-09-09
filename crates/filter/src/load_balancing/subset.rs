@@ -109,11 +109,20 @@ impl Subset {
     }
 
     /// Propagate release to inner strategies.
+    ///
     /// Release is forwarded to both inner strategies because the composite
     /// cannot know which one served the request. With counter-based inner
-    /// strategies (`least_connections`, `p2c`) the counters therefore
-    /// saturate toward zero on the side that did not serve, making in-flight
-    /// counts approximate when the fallback path is in use.
+    /// strategies (`least_connections`, `p2c`) that costs accuracy on
+    /// every request, not only on requests that take the fallback path:
+    /// the subset and fallback strategies keep separate counters for the
+    /// endpoints they share, `select` increments only the strategy that
+    /// served, and `release` decrements both. The non-serving side
+    /// saturates at zero, so the moment traffic moves to it, it sees idle
+    /// endpoints that are in fact loaded and piles onto them until its own
+    /// counters catch up.
+    ///
+    /// Exact counts would require the two strategies to share per-endpoint
+    /// in-flight counters instead of owning one set each.
     pub(crate) fn release(&self, addr: &str) {
         if let Some(strategy) = &self.subset_strategy {
             strategy.release(addr);
@@ -281,9 +290,57 @@ mod tests {
         );
     }
 
+    #[test]
+    fn release_decrements_the_non_serving_strategy_too() {
+        // Pins the documented approximation: a request served by the
+        // subset strategy is released from the fallback strategy as well,
+        // so the fallback's counter for a shared endpoint saturates at
+        // zero while requests are still in flight there.
+        let endpoints = vec![
+            ep("10.0.0.1:80", 0, &[("version", "canary")]),
+            ep("10.0.0.2:80", 1, &[("version", "stable")]),
+        ];
+        let selector = HashMap::from([("version".to_owned(), "canary".to_owned())]);
+        let subset = Subset::new(
+            endpoints,
+            &selector,
+            &SimpleStrategy::LeastConnections,
+            SubsetFallbackPolicy::AnyEndpoint,
+        );
+
+        for _ in 0..2 {
+            assert_eq!(
+                &*subset.select(None, None, &[]).unwrap(),
+                "10.0.0.1:80",
+                "the only subset member must serve"
+            );
+        }
+        subset.release("10.0.0.1:80");
+
+        let subset_strategy = subset.subset_strategy.as_deref().expect("subset is non-empty");
+        assert_eq!(
+            load_of(subset_strategy, "10.0.0.1:80"),
+            1,
+            "the serving strategy must still see the second request in flight"
+        );
+        assert_eq!(
+            load_of(&subset.fallback_strategy, "10.0.0.1:80"),
+            0,
+            "the non-serving strategy is decremented too and saturates at zero"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// In-flight count an inner least-connections strategy holds for `addr`.
+    fn load_of(strategy: &Strategy, addr: &str) -> usize {
+        match strategy {
+            Strategy::LeastConnections(lc) => lc.load_for(addr),
+            _ => panic!("expected a least_connections inner strategy"),
+        }
+    }
 
     fn ep(addr: &str, index: usize, meta: &[(&str, &str)]) -> WeightedEndpoint {
         WeightedEndpoint {

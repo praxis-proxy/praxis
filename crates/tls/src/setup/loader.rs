@@ -60,6 +60,22 @@ pub(crate) fn load_certified_key(pair: &CertKeyPair) -> Result<CertifiedKey, Tls
 }
 
 /// Load certificate chain and private key from PEM files.
+///
+/// The key PEM itself is read into a [`Zeroizing`] buffer, but the
+/// parsed [`PrivateKeyDer`] deliberately is not: every caller moves it
+/// straight into rustls ([`KeyProvider::load_private_key`] here,
+/// `with_single_cert` in [`setup`]), which takes ownership of the DER
+/// buffer and drops it without scrubbing. Wrapping the return value
+/// would only add a `clone_key()` copy for rustls to drop and leave
+/// exactly the same unscrubbed buffer behind. Callers must therefore
+/// hand the key to rustls immediately and must not keep it alive for
+/// longer than that; code that needs to *retain* parsed key material
+/// wraps it itself, as `cached::parse_key_pem` does.
+///
+/// [`Zeroizing`]: zeroize::Zeroizing
+/// [`PrivateKeyDer`]: rustls::pki_types::PrivateKeyDer
+/// [`KeyProvider::load_private_key`]: rustls::crypto::KeyProvider::load_private_key
+/// [`setup`]: crate::setup
 pub(super) fn load_cert_and_key(
     pair: &CertKeyPair,
 ) -> Result<(Vec<CertificateDer<'static>>, PrivateKeyDer<'static>), TlsError> {

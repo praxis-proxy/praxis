@@ -95,7 +95,51 @@ fn reject_empty_field() {
 fn reject_empty_header() {
     let yaml: serde_yaml::Value = serde_yaml::from_str("field: model\nheader: ''").unwrap();
     let err = JsonBodyFieldFilter::from_config(&yaml).err().expect("should fail");
-    assert!(err.to_string().contains("'header' must not be empty"), "got: {err}");
+    assert!(
+        err.to_string().contains("'header' header name must not be empty"),
+        "got: {err}"
+    );
+}
+
+#[test]
+fn reject_header_name_with_space() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "field: model
+header: bad header",
+    )
+    .unwrap();
+    let err = JsonBodyFieldFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("not a valid HTTP header name"),
+        "a header name that cannot be sent must be rejected at config time, got: {err}"
+    );
+}
+
+#[test]
+fn reject_header_name_with_colon_in_fields_list() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "fields:
+  - field: model
+    header: X-Model
+  - field: user
+    header: 'X:User'",
+    )
+    .unwrap();
+    let err = JsonBodyFieldFilter::from_config(&yaml).err().expect("should fail");
+    assert!(
+        err.to_string().contains("not a valid HTTP header name"),
+        "every mapping in 'fields' must have its header name validated, got: {err}"
+    );
+}
+
+#[test]
+fn accepts_valid_header_name() {
+    let yaml: serde_yaml::Value = serde_yaml::from_str(
+        "field: model
+header: X-Model",
+    )
+    .unwrap();
+    JsonBodyFieldFilter::from_config(&yaml).expect("a valid header name must still be accepted");
 }
 
 #[test]
@@ -147,6 +191,78 @@ async fn extracts_multiple_fields_in_single_parse() {
     let (n1, v1) = &ctx.extra_request_headers[1];
     assert_eq!(n1, "X-User-Id", "second mapping should extract user_id name");
     assert_eq!(v1, "u-42", "second mapping should extract user_id value");
+}
+
+#[tokio::test]
+async fn complete_prefix_chunk_does_not_promote_before_end_of_stream() {
+    // A client can make the first chunk a self-contained document and send
+    // more bytes after it. Promoting here would publish a value the backend
+    // never parses, and BodyDone would skip the rest of the body.
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.current_filter_id = Some(0);
+
+    let mut body = Some(Bytes::from_static(br#"{"model":"premium"}"#));
+    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a mid-stream chunk must not end body processing for this filter"
+    );
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "no header may be promoted before the whole body is known"
+    );
+}
+
+#[tokio::test]
+async fn trailing_bytes_after_a_complete_prefix_chunk_block_promotion() {
+    // The full body is `{"model":"premium"}{"model":"budget"}`: two documents,
+    // which the extractor rejects as trailing content. Promoting from the
+    // first chunk would have sent `premium` upstream regardless.
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.current_filter_id = Some(0);
+
+    let mut first = Some(Bytes::from_static(br#"{"model":"premium"}"#));
+    drop(filter.on_request_body(&mut ctx, &mut first, false).await.unwrap());
+
+    let mut full = Some(Bytes::from_static(br#"{"model":"premium"}{"model":"budget"}"#));
+    let action = filter.on_request_body(&mut ctx, &mut full, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a body with trailing content must not promote"
+    );
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "the promoted header must reflect the body the backend parses"
+    );
+}
+
+#[tokio::test]
+async fn promotes_from_the_frozen_body_at_end_of_stream() {
+    // The chunked counterpart of the case above: the same first chunk, but
+    // the complete body is a single document, so end-of-stream promotes.
+    let filter = make_filter("model", "X-Model");
+    let req = crate::test_utils::make_request(http::Method::POST, "/v1/chat");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.current_filter_id = Some(0);
+
+    let mut first = Some(Bytes::from_static(br#"{"model":"premium"#));
+    drop(filter.on_request_body(&mut ctx, &mut first, false).await.unwrap());
+
+    let mut full = Some(Bytes::from_static(br#"{"model":"premium","prompt":"hi"}"#));
+    let action = filter.on_request_body(&mut ctx, &mut full, true).await.unwrap();
+
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "the complete body at end-of-stream should promote and finish"
+    );
+    assert_eq!(ctx.extra_request_headers.len(), 1, "should promote exactly one header");
+    assert_eq!(ctx.extra_request_headers[0].1, "premium", "promoted value should match");
 }
 
 #[tokio::test]
@@ -898,10 +1014,10 @@ async fn repeated_body_hooks_do_not_duplicate_promoted_headers() {
     let mut ctx = crate::test_utils::make_filter_context(&req);
     ctx.current_filter_id = Some(0);
 
-    // First, a complete body promotes and returns BodyDone.
+    // First, the complete body at end-of-stream promotes and returns BodyDone.
     let full = br#"{"model":"gpt-4","messages":[{"role":"user","content":"hi"}]}"#;
     let mut body = Some(Bytes::from_static(full));
-    let action = filter.on_request_body(&mut ctx, &mut body, false).await.unwrap();
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
     assert!(
         matches!(action, FilterAction::BodyDone),
         "a complete body with the mapped field should BodyDone"

@@ -93,11 +93,20 @@ impl ZoneAware {
     }
 
     /// Propagate release to both inner strategies.
+    ///
     /// Release is forwarded to both inner strategies because the composite
     /// cannot know which one served the request. With counter-based inner
-    /// strategies (`least_connections`, `p2c`) the counters therefore
-    /// saturate toward zero on the side that did not serve, making in-flight
-    /// counts approximate while traffic spills between zones.
+    /// strategies (`least_connections`, `p2c`) that costs accuracy on
+    /// every request, not only while traffic spills between zones: the
+    /// local and all-endpoint strategies keep separate counters for the
+    /// local endpoints they share, `select` increments only the strategy
+    /// that served, and `release` decrements both. The non-serving side
+    /// saturates at zero, so the moment traffic moves to it, it sees idle
+    /// endpoints that are in fact loaded and piles onto them until its own
+    /// counters catch up.
+    ///
+    /// Exact counts would require the two strategies to share per-endpoint
+    /// in-flight counters instead of owning one set each.
     pub(crate) fn release(&self, addr: &str) {
         if let Some(local) = &self.local_strategy {
             local.release(addr);
@@ -245,9 +254,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn release_decrements_the_non_serving_strategy_too() {
+        // Pins the documented approximation: a request served by the
+        // local-zone strategy is released from the all-endpoint strategy
+        // as well, so the latter's counter for a shared endpoint
+        // saturates at zero while requests are still in flight there.
+        let endpoints = vec![ep("10.0.0.1:80", 0, "us-east-1a"), ep("10.0.0.2:80", 1, "us-west-2a")];
+        let za = ZoneAware::new(endpoints, "us-east-1a", &SimpleStrategy::LeastConnections, 70);
+
+        for _ in 0..2 {
+            assert_eq!(
+                &*za.select(None, None, &[]).unwrap(),
+                "10.0.0.1:80",
+                "the only local endpoint must serve"
+            );
+        }
+        za.release("10.0.0.1:80");
+
+        let local = za.local_strategy.as_deref().expect("local zone is non-empty");
+        assert_eq!(
+            load_of(local, "10.0.0.1:80"),
+            1,
+            "the serving strategy must still see the second request in flight"
+        );
+        assert_eq!(
+            load_of(&za.all_strategy, "10.0.0.1:80"),
+            0,
+            "the non-serving strategy is decremented too and saturates at zero"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// In-flight count an inner least-connections strategy holds for `addr`.
+    fn load_of(strategy: &Strategy, addr: &str) -> usize {
+        match strategy {
+            Strategy::LeastConnections(lc) => lc.load_for(addr),
+            _ => panic!("expected a least_connections inner strategy"),
+        }
+    }
 
     fn ep(addr: &str, index: usize, zone: &str) -> WeightedEndpoint {
         WeightedEndpoint {

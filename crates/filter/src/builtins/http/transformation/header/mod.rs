@@ -25,7 +25,7 @@ use serde::Deserialize;
 use tracing::trace;
 
 use self::ops::{
-    append_headers, parse_header_name_with_raw_value, parse_header_names, parse_header_pairs,
+    append_headers, group_adds_by_name, parse_header_name_with_raw_value, parse_header_names, parse_header_pairs,
     reject_response_hop_by_hop, remove_headers, set_headers,
 };
 use crate::{
@@ -42,7 +42,8 @@ use crate::{
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HeaderFilterConfig {
-    /// Headers to append to the upstream request.
+    /// Headers to append to the upstream request; repeated entries for one
+    /// name stack in configuration order.
     #[serde(default)]
     pub(crate) request_add: Vec<HeaderPair>,
 
@@ -124,7 +125,7 @@ pub(crate) struct HeaderPair {
 /// assert_eq!(filter.name(), "headers");
 /// ```
 pub struct HeaderFilter {
-    /// Headers to append to the upstream request.
+    /// Headers to append to the upstream request, in configuration order.
     pub(crate) request_add: Vec<(http::header::HeaderName, String)>,
 
     /// Pre-parsed header names to strip from the upstream request.
@@ -191,23 +192,33 @@ impl HttpFilter for HeaderFilter {
             ctx.request_headers_to_set.push((name.clone(), value.clone()));
         }
 
-        for (name, value) in &self.request_add {
+        // Values configured for the same name are folded into one operation:
+        // stacking onto an existing header queues an overwrite, so a separate
+        // overwrite per entry would keep only the last addition.
+        for (name, values) in group_adds_by_name(&self.request_add) {
             trace!(header = %name, "adding request header");
             let existing: Result<Vec<&str>, _> = ctx.request.headers.get_all(name).iter().map(|v| v.to_str()).collect();
 
             if let Ok(parts) = existing
                 && !parts.is_empty()
             {
-                let combined = format!("{},{value}", parts.join(","));
+                let combined = format!("{},{}", parts.join(","), values.join(","));
                 if let Ok(combined_val) = http::header::HeaderValue::from_str(&combined) {
                     ctx.request_headers_to_set.push((name.clone(), combined_val));
                     continue;
                 }
             }
 
-            ctx.extra_request_headers
-                .push((Cow::Owned(name.to_string()), value.clone()));
+            // No existing header of this name: add every configured value as its
+            // own upstream header line, in configuration order. The protocol
+            // inserts the first entry for a name and appends the rest, so all
+            // values reach the upstream instead of collapsing to the last.
+            for value in values {
+                ctx.extra_request_headers
+                    .push((Cow::Owned(name.to_string()), value.to_owned()));
+            }
         }
+
         Ok(FilterAction::Continue)
     }
 

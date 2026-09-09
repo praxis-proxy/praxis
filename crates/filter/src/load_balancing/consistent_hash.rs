@@ -14,7 +14,8 @@ use super::{endpoint::WeightedEndpoint, hash::fnv1a};
 // -----------------------------------------------------------------------------
 
 /// Routes each request to the same endpoint by hashing a stable
-/// attribute. Virtual nodes are proportional to endpoint weight.
+/// attribute. Each endpoint owns a slice of the hash space proportional
+/// to its weight.
 pub(crate) struct ConsistentHash {
     /// Deduplicated endpoint list with weights and original indices.
     endpoints: Vec<WeightedEndpoint>,
@@ -23,24 +24,34 @@ pub(crate) struct ConsistentHash {
     /// or when the header is absent from the request.
     header: Option<String>,
 
-    /// Virtual-node ring: each entry is an index into `endpoints`.
-    /// Built by expanding each endpoint proportionally to its weight.
-    ring: Vec<usize>,
+    /// Cumulative weight boundaries: `boundaries[i]` is the sum of weights
+    /// `0..=i`, so endpoint `i` owns the hash slots
+    /// `boundaries[i] - weight[i] .. boundaries[i]`.
+    ///
+    /// Boundaries rather than one ring entry per unit of weight (the
+    /// round-robin and random precedent): the ring is rebuilt from
+    /// scratch on every config reload, and the endpoint and weight
+    /// ceilings alone (10 000 × 1 000) allowed a 10 M-entry, 80 MiB
+    /// expansion, far past the 1 Mi ceiling `ring_hash` is held to.
+    boundaries: Vec<u64>,
 }
 
 impl ConsistentHash {
-    /// Create a consistent-hash selector with weight-proportional virtual nodes.
+    /// Create a consistent-hash selector with a weight-proportional hash space.
     pub(crate) fn new(endpoints: Vec<WeightedEndpoint>, header: Option<String>) -> Self {
-        let ring: Vec<usize> = endpoints
+        let mut running = 0_u64;
+        let boundaries: Vec<u64> = endpoints
             .iter()
-            .enumerate()
-            .flat_map(|(i, ep)| std::iter::repeat_n(i, ep.weight as usize))
+            .map(|ep| {
+                running += u64::from(ep.weight);
+                running
+            })
             .collect();
-        debug_assert!(!ring.is_empty(), "consistent-hash requires at least one endpoint");
+        debug_assert!(running > 0, "consistent-hash requires at least one weighted endpoint");
         Self {
             endpoints,
             header,
-            ring,
+            boundaries,
         }
     }
 
@@ -49,9 +60,16 @@ impl ConsistentHash {
         self.header.as_deref()
     }
 
+    /// Number of stored weight boundaries; test observability for the
+    /// O(endpoints) memory invariant.
+    #[cfg(test)]
+    pub(crate) fn stored_slots(&self) -> usize {
+        self.boundaries.len()
+    }
+
     /// Hash the key and return the corresponding healthy endpoint.
     ///
-    /// Skips unhealthy endpoints by probing adjacent ring slots, falling
+    /// Skips unhealthy endpoints by probing adjacent endpoints, falling
     /// back to the original selection if all are unhealthy.
     pub(crate) fn select(
         &self,
@@ -61,12 +79,15 @@ impl ConsistentHash {
     ) -> Option<Arc<str>> {
         let key = hash_key.unwrap_or("");
 
-        let len = self.ring.len();
-        if len == 0 {
+        let total = self.boundaries.last().copied().unwrap_or(0);
+        if total == 0 {
             return None;
         }
-        #[expect(clippy::cast_possible_truncation, reason = "modulo fits usize")]
-        let start = (fnv1a(key) as usize) % len;
+        // The first endpoint whose cumulative weight exceeds the hashed
+        // slot owns it; zero-weight endpoints share their predecessor's
+        // boundary and are therefore never landed on.
+        let slot = fnv1a(key) % total;
+        let start = self.boundaries.partition_point(|&end| end <= slot);
 
         if let Some(state) = health
             && let Some(addr) = self.probe(start, exclude, |ep| {
@@ -80,43 +101,26 @@ impl ConsistentHash {
         self.probe(start, exclude, |_| true)
     }
 
-    /// Walk the ring clockwise from `start` for an endpoint that is not
-    /// excluded and passes `accept`.
+    /// Walk endpoints clockwise from `start` for one that is not excluded
+    /// and passes `accept`.
     ///
-    /// Bounded by distinct endpoints rather than ring entries (the
-    /// ring-hash precedent): with every endpoint rejected, walking the
-    /// weight-expanded ring would revisit each endpoint once per unit of
-    /// weight — per request, exactly during a full-cluster outage.
-    #[expect(clippy::indexing_slicing, reason = "ring indices are bounded via modulo")]
+    /// Walking endpoints rather than individual hash slots yields the same
+    /// first match, every slot an endpoint owns resolves to that same
+    /// endpoint, while visiting each candidate exactly once, which is
+    /// what a full-cluster outage needs.
+    #[expect(clippy::indexing_slicing, reason = "endpoint indices are bounded via modulo")]
     fn probe(
         &self,
         start: usize,
         exclude: &[Arc<str>],
         accept: impl Fn(&WeightedEndpoint) -> bool,
     ) -> Option<Arc<str>> {
-        let len = self.ring.len();
-        // Built lazily on the first rejected slot (the ring-hash
-        // precedent): the dominant healthy-first-slot case must not pay
-        // a per-request memset — or, past the inline capacity, a heap
-        // allocation — for a set it never reads.
-        let mut visited: Option<smallvec::SmallVec<[bool; 32]>> = None;
-        let mut remaining = self.endpoints.len();
-        for offset in 0..len {
-            let ep_idx = self.ring[(start + offset) % len];
-            let ep = &self.endpoints[ep_idx];
-            if !is_excluded(&ep.address, exclude) && accept(ep) {
-                return Some(Arc::clone(&ep.address));
-            }
-            let visited = visited.get_or_insert_with(|| smallvec::smallvec![false; self.endpoints.len()]);
-            if !visited[ep_idx] {
-                visited[ep_idx] = true;
-                remaining -= 1;
-                if remaining == 0 {
-                    break;
-                }
-            }
-        }
-        None
+        let len = self.endpoints.len();
+        (0..len)
+            .map(|offset| &self.endpoints[(start + offset) % len])
+            .filter(|ep| ep.weight > 0)
+            .find(|ep| !is_excluded(&ep.address, exclude) && accept(ep))
+            .map(|ep| Arc::clone(&ep.address))
     }
 }
 
@@ -255,6 +259,56 @@ mod tests {
             assert_eq!(
                 first, again,
                 "None hash key should consistently select the same endpoint"
+            );
+        }
+    }
+
+    #[test]
+    fn stored_slots_do_not_grow_with_weight() {
+        // The selector must stay O(endpoints): the previous
+        // weight-expanded ring stored one entry per unit of weight, so
+        // this cluster alone materialised 3 000 entries, and a cluster at
+        // the configured ceilings (10 000 endpoints x weight 1 000)
+        // materialised 10 M -- rebuilt on every config reload.
+        let ch = ConsistentHash::new(
+            vec![
+                WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 1_000),
+                WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1_000),
+                WeightedEndpoint::simple(Arc::from("10.0.0.3:80"), 2, 1_000),
+            ],
+            None,
+        );
+        assert_eq!(
+            ch.stored_slots(),
+            3,
+            "stored slots must scale with endpoint count, not summed weight"
+        );
+    }
+
+    #[test]
+    fn matches_weight_expanded_ring_selection() {
+        // Boundary search must pick exactly the endpoint the expanded
+        // ring would have picked, for every key and at every weight.
+        let endpoints = vec![
+            WeightedEndpoint::simple(Arc::from("10.0.0.1:80"), 0, 3),
+            WeightedEndpoint::simple(Arc::from("10.0.0.2:80"), 1, 1),
+            WeightedEndpoint::simple(Arc::from("10.0.0.3:80"), 2, 5),
+            WeightedEndpoint::simple(Arc::from("10.0.0.4:80"), 3, 2),
+        ];
+        let ring: Vec<usize> = endpoints
+            .iter()
+            .enumerate()
+            .flat_map(|(i, ep)| std::iter::repeat_n(i, ep.weight as usize))
+            .collect();
+        let ch = ConsistentHash::new(endpoints.clone(), None);
+
+        for i in 0..500 {
+            let key = format!("/key-{i}");
+            let expected = &endpoints[ring[(fnv1a(&key) as usize) % ring.len()]].address;
+            assert_eq!(
+                ch.select(Some(&key), None, &[]).unwrap(),
+                *expected,
+                "boundary search diverged from the weight-expanded ring for {key}"
             );
         }
     }

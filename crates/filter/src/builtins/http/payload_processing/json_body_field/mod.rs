@@ -7,7 +7,8 @@
 //! unmapped values are skipped, duplicate keys are last-wins (matching
 //! `serde_json` and typical backend parsers), and trailing non-whitespace
 //! content after the document blocks promotion so a promoted value always
-//! matches what the backend will parse.
+//! matches what the backend will parse. For the same reason extraction runs
+//! only on the end-of-stream body, never on an earlier chunk.
 
 mod config;
 mod extract;
@@ -54,9 +55,11 @@ struct Promoted;
 /// (matching `serde_json` and typical backend parsers), and trailing
 /// non-whitespace content after the document blocks promotion.
 ///
-/// On successful promotion the filter returns [`FilterAction::BodyDone`] so
-/// [`StreamBuffer`] pre-read does not re-run extraction on later chunks
-/// (including the frozen full body at EOS).
+/// Promotion happens only at end-of-stream, from the complete buffered
+/// body: a mid-stream chunk can be a complete JSON document with more bytes
+/// still to come, and the backend parses the whole body. On successful
+/// promotion the filter returns [`FilterAction::BodyDone`] so a repeated
+/// body hook does not re-run extraction and add the header twice.
 ///
 /// If the field is missing or the body is not valid JSON before the needed
 /// fields are collected, the filter passes through without modification.
@@ -184,13 +187,23 @@ impl HttpFilter for JsonBodyFieldFilter {
         &self,
         ctx: &mut HttpFilterContext<'_>,
         body: &mut Option<Bytes>,
-        _end_of_stream: bool,
+        end_of_stream: bool,
     ) -> Result<FilterAction, FilterError> {
         // Skip re-entry after a successful promote (BodyDone also tells the
         // pipeline to stop calling us). Do not key off header names — an
         // incoming or pre-existing X-* must not block the first promotion.
         if ctx.get_filter_state::<Promoted>().is_some() {
             return Ok(FilterAction::BodyDone);
+        }
+
+        // Promote only from the complete body. A client can make the first
+        // chunk a self-contained document and send more bytes after it; the
+        // backend parses the whole body, so promoting from the prefix would
+        // publish a value the backend never sees. StreamBuffer delivers the
+        // frozen full body at end-of-stream and defers forwarding until then,
+        // so nothing is lost by waiting.
+        if !end_of_stream {
+            return Ok(FilterAction::Continue);
         }
 
         let Some(chunk) = body.as_ref() else {

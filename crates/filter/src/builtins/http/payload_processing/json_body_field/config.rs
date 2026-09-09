@@ -5,7 +5,7 @@
 
 use serde::Deserialize;
 
-use super::super::config_validation::validate_max_body_bytes;
+use super::super::config_validation::{validate_header_name, validate_max_body_bytes};
 use crate::{FilterError, body::DEFAULT_JSON_BODY_MAX_BYTES};
 
 // -----------------------------------------------------------------------------
@@ -60,14 +60,16 @@ fn default_max_body_bytes() -> usize {
 // -----------------------------------------------------------------------------
 
 /// Validate a single field-to-header mapping.
+///
+/// The target header name is parsed here so a name that cannot identify
+/// an HTTP header is rejected at config time rather than silently dropped
+/// at the protocol boundary, which would leave the promoted metadata
+/// missing on an apparently valid deployment.
 fn validate_mapping(field: &str, header: &str) -> Result<(), FilterError> {
     if field.is_empty() {
         return Err("json_body_field: 'field' must not be empty".into());
     }
-    if header.is_empty() {
-        return Err("json_body_field: 'header' must not be empty".into());
-    }
-    Ok(())
+    validate_header_name("json_body_field", "'header'", Some(header))
 }
 
 /// Build the mappings vec from either single-field or multi-field

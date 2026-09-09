@@ -296,6 +296,16 @@ SSRF-sensitive addresses. Loopback (`127.0.0.0/8`,
 `fe80::/10`), and cloud metadata addresses
 (`169.254.169.254`) are blocked by default.
 
+The check is exact for IP literals (in any
+notation, and in the fully-qualified `127.0.0.1.`
+spelling). A hostname is matched by name only:
+validation never resolves DNS, so a name whose
+address record points at loopback or a metadata
+service, or one that only starts to after startup
+(DNS rebinding), is not caught here. Where that
+matters, restrict egress at the network level as
+well.
+
 For local development, set
 `insecure_options.allow_private_health_checks: true`
 to allow probing loopback and private addresses:
@@ -406,10 +416,19 @@ timeout must always be less than the interval.
 ## Dynamic Reload
 
 Health check configuration is dynamically reloadable.
-Changing health check settings in the config file
-triggers a rebuild of the health registry and probe
-tasks without restarting the proxy. In-flight requests
-complete on the previous configuration.
+Changing health check settings, or the endpoint list of
+a health-checked cluster, triggers a rebuild of the
+health registry and probe tasks without restarting the
+proxy. In-flight requests complete on the previous
+configuration. Endpoints that are known to be down and
+still present in the new config stay out of rotation
+until the new probes confirm their recovery, but the
+consecutive success/failure counters restart from zero.
+
+A reload that leaves active health checking untouched
+keeps the running probes and their state, so unrelated
+config edits neither restart probe timers nor reset the
+counters that thresholds are measured against.
 
 ## Monitoring
 

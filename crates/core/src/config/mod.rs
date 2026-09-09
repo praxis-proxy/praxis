@@ -49,7 +49,7 @@ pub use condition::{Condition, ConditionMatch, ResponseCondition, ResponseCondit
 pub use filters::{FailureMode, FilterChainConfig, FilterEntry};
 pub use insecure_options::{InsecureOptions, SkipPipelineChecks};
 pub use listener::{Listener, ListenerTls, ProtocolKind};
-pub use logging::{DEFAULT_BUFFER_SIZE_LINES, LogOutput, LoggingConfig};
+pub use logging::{DEFAULT_BUFFER_SIZE_LINES, LogOutput, LoggingConfig, MAX_BUFFER_SIZE_LINES};
 pub use metrics::{MetricLabel, MetricLabelsConfig, MetricsConfig, RouteTemplates};
 use parse::check_yaml_safety;
 pub use parse::read_config_file;

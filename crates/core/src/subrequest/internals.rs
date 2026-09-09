@@ -329,13 +329,20 @@ pub(super) use crate::reserved_headers::HOP_BY_HOP_HEADERS;
 /// Collect the `Connection`-nominated header names, borrowed from the
 /// map's own `Connection` values. Costs nothing when the header is
 /// absent (an empty iterator collects without allocating).
-pub(super) fn connection_nominated_tokens(headers: &HeaderMap) -> Vec<&str> {
+///
+/// Tokens stay raw bytes rather than `&str`: a header value may legally
+/// carry obs-text (non-ASCII) bytes, and `HeaderValue::to_str` fails for
+/// the whole value when one appears, which would drop every nomination
+/// in that value, including the well-formed tokens beside the offending
+/// byte, and forward those headers across the boundary. Matching is
+/// ASCII-case-insensitive against a `HeaderName`, so a token that is not
+/// a valid header name simply never matches.
+pub(super) fn connection_nominated_tokens(headers: &HeaderMap) -> Vec<&[u8]> {
     headers
         .get_all(http::header::CONNECTION)
         .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .map(str::trim)
+        .flat_map(|value| value.as_bytes().split(|byte| *byte == b','))
+        .map(<[u8]>::trim_ascii)
         .filter(|token| !token.is_empty())
         .collect()
 }
@@ -344,18 +351,20 @@ pub(super) fn connection_nominated_tokens(headers: &HeaderMap) -> Vec<&str> {
 /// direction: hop-by-hop (the fixed list or `Connection`-nominated) or
 /// a reserved internal prefix (`x-praxis-*`, `x-ext-protocol-*`,
 /// `x-ext-agent-*`).
-pub(super) fn is_boundary_stripped(name: &http::header::HeaderName, nominated: &[&str]) -> bool {
+pub(super) fn is_boundary_stripped(name: &http::header::HeaderName, nominated: &[&[u8]]) -> bool {
     // `HeaderName::as_str` is always lowercase, so the fixed list needs
     // no case folding; nominated tokens arrive raw from the wire.
     let name = name.as_str();
     HOP_BY_HOP_HEADERS.contains(&name)
         || crate::reserved_headers::is_reserved(name)
-        || nominated.iter().any(|token| token.eq_ignore_ascii_case(name))
+        || nominated
+            .iter()
+            .any(|token| token.eq_ignore_ascii_case(name.as_bytes()))
 }
 
 /// Request-direction predicate: boundary-stripped plus the framing
 /// headers the executor re-computes.
-pub(super) fn is_request_stripped(name: &http::header::HeaderName, nominated: &[&str]) -> bool {
+pub(super) fn is_request_stripped(name: &http::header::HeaderName, nominated: &[&[u8]]) -> bool {
     let lower = name.as_str();
     lower == "content-length" || lower == "transfer-encoding" || is_boundary_stripped(name, nominated)
 }

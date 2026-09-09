@@ -3,7 +3,7 @@
 
 //! Request condition evaluation for gating filter execution.
 
-use std::{borrow::Cow, convert::Infallible};
+use std::convert::Infallible;
 
 use http::header::HeaderName;
 use praxis_core::config::{Condition, ConditionMatch};
@@ -18,9 +18,17 @@ use crate::context::Request;
 impl HeaderSource for Request {
     type Error = Infallible;
 
-    fn header(&self, name: &HeaderName) -> Result<Option<Cow<'_, str>>, Infallible> {
-        Ok(self.headers.get(name).and_then(|v| v.to_str().ok()).map(Cow::Borrowed))
+    fn header_matches(&self, name: &HeaderName, expected: &str) -> Result<bool, Infallible> {
+        Ok(header_map_matches(&self.headers, name, expected))
     }
+}
+
+/// Whether `headers` carries `expected` on any of `name`'s field lines.
+pub(crate) fn header_map_matches(headers: &http::HeaderMap, name: &HeaderName, expected: &str) -> bool {
+    headers
+        .get_all(name)
+        .iter()
+        .any(|value| value.to_str().is_ok_and(|value| value == expected))
 }
 
 /// Returns true if the filter should execute given its conditions.
@@ -128,9 +136,8 @@ fn matches_request_from<S: HeaderSource>(m: &ConditionMatch, req: &Request, sour
             let Ok(header_name) = HeaderName::from_bytes(name.as_bytes()) else {
                 return Ok(false);
             };
-            match source.header(&header_name)? {
-                Some(v) if v.as_ref() == value.as_str() => {},
-                _ => return Ok(false),
+            if !source.header_matches(&header_name, value)? {
+                return Ok(false);
             }
         }
     }
@@ -214,6 +221,42 @@ mod tests {
         headers.insert("x-debug", HeaderValue::from_static("false"));
         let req = make_request(Method::GET, "/", headers);
         assert!(!should_execute(&[when(header_match(&[("x-debug", "true")]))], &req));
+    }
+
+    #[test]
+    fn when_header_matches_later_occurrence() {
+        let mut headers = HeaderMap::new();
+        headers.append("x-debug", HeaderValue::from_static("false"));
+        headers.append("x-debug", HeaderValue::from_static("true"));
+        let req = make_request(Method::GET, "/", headers);
+        assert!(
+            should_execute(&[when(header_match(&[("x-debug", "true")]))], &req),
+            "a repeated header should match on any of its values"
+        );
+    }
+
+    #[test]
+    fn unless_skips_on_later_occurrence() {
+        let mut headers = HeaderMap::new();
+        headers.append("x-debug", HeaderValue::from_static("false"));
+        headers.append("x-debug", HeaderValue::from_static("true"));
+        let req = make_request(Method::GET, "/", headers);
+        assert!(
+            !should_execute(&[unless(header_match(&[("x-debug", "true")]))], &req),
+            "an 'unless' predicate should also see every occurrence"
+        );
+    }
+
+    #[test]
+    fn when_no_occurrence_matches() {
+        let mut headers = HeaderMap::new();
+        headers.append("x-debug", HeaderValue::from_static("false"));
+        headers.append("x-debug", HeaderValue::from_static("maybe"));
+        let req = make_request(Method::GET, "/", headers);
+        assert!(
+            !should_execute(&[when(header_match(&[("x-debug", "true")]))], &req),
+            "no occurrence carries the expected value"
+        );
     }
 
     #[test]
@@ -534,11 +577,11 @@ mod tests {
     impl HeaderSource for MockSource {
         type Error = MockError;
 
-        fn header(&self, name: &HeaderName) -> Result<Option<Cow<'_, str>>, MockError> {
+        fn header_matches(&self, name: &HeaderName, expected: &str) -> Result<bool, MockError> {
             if self.ambiguous.contains(name) {
                 return Err(MockError);
             }
-            Ok(self.values.get(name).map(|v| Cow::Borrowed(v.as_str())))
+            Ok(self.values.get(name).is_some_and(|v| v == expected))
         }
     }
 

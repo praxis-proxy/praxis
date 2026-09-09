@@ -23,7 +23,7 @@ The resolved value must be a single `host:port` authority. If no trusted value i
 | `connection.write_timeout_ms` | integer | no | Per-write timeout in milliseconds. |
 | `required` | bool | no | Whether the destination header is required (fail-closed). When `true`, requests without a trusted destination header are rejected. Use for compositions where an external processor is expected to always supply a destination. |
 | `source_header` | string | yes | The request header to read the upstream endpoint address from. |
-| `status_on_required_failure` | integer | no | HTTP status code for required-mode routing failures. Only used when `required: true`. Defaults to 500. Compositions with required external processing typically set 503. |
+| `status_on_required_failure` | integer | no | HTTP status code for required-mode routing failures. Only used when `required: true`. Must be a final status (200..=599). Defaults to 500. Compositions with required external processing typically set 503. |
 | `strip_header` | bool | no | Whether to remove the source header after reading it. |
 | `tls` | ClusterTls | no | Optional TLS settings for selected upstreams. Certificates and keys are loaded and parsed once when the filter is constructed, never on a request path. |
 | `tls.ca` | CaConfig | no | Custom CA. |

@@ -153,7 +153,8 @@ fn check_yaml_size(raw: &str) -> Result<(), ProxyError> {
 /// The scan is quote- and comment-aware so that a `*` inside a string
 /// scalar (e.g. `pattern: "a*"`) or a `#` comment is not mistaken for
 /// an alias. An alias node is a `*` at a value/node boundary followed
-/// by an anchor-name character.
+/// by an anchor-name character: an ASCII alphanumeric, `_`, or `-`,
+/// matching the anchor names the YAML parser itself accepts.
 ///
 /// # Errors
 ///
@@ -183,7 +184,11 @@ fn line_contains_alias(line: &str) -> bool {
     for &c in line.as_bytes() {
         // An alias node is `*` at a node boundary followed by an
         // anchor-name character; check the char after a boundary `*`.
-        if prev_star && (c.is_ascii_alphanumeric() || c == b'_') {
+        // `-` belongs in that set, the parser accepts it anywhere in an
+        // anchor name, first character included, and leaving it out let
+        // `*-node` through the scan and into the expansion it exists to
+        // prevent.
+        if prev_star && (c.is_ascii_alphanumeric() || c == b'_' || c == b'-') {
             return true;
         }
         prev_star = false;
@@ -284,6 +289,34 @@ mod tests {
     fn reject_single_alias() {
         let err = reject_yaml_aliases("a: &a x\nb: *a\nlisteners: []\n");
         assert!(err.is_err(), "any alias node should be rejected");
+    }
+
+    #[test]
+    fn reject_alias_with_hyphenated_anchor_name() {
+        // The parser accepts `-` in an anchor name, so `*-a` expands like
+        // any other alias; the scan used to stop at the hyphen.
+        for yaml in ["a: &-a x\nb: *-a\n", "a: &my-anchor x\nb: *my-anchor\n"] {
+            let err = reject_yaml_aliases(yaml);
+            assert!(err.is_err(), "a hyphenated alias name must be rejected: {yaml}");
+        }
+    }
+
+    #[test]
+    fn reject_hyphenated_alias_bomb_through_from_yaml() {
+        let yaml = "listeners: &-a []\nfilter_chains: [*-a]\n";
+        let err = crate::config::Config::from_yaml(yaml).unwrap_err();
+        assert!(
+            err.to_string().contains("alias nodes"),
+            "the alias must be rejected before deserialization: {err}"
+        );
+    }
+
+    #[test]
+    fn accept_hyphen_after_asterisk_inside_a_string() {
+        // Widening the anchor-name set must not start rejecting quoted
+        // scalars that merely contain `*-`.
+        reject_yaml_aliases("pattern: \"*-suffix\"\nglob: '*-.txt'\nnote: ok # *-not-an-alias\n")
+            .expect("a quoted or commented `*-` is not an alias node");
     }
 
     #[test]

@@ -607,15 +607,47 @@ fn extract_origin_normalizes_default_port_in_referer() {
 fn extract_origin_referer_fragment_no_path() {
     let mut headers = http::HeaderMap::new();
     headers.insert("referer", "https://example.com#section".parse().unwrap());
-    let origin = extract_origin(&headers);
-    assert!(
-        origin.is_some(),
-        "Referer with fragment but no path should still extract an origin"
-    );
     assert_eq!(
-        origin.as_deref(),
-        Some("https://example.com#section"),
-        "fragment leaks when no path separates it (split('/') misses '#')"
+        extract_origin(&headers).as_deref(),
+        Some("https://example.com"),
+        "the authority ends at '#', so the fragment must not leak into the origin"
+    );
+}
+
+#[test]
+fn extract_origin_referer_query_no_path() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert("referer", "https://example.com?next=/admin".parse().unwrap());
+    assert_eq!(
+        extract_origin(&headers).as_deref(),
+        Some("https://example.com"),
+        "the authority ends at '?', so the query must not leak into the origin"
+    );
+}
+
+#[test]
+fn extract_origin_referer_fragment_with_port() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert("referer", "https://example.com:443#section".parse().unwrap());
+    assert_eq!(
+        extract_origin(&headers).as_deref(),
+        Some("https://example.com"),
+        "stripping the fragment must leave the default port normalizable"
+    );
+}
+
+#[tokio::test]
+async fn post_with_trusted_referer_carrying_only_a_fragment_continues() {
+    let f = make_filter(&["https://example.com"], 100, false);
+    let mut req = crate::test_utils::make_request(http::Method::POST, "/submit");
+    req.headers
+        .insert("referer", "https://example.com#section".parse().unwrap());
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    let action = f.on_request(&mut ctx).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "a trusted Referer whose only trailing component is a fragment must not be rejected"
     );
 }
 

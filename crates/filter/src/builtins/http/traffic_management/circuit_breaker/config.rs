@@ -67,18 +67,22 @@ pub(super) struct ClusterCircuitBreakerConfig {
     pub name: Arc<str>,
 
     /// Number of consecutive upstream failures before the
-    /// circuit trips to Open.
+    /// circuit trips to Open. Must be greater than zero.
     pub consecutive_failures: u32,
 
     /// Seconds a Half-Open probe may remain in-flight before
     /// the circuit resets to Open and starts a new recovery
     /// cycle. Prevents indefinite stall when a probe request
-    /// is dropped without a response. Defaults to 30 seconds.
+    /// is dropped without a response. Must be greater than
+    /// zero: a zero timeout makes every probe stale as soon
+    /// as it is issued, so concurrent requests keep resetting
+    /// the circuit instead of letting one probe decide
+    /// recovery. Defaults to 30 seconds.
     #[serde(default = "default_half_open_timeout_secs")]
     pub half_open_timeout_secs: u64,
 
     /// Seconds the circuit stays Open before transitioning
-    /// to Half-Open.
+    /// to Half-Open. Must be greater than zero.
     pub recovery_window_secs: u64,
 }
 
