@@ -34,7 +34,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust (stable + nightly fmt)
-        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@465a493e9f18776294940c9912935eb7e68fb03b # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@9e74afe2bfce6db1d0e0df15b279d6e1e9dd6e2b # v0.1.0
 
       - name: Install cargo-machete
         run: cargo install cargo-machete --locked
@@ -144,7 +144,7 @@ jobs:
           persist-credentials: false
 
       - name: Supply chain audit
-        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@9e4a1eec33475d18854e7ad182d15c98f84fa8b7 # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/supply-chain-audit@9e74afe2bfce6db1d0e0df15b279d6e1e9dd6e2b # v0.1.0
 
   # ----------------------------------------------------------------------------
   # Coverage gate
@@ -219,7 +219,7 @@ jobs:
           persist-credentials: false
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

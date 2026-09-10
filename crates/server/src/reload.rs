@@ -54,6 +54,7 @@ pub(crate) fn reload_pipelines(
     registry: &FilterRegistry,
     live: &ListenerPipelines,
     listener_meta: &praxis_protocol::http::pingora::health::ListenerMetaStore,
+    cluster_meta: &praxis_protocol::http::pingora::health::ClusterMetaStore,
     health_shutdown: &Arc<Mutex<CancellationToken>>,
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
@@ -148,6 +149,9 @@ pub(crate) fn reload_pipelines(
 
     listener_meta.store(Arc::new(
         praxis_protocol::http::pingora::health::listener_meta_from_config(new_config),
+    ));
+    cluster_meta.store(Arc::new(
+        praxis_protocol::http::pingora::health::cluster_meta_from_config(new_config),
     ));
 
     respawn_health_checks(old_config, new_config, &health_registry, health_shutdown);
@@ -348,7 +352,7 @@ mod tests {
 
     #[test]
     fn valid_reload_swaps_pipeline() {
-        let (live, old_config, registry, shutdown, meta) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
         let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
         assert_eq!(
             meta.load().get("web").unwrap().address,
@@ -376,6 +380,7 @@ filter_chains:
             &registry,
             &live,
             &meta,
+            &cluster_meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_session_stores(),
@@ -409,7 +414,7 @@ filter_chains:
 
     #[test]
     fn invalid_filter_returns_err_old_pipeline_untouched() {
-        let (live, old_config, registry, shutdown, meta) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
         let old_ptr = Arc::as_ptr(&live.get("web").unwrap().load());
 
         let bad_config = Config::from_yaml(
@@ -432,6 +437,7 @@ filter_chains:
             &registry,
             &live,
             &meta,
+            &cluster_meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_session_stores(),
@@ -446,7 +452,7 @@ filter_chains:
 
     #[test]
     fn old_cancellation_token_cancelled_on_success() {
-        let (live, old_config, registry, shutdown, meta) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
         let old_token = shutdown.lock().unwrap().clone();
 
         let new_config = valid_config();
@@ -456,6 +462,7 @@ filter_chains:
             &registry,
             &live,
             &meta,
+            &cluster_meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_session_stores(),
@@ -472,7 +479,7 @@ filter_chains:
 
     #[test]
     fn new_cancellation_token_created_on_success() {
-        let (live, old_config, registry, shutdown, meta) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
         let old_token = shutdown.lock().unwrap().clone();
 
         let new_config = valid_config();
@@ -482,6 +489,7 @@ filter_chains:
             &registry,
             &live,
             &meta,
+            &cluster_meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_session_stores(),
@@ -500,7 +508,7 @@ filter_chains:
 
     #[test]
     fn health_checks_not_cancelled_on_failure() {
-        let (live, old_config, registry, shutdown, meta) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
         let old_token = shutdown.lock().unwrap().clone();
 
         let bad_config = Config::from_yaml(
@@ -523,6 +531,7 @@ filter_chains:
             &registry,
             &live,
             &meta,
+            &cluster_meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_session_stores(),
@@ -537,7 +546,7 @@ filter_chains:
 
     #[test]
     fn new_listener_in_config_is_skipped() {
-        let (live, old_config, registry, shutdown, meta) = setup_live_pipelines();
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
 
         let new_config = Config::from_yaml(
             r#"
@@ -563,6 +572,7 @@ filter_chains:
             &registry,
             &live,
             &meta,
+            &cluster_meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_session_stores(),
@@ -1183,6 +1193,9 @@ filter_chains:
         let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
             praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
         );
+        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
+            praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
+        );
 
         old_health.get("backend").unwrap().endpoints()[1].mark_unhealthy();
 
@@ -1192,6 +1205,7 @@ filter_chains:
             &registry,
             &live,
             &meta,
+            &cluster_meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_session_stores(),
@@ -1271,6 +1285,9 @@ filter_chains:
         let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
             praxis_protocol::http::pingora::health::listener_meta_from_config(&two),
         );
+        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
+            praxis_protocol::http::pingora::health::cluster_meta_from_config(&two),
+        );
 
         // First reload (new=one, old=two) removes the 'legacy' listener;
         // its pipeline stays pinned to the now probe-less first-generation
@@ -1281,6 +1298,7 @@ filter_chains:
             &registry,
             &live,
             &meta,
+            &cluster_meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_session_stores(),
@@ -1301,6 +1319,7 @@ filter_chains:
             &registry,
             &live,
             &meta,
+            &cluster_meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_session_stores(),
@@ -1334,6 +1353,9 @@ filter_chains:
         let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
             praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
         );
+        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
+            praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
+        );
 
         old_health.get("backend").unwrap().endpoints()[1].mark_unhealthy();
 
@@ -1348,6 +1370,7 @@ filter_chains:
             &registry,
             &live,
             &meta,
+            &cluster_meta,
             &shutdown,
             &empty_kv_stores(),
             &empty_session_stores(),
@@ -1392,6 +1415,7 @@ filter_chains:
         FilterRegistry,
         Arc<Mutex<CancellationToken>>,
         praxis_protocol::http::pingora::health::ListenerMetaStore,
+        praxis_protocol::http::pingora::health::ClusterMetaStore,
     ) {
         let config = valid_config();
         let registry = FilterRegistry::with_builtins();
@@ -1409,7 +1433,10 @@ filter_chains:
         let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
             praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
         );
-        (pipelines, config, registry, shutdown, meta)
+        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
+            praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
+        );
+        (pipelines, config, registry, shutdown, meta, cluster_meta)
     }
 
     /// Empty KV store registry for tests without KV stores.

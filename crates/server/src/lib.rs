@@ -34,6 +34,8 @@ pub(crate) mod reload;
 pub(crate) mod reload_diagnostics;
 mod server;
 pub(crate) mod startup_checks;
+#[cfg(feature = "admin-api")]
+mod version;
 #[cfg(feature = "config-reload")]
 pub(crate) mod watcher;
 pub use pipelines::{build_subrequest_client, resolve_pipelines};
@@ -42,6 +44,8 @@ pub use praxis_core::{
     logging::{TracingGuard, init_tracing},
 };
 pub use server::{check_root_privilege, fatal, resolve_config_path, run_server, run_server_with_registry};
+#[cfg(feature = "admin-api")]
+pub use version::process_version_info;
 
 // -----------------------------------------------------------------------------
 // External Filter Discovery

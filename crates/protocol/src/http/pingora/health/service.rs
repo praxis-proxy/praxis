@@ -20,7 +20,7 @@ use praxis_core::{health::HealthRegistry, kv::KvStoreRegistry};
 use tokio::time::Duration;
 use tracing::{error, info};
 
-use super::{listener_meta::ListenerMetaStore, log_level_admin, pipelines_admin};
+use super::{listener_meta::ListenerMetaStore, log_level_admin, pipelines_admin, stats_admin};
 use crate::http::pingora::{json::json_response, kv::dispatch_kv_request, metrics};
 
 /// Recorder upkeep runs independently of Prometheus scrape traffic.
@@ -156,6 +156,9 @@ pub struct PingoraAdminService {
     /// Optional runtime log-level state for `/api/log-level`.
     log_level: Option<Arc<praxis_core::logging::LogLevelState>>,
 
+    /// Optional `/api/stats` snapshot state.
+    stats: Option<stats_admin::StatsAdminState>,
+
     /// When `true`, include per-cluster detail in `/ready` responses.
     verbose: bool,
 }
@@ -165,11 +168,13 @@ impl PingoraAdminService {
     ///
     /// `kv_registry` enables `/api/kv/*` endpoints when `Some`.
     /// `pipelines` enables `GET /api/pipelines` when `Some`.
+    #[expect(clippy::too_many_arguments, reason = "admin service optional endpoint wiring")]
     pub fn new(
         health_registry: Option<HealthRegistry>,
         kv_registry: Option<KvStoreRegistry>,
         pipelines: Option<(Arc<crate::ListenerPipelines>, ListenerMetaStore)>,
         log_level: Option<Arc<praxis_core::logging::LogLevelState>>,
+        stats: Option<stats_admin::StatsAdminState>,
         verbose: bool,
     ) -> Self {
         Self {
@@ -177,6 +182,7 @@ impl PingoraAdminService {
             kv_registry,
             pipelines: pipelines.map(|(pipelines, meta)| pipelines_admin::PipelinesAdminState { pipelines, meta }),
             log_level,
+            stats,
             verbose,
         }
     }
@@ -187,6 +193,7 @@ impl PingoraAdminService {
     }
 
     /// Dispatch `/api/*` admin routes when configured.
+    #[expect(clippy::too_many_lines, reason = "admin route table")]
     async fn dispatch_admin_api(
         &self,
         http_session: &mut ServerSession,
@@ -211,6 +218,20 @@ impl PingoraAdminService {
         if path == "/api/log-level" {
             return Some(match &self.log_level {
                 Some(state) => log_level_admin::log_level_response(state, http_session, method, query).await,
+                None => json_response(404, br#"{"error":"not found"}"#),
+            });
+        }
+
+        if path == "/api/stats" {
+            return Some(match &self.stats {
+                Some(state) => {
+                    let registry = stats_admin::resolve_health_registry(
+                        self.health_registry.as_ref(),
+                        self.pipelines.as_ref(),
+                        &state.listener_meta,
+                    );
+                    stats_admin::stats_response(registry.as_ref(), state, method)
+                },
                 None => json_response(404, br#"{"error":"not found"}"#),
             });
         }
@@ -280,6 +301,9 @@ pub struct AdminEndpointOptions {
 
     /// Runtime log-level state for `/api/log-level`.
     pub log_level: Option<Arc<praxis_core::logging::LogLevelState>>,
+
+    /// Runtime stats snapshot state for `/api/stats`.
+    pub stats: Option<stats_admin::StatsAdminState>,
 
     /// When `true`, include per-cluster detail in `/ready`.
     pub verbose: bool,
@@ -404,11 +428,12 @@ pub fn add_admin_endpoints_to_pingora_server_with_recorder(
         options.kv_registry,
         options.pipelines,
         options.log_level,
+        options.stats,
         verbose,
     );
     let mut service = Service::new("admin".to_owned(), admin);
     service.add_tcp(admin_addr);
-    info!(address = %admin_addr, verbose, "admin endpoints enabled (health + metrics + kv + pipelines + log-level)");
+    info!(address = %admin_addr, verbose, "admin endpoints enabled (health + metrics + kv + pipelines + log-level + stats)");
     server.add_service(service);
 }
 

@@ -43,7 +43,7 @@ jobs:
           persist-credentials: false
 
       - name: Set up Rust (stable + nightly fmt)
-        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@465a493e9f18776294940c9912935eb7e68fb03b # v0.1.0
+        uses: praxis-proxy/conventions/.github/actions/setup-rust-lint@9e74afe2bfce6db1d0e0df15b279d6e1e9dd6e2b # v0.1.0
 
       - name: Cache cargo-machete
         id: cache-machete
