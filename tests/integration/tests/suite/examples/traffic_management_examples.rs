@@ -123,8 +123,6 @@ fn cluster_application_metadata_example_proxies_request() {
         HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
     );
 
-    // Both identifiers survive parsing and validation on the cluster that
-    // declared them, not merely somewhere in the config as a whole.
     let clusters = inline_clusters(&config, "main", "load_balancer");
     let cluster = clusters
         .iter()
@@ -133,20 +131,18 @@ fn cluster_application_metadata_example_proxies_request() {
     assert_eq!(
         cluster.http.application_protocol.as_deref(),
         Some("openai_chat_completions"),
-        "application_protocol should survive parsing"
+        "application_protocol should survive parsing on the declaring cluster"
     );
     assert_eq!(
         cluster.http.application_provider.as_deref(),
         Some("vllm"),
-        "application_provider should survive parsing"
+        "application_provider should survive parsing on the declaring cluster"
     );
 
     let proxy = start_proxy(&config);
 
-    // A cluster tagged with opaque application metadata is accepted and still
-    // proxies traffic normally — the metadata rides along with the cluster.
     let (status, body) = http_get(proxy.addr(), "/v1/chat/completions", None);
-    assert_eq!(status, 200, "request to the tagged cluster should be proxied");
+    assert_eq!(status, 200, "tagged cluster should still proxy traffic normally");
     assert_eq!(body, "llm", "response body should come from the tagged backend");
 }
 

@@ -125,12 +125,18 @@ mod tests {
 
     #[test]
     fn reject_non_ascii_identifiers() {
-        // The byte-wise check already rejects multi-byte UTF-8; asserting it
-        // explicitly documents the intent and guards against a future
-        // refactor that loosens the identifier to Unicode.
-        assert!(err("café").contains("lowercase ASCII"), "accented latin");
-        assert!(err("模型").contains("lowercase ASCII"), "cjk");
-        assert!(err("openai🚀").contains("lowercase ASCII"), "emoji");
+        assert!(
+            err("café").contains("lowercase ASCII"),
+            "byte-wise check must reject accented latin as non-lowercase-ASCII"
+        );
+        assert!(
+            err("模型").contains("lowercase ASCII"),
+            "byte-wise check must reject multi-byte CJK as non-lowercase-ASCII"
+        );
+        assert!(
+            err("openai🚀").contains("lowercase ASCII"),
+            "byte-wise check must reject an emoji as non-lowercase-ASCII"
+        );
     }
 
     #[test]
