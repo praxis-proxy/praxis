@@ -50,6 +50,8 @@ docs/**/
 !docs/filters/tcp/
 !docs/filters/tcp/*/
 !docs/operating/
+!docs/catalog/
+!docs/catalog/config-catalog.json
 !docs/proposals/
 
 # Praxis config files

@@ -28,6 +28,50 @@ env:
   V: ${{ inputs.debug && '1' || '' }}
 
 jobs:
+  # The catalog is a data-only public contract and must remain consumable by
+  # browser/WASM configuration tools.
+  config-catalog-wasm:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+      - name: Install WASM target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Check catalog for WASM
+        run: cargo check -p praxis-proxy-config-catalog --target wasm32-unknown-unknown
+
+  config-catalog-profiles:
+    name: catalog profile (${{ matrix.feature || 'default' }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - feature: ''
+          - feature: basic-auth-filter
+          - feature: policy-engine
+          - feature: otel
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+      - name: Check registry/catalog parity
+        run: >-
+          cargo test -p xtask
+          ${{ matrix.feature != '' && format('--features {0}', matrix.feature) || '' }}
+          config_catalog
+
   # ----------------------------------------------------------------------------
   # Lint (fmt + clippy)
   # ----------------------------------------------------------------------------

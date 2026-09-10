@@ -1,0 +1,21 @@
+[package]
+name = "praxis-proxy-config-catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "WASM-safe serialized configuration catalog types for Praxis"
+
+[features]
+default = []
+generator = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+semver = { workspace = true }
+
+[lints]
+workspace = true

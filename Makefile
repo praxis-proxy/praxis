@@ -66,7 +66,7 @@ LINT_EXTRA_CMDS := typos taplo shellcheck actionlint
 	check-prereqs-extra \
 	check-prereqs-nightly \
 	check-prereqs-nightly-toolchain \
-	setup-hooks \
+	setup-hooks generate-config-catalog lint-config-catalog \
 	help
 
 # Uses --version rather than command -v so we catch broken installs.
@@ -322,6 +322,7 @@ lint:
 	cargo xtask lint-example-tests
 	cargo xtask sync-example-readme
 	cargo xtask lint-filter-docs
+	cargo xtask lint-config-catalog
 
 lint-extra: check-prereqs-extra
 	typos
@@ -331,6 +332,12 @@ lint-extra: check-prereqs-extra
 
 generate-filter-docs:
 	cargo xtask generate-filter-docs
+
+generate-config-catalog:
+	cargo xtask generate-config-catalog
+
+lint-config-catalog:
+	cargo xtask lint-config-catalog
 
 mutants:
 	cargo mutants --workspace
@@ -348,7 +355,7 @@ audit:
 	cargo audit
 	cargo deny check
 
-PUBLISH_CRATES := praxis-proxy-tls praxis-proxy-core \
+PUBLISH_CRATES := praxis-proxy-config-catalog praxis-proxy-tls praxis-proxy-core \
 	praxis-proxy-filter praxis-proxy-protocol praxis-proxy
 
 publish-dry-run:
@@ -441,6 +448,8 @@ help:
 	@echo "  lint                 clippy (default + optional features) + rustfmt check + filter docs"
 	@echo "  lint-extra           typos + taplo + shellcheck + actionlint"
 	@echo "  generate-filter-docs generate per-filter docs under docs/filters/"
+	@echo "  generate-config-catalog generate the machine-readable configuration catalog"
+	@echo "  lint-config-catalog verify the machine-readable configuration catalog"
 	@echo "  fmt                  format with nightly rustfmt"
 	@echo "  audit                cargo audit + cargo deny"
 	@echo "  semver               cargo semver-checks"

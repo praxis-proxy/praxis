@@ -113,50 +113,56 @@ fn collect_stale_doc_paths(root: &Path, docs_dir: &Path, all_filters: &[FilterEn
 // ---------------------------------------------------------------------------
 
 /// A filter with its location metadata for output path construction.
-struct FilterEntry {
+pub(crate) struct FilterEntry {
     /// Protocol name (`http` or `tcp`).
-    protocol: String,
+    pub(crate) protocol: String,
     /// Category slug (e.g. `traffic_management`).
-    category: String,
+    pub(crate) category: String,
     /// Cargo feature required for the filter to be registered.
-    required_feature: Option<String>,
+    pub(crate) required_feature: Option<String>,
     /// Extracted filter information.
-    filter: FilterInfo,
+    pub(crate) filter: FilterInfo,
 }
 
 /// Information extracted for one filter.
 #[derive(Clone)]
-struct FilterInfo {
+pub(crate) struct FilterInfo {
     /// Filter name as returned by `fn name()` (e.g. `"rate_limit"`).
-    name: String,
+    pub(crate) name: String,
     /// First paragraph of the filter struct doc comment.
-    description: String,
+    pub(crate) description: String,
     /// First paragraphs from same-name filter variants.
-    extra_descriptions: Vec<String>,
+    pub(crate) extra_descriptions: Vec<String>,
     /// Additional notes extracted from config struct docs.
-    config_notes: Vec<String>,
+    pub(crate) config_notes: Vec<String>,
     /// Config fields in declaration order.
-    fields: Vec<FieldInfo>,
+    pub(crate) fields: Vec<FieldInfo>,
+    /// Structured config fields retained for machine-readable catalogs.
+    pub(crate) raw_fields: Vec<RawField>,
+    /// Source type table used to resolve nested config shapes.
+    pub(crate) source_items: ModuleItems,
+    /// Anchor source path for catalog provenance.
+    pub(crate) source_path: Option<String>,
     /// YAML configuration example from doc comments.
-    yaml_examples: Vec<String>,
+    pub(crate) yaml_examples: Vec<String>,
 }
 
 /// Information extracted for one config field.
 #[derive(Clone)]
-struct FieldInfo {
+pub(crate) struct FieldInfo {
     /// Field name.
-    name: String,
+    pub(crate) name: String,
     /// Human-readable type string.
-    type_str: String,
+    pub(crate) type_str: String,
     /// Doc comment text.
-    doc: String,
+    pub(crate) doc: String,
     /// Field presence requirement.
-    required: RequiredKind,
+    pub(crate) required: RequiredKind,
 }
 
 /// How a field must appear in YAML.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RequiredKind {
+pub(crate) enum RequiredKind {
     /// Field must be present.
     Yes,
     /// Field may be omitted.
@@ -198,7 +204,8 @@ struct ConfigStruct {
 }
 
 /// Parsed items accumulated from source files belonging to one filter module.
-struct ModuleItems {
+#[derive(Clone)]
+pub(crate) struct ModuleItems {
     /// Module-level doc comments from files in the filter scope.
     module_docs: Vec<String>,
     /// Local config structs found (with `Deserialize` + `deny_unknown_fields`).
@@ -210,9 +217,15 @@ struct ModuleItems {
     structs: BTreeMap<String, ConfigStruct>,
     /// Enum definitions with `Deserialize` for variant rendering.
     enums: BTreeMap<String, EnumInfo>,
+    /// Single-field newtypes whose serde shape is their inner value.
+    newtypes: BTreeMap<String, syn::Type>,
     /// `serde(try_from)` aliases: public struct name to the raw struct
     /// whose fields describe the actual YAML shape.
     try_from_aliases: BTreeMap<String, String>,
+    /// Rust `use` and type aliases used by configuration fields.
+    type_aliases: BTreeMap<String, String>,
+    /// Aliases whose source paths disagree; these must fail closed.
+    ambiguous_aliases: BTreeSet<String>,
 }
 
 impl ModuleItems {
@@ -224,7 +237,10 @@ impl ModuleItems {
             struct_docs: Vec::new(),
             structs: BTreeMap::new(),
             enums: BTreeMap::new(),
+            newtypes: BTreeMap::new(),
             try_from_aliases: BTreeMap::new(),
+            type_aliases: BTreeMap::new(),
+            ambiguous_aliases: BTreeSet::new(),
         }
     }
 
@@ -236,33 +252,72 @@ impl ModuleItems {
             struct_docs: Vec::new(),
             structs: self.structs.clone(),
             enums: self.enums.clone(),
+            newtypes: self.newtypes.clone(),
             try_from_aliases: self.try_from_aliases.clone(),
+            type_aliases: self.type_aliases.clone(),
+            ambiguous_aliases: self.ambiguous_aliases.clone(),
         }
     }
 
     /// Resolve a struct name through any `serde(try_from)` alias to the
     /// struct whose fields describe the YAML shape.
-    fn resolve_alias<'a>(&'a self, name: &'a str) -> &'a str {
-        self.try_from_aliases.get(name).map_or(name, String::as_str)
+    pub(crate) fn resolve_alias<'a>(&'a self, name: &'a str) -> &'a str {
+        self.try_from_aliases
+            .get(name)
+            .or_else(|| self.type_aliases.get(name))
+            .map_or(name, String::as_str)
+    }
+
+    /// Resolve only Rust `use`/type aliases, preserving serde `try_from`
+    /// wrapper names so their portable constraints can be emitted.
+    pub(crate) fn resolve_type_alias<'a>(&'a self, name: &'a str) -> &'a str {
+        self.type_aliases.get(name).map_or(name, String::as_str)
+    }
+
+    /// Return whether a short type alias maps to more than one source path.
+    pub(crate) fn has_ambiguous_alias(&self, name: &str) -> bool {
+        self.ambiguous_aliases.contains(name)
+    }
+
+    /// Return a parsed struct by its Rust identifier.
+    pub(crate) fn struct_fields(&self, name: &str) -> Option<&[RawField]> {
+        self.structs
+            .get(self.resolve_alias(name))
+            .map(|config| config.fields.as_slice())
+    }
+
+    /// Return parsed enum metadata by its Rust identifier.
+    pub(crate) fn enum_info(&self, name: &str) -> Option<&EnumInfo> {
+        self.enums.get(self.resolve_alias(name))
+    }
+
+    /// Return the inner type of a serialized single-field newtype.
+    pub(crate) fn newtype_inner(&self, name: &str) -> Option<&syn::Type> {
+        self.newtypes.get(self.resolve_alias(name))
     }
 }
 
 /// Parsed enum metadata.
 #[derive(Clone)]
-struct EnumInfo {
+pub(crate) struct EnumInfo {
     /// YAML variant names.
-    variants: Vec<String>,
+    pub(crate) variants: Vec<String>,
     /// Whether serde tries variants by shape instead of by variant tag.
-    untagged: bool,
+    pub(crate) untagged: bool,
     /// Source shape for each variant.
-    variant_shapes: Vec<EnumVariantShape>,
+    pub(crate) variant_shapes: Vec<EnumVariantShape>,
     /// Named fields from struct-like variants.
-    fields: Vec<RawField>,
+    pub(crate) fields: Vec<RawField>,
+    /// Optional internally or adjacently tagged representation metadata.
+    pub(crate) tag: Option<String>,
+    pub(crate) content: Option<String>,
+    /// Fields grouped by variant for tagged rendering.
+    pub(crate) variant_fields: Vec<Vec<RawField>>,
 }
 
 /// Source shape for one enum variant.
 #[derive(Clone)]
-enum EnumVariantShape {
+pub(crate) enum EnumVariantShape {
     /// Unit variant, usually rendered as a scalar YAML value.
     Unit,
     /// Tuple variant with one wrapped type.
@@ -273,26 +328,32 @@ enum EnumVariantShape {
 
 /// A raw field before type rendering.
 #[derive(Clone)]
-struct RawField {
+pub(crate) struct RawField {
     /// Field name.
-    name: String,
+    pub(crate) name: String,
     /// Raw type from syn.
-    ty: syn::Type,
+    pub(crate) ty: syn::Type,
     /// Doc comment lines joined.
-    doc: String,
+    pub(crate) doc: String,
     /// Has `#[serde(default)]` or `#[serde(default = "...")]`.
-    has_default: bool,
+    pub(crate) has_default: bool,
     /// Custom serde deserializer from `#[serde(deserialize_with = "...")]`.
-    deserialize_with: Option<String>,
+    pub(crate) deserialize_with: Option<String>,
     /// Has `#[serde(flatten)]`.
-    flatten: bool,
+    pub(crate) flatten: bool,
     /// Additional requiredness hint from surrounding syntax.
-    requirement_hint: RequirementHint,
+    pub(crate) requirement_hint: RequirementHint,
+    /// Accepted serde aliases.
+    pub(crate) aliases: Vec<String>,
+    /// Whether serde skips this field during deserialization.
+    pub(crate) skip: bool,
+    /// Default function path, when present.
+    pub(crate) default_path: Option<String>,
 }
 
 /// Requiredness hint from the surrounding source shape.
 #[derive(Clone, Copy)]
-enum RequirementHint {
+pub(crate) enum RequirementHint {
     /// Use the field type and serde defaults to infer requiredness.
     Normal,
     /// Field came from one of several struct-like enum variants.
@@ -314,6 +375,13 @@ impl FilterInfo {
         append_unique(&mut self.config_notes, other.config_notes);
         append_unique_fields(&mut self.fields, other.fields);
         append_unique(&mut self.yaml_examples, other.yaml_examples);
+        if self.raw_fields.is_empty() {
+            self.raw_fields = other.raw_fields;
+            self.source_items = other.source_items;
+        }
+        if self.source_path.is_none() {
+            self.source_path = other.source_path;
+        }
     }
 }
 
@@ -322,7 +390,7 @@ impl FilterInfo {
 // ---------------------------------------------------------------------------
 
 /// Parse shared config types that built-in filters reference.
-fn parse_shared_config_items(root: &Path) -> ModuleItems {
+pub(crate) fn parse_shared_config_items(root: &Path) -> ModuleItems {
     let mut items = ModuleItems::new();
     for dir in &[root.join("crates/core/src/config"), root.join("crates/tls/src/config")] {
         for path in collect_rs_files(dir) {
@@ -342,8 +410,27 @@ fn parse_shared_config_items(root: &Path) -> ModuleItems {
     items
 }
 
+/// Extract the structured top-level Core `Config` fields and type table.
+pub(crate) fn parse_root_config_source(root: &Path) -> (ModuleItems, Vec<RawField>) {
+    let path = root.join("crates/core/src/config/mod.rs");
+    let Ok(source) = fs::read_to_string(path) else {
+        return (ModuleItems::new(), Vec::new());
+    };
+    let Ok(file) = syn::parse_file(&source) else {
+        return (ModuleItems::new(), Vec::new());
+    };
+    let mut items = parse_shared_config_items(root);
+    parse_file_items(&file, &mut items);
+    let fields = items
+        .configs
+        .iter()
+        .find(|config| config.name == "Config")
+        .map_or_else(Vec::new, |config| config.fields.clone());
+    (items, fields)
+}
+
 /// Discover all filters across all protocols and categories.
-fn discover_all_filters(root: &Path, shared_items: &ModuleItems) -> Vec<FilterEntry> {
+pub(crate) fn discover_all_filters(root: &Path, shared_items: &ModuleItems) -> Vec<FilterEntry> {
     let builtins = root.join("crates/filter/src/builtins");
     let feature_requirements = discover_feature_requirements(root);
     let mut entries = Vec::new();
@@ -403,7 +490,9 @@ fn extract_filters(category_dir: &Path, shared_items: &ModuleItems) -> Vec<Filte
                 };
                 parse_file_items(&file, &mut items);
             }
-            build_filter(&items, &anchor.name, anchor.config_type_name.as_deref())
+            let mut filter = build_filter(&items, &anchor.name, anchor.config_type_name.as_deref());
+            filter.source_path = Some(anchor.file.to_string_lossy().into_owned());
+            filter
         })
         .collect();
     merge_filter_variants(filters)
@@ -714,7 +803,7 @@ fn scope_files_recursive(dir: &Path, excluded: &HashSet<&Path>, out: &mut Vec<Pa
 }
 
 /// Recursively collect `.rs` files, skipping test files.
-fn collect_rs_files(dir: &Path) -> Vec<PathBuf> {
+pub(crate) fn collect_rs_files(dir: &Path) -> Vec<PathBuf> {
     let mut files = Vec::new();
     collect_rs_files_recursive(dir, &mut files);
     files.sort();
@@ -752,6 +841,14 @@ fn parse_file_items(file: &syn::File, out: &mut ModuleItems) {
     for item in &file.items {
         match item {
             syn::Item::Struct(s) => parse_struct(s, out),
+            syn::Item::Type(alias) => {
+                if let syn::Type::Path(path) = &*alias.ty
+                    && let Some(segment) = path.path.segments.last()
+                {
+                    register_type_alias(out, alias.ident.to_string(), segment.ident.to_string());
+                }
+            },
+            syn::Item::Use(use_item) => collect_use_aliases(&use_item.tree, String::new(), out),
             syn::Item::Enum(e)
                 if derives_deserialize(&e.attrs) || manual_deserialize.contains(&e.ident.to_string()) =>
             {
@@ -762,6 +859,52 @@ fn parse_file_items(file: &syn::File, out: &mut ModuleItems) {
             },
             _ => {},
         }
+    }
+}
+
+fn register_type_alias(out: &mut ModuleItems, alias: String, target: String) {
+    let target = target.rsplit("::").next().unwrap_or(&target).to_owned();
+    if let Some(existing) = out.type_aliases.get(&alias)
+        && existing != &target
+    {
+        out.ambiguous_aliases.insert(alias);
+        return;
+    }
+    out.type_aliases.insert(alias, target);
+}
+
+fn collect_use_aliases(tree: &syn::UseTree, prefix: String, out: &mut ModuleItems) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            let next = if prefix.is_empty() {
+                path.ident.to_string()
+            } else {
+                format!("{prefix}::{}", path.ident)
+            };
+            collect_use_aliases(&path.tree, next, out);
+        },
+        syn::UseTree::Name(name) => {
+            let target = if prefix.is_empty() {
+                name.ident.to_string()
+            } else {
+                format!("{prefix}::{}", name.ident)
+            };
+            register_type_alias(out, name.ident.to_string(), target);
+        },
+        syn::UseTree::Rename(rename) => {
+            let target = if prefix.is_empty() {
+                rename.ident.to_string()
+            } else {
+                format!("{prefix}::{}", rename.ident)
+            };
+            register_type_alias(out, rename.rename.to_string(), target);
+        },
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                collect_use_aliases(item, prefix.clone(), out);
+            }
+        },
+        syn::UseTree::Glob(_) => {},
     }
 }
 
@@ -820,6 +963,12 @@ fn parse_struct(s: &syn::ItemStruct, out: &mut ModuleItems) {
         if is_config_struct(s) {
             out.configs.push(config);
         }
+    } else if let syn::Fields::Unnamed(fields) = &s.fields
+        && fields.unnamed.len() == 1
+    {
+        if let Some(field) = fields.unnamed.first() {
+            out.newtypes.insert(s.ident.to_string(), field.ty.clone());
+        }
     }
     if !docs.is_empty() && is_filter_doc_candidate(s) {
         out.struct_docs.push((s.ident.to_string(), docs));
@@ -850,6 +999,7 @@ fn build_filter(items: &ModuleItems, name: &str, config_type: Option<&str>) -> F
     let cfg_notes = config.map_or_else(Vec::new, |c| config_notes(&c.doc));
     append_unique(&mut all_notes, cfg_notes);
     let fields = config.map_or_else(Vec::new, |c| build_fields(c, items));
+    let raw_fields = config.map_or_else(Vec::new, |c| c.fields.clone());
 
     FilterInfo {
         name: name.to_owned(),
@@ -857,6 +1007,9 @@ fn build_filter(items: &ModuleItems, name: &str, config_type: Option<&str>) -> F
         extra_descriptions: Vec::new(),
         config_notes: all_notes,
         fields,
+        raw_fields,
+        source_items: items.clone(),
+        source_path: None,
         yaml_examples,
     }
 }
@@ -1027,6 +1180,9 @@ fn parse_config_fields(s: &syn::ItemStruct) -> Option<Vec<RawField>> {
                 deserialize_with: serde_deserialize_with(&f.attrs),
                 flatten: has_serde_attr(&f.attrs, "flatten"),
                 requirement_hint: RequirementHint::Normal,
+                aliases: serde_aliases(&f.attrs),
+                skip: has_serde_attr(&f.attrs, "skip") || has_serde_attr(&f.attrs, "skip_deserializing"),
+                default_path: serde_default_path(&f.attrs),
                 ty: f.ty.clone(),
             })
             .collect(),
@@ -1070,6 +1226,43 @@ fn serde_field_name(field: &syn::Field) -> String {
         .find_map(serde_rename)
         .or_else(|| field.ident.as_ref().map(ToString::to_string))
         .unwrap_or_default()
+}
+
+fn serde_aliases(attrs: &[syn::Attribute]) -> Vec<String> {
+    attrs
+        .iter()
+        .filter(|attr| attr.path().is_ident("serde"))
+        .flat_map(|attr| {
+            let mut aliases = Vec::new();
+            let _ = attr.parse_nested_meta(|meta| {
+                if meta.path.is_ident("alias") {
+                    if let Ok(value) = meta.value()?.parse::<syn::LitStr>() {
+                        aliases.push(value.value());
+                    }
+                }
+                Ok(())
+            });
+            aliases
+        })
+        .collect()
+}
+
+fn serde_default_path(attrs: &[syn::Attribute]) -> Option<String> {
+    attrs.iter().find_map(|attr| {
+        if !attr.path().is_ident("serde") {
+            return None;
+        }
+        let mut path = None;
+        let _ = attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("default")
+                && let Ok(value) = meta.value()?.parse::<syn::LitStr>()
+            {
+                path = Some(value.value());
+            }
+            Ok(())
+        });
+        path
+    })
 }
 
 /// Return whether a serde attribute contains a given nested key.
@@ -1143,13 +1336,16 @@ fn extract_enum_info(e: &syn::ItemEnum) -> EnumInfo {
             }
         }
     }
-    let fields = variant_fields.into_iter().flatten().collect();
+    let fields = variant_fields.clone().into_iter().flatten().collect();
 
     EnumInfo {
         variants,
         untagged,
         variant_shapes,
         fields,
+        tag: e.attrs.iter().find_map(|attr| serde_lit_value(attr, "tag")),
+        content: e.attrs.iter().find_map(|attr| serde_lit_value(attr, "content")),
+        variant_fields,
     }
 }
 
@@ -1211,6 +1407,9 @@ fn parse_variant_fields(variant: &syn::Variant) -> Vec<RawField> {
             deserialize_with: serde_deserialize_with(&f.attrs),
             flatten: has_serde_attr(&f.attrs, "flatten"),
             requirement_hint: RequirementHint::Normal,
+            aliases: serde_aliases(&f.attrs),
+            skip: has_serde_attr(&f.attrs, "skip") || has_serde_attr(&f.attrs, "skip_deserializing"),
+            default_path: serde_default_path(&f.attrs),
             ty: f.ty.clone(),
         })
         .collect()
@@ -2454,6 +2653,9 @@ mod tests {
                 extra_descriptions: vec![],
                 config_notes: vec![],
                 fields: vec![],
+                raw_fields: vec![],
+                source_items: ModuleItems::new(),
+                source_path: None,
                 yaml_examples: vec![],
             },
         }];
@@ -2708,6 +2910,9 @@ mod tests {
                     doc: "Max time in milliseconds.".to_owned(),
                     required: RequiredKind::Yes,
                 }],
+                raw_fields: vec![],
+                source_items: ModuleItems::new(),
+                source_path: None,
                 yaml_examples: vec!["filter: timeout\ntimeout_ms: 5000".to_owned()],
             },
         }

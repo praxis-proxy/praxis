@@ -24,6 +24,7 @@
 #![allow(let_underscore_drop, reason = "development tooling")]
 
 mod benchmark;
+mod config_catalog;
 mod debug;
 mod echo;
 mod filter_docs;
@@ -78,6 +79,12 @@ enum Command {
 
     /// Check that filter doc files are up to date.
     LintFilterDocs(filter_docs::LintArgs),
+
+    /// Generate the machine-readable configuration catalog.
+    GenerateConfigCatalog(config_catalog::GenerateArgs),
+
+    /// Check the machine-readable configuration catalog is current.
+    LintConfigCatalog(config_catalog::LintArgs),
 }
 
 // -----------------------------------------------------------------------------
@@ -96,6 +103,8 @@ fn main() {
         Command::SyncExampleReadme(args) => sync_example_readme::run(&args),
         Command::GenerateFilterDocs(args) => filter_docs::generate(args),
         Command::LintFilterDocs(args) => filter_docs::lint(args),
+        Command::GenerateConfigCatalog(args) => config_catalog::generate(args),
+        Command::LintConfigCatalog(args) => config_catalog::lint(args),
     }
 }
 

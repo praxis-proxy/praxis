@@ -226,11 +226,26 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Set up Rust
+        uses: praxis-proxy/conventions/.github/actions/setup-rust@dc77dbd3a55ce96e8e31a3c8d36cea4952617dd3 # v0.1.0
+
+      - name: Generate and validate Core catalog artifact
+        env:
+          PRAXIS_SOURCE_REVISION: ${{ github.sha }}
+        run: |
+          cargo xtask generate-config-catalog
+          cargo xtask lint-config-catalog
+          cargo test -p praxis-proxy-config-catalog --all-features
+
       - name: Create draft pre-release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ github.ref_name }}
-        run: gh release create "$TAG" --generate-notes --prerelease --draft
+        run: |
+          VERSION="${TAG#v}"
+          ARTIFACT="praxis-core-config-catalog-${VERSION}.json"
+          cp docs/catalog/config-catalog.json "$ARTIFACT"
+          gh release create "$TAG" --generate-notes --prerelease --draft "$ARTIFACT"
 
   # ----------------------------------------------------------------------------
   # Phase 2 (release published): publish the crates to crates.io for real
