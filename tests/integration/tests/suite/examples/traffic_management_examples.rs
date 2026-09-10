@@ -5,6 +5,7 @@
 
 use std::collections::HashMap;
 
+use praxis_core::config::{Cluster, Config};
 use praxis_test_utils::{
     free_port, http_get, http_send, parse_header, parse_status, start_backend_with_shutdown, start_proxy,
 };
@@ -121,6 +122,25 @@ fn cluster_application_metadata_example_proxies_request() {
         proxy_port,
         HashMap::from([("127.0.0.1:3001", backend_guard.port())]),
     );
+
+    // Both identifiers survive parsing and validation on the cluster that
+    // declared them, not merely somewhere in the config as a whole.
+    let clusters = inline_clusters(&config, "main", "load_balancer");
+    let cluster = clusters
+        .iter()
+        .find(|c| &*c.name == "llm_backend")
+        .expect("example should define the llm_backend cluster");
+    assert_eq!(
+        cluster.http.application_protocol.as_deref(),
+        Some("openai_chat_completions"),
+        "application_protocol should survive parsing"
+    );
+    assert_eq!(
+        cluster.http.application_provider.as_deref(),
+        Some("vllm"),
+        "application_provider should survive parsing"
+    );
+
     let proxy = start_proxy(&config);
 
     // A cluster tagged with opaque application metadata is accepted and still
@@ -128,4 +148,34 @@ fn cluster_application_metadata_example_proxies_request() {
     let (status, body) = http_get(proxy.addr(), "/v1/chat/completions", None);
     assert_eq!(status, 200, "request to the tagged cluster should be proxied");
     assert_eq!(body, "llm", "response body should come from the tagged backend");
+}
+
+// ---------------------------------------------------------------------------
+// Test Utilities
+// ---------------------------------------------------------------------------
+
+/// Read back the inline `clusters:` list of one filter entry.
+///
+/// Example clusters are declared inside the load balancer's opaque filter
+/// config rather than the top-level `clusters:` block, so recovering the
+/// typed [`Cluster`] means re-deserializing that YAML value — the same way
+/// `validate_inline_clusters` reaches them.
+fn inline_clusters(config: &Config, chain_name: &str, filter_type: &str) -> Vec<Cluster> {
+    let chain = config
+        .filter_chains
+        .iter()
+        .find(|c| c.name == chain_name)
+        .unwrap_or_else(|| panic!("chain '{chain_name}' not found"));
+    let entry = chain
+        .filters
+        .iter()
+        .find(|f| f.filter_type == filter_type)
+        .unwrap_or_else(|| panic!("filter '{filter_type}' not found in chain '{chain_name}'"));
+    let serde_yaml::Value::Mapping(mapping) = &entry.config else {
+        panic!("filter '{filter_type}' config should be a mapping");
+    };
+    let clusters = mapping
+        .get("clusters")
+        .unwrap_or_else(|| panic!("filter '{filter_type}' should declare inline clusters"));
+    serde_yaml::from_value(clusters.clone()).expect("inline clusters should deserialize")
 }

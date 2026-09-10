@@ -1,11 +1,12 @@
 # Cluster Application Metadata
 #
-# Tags an upstream cluster with opaque application metadata:
-# `application_protocol` (the wire format the upstream body speaks) and
-# `application_provider` (the provider-specific flavor). Both stay
-# opaque to Praxis core — consuming filters interpret them — and are
-# validated only as bounded, canonical identifiers. Traffic is proxied
-# normally; the metadata simply travels with the cluster definition.
+# Tags an upstream cluster with opaque application metadata that
+# consuming filters interpret. The `application_protocol` field
+# declares the wire format the upstream body speaks and
+# `application_provider` names the provider-specific flavor. Both stay
+# opaque to Praxis core and are validated only as bounded, canonical
+# identifiers. Traffic is proxied normally; the metadata simply travels
+# with the cluster definition.
 #
 # Usage:
 #   cargo run -p praxis-proxy -- -c examples/configs/traffic-management/cluster-application-metadata.yaml

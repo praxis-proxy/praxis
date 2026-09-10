@@ -47,8 +47,8 @@ fn validate_identifier(value: &str, field: &str, cluster_name: &str) -> Result<(
             "cluster '{cluster_name}': {field} {value:?} exceeds {MAX_IDENTIFIER_LEN} bytes"
         )));
     }
-    let char_allowed = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-');
-    if !value.bytes().all(char_allowed) {
+    let byte_allowed = |b: u8| b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'_' | b'-');
+    if !value.bytes().all(byte_allowed) {
         return Err(ProxyError::Config(format!(
             "cluster '{cluster_name}': {field} {value:?} must use only lowercase ASCII \
              letters, digits, '.', '_', or '-'"
