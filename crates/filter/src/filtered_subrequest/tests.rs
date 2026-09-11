@@ -1389,6 +1389,81 @@ async fn run_streaming_enforces_response_byte_ceiling() {
 
 #[tokio::test]
 #[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
+async fn run_streaming_ceiling_breach_ends_the_stream() {
+    use std::{
+        sync::Arc,
+        time::{Duration, Instant},
+    };
+
+    // A 20-byte upstream body (hex chunk length 14), behind a chain whose
+    // completion hook emits a 14-byte terminal event at EOF.
+    let (addr, backend) = spawn_raw_backend(
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n14\r\nAAAAAAAAAAAAAAAAAAAA\r\n0\r\n\r\n",
+    )
+    .await;
+    let registry = callout_registry();
+    let mut entries: Vec<crate::FilterEntry> =
+        serde_yaml::from_str(&routed_chain_yaml(addr, "- filter: test_terminal_event\n")).unwrap();
+    let pipeline = Arc::new(crate::FilterPipeline::build(&mut entries, &registry).unwrap());
+
+    // 20 bytes of body cannot fit under a 15-byte ceiling however the upstream
+    // frames it, so some chunk must be rejected. A rejected chunk is never
+    // emitted and so never advances `emitted_bytes` — leaving room for the
+    // 14-byte completion event to pass the check afterwards. A stream that kept
+    // running would therefore resume around the hole and hand the caller a body
+    // with a gap in it instead of an error-terminated one.
+    let executor = streaming_executor(15);
+    let request = crate::SubRequest {
+        method: http::Method::GET,
+        uri: http::Uri::from_static("/"),
+        headers: HeaderMap::new(),
+        body: bytes::Bytes::new(),
+    };
+    let deadline = Instant::now() + Duration::from_secs(5);
+
+    let mut body = match executor
+        .run(&pipeline, &request, crate::RequestExtensions::default(), deadline)
+        .await
+        .expect("streaming callout should open")
+    {
+        crate::CalloutResponse::Streaming { body, .. } => body,
+        crate::CalloutResponse::Buffered(_) => panic!("the chain selected streaming mode"),
+    };
+
+    // Pull until the ceiling rejects a chunk, whatever framing the upstream used.
+    let mut breach = None;
+    for _ in 0_u8..32 {
+        match body.next_chunk().await {
+            Ok(Some(_)) => {},
+            Ok(None) => break,
+            Err(error) => {
+                breach = Some(error);
+                break;
+            },
+        }
+    }
+    let breach = breach.expect("20 bytes of body must breach a 15-byte ceiling");
+    assert!(
+        breach.to_string().contains("exceeds configured body limit"),
+        "the breach must be the body-limit error: {breach}"
+    );
+
+    let resumed = body.next_chunk().await;
+    backend.abort();
+
+    let observed = match &resumed {
+        Ok(Some(chunk)) => format!("resumed with {} more bytes", chunk.len()),
+        Ok(None) => "end of stream".to_owned(),
+        Err(error) => format!("error: {error}"),
+    };
+    assert!(
+        matches!(resumed, Ok(None)),
+        "a ceiling breach must end the stream; polling again must not resume it, got {observed}"
+    );
+}
+
+#[tokio::test]
+#[expect(clippy::large_futures, reason = "drives the full executor future in a test")]
 async fn run_streaming_surfaces_unhandled_upstream_termination() {
     use std::{
         sync::Arc,

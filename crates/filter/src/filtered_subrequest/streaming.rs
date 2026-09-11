@@ -349,8 +349,34 @@ impl CalloutStreamingBody {
         }
     }
 
-    /// Account one outgoing chunk against the response byte ceiling.
+    /// Account one outgoing chunk against the response byte ceiling, ending the
+    /// stream if it does not fit.
+    ///
+    /// A breach is *terminal*. The rejected chunk is never emitted, so
+    /// `emitted_bytes` does not advance; without marking the stream finished a
+    /// caller that polled again would resume around the hole and keep delivering
+    /// later chunks against the stale count, handing the consumer a body with a
+    /// gap in it instead of an error-terminated stream. Marking it finished and
+    /// dropping queued chunks makes the next poll report end-of-stream, matching
+    /// the `deferred_error` arm of [`next_chunk`](CalloutStreamingBody::next_chunk).
+    ///
+    /// The inner body is deliberately left in place: tearing it down here would
+    /// have to drop the upstream synchronously, whereas a subsequent
+    /// [`cancel`](CalloutStreamingBody::cancel) or
+    /// [`suppress`](CalloutStreamingBody::suppress) can still cancel it
+    /// asynchronously and recover the parent extensions.
     fn checked(&mut self, chunk: Bytes) -> Result<Option<Bytes>, FilterError> {
+        let outcome = self.account(chunk);
+        if outcome.is_err() {
+            self.finished = true;
+            self.pending.clear();
+        }
+        outcome
+    }
+
+    /// Add `chunk` to the emitted-byte total, rejecting a counter overflow or a
+    /// breach of the response ceiling.
+    fn account(&mut self, chunk: Bytes) -> Result<Option<Bytes>, FilterError> {
         let total = self
             .emitted_bytes
             .checked_add(chunk.len())
