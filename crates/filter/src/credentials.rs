@@ -279,12 +279,24 @@ impl DeferredCredential {
         if !self.scope.matches(resolved) {
             return false;
         }
-        // The value was validated in `new`, so this cannot fail; degrade to a
-        // no-op rather than panic if that invariant ever regresses. Building the
-        // `HeaderValue` only on a match keeps an unzeroized copy of the secret
-        // off the heap for every destination it is *not* authorized for.
-        let Ok(value) = HeaderValue::from_str(&self.value) else {
-            return false;
+        // The value was validated in `new`, so this cannot fail; narrate the
+        // broken invariant and degrade to a no-op rather than panic (or silently
+        // drop) if it ever regresses. Building the `HeaderValue` only on a match
+        // keeps an unzeroized copy of the secret off the heap for every
+        // destination it is *not* authorized for.
+        let value = match HeaderValue::from_str(&self.value) {
+            Ok(value) => value,
+            Err(error) => {
+                // `error` (http's InvalidHeaderValue) never echoes the offending
+                // bytes, and the secret value itself is deliberately not logged.
+                tracing::warn!(
+                    header = %self.header,
+                    %error,
+                    "deferred credential value failed re-validation at injection; \
+                     dropping credential without sending (a pre-validated invariant regressed)"
+                );
+                return false;
+            },
         };
         headers.insert(self.header.clone(), value);
         true
@@ -377,6 +389,37 @@ mod tests {
         resolved(authority)
             .canonicalize()
             .is_some_and(|resolved| cred.inject_canonical(&resolved, headers))
+    }
+
+    // Run `f` under a capturing tracing subscriber, returning its value paired
+    // with everything it logged at warn level or above on this thread.
+    fn capture_logs<T, F: FnOnce() -> T>(f: F) -> (T, String) {
+        use std::sync::{Arc, Mutex};
+
+        #[derive(Clone)]
+        struct Buffer(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for Buffer {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().expect("buffer lock").extend_from_slice(buf);
+                Ok(buf.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let buffer = Buffer(Arc::new(Mutex::new(Vec::new())));
+        let writer = buffer.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .with_max_level(tracing::Level::WARN)
+            .finish();
+        let out = tracing::subscriber::with_default(subscriber, f);
+        let bytes = buffer.0.lock().expect("buffer lock").clone();
+        (out, String::from_utf8_lossy(&bytes).into_owned())
     }
 
     #[test]
@@ -630,5 +673,136 @@ mod tests {
         .err()
         .expect("a value with control characters must be rejected");
         assert!(err.to_string().contains("valid header value"), "{err}");
+    }
+
+    #[test]
+    fn credential_matches_bracketed_ipv6_authority() {
+        // `[::1]:443` takes the bracketed-with-port branch in `split_host_port`:
+        // the host keeps its colons, the port is parsed after `]`.
+        let cred = credential("[::1]:443", "Bearer sk-secret");
+        let mut headers = HeaderMap::new();
+
+        let injected = inject_if_authorized(&cred, "[::1]:443", &mut headers);
+
+        assert!(injected, "a bracketed IPv6 authority must match itself");
+        assert_eq!(
+            headers.get("authorization").and_then(|v| v.to_str().ok()),
+            Some("Bearer sk-secret"),
+        );
+    }
+
+    #[test]
+    fn credential_host_wildcard_matches_bracketed_ipv6_any_port() {
+        // `[::1]` is the bracketed-without-port branch: a valid wildcard host
+        // that must match the IPv6 literal on every port.
+        let cred = DeferredCredential::new_host_wildcard(
+            "[::1]",
+            HeaderName::from_static("authorization"),
+            "Bearer sk-secret",
+        )
+        .expect("a bracketed IPv6 literal is a valid wildcard host");
+
+        for authority in ["[::1]:443", "[::1]:8443"] {
+            let mut headers = HeaderMap::new();
+            assert!(
+                inject_if_authorized(&cred, authority, &mut headers),
+                "an IPv6 host wildcard must match any port on its host: {authority}"
+            );
+        }
+    }
+
+    #[test]
+    fn credential_host_wildcard_accepts_unbracketed_ipv6() {
+        // `::1` (unbracketed) keeps its colons in the host part, so `canonical_host`
+        // falls through to the bare-host branch and accepts it as a wildcard that
+        // still matches the canonicalized (bracket-stripped) destination host.
+        let cred =
+            DeferredCredential::new_host_wildcard("::1", HeaderName::from_static("authorization"), "Bearer sk-secret")
+                .expect("an unbracketed IPv6 literal is accepted as a wildcard host");
+        let mut headers = HeaderMap::new();
+
+        assert!(
+            inject_if_authorized(&cred, "[::1]:443", &mut headers),
+            "an unbracketed IPv6 wildcard must match the same literal on any port"
+        );
+    }
+
+    #[test]
+    fn deferred_credential_rejects_unbracketed_ipv6_authority() {
+        // `::1` has no separable port (its trailing `:1` is part of the literal),
+        // so an exact authority binding is ambiguous and must be rejected — the
+        // caller must bracket it (`[::1]:443`) or use a host wildcard.
+        let err = DeferredCredential::new("::1", HeaderName::from_static("authorization"), "Bearer sk-secret")
+            .err()
+            .expect("an unbracketed IPv6 literal carries no separable port and must be rejected");
+        assert!(
+            err.to_string().contains("port"),
+            "the error must explain that an explicit port is required: {err}"
+        );
+    }
+
+    #[test]
+    fn deferred_credential_rejects_bracketed_ipv6_without_port() {
+        // `[::1]` takes the bracketed-without-port branch in `split_host_port`,
+        // yielding a host with no port; an exact binding still needs an explicit
+        // port, so it must be rejected just like the unbracketed literal.
+        let err = DeferredCredential::new("[::1]", HeaderName::from_static("authorization"), "Bearer sk-secret")
+            .err()
+            .expect("a bracketed IPv6 literal without a port must be rejected");
+        assert!(
+            err.to_string().contains("port"),
+            "the error must explain that an explicit port is required: {err}"
+        );
+    }
+
+    #[test]
+    fn deferred_credential_host_wildcard_rejects_bracketed_ipv6_with_port() {
+        // A bracketed IPv6 literal carrying a port hits the bracket branch of
+        // `canonical_host`: a wildcard host must not include a port (the caller
+        // meant an exact authority), so it is rejected.
+        let err = DeferredCredential::new_host_wildcard(
+            "[::1]:443",
+            HeaderName::from_static("authorization"),
+            "Bearer sk-secret",
+        )
+        .err()
+        .expect("a bracketed IPv6 wildcard host must not carry a port");
+        assert!(
+            err.to_string().contains("port"),
+            "the error must explain that a wildcard host must not include a port: {err}"
+        );
+    }
+
+    #[test]
+    fn inject_warns_and_drops_when_prevalidated_value_regresses() {
+        // Force the "unreachable" invariant-violation branch by constructing a
+        // credential whose value bypasses `build`'s up-front validation. Injection
+        // must degrade to a no-op AND narrate the broken invariant at warn level,
+        // never silently drop — and the diagnostic must never leak the secret.
+        let cred = DeferredCredential {
+            scope: CredentialScope::Authority(parse_canonical("api.example.com:443", None).expect("valid authority")),
+            header: HeaderName::from_static("authorization"),
+            value: Zeroizing::new("SENTINELSECRET\nx".to_owned()),
+        };
+        let resolved = resolved("api.example.com:443")
+            .canonicalize()
+            .expect("resolvable destination");
+        let mut headers = HeaderMap::new();
+
+        let (injected, logs) = capture_logs(|| cred.inject_canonical(&resolved, &mut headers));
+
+        assert!(!injected, "a regressed invariant must degrade to a no-op, not inject");
+        assert!(
+            !headers.contains_key("authorization"),
+            "no header may be written on the invariant-violation fallback path"
+        );
+        assert!(
+            logs.contains("WARN"),
+            "the broken invariant must be narrated at warn level, not silently dropped: {logs:?}"
+        );
+        assert!(
+            !logs.contains("SENTINELSECRET"),
+            "the diagnostic must never leak the secret value: {logs:?}"
+        );
     }
 }
