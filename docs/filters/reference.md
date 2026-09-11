@@ -11,7 +11,7 @@ Built-in filters organized by protocol and category.
 |--------|---------|-------------|
 | [`access_log`](http/observability/access_log.md) | - | Logs structured access records for each request and response. |
 | [`request_id`](http/observability/request_id.md) | - | Ensures every request carries a correlation ID. |
-| [`trace_context`](http/observability/trace_context.md) | - | Propagates W3C Trace Context headers (`traceparent`, `tracestate`). |
+| [`trace_context`](http/observability/trace_context.md) | - | Propagates W3C Trace Context and `x-request-id` correlation. |
 
 ## HTTP / Payload Processing
 
