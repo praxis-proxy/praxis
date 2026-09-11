@@ -284,7 +284,10 @@ fn strip_promotion_headers(
     .into_iter()
     .flatten()
     {
-        if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_bytes()) {
+match http::header::HeaderName::from_bytes(name.as_bytes()) {
+    Ok(header_name) => headers_to_remove.push(header_name),
+    Err(_) => warn!(header = %name, "cannot strip promotion header: invalid header name"),
+}
             headers_to_remove.push(header_name);
         }
     }
