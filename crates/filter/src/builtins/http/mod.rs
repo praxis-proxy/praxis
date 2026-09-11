@@ -23,7 +23,9 @@ pub use security::{
     GuardrailsAction, GuardrailsFilter, IpAclFilter, PeerIdentityTrustFilter, PiiKind, RuleTargetKind,
 };
 #[cfg(feature = "policy-engine")]
-pub use security::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
+pub use security::{
+    PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory, set_policy_subrequest_connector,
+};
 pub use traffic_management::{
     CircuitBreakerFilter, EndpointReselector, EndpointSelectorFilter, GrpcDetectionFilter,
     IterativeRequestRouterFilter, LoadBalancerFilter, RateLimitFilter, RateLimitMode, RedirectFilter, RedirectStatus,

@@ -54,6 +54,8 @@ mod policy;
 mod policy_assertions;
 #[cfg(feature = "policy-engine")]
 mod policy_http;
+#[cfg(feature = "policy-engine")]
+mod policy_jwks;
 mod priority_lb;
 mod process_logging;
 mod protocol_examples;

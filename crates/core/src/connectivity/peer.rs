@@ -81,11 +81,10 @@ pub enum AddressResolutionError {
     },
 }
 
-/// Cached DNS resolution result: the preferred address, or the failure
-/// message when the last resolution failed (negative caching).
+/// Cached DNS addresses, or the last resolution failure.
 struct DnsCacheEntry {
     /// Outcome of the last resolution.
-    outcome: Result<SocketAddr, String>,
+    outcome: Result<Arc<[SocketAddr]>, String>,
     /// Cache insertion time.
     resolved_at: Instant,
 }
@@ -102,11 +101,7 @@ impl DnsCacheEntry {
     }
 }
 
-/// Process-wide bounded DNS cache.
-///
-/// Sharded ([`DashMap`]) so the per-request read path never contends
-/// on a single process-wide lock; the preferred address is stored
-/// pre-selected so a hit is one lock-free lookup with no scan.
+/// Process-wide bounded cache of complete DNS results.
 fn dns_cache() -> &'static DashMap<String, DnsCacheEntry> {
     static CACHE: OnceLock<DashMap<String, DnsCacheEntry>> = OnceLock::new();
     CACHE.get_or_init(DashMap::new)
@@ -120,19 +115,36 @@ fn dns_inflight() -> &'static DashMap<String, Arc<tokio::sync::Mutex<()>>> {
     INFLIGHT.get_or_init(DashMap::new)
 }
 
-/// Resolve an upstream address without blocking the async worker.
+/// Resolve one upstream address, preferring IPv4.
 ///
-/// Literal socket addresses take the allocation-free fast path. Hostnames use
-/// a bounded process-wide cache and run the operating-system resolver through
-/// [`tokio::task::spawn_blocking`].
+/// Use [`resolve_addresses`] when the caller can fail over.
 ///
 /// # Errors
 ///
 /// Returns [`AddressResolutionError`] when resolution fails or returns no
 /// usable addresses.
 pub async fn resolve_address(address: &str) -> Result<SocketAddr, AddressResolutionError> {
+    // Answer a literal without building the list, so the common host:port
+    // upstream costs no allocation on the request path.
     if let Some(addr) = literal_socket_addr(address) {
         return Ok(addr);
+    }
+    let addresses = resolve_addresses(address).await?;
+    select_preferred_address(&addresses, address)
+}
+
+/// Resolve every address returned for an upstream.
+///
+/// Results retain resolver order and are cached. Callers must validate each
+/// address before dialing it.
+///
+/// # Errors
+///
+/// Returns [`AddressResolutionError`] when resolution fails or returns no
+/// usable addresses.
+pub async fn resolve_addresses(address: &str) -> Result<Arc<[SocketAddr]>, AddressResolutionError> {
+    if let Some(addr) = literal_socket_addr(address) {
+        return Ok(Arc::from([addr]));
     }
     if let Some(cached) = lookup_cached(address) {
         return cached;
@@ -155,7 +167,7 @@ pub async fn resolve_address(address: &str) -> Result<SocketAddr, AddressResolut
     insert_cached(
         address,
         match &outcome {
-            Ok(preferred) => Ok(*preferred),
+            Ok(addresses) => Ok(Arc::clone(addresses)),
             Err(e) => Err(e.to_string()),
         },
     );
@@ -232,8 +244,8 @@ fn literal_socket_addr(address: &str) -> Option<SocketAddr> {
     address.parse::<SocketAddr>().ok()
 }
 
-/// Run the blocking resolver and select the preferred address.
-async fn resolve_uncached(address: &str) -> Result<SocketAddr, AddressResolutionError> {
+/// Run the blocking resolver and keep every address it answers with.
+async fn resolve_uncached(address: &str) -> Result<Arc<[SocketAddr]>, AddressResolutionError> {
     let owned = address.to_owned();
     let task_address = owned.clone();
     let addrs = tokio::task::spawn_blocking(move || {
@@ -245,12 +257,18 @@ async fn resolve_uncached(address: &str) -> Result<SocketAddr, AddressResolution
         address: owned.clone(),
         message: error.to_string(),
     })?
-    .map_err(|source| AddressResolutionError::Resolve { address: owned, source })?;
-    select_preferred_address(&addrs, address)
+    .map_err(|source| AddressResolutionError::Resolve {
+        address: owned.clone(),
+        source,
+    })?;
+    if addrs.is_empty() {
+        return Err(AddressResolutionError::Empty(owned));
+    }
+    Ok(Arc::from(addrs))
 }
 
 /// Store a resolution outcome, evicting the oldest entry at capacity.
-fn insert_cached(address: &str, outcome: Result<SocketAddr, String>) {
+fn insert_cached(address: &str, outcome: Result<Arc<[SocketAddr]>, String>) {
     let cache = dns_cache();
     if cache.len() >= MAX_DNS_ENTRIES && !cache.contains_key(address) {
         cache.retain(|_, entry| entry.is_fresh());
@@ -273,7 +291,7 @@ fn insert_cached(address: &str, outcome: Result<SocketAddr, String>) {
 }
 
 /// Return a non-expired cached outcome (positive or negative).
-fn lookup_cached(address: &str) -> Option<Result<SocketAddr, AddressResolutionError>> {
+fn lookup_cached(address: &str) -> Option<Result<Arc<[SocketAddr]>, AddressResolutionError>> {
     dns_cache().get(address).and_then(|entry| {
         entry.is_fresh().then(|| {
             entry
@@ -283,7 +301,7 @@ fn lookup_cached(address: &str) -> Option<Result<SocketAddr, AddressResolutionEr
                     address: address.to_owned(),
                     message: message.clone(),
                 })
-                .copied()
+                .map(Arc::clone)
         })
     })
 }
@@ -383,6 +401,27 @@ pub fn client_cert_from_cached(cached: &praxis_tls::CachedClientCert) -> pingora
 // SNI
 // ---------------------------------------------------------------------------
 
+/// Whether a URI host is an IP literal rather than a DNS name.
+///
+/// Accepts the bracketed form an IPv6 authority is written in, so a host
+/// taken straight from a URL can be tested without unwrapping it first.
+///
+/// ```
+/// use praxis_core::connectivity::peer;
+///
+/// assert!(peer::is_ip_literal("127.0.0.1"));
+/// assert!(peer::is_ip_literal("[::1]"));
+/// assert!(!peer::is_ip_literal("api.example.com"));
+/// ```
+#[must_use]
+pub fn is_ip_literal(host: &str) -> bool {
+    host.strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host)
+        .parse::<std::net::IpAddr>()
+        .is_ok()
+}
+
 /// Derive an SNI hostname from an `address` string in `host:port` form.
 ///
 /// Returns the host portion if it is a DNS name. Returns an empty
@@ -399,8 +438,7 @@ pub fn client_cert_from_cached(cached: &praxis_tls::CachedClientCert) -> pingora
 /// [RFC 6066]: https://datatracker.ietf.org/doc/html/rfc6066
 pub fn derive_sni(address: &str) -> String {
     let host = address.rsplit_once(':').map_or(address, |(h, _)| h);
-    let host_bare = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
-    if host_bare.parse::<std::net::IpAddr>().is_ok() {
+    if is_ip_literal(host) {
         tracing::debug!(
             address,
             "upstream is an IP without explicit SNI; TLS hostname verification is meaningless"

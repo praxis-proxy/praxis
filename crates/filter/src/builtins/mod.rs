@@ -19,5 +19,5 @@ pub use http::{
     mark_access_record_emitted, normalize_rewritten_path,
 };
 #[cfg(feature = "policy-engine")]
-pub use http::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
+pub use http::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory, set_policy_subrequest_connector};
 pub use tcp::{SniRouterFilter, TcpAccessLogFilter, TcpLoadBalancerFilter};

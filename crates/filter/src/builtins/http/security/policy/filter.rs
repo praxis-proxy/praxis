@@ -100,6 +100,12 @@ enum GatedIdentity {
 /// round-trip so APL field mutators (`redact()`, `assign()`) rewrite
 /// the upstream request body and the downstream response.
 ///
+/// Outbound policy calls share the proxy's sub-request limits and circuit
+/// breaker, use HTTP/1.1, and keep a separate 1 MiB response ceiling. TLS
+/// uses the platform trust store; cluster private CAs and client
+/// certificates do not apply. Private destinations require
+/// `allow_private_idp`.
+///
 /// # YAML configuration
 ///
 /// Filter fields sit directly under the `- filter:` entry; there is no
@@ -476,16 +482,15 @@ impl PolicyFilter {
         Self::publish_identity_projection(ctx, Self::authenticated_identity(identity));
     }
 
-    /// Install the bundled transport with the configured destination policy.
+    /// Install the proxy-backed transport with the configured destination policy.
     fn install_http_transport(mgr: &Arc<PolicyEngine>, allow_private: bool) -> bool {
         if allow_private {
             tracing::info!(
                 target: "policy.filter",
                 "policy: allowing the engine to reach private and loopback IdP addresses"
             );
-            return mgr.set_http_transport(Arc::new(ppe::HyperTransport::new().with_allow_private_destinations()));
         }
-        ppe::install_default_http_transport(mgr)
+        mgr.set_http_transport(Arc::new(super::transport::PolicyHttpTransport::new(allow_private)))
     }
 
     /// Build the public string-valued identity projection from a validated payload.

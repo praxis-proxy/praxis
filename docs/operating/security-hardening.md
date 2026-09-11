@@ -35,6 +35,19 @@ ambiguous configuration:
   `insecure_options.allow_private_upstreams` when
   upstream DNS names legitimately resolve into private
   space.
+- Policy engine outbound calls (JWKS, token exchange,
+  CIBA backchannel) share the proxy's sub-request
+  connector. Private DNS answers (loopback, RFC 1918,
+  link-local, cloud metadata, and CGNAT) are skipped;
+  calls with no public answer are refused. Resolution
+  happens once to prevent rebinding. Use
+  `allow_private_idp` for an in-cluster provider.
+- Policy engine TLS verifies against the platform
+  trust store, including `SSL_CERT_FILE` and
+  `SSL_CERT_DIR`; certificate and hostname verification
+  are always on. Cluster `tls` settings do not apply,
+  so private-CA and mTLS providers are unsupported and
+  cannot share cluster-TLS connections.
 - Root execution (UID 0) rejected by default.
 - Supply chain audited via `cargo audit` and
   `cargo deny`.

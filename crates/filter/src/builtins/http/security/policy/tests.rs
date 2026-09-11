@@ -3062,10 +3062,20 @@ fn try_build_filter(config_path: String) -> Result<PolicyFilter, crate::FilterEr
 }
 
 /// Build a filter with the configured private-destination policy.
+///
+/// Registers a shared connector first, so the transport these filters
+/// install takes the same path a server does instead of falling back to a
+/// private pool. The holder is set-once per process, so a connector another
+/// test registered first is equally good here — the point is that one is
+/// registered at all.
 fn try_build_filter_allowing_private(
     config_path: String,
     allow_private_idp: bool,
 ) -> Result<PolicyFilter, crate::FilterError> {
+    super::set_policy_subrequest_connector(&praxis_core::subrequest::SubRequestConnector::new(
+        praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE,
+        None,
+    ));
     PolicyFilter::new(PolicyFilterConfig {
         config_path,
         allow_private_idp,

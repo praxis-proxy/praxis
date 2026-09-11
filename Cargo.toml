@@ -42,19 +42,6 @@ benchmarks = { path = "benchmarks" }
 bytes = "1.12.1"
 cargo_metadata = "0.23.1"
 chrono = { version = "0.4.45", default-features = false, features = ["clock"] }
-# `builtins` is the engine's one umbrella for every bundled extension, session
-# store included. Naming it rather than enumerating the granular features keeps
-# this line from drifting each time the set changes, which is how the OPA
-# decision point had to be added by hand.
-#
-# The umbrella is bundled extensions only. Anything else a policy document names
-# comes from the host via `register_policy_plugin_factory`; see the policy
-# filter's `host_plugins` module.
-# `http-hyper` provides the transport required by network-capable PPE plugins.
-ppe = { version = "0.2.0", package = "praxis-policy", features = [
-    "builtins",
-    "http-hyper",
-] }
 clap = { version = "4.6.6", features = ["derive"] }
 criterion = { version = "0.8.2", features = ["async_tokio"] }
 dashmap = "6.2.1"
@@ -77,6 +64,7 @@ pingora-proxy = { version = "0.8.4", package = "quixotic-plecostomus-proxy", fea
 percent-encoding = "2.3.2"
 rand = "0.10.2"
 plotters = { version = "0.3.7", default-features = false, features = ["svg_backend", "line_series"] }
+ppe = { version = "0.2.0", package = "praxis-policy", features = ["builtins"] }
 proptest = "1.11.0"
 quote = "1.0.47"
 praxis = { path = "crates/server", package = "praxis-proxy" }

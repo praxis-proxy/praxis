@@ -29,4 +29,6 @@ pub use guardrails::{ContainsValue, GuardrailsAction, GuardrailsFilter, PiiKind,
 pub use ip_acl::IpAclFilter;
 pub use peer_identity_trust::PeerIdentityTrustFilter;
 #[cfg(feature = "policy-engine")]
-pub use policy::{PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory};
+pub use policy::{
+    PolicyFilter, PolicyPluginFactoryFn, register_policy_plugin_factory, set_policy_subrequest_connector,
+};

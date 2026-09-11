@@ -139,9 +139,12 @@ mod error;
 mod filter;
 mod host_plugins;
 mod json_rpc;
+mod shared_connector;
+mod transport;
 
 pub use filter::PolicyFilter;
 pub use host_plugins::{PolicyPluginFactoryFn, register_policy_plugin_factory};
+pub use shared_connector::set_policy_subrequest_connector;
 
 #[cfg(test)]
 #[expect(
