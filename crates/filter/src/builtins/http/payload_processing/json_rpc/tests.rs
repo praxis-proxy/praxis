@@ -1270,3 +1270,167 @@ fn root_scalars_are_not_json_rpc() {
         assert!(out.is_none(), "root scalar {root} is not JSON-RPC");
     }
 }
+
+// -----------------------------------------------------------------------------
+// Header Forgery Prevention Tests (#1057)
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn strips_forged_headers_on_valid_json_rpc() {
+    // A classified JSON-RPC request must remove any client-supplied copies
+    // of the promotion headers before adding the body-derived values.
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/rpc");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let json = br#"{"jsonrpc":"2.0","method":"service/invoke","id":"req-123"}"#;
+    let mut body = Some(Bytes::from_static(json));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(matches!(action, FilterAction::Release));
+
+    // The configured header names should appear in the remove list so
+    // client-supplied copies are stripped before the promoted values
+    // are added.
+    let remove_names: Vec<&str> = ctx
+        .request_headers_to_remove
+        .iter()
+        .map(|h| h.as_str())
+        .collect();
+    assert!(
+        remove_names.contains(&"x-json-rpc-method"),
+        "X-Json-Rpc-Method should be in the remove list: {remove_names:?}"
+    );
+    assert!(
+        remove_names.contains(&"x-json-rpc-id"),
+        "X-Json-Rpc-Id should be in the remove list: {remove_names:?}"
+    );
+    assert!(
+        remove_names.contains(&"x-json-rpc-kind"),
+        "X-Json-Rpc-Kind should be in the remove list: {remove_names:?}"
+    );
+
+    // Promoted values should still be present in extra_request_headers.
+    assert_promoted_header(&ctx, "X-Json-Rpc-Method", "service/invoke");
+    assert_promoted_header(&ctx, "X-Json-Rpc-Id", "req-123");
+    assert_promoted_header(&ctx, "X-Json-Rpc-Kind", "request");
+}
+
+#[tokio::test]
+async fn strips_forged_headers_on_non_json_rpc_body() {
+    // A non-JSON-RPC request must strip the configured promotion headers
+    // even though the classifier does not promote anything. Without this,
+    // a forged X-Json-Rpc-Method passes through unchanged.
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/test");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from_static(b"not json at all"));
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(
+        matches!(action, FilterAction::Continue),
+        "non-JSON body should continue"
+    );
+
+    // Even though no promotion happened, the remove list should contain
+    // the configured header names to strip any client-supplied forgeries.
+    let remove_names: Vec<&str> = ctx
+        .request_headers_to_remove
+        .iter()
+        .map(|h| h.as_str())
+        .collect();
+    assert!(
+        remove_names.contains(&"x-json-rpc-method"),
+        "non-JSON-RPC request must still strip X-Json-Rpc-Method: {remove_names:?}"
+    );
+    assert!(
+        remove_names.contains(&"x-json-rpc-id"),
+        "non-JSON-RPC request must still strip X-Json-Rpc-Id: {remove_names:?}"
+    );
+    assert!(
+        remove_names.contains(&"x-json-rpc-kind"),
+        "non-JSON-RPC request must still strip X-Json-Rpc-Kind: {remove_names:?}"
+    );
+
+    // No promotion should have occurred.
+    assert!(
+        ctx.extra_request_headers.is_empty(),
+        "non-JSON body should not promote any headers"
+    );
+}
+
+#[tokio::test]
+async fn strips_forged_headers_on_none_body() {
+    // Even with no body at all, configured headers should be stripped.
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/test");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body: Option<Bytes> = None;
+    let action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+    assert!(matches!(action, FilterAction::Continue));
+
+    let remove_names: Vec<&str> = ctx
+        .request_headers_to_remove
+        .iter()
+        .map(|h| h.as_str())
+        .collect();
+    assert!(
+        remove_names.contains(&"x-json-rpc-method"),
+        "None body must still strip configured headers: {remove_names:?}"
+    );
+}
+
+#[tokio::test]
+async fn strips_forged_headers_with_custom_header_names() {
+    // Custom header names configured by the operator should also be
+    // stripped from inbound requests.
+    let filter = JsonRpcFilter {
+        config: super::config::JsonRpcConfig {
+            batch_policy: BatchPolicy::Reject,
+            headers: JsonRpcHeaders {
+                id: Some("X-Custom-Id".to_owned()),
+                kind: Some("X-Custom-Kind".to_owned()),
+                method: Some("X-Custom-Method".to_owned()),
+            },
+            max_batch_size: DEFAULT_MAX_BATCH_SIZE,
+            max_body_bytes: 1_048_576,
+            on_invalid: OnInvalidBehavior::Continue,
+        },
+        max_body_bytes: 1_048_576,
+    };
+    let req = crate::test_utils::make_request(http::Method::POST, "/test");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let mut body = Some(Bytes::from_static(b"not json"));
+    let _action = filter.on_request_body(&mut ctx, &mut body, true).await.unwrap();
+
+    let remove_names: Vec<&str> = ctx
+        .request_headers_to_remove
+        .iter()
+        .map(|h| h.as_str())
+        .collect();
+    assert!(
+        remove_names.contains(&"x-custom-method"),
+        "custom method header should be stripped: {remove_names:?}"
+    );
+    assert!(
+        remove_names.contains(&"x-custom-id"),
+        "custom id header should be stripped: {remove_names:?}"
+    );
+    assert!(
+        remove_names.contains(&"x-custom-kind"),
+        "custom kind header should be stripped: {remove_names:?}"
+    );
+}
+
+#[tokio::test]
+async fn no_strip_before_end_of_stream() {
+    // Pre-EOS calls should not strip headers (the strip happens at EOS).
+    let filter = make_filter();
+    let req = crate::test_utils::make_request(http::Method::POST, "/rpc");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let json = br#"{"jsonrpc":"2.0","method":"service/invoke","id":"req-123"}"#;
+    let mut partial = Some(Bytes::from_static(json));
+    let _action = filter.on_request_body(&mut ctx, &mut partial, false).await.unwrap();
+
+    assert!(
+        ctx.request_headers_to_remove.is_empty(),
+        "pre-EOS should not modify the remove list"
+    );
+}

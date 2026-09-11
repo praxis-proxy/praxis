@@ -168,6 +168,14 @@ impl HttpFilter for JsonRpcFilter {
             return Ok(FilterAction::Continue);
         }
 
+        // Strip any client-supplied copies of the configured promotion
+        // headers unconditionally at end-of-stream, *before* attempting
+        // to parse the body. This prevents header forgery regardless of
+        // whether the body is valid JSON-RPC: a non-JSON-RPC request (or
+        // a parse failure with `on_invalid: continue`) must not pass
+        // through client-supplied classifier headers. (#1057)
+        strip_promotion_headers(&self.config, &mut ctx.request_headers_to_remove);
+
         let Some(chunk) = body.as_ref() else {
             return Ok(FilterAction::Continue);
         };
@@ -254,6 +262,31 @@ fn promote_checked(
         );
     } else {
         headers.push((std::borrow::Cow::Owned(header_name.clone()), value.clone()));
+    }
+}
+
+/// Strip client-supplied copies of the configured promotion headers.
+///
+/// Pushes each configured header name onto the remove list so that
+/// any client-supplied values are discarded before the promoted
+/// (body-derived) values are added. The mutation pipeline applies
+/// removes before adds, so the promoted values replace — not
+/// coexist with — forged client copies.
+fn strip_promotion_headers(
+    config: &JsonRpcConfig,
+    headers_to_remove: &mut Vec<http::header::HeaderName>,
+) {
+    for name in [
+        config.headers.method.as_ref(),
+        config.headers.id.as_ref(),
+        config.headers.kind.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        if let Ok(header_name) = http::header::HeaderName::from_bytes(name.as_bytes()) {
+            headers_to_remove.push(header_name);
+        }
     }
 }
 
