@@ -11,11 +11,15 @@ autobenches = false
 [lints]
 workspace = true
 
+[dependencies]
+dhat = { workspace = true, optional = true }
+
 [dev-dependencies]
 criterion = { workspace = true }
 http = { workspace = true }
 praxis-core = { workspace = true }
 praxis-filter = { workspace = true }
+serde_json = { workspace = true }
 serde_yaml = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "net", "time"] }
 
@@ -40,6 +44,17 @@ path = "benches/headers.rs"
 harness = false
 
 [[bench]]
+name = "json_body"
+path = "benches/json_body.rs"
+harness = false
+
+[[bench]]
+name = "json_body_heap"
+path = "benches/json_body_heap.rs"
+harness = false
+required-features = ["dhat-heap"]
+
+[[bench]]
 name = "load_balancer"
 path = "benches/load_balancer.rs"
 harness = false
@@ -53,3 +68,4 @@ harness = false
 # hot path can be measured. Off by default, matching the filter crate.
 [features]
 policy-engine = ["praxis-filter/policy-engine"]
+dhat-heap = ["dep:dhat"]

@@ -77,6 +77,18 @@
   payload scanning, content classification).
   See the [payload processing][payload-processing]
   docs for the full body access model.
+- **JSON body rewrite**: the built-in `json_body` filter
+  applies JSON Pointer add, remove, replace, and extract
+  operations to request bodies, and remove and extract to
+  response bodies, without building a JSON DOM. Duplicate
+  object keys are preserved unless an operation targets
+  them (remove every match, rewrite every match, extract
+  last). Extract copies pointer values into
+  `filter_metadata` or structured metadata without
+  changing the body. Request `Content-Length` is repaired.
+  Response add and replace are rejected at config time
+  because headers are already on the wire; response remove
+  is padded with trailing spaces.
 - **Body-based routing**: the built-in `json_body_field`
   filter extracts top-level fields from JSON request
   bodies and promotes values to request headers, enabling

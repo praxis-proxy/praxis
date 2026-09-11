@@ -656,7 +656,7 @@ by category:
 | ----------- | ---------- |
 | `branching` | Branch chains: conditional skip, terminal, reentrance, cross-chain |
 | `traffic-management` | Router, load balancing, timeouts, redirects, rate limiting, static responses, P2C, canary, circuit breaker, health checks, gRPC detection |
-| `payload-processing` | Compression, JSON field extraction, stream buffering, size limits |
+| `payload-processing` | Compression, JSON Pointer rewrite, JSON field extraction, stream buffering, size limits |
 | `security` | CORS, CSRF, IP ACL, guardrails, policy (feature-gated), forwarded headers, downstream read timeout |
 | `observability` | Access logs, request IDs, TCP access logs |
 | `transformation` | Headers, path rewrite, URL rewrite |
