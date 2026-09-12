@@ -9,7 +9,7 @@ Extracts top-level fields from a JSON request body and promotes their values to 
 
 Uses a map visitor (not a full JSON DOM). Unmapped values are skipped; the whole top-level object is scanned so duplicate keys are last-wins (matching `serde_json` and typical backend parsers), and trailing non-whitespace content after the document blocks promotion.
 
-On successful promotion the filter returns [`FilterAction::BodyDone`] so [`StreamBuffer`] pre-read does not re-run extraction on later chunks (including the frozen full body at EOS).
+Promotion happens only at end-of-stream, from the complete buffered body: a mid-stream chunk can be a complete JSON document with more bytes still to come, and the backend parses the whole body. On successful promotion the filter returns [`FilterAction::BodyDone`] so a repeated body hook does not re-run extraction and add the header twice.
 
 If the field is missing or the body is not valid JSON before the needed fields are collected, the filter passes through without modification.
 

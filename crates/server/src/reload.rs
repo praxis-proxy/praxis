@@ -15,7 +15,7 @@ use praxis_core::{
 use praxis_filter::FilterRegistry;
 use praxis_protocol::ListenerPipelines;
 use tokio_util::sync::CancellationToken;
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 #[cfg(test)]
 use crate::reload_diagnostics::{
@@ -39,9 +39,11 @@ use crate::{
 /// Validate a new config, rebuild pipelines, and atomically swap them
 /// into the running server.
 ///
-/// On success, cancels old health check tasks and spawns replacements.
-/// On failure, logs the error and returns `Err` without modifying any
-/// live state.
+/// On success, cancels old health check tasks and spawns replacements,
+/// unless the reload leaves active health checking untouched: then the
+/// live registry and the probes already running against it are kept (see
+/// [`health_checks_changed`]). On failure, logs the error and returns
+/// `Err` without modifying any live state.
 ///
 /// Listeners whose configured protocol no longer matches the handler
 /// `bound` records their socket being created with keep their live
@@ -82,7 +84,28 @@ pub(crate) fn reload_pipelines(
         return Err(e.into());
     }
 
-    let health_registry = build_health_registry(&new_config.clusters);
+    // A reload that changes nothing about active health checking keeps the live
+    // registry, and with it the probe generation already running against it.
+    // Rebuilding would zero every endpoint's consecutive success and failure
+    // counters: an endpoint one probe short of the unhealthy threshold starts
+    // over, so a config that is reloaded more often than the threshold takes to
+    // trip keeps a failing endpoint in rotation indefinitely. Only the
+    // unhealthy flag survives a rebuild, and only via `carry_over_health_state`.
+    //
+    // Reuse is skipped when this reload leaves a listener protocol-blocked. The
+    // blocked listener keeps pinning the live registry, so sharing that same
+    // registry with the listeners that do swap would let a stale verdict
+    // recorded against the frozen generation leak into live traffic. Falling
+    // back to a rebuild plus `carry_over_health_state`, which excludes frozen
+    // listeners, keeps the frozen and live generations isolated.
+    let reused_registry = (!health_checks_changed(old_config, new_config)
+        && bound.protocol_mismatches(new_config).is_empty())
+    .then(|| live_health_registry(live, old_config, &bound.protocol_mismatches(old_config)))
+    .flatten();
+    let health_registry = reused_registry
+        .clone()
+        .unwrap_or_else(|| build_health_registry(&new_config.clusters));
+    let registry_reused = reused_registry.is_some();
 
     let new_ceiling = new_config.body_limits.max_response_bytes.unwrap_or(usize::MAX);
     let updated_client = praxis_core::subrequest::SubRequestClient::with_max_response_bytes(
@@ -146,8 +169,11 @@ pub(crate) fn reload_pipelines(
 
     // Copy known-down endpoint state into the new registry BEFORE the
     // swap: afterwards `live` already serves the new pipelines and the
-    // old registry is no longer reachable through them.
-    carry_over_health_state(live, old_config, new_config, &health_registry, &frozen);
+    // old registry is no longer reachable through them. A reused registry
+    // is the live one, so there is nothing to copy.
+    if !registry_reused {
+        carry_over_health_state(live, old_config, new_config, &health_registry, &frozen);
+    }
 
     let mut swapped: Vec<&str> = Vec::new();
     let mut skipped: Vec<&str> = Vec::new();
@@ -175,7 +201,11 @@ pub(crate) fn reload_pipelines(
         praxis_protocol::http::pingora::health::cluster_meta_from_config(new_config),
     ));
 
-    respawn_health_checks(old_config, new_config, &health_registry, health_shutdown);
+    if registry_reused {
+        debug!("health check configuration unchanged; keeping the running probes and their state");
+    } else {
+        respawn_health_checks(old_config, new_config, &health_registry, health_shutdown);
+    }
 
     info!(
         swapped = ?swapped,
@@ -269,6 +299,42 @@ fn live_listener_meta(
 // -----------------------------------------------------------------------------
 // Health Check Lifecycle
 // -----------------------------------------------------------------------------
+
+/// Everything active health checking reads out of a config.
+///
+/// The registry is keyed by cluster name and holds one entry per endpoint in
+/// declaration order plus the passive thresholds; a probe task reads the
+/// cluster name, the endpoint addresses and the `health_check` block. Nothing
+/// else about a cluster, weights, zones, TLS, load-balancer options, reaches
+/// either, so the projection deliberately excludes it.
+fn health_check_projection(config: &Config) -> Vec<(&str, Vec<&str>, &praxis_core::config::HealthCheckConfig)> {
+    config
+        .clusters
+        .iter()
+        .filter_map(|cluster| {
+            let health_check = cluster.health_check.as_ref()?;
+            let endpoints = cluster
+                .endpoints
+                .iter()
+                .map(praxis_core::config::Endpoint::address)
+                .collect();
+            Some((cluster.name.as_ref(), endpoints, health_check))
+        })
+        .collect()
+}
+
+/// Whether the reload changes anything the health registry or the probe tasks
+/// depend on.
+///
+/// Compares the [`health_check_projection`] of both configs. Cluster and
+/// endpoint order are part of it: the registry indexes endpoints positionally,
+/// and reordering is rare enough that respawning is the right answer.
+fn health_checks_changed(old_config: &Config, new_config: &Config) -> bool {
+    crate::reload_diagnostics::config_value_changed(
+        &health_check_projection(old_config),
+        &health_check_projection(new_config),
+    )
+}
 
 /// The health registry pinned by the currently live pipelines.
 ///
@@ -430,7 +496,11 @@ fn spawn_health_check_thread(
         let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
             Ok(rt) => rt,
             Err(e) => {
-                error!(error = %e, "failed to start health-check runtime after reload; health checks disabled until next reload");
+                error!(
+                    error = %e,
+                    "failed to start health-check runtime after reload; health checks disabled until a \
+                     reload changes health-check configuration"
+                );
                 return;
             },
         };
@@ -1958,6 +2028,9 @@ filter_chains:
         .unwrap()
     }
 
+    /// Scaling a health-checked cluster forces a registry rebuild, which is
+    /// when the known-down state of the endpoints that survive has to be
+    /// copied across.
     #[test]
     fn reload_carries_unhealthy_endpoint_state() {
         let config = health_checked_config();
@@ -1983,8 +2056,9 @@ filter_chains:
         let bound = BoundListeners::from_config(&config);
         old_health.get("backend").unwrap().endpoints()[1].mark_unhealthy();
 
+        let scaled = scaled_config(&config, &["10.0.0.1:80", "10.0.0.2:80", "10.0.0.3:80"]);
         reload_pipelines(
-            &config,
+            &scaled,
             &config,
             &registry,
             &live,
@@ -2076,11 +2150,13 @@ filter_chains:
 
         let bound = BoundListeners::from_config(&two);
 
-        // First reload (new=one, old=two) removes the 'legacy' listener;
-        // its pipeline stays pinned to the now probe-less first-generation
-        // registry while 'web' swaps to a fresh one.
+        // First reload (new=scaled_up, old=two) removes the 'legacy' listener
+        // and scales the cluster, which rebuilds the registry: 'legacy' stays
+        // pinned to the now probe-less first generation while 'web' swaps to a
+        // fresh one.
+        let scaled_up = scaled_config(&one, &["10.0.0.1:80", "10.0.0.2:80", "10.0.0.3:80"]);
         reload_pipelines(
-            &one,
+            &scaled_up,
             &two,
             &registry,
             &live,
@@ -2098,12 +2174,12 @@ filter_chains:
         // The frozen registry accumulates a stale verdict.
         stale_health.get("backend").unwrap().endpoints()[0].mark_unhealthy();
 
-        // The next reload must carry state from the current generation
-        // (via 'web', all healthy), never from the removed listener's
-        // frozen registry.
+        // The next reload scales back down, rebuilding the registry again. It
+        // must carry state from the current generation (via 'web', all
+        // healthy), never from the removed listener's frozen registry.
         reload_pipelines(
             &one,
-            &one,
+            &scaled_up,
             &registry,
             &live,
             &bound,
@@ -2174,6 +2250,212 @@ filter_chains:
         assert!(
             new_registry.get("backend").unwrap().endpoints()[1].is_healthy(),
             "changed health_check config must reset endpoint state"
+        );
+    }
+
+    /// A reload that leaves health checking alone must keep the live registry,
+    /// so the running probes and the new pipelines stay pointed at the same
+    /// endpoint state.
+    #[test]
+    fn reload_keeps_the_live_registry_when_health_checks_are_unchanged() {
+        let config = health_checked_config();
+        let registry = FilterRegistry::with_builtins();
+        let old_health = build_health_registry(&config.clusters);
+        let live = resolve_pipelines(
+            &config,
+            &registry,
+            &old_health,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+        )
+        .unwrap();
+        let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let token = shutdown.lock().unwrap().clone();
+        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        );
+        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
+            praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
+        );
+
+        // An edit that has nothing to do with health checking.
+        let mut new_config = health_checked_config();
+        new_config.shutdown_timeout_secs = 45;
+
+        let bound = BoundListeners::from_config(&config);
+        reload_pipelines(
+            &new_config,
+            &config,
+            &registry,
+            &live,
+            &bound,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        let new_registry = live.get("web").unwrap().load().health_registry().cloned().unwrap();
+        assert!(
+            Arc::ptr_eq(&new_registry, &old_health),
+            "an unchanged health-check configuration must keep the live registry"
+        );
+        assert!(
+            !token.is_cancelled(),
+            "the running probe generation must not be cancelled when nothing about it changed"
+        );
+    }
+
+    /// Rebuilding the registry zeroes the consecutive-failure counters, so a
+    /// config reloaded more often than the unhealthy threshold takes to trip
+    /// would keep a failing endpoint in rotation forever. Reloads that do not
+    /// touch health checking must leave the hysteresis intact.
+    #[test]
+    fn unrelated_reload_preserves_probe_hysteresis() {
+        let config = health_checked_config();
+        let registry = FilterRegistry::with_builtins();
+        let old_health = build_health_registry(&config.clusters);
+        let live = resolve_pipelines(
+            &config,
+            &registry,
+            &old_health,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+        )
+        .unwrap();
+        let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        );
+        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
+            praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
+        );
+
+        // One probe short of the two failures needed to mark the endpoint down.
+        assert!(
+            !old_health.get("backend").unwrap().endpoints()[1].record_failure(2),
+            "one failure must not trip a threshold of two"
+        );
+
+        let mut new_config = health_checked_config();
+        new_config.shutdown_timeout_secs = 45;
+        let bound = BoundListeners::from_config(&config);
+        reload_pipelines(
+            &new_config,
+            &config,
+            &registry,
+            &live,
+            &bound,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        let after = live.get("web").unwrap().load().health_registry().cloned().unwrap();
+        assert!(
+            after.get("backend").unwrap().endpoints()[1].record_failure(2),
+            "the second failure must still trip the threshold across a reload that left health checks alone"
+        );
+    }
+
+    /// Endpoints are what the probes iterate and what the registry indexes, so
+    /// a scaled cluster must rebuild the registry and respawn the probes even
+    /// though the `health_check` block itself is untouched.
+    #[test]
+    fn reload_respawns_health_checks_when_endpoints_change() {
+        let config = health_checked_config();
+        let registry = FilterRegistry::with_builtins();
+        let old_health = build_health_registry(&config.clusters);
+        let live = resolve_pipelines(
+            &config,
+            &registry,
+            &old_health,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+        )
+        .unwrap();
+        let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let token = shutdown.lock().unwrap().clone();
+        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        );
+        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
+            praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
+        );
+
+        let scaled = scaled_config(&config, &["10.0.0.1:80", "10.0.0.2:80", "10.0.0.3:80"]);
+        let bound = BoundListeners::from_config(&config);
+        reload_pipelines(
+            &scaled,
+            &config,
+            &registry,
+            &live,
+            &bound,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+        )
+        .unwrap();
+
+        let new_registry = live.get("web").unwrap().load().health_registry().cloned().unwrap();
+        assert!(
+            !Arc::ptr_eq(&new_registry, &old_health),
+            "a changed endpoint list must install a registry that knows the new endpoint"
+        );
+        assert_eq!(
+            new_registry.get("backend").unwrap().endpoints().len(),
+            3,
+            "the rebuilt registry must track every configured endpoint"
+        );
+        assert!(
+            token.is_cancelled(),
+            "the previous probe generation must be cancelled when the endpoint list changes"
+        );
+    }
+
+    #[test]
+    fn health_checks_changed_ignores_endpoint_weight() {
+        let config = health_checked_config();
+        let mut weighted = health_checked_config();
+        weighted.clusters[0].endpoints[0] = praxis_core::config::Endpoint::Weighted {
+            address: "10.0.0.1:80".to_owned(),
+            weight: 5,
+            metadata: HashMap::new(),
+            priority: 0,
+            zone: None,
+        };
+
+        assert!(
+            !health_checks_changed(&config, &weighted),
+            "weights are invisible to both the registry and the probes"
+        );
+    }
+
+    #[test]
+    fn health_checks_changed_detects_a_new_health_check() {
+        let config = health_checked_config();
+        let mut without = health_checked_config();
+        without.clusters[0].health_check = None;
+
+        assert!(
+            health_checks_changed(&without, &config),
+            "adding a health check to a cluster is a change"
         );
     }
 
@@ -2554,6 +2836,17 @@ filter_chains:
     }
 
     /// Empty KV store registry for tests without KV stores.
+    /// Copy `config` with the health-checked `backend` cluster rescaled to
+    /// `endpoints`, leaving its `health_check` block untouched.
+    fn scaled_config(config: &Config, endpoints: &[&str]) -> Config {
+        let mut scaled = config.clone();
+        scaled.clusters[0].endpoints = endpoints
+            .iter()
+            .map(|addr| praxis_core::config::Endpoint::Simple((*addr).to_owned()))
+            .collect();
+        scaled
+    }
+
     fn empty_kv_stores() -> praxis_core::kv::KvStoreRegistry {
         praxis_core::kv::KvStoreRegistry::new()
     }

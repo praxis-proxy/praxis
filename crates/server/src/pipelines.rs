@@ -817,8 +817,32 @@ filter_chains:
     }
 
     #[test]
-    fn resolve_pipelines_rejects_terminal_filter_not_last_in_flattened_pipeline() {
-        let config = Config::from_yaml(
+    fn terminal_filter_not_last_in_flattened_pipeline_rejected() {
+        // Config validation now rejects this listener before a pipeline is
+        // ever built, so the guard here is exercised on the concatenated
+        // entries directly, it is the last line of defence for a pipeline
+        // assembled without going through `Config::validate`.
+        let entries: Vec<praxis_core::config::FilterEntry> = serde_yaml::from_str(
+            r#"
+- filter: iterative_request_router
+  steps:
+    - url: "http://example.com"
+- filter: headers
+"#,
+        )
+        .expect("entries yaml");
+        let err = validate_terminal_position(&entries, "web")
+            .expect_err("terminal filter not last in flattened pipeline should fail")
+            .to_string();
+        assert!(
+            err.contains("flattened pipeline") && err.contains("iterative_request_router"),
+            "error should mention flattened pipeline context: {err}"
+        );
+    }
+
+    #[test]
+    fn config_validation_rejects_a_terminal_filter_followed_by_another_chain() {
+        let err = Config::from_yaml(
             r#"
 listeners:
   - name: web
@@ -835,23 +859,10 @@ filter_chains:
       - filter: headers
 "#,
         )
-        .unwrap();
-        let registry = FilterRegistry::with_builtins();
-        let result = resolve_pipelines(
-            &config,
-            &registry,
-            &empty_health_registry(),
-            &empty_kv_stores(),
-            &empty_session_stores(),
-            &empty_subrequest_client(),
-        );
+        .expect_err("chain concatenation must be validated before pipelines are built")
+        .to_string();
         assert!(
-            result.is_err(),
-            "terminal filter not last in flattened pipeline should fail"
-        );
-        let err = result.err().unwrap().to_string();
-        assert!(
-            err.contains("flattened pipeline") && err.contains("iterative_request_router"),
+            err.contains("flattened pipeline"),
             "error should mention flattened pipeline context: {err}"
         );
     }

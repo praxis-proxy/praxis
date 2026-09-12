@@ -172,15 +172,29 @@ pub(in crate::http) async fn execute(
             for (name, value) in &headers_to_set {
                 let _insert = req_headers.insert_header(name.clone(), value.clone());
             }
+            // Apply the first entry for each name with insert, so a producer that
+            // replaces a client-sent value (credential_injection, forwarded_headers)
+            // still overwrites it. Apply any later entries for the same name with
+            // append, so a filter adding several values for one fresh header (headers
+            // request_add) has them all reach the upstream instead of collapsing to
+            // the last under insert's replace semantics.
+            let mut seen_extra: std::collections::HashSet<String> = std::collections::HashSet::new();
             for (name, value) in extra_headers {
-                // Most promoted names are `Cow::Borrowed` statics
-                // ("X-Forwarded-For", …): Pingora converts a &'static
-                // str zero-copy, while `into_owned` heap-copied every
-                // one per request.
-                let _insert = match name {
-                    Cow::Borrowed(name) => req_headers.insert_header(name, value),
-                    Cow::Owned(name) => req_headers.insert_header(name, value),
-                };
+                let first = seen_extra.insert(name.as_ref().to_ascii_lowercase());
+                match name {
+                    Cow::Borrowed(name) if first => {
+                        let _insert = req_headers.insert_header(name, value);
+                    },
+                    Cow::Borrowed(name) => {
+                        let _append = req_headers.append_header(name, value);
+                    },
+                    Cow::Owned(name) if first => {
+                        let _insert = req_headers.insert_header(name, value);
+                    },
+                    Cow::Owned(name) => {
+                        let _append = req_headers.append_header(name, value);
+                    },
+                }
             }
             Ok(false)
         },
@@ -928,13 +942,18 @@ fn apply_pending_header_mutations(
     for (name, value) in to_set {
         let _replaced = headers.insert(name.clone(), value.clone());
     }
+    let mut seen_extra: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (name, value) in extra {
         match (
             http::header::HeaderName::from_bytes(name.as_bytes()),
             http::header::HeaderValue::from_str(value),
         ) {
             (Ok(header_name), Ok(header_value)) => {
-                let _replaced = headers.insert(header_name, header_value);
+                if seen_extra.insert(header_name.as_str().to_ascii_lowercase()) {
+                    let _replaced = headers.insert(header_name, header_value);
+                } else {
+                    headers.append(header_name, header_value);
+                }
             },
             (name_result, value_result) => {
                 warn!(

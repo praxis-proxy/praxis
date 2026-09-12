@@ -17,8 +17,15 @@ const MAX_ENTRIES_UPPER_BOUND: u64 = 200_000;
 /// Uses `#[serde(tag = "type")]` so the YAML discriminator is `type: cookie`,
 /// `type: header`, or `type: learn`. Each variant carries only the fields
 /// relevant to that mode, eliminating conditionally-required `Option` fields.
+///
+/// `deny_unknown_fields` lives here rather than on [`ClusterSessionConfig`]
+/// because serde forbids it alongside `#[serde(flatten)]`. It still guards
+/// the whole cluster entry: flattening hands this enum every key the outer
+/// struct did not claim, so a typo anywhere in an entry, a misspelled
+/// `ttl_secs`, or a `header_name` under `type: cookie`, is rejected instead
+/// of silently ignored.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum PersistenceConfig {
     /// Proxy-managed session cookie.
     Cookie {
@@ -368,6 +375,37 @@ clusters:
 "#;
         let err = serde_yaml::from_str::<StickySessionsConfig>(yaml).unwrap_err();
         assert!(err.to_string().contains("200000"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_unknown_cluster_entry_field() {
+        // A typo of a top-level entry key falls through the flattened
+        // persistence enum, which must reject it instead of silently
+        // leaving the entry on the 1-hour default TTL.
+        let yaml = r#"
+clusters:
+  - name: x
+    type: header
+    header_name: "X-Id"
+    ttl_sec: 60
+"#;
+        let err = serde_yaml::from_str::<StickySessionsConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("ttl_sec"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_unknown_persistence_variant_field() {
+        // A key that belongs to a different persistence variant must not be
+        // accepted and ignored: this config pins nothing by header.
+        let yaml = r#"
+clusters:
+  - name: x
+    type: cookie
+    cookie_name: "_praxis_route"
+    header_name: "X-Id"
+"#;
+        let err = serde_yaml::from_str::<StickySessionsConfig>(yaml).unwrap_err();
+        assert!(err.to_string().contains("header_name"), "got: {err}");
     }
 
     #[test]

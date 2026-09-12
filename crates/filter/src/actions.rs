@@ -11,6 +11,25 @@ use bytes::Bytes;
 use crate::{FilterError, RequestExtensions};
 
 // -----------------------------------------------------------------------------
+// Status validation
+// -----------------------------------------------------------------------------
+
+/// Whether `code` can be the final status of a response Praxis returns itself.
+///
+/// Informational (1xx) statuses precede a final response rather than being
+/// one, so they cannot end an exchange; 600 and above is not an HTTP status
+/// code at all. Every response type in this module shares the range so a
+/// status accepted by one is accepted by all of them.
+fn is_final_status(code: u16) -> bool {
+    (200..=599).contains(&code)
+}
+
+/// Message for a status code outside the final-response range.
+fn invalid_status(kind: &str, code: u16) -> String {
+    format!("{kind} status must be 200..=599 (1xx is informational, not final), got {code}")
+}
+
+// -----------------------------------------------------------------------------
 // Streaming terminal response
 // -----------------------------------------------------------------------------
 
@@ -67,17 +86,31 @@ impl StreamingTerminalResponse {
     /// # Panics
     ///
     /// Panics if `code` is outside 200..=599. Informational responses cannot
-    /// terminate a request.
+    /// terminate a request. Use [`try_new`] for a status that comes from
+    /// configuration, a document, or an upstream response.
+    ///
+    /// [`try_new`]: StreamingTerminalResponse::try_new
     pub fn new(code: u16, body: Box<dyn StreamingResponseBody>) -> Self {
-        assert!(
-            (200..=599).contains(&code),
-            "streaming terminal status must be 200..=599, got {code}"
-        );
+        assert!(is_final_status(code), "{}", invalid_status("streaming terminal", code));
         Self {
             status: code,
             headers: http::HeaderMap::new(),
             body,
         }
+    }
+
+    /// Create a streaming terminal response, reporting an unusable status
+    /// instead of panicking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if `code` is outside 200..=599.
+    pub fn try_new(code: u16, body: Box<dyn StreamingResponseBody>) -> Result<Self, FilterError> {
+        if !is_final_status(code) {
+            return Err(invalid_status("streaming terminal", code).into());
+        }
+        // Validated above, so the assertion in `new` cannot fire.
+        Ok(Self::new(code, body))
     }
 
     /// Set the response headers.
@@ -141,7 +174,10 @@ pub enum FilterAction {
     /// execute before the response is sent, so preceding
     /// observability filters see the terminal response.
     ///
-    /// Only valid in request-phase filters.
+    /// Only valid in request-phase filters. Returned from a body hook it is
+    /// treated as a filter error (the body phase is already committed and has
+    /// no response to substitute), so the filter's failure mode decides
+    /// whether the request is aborted or continues.
     ///
     /// [`Reject`]: FilterAction::Reject
     TerminalResponse(Box<TerminalResponse>),
@@ -154,7 +190,10 @@ pub enum FilterAction {
     /// filter failures after commitment terminate the downstream stream and
     /// cannot produce a replacement response.
     ///
-    /// Only valid in request-phase filters.
+    /// Only valid in request-phase filters, with the same body-phase handling
+    /// as [`TerminalResponse`].
+    ///
+    /// [`TerminalResponse`]: FilterAction::TerminalResponse
     StreamingTerminalResponse(Box<StreamingTerminalResponse>),
 
     /// Signal that accumulated body data ([`StreamBuffer`] mode)
@@ -235,13 +274,13 @@ impl Rejection {
     ///
     /// # Panics
     ///
-    /// Panics if `code` is outside the valid HTTP status range
-    /// (100..=599).
+    /// Panics if `code` is outside 200..=599, the range every response Praxis
+    /// returns itself shares. Use [`try_status`] for a status that comes from
+    /// configuration, a document, or an upstream response.
+    ///
+    /// [`try_status`]: Rejection::try_status
     pub fn status(code: u16) -> Self {
-        assert!(
-            (100..=599).contains(&code),
-            "HTTP status code must be 100..=599, got {code}"
-        );
+        assert!(is_final_status(code), "{}", invalid_status("rejection", code));
         Self {
             status: code,
             headers: Vec::new(),
@@ -249,6 +288,26 @@ impl Rejection {
             body: None,
             preserve_keepalive: false,
         }
+    }
+
+    /// Create a rejection, reporting an unusable status instead of panicking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if `code` is outside 200..=599.
+    ///
+    /// ```
+    /// use praxis_filter::Rejection;
+    ///
+    /// assert_eq!(Rejection::try_status(429).unwrap().status, 429);
+    /// assert!(Rejection::try_status(100).is_err());
+    /// ```
+    pub fn try_status(code: u16) -> Result<Self, FilterError> {
+        if !is_final_status(code) {
+            return Err(invalid_status("rejection", code).into());
+        }
+        // Validated above, so the assertion in `status` cannot fire.
+        Ok(Self::status(code))
     }
 
     /// Set the body of the rejection response.
@@ -310,17 +369,39 @@ impl TerminalResponse {
     ///
     /// Panics if `code` is outside the valid terminal status range
     /// (200..=599). Informational (1xx) statuses cannot be terminal
-    /// because they require a subsequent final response.
+    /// because they require a subsequent final response. Use [`try_new`]
+    /// for a status that comes from configuration, a document, or an
+    /// upstream response.
+    ///
+    /// [`try_new`]: TerminalResponse::try_new
     pub fn new(code: u16) -> Self {
-        assert!(
-            (200..=599).contains(&code),
-            "terminal status must be 200..=599 (1xx is informational, not final), got {code}"
-        );
+        assert!(is_final_status(code), "{}", invalid_status("terminal", code));
         Self {
             status: code,
             headers: http::HeaderMap::new(),
             body: None,
         }
+    }
+
+    /// Create a terminal response, reporting an unusable status instead of
+    /// panicking.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if `code` is outside 200..=599.
+    ///
+    /// ```
+    /// use praxis_filter::TerminalResponse;
+    ///
+    /// assert_eq!(TerminalResponse::try_new(200).unwrap().status, 200);
+    /// assert!(TerminalResponse::try_new(600).is_err());
+    /// ```
+    pub fn try_new(code: u16) -> Result<Self, FilterError> {
+        if !is_final_status(code) {
+            return Err(invalid_status("terminal", code).into());
+        }
+        // Validated above, so the assertion in `new` cannot fire.
+        Ok(Self::new(code))
     }
 
     /// Set the headers of the terminal response.
@@ -366,9 +447,9 @@ mod tests {
     }
 
     #[test]
-    fn rejection_status_boundary_100() {
-        let r = Rejection::status(100);
-        assert_eq!(r.status, 100, "100 is a valid HTTP status");
+    fn rejection_status_boundary_200() {
+        let r = Rejection::status(200);
+        assert_eq!(r.status, 200, "200 is the lower boundary");
     }
 
     #[test]
@@ -377,16 +458,83 @@ mod tests {
         assert_eq!(r.status, 599, "599 is a valid HTTP status");
     }
 
+    /// A rejection is a final response, so it shares the terminal range: a 1xx
+    /// would leave the client waiting for a response that never comes.
     #[test]
-    #[should_panic(expected = "HTTP status code must be 100..=599")]
+    #[should_panic(expected = "rejection status must be 200..=599")]
+    fn rejection_status_1xx_panics() {
+        let _r = Rejection::status(100);
+    }
+
+    #[test]
+    #[should_panic(expected = "rejection status must be 200..=599")]
     fn rejection_status_zero_panics() {
         let _r = Rejection::status(0);
     }
 
     #[test]
-    #[should_panic(expected = "HTTP status code must be 100..=599")]
+    #[should_panic(expected = "rejection status must be 200..=599")]
     fn rejection_status_600_panics() {
         let _r = Rejection::status(600);
+    }
+
+    #[test]
+    fn rejection_try_status_reports_instead_of_panicking() {
+        for code in [0_u16, 100, 199, 600] {
+            let err = Rejection::try_status(code)
+                .err()
+                .unwrap_or_else(|| panic!("status {code} must be rejected"));
+            assert!(
+                err.to_string().contains("must be 200..=599"),
+                "error should name the accepted range, got: {err}"
+            );
+        }
+        assert_eq!(
+            Rejection::try_status(503).unwrap().status,
+            503,
+            "a valid status should still build a rejection"
+        );
+    }
+
+    #[test]
+    fn terminal_response_try_new_reports_instead_of_panicking() {
+        for code in [0_u16, 100, 199, 600] {
+            let err = TerminalResponse::try_new(code)
+                .err()
+                .unwrap_or_else(|| panic!("status {code} must be rejected"));
+            assert!(
+                err.to_string().contains("must be 200..=599"),
+                "error should name the accepted range, got: {err}"
+            );
+        }
+        assert_eq!(
+            TerminalResponse::try_new(204).unwrap().status,
+            204,
+            "a valid status should still build a terminal response"
+        );
+    }
+
+    /// All three response constructors accept exactly the same range.
+    #[test]
+    fn constructors_agree_on_the_accepted_status_range() {
+        for code in [0_u16, 99, 100, 199, 200, 400, 599, 600, 999] {
+            let expected = (200..=599).contains(&code);
+            assert_eq!(
+                Rejection::try_status(code).is_ok(),
+                expected,
+                "rejection disagrees on status {code}"
+            );
+            assert_eq!(
+                TerminalResponse::try_new(code).is_ok(),
+                expected,
+                "terminal response disagrees on status {code}"
+            );
+            assert_eq!(
+                StreamingTerminalResponse::try_new(code, Box::new(NullStreamBody)).is_ok(),
+                expected,
+                "streaming terminal response disagrees on status {code}"
+            );
+        }
     }
 
     #[test]

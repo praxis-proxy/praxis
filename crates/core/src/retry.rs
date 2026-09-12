@@ -14,7 +14,10 @@ use crate::config::RetryBudgetConfig;
 /// Token-bucket rate limiter for cluster-wide retry admission.
 ///
 /// Tokens refill at `min_retries_per_second` per second and are capped
-/// at a dynamically computed `max_tokens(active_requests)`.
+/// at a dynamically computed `max_tokens(active_requests)`. The cap
+/// tracks live traffic in both directions: a bucket filled during a
+/// peak is brought back down to the cap on the next admission check,
+/// not left to be spent against a trough.
 pub struct RetryBudget {
     /// Current available retry tokens.
     tokens: AtomicU64,
@@ -40,6 +43,10 @@ impl RetryBudget {
     }
 
     /// Create an unconstrained budget that always admits retries.
+    ///
+    /// The cap settles to `u32::MAX` on the first admission check and is
+    /// restored in full every second, so the bucket is inexhaustible in
+    /// practice.
     #[must_use]
     pub fn unlimited() -> Self {
         Self {
@@ -63,41 +70,50 @@ impl RetryBudget {
         computed.max(u64::from(self.min_retries_per_second))
     }
 
-    /// Refill tokens based on elapsed time since `last_refill`.
+    /// Settle the bucket against the current traffic level.
     ///
     /// Refill rate = `min_retries_per_second` tokens/second.
     /// `tokens_to_add = min_retries_per_second * elapsed_seconds`,
     /// capped at `max_tokens(active_requests)`.
+    ///
+    /// The cap is applied on every call, not only on the calls that
+    /// accrue whole tokens: `max_tokens` is a function of the *live*
+    /// active-request count, so a bucket filled at peak traffic has to
+    /// come back down as soon as traffic falls. Clamping only when
+    /// tokens are added let a burst of retries arriving inside one
+    /// refill period spend the peak's tokens against the trough's cap.
     pub fn refill(&self, active_requests: u64) {
+        self.settle(self.accrue(), active_requests);
+    }
+
+    /// Tokens accrued since `last_refill`, claiming that time window.
+    ///
+    /// Returns `0`, claiming nothing, when the clock has not advanced,
+    /// when less than one whole token has accrued, or when another
+    /// refiller won the race to advance the timestamp.
+    fn accrue(&self) -> u64 {
         let now = now_ms();
         let last = self.last_refill_ms.load(Ordering::Relaxed);
-        if now <= last {
-            return;
-        }
-        let elapsed_ms = now - last;
-        if elapsed_ms == 0 {
-            return;
-        }
+        let Some(elapsed_ms) = now.checked_sub(last).filter(|elapsed| *elapsed > 0) else {
+            return 0;
+        };
 
         let tokens_to_add = u64::from(self.min_retries_per_second).saturating_mul(elapsed_ms) / 1000;
         if tokens_to_add == 0 {
-            return;
+            return 0;
         }
 
-        // Only one refiller should advance last_refill; losers skip.
-        if self
-            .last_refill_ms
+        // Only one refiller should advance last_refill; losers claim nothing
+        // and settle with what the winner leaves behind.
+        self.last_refill_ms
             .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
-            .is_err()
-        {
-            return;
-        }
-
-        self.add_tokens(tokens_to_add, active_requests);
+            .map_or(0, |_| tokens_to_add)
     }
 
-    /// CAS loop to add tokens up to the dynamic cap.
-    fn add_tokens(&self, tokens_to_add: u64, active_requests: u64) {
+    /// CAS loop settling the bucket at `tokens + tokens_to_add`, bounded
+    /// by the dynamic cap. With `tokens_to_add == 0` this is a pure
+    /// clamp down to the cap.
+    fn settle(&self, tokens_to_add: u64, active_requests: u64) {
         let cap = self.max_tokens(active_requests);
         let mut current = self.tokens.load(Ordering::Relaxed);
         loop {
@@ -253,6 +269,54 @@ mod tests {
         assert!(b.try_acquire());
         assert!(!b.try_acquire());
         assert_eq!(b.available(), 0);
+    }
+
+    #[test]
+    fn tokens_fall_back_to_the_cap_when_traffic_drops() {
+        // Fill the bucket at peak traffic, then settle it against an idle
+        // cluster: the cap is a function of live traffic, so the peak's
+        // tokens must not survive the drop.
+        let b = budget(100.0, 10);
+        b.last_refill_ms
+            .store(now_ms().saturating_sub(100_000), Ordering::Relaxed);
+        b.refill(1_000);
+        assert_eq!(b.available(), 1_000, "the bucket fills to the peak cap");
+
+        b.refill(0);
+        assert_eq!(
+            b.available(),
+            10,
+            "an idle cluster's cap is the floor, and the bucket must settle to it"
+        );
+    }
+
+    #[test]
+    fn settling_without_accrual_does_not_mint_tokens() {
+        // The settle is a clamp: it may lower the bucket to the cap, never
+        // raise it toward one.
+        let b = budget(100.0, 10);
+        assert!(b.try_acquire());
+        b.refill(1_000);
+        assert_eq!(b.available(), 9, "no time has elapsed, so nothing accrues");
+    }
+
+    #[test]
+    fn retry_burst_cannot_spend_peak_tokens_after_traffic_drops() {
+        let state = ClusterRetryState::new(Some(&RetryBudgetConfig {
+            percent: BudgetPercent::try_from(100.0).unwrap(),
+            min_retries_per_second: 10,
+        }));
+        state
+            .budget
+            .last_refill_ms
+            .store(now_ms().saturating_sub(100_000), Ordering::Relaxed);
+        state.budget.refill(1_000);
+        assert_eq!(state.budget.available(), 1_000, "the bucket fills to the peak cap");
+
+        // Traffic has drained; the burst arrives inside one refill period,
+        // so no admission accrues new tokens.
+        let admitted = (0..50).filter(|_| state.try_admit_retry()).count();
+        assert_eq!(admitted, 10, "only the current cap's worth of retries may be admitted");
     }
 
     #[test]

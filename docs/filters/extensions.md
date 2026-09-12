@@ -427,6 +427,15 @@ a panic takes down the worker thread. Return
 `Err(...)` for unexpected failures and let the pipeline
 handle the 500 response.
 
+`Rejection::status` takes a final status (200..=599) and
+panics on anything else, so validate a configured status in
+`from_config` or build the rejection with
+`Rejection::try_status(code)?` when the code comes from
+configuration, a policy document, or an upstream response.
+`TerminalResponse::try_new` and
+`StreamingTerminalResponse::try_new` do the same for the
+terminal response types.
+
 ### Declare body access accurately
 
 Only declare `request_body_access()` or

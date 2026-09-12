@@ -107,9 +107,10 @@ impl SubRequestClient {
         &self.connector
     }
 
-    /// Evict idle circuit breaker entries that have been healthy for
-    /// at least `idle_threshold`. Returns the number of entries
-    /// removed, or `0` if no circuit breaker is configured.
+    /// Evict circuit breaker entries that have seen no traffic for at
+    /// least `idle_threshold` and have no request in flight, whatever
+    /// their state or residual failure count. Returns the number of
+    /// entries removed, or `0` if no circuit breaker is configured.
     pub fn evict_idle_circuits(&self, idle_threshold: Duration) -> usize {
         self.connector
             .circuit_breakers

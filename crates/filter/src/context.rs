@@ -21,7 +21,7 @@ use praxis_tls::TlsPeerIdentity;
 use crate::{
     FilterError, IterationState,
     body::BodyMode,
-    condition::{ConditionError, HeaderSource},
+    condition::{ConditionError, HeaderSource, header_map_matches},
     extensions::RequestExtensions,
     pipeline::body::merge_body_mode,
     results::FilterResultSet,
@@ -979,23 +979,33 @@ fn require_unique_value(values: Vec<String>, name: &HeaderName, source: &str) ->
 /// [`resolve_trusted_header_state`]: HttpFilterContext::resolve_trusted_header_state
 pub(crate) struct EffectiveHeaders<'c, 'r>(pub(crate) &'c HttpFilterContext<'r>);
 
-impl HeaderSource for EffectiveHeaders<'_, '_> {
-    type Error = ConditionError;
-
-    fn header(&self, name: &HeaderName) -> Result<Option<Cow<'_, str>>, ConditionError> {
+impl EffectiveHeaders<'_, '_> {
+    /// Resolve `name` through the overlay alone.
+    ///
+    /// [`TrustedHeaderState::Absent`] means no pass mentioned the header, so
+    /// the original request decides; the other states mask it entirely.
+    fn overlaid(&self, name: &HeaderName) -> Result<TrustedHeaderState, ConditionError> {
         let ctx = self.0;
         // This pass's grouped queues are the last writer this pass.
         match ctx.pending_header_value(name).map_err(|_e| ambiguous(name))? {
-            PendingHeaderResult::Removed => return Ok(None),
-            PendingHeaderResult::Value(v) => return Ok(Some(Cow::Owned(v))),
+            PendingHeaderResult::Removed => return Ok(TrustedHeaderState::Removed),
+            PendingHeaderResult::Value(v) => return Ok(TrustedHeaderState::Value(v)),
             PendingHeaderResult::Absent => {},
         }
-        match ctx.resolve_trusted_header_state(name).map_err(|_e| ambiguous(name))? {
-            TrustedHeaderState::Removed => Ok(None),
-            TrustedHeaderState::Value(v) => Ok(Some(Cow::Owned(v))),
-            // Fall through to the original request. The `Request` source is
-            // infallible, so the error arm is unreachable.
-            TrustedHeaderState::Absent => ctx.request.header(name).map_err(|e| match e {}),
+        ctx.resolve_trusted_header_state(name).map_err(|_e| ambiguous(name))
+    }
+}
+
+impl HeaderSource for EffectiveHeaders<'_, '_> {
+    type Error = ConditionError;
+
+    fn header_matches(&self, name: &HeaderName, expected: &str) -> Result<bool, ConditionError> {
+        match self.overlaid(name)? {
+            TrustedHeaderState::Removed => Ok(false),
+            // An overlaid value replaces every original field line, so the
+            // request's own repetition only matters when nothing masked it.
+            TrustedHeaderState::Value(value) => Ok(value == expected),
+            TrustedHeaderState::Absent => Ok(header_map_matches(&self.0.request.headers, name, expected)),
         }
     }
 }
@@ -1902,9 +1912,17 @@ mod tests {
 
     /// Resolve `name` through the pre-read overlay, returning an owned value.
     fn effective_value(ctx: &HttpFilterContext<'_>, name: &str) -> Result<Option<String>, ConditionError> {
-        use crate::condition::HeaderSource as _;
         let hname = HeaderName::from_bytes(name.as_bytes()).unwrap();
-        EffectiveHeaders(ctx).header(&hname).map(|opt| opt.map(Cow::into_owned))
+        Ok(match EffectiveHeaders(ctx).overlaid(&hname)? {
+            TrustedHeaderState::Removed => None,
+            TrustedHeaderState::Value(value) => Some(value),
+            TrustedHeaderState::Absent => ctx
+                .request
+                .headers
+                .get(&hname)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned),
+        })
     }
 
     #[test]

@@ -9,7 +9,10 @@
 //!
 //! [`DashMap`]: dashmap::DashMap
 
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 
 use dashmap::DashMap;
 use regex::Regex;
@@ -23,7 +26,8 @@ use super::{KvBackend, MatchType};
 /// Maximum number of compiled regex patterns to cache.
 const MAX_REGEX_CACHE_SIZE: usize = 10_000;
 
-/// Maximum number of entries per store.
+/// Maximum number of entries per store. Enforced as an invariant: no
+/// constructor or write path can take a store past it.
 const MAX_ENTRIES: usize = 100_000;
 
 // -----------------------------------------------------------------------------
@@ -51,6 +55,10 @@ pub struct InMemoryKvBackend {
     /// Sharded concurrent hash map.
     data: DashMap<Arc<str>, Arc<str>>,
 
+    /// Live entry count, reserved ahead of every new-key insert so
+    /// [`MAX_ENTRIES`] holds under concurrent writers.
+    entries: AtomicUsize,
+
     /// Cached compiled regexes for [`MatchType::Regex`] lookups.
     regex_cache: DashMap<String, Regex>,
 }
@@ -67,11 +75,17 @@ impl InMemoryKvBackend {
     pub fn new() -> Self {
         Self {
             data: DashMap::new(),
+            entries: AtomicUsize::new(0),
             regex_cache: DashMap::new(),
         }
     }
 
     /// Create a store pre-populated from key-value pairs.
+    ///
+    /// Pairs are admitted through [`set`](KvBackend::set), so the store is
+    /// subject to the same entry ceiling as any later write: once it is
+    /// full, further new keys are logged and skipped rather than
+    /// silently building an oversized store.
     ///
     /// ```
     /// use std::sync::Arc;
@@ -82,14 +96,36 @@ impl InMemoryKvBackend {
     /// assert_eq!(store.len(), 1);
     /// ```
     pub fn from_pairs(pairs: Vec<(String, String)>) -> Self {
-        let data = DashMap::with_capacity(pairs.len());
-        for (k, v) in pairs {
-            data.insert(Arc::from(k.as_str()), Arc::from(v.as_str()));
-        }
-        Self {
-            data,
+        let store = Self {
+            data: DashMap::with_capacity(pairs.len().min(MAX_ENTRIES)),
+            entries: AtomicUsize::new(0),
             regex_cache: DashMap::new(),
+        };
+        for (k, v) in pairs {
+            store.set(&k, Arc::from(v.as_str()));
         }
+        store
+    }
+
+    /// Reserve one entry slot, returning `false` when the store is full.
+    ///
+    /// Reserving before the insert is what makes [`MAX_ENTRIES`] an
+    /// invariant rather than a hint: a plain length check races, because
+    /// every concurrent writer can observe a below-cap length and then
+    /// insert its own distinct key. The slot is handed back by
+    /// [`release_entry`](Self::release_entry) when the insert turns out
+    /// to be an overwrite, and by `delete` when an entry goes away.
+    fn reserve_entry(&self) -> bool {
+        self.entries
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |count| {
+                (count < MAX_ENTRIES).then_some(count + 1)
+            })
+            .is_ok()
+    }
+
+    /// Give one reserved entry slot back.
+    fn release_entry(&self) {
+        self.entries.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Retrieve a cached compiled regex or compile and cache it.
@@ -139,23 +175,30 @@ impl KvBackend for InMemoryKvBackend {
     }
 
     fn set(&self, key: &str, value: Arc<str>) -> bool {
-        // Overwrites need neither the capacity check (the cap only gates
-        // new keys) nor a fresh key allocation; DashMap::len sums every
-        // shard, so only new-key inserts pay that sweep.
+        // Overwrites need neither a reservation (the cap only gates new
+        // keys) nor a fresh key allocation.
         if let Some(mut existing) = self.data.get_mut(key) {
             *existing = value;
             return true;
         }
-        if self.data.len() >= MAX_ENTRIES {
+        if !self.reserve_entry() {
             tracing::warn!(key, limit = MAX_ENTRIES, "KV store entry limit reached; insert skipped");
             return false;
         }
-        self.data.insert(Arc::from(key), value);
+        // The key can have appeared since the lookup above; that insert is
+        // an overwrite after all and consumes no slot.
+        if self.data.insert(Arc::from(key), value).is_some() {
+            self.release_entry();
+        }
         true
     }
 
     fn delete(&self, key: &str) -> bool {
-        self.data.remove(key).is_some()
+        let removed = self.data.remove(key).is_some();
+        if removed {
+            self.release_entry();
+        }
+        removed
     }
 
     fn entries(&self) -> Vec<(Arc<str>, Arc<str>)> {
@@ -494,6 +537,97 @@ mod tests {
     fn from_pairs_empty_vec() {
         let store = InMemoryKvBackend::from_pairs(vec![]);
         assert!(store.is_empty(), "from_pairs with empty vec should be empty");
+    }
+
+    #[test]
+    fn from_pairs_enforces_the_entry_cap() {
+        // The cap is an invariant of the store, not just of `set`: a
+        // constructor must not be able to build an oversized store.
+        let pairs: Vec<(String, String)> = (0..=MAX_ENTRIES).map(|i| (format!("k{i}"), "v".to_owned())).collect();
+        let store = InMemoryKvBackend::from_pairs(pairs);
+        assert_eq!(
+            store.len(),
+            MAX_ENTRIES,
+            "from_pairs must not build a store past the entry limit"
+        );
+    }
+
+    /// Key used by one racing writer in [`set_cap_holds_under_concurrent_writers`].
+    fn race_key(round: usize, thread: usize, index: usize) -> String {
+        format!("race-{round}-{thread}-{index}")
+    }
+
+    /// Run one race round: `threads` writers start together and each tries
+    /// `keys` distinct new keys. Returns how many inserts were admitted.
+    fn race_for_free_slot(store: &Arc<InMemoryKvBackend>, round: usize, threads: usize, keys: usize) -> usize {
+        let barrier = Arc::new(std::sync::Barrier::new(threads));
+        let handles: Vec<_> = (0..threads)
+            .map(|thread| {
+                let store = Arc::clone(store);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    (0..keys)
+                        .filter(|index| store.set(&race_key(round, thread, *index), Arc::from("v")))
+                        .count()
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).sum()
+    }
+
+    #[test]
+    fn set_cap_holds_under_concurrent_writers() {
+        // A length check taken before the insert races: every writer can
+        // observe a below-cap store and then insert its own distinct key.
+        // Leave exactly one free slot and make threads contend for it, then
+        // clear the round's keys and do it again, a single round only
+        // catches the race when the scheduler cooperates.
+        const THREADS: usize = 16;
+        const KEYS_PER_THREAD: usize = 4;
+        const ROUNDS: usize = 40;
+
+        let store = Arc::new(InMemoryKvBackend::new());
+        for i in 1..MAX_ENTRIES {
+            store.set(&format!("k{i}"), Arc::from("v"));
+        }
+        assert_eq!(store.len(), MAX_ENTRIES - 1, "exactly one slot should be free");
+
+        let mut admitted = 0;
+        for round in 0..ROUNDS {
+            admitted += race_for_free_slot(&store, round, THREADS, KEYS_PER_THREAD);
+            assert!(
+                store.len() <= MAX_ENTRIES,
+                "round {round}: the store must never grow past the entry limit"
+            );
+            // Restore the single free slot for the next round.
+            for thread in 0..THREADS {
+                for index in 0..KEYS_PER_THREAD {
+                    store.delete(&race_key(round, thread, index));
+                }
+            }
+        }
+
+        assert_eq!(
+            admitted, ROUNDS,
+            "each round may hand out its one free slot exactly once"
+        );
+        assert_eq!(store.len(), MAX_ENTRIES - 1, "the single free slot is back");
+    }
+
+    #[test]
+    fn delete_frees_a_slot_at_capacity() {
+        // The reserved slot count has to come back down, or a store that
+        // once filled up would reject new keys forever.
+        let store = InMemoryKvBackend::new();
+        for i in 0..MAX_ENTRIES {
+            store.set(&format!("k{i}"), Arc::from("v"));
+        }
+        assert!(!store.set("new_key", Arc::from("v")), "a full store rejects a new key");
+
+        assert!(store.delete("k0"), "the entry should have existed");
+        assert!(store.set("new_key", Arc::from("v")), "the freed slot must be reusable");
+        assert_eq!(store.len(), MAX_ENTRIES, "the store is full again");
     }
 
     #[test]

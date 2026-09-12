@@ -540,6 +540,92 @@ async fn request_add_stacks_existing_but_not_fresh() {
 }
 
 #[tokio::test]
+async fn request_add_stacks_repeated_entries_for_one_header() {
+    // Each stacked entry queues an overwrite of the same header, so all of
+    // them must be folded into one value: emitting one set per entry keeps
+    // only the last addition.
+    let filter = make_header_filter(
+        r#"request_add:
+  - name: x-trace-id
+    value: hop-2
+  - name: x-trace-id
+    value: hop-3"#,
+    );
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers
+        .insert("x-trace-id", http::HeaderValue::from_static("hop-1"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    assert_eq!(
+        ctx.request_headers_to_set.len(),
+        1,
+        "repeated entries should produce a single set operation"
+    );
+    assert_eq!(
+        ctx.request_headers_to_set[0].1.to_str().unwrap(),
+        "hop-1,hop-2,hop-3",
+        "every configured value should survive, in configuration order"
+    );
+}
+
+#[tokio::test]
+async fn request_add_repeated_entries_group_per_header_name() {
+    // Interleaved names must not merge with each other, and group order
+    // follows first appearance.
+    let filter = make_header_filter(
+        r#"request_add:
+  - name: x-first
+    value: a
+  - name: x-second
+    value: x
+  - name: x-first
+    value: b"#,
+    );
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers.insert("x-first", http::HeaderValue::from_static("orig-1"));
+    req.headers.insert("x-second", http::HeaderValue::from_static("orig-2"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    let sets: Vec<(&str, &str)> = ctx
+        .request_headers_to_set
+        .iter()
+        .map(|(name, value)| (name.as_str(), value.to_str().unwrap()))
+        .collect();
+    assert_eq!(
+        sets,
+        vec![("x-first", "orig-1,a,b"), ("x-second", "orig-2,x")],
+        "each name should get one set, values stacked in configuration order"
+    );
+}
+
+#[tokio::test]
+async fn request_add_repeated_entries_on_fresh_header_add_every_value() {
+    // Without an existing header the values are added, not overwritten, so
+    // each configured entry stays its own header line.
+    let filter = make_header_filter(
+        r#"request_add:
+  - name: x-fresh
+    value: a
+  - name: x-fresh
+    value: b"#,
+    );
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(filter.on_request(&mut ctx).await.unwrap());
+    assert!(
+        ctx.request_headers_to_set.is_empty(),
+        "a header that does not exist should not be overwritten"
+    );
+    assert_eq!(
+        ctx.extra_request_headers.len(),
+        2,
+        "both values should be added to a fresh header"
+    );
+    assert_eq!(ctx.extra_request_headers[0].1, "a", "first value should be added");
+    assert_eq!(ctx.extra_request_headers[1].1, "b", "second value should be added");
+}
+
+#[tokio::test]
 async fn request_add_fresh_header_uses_extra_headers() {
     let filter = make_header_filter(
         r#"request_add:

@@ -103,7 +103,12 @@
 //!   the body.
 //! - Response phase: the filter dispatches the post-invoke hook; `result.<field>` redactions run here, so a value the
 //!   backend returns unsolicited is still stripped for a caller without the permission. A post-phase deny replaces the
-//!   response body with a JSON-RPC error envelope fitted to the committed Content-Length.
+//!   response body with a JSON-RPC error envelope fitted to the committed Content-Length: padded with trailing spaces
+//!   when it is shorter, truncated when it is longer. The status and headers are already on the wire by then, so a deny
+//!   against an upstream result shorter than the envelope reaches the client as a truncated, unparseable body rather
+//!   than a structured error, the denied payload is still withheld, but the reason is not legible. Sizing the envelope
+//!   to fit is impossible (nothing carrying the violation is that small) and growing the body would be an HTTP/1.1
+//!   framing desync, so this is an accepted trade-off.
 //!
 //! # Decisions and denials
 //!

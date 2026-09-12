@@ -232,17 +232,26 @@ impl HttpFilter for LoadBalancerFilter {
         };
         ctx.retry_policy = Some(Arc::clone(&policy));
 
+        // Resolve TLS once and hand the same material to both the initial
+        // upstream and the reselector: an alternate-host retry must offer
+        // the `Host`-derived SNI the first attempt did, not the cluster's
+        // SNI-less cached material.
+        let tls = entry.request_tls(ctx);
+
         let hash_key = entry.strategy.capture_hash_key(ctx);
         // The reselector is stateless config data: share one instance for
         // the dominant no-hash-key, cluster-default-policy case instead of
-        // allocating a fresh one per request.
-        ctx.endpoint_reselector = Some(if hash_key.is_none() && Arc::ptr_eq(&policy, &entry.retry_policy) {
+        // allocating a fresh one per request. A cluster that derives its
+        // SNI from the request is per-request state and cannot share it.
+        let shareable =
+            hash_key.is_none() && Arc::ptr_eq(&policy, &entry.retry_policy) && !entry.tls_needs_request_sni();
+        ctx.endpoint_reselector = Some(if shareable {
             Arc::clone(entry.default_reselector())
         } else {
-            Arc::new(entry.reselector_with_policy(hash_key, policy))
+            Arc::new(entry.reselector_with_policy(hash_key, policy, tls.clone()))
         });
         ctx.attempted_endpoints.push(Arc::clone(&addr));
-        ctx.upstream = Some(entry.build_upstream(addr, ctx));
+        ctx.upstream = Some(entry.upstream_with_tls(addr, tls));
 
         Ok(FilterAction::Continue)
     }

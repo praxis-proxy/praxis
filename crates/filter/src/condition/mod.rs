@@ -3,15 +3,13 @@
 
 //! Condition evaluation for gating filter execution on request/response attributes.
 
-use std::borrow::Cow;
-
 use http::header::HeaderName;
 
 mod request;
 mod response;
 
 pub use request::should_execute;
-pub(crate) use request::should_execute_from;
+pub(crate) use request::{header_map_matches, should_execute_from};
 pub use response::{should_execute_response, should_execute_response_ref};
 
 // -----------------------------------------------------------------------------
@@ -31,8 +29,12 @@ pub(crate) trait HeaderSource {
     /// Failure returned by a header lookup.
     type Error;
 
-    /// Return the effective value of `name`, or `None` when it is absent.
-    fn header(&self, name: &HeaderName) -> Result<Option<Cow<'_, str>>, Self::Error>;
+    /// Whether `name` carries `expected` as one of its values.
+    ///
+    /// A header may occupy several field lines, which is semantically the one
+    /// comma-joined list of all of them, so a condition naming one member of
+    /// that list has to consider every occurrence and not just the first.
+    fn header_matches(&self, name: &HeaderName, expected: &str) -> Result<bool, Self::Error>;
 }
 
 // -----------------------------------------------------------------------------

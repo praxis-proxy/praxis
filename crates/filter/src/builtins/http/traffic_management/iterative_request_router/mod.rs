@@ -358,6 +358,13 @@ impl HttpFilter for IterativeRequestRouterFilter {
             .collect()
     }
 
+    fn referenced_file_digests(&self) -> Vec<(std::path::PathBuf, u64)> {
+        self.step_pipelines
+            .values()
+            .flat_map(|pipeline| pipeline.referenced_file_digests())
+            .collect()
+    }
+
     /// Validate the request, then run the iteration at the router's normal
     /// request-header position after preceding filters have completed.
     async fn on_request(&self, ctx: &mut HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {

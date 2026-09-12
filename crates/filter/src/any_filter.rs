@@ -44,6 +44,15 @@ impl AnyFilter {
         }
     }
 
+    /// Content digests of the documents this filter loaded at construction,
+    /// keyed by path. Empty for TCP filters, which read no external documents.
+    pub fn referenced_file_digests(&self) -> Vec<(std::path::PathBuf, u64)> {
+        match self {
+            Self::Http(f) => f.referenced_file_digests(),
+            Self::Tcp(_) => Vec::new(),
+        }
+    }
+
     /// The protocol level this filter operates at.
     pub fn protocol_level(&self) -> ProtocolKind {
         match self {

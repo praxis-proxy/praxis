@@ -59,6 +59,12 @@ const HANDSHAKE_HEADER_LEN: usize = 4;
 /// Version(2) + Random(32).
 const CLIENT_HELLO_FIXED_LEN: usize = 34;
 
+/// Size of an extension header: Type(2) + Length(2).
+const EXTENSION_HEADER_LEN: usize = 4;
+
+/// Size of a `ServerName` entry header: `NameType`(1) + Length(2).
+const SERVER_NAME_HEADER_LEN: usize = 3;
+
 // -----------------------------------------------------------------------------
 // ClientHelloInfo
 // -----------------------------------------------------------------------------
@@ -437,31 +443,52 @@ fn read_variable_u16(data: &[u8], pos: usize) -> Result<&[u8], SniParseError> {
 // -----------------------------------------------------------------------------
 
 /// Walk extensions looking for the SNI extension (type 0).
+///
+/// The whole extension block is walked even once SNI has been found:
+/// stopping at the first match would leave the framing of everything
+/// after it unchecked and would accept a second SNI extension, so this
+/// parser could route on a hostname a stricter TLS stack rejects or
+/// resolves differently.
 fn parse_extensions(mut ext: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
-    while ext.len() >= 4 {
-        let ext_type = read_u16(ext, 0)?;
-        let ext_len = read_u16(ext, 2)? as usize;
+    let mut info: Option<ClientHelloInfo> = None;
 
-        if ext.len() < 4 + ext_len {
+    while !ext.is_empty() {
+        if ext.len() < EXTENSION_HEADER_LEN {
             return Err(SniParseError::MalformedExtension);
         }
 
-        let ext_data = ext.get(4..4 + ext_len).ok_or(SniParseError::MalformedExtension)?;
+        let ext_type = read_u16(ext, 0)?;
+        let ext_len = read_u16(ext, 2)? as usize;
+        let end = EXTENSION_HEADER_LEN + ext_len;
+
+        let ext_data = ext
+            .get(EXTENSION_HEADER_LEN..end)
+            .ok_or(SniParseError::MalformedExtension)?;
 
         if ext_type == EXTENSION_TYPE_SNI {
-            return parse_sni_extension(ext_data);
+            // RFC 8446 s4.2: there must not be more than one extension of the
+            // same type in a given extension block.
+            if info.is_some() {
+                return Err(SniParseError::MalformedExtension);
+            }
+            info = Some(parse_sni_extension(ext_data)?);
         }
 
-        ext = ext.get(4 + ext_len..).ok_or(SniParseError::MalformedExtension)?;
+        ext = ext.get(end..).ok_or(SniParseError::MalformedExtension)?;
     }
 
-    Ok(ClientHelloInfo { sni: None })
+    Ok(info.unwrap_or(ClientHelloInfo { sni: None }))
 }
 
 /// Parse the SNI extension payload and extract the hostname.
+///
+/// The payload must be exactly one `ServerNameList` and the list must
+/// divide exactly into entries: trailing bytes after the list, or a
+/// one- or two-byte remainder too short to be an entry header, are
+/// malformed rather than something to ignore.
 fn parse_sni_extension(data: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
     let list_len = read_u16(data, 0)? as usize;
-    if data.len() < 2 + list_len {
+    if data.len() != 2 + list_len {
         return Err(SniParseError::MalformedExtension);
     }
 
@@ -469,11 +496,15 @@ fn parse_sni_extension(data: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
 
     let mut hostname: Option<String> = None;
 
-    while list.len() >= 3 {
+    while !list.is_empty() {
+        if list.len() < SERVER_NAME_HEADER_LEN {
+            return Err(SniParseError::MalformedExtension);
+        }
+
         let name_type = *list.first().ok_or(SniParseError::MalformedExtension)?;
         let name_len = read_u16(list, 1)? as usize;
 
-        if list.len() < 3 + name_len {
+        if list.len() < SERVER_NAME_HEADER_LEN + name_len {
             return Err(SniParseError::MalformedExtension);
         }
 
@@ -486,24 +517,33 @@ fn parse_sni_extension(data: &[u8]) -> Result<ClientHelloInfo, SniParseError> {
                 return Err(SniParseError::MalformedExtension);
             }
 
-            let name_bytes = list.get(3..3 + name_len).ok_or(SniParseError::MalformedExtension)?;
+            let name_bytes = list
+                .get(SERVER_NAME_HEADER_LEN..SERVER_NAME_HEADER_LEN + name_len)
+                .ok_or(SniParseError::MalformedExtension)?;
 
-            if name_bytes.is_empty() {
-                return Err(SniParseError::EmptyHostname);
-            }
-
-            let name = std::str::from_utf8(name_bytes).map_err(|_utf8| SniParseError::InvalidHostname)?;
-
-            reject_ip_literal(name)?;
-            crate::dns::validate_dns_hostname(name).map_err(|_dns| SniParseError::InvalidHostname)?;
-
-            hostname = Some(name.to_owned());
+            hostname = Some(parse_host_name(name_bytes)?);
         }
 
-        list = list.get(3 + name_len..).ok_or(SniParseError::MalformedExtension)?;
+        list = list
+            .get(SERVER_NAME_HEADER_LEN + name_len..)
+            .ok_or(SniParseError::MalformedExtension)?;
     }
 
     Ok(ClientHelloInfo { sni: hostname })
+}
+
+/// Validate a `host_name` entry and return it as an owned hostname.
+fn parse_host_name(name_bytes: &[u8]) -> Result<String, SniParseError> {
+    if name_bytes.is_empty() {
+        return Err(SniParseError::EmptyHostname);
+    }
+
+    let name = std::str::from_utf8(name_bytes).map_err(|_utf8| SniParseError::InvalidHostname)?;
+
+    reject_ip_literal(name)?;
+    crate::dns::validate_dns_hostname(name).map_err(|_dns| SniParseError::InvalidHostname)?;
+
+    Ok(name.to_owned())
 }
 
 // -----------------------------------------------------------------------------
@@ -1015,6 +1055,124 @@ mod tests {
         ext.extend_from_slice(&(list.len() as u16).to_be_bytes());
         ext.extend_from_slice(&list);
         ext
+    }
+
+    /// Build a `host_name` `ServerNameList` entry.
+    #[expect(clippy::cast_possible_truncation, reason = "test hostnames are short")]
+    fn host_entry(hostname: &str) -> Vec<u8> {
+        let name = hostname.as_bytes();
+        let mut entry = vec![SNI_NAME_TYPE_HOST];
+        entry.extend_from_slice(&(name.len() as u16).to_be_bytes());
+        entry.extend_from_slice(name);
+        entry
+    }
+
+    /// Wrap a raw `ServerNameList` body in an SNI extension, appending
+    /// `trailing` after the declared list.
+    #[expect(clippy::cast_possible_truncation, reason = "test payloads are small")]
+    fn sni_extension_from_list(list: &[u8], trailing: &[u8]) -> Vec<u8> {
+        let mut payload = (list.len() as u16).to_be_bytes().to_vec();
+        payload.extend_from_slice(list);
+        payload.extend_from_slice(trailing);
+
+        let mut ext = EXTENSION_TYPE_SNI.to_be_bytes().to_vec();
+        ext.extend_from_slice(&(payload.len() as u16).to_be_bytes());
+        ext.extend_from_slice(&payload);
+        ext
+    }
+
+    #[test]
+    fn second_sni_extension_rejected() {
+        let mut extensions = build_sni_extension("first.example.com");
+        extensions.extend_from_slice(&build_sni_extension("second.example.com"));
+
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &extensions);
+        let record = wrap_in_record(&hello);
+
+        assert_eq!(
+            parse_sni(&record),
+            Err(SniParseError::MalformedExtension),
+            "a second SNI extension violates RFC 8446 4.2 and must be rejected, not silently first-wins"
+        );
+    }
+
+    #[test]
+    fn malformed_extension_after_sni_rejected() {
+        let mut extensions = build_sni_extension("example.com");
+        // An extension declaring 16 bytes of data with none present.
+        extensions.extend_from_slice(&[0x00, 0x17, 0x00, 0x10]);
+
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &extensions);
+        let record = wrap_in_record(&hello);
+
+        assert_eq!(
+            parse_sni(&record),
+            Err(SniParseError::MalformedExtension),
+            "extension framing after the SNI extension must still be validated"
+        );
+    }
+
+    #[test]
+    fn trailing_bytes_after_the_extension_block_rejected() {
+        let mut extensions = build_sni_extension("example.com");
+        // Two stray bytes: too short to be an extension header, not ignorable.
+        extensions.extend_from_slice(&[0xAB, 0xCD]);
+
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &extensions);
+        let record = wrap_in_record(&hello);
+
+        assert_eq!(
+            parse_sni(&record),
+            Err(SniParseError::MalformedExtension),
+            "a truncated extension header at the end of the block must be rejected"
+        );
+    }
+
+    #[test]
+    fn trailing_bytes_after_server_name_list_rejected() {
+        let ext = sni_extension_from_list(&host_entry("example.com"), &[0xAB, 0xCD]);
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
+        let record = wrap_in_record(&hello);
+
+        assert_eq!(
+            parse_sni(&record),
+            Err(SniParseError::MalformedExtension),
+            "extension data beyond the declared ServerNameList must be rejected"
+        );
+    }
+
+    #[test]
+    fn truncated_server_name_entry_tail_rejected() {
+        let mut list = host_entry("example.com");
+        // A two-byte remainder: too short to be an entry header.
+        list.extend_from_slice(&[0x00, 0x00]);
+
+        let ext = sni_extension_from_list(&list, &[]);
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &ext);
+        let record = wrap_in_record(&hello);
+
+        assert_eq!(
+            parse_sni(&record),
+            Err(SniParseError::MalformedExtension),
+            "a truncated ServerNameList entry must be rejected, not silently ignored"
+        );
+    }
+
+    #[test]
+    fn well_formed_sni_between_other_extensions_still_parses() {
+        let mut extensions = build_dummy_extension(0x0017, &[1, 2, 3]);
+        extensions.extend_from_slice(&sni_extension_from_list(&host_entry("api.example.com"), &[]));
+        extensions.extend_from_slice(&build_dummy_extension(0x000D, &[4, 5]));
+
+        let hello = build_client_hello(&[], &[0x00, 0xFF], &[0x00], &extensions);
+        let record = wrap_in_record(&hello);
+
+        let result = parse_sni(&record).expect("a well-formed extension block must still parse");
+        assert_eq!(
+            result.sni.as_deref(),
+            Some("api.example.com"),
+            "the SNI hostname should still be extracted"
+        );
     }
 
     #[test]

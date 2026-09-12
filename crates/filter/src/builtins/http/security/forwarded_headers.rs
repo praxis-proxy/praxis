@@ -46,8 +46,10 @@ struct ForwardedHeadersConfig {
 ///
 /// When the client IP is from a trusted proxy, existing
 /// `X-Forwarded-For` values are preserved and the client
-/// IP is appended. Otherwise, the header is overwritten
-/// with the client IP to prevent spoofing.
+/// IP is appended. A header sent as several separate lines
+/// is read in full and comma-joined, so no part of the
+/// recorded chain is dropped. Otherwise, the header is
+/// overwritten with the client IP to prevent spoofing.
 ///
 /// When `use_standard_header` is `true`, also injects the
 /// [RFC 7239] `Forwarded` header with `for`, `proto`, and
@@ -144,17 +146,12 @@ impl ForwardedHeadersFilter {
         use std::fmt::Write as _;
 
         tracing::debug!(client_ip = %client_ip, "setting standard Forwarded header");
-        // Build the whole entry in one pre-sized buffer: the old shape
-        // staged the for= parameter, grew the entry through format!, and
-        // re-allocated a third time for the trusted-append case.
-        let existing = if trusted {
-            ctx.request.headers.get("forwarded").and_then(|v| v.to_str().ok())
-        } else {
-            None
-        };
-        let mut value = String::with_capacity(existing.map_or(0, |e| e.len() + 2) + 64);
-        if let Some(existing) = existing {
-            value.push_str(existing);
+        // Build the whole entry in one buffer: the old shape staged the
+        // for= parameter, grew the entry through format!, and re-allocated
+        // a third time for the trusted-append case. The existing chain is
+        // pushed first so every line of a repeated header is preserved.
+        let mut value = String::with_capacity(64);
+        if trusted && push_forwarding_chain(&mut value, &ctx.request.headers, "forwarded") {
             value.push_str(", ");
         }
         value.push_str("for=");
@@ -197,6 +194,44 @@ impl ForwardedHeadersFilter {
 // -----------------------------------------------------------------------------
 // Forwarded Header Formatting
 // -----------------------------------------------------------------------------
+
+/// Append the whole `name` header chain to `out`, comma-joined.
+///
+/// [`HeaderMap::get`] yields only the first line, but a peer may send
+/// `X-Forwarded-For` or `Forwarded` as several separate header lines.
+/// [RFC 9110 Section 5.3] makes that exactly equivalent to one line holding
+/// the values joined by `, `. The header this filter injects replaces every
+/// existing line, so reading only the first would silently drop the rest of
+/// the chain a trusted proxy recorded.
+///
+/// Returns `true` when at least one line was appended. Returns `false`, with
+/// `out` restored to the length it had on entry, when the header is absent
+/// or any of its lines holds non-UTF-8 bytes: an unreadable chain is
+/// overwritten rather than appended to, exactly as a single unreadable line
+/// always was.
+///
+/// [`HeaderMap::get`]: http::HeaderMap::get
+/// [RFC 9110 Section 5.3]: https://datatracker.ietf.org/doc/html/rfc9110#section-5.3
+fn push_forwarding_chain(out: &mut String, headers: &http::HeaderMap, name: &'static str) -> bool {
+    let start = out.len();
+    let mut appended = false;
+    for value in headers.get_all(name) {
+        let Ok(text) = value.to_str() else {
+            tracing::warn!(
+                header = name,
+                "existing forwarding header contains non-UTF-8 bytes; overwriting"
+            );
+            out.truncate(start);
+            return false;
+        };
+        if appended {
+            out.push_str(", ");
+        }
+        out.push_str(text);
+        appended = true;
+    }
+    appended
+}
 
 /// Write the `for` parameter value per [RFC 7239 Section 6] into `out`.
 ///
@@ -262,24 +297,14 @@ impl HttpFilter for ForwardedHeadersFilter {
         // once instead of re-scanning the trusted CIDR list per use.
         let trusted = self.is_trusted(&client_ip);
         tracing::debug!(trusted, "setting X-Forwarded-For");
-        let xff = if trusted && let Some(existing) = ctx.request.headers.get("x-forwarded-for") {
-            if let Ok(existing) = existing.to_str() {
-                let mut val = String::with_capacity(existing.len() + 2 + 45);
-                val.push_str(existing);
-                val.push_str(", ");
-                let _ok = write!(val, "{client_ip}");
-                val
-            } else {
-                tracing::warn!(client_ip = %client_ip, "existing X-Forwarded-For contains non-UTF-8 bytes; overwriting");
-                let mut val = String::with_capacity(45);
-                let _ok = write!(val, "{client_ip}");
-                val
-            }
-        } else {
-            let mut val = String::with_capacity(45);
-            let _ok = write!(val, "{client_ip}");
-            val
-        };
+        // 45 bytes is the longest textual IPv6 address; an existing chain,
+        // when the peer is trusted, is pushed in front of it and grows the
+        // buffer as needed.
+        let mut xff = String::with_capacity(45);
+        if trusted && push_forwarding_chain(&mut xff, &ctx.request.headers, "x-forwarded-for") {
+            xff.push_str(", ");
+        }
+        let _ok = write!(xff, "{client_ip}");
         ctx.extra_request_headers.push((Cow::Borrowed("X-Forwarded-For"), xff));
 
         let proto = if ctx.downstream_tls { "https" } else { "http" };
@@ -393,6 +418,124 @@ mod tests {
             xff,
             Some("203.0.113.50, 10.1.2.3"),
             "trusted proxy should append to existing XFF"
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_proxy_appends_to_multi_line_xff() {
+        let f = make_filter(&["10.0.0.0/8"]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        // Two separate header lines: valid HTTP, and semantically identical
+        // to `X-Forwarded-For: 203.0.113.50, 198.51.100.7`.
+        req.headers.append(
+            http::header::HeaderName::from_static("x-forwarded-for"),
+            "203.0.113.50".parse().unwrap(),
+        );
+        req.headers.append(
+            http::header::HeaderName::from_static("x-forwarded-for"),
+            "198.51.100.7".parse().unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("10.1.2.3".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let xff = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "X-Forwarded-For")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            xff,
+            Some("203.0.113.50, 198.51.100.7, 10.1.2.3"),
+            "every existing X-Forwarded-For line must survive the append"
+        );
+    }
+
+    #[tokio::test]
+    async fn trusted_proxy_appends_to_multi_line_forwarded() {
+        let f = make_standard_filter(&["10.0.0.0/8"]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.append(
+            http::header::HeaderName::from_static("forwarded"),
+            "for=203.0.113.50;proto=https".parse().unwrap(),
+        );
+        req.headers.append(
+            http::header::HeaderName::from_static("forwarded"),
+            "for=198.51.100.7;proto=https".parse().unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("10.1.2.3".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let fwd = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "Forwarded")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            fwd,
+            Some("for=203.0.113.50;proto=https, for=198.51.100.7;proto=https, for=10.1.2.3;proto=http"),
+            "every existing Forwarded line must survive the append"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_utf8_line_anywhere_in_xff_chain_overwrites() {
+        let f = make_filter(&["10.0.0.0/8"]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.append(
+            http::header::HeaderName::from_static("x-forwarded-for"),
+            "203.0.113.50".parse().unwrap(),
+        );
+        req.headers.append(
+            http::header::HeaderName::from_static("x-forwarded-for"),
+            http::HeaderValue::from_bytes(b"\xff\xfe").unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("10.1.2.3".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let xff = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "X-Forwarded-For")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            xff,
+            Some("10.1.2.3"),
+            "an unreadable line anywhere in the chain must overwrite, leaving no partial chain"
+        );
+    }
+
+    #[tokio::test]
+    async fn untrusted_client_overwrites_multi_line_xff() {
+        let f = make_filter(&[]);
+        let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+        req.headers.append(
+            http::header::HeaderName::from_static("x-forwarded-for"),
+            "1.2.3.4".parse().unwrap(),
+        );
+        req.headers.append(
+            http::header::HeaderName::from_static("x-forwarded-for"),
+            "5.6.7.8".parse().unwrap(),
+        );
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.client_addr = Some("203.0.113.50".parse().unwrap());
+
+        drop(f.on_request(&mut ctx).await.unwrap());
+
+        let xff = ctx
+            .extra_request_headers
+            .iter()
+            .find(|(k, _)| k == "X-Forwarded-For")
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            xff,
+            Some("203.0.113.50"),
+            "an untrusted client's spoofed multi-line chain must be replaced entirely"
         );
     }
 

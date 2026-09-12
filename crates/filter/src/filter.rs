@@ -239,6 +239,21 @@ pub trait HttpFilter: Send + Sync {
         Vec::new()
     }
 
+    /// Content digests of the documents this filter loaded at construction,
+    /// paired with the same paths [`referenced_files`] returns.
+    ///
+    /// The watcher hashes these rather than re-reading, so the recorded content
+    /// hash reflects exactly the bytes the live pipeline is running. That closes
+    /// the window where a document edited between the pipeline reading it and the
+    /// watcher re-reading it for the hash would be recorded as current yet never
+    /// actually loaded. Default empty: a filter that reads no document
+    /// contributes nothing, and its paths fall back to a re-read.
+    ///
+    /// [`referenced_files`]: HttpFilter::referenced_files
+    fn referenced_file_digests(&self) -> Vec<(std::path::PathBuf, u64)> {
+        Vec::new()
+    }
+
     /// Apply global [`InsecureOptions`] to this filter.
     ///
     /// Filters that support insecure overrides (e.g. CSRF

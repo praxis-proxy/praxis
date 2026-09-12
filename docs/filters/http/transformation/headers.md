@@ -9,7 +9,7 @@ Adds, sets, or removes headers on upstream requests and downstream responses.
 
 | Field | Type | Required | Description |
 |-------|------|---------|-------------|
-| `request_add` | HeaderPair[] | no | Headers to append to the upstream request. |
+| `request_add` | HeaderPair[] | no | Headers to append to the upstream request; repeated entries for one name stack in configuration order. |
 | `request_add[].name` | string | yes | Header field name. |
 | `request_add[].value` | string | yes | Header field value. |
 | `request_remove` | string[] | no | Header names to remove from the upstream request. |

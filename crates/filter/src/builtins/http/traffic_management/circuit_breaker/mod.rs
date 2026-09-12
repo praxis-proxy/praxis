@@ -26,7 +26,7 @@ use praxis_core::circuit::{
 };
 use tracing::{debug, warn};
 
-use self::config::CircuitBreakerConfig;
+use self::config::{CircuitBreakerConfig, ClusterCircuitBreakerConfig};
 use crate::{
     FilterError,
     actions::{FilterAction, Rejection},
@@ -179,7 +179,8 @@ impl CircuitBreakerFilter {
     /// # Errors
     ///
     /// Returns [`FilterError`] if any config field is
-    /// invalid (zero threshold, zero recovery window).
+    /// invalid (zero threshold, zero recovery window, or zero
+    /// half-open timeout).
     ///
     /// [`FilterError`]: crate::FilterError
     pub fn from_config(config: &serde_yaml::Value) -> Result<Box<dyn HttpFilter>, FilterError> {
@@ -187,20 +188,7 @@ impl CircuitBreakerFilter {
 
         let mut breakers = HashMap::new();
         for cluster in &cfg.clusters {
-            if cluster.consecutive_failures == 0 {
-                return Err(format!(
-                    "circuit_breaker: cluster '{}': consecutive_failures must be > 0",
-                    cluster.name
-                )
-                .into());
-            }
-            if cluster.recovery_window_secs == 0 {
-                return Err(format!(
-                    "circuit_breaker: cluster '{}': recovery_window_secs must be > 0",
-                    cluster.name
-                )
-                .into());
-            }
+            validate_cluster(cluster)?;
             breakers.insert(
                 Arc::clone(&cluster.name),
                 InstrumentedCircuitBreaker::new(
@@ -216,6 +204,30 @@ impl CircuitBreakerFilter {
 
         Ok(Box::new(Self { breakers }))
     }
+}
+
+/// Reject cluster settings the circuit state machine cannot act on.
+///
+/// # Errors
+///
+/// Returns [`FilterError`] when any bound is zero. A zero threshold or
+/// recovery window leaves the circuit unable to open or to ever retry;
+/// a zero half-open timeout makes every probe stale the instant it is
+/// issued, so any concurrent request resets the circuit to `Open` and
+/// hands out a fresh probe. Recovery then never settles on a single
+/// probe and the breaker admits unbounded traffic to an upstream it is
+/// meant to be testing with exactly one request.
+fn validate_cluster(cluster: &ClusterCircuitBreakerConfig) -> Result<(), FilterError> {
+    [
+        ("consecutive_failures", u64::from(cluster.consecutive_failures)),
+        ("recovery_window_secs", cluster.recovery_window_secs),
+        ("half_open_timeout_secs", cluster.half_open_timeout_secs),
+    ]
+    .into_iter()
+    .find(|&(_, value)| value == 0)
+    .map_or(Ok(()), |(field, _)| {
+        Err(format!("circuit_breaker: cluster '{}': {field} must be > 0", cluster.name).into())
+    })
 }
 
 #[async_trait]

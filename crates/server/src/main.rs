@@ -73,8 +73,10 @@ fn main() {
         return;
     }
 
-    let config_path = praxis::resolve_config_path(explicit.as_deref());
-    let config = praxis::load_config(explicit.as_deref()).unwrap_or_else(|e| praxis::fatal(&e));
+    // One lookup decides both the config that is loaded and the file that is
+    // watched, so the two can never disagree about the source.
+    let (config, config_path) =
+        praxis::load_config_with_source(explicit.as_deref()).unwrap_or_else(|e| praxis::fatal(&e));
     let tracing_guard = praxis::init_tracing(&config).unwrap_or_else(|e| praxis::fatal(&e));
     let log_level = Some(tracing_guard.log_level_state());
     info!(version = env!("PRAXIS_VERSION"), "starting server");

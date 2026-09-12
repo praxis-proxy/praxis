@@ -76,9 +76,17 @@ pub(super) fn extract_origin(headers: &HeaderMap) -> Option<std::borrow::Cow<'_,
 }
 
 /// Parse `scheme://host[:port]` from a full URL.
+///
+/// The authority component ends at the first `/`, `?`, or `#`
+/// ([RFC 3986 Section 3.2]). Splitting on `/` alone leaves a query or
+/// fragment glued to the host when no path separates them, so a
+/// `Referer` of `https://example.com#section` would yield the malformed
+/// origin `https://example.com#section` and never match a trusted entry.
+///
+/// [RFC 3986 Section 3.2]: https://datatracker.ietf.org/doc/html/rfc3986#section-3.2
 fn extract_origin_from_url(url: &str) -> Option<String> {
     let (scheme, rest) = url.split_once("://")?;
-    let host_port = rest.split('/').next()?;
+    let host_port = rest.split(['/', '?', '#']).next()?;
     if host_port.is_empty() {
         return None;
     }

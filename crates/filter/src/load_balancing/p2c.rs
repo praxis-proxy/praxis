@@ -103,9 +103,7 @@ impl PowerOfTwoChoices {
             return Some(Arc::clone(&ep.address));
         }
 
-        let (a, b) = self.pick_two(total_w);
-        let pos_a = self.weight_index_pos(&candidates, a, total_w);
-        let pos_b = self.weight_index_pos(&candidates, b, total_w);
+        let (pos_a, pos_b) = self.pick_two_positions(&candidates, total_w);
         let chosen = self.less_loaded(pos_a, pos_b);
 
         self.counters[chosen].fetch_add(1, Ordering::AcqRel);
@@ -148,36 +146,54 @@ impl PowerOfTwoChoices {
         }
     }
 
-    /// Generate two distinct random slots in `[0, total_weight)`.
+    /// Sample two distinct candidate positions, weighted by endpoint weight.
+    ///
+    /// Drawing two distinct cumulative-weight slots is not enough: both
+    /// land inside the same endpoint's weight range whenever that
+    /// endpoint's weight is >= 2, and comparing an endpoint against
+    /// itself degrades P2C to a weighted random pick that ignores load.
+    /// The second draw therefore samples the weight space with the first
+    /// pick removed, distinct by construction, and still
+    /// weight-proportional over the remaining candidates.
     #[expect(
         clippy::cast_possible_truncation,
-        reason = "modulo total_weight bounds the result to usize range"
+        reason = "modulo the sampled weight bounds the result to usize range"
     )]
-    fn pick_two(&self, total_weight: usize) -> (usize, usize) {
-        let r1 = super::next_random(&self.rng);
-        let mut r2 = super::next_random(&self.rng);
-        let a = (r1 as usize) % total_weight;
-        let mut b = (r2 as usize) % total_weight;
-        while b == a {
-            r2 = r2.wrapping_mul(super::LCG_A).wrapping_add(super::LCG_C);
-            b = (r2 as usize) % total_weight;
-        }
-        (a, b)
+    #[expect(clippy::indexing_slicing, reason = "positions come from the endpoints scan")]
+    fn pick_two_positions(&self, candidates: &[usize], total_weight: usize) -> (usize, usize) {
+        let slot_a = (super::next_random(&self.rng) as usize) % total_weight;
+        let pos_a = self.weight_index_pos(candidates, slot_a, None);
+
+        // Config validation rejects weight 0, so the remaining weight is
+        // only zero if a programmatic caller left every other candidate
+        // weightless; `weight_index_pos` then falls back to the last
+        // eligible candidate, which is still not `pos_a`.
+        let remaining = total_weight.saturating_sub(self.endpoints[pos_a].weight as usize);
+        let slot_b = if remaining == 0 {
+            0
+        } else {
+            (super::next_random(&self.rng) as usize) % remaining
+        };
+        (pos_a, self.weight_index_pos(candidates, slot_b, Some(pos_a)))
     }
 
-    /// Map a cumulative-weight slot to a candidate position.
+    /// Map a cumulative-weight slot to a candidate position, skipping an
+    /// already-picked position when one is given.
     #[expect(clippy::indexing_slicing, reason = "positions come from the endpoints scan")]
-    #[expect(clippy::expect_used, reason = "caller guarantees candidates is non-empty")]
-    fn weight_index_pos(&self, candidates: &[usize], slot: usize, total_weight: usize) -> usize {
-        let slot = slot % total_weight;
+    fn weight_index_pos(&self, candidates: &[usize], slot: usize, skip: Option<usize>) -> usize {
         let mut cumulative = 0_usize;
-        for &pos in candidates {
+        let mut last_eligible = None;
+        for &pos in candidates.iter().filter(|&&pos| Some(pos) != skip) {
             cumulative += self.endpoints[pos].weight as usize;
             if slot < cumulative {
                 return pos;
             }
+            last_eligible = Some(pos);
         }
-        *candidates.last().expect("candidates must be non-empty")
+        // Unreachable for a slot below the sampled weight; `select` only
+        // calls this with a non-empty candidate list, and only passes
+        // `skip` once it has at least two candidates.
+        last_eligible.or(skip).unwrap_or(0)
     }
 
     /// Candidate positions in one pass: healthy-and-not-excluded when
@@ -305,6 +321,25 @@ mod tests {
 
         let heavy = counts.get("10.0.0.2:80").copied().unwrap_or(0);
         assert!(heavy > 60, "weight-9 endpoint should get majority: heavy={heavy}");
+    }
+
+    #[test]
+    fn loaded_endpoint_loses_when_weights_exceed_one() {
+        // The two sampled cumulative-weight slots are distinct, but with
+        // weight >= 2 both can land inside the same endpoint's weight
+        // range. P2C must still compare two *distinct* endpoints, or the
+        // heavily loaded one wins by being compared against itself.
+        let p2c = PowerOfTwoChoices::new(vec![ep("10.0.0.1:80", 5, 0), ep("10.0.0.2:80", 5, 1)]);
+        p2c.counter_for("10.0.0.1:80").store(100, Ordering::Relaxed);
+
+        for i in 0..200 {
+            let addr = p2c.select(None, &[]).unwrap();
+            assert_eq!(
+                &*addr, "10.0.0.2:80",
+                "iteration {i}: the endpoint with 100 in-flight requests must lose every comparison"
+            );
+            p2c.release(&addr);
+        }
     }
 
     #[test]

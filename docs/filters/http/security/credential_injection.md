@@ -9,7 +9,7 @@ Injects per-cluster API credentials into upstream requests.
 
 For each configured cluster, injects a header (e.g. `Authorization: Bearer sk-...`), replacing any client-provided value for that header to prevent credential forwarding.
 
-Credentials are resolved at construction time (inline values or environment variables). The filter matches on the cluster name selected by the router filter earlier in the pipeline.
+Credentials are resolved at construction time (inline values or environment variables). The filter matches on the cluster name selected by the router filter earlier in the pipeline. Each cluster may carry at most one rule: a second rule naming the same cluster is rejected at startup rather than silently replacing the first.
 
 Scoping is per-cluster: a request routed to a cluster with no configured entry is left untouched, so a client-supplied header (e.g. `Authorization`) is forwarded to that cluster unchanged. This filter is not a general credential stripper; pair it with an explicit header-removal filter if every cluster must have client credentials stripped. The injected secret itself is only ever applied to the cluster it is configured for.
 

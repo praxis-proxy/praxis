@@ -514,6 +514,18 @@ impl FilterPipeline {
         files
     }
 
+    /// Content digests of the documents this pipeline's filters loaded at
+    /// construction, keyed by path, including branch sub-chains.
+    pub fn referenced_file_digests(&self) -> Vec<(std::path::PathBuf, u64)> {
+        let mut digests = Vec::new();
+        for_each_pipeline_filter(&self.filters, &mut |pf| {
+            if let crate::any_filter::AnyFilter::Http(f) = &pf.filter {
+                digests.extend(f.referenced_file_digests());
+            }
+        });
+        digests
+    }
+
     /// Whether upstream hostnames are allowed to resolve to private or
     /// reserved IP addresses.
     ///
@@ -533,7 +545,8 @@ impl FilterPipeline {
         self.allow_private_upstreams = allow;
     }
 
-    /// Apply [`InsecureOptions`] to all filters in the pipeline.
+    /// Apply [`InsecureOptions`] to all filters in the pipeline, including those
+    /// resolved inside branch chains.
     ///
     /// Delegates to each filter's [`apply_insecure_options`] method, recursing
     /// into branch sub-chains so a filter buried in a branch honors the override

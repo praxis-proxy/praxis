@@ -84,6 +84,15 @@ the certificate statically. See
   a warning and continues serving the previous valid
   certificate. Consecutive failures trigger exponential
   backoff (up to 60s) to avoid log spam.
+- A client-CA reload updates verification only. The CA
+  names advertised to clients in the TLS
+  `CertificateRequest` are captured at startup and are
+  never updated, so rotating to a client CA with a
+  different subject leaves clients that select their
+  certificate from that list pointing at the retired CA
+  until the proxy restarts. Rotate through a `client_ca`
+  bundle holding both the outgoing and incoming CA to
+  avoid the gap.
 
 **Debounce behavior:** filesystem events are debounced by
 500ms to handle atomic rename patterns used by Kubernetes
@@ -166,6 +175,11 @@ certificate verification (default: `true`). See
 
 Present a client certificate to upstream servers.
 See [tls-mtls-upstream] and [tls-mtls-both].
+
+The certificate and key are read and checked at
+startup: the certificate must parse as X.509 and the
+key must match it, so a mismatched or corrupt pair
+fails config load instead of every upstream handshake.
 
 ## CA Trust
 

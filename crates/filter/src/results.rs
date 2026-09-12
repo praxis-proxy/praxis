@@ -39,6 +39,14 @@ const MAX_KEY_LEN: usize = 64;
 /// Maximum length of a result value in bytes.
 const MAX_VALUE_LEN: usize = 256;
 
+/// Maximum number of distinct keys a single filter may record.
+///
+/// Keys and values are already size-bounded, but without an entry count
+/// cap a filter driven by request-derived data could record an unbounded
+/// number of distinct keys per request. Mirrors the entry cap on the
+/// general `filter_metadata` map.
+const MAX_ENTRIES: usize = 128;
+
 // -----------------------------------------------------------------------------
 // FilterResultSet
 // -----------------------------------------------------------------------------
@@ -125,6 +133,7 @@ impl FilterResultSet {
     /// Returns [`FilterError`] if:
     /// - `key` is empty, exceeds 64 bytes, or contains non-ASCII-alphanumeric characters (besides `_` and `-`)
     /// - `value` exceeds 256 bytes or contains control characters (0x00-0x1F except 0x09/tab)
+    /// - the set already holds 128 distinct keys and `key` is not one of them
     ///
     /// ```
     /// use praxis_filter::FilterResultSet;
@@ -142,6 +151,11 @@ impl FilterResultSet {
         let value = value.into();
         validate_result_key(&key)?;
         validate_result_value(&value)?;
+        // Overwriting an existing key never grows the set, so it stays
+        // allowed once the cap is reached.
+        if self.entries.len() >= MAX_ENTRIES && !self.entries.contains_key(&key) {
+            return Err(format!("result set must not exceed {MAX_ENTRIES} entries").into());
+        }
         self.entries.insert(key, value);
         Ok(())
     }
@@ -291,6 +305,50 @@ mod tests {
         rs.set("tier", "premium").unwrap();
         assert_eq!(rs.get("status"), Some("hit"), "first key should be retained");
         assert_eq!(rs.get("tier"), Some("premium"), "second key should be present");
+    }
+
+    #[test]
+    fn set_accepts_exactly_max_entries() {
+        let mut rs = FilterResultSet::new();
+        for i in 0..MAX_ENTRIES {
+            rs.set(format!("key-{i}"), "v")
+                .unwrap_or_else(|e| panic!("entry {i} should be accepted: {e}"));
+        }
+        assert_eq!(
+            rs.entries.len(),
+            MAX_ENTRIES,
+            "should hold exactly {MAX_ENTRIES} entries"
+        );
+    }
+
+    #[test]
+    fn reject_entry_beyond_max_entries() {
+        let mut rs = FilterResultSet::new();
+        for i in 0..MAX_ENTRIES {
+            rs.set(format!("key-{i}"), "v").unwrap();
+        }
+        let err = rs.set("one-too-many", "v").unwrap_err();
+        assert!(
+            err.to_string().contains("must not exceed"),
+            "error should name the entry cap, got: {err}"
+        );
+        assert_eq!(
+            rs.entries.len(),
+            MAX_ENTRIES,
+            "rejected entry should not have been stored"
+        );
+        assert_eq!(rs.get("one-too-many"), None, "rejected key should be absent");
+    }
+
+    #[test]
+    fn overwrite_allowed_at_max_entries() {
+        let mut rs = FilterResultSet::new();
+        for i in 0..MAX_ENTRIES {
+            rs.set(format!("key-{i}"), "v").unwrap();
+        }
+        rs.set("key-0", "updated")
+            .expect("overwriting an existing key must stay allowed at the cap");
+        assert_eq!(rs.get("key-0"), Some("updated"), "overwrite should take effect");
     }
 
     #[test]

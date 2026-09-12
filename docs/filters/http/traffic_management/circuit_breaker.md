@@ -17,9 +17,9 @@ When consecutive upstream failures reach the threshold, the circuit opens and su
 |-------|------|---------|-------------|
 | `clusters` | ClusterCircuitBreakerConfig[] | yes | Per-cluster circuit breaker settings. |
 | `clusters[].name` | string | yes | Cluster name (must match a cluster in the load balancer). |
-| `clusters[].consecutive_failures` | integer | yes | Number of consecutive upstream failures before the circuit trips to Open. |
-| `clusters[].half_open_timeout_secs` | integer | no | Seconds a Half-Open probe may remain in-flight before the circuit resets to Open and starts a new recovery cycle. Prevents indefinite stall when a probe request is dropped without a response. Defaults to 30 seconds. |
-| `clusters[].recovery_window_secs` | integer | yes | Seconds the circuit stays Open before transitioning to Half-Open. |
+| `clusters[].consecutive_failures` | integer | yes | Number of consecutive upstream failures before the circuit trips to Open. Must be greater than zero. |
+| `clusters[].half_open_timeout_secs` | integer | no | Seconds a Half-Open probe may remain in-flight before the circuit resets to Open and starts a new recovery cycle. Prevents indefinite stall when a probe request is dropped without a response. Must be greater than zero: a zero timeout makes every probe stale as soon as it is issued, so concurrent requests keep resetting the circuit instead of letting one probe decide recovery. Defaults to 30 seconds. |
+| `clusters[].recovery_window_secs` | integer | yes | Seconds the circuit stays Open before transitioning to Half-Open. Must be greater than zero. |
 
 ## Example
 

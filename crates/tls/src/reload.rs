@@ -163,13 +163,22 @@ impl VerifierState {
 /// proxy restart. All verification methods delegate to the latest
 /// inner verifier.
 ///
-/// Root hint subjects (the CA distinguished names sent to clients
-/// in `CertificateRequest`) are cached at creation time. Updating
-/// them requires a reference with `&self` lifetime, which is
-/// incompatible with atomic swaps. This is acceptable because:
+/// Root hint subjects (the CA distinguished names sent to clients in
+/// `CertificateRequest`) are captured once, when the verifier is
+/// built. [`root_hint_subjects`] hands back a slice borrowed from
+/// `&self`, which an atomic swap cannot produce, so a reload replaces
+/// the verifier without replacing the advertised subjects:
 ///
-/// - CRL changes never affect root hints.
-/// - CA changes update the verification logic; hints are advisory and stale hints do not weaken security.
+/// - A CRL reload never changes the subjects, so it is unaffected.
+/// - A CA reload takes effect for verification immediately: client certificates are checked against the CA file as it
+///   now stands.
+/// - The advertised subjects keep naming the CA loaded at startup. Verification is never weakened - a certificate
+///   issued by a retired CA is still rejected - but a client that selects its certificate from the advertised list
+///   keeps being pointed at the old CA. Rotating to a CA whose subjects are disjoint from the original therefore needs
+///   a proxy restart before such clients are told about it; rotating through a bundle that holds both the outgoing and
+///   incoming CA avoids the gap, because both subjects were advertised from the start.
+///
+/// [`root_hint_subjects`]: ClientCertVerifier::root_hint_subjects
 ///
 /// ```ignore
 /// let verifier = ReloadableClientVerifier::new(
@@ -191,9 +200,10 @@ pub struct ReloadableClientVerifier {
     /// Swappable verifier state (verifier + mandatory flag).
     inner: Arc<ArcSwap<VerifierState>>,
 
-    /// Cached root hint subjects from initial CA load. Deliberately
-    /// not part of the swapped [`VerifierState`] — see the type-level
-    /// doc for why stale hints after a CA reload are acceptable.
+    /// Root hint subjects captured from the initial CA load. Cannot
+    /// live in the swapped [`VerifierState`], because they are handed
+    /// out as a slice borrowed from `&self` - see the type-level doc
+    /// for what a CA rotation does and does not change.
     root_hints: Vec<DistinguishedName>,
 }
 
@@ -218,6 +228,13 @@ impl ReloadableClientVerifier {
     /// the inner verifier on success.
     ///
     /// On failure the previous verifier remains active.
+    ///
+    /// Only verification is swapped. The root hint subjects sent to
+    /// clients in `CertificateRequest` stay as they were captured in
+    /// [`new`] - see the type-level doc for what that means for a CA
+    /// rotation.
+    ///
+    /// [`new`]: ReloadableClientVerifier::new
     ///
     /// # Errors
     ///
@@ -559,6 +576,34 @@ mod tests {
     }
 
     #[test]
+    fn ca_rotation_swaps_verification_but_keeps_the_advertised_subjects() {
+        ensure_crypto_provider();
+        let (_dir_a, ca_a) = gen_named_ca_file("Rotation CA A");
+        let (_dir_b, ca_b) = gen_named_ca_file("Rotation CA B");
+
+        let verifier = ReloadableClientVerifier::new(ca_a.to_str().expect("ca path"), ClientCertMode::Require, &[])
+            .expect("initial verifier");
+        let subjects =
+            |dns: &[DistinguishedName]| -> Vec<Vec<u8>> { dns.iter().map(|dn| dn.as_ref().to_vec()).collect() };
+        let advertised_before = subjects(verifier.root_hint_subjects());
+
+        verifier
+            .reload(ca_b.to_str().expect("ca path"), ClientCertMode::Require, &[])
+            .expect("rotation to a disjoint CA should succeed");
+
+        assert_eq!(
+            subjects(verifier.root_hint_subjects()),
+            advertised_before,
+            "documented behaviour: CertificateRequest keeps naming the CA loaded at startup"
+        );
+        assert_ne!(
+            subjects(verifier.inner.load().verifier.root_hint_subjects()),
+            advertised_before,
+            "the swapped verifier must be the one built from the rotated CA"
+        );
+    }
+
+    #[test]
     fn reloadable_verifier_debug_impl() {
         ensure_crypto_provider();
         let ca = gen_ca_file();
@@ -602,6 +647,20 @@ mod tests {
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
+
+    /// Write a self-signed CA PEM with the given common name to a temp dir.
+    fn gen_named_ca_file(common_name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let key = rcgen::KeyPair::generate().expect("CA key generation");
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).expect("CA params");
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        params.distinguished_name.push(rcgen::DnType::CommonName, common_name);
+        let cert = params.self_signed(&key).expect("CA self-sign");
+
+        let dir = tempfile::TempDir::new().expect("tempdir");
+        let path = dir.path().join("ca.pem");
+        std::fs::write(&path, cert.pem()).expect("write CA PEM");
+        (dir, path)
+    }
 
     /// Build a [`CertKeyPair`] from freshly generated test certs.
     fn make_pair() -> (crate::test_utils::TestCerts, CertKeyPair) {

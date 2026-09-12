@@ -109,7 +109,21 @@ pub(super) async fn execute(
             }
         },
 
-        BodyMode::StreamBuffer { .. } => {},
+        // After Release the body streams unbuffered; the global ceiling
+        // still applies (StreamBuffer's own cap no longer runs).
+        BodyMode::StreamBuffer { .. } => {
+            let chunk_len = body.as_ref().map_or(0, Bytes::len) as u64;
+            if let Some(max) = pipeline.request_body_ceiling()
+                && ctx.request_body_bytes.saturating_add(chunk_len) > max as u64
+            {
+                ctx.stamp_error_type(crate::http::pingora::metrics::ERROR_TYPE_FILTER_REJECT);
+                send_rejection(session, Rejection::status(413)).await;
+                return Err(pingora_core::Error::explain(
+                    pingora_core::ErrorType::HTTPStatus(413),
+                    "released request body exceeds global body limit",
+                ));
+            }
+        },
         _ => tracing::error!("unhandled BodyMode variant in request body filter"),
     }
 
@@ -184,8 +198,46 @@ mod tests {
     use std::collections::VecDeque;
 
     use bytes::Bytes;
+    use praxis_filter::{BodyMode, FilterPipeline, FilterRegistry};
 
+    use super::{Session, execute};
     use crate::http::pingora::context::PingoraRequestCtx;
+
+    /// Global request-body ceiling used by the released-buffer tests.
+    const CEILING: usize = 8;
+
+    #[tokio::test]
+    async fn released_stream_buffer_request_body_enforces_global_ceiling() {
+        let pipeline = ceiling_pipeline();
+        let (mut session, _client) = session_for("POST / HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        let mut ctx = released_stream_buffer_ctx();
+        let mut body = Some(Bytes::from_static(b"0123456789"));
+
+        let result = execute(&pipeline, &mut session, &mut body, false, &mut ctx).await;
+        assert!(
+            result.is_err(),
+            "a released stream buffer must still honor the global request body ceiling"
+        );
+    }
+
+    #[tokio::test]
+    async fn released_stream_buffer_request_body_accumulates_across_chunks() {
+        let pipeline = ceiling_pipeline();
+        let (mut session, _client) = session_for("POST / HTTP/1.1\r\nHost: x\r\n\r\n").await;
+        let mut ctx = released_stream_buffer_ctx();
+
+        let mut first = Some(Bytes::from_static(b"01234"));
+        let result = execute(&pipeline, &mut session, &mut first, false, &mut ctx).await;
+        assert!(result.is_ok(), "a chunk below the ceiling must pass through");
+        assert_eq!(ctx.request_body_bytes, 5, "the released chunk must be counted");
+
+        let mut second = Some(Bytes::from_static(b"56789"));
+        let result = execute(&pipeline, &mut session, &mut second, true, &mut ctx).await;
+        assert!(
+            result.is_err(),
+            "chunks must accumulate so a released body cannot exceed the ceiling in pieces"
+        );
+    }
 
     #[test]
     fn pre_read_body_drains_chunks_in_order() {
@@ -254,5 +306,41 @@ mod tests {
     /// Create a default request context for body filter tests.
     fn make_ctx() -> PingoraRequestCtx {
         PingoraRequestCtx::default()
+    }
+
+    /// Build an empty pipeline carrying a global request body ceiling.
+    fn ceiling_pipeline() -> FilterPipeline {
+        let registry = FilterRegistry::with_builtins();
+        let mut pipeline = FilterPipeline::build(&mut [], &registry).unwrap();
+        pipeline.apply_body_limits(Some(CEILING), None, false).unwrap();
+        pipeline
+    }
+
+    /// Context for a `StreamBuffer` request body that a filter released.
+    fn released_stream_buffer_ctx() -> PingoraRequestCtx {
+        let mut ctx = make_ctx();
+        ctx.request_body_mode = BodyMode::StreamBuffer {
+            max_bytes: Some(CEILING),
+        };
+        ctx.request_body_released = true;
+        ctx.request_snapshot = Some(praxis_filter::Request {
+            method: http::Method::POST,
+            uri: "/upload".parse().unwrap(),
+            headers: http::HeaderMap::new(),
+        });
+        ctx
+    }
+
+    /// Build a proxy session that has read the given raw HTTP/1.1
+    /// request. The client half must stay alive for response writes.
+    async fn session_for(raw: &str) -> (Session, tokio::io::DuplexStream) {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut client, server) = tokio::io::duplex(1_048_576);
+        client.write_all(raw.as_bytes()).await.unwrap();
+        let mut session = Session::new_h1(Box::new(server));
+        let read = session.read_request().await.unwrap();
+        assert!(read, "the session must parse the request header");
+        (session, client)
     }
 }

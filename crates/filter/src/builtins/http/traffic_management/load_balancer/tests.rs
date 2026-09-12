@@ -381,6 +381,88 @@ async fn sni_fallback_is_none_when_no_host_header() {
 }
 
 #[tokio::test]
+async fn retry_reselector_keeps_host_derived_sni() {
+    // The reselector builds the upstream for an alternate-host retry. It
+    // must carry the SNI the initial attempt derived from `Host`, not the
+    // cluster's SNI-less cached TLS, otherwise the retry connects with no
+    // SNI and a name-based upstream rejects the handshake or serves the
+    // wrong certificate.
+    let cluster = Cluster {
+        tls: Some(praxis_core::config::ClusterTls::default()),
+        ..Cluster::with_defaults("no-sni", vec!["10.0.0.1:443".into(), "10.0.0.2:443".into()])
+    };
+    let lb = LoadBalancerFilter::new(&[cluster]);
+
+    let mut req = crate::test_utils::make_request(http::Method::GET, "/");
+    req.headers
+        .insert("host", http::HeaderValue::from_static("api.example.com:8443"));
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("no-sni"));
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+    assert_eq!(
+        ctx.upstream.as_ref().unwrap().tls.as_ref().unwrap().sni(),
+        Some("api.example.com"),
+        "the initial upstream should carry the Host-derived SNI"
+    );
+
+    let reselector = ctx.endpoint_reselector.clone().expect("reselector should be set");
+    let alternate = reselector
+        .select_address(None, &ctx.attempted_endpoints)
+        .expect("a second endpoint should be available for the retry");
+    let retry = reselector.build_upstream(alternate);
+    assert_eq!(
+        retry.tls.as_ref().expect("retry upstream should keep TLS").sni(),
+        Some("api.example.com"),
+        "the retry upstream must offer the same Host-derived SNI as the first attempt"
+    );
+}
+
+#[tokio::test]
+async fn retry_reselector_is_shared_when_sni_is_cluster_wide() {
+    // Clusters that do not depend on the per-request Host header keep the
+    // shared reselector: two requests must get the very same instance.
+    let cluster = Cluster {
+        tls: Some(praxis_core::config::ClusterTls {
+            sni: Some("api.example.com".into()),
+            ..praxis_core::config::ClusterTls::default()
+        }),
+        ..Cluster::with_defaults("explicit-sni", vec!["10.0.0.1:443".into()])
+    };
+    let lb = LoadBalancerFilter::new(&[cluster]);
+
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut first_ctx = crate::test_utils::make_filter_context(&req);
+    first_ctx.cluster = Some(Arc::from("explicit-sni"));
+    drop(lb.on_request(&mut first_ctx).await.unwrap());
+
+    let mut second_ctx = crate::test_utils::make_filter_context(&req);
+    second_ctx.cluster = Some(Arc::from("explicit-sni"));
+    drop(lb.on_request(&mut second_ctx).await.unwrap());
+
+    assert!(
+        Arc::ptr_eq(
+            first_ctx.endpoint_reselector.as_ref().unwrap(),
+            second_ctx.endpoint_reselector.as_ref().unwrap()
+        ),
+        "a cluster-wide SNI must still use the shared reselector"
+    );
+    assert_eq!(
+        first_ctx
+            .endpoint_reselector
+            .as_ref()
+            .unwrap()
+            .build_upstream(Arc::from("10.0.0.9:443"))
+            .tls
+            .as_ref()
+            .unwrap()
+            .sni(),
+        Some("api.example.com"),
+        "the shared reselector should carry the configured SNI"
+    );
+}
+
+#[tokio::test]
 async fn explicit_sni_overrides_host_header() {
     let cluster = Cluster {
         tls: Some(praxis_core::config::ClusterTls {

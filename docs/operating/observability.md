@@ -624,9 +624,11 @@ filter_chains:
 ```
 
 `sample_rate` accepts values in `(0.0, 1.0]`. The
-value `0.1` logs approximately 10% of requests.
-Sampling uses a deterministic counter (every Nth
-request), not random selection.
+value `0.1` logs 10% of requests. Sampling uses a
+deterministic counter, not random selection: the
+configured fraction is realized exactly over each
+window of one million requests, so non-reciprocal
+rates such as `0.33` are honored as written.
 
 ### Log Format
 
@@ -674,7 +676,7 @@ runtime:
     output: stdout        # stdout (default) | stderr | file
     file_path: /var/log/praxis/proxy.log
     non_blocking: true
-    buffer_size: 8192     # buffered lines; default 128000
+    buffer_size: 8192     # buffered lines; default 128000, max 1048576
 ```
 
 Defaults keep today's behavior: non-blocking stdout,

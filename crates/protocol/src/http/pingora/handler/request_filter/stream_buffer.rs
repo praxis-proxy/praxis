@@ -270,12 +270,21 @@ fn push_grouped_queues(filter_ctx: &HttpFilterContext<'_>, log: &mut Vec<Trusted
     for (name, value) in &filter_ctx.request_headers_to_set {
         log.push(TrustedHeaderMutation::Set(name.clone(), value.clone()));
     }
+    let mut seen_extra: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (name, value) in &filter_ctx.extra_request_headers {
-        if let (Ok(hname), Ok(_)) = (
+        if let (Ok(hname), Ok(hvalue)) = (
             http::header::HeaderName::from_bytes(name.as_bytes()),
             http::header::HeaderValue::from_str(value),
         ) {
-            log.push(TrustedHeaderMutation::Add(hname, value.clone()));
+            // First entry for a name replaces (matching the wire path and the
+            // replace-reliant producers such as credential_injection); a repeat of
+            // the same name appends, so a fresh header carrying several request_add
+            // values keeps every one instead of collapsing to the last.
+            if seen_extra.insert(hname.as_str().to_ascii_lowercase()) {
+                log.push(TrustedHeaderMutation::Set(hname, hvalue));
+            } else {
+                log.push(TrustedHeaderMutation::Add(hname, value.clone()));
+            }
         } else {
             warn!(header = %name, "skipping invalid promoted header");
         }

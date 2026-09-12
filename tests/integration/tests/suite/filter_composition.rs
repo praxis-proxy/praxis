@@ -300,6 +300,58 @@ insecure_options:
 }
 
 #[test]
+fn request_add_repeats_survive_when_header_is_absent() {
+    let backend_guard = start_header_echo_backend();
+    let backend_port = backend_guard.port();
+    let proxy_port = free_port();
+
+    let yaml = format!(
+        r#"
+listeners:
+  - name: default
+    address: "127.0.0.1:{proxy_port}"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        request_add:
+          - name: X-Foo
+            value: "alpha"
+          - name: X-Foo
+            value: "beta"
+      - filter: router
+        routes:
+          - path_prefix: "/"
+            cluster: "backend"
+      - filter: load_balancer
+        clusters:
+          - name: "backend"
+            endpoints:
+              - "127.0.0.1:{backend_port}"
+insecure_options:
+  allow_private_endpoints: true
+"#
+    );
+
+    let config = Config::from_yaml(&yaml).unwrap();
+    let proxy = start_proxy(&config);
+
+    let raw = http_send(
+        proxy.addr(),
+        "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
+    );
+    assert_eq!(parse_status(&raw), 200, "request_add composition should return 200");
+
+    let body = parse_body(&raw);
+    let body_lower = body.to_lowercase();
+    assert!(
+        body_lower.contains("x-foo: alpha") && body_lower.contains("x-foo: beta"),
+        "both request_add values must reach the upstream as separate header lines when the header was absent, got:\n{body}"
+    );
+}
+
+#[test]
 fn conditional_filter_does_not_affect_unconditional_filters() {
     let backend_guard = start_header_echo_backend();
     let backend_port = backend_guard.port();

@@ -201,7 +201,10 @@ pub(super) fn http_authz_rejection(violation: Option<&PluginViolation>) -> Rejec
         .and_then(|d| d.get("http.status"))
         .and_then(serde_json::Value::as_u64)
         .and_then(|n| u16::try_from(n).ok())
-        .filter(|s| (100..=599).contains(s))
+        // A policy document is external input: a status it cannot deliver as a
+        // final response falls back to the default rather than reaching
+        // `Rejection::status`, which panics on one.
+        .filter(|s| (200..=599).contains(s))
         .unwrap_or(403);
 
     let body = details

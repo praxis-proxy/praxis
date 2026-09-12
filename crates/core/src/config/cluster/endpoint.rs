@@ -76,6 +76,11 @@ enum EndpointRaw {
     Weighted(WeightedEndpointRaw),
 }
 
+/// Field names [`WeightedEndpointRaw`] accepts, named in the
+/// unknown-field error so a typo is reported against the full set
+/// rather than a subset of it.
+const ENDPOINT_FIELDS: &str = "'address', 'weight', 'metadata', 'priority', 'zone'";
+
 /// Object form of an endpoint, capturing unknown keys for rejection.
 #[derive(Deserialize)]
 struct WeightedEndpointRaw {
@@ -114,7 +119,7 @@ impl TryFrom<EndpointRaw> for Endpoint {
                     let mut keys: Vec<&str> = w.unknown.keys().map(String::as_str).collect();
                     keys.sort_unstable();
                     return Err(format!(
-                        "endpoint '{}': unknown field(s): {}; expected only 'address' and 'weight'",
+                        "endpoint '{}': unknown field(s): {}; expected only {ENDPOINT_FIELDS}",
                         w.address,
                         keys.join(", ")
                     ));
@@ -305,5 +310,29 @@ priority: 1
             err.to_string().contains("max_conns"),
             "unknown endpoint keys must be rejected by name, got: {err}"
         );
+    }
+
+    #[test]
+    fn unknown_endpoint_key_error_names_every_accepted_field() {
+        // A typo of an accepted-but-unlisted field (`metadataa`) used to be
+        // answered with "expected only 'address' and 'weight'", telling the
+        // operator the field they meant does not exist.
+        let yaml = "address: \"10.0.0.2:8080\"\nmetadataa:\n  version: canary\n";
+        let err = serde_yaml::from_str::<Endpoint>(yaml).unwrap_err().to_string();
+        for field in ["address", "weight", "metadata", "priority", "zone"] {
+            assert!(
+                err.contains(&format!("'{field}'")),
+                "the unknown-field error must name '{field}' as accepted, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_field_named_in_the_unknown_key_error_is_accepted() {
+        // Guards the other direction: the message must not advertise a
+        // field the endpoint form rejects.
+        let yaml =
+            "address: \"10.0.0.2:8080\"\nweight: 2\nmetadata:\n  version: canary\npriority: 1\nzone: us-east-1a\n";
+        serde_yaml::from_str::<Endpoint>(yaml).expect("every advertised field must parse");
     }
 }

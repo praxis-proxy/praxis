@@ -61,6 +61,26 @@ pub(super) fn set_headers(
     }
 }
 
+/// Group `request_add` entries by header name.
+///
+/// Preserves the order in which names first appear and the order of the
+/// values configured for each name. Repeated entries for one name have to
+/// be applied together: a request header that already exists is extended
+/// with a single overwrite, and one overwrite per entry would discard
+/// every addition but the last.
+pub(super) fn group_adds_by_name(
+    adds: &[(http::header::HeaderName, String)],
+) -> Vec<(&http::header::HeaderName, Vec<&str>)> {
+    let mut grouped: Vec<(&http::header::HeaderName, Vec<&str>)> = Vec::with_capacity(adds.len());
+    for (name, value) in adds {
+        match grouped.iter_mut().find(|(grouped_name, _)| *grouped_name == name) {
+            Some((_, values)) => values.push(value),
+            None => grouped.push((name, vec![value.as_str()])),
+        }
+    }
+    grouped
+}
+
 // -----------------------------------------------------------------------------
 // Config-Time Validation
 // -----------------------------------------------------------------------------

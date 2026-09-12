@@ -3215,6 +3215,104 @@ fn referenced_files_keeps_duplicates_for_the_caller_to_dedupe() {
     );
 }
 
+/// A branch chain's filters are active members of the pipeline, so the watcher
+/// has to hash and watch the documents they read.
+#[test]
+fn referenced_files_collects_from_branch_chain_filters() {
+    let mut branching = PipelineFilter::new(0, AnyFilter::Http(Box::new(PassthroughFilter)), vec![], vec![]);
+    branching.branches = vec![ResolvedBranch {
+        name: Arc::from("policy_branch"),
+        condition: None,
+        filters: vec![PipelineFilter::new(
+            1,
+            AnyFilter::Http(Box::new(ReferencingFilter::new(&["/etc/praxis/branch.yaml"]))),
+            vec![],
+            vec![],
+        )],
+        max_iterations: None,
+        rejoin: RejoinTarget::Next,
+    }];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![branching]);
+
+    assert_eq!(
+        pipeline.referenced_files(),
+        vec![std::path::PathBuf::from("/etc/praxis/branch.yaml")],
+        "a document referenced only from a branch chain must still be reported"
+    );
+}
+
+/// Branches nest, and so must the walk.
+#[test]
+fn referenced_files_collects_from_nested_branch_chains() {
+    let mut inner = PipelineFilter::new(1, AnyFilter::Http(Box::new(PassthroughFilter)), vec![], vec![]);
+    inner.branches = vec![ResolvedBranch {
+        name: Arc::from("inner"),
+        condition: None,
+        filters: vec![PipelineFilter::new(
+            2,
+            AnyFilter::Http(Box::new(ReferencingFilter::new(&["/etc/praxis/inner.yaml"]))),
+            vec![],
+            vec![],
+        )],
+        max_iterations: None,
+        rejoin: RejoinTarget::Next,
+    }];
+
+    let mut outer = PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(ReferencingFilter::new(&["/etc/praxis/outer.yaml"]))),
+        vec![],
+        vec![],
+    );
+    outer.branches = vec![ResolvedBranch {
+        name: Arc::from("outer"),
+        condition: None,
+        filters: vec![inner],
+        max_iterations: None,
+        rejoin: RejoinTarget::Next,
+    }];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![outer]);
+
+    assert_eq!(
+        pipeline.referenced_files(),
+        vec![
+            std::path::PathBuf::from("/etc/praxis/outer.yaml"),
+            std::path::PathBuf::from("/etc/praxis/inner.yaml"),
+        ],
+        "documents at every branch depth must be reported"
+    );
+}
+
+/// Insecure options are a listener-wide switch; a filter does not escape it by
+/// living in a branch chain.
+#[test]
+fn apply_insecure_options_reaches_branch_chain_filters() {
+    let applied = Arc::new(AtomicBool::new(false));
+    let mut branching = PipelineFilter::new(0, AnyFilter::Http(Box::new(PassthroughFilter)), vec![], vec![]);
+    branching.branches = vec![ResolvedBranch {
+        name: Arc::from("branch"),
+        condition: None,
+        filters: vec![PipelineFilter::new(
+            1,
+            AnyFilter::Http(Box::new(InsecureOptionsRecorder {
+                applied: Arc::clone(&applied),
+            })),
+            vec![],
+            vec![],
+        )],
+        max_iterations: None,
+        rejoin: RejoinTarget::Next,
+    }];
+    let pipeline = test_pipeline(BodyCapabilities::default(), vec![branching]);
+
+    pipeline.apply_insecure_options(&praxis_core::config::InsecureOptions::default());
+
+    assert!(
+        applied.load(Ordering::SeqCst),
+        "a filter inside a branch chain must receive the listener's insecure options"
+    );
+}
+
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
@@ -3284,6 +3382,26 @@ fn pipeline_with_branch(branch_filters: Vec<PipelineFilter>) -> FilterPipeline {
         rejoin: RejoinTarget::Next,
     }];
     test_pipeline(BodyCapabilities::default(), vec![parent])
+}
+
+/// A filter that records whether insecure options were applied to it.
+struct InsecureOptionsRecorder {
+    applied: Arc<AtomicBool>,
+}
+
+#[async_trait]
+impl HttpFilter for InsecureOptionsRecorder {
+    fn name(&self) -> &'static str {
+        "insecure_options_recorder"
+    }
+
+    fn apply_insecure_options(&self, _options: &praxis_core::config::InsecureOptions) {
+        self.applied.store(true, Ordering::SeqCst);
+    }
+
+    async fn on_request(&self, _ctx: &mut crate::HttpFilterContext<'_>) -> Result<FilterAction, FilterError> {
+        Ok(FilterAction::Continue)
+    }
 }
 
 /// A filter that reads config from external documents.

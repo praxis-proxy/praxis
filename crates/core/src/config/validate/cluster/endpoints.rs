@@ -7,11 +7,10 @@ use std::net::IpAddr;
 
 use super::{
     MAX_ENDPOINT_WEIGHT, MAX_ENDPOINTS,
-    health_check::{extract_host, is_ssrf_sensitive, is_ssrf_sensitive_hostname},
+    health_check::{extract_host, is_sensitive_host},
 };
 use crate::{
     config::{Cluster, InsecureOptions},
-    connectivity::normalize_mapped_ipv4,
     errors::ProxyError,
 };
 
@@ -78,13 +77,80 @@ fn validate_endpoint_address(addr: &str, cluster_name: &str) -> Result<(), Proxy
     // A valid port with an empty host (`:80`) parses here but has no
     // resolvable host, so every request to the cluster fails at connect;
     // the empty host also slips past the SSRF hostname check.
-    let host = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
-    if host.is_empty() {
+    if host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(host)
+        .is_empty()
+    {
         return Err(ProxyError::Config(format!(
             "cluster '{cluster_name}': endpoint '{addr}' has an empty host (expected 'host:port')"
         )));
     }
+    validate_endpoint_host(host, addr, cluster_name)
+}
+
+/// Validate the host half of a `host:port` endpoint address.
+///
+/// Only `SocketAddr`-parseable addresses have been accepted above, so
+/// everything reaching here is either a bracketed IPv6 literal or a
+/// hostname. Without a syntax check, any string ending in `:<u16>` was
+/// accepted, `http://backend:80`, `bad host:80`, or the unbalanced
+/// `[::1:80`, and the config only failed at connect time, per request,
+/// long after startup.
+fn validate_endpoint_host(host: &str, addr: &str, cluster_name: &str) -> Result<(), ProxyError> {
+    let bracket_error = || {
+        ProxyError::Config(format!(
+            "cluster '{cluster_name}': endpoint '{addr}' has a malformed IPv6 host \
+             (expected '[<ipv6>]:port')"
+        ))
+    };
+    if host.starts_with('[') || host.ends_with(']') {
+        return host
+            .strip_prefix('[')
+            .and_then(|inner| inner.strip_suffix(']'))
+            .filter(|inner| inner.parse::<std::net::Ipv6Addr>().is_ok())
+            .map(|_| ())
+            .ok_or_else(bracket_error);
+    }
+    // An unbracketed IPv6 literal (`::ffff:127.0.0.1:80`) still reaches
+    // the SSRF check via `extract_host`, so leave it to that gate rather
+    // than rejecting it here as a malformed hostname.
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(());
+    }
+    if !is_valid_hostname(host) {
+        return Err(ProxyError::Config(format!(
+            "cluster '{cluster_name}': endpoint '{addr}' has an invalid host '{host}' \
+             (expected a hostname, 'ipv4:port', or '[ipv6]:port')"
+        )));
+    }
     Ok(())
+}
+
+/// Whether `host` is syntactically usable as a DNS hostname.
+///
+/// Labels are 1..=63 bytes of ASCII alphanumerics, `-`, or `_`, and may
+/// not start or end with `-`; the whole name is at most 253 bytes.
+///
+/// Deliberately looser than [`praxis_tls::dns::validate_dns_hostname`],
+/// which is applied to names Praxis presents on the wire: an upstream
+/// address is passed to the resolver, and both `_` (Docker Compose and
+/// service-discovery names) and the trailing root dot resolve fine, so
+/// rejecting them here would refuse working deployments. Only shapes no
+/// resolver can use are rejected.
+fn is_valid_hostname(host: &str) -> bool {
+    let host = host.strip_suffix('.').unwrap_or(host);
+    !host.is_empty()
+        && host.len() <= 253
+        && host.split('.').all(|label| {
+            (1..=63).contains(&label.len())
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+        })
 }
 
 /// Reject a zero or out-of-range endpoint weight.
@@ -124,13 +190,12 @@ fn validate_endpoint_ssrf(cluster: &Cluster, insecure_options: &InsecureOptions)
     Ok(())
 }
 
-/// Return an error when a host resolves to an SSRF-sensitive address.
+/// Return an error when a host is SSRF-sensitive.
+///
+/// Best-effort: exact for IP literals, lexical for hostnames. See
+/// [`is_sensitive_host`] for what that does and does not catch.
 fn reject_ssrf_host(host: &str, cluster_name: &str, addr_str: &str) -> Result<(), ProxyError> {
-    let sensitive = match host.parse::<IpAddr>() {
-        Ok(raw) => is_ssrf_sensitive(&normalize_mapped_ipv4(raw)),
-        Err(_) => is_ssrf_sensitive_hostname(host),
-    };
-    if sensitive {
+    if is_sensitive_host(host) {
         return Err(ProxyError::Config(format!(
             "cluster '{cluster_name}': endpoint '{addr_str}' resolves to a sensitive \
              address; set insecure_options.allow_private_endpoints: true to allow"
@@ -321,6 +386,105 @@ mod tests {
         let clusters = vec![Cluster::with_defaults("web", vec!["[]:80".into()])];
         let err = validate_clusters(&clusters, &InsecureOptions::default()).unwrap_err();
         assert!(err.to_string().contains("empty host"), "got: {err}");
+    }
+
+    #[test]
+    fn reject_endpoint_host_with_invalid_characters() {
+        // Every string ending in ':<u16>' used to be accepted, so a scheme
+        // or a stray space in the address only failed at connect time.
+        for addr in ["http://backend:80", "bad host:80", "user@backend:80", "back/end:80"] {
+            let clusters = vec![Cluster::with_defaults("web", vec![addr.into()])];
+            let err = validate_clusters(&clusters, &InsecureOptions::default())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("invalid host"),
+                "endpoint '{addr}' must be rejected as a malformed host: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_endpoint_host_with_malformed_labels() {
+        for addr in ["foo..bar:80", "-leading.example.com:80", "trailing-.example.com:80"] {
+            let clusters = vec![Cluster::with_defaults("web", vec![addr.into()])];
+            let err = validate_clusters(&clusters, &InsecureOptions::default())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("invalid host"),
+                "endpoint '{addr}' must be rejected as a malformed hostname: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn reject_endpoint_with_unbalanced_ipv6_brackets() {
+        for addr in ["[::1:80", "2001:db8::1]:80", "[not-ipv6]:80"] {
+            let clusters = vec![Cluster::with_defaults("web", vec![addr.into()])];
+            let err = validate_clusters(&clusters, &InsecureOptions::default())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("malformed IPv6 host"),
+                "endpoint '{addr}' must be rejected as malformed IPv6: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn accept_service_discovery_hostname_endpoints() {
+        // The syntax check must not reject the hostname forms real configs
+        // use: underscores, the fully-qualified trailing dot, and a
+        // 63-character label at the length ceiling.
+        let long_label = "a".repeat(63);
+        // `.local` is SSRF-sensitive by name, so the override isolates the
+        // address-syntax check from the SSRF gate.
+        let opts = InsecureOptions {
+            allow_private_endpoints: true,
+            ..InsecureOptions::default()
+        };
+        for addr in [
+            "backend.default.svc.cluster.local:8080".to_owned(),
+            "my_service.example.com:80".to_owned(),
+            "api.example.com.:443".to_owned(),
+            format!("{long_label}.example.com:80"),
+        ] {
+            let clusters = vec![Cluster::with_defaults("web", vec![addr.clone().into()])];
+            let result = validate_clusters(&clusters, &opts);
+            assert!(result.is_ok(), "endpoint '{addr}' must be accepted: {result:?}");
+        }
+    }
+
+    #[test]
+    fn reject_endpoint_hostname_label_over_the_length_ceiling() {
+        let addr = format!("{}.example.com:80", "a".repeat(64));
+        let clusters = vec![Cluster::with_defaults("web", vec![addr.as_str().into()])];
+        let err = validate_clusters(&clusters, &InsecureOptions::default())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("invalid host"), "a 64-byte label must be rejected: {err}");
+    }
+
+    #[test]
+    fn reject_fully_qualified_sensitive_endpoint_hosts() {
+        for addr in ["localhost.:80", "127.0.0.1.:80", "metadata.google.internal.:80"] {
+            let clusters = vec![Cluster::with_defaults("web", vec![addr.into()])];
+            let err = validate_clusters(&clusters, &InsecureOptions::default())
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("sensitive address"),
+                "the fully-qualified form of '{addr}' must be rejected too: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn accept_fully_qualified_public_endpoint_host() {
+        let clusters = vec![Cluster::with_defaults("web", vec!["api.example.com.:443".into()])];
+        let result = validate_clusters(&clusters, &InsecureOptions::default());
+        assert!(result.is_ok(), "a public fully-qualified host must pass: {result:?}");
     }
 
     #[test]

@@ -499,8 +499,16 @@ impl CircuitBreakerRegistry {
         }
     }
 
-    /// Evict idle breakers that have been `Closed` with zero failures
-    /// for at least `idle_threshold`.
+    /// Evict breakers that have seen no traffic for at least
+    /// `idle_threshold` and have no request in flight.
+    ///
+    /// Eviction is keyed on idleness, not on health: an idle breaker is
+    /// removed whatever its state or residual failure count, because a
+    /// recreated breaker starts `Closed`, the same admission decision
+    /// an elapsed recovery window would produce once traffic resumes.
+    /// The one exemption is an `Open` breaker still inside its recovery
+    /// window, which is never idle. See `CircuitBreaker::is_idle` for
+    /// the full reasoning.
     ///
     /// Returns the number of entries removed. The caller is
     /// responsible for scheduling periodic invocations.
@@ -857,6 +865,23 @@ mod tests {
         assert_eq!(registry.len(), 2);
         let evicted = registry.evict_idle(Duration::ZERO);
         assert_eq!(evicted, 2, "both idle entries should be evicted");
+        assert_eq!(registry.len(), 0);
+    }
+
+    #[test]
+    fn evict_idle_removes_closed_entries_carrying_a_failure_streak() {
+        // Eviction is keyed on idleness, not on health: a Closed breaker
+        // that still carries failures below its threshold is idle and must
+        // be evicted, or the registry leaks an entry per churned peer that
+        // ever failed. Pins the contract documented on `evict_idle`.
+        let registry = CircuitBreakerRegistry::new(config(3, 30_000, 9_999_000));
+        let a = peer("127.0.0.1:8080");
+        let ta = registry.try_acquire(a.clone());
+        record_registry_failure(&registry, &a, ta);
+        assert!(registry.precheck(&a), "one failure must not trip threshold=3");
+
+        let evicted = registry.evict_idle(Duration::ZERO);
+        assert_eq!(evicted, 1, "an idle Closed breaker with residual failures is evictable");
         assert_eq!(registry.len(), 0);
     }
 

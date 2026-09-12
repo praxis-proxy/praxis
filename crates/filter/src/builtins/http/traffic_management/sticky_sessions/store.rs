@@ -108,12 +108,28 @@ impl SessionStore {
         let now = Instant::now();
         if now.duration_since(entry.last_accessed) >= self.ttl {
             drop(entry);
-            self.map.remove(key);
+            self.remove_if_expired(key, now);
             self.maybe_sweep(now);
             return None;
         }
         entry.last_accessed = now;
         Some(Arc::clone(&entry.endpoint))
+    }
+
+    /// Remove `key`, but only while it is still expired as of `now`.
+    ///
+    /// The re-check and the removal run under a single shard lock. A lookup
+    /// that observes an expired entry must drop its guard before it can
+    /// remove the key, and in that gap another request can revive the
+    /// session: `put` refreshes `last_accessed` and may pin a different
+    /// endpoint. Re-checking under the removal lock leaves that fresh
+    /// binding intact instead of dropping it and unpinning a live session.
+    ///
+    /// Returns whether an entry was removed.
+    fn remove_if_expired(&self, key: &str, now: Instant) -> bool {
+        self.map
+            .remove_if(key, |_, entry| now.duration_since(entry.last_accessed) >= self.ttl)
+            .is_some()
     }
 
     /// Run `sweep_expired` if at least `ttl / 2` has elapsed since the last sweep.
@@ -414,6 +430,48 @@ mod tests {
         thread::sleep(Duration::from_millis(5));
         assert!(store.get("sess1").is_none());
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn expired_removal_spares_a_concurrently_refreshed_binding() {
+        // `get` observes expiry under a read guard, then removes the key in
+        // a second operation. Between the two, another request can re-pin
+        // the session through `put`. The removal must not delete that fresh
+        // binding, so it re-checks expiry under the removal lock.
+        let store = SessionStore::new(100, Duration::from_millis(20), EvictionPolicy::Lru);
+        store.put("sess1", "10.0.0.1:80".into());
+        thread::sleep(Duration::from_millis(30));
+
+        // `now` as a lookup that just saw the entry expired would sample it.
+        let observed = Instant::now();
+        // The concurrent request lands in the gap: re-pins to a new endpoint
+        // and refreshes the sliding TTL.
+        store.put("sess1", "10.0.0.2:80".into());
+
+        assert!(
+            !store.remove_if_expired("sess1", observed),
+            "a binding refreshed since the expiry observation must not be removed"
+        );
+        assert_eq!(
+            store.get("sess1").as_deref(),
+            Some("10.0.0.2:80"),
+            "the concurrently installed endpoint must survive"
+        );
+    }
+
+    #[test]
+    fn expired_removal_still_removes_a_stale_binding() {
+        // The guard against the refresh race must not stop the ordinary
+        // lazy-expiry path from reclaiming genuinely stale entries.
+        let store = SessionStore::new(100, Duration::from_millis(20), EvictionPolicy::Lru);
+        store.put("sess1", "10.0.0.1:80".into());
+        thread::sleep(Duration::from_millis(30));
+
+        assert!(
+            store.remove_if_expired("sess1", Instant::now()),
+            "an untouched expired binding must still be removed"
+        );
+        assert!(store.is_empty(), "the store should be empty after lazy expiry");
     }
 
     #[test]
