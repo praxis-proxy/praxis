@@ -27,6 +27,7 @@
 //!
 //! [`FilterPipeline`]: praxis_filter::FilterPipeline
 
+mod composition;
 pub(crate) mod pipelines;
 #[cfg(feature = "config-reload")]
 pub(crate) mod reload;
@@ -38,12 +39,16 @@ pub(crate) mod startup_checks;
 mod version;
 #[cfg(feature = "config-reload")]
 pub(crate) mod watcher;
+pub use composition::{CompositionError, ExtensionContext, RegistryContext, ServerComposition, ValidatorContext};
 pub use pipelines::{build_subrequest_client, resolve_pipelines};
 pub use praxis_core::{
     config::load_config,
     logging::{TracingGuard, init_tracing},
 };
-pub use server::{check_root_privilege, fatal, resolve_config_path, run_server, run_server_with_registry};
+pub use praxis_filter::{PipelineExtension, RequestExtensions};
+pub use server::{
+    check_root_privilege, fatal, resolve_config_path, run_server, run_server_with_composition, run_server_with_registry,
+};
 #[cfg(feature = "admin-api")]
 pub use version::process_version_info;
 

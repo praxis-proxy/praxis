@@ -28,7 +28,8 @@ use crate::startup_checks::warn_admin_configured_without_feature;
 #[cfg(feature = "experimental")]
 use crate::startup_checks::warn_experimental_features;
 use crate::{
-    pipelines::resolve_pipelines,
+    composition::{PipelineComposition, RegistryContext, ServerComposition},
+    pipelines::resolve_pipelines_with_composition,
     startup_checks::{
         enforce_root_check, warn_insecure_key_permissions, warn_insecure_log_file_permissions, warn_insecure_options,
     },
@@ -96,7 +97,7 @@ pub fn resolve_config_path(explicit: Option<&str>) -> Option<PathBuf> {
 #[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
 #[allow(clippy::needless_pass_by_value, reason = "server owns config")]
 pub fn run_server(config: Config, config_path: Option<PathBuf>, log_level: Option<Arc<LogLevelState>>) -> ! {
-    run_server_with_registry(config, crate::build_full_registry(), config_path, log_level)
+    run_server_with_composition(config, ServerComposition::standard(), config_path, log_level)
 }
 
 /// Build filter pipelines from the given registry, register protocols and run the server.
@@ -113,6 +114,37 @@ pub fn run_server(config: Config, config_path: Option<PathBuf>, log_level: Optio
 pub fn run_server_with_registry(
     config: Config,
     registry: FilterRegistry,
+    config_path: Option<PathBuf>,
+    log_level: Option<Arc<LogLevelState>>,
+) -> ! {
+    run_server_with_composition(
+        config,
+        ServerComposition::with_registry(registry),
+        config_path,
+        log_level,
+    )
+}
+
+/// Build filter pipelines from a [`ServerComposition`], register protocols and
+/// run the server.
+///
+/// This is the composition-aware entry point that owns the full server
+/// lifecycle; [`run_server`] and [`run_server_with_registry`] are thin
+/// convenience wrappers over it. The composition describes how the downstream
+/// filter registry is built, which pipeline extensions are attached to each
+/// per-listener pipeline, and which read-only validators gate pipeline
+/// construction. The same composition is carried into the hot-reload watcher so
+/// downstream extensions and validators are re-applied on every reload.
+///
+/// Assumes tracing is already initialized. Blocks until the process is
+/// terminated; never returns.
+///
+/// Config is owned for the server's lifetime (never returns).
+#[expect(clippy::allow_attributes, reason = "lint is platform/config-dependent")]
+#[allow(clippy::needless_pass_by_value, reason = "server owns config")]
+pub fn run_server_with_composition(
+    config: Config,
+    composition: ServerComposition,
     config_path: Option<PathBuf>,
     log_level: Option<Arc<LogLevelState>>,
 ) -> ! {
@@ -136,7 +168,7 @@ pub fn run_server_with_registry(
         .map(|_| praxis_protocol::http::pingora::health::install_prometheus_admin_recorder());
 
     let health_registry = build_health_registry(&config.clusters);
-    let state = build_server_state(&config, &registry, &health_registry, log_level);
+    let (state, registry) = build_server_state(&config, composition, &health_registry, log_level);
 
     info!("initializing server");
     let mut server = PingoraServerRuntime::new(&config);
@@ -189,34 +221,47 @@ struct ServerState {
     health_shutdown: Arc<Mutex<CancellationToken>>,
     /// Runtime log-level overlay state for admin API and reload.
     log_level: Option<Arc<LogLevelState>>,
+    /// Downstream pipeline extensions and validators, re-applied on reload.
+    pipeline_composition: PipelineComposition,
 }
 
 /// Build filter pipelines, health checks, and registries.
+///
+/// Returns the assembled [`ServerState`] together with the [`FilterRegistry`]
+/// built from the composition. The registry is handed to the caller so it can
+/// be carried into the reload watcher (which rebuilds pipelines from the same
+/// registry).
 #[expect(
     clippy::too_many_lines,
     reason = "pipeline resolution, health spawn, and state assembly"
 )]
 fn build_server_state(
     config: &Config,
-    registry: &FilterRegistry,
+    composition: ServerComposition,
     health_registry: &HealthRegistry,
     log_level: Option<Arc<LogLevelState>>,
-) -> ServerState {
+) -> (ServerState, FilterRegistry) {
     info!("building filter pipelines");
     let kv_stores = praxis_core::kv::KvStoreRegistry::new();
     // Shared with the CLI --validate/--dump path (commands.rs) so both build an
     // identical connector, including the circuit breaker (issue #994).
     let subrequest_client = crate::pipelines::build_subrequest_client(config);
 
+    // Build the downstream registry once, from immutable server context, then
+    // reuse it across reloads. The factory is synchronous and side-effect-free.
+    let (registry_factory, pipeline_composition) = composition.into_parts();
+    let registry = registry_factory(&RegistryContext::new(&subrequest_client)).unwrap_or_else(|e| fatal(&e));
+
     let session_stores = Arc::new(praxis_filter::SessionStoreRegistry::new());
 
-    let pipelines = resolve_pipelines(
+    let pipelines = resolve_pipelines_with_composition(
         config,
-        registry,
+        &registry,
         health_registry,
         &kv_stores,
         &session_stores,
         &subrequest_client,
+        &pipeline_composition,
     )
     .unwrap_or_else(|e| fatal(&e));
     let listener_meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
@@ -233,7 +278,7 @@ fn build_server_state(
         spawn_circuit_eviction_task(subrequest_client.clone());
     }
 
-    ServerState {
+    let state = ServerState {
         pipelines: Arc::new(pipelines),
         listener_meta,
         cluster_meta,
@@ -242,7 +287,9 @@ fn build_server_state(
         subrequest_client,
         health_shutdown,
         log_level,
-    }
+        pipeline_composition,
+    };
+    (state, registry)
 }
 
 // -----------------------------------------------------------------------------
@@ -307,6 +354,7 @@ fn spawn_watcher(
         shutdown: CancellationToken::new(),
         subrequest_client: state.subrequest_client,
         log_level: state.log_level,
+        pipeline_composition: state.pipeline_composition,
     });
     Some(handle)
 }

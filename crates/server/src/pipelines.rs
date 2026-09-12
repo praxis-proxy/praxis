@@ -30,6 +30,8 @@ use praxis_core::{
 use praxis_filter::{FilterPipeline, FilterRegistry};
 use praxis_protocol::ListenerPipelines;
 
+use crate::composition::{ExtensionContext, PipelineComposition, ValidatorContext};
+
 // -----------------------------------------------------------------------------
 // Sub-request client construction
 // -----------------------------------------------------------------------------
@@ -73,9 +75,11 @@ pub fn build_subrequest_client(config: &Config) -> SubRequestClient {
 
 /// Build a [`FilterPipeline`] for each listener by resolving named chains.
 ///
-/// This is the config-to-runtime bridge. After it returns, the concept
-/// of "chains" no longer exists — each listener has a flat pipeline of
-/// filters in execution order.
+/// This is the config-to-runtime bridge used by the CLI validate/dump path and
+/// by callers that need no downstream composition: it applies no pipeline
+/// extensions and no validators. Embedded servers that customize per-listener
+/// pipelines go through [`run_server_with_composition`](crate::run_server_with_composition)
+/// instead.
 ///
 /// # Errors
 ///
@@ -84,11 +88,7 @@ pub fn build_subrequest_client(config: &Config) -> SubRequestClient {
 /// resolution error, body limit conflict, or pipeline ordering violation).
 ///
 /// [`FilterPipeline`]: praxis_filter::FilterPipeline
-#[expect(
-    clippy::too_many_arguments,
-    clippy::too_many_lines,
-    reason = "pipeline wiring passes multiple registries and validates each listener inline"
-)]
+#[expect(clippy::too_many_arguments, reason = "pipeline wiring passes multiple registries")]
 pub fn resolve_pipelines(
     config: &Config,
     registry: &FilterRegistry,
@@ -96,6 +96,56 @@ pub fn resolve_pipelines(
     kv_stores: &praxis_core::kv::KvStoreRegistry,
     session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
     subrequest_client: &SubRequestClient,
+) -> Result<ListenerPipelines, Box<dyn std::error::Error + Send + Sync>> {
+    resolve_pipelines_with_composition(
+        config,
+        registry,
+        health_registry,
+        kv_stores,
+        session_stores,
+        subrequest_client,
+        &PipelineComposition::default(),
+    )
+}
+
+/// Build a [`FilterPipeline`] for each listener, applying a downstream
+/// [`ServerComposition`]'s pipeline extensions and read-only validators.
+///
+/// This is the config-to-runtime bridge. After it returns, the concept
+/// of "chains" no longer exists — each listener has a flat pipeline of
+/// filters in execution order.
+///
+/// For each listener pipeline, after the built-in resources are configured, a
+/// fresh [`PipelineExtension`] is produced from each of `composition`'s
+/// factories and attached, then each of `composition`'s validators inspects the
+/// completed pipeline. A factory or validator error rejects that pipeline (and
+/// therefore the whole build), exactly like a built-in validation failure. Both
+/// hooks run again on every hot reload, so downstream extensions are never lost
+/// across a reload.
+///
+/// # Errors
+///
+/// Returns an error when pipeline construction fails (unknown filter chain
+/// referenced by listener, filter instantiation failure, branch chain
+/// resolution error, body limit conflict, pipeline ordering violation, or a
+/// composition factory/validator rejecting the pipeline).
+///
+/// [`FilterPipeline`]: praxis_filter::FilterPipeline
+/// [`PipelineExtension`]: praxis_filter::PipelineExtension
+/// [`ServerComposition`]: crate::ServerComposition
+#[expect(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "pipeline wiring passes multiple registries and validates each listener inline"
+)]
+pub(crate) fn resolve_pipelines_with_composition(
+    config: &Config,
+    registry: &FilterRegistry,
+    health_registry: &praxis_core::health::HealthRegistry,
+    kv_stores: &praxis_core::kv::KvStoreRegistry,
+    session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
+    subrequest_client: &SubRequestClient,
+    composition: &PipelineComposition,
 ) -> Result<ListenerPipelines, Box<dyn std::error::Error + Send + Sync>> {
     let chains: HashMap<&str, &[_]> = config
         .filter_chains
@@ -117,6 +167,14 @@ pub fn resolve_pipelines(
 
         validate_terminal_position(&entries, &listener.name)?;
 
+        // Snapshot the complete flattened entries before build_with_chains()
+        // drains conditions and branch chains out of them (via mem::take). The
+        // built-in ordering checks read those from the built pipeline's filters,
+        // but downstream validators only see this snapshot, so it must retain
+        // the full configuration or conditional filters and branch chains would
+        // appear absent.
+        let entry_snapshot = entries.clone();
+
         let mut pipeline =
             FilterPipeline::build_with_chains(&mut entries, registry, &chains, &config.insecure_options)?;
         configure_pipeline(
@@ -126,6 +184,13 @@ pub fn resolve_pipelines(
             kv_stores,
             session_stores,
             subrequest_client,
+        )?;
+
+        // Attach a fresh downstream extension per listener pipeline. Runs at
+        // startup and on every reload, so extensions survive reloads.
+        composition.apply_extensions(
+            &mut pipeline,
+            &ExtensionContext::new(config, listener, subrequest_client),
         )?;
 
         let unsupported = pipeline.filters_unsupported_by(listener.protocol);
@@ -141,6 +206,11 @@ pub fn resolve_pipelines(
         }
 
         validate_pipeline(&pipeline, &entries, &listener.name, &config.insecure_options)?;
+
+        // Read-only downstream validation against the completed pipeline. The
+        // validator sees the pristine flattened entries, not the husks left by
+        // build_with_chains.
+        composition.validate(&ValidatorContext::new(config, listener, &entry_snapshot, &pipeline))?;
 
         pipelines.insert(listener.name.clone(), Arc::new(pipeline));
     }
@@ -263,9 +333,23 @@ fn validate_pipeline(
     reason = "tests"
 )]
 mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use praxis_core::health::HealthRegistry;
+    use praxis_filter::{PipelineExtension, RequestExtensions};
 
     use super::*;
+    use crate::composition::{CompositionError, ServerComposition};
+
+    /// A marker resource a composed extension injects into per-request state.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    struct Marker(u8);
+
+    impl PipelineExtension for Marker {
+        fn prepare(&self, extensions: &mut RequestExtensions) {
+            extensions.insert(self.clone());
+        }
+    }
 
     #[test]
     fn resolve_pipelines_builds_for_each_listener() {
@@ -857,6 +941,195 @@ filter_chains:
     }
 
     // -------------------------------------------------------------------------
+    // Server composition (issue #1085)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn composition_runs_extension_factory_once_per_listener() {
+        let config = two_listener_config();
+        let registry = FilterRegistry::with_builtins();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_in_factory = Arc::clone(&calls);
+        let (_registry_factory, composition) = ServerComposition::standard()
+            .add_pipeline_extension_factory(move |_ctx| {
+                calls_in_factory.fetch_add(1, Ordering::SeqCst);
+                let ext: Box<dyn PipelineExtension> = Box::new(Marker(9));
+                Ok(ext)
+            })
+            .into_parts();
+
+        let pipelines = resolve_pipelines_with_composition(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            &composition,
+        )
+        .unwrap();
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "the factory must run exactly once per listener pipeline"
+        );
+
+        // Each listener pipeline carries its own fresh extension.
+        for name in ["web", "api"] {
+            let pipeline = pipelines.get(name).expect("listener pipeline exists").load();
+            let mut request_extensions = RequestExtensions::new();
+            pipeline.prepare_extensions(&mut request_extensions);
+            assert_eq!(
+                request_extensions.get::<Marker>(),
+                Some(&Marker(9)),
+                "listener '{name}' pipeline must inject the composed extension per request"
+            );
+        }
+    }
+
+    #[test]
+    fn composition_factory_error_rejects_pipeline_build() {
+        let config = valid_config();
+        let registry = FilterRegistry::with_builtins();
+        let (_registry_factory, composition) = ServerComposition::standard()
+            .add_pipeline_extension_factory(|_ctx| Err(CompositionError::new("factory refused")))
+            .into_parts();
+
+        let result = resolve_pipelines_with_composition(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            &composition,
+        );
+        let err = result
+            .err()
+            .expect("a failing extension factory must reject the whole build")
+            .to_string();
+        assert!(
+            err.contains("factory refused"),
+            "the build error must surface the factory message: {err}"
+        );
+    }
+
+    #[test]
+    fn composition_validator_error_rejects_pipeline_build() {
+        let config = valid_config();
+        let registry = FilterRegistry::with_builtins();
+        let (_registry_factory, composition) = ServerComposition::standard()
+            .add_pipeline_validator(|_ctx| Err(CompositionError::new("validator refused")))
+            .into_parts();
+
+        let result = resolve_pipelines_with_composition(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            &composition,
+        );
+        let err = result
+            .err()
+            .expect("a failing validator must reject the whole build")
+            .to_string();
+        assert!(
+            err.contains("validator refused"),
+            "the build error must surface the validator message: {err}"
+        );
+    }
+
+    #[test]
+    fn composition_validator_sees_flattened_entries_and_pipeline() {
+        let config = valid_config();
+        let registry = FilterRegistry::with_builtins();
+        let observed = Arc::new(AtomicUsize::new(0));
+        let observed_in_validator = Arc::clone(&observed);
+        let (_registry_factory, composition) = ServerComposition::standard()
+            .add_pipeline_validator(move |ctx| {
+                // valid_config()'s single chain has a router + load_balancer.
+                observed_in_validator.store(ctx.entries().len(), Ordering::SeqCst);
+                assert_eq!(ctx.pipeline().len(), ctx.entries().len());
+                assert_eq!(ctx.listener().name, "web");
+                Ok(())
+            })
+            .into_parts();
+
+        resolve_pipelines_with_composition(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            &composition,
+        )
+        .unwrap();
+        assert_eq!(
+            observed.load(Ordering::SeqCst),
+            2,
+            "the validator must see the flattened filter entries (router + load_balancer)"
+        );
+    }
+
+    #[test]
+    fn composition_validator_sees_entry_conditions_and_branch_chains() {
+        // Regression for the entries snapshot: build_with_chains() drains
+        // conditions, response_conditions, and branch_chains out of the entries
+        // via mem::take while constructing the pipeline. If the validator were
+        // handed those consumed entries, conditional filters would look
+        // unconditional and branch chains would vanish. Assert every gated
+        // field is still visible, not merely that the entry count matches.
+        const REQUEST_CONDITION: usize = 1 << 0;
+        const RESPONSE_CONDITION: usize = 1 << 1;
+        const BRANCH_CHAIN: usize = 1 << 2;
+
+        let config = config_with_conditions_and_branch();
+        let registry = FilterRegistry::with_builtins();
+        let seen = Arc::new(AtomicUsize::new(0));
+        let seen_in_validator = Arc::clone(&seen);
+        let (_registry_factory, composition) = ServerComposition::standard()
+            .add_pipeline_validator(move |ctx| {
+                let mut bits = 0;
+                for entry in ctx.entries() {
+                    if !entry.conditions.is_empty() {
+                        bits |= REQUEST_CONDITION;
+                    }
+                    if !entry.response_conditions.is_empty() {
+                        bits |= RESPONSE_CONDITION;
+                    }
+                    if entry.branch_chains.as_ref().is_some_and(|chains| !chains.is_empty()) {
+                        bits |= BRANCH_CHAIN;
+                    }
+                }
+                seen_in_validator.store(bits, Ordering::SeqCst);
+                Ok(())
+            })
+            .into_parts();
+
+        resolve_pipelines_with_composition(
+            &config,
+            &registry,
+            &empty_health_registry(),
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            &composition,
+        )
+        .unwrap();
+
+        assert_eq!(
+            seen.load(Ordering::SeqCst),
+            REQUEST_CONDITION | RESPONSE_CONDITION | BRANCH_CHAIN,
+            "the validator must see request conditions, response conditions, and branch chains \
+             on the flattened entries, not the husks left by build_with_chains"
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
 
@@ -906,6 +1179,75 @@ filter_chains:
         clusters:
           - name: backend
             endpoints: ["10.0.0.1:80"]
+"#,
+        )
+        .unwrap()
+    }
+
+    /// Two-listener config for verifying per-listener composition behavior.
+    fn two_listener_config() -> Config {
+        Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+  - name: api
+    address: "127.0.0.1:8081"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap()
+    }
+
+    /// Single-listener config whose chain carries request conditions,
+    /// response conditions, and an (unconditional) branch chain. Used to prove
+    /// the validator snapshot survives `build_with_chains()`, which drains all
+    /// three off the entries while building the pipeline.
+    fn config_with_conditions_and_branch() -> Config {
+        Config::from_yaml(
+            r#"
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: headers
+        request_add:
+          - name: "X-Conditional-Request"
+            value: "on"
+        conditions:
+          - when:
+              path_prefix: "/api/"
+      - filter: headers
+        response_set:
+          - name: "X-Conditional-Response"
+            value: "on"
+        response_conditions:
+          - when:
+              status: [200]
+      - filter: headers
+        request_add:
+          - name: "X-Branch-Parent"
+            value: "on"
+        branch_chains:
+          - name: utility_branch
+            chains:
+              - name: utility_inline
+                filters:
+                  - filter: headers
+                    request_add:
+                      - name: "X-Branch-Applied"
+                        value: "on"
+      - filter: static_response
+        status: 200
 "#,
         )
         .unwrap()

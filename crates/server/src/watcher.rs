@@ -24,7 +24,7 @@ use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::reload::reload_pipelines;
+use crate::{composition::PipelineComposition, reload::reload_pipelines};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -93,6 +93,10 @@ pub(crate) struct WatcherParams {
 
     /// Filter registry for building new pipelines.
     pub(crate) registry: Arc<FilterRegistry>,
+
+    /// Downstream pipeline composition (extension factories and validators),
+    /// re-applied on every reload so downstream extensions survive reloads.
+    pub(crate) pipeline_composition: PipelineComposition,
 
     /// Token for clean watcher shutdown.
     pub(crate) shutdown: CancellationToken,
@@ -211,6 +215,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: WatcherParams) {
         &params.session_stores,
         &params.subrequest_client,
         params.log_level.as_ref(),
+        &params.pipeline_composition,
     );
     // A change seen while backing off is remembered rather than dropped,
     // and retried when the window expires. The filesystem will not
@@ -259,6 +264,7 @@ async fn run_event_loop(rx: &mut mpsc::Receiver<()>, params: WatcherParams) {
             &params.session_stores,
             &params.subrequest_client,
             params.log_level.as_ref(),
+            &params.pipeline_composition,
         );
         update_reload_backoff(ok, &mut consecutive_failures, &mut last_failure);
         // Cleared on success; a failed attempt stays pending so the timer
@@ -312,6 +318,7 @@ fn handle_reload(
     session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
     subrequest_client: &praxis_core::subrequest::SubRequestClient,
     log_level: Option<&Arc<praxis_core::logging::LogLevelState>>,
+    composition: &PipelineComposition,
 ) -> bool {
     let content = match praxis_core::config::read_config_file(config_path) {
         Ok(c) => c,
@@ -366,6 +373,7 @@ fn handle_reload(
         session_stores,
         subrequest_client,
         log_level,
+        composition,
     ) {
         Ok(()) => {
             *current_config = new_config;
@@ -962,6 +970,7 @@ mod tests {
             &session_stores,
             &subrequest_client,
             None,
+            &PipelineComposition::default(),
         );
 
         assert!(!ok, "an unparseable config must report failure");
@@ -987,6 +996,7 @@ mod tests {
             &session_stores,
             &subrequest_client,
             None,
+            &PipelineComposition::default(),
         );
         assert!(recovered, "a subsequent valid config must reload");
     }
@@ -1038,6 +1048,7 @@ mod tests {
                 praxis_core::subrequest::SubRequestConnector::new(8, None),
             ),
             log_level: None,
+            pipeline_composition: PipelineComposition::default(),
         });
 
         std::thread::sleep(Duration::from_millis(100));
@@ -1094,6 +1105,7 @@ mod tests {
                 praxis_core::subrequest::SubRequestConnector::new(8, None),
             ),
             log_level: None,
+            pipeline_composition: PipelineComposition::default(),
         });
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
@@ -1158,6 +1170,7 @@ mod tests {
                 praxis_core::subrequest::SubRequestConnector::new(8, None),
             ),
             log_level: None,
+            pipeline_composition: PipelineComposition::default(),
         });
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
@@ -1252,6 +1265,7 @@ mod tests {
                 praxis_core::subrequest::SubRequestConnector::new(8, None),
             ),
             log_level: None,
+            pipeline_composition: PipelineComposition::default(),
         });
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -1328,6 +1342,7 @@ mod tests {
                 praxis_core::subrequest::SubRequestConnector::new(8, None),
             ),
             log_level: None,
+            pipeline_composition: PipelineComposition::default(),
         });
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
@@ -1406,6 +1421,7 @@ mod tests {
                 praxis_core::subrequest::SubRequestConnector::new(8, None),
             ),
             log_level: None,
+            pipeline_composition: PipelineComposition::default(),
         });
 
         tracing::info!("waiting for startup pre-check reload (mismatched hash triggers swap)");
@@ -1483,6 +1499,7 @@ mod tests {
                 praxis_core::subrequest::SubRequestConnector::new(8, None),
             ),
             log_level: None,
+            pipeline_composition: PipelineComposition::default(),
         });
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));
@@ -1655,6 +1672,7 @@ mod tests {
                 praxis_core::subrequest::SubRequestConnector::new(8, None),
             ),
             log_level: None,
+            pipeline_composition: PipelineComposition::default(),
         });
 
         std::thread::sleep(Duration::from_millis(WATCHER_STARTUP_MS));

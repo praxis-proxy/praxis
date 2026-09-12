@@ -15,12 +15,15 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info};
 
 #[cfg(test)]
+use crate::pipelines::resolve_pipelines;
+#[cfg(test)]
 use crate::reload_diagnostics::{
     collect_escalated_flags, detect_compression_additions, diff_named_items, find_chains_with_compression,
     is_stateful_recursive,
 };
 use crate::{
-    pipelines::resolve_pipelines,
+    composition::PipelineComposition,
+    pipelines::resolve_pipelines_with_composition,
     reload_diagnostics::{
         log_config_change_audit, log_restart_required_changes, warn_insecure_option_escalations,
         warn_stateful_filter_reset,
@@ -60,6 +63,7 @@ pub(crate) fn reload_pipelines(
     session_stores: &Arc<praxis_filter::SessionStoreRegistry>,
     subrequest_client: &praxis_core::subrequest::SubRequestClient,
     log_level: Option<&Arc<praxis_core::logging::LogLevelState>>,
+    composition: &PipelineComposition,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("building new pipelines from reloaded config");
 
@@ -81,13 +85,14 @@ pub(crate) fn reload_pipelines(
         new_ceiling,
     );
 
-    let new_pipelines = match resolve_pipelines(
+    let new_pipelines = match resolve_pipelines_with_composition(
         new_config,
         registry,
         &health_registry,
         kv_stores,
         session_stores,
         &updated_client,
+        composition,
     ) {
         Ok(p) => p,
         Err(e) => {
@@ -344,11 +349,26 @@ fn spawn_health_check_thread(
     reason = "tests"
 )]
 mod tests {
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        sync::atomic::{AtomicUsize, Ordering},
+    };
 
     use praxis_core::config::{InsecureOptions, SkipPipelineChecks};
+    use praxis_filter::{CircuitBreakerFilter, FilterFactory, PipelineExtension, RequestExtensions};
 
     use super::*;
+    use crate::composition::ServerComposition;
+
+    /// A marker resource a composed extension injects into per-request state.
+    #[derive(Clone, PartialEq, Eq, Debug)]
+    struct ReloadMarker(u8);
+
+    impl PipelineExtension for ReloadMarker {
+        fn prepare(&self, extensions: &mut RequestExtensions) {
+            extensions.insert(self.clone());
+        }
+    }
 
     #[test]
     fn valid_reload_swaps_pipeline() {
@@ -386,6 +406,7 @@ filter_chains:
             &empty_session_stores(),
             &empty_subrequest_client(),
             None,
+            &PipelineComposition::default(),
         );
 
         assert!(result.is_ok(), "valid reload should succeed");
@@ -569,6 +590,7 @@ filter_chains:
             &session_stores,
             &subrequest_client,
             None,
+            &PipelineComposition::default(),
         )
         .unwrap();
 
@@ -622,6 +644,7 @@ filter_chains:
             &empty_session_stores(),
             &empty_subrequest_client(),
             None,
+            &PipelineComposition::default(),
         );
         assert!(result.is_err(), "invalid filter should return Err");
 
@@ -647,6 +670,7 @@ filter_chains:
             &empty_session_stores(),
             &empty_subrequest_client(),
             None,
+            &PipelineComposition::default(),
         )
         .unwrap();
 
@@ -674,6 +698,7 @@ filter_chains:
             &empty_session_stores(),
             &empty_subrequest_client(),
             None,
+            &PipelineComposition::default(),
         )
         .unwrap();
 
@@ -716,6 +741,7 @@ filter_chains:
             &empty_session_stores(),
             &empty_subrequest_client(),
             None,
+            &PipelineComposition::default(),
         );
         assert!(
             !old_token.is_cancelled(),
@@ -757,6 +783,7 @@ filter_chains:
             &empty_session_stores(),
             &empty_subrequest_client(),
             None,
+            &PipelineComposition::default(),
         );
         assert!(result.is_ok(), "reload with new listener should succeed");
         assert!(
@@ -1390,6 +1417,7 @@ filter_chains:
             &empty_session_stores(),
             &empty_subrequest_client(),
             None,
+            &PipelineComposition::default(),
         )
         .unwrap();
 
@@ -1483,6 +1511,7 @@ filter_chains:
             &empty_session_stores(),
             &empty_subrequest_client(),
             None,
+            &PipelineComposition::default(),
         )
         .unwrap();
 
@@ -1504,6 +1533,7 @@ filter_chains:
             &empty_session_stores(),
             &empty_subrequest_client(),
             None,
+            &PipelineComposition::default(),
         )
         .unwrap();
 
@@ -1555,6 +1585,7 @@ filter_chains:
             &empty_session_stores(),
             &empty_subrequest_client(),
             None,
+            &PipelineComposition::default(),
         )
         .unwrap();
 
@@ -1562,6 +1593,132 @@ filter_chains:
         assert!(
             new_registry.get("backend").unwrap().endpoints()[1].is_healthy(),
             "changed health_check config must reset endpoint state"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Server composition (issue #1085)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn reload_reuses_provided_registry_including_custom_filters() {
+        // The registry carries a custom filter name unknown to the built-ins.
+        // If reload rebuilt a built-ins-only registry instead of reusing the one
+        // handed to it, resolving a config that references the custom filter
+        // would fail with "unknown filter type". A successful reload proves the
+        // custom registry survives reload.
+        let mut registry = FilterRegistry::with_builtins();
+        registry
+            .register(
+                "my_custom_breaker",
+                FilterFactory::Http(Arc::new(|cfg: &serde_yaml::Value| {
+                    CircuitBreakerFilter::from_config(cfg)
+                })),
+            )
+            .unwrap();
+
+        let config = valid_config();
+        let health_registry: HealthRegistry = Arc::new(HashMap::new());
+        let live = resolve_pipelines(
+            &config,
+            &registry,
+            &health_registry,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+        )
+        .unwrap();
+        let shutdown = Arc::new(Mutex::new(CancellationToken::new()));
+        let meta = praxis_protocol::http::pingora::health::new_listener_meta_store(
+            praxis_protocol::http::pingora::health::listener_meta_from_config(&config),
+        );
+        let cluster_meta = praxis_protocol::http::pingora::health::new_cluster_meta_store(
+            praxis_protocol::http::pingora::health::cluster_meta_from_config(&config),
+        );
+
+        let new_config = Config::from_yaml(
+            r#"
+insecure_options:
+  skip_pipeline_validation: true
+listeners:
+  - name: web
+    address: "127.0.0.1:8080"
+    filter_chains: [main]
+filter_chains:
+  - name: main
+    filters:
+      - filter: my_custom_breaker
+        clusters:
+          - name: backend
+            consecutive_failures: 3
+            recovery_window_secs: 30
+      - filter: static_response
+        status: 200
+"#,
+        )
+        .unwrap();
+
+        reload_pipelines(
+            &new_config,
+            &config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+            &PipelineComposition::default(),
+        )
+        .expect("reload must reuse the custom registry and resolve the custom filter");
+    }
+
+    #[test]
+    fn reload_preserves_downstream_extensions() {
+        let (live, old_config, registry, shutdown, meta, cluster_meta) = setup_live_pipelines();
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let calls_in_factory = Arc::clone(&calls);
+        let (_registry_factory, composition) = ServerComposition::standard()
+            .add_pipeline_extension_factory(move |_ctx| {
+                calls_in_factory.fetch_add(1, Ordering::SeqCst);
+                let ext: Box<dyn PipelineExtension> = Box::new(ReloadMarker(3));
+                Ok(ext)
+            })
+            .into_parts();
+
+        let new_config = valid_config();
+        reload_pipelines(
+            &new_config,
+            &old_config,
+            &registry,
+            &live,
+            &meta,
+            &cluster_meta,
+            &shutdown,
+            &empty_kv_stores(),
+            &empty_session_stores(),
+            &empty_subrequest_client(),
+            None,
+            &composition,
+        )
+        .unwrap();
+
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the extension factory must run for the listener pipeline on reload"
+        );
+
+        let pipeline = live.get("web").unwrap().load();
+        let mut request_extensions = RequestExtensions::new();
+        pipeline.prepare_extensions(&mut request_extensions);
+        assert_eq!(
+            request_extensions.get::<ReloadMarker>(),
+            Some(&ReloadMarker(3)),
+            "the reloaded pipeline must still carry the downstream extension"
         );
     }
 
