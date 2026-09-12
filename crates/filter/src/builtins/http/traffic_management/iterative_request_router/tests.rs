@@ -3628,3 +3628,260 @@ steps:
         other => panic!("expected TerminalResponse, got {other:?}"),
     }
 }
+
+// ---------------------------------------------------------------------------
+// Selected Cluster Application Isolation Across Steps
+//
+// A single `RequestExtensions` is threaded across steps, so a step must
+// not observe the cluster application metadata published by a prior step.
+// ---------------------------------------------------------------------------
+
+/// Shared slot recording the selected cluster application a probe filter
+/// observed from inside an IRR step, so the test can assert on it afterward.
+type ObservedApplication = std::sync::Arc<std::sync::Mutex<Option<(Option<String>, Option<String>)>>>;
+
+/// Records the selected cluster application it observes during the request
+/// body phase. Declares a `StreamBuffer` request body mode so its
+/// `on_request_body` hook runs before the step's `on_request` phase, i.e.
+/// before that step's load balancer selects and publishes.
+struct ApplicationProbeFilter {
+    observed: ObservedApplication,
+}
+
+#[async_trait::async_trait]
+impl crate::HttpFilter for ApplicationProbeFilter {
+    fn name(&self) -> &'static str {
+        "test_application_probe"
+    }
+
+    fn request_body_access(&self) -> crate::BodyAccess {
+        crate::BodyAccess::ReadOnly
+    }
+
+    fn request_body_mode(&self) -> crate::BodyMode {
+        crate::BodyMode::StreamBuffer { max_bytes: Some(65536) }
+    }
+
+    async fn on_request(
+        &self,
+        _ctx: &mut crate::HttpFilterContext<'_>,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        Ok(crate::FilterAction::Continue)
+    }
+
+    async fn on_request_body(
+        &self,
+        ctx: &mut crate::HttpFilterContext<'_>,
+        _body: &mut Option<bytes::Bytes>,
+        _end_of_stream: bool,
+    ) -> Result<crate::FilterAction, crate::FilterError> {
+        let protocol = ctx.selected_application_protocol().map(str::to_owned);
+        let provider = ctx.selected_application_provider().map(str::to_owned);
+        *self.observed.lock().unwrap() = Some((protocol, provider));
+        Ok(crate::FilterAction::Continue)
+    }
+}
+
+/// Build an IRR filter whose registry includes a probe filter recording
+/// the selected cluster application into `observed`.
+fn irr_with_application_probe(yaml: &str, observed: &ObservedApplication) -> Box<dyn crate::HttpFilter> {
+    let observed = std::sync::Arc::clone(observed);
+    let mut registry = crate::FilterRegistry::with_builtins();
+    registry
+        .register(
+            "test_application_probe",
+            crate::FilterFactory::Http(std::sync::Arc::new(move |_| {
+                Ok(Box::new(ApplicationProbeFilter {
+                    observed: std::sync::Arc::clone(&observed),
+                }))
+            })),
+        )
+        .unwrap();
+    let value: serde_yaml::Value = serde_yaml::from_str(yaml).unwrap();
+    super::IterativeRequestRouterFilter::from_config_with_registry(&value, &registry).unwrap()
+}
+
+#[tokio::test]
+async fn iteration_streambuffer_step_body_hook_does_not_observe_prior_step_application() {
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    let yaml = format!(
+        "
+initial_step: tagged
+steps:
+  - name: tagged
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: \"/\"
+            cluster: tagged_backend
+      - filter: load_balancer
+        clusters:
+          - name: tagged_backend
+            endpoints:
+              - \"{addr}\"
+            http:
+              application_protocol: openai_chat_completions
+              application_provider: vllm
+    on_result:
+      - default: true
+        next: untagged
+  - name: untagged
+    filters:
+      - filter: test_application_probe
+      - filter: router
+        routes:
+          - path_prefix: \"/\"
+            cluster: plain_backend
+      - filter: load_balancer
+        clusters:
+          - name: plain_backend
+            endpoints:
+              - \"{addr}\"
+    on_result:
+      - default: true
+        done: true
+"
+    );
+    let observed = ObservedApplication::default();
+    let filter = irr_with_application_probe(&yaml, &observed);
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::POST, "/chat");
+    let mut ctx = make_iteration_context(&req, &client, b"payload");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    backend.abort();
+
+    assert!(
+        matches!(action, crate::FilterAction::TerminalResponse(_)),
+        "the two-step run must reach a terminal response: {action:?}"
+    );
+    let (protocol, provider) = observed
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("the probe body hook must have run in the untagged step");
+    assert_eq!(
+        protocol, None,
+        "the untagged step's body hook must not observe the prior tagged step's application_protocol before selection"
+    );
+    assert_eq!(
+        provider, None,
+        "the untagged step's body hook must not observe the prior tagged step's application_provider before selection"
+    );
+}
+
+#[tokio::test]
+async fn iteration_selection_failure_does_not_leak_prior_step_application() {
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok").await;
+    let yaml = format!(
+        "
+initial_step: tagged
+steps:
+  - name: tagged
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: \"/\"
+            cluster: tagged_backend
+      - filter: load_balancer
+        clusters:
+          - name: tagged_backend
+            endpoints:
+              - \"{addr}\"
+            http:
+              application_protocol: openai_chat_completions
+              application_provider: vllm
+    on_result:
+      - default: true
+        next: broken
+  - name: broken
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: \"/\"
+            cluster: empty_backend
+      - filter: load_balancer
+        clusters:
+          - name: empty_backend
+            endpoints:
+              - address: \"{addr}\"
+                weight: 0
+    on_result:
+      - default: true
+        done: true
+"
+    );
+    let filter = irr_from_yaml(&yaml);
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::POST, "/chat");
+    let mut ctx = make_iteration_context(&req, &client, b"payload");
+
+    let err = filter.on_request(&mut ctx).await.unwrap_err();
+    backend.abort();
+
+    assert!(
+        err.to_string().contains("no available endpoints"),
+        "the second step's selection must fail: {err}"
+    );
+    assert_eq!(
+        ctx.selected_application_protocol(),
+        None,
+        "a step whose selection fails must not leak the prior step's application_protocol to the parent"
+    );
+    assert_eq!(
+        ctx.selected_application_provider(),
+        None,
+        "a step whose selection fails must not leak the prior step's application_provider to the parent"
+    );
+}
+
+#[tokio::test]
+async fn iteration_max_iterations_early_exit_does_not_leak_prior_step_application() {
+    let (addr, backend) = spawn_raw_backend("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n").await;
+    let yaml = format!(
+        "
+initial_step: tagged
+max_iterations: 1
+steps:
+  - name: tagged
+    filters:
+      - filter: router
+        routes:
+          - path_prefix: \"/\"
+            cluster: tagged_backend
+      - filter: load_balancer
+        clusters:
+          - name: tagged_backend
+            endpoints:
+              - \"{addr}\"
+            http:
+              application_protocol: openai_chat_completions
+              application_provider: vllm
+    on_result:
+      - status: [200]
+        next: tagged
+      - default: true
+        done: true
+"
+    );
+    let filter = irr_from_yaml(&yaml);
+    let client = make_client();
+    let req = crate::test_utils::make_request(http::Method::GET, "/loop");
+    let mut ctx = make_iteration_context(&req, &client, b"");
+
+    let action = filter.on_request(&mut ctx).await.unwrap();
+    backend.abort();
+
+    let is_508 = matches!(&action, crate::FilterAction::Reject(rej) if rej.status == 508);
+    assert!(is_508, "exhausted iterations must reject with 508: {action:?}");
+    assert_eq!(
+        ctx.selected_application_protocol(),
+        None,
+        "a max-iterations early exit must not leak the prior step's application_protocol to the parent"
+    );
+    assert_eq!(
+        ctx.selected_application_provider(),
+        None,
+        "a max-iterations early exit must not leak the prior step's application_provider to the parent"
+    );
+}

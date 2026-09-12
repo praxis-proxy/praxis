@@ -332,6 +332,9 @@ impl IrrStreamingSession {
             .take()
             .ok_or_else(|| -> FilterError { "iterative_request_router: next step missing".into() })?;
         self.current_step = next;
+        if let Some(extensions) = self.extensions.as_mut() {
+            super::clear_selected_application(extensions);
+        }
         let state = self.state.take().ok_or_else(|| -> FilterError {
             "iterative_request_router: iteration state missing between steps".into()
         })?;

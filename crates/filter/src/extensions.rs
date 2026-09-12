@@ -22,6 +22,7 @@
 use std::{
     any::Any,
     collections::{BTreeMap, BTreeSet, HashMap},
+    sync::Arc,
 };
 
 // -----------------------------------------------------------------------------
@@ -97,6 +98,59 @@ impl AuthenticatedIdentity {
     /// serializing them outside Praxis.
     pub fn custom_claims(&self) -> &BTreeMap<String, String> {
         &self.custom_claims
+    }
+}
+
+// -----------------------------------------------------------------------------
+// SelectedClusterApplication
+// -----------------------------------------------------------------------------
+
+/// Opaque application metadata of the cluster the load balancer selected
+/// for this exchange.
+///
+/// Published once by the trusted built-in load balancer after a successful
+/// upstream selection and read-only thereafter, so request, response,
+/// response-body, and logging filters all observe the same values for the
+/// life of the exchange. Absent when no cluster was selected or the
+/// selected cluster tagged neither field.
+///
+/// The identifiers are opaque to Praxis core — consuming filters interpret
+/// them; Praxis defines no enum of known protocols or providers. The type
+/// is deliberately crate-private with read-only getters: only the load
+/// balancer constructs it (via
+/// [`HttpFilterContext::publish_selected_application`]), and external
+/// filters read it through
+/// [`HttpFilterContext::selected_application_protocol`] and
+/// [`HttpFilterContext::selected_application_provider`] rather than naming
+/// the type. The identifiers come straight from the resolved cluster entry.
+///
+/// [`HttpFilterContext::publish_selected_application`]: crate::HttpFilterContext::publish_selected_application
+/// [`HttpFilterContext::selected_application_protocol`]: crate::HttpFilterContext::selected_application_protocol
+/// [`HttpFilterContext::selected_application_provider`]: crate::HttpFilterContext::selected_application_provider
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SelectedClusterApplication {
+    /// Opaque application protocol of the selected cluster, if tagged.
+    protocol: Option<Arc<str>>,
+    /// Opaque application provider of the selected cluster, if tagged.
+    provider: Option<Arc<str>>,
+}
+
+impl SelectedClusterApplication {
+    /// Build selected-application metadata from a resolved cluster's
+    /// identifiers, or `None` when the cluster tagged neither field, so the
+    /// extension is inserted only when there is something to read.
+    pub(crate) fn new(protocol: Option<Arc<str>>, provider: Option<Arc<str>>) -> Option<Self> {
+        (protocol.is_some() || provider.is_some()).then_some(Self { protocol, provider })
+    }
+
+    /// Opaque application protocol of the selected cluster, if tagged.
+    pub(crate) fn protocol(&self) -> Option<&str> {
+        self.protocol.as_deref()
+    }
+
+    /// Opaque application provider of the selected cluster, if tagged.
+    pub(crate) fn provider(&self) -> Option<&str> {
+        self.provider.as_deref()
     }
 }
 
@@ -214,6 +268,46 @@ mod tests {
     fn default_is_empty() {
         let ext = RequestExtensions::default();
         assert!(ext.get::<String>().is_none(), "default should contain no values");
+    }
+
+    // -------------------------------------------------------------------------
+    // SelectedClusterApplication Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn selected_cluster_application_absent_when_both_fields_absent() {
+        assert!(
+            SelectedClusterApplication::new(None, None).is_none(),
+            "an untagged cluster must not produce a metadata value"
+        );
+    }
+
+    #[test]
+    fn selected_cluster_application_present_with_protocol_only() {
+        let app = SelectedClusterApplication::new(Some(Arc::from("openai_chat_completions")), None)
+            .expect("a protocol-only cluster should produce a value");
+        assert_eq!(
+            app.protocol(),
+            Some("openai_chat_completions"),
+            "protocol should read back"
+        );
+        assert!(app.provider().is_none(), "an absent provider should read back as None");
+    }
+
+    #[test]
+    fn selected_cluster_application_present_with_provider_only() {
+        let app = SelectedClusterApplication::new(None, Some(Arc::from("vllm")))
+            .expect("a provider-only cluster should produce a value");
+        assert!(app.protocol().is_none(), "an absent protocol should read back as None");
+        assert_eq!(app.provider(), Some("vllm"), "provider should read back");
+    }
+
+    #[test]
+    fn selected_cluster_application_exposes_both_fields() {
+        let app = SelectedClusterApplication::new(Some(Arc::from("openai_responses")), Some(Arc::from("openai")))
+            .expect("a fully tagged cluster should produce a value");
+        assert_eq!(app.protocol(), Some("openai_responses"), "protocol should read back");
+        assert_eq!(app.provider(), Some("openai"), "provider should read back");
     }
 
     #[test]

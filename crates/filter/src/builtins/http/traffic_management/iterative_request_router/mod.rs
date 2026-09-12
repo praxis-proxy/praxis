@@ -71,6 +71,7 @@ use crate::{
     FilterEntry, FilterError, FilterPipeline, FilterRegistry, IterationState, NextIterationBody, RequestExtensions,
     StreamTermination, SubRequest, SubResponse,
     actions::{FilterAction, Rejection, StreamingResponseBody as _, StreamingTerminalResponse, TerminalResponse},
+    extensions::SelectedClusterApplication,
     factory::parse_filter_config,
     filter::{HttpFilter, HttpFilterContext},
     filtered_subrequest::{FilteredStreamingBody, SubrequestRuntime, normalize_response_status},
@@ -124,6 +125,21 @@ pub(super) fn strip_iteration_extensions(mut extensions: RequestExtensions) -> R
     extensions.remove::<IterationState>();
     extensions.remove::<NextIterationBody>();
     extensions
+}
+
+/// Drop any selected-cluster application metadata a prior step published, so a
+/// new step never inherits it through the threaded [`RequestExtensions`].
+///
+/// Called at each iteration boundary — the top of the run loop and the top of a
+/// streaming resume (`IrrStreamingSession::open_next`) — before the
+/// max-iteration and deadline guards can early-return the threaded extensions to
+/// the parent, and before the step's body hooks run (which precede its load
+/// balancer under a `StreamBuffer` pre-read). The step's load balancer
+/// republishes for the current step during `on_request`, so the terminal step's
+/// value survives while no early exit and no pre-selection hook observes a stale
+/// one.
+pub(super) fn clear_selected_application(extensions: &mut RequestExtensions) {
+    extensions.remove::<SelectedClusterApplication>();
 }
 
 // ---------------------------------------------------------------------------
@@ -459,6 +475,7 @@ impl IterativeRequestRouterFilter {
         let mut pending_bytes = 0_usize;
 
         loop {
+            clear_selected_application(&mut extensions);
             if state.iteration >= self.max_iterations {
                 ctx.extensions = extensions;
                 warn!(

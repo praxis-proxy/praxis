@@ -45,6 +45,12 @@ pub(super) struct ClusterEntry {
     /// Pre-cached TLS material. `None` means plain TCP.
     pub(super) tls: Option<CachedClusterTls>,
 
+    /// Opaque application protocol tagged on the cluster, if any.
+    pub(super) application_protocol: Option<Arc<str>>,
+
+    /// Opaque application provider tagged on the cluster, if any.
+    pub(super) application_provider: Option<Arc<str>>,
+
     /// Resolved retry policy (legacy default when unset).
     pub(super) retry_policy: Arc<RetryPolicy>,
 
@@ -178,6 +184,8 @@ pub(super) fn build_cluster_entry(cluster: &Cluster) -> Result<ClusterEntry, Fil
         opts: Arc::new(ConnectionOptions::from(cluster)),
         strategy,
         tls,
+        application_protocol: cluster.http.application_protocol.clone(),
+        application_provider: cluster.http.application_provider.clone(),
         retry_policy,
         retry_state,
         merged_retry_memo: ArcSwap::from_pointee(None),

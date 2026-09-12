@@ -5,8 +5,9 @@
 
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
-use praxis_core::config::{
-    Cluster, ConsistentHashOpts, Endpoint, LoadBalancerStrategy, ParameterisedStrategy, SimpleStrategy,
+use praxis_core::{
+    config::{Cluster, ConsistentHashOpts, Endpoint, LoadBalancerStrategy, ParameterisedStrategy, SimpleStrategy},
+    health::{ClusterHealthEntry, ClusterHealthState, EndpointHealth, HealthRegistry},
 };
 
 use super::{LoadBalancerFilter, entry::build_cluster_entry, strategy::build_strategy};
@@ -583,12 +584,302 @@ async fn on_request_errors_when_cluster_has_no_endpoints() {
 }
 
 // -----------------------------------------------------------------------------
+// Selected Cluster Application Tests
+// -----------------------------------------------------------------------------
+
+#[tokio::test]
+async fn on_request_publishes_selected_application_ordinary_path() {
+    let lb = LoadBalancerFilter::new(&[cluster_with_application(
+        "llm",
+        &["127.0.0.1:8080"],
+        Some("openai_chat_completions"),
+        Some("vllm"),
+    )]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("llm"));
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.selected_application_protocol(),
+        Some("openai_chat_completions"),
+        "ordinary selection should publish the selected cluster's application protocol"
+    );
+    assert_eq!(
+        ctx.selected_application_provider(),
+        Some("vllm"),
+        "ordinary selection should publish the selected cluster's application provider"
+    );
+}
+
+#[tokio::test]
+async fn on_request_publishes_selected_application_pinned_endpoint() {
+    let lb = LoadBalancerFilter::new(&[cluster_with_application(
+        "llm",
+        &["127.0.0.1:8080"],
+        Some("openai_responses"),
+        Some("openai"),
+    )]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("llm"));
+    ctx.pinned_endpoint_address = Some(Arc::from("127.0.0.1:8080"));
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+
+    assert!(ctx.upstream.is_some(), "the pinned endpoint should have been used");
+    assert_eq!(
+        ctx.selected_application_protocol(),
+        Some("openai_responses"),
+        "the pinned-endpoint path should publish the selected cluster's application protocol"
+    );
+    assert_eq!(
+        ctx.selected_application_provider(),
+        Some("openai"),
+        "the pinned-endpoint path should publish the selected cluster's application provider"
+    );
+}
+
+#[tokio::test]
+async fn on_request_publishes_selected_application_panic_mode() {
+    let lb = LoadBalancerFilter::new(&[cluster_with_application(
+        "llm",
+        &["127.0.0.1:8080", "127.0.0.1:8081"],
+        Some("openai_chat_completions"),
+        Some("vllm"),
+    )]);
+    let registry = all_unhealthy_registry("llm", &["127.0.0.1:8080", "127.0.0.1:8081"]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("llm"));
+    ctx.health_registry = Some(&registry);
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+
+    assert!(ctx.upstream.is_some(), "panic mode should still select an upstream");
+    assert_eq!(
+        ctx.selected_application_protocol(),
+        Some("openai_chat_completions"),
+        "panic-mode selection should publish the selected cluster's application protocol"
+    );
+    assert_eq!(
+        ctx.selected_application_provider(),
+        Some("vllm"),
+        "panic-mode selection should publish the selected cluster's application provider"
+    );
+}
+
+#[tokio::test]
+async fn on_request_leaves_application_absent_for_untagged_cluster() {
+    let lb = LoadBalancerFilter::new(&[test_cluster("web", &["127.0.0.1:8080"])]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("web"));
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+
+    assert!(
+        ctx.upstream.is_some(),
+        "an untagged cluster should still select an upstream"
+    );
+    assert_eq!(
+        ctx.selected_application_protocol(),
+        None,
+        "an untagged cluster must not publish an application protocol"
+    );
+    assert_eq!(
+        ctx.selected_application_provider(),
+        None,
+        "an untagged cluster must not publish an application provider"
+    );
+}
+
+#[tokio::test]
+async fn on_request_leaves_application_absent_on_failed_selection() {
+    let lb = LoadBalancerFilter::new(&[cluster_with_application(
+        "empty",
+        &[],
+        Some("openai_chat_completions"),
+        Some("vllm"),
+    )]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("empty"));
+
+    let result = lb.on_request(&mut ctx).await;
+
+    assert!(result.is_err(), "a cluster with no endpoints must fail selection");
+    assert_eq!(
+        ctx.selected_application_protocol(),
+        None,
+        "a failed selection must not publish an application protocol"
+    );
+    assert_eq!(
+        ctx.selected_application_provider(),
+        None,
+        "a failed selection must not publish an application provider"
+    );
+}
+
+#[tokio::test]
+async fn selected_application_survives_on_response() {
+    let lb = LoadBalancerFilter::new(&[cluster_with_application(
+        "llm",
+        &["127.0.0.1:8080"],
+        Some("openai_responses"),
+        Some("openai"),
+    )]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("llm"));
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+    drop(lb.on_response(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.selected_application_protocol(),
+        Some("openai_responses"),
+        "the response phase must observe the same application protocol published at selection"
+    );
+    assert_eq!(
+        ctx.selected_application_provider(),
+        Some("openai"),
+        "the response phase must observe the same application provider published at selection"
+    );
+}
+
+#[tokio::test]
+async fn transport_retry_does_not_change_selected_application() {
+    let lb = LoadBalancerFilter::new(&[cluster_with_application(
+        "llm",
+        &["127.0.0.1:8080", "127.0.0.1:8081"],
+        Some("openai_chat_completions"),
+        Some("vllm"),
+    )]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("llm"));
+
+    drop(lb.on_request(&mut ctx).await.unwrap());
+
+    let reselector = ctx.endpoint_reselector.clone().expect("reselector should be set");
+    let attempted = ctx.attempted_endpoints.clone();
+    let next = reselector
+        .select_address(None, &attempted)
+        .expect("an alternate endpoint should be available for retry");
+    ctx.upstream = Some(reselector.build_upstream(next));
+
+    assert_eq!(
+        ctx.selected_application_protocol(),
+        Some("openai_chat_completions"),
+        "a transport retry must not change the published application protocol"
+    );
+    assert_eq!(
+        ctx.selected_application_provider(),
+        Some("vllm"),
+        "a transport retry must not change the published application provider"
+    );
+}
+
+#[tokio::test]
+async fn selected_application_survives_pipeline_drop() {
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    ctx.cluster = Some(Arc::from("llm"));
+
+    {
+        let lb = LoadBalancerFilter::new(&[cluster_with_application(
+            "llm",
+            &["127.0.0.1:8080"],
+            Some("openai_chat_completions"),
+            Some("vllm"),
+        )]);
+        drop(lb.on_request(&mut ctx).await.unwrap());
+    }
+
+    assert_eq!(
+        ctx.selected_application_protocol(),
+        Some("openai_chat_completions"),
+        "dropping the selecting pipeline (as a hot reload does) must not disturb this exchange's protocol"
+    );
+    assert_eq!(
+        ctx.selected_application_provider(),
+        Some("vllm"),
+        "dropping the selecting pipeline (as a hot reload does) must not disturb this exchange's provider"
+    );
+}
+
+#[tokio::test]
+async fn irr_style_reuse_untagged_step_clears_prior_application() {
+    let tagged_step = LoadBalancerFilter::new(&[cluster_with_application(
+        "llm",
+        &["127.0.0.1:8080"],
+        Some("openai_chat_completions"),
+        Some("vllm"),
+    )]);
+    let untagged_step = LoadBalancerFilter::new(&[test_cluster("web", &["127.0.0.1:9090"])]);
+    let req = crate::test_utils::make_request(http::Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+
+    ctx.cluster = Some(Arc::from("llm"));
+    drop(tagged_step.on_request(&mut ctx).await.unwrap());
+    assert_eq!(
+        ctx.selected_application_protocol(),
+        Some("openai_chat_completions"),
+        "the first step must publish its tagged cluster's application protocol"
+    );
+
+    ctx.upstream = None;
+    ctx.cluster = Some(Arc::from("web"));
+    drop(untagged_step.on_request(&mut ctx).await.unwrap());
+
+    assert_eq!(
+        ctx.selected_application_protocol(),
+        None,
+        "a later untagged step reusing the same extensions must not observe the prior step's protocol"
+    );
+    assert_eq!(
+        ctx.selected_application_provider(),
+        None,
+        "a later untagged step reusing the same extensions must not observe the prior step's provider"
+    );
+}
+
+// -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
 
 /// Build a [`Cluster`] with default strategy for testing.
 fn test_cluster(name: &str, endpoints: &[&str]) -> Cluster {
     Cluster::with_defaults(name, endpoints.iter().map(|s| (*s).into()).collect())
+}
+
+/// Build a [`Cluster`] tagged with application protocol and/or provider.
+fn cluster_with_application(name: &str, endpoints: &[&str], protocol: Option<&str>, provider: Option<&str>) -> Cluster {
+    Cluster {
+        http: praxis_core::config::ClusterHttpOptions {
+            application_protocol: protocol.map(Arc::from),
+            application_provider: provider.map(Arc::from),
+            ..praxis_core::config::ClusterHttpOptions::default()
+        },
+        ..Cluster::with_defaults(name, endpoints.iter().map(|s| (*s).into()).collect())
+    }
+}
+
+/// Build a [`HealthRegistry`] whose every endpoint is marked unhealthy,
+/// forcing the load balancer into panic mode for `cluster`.
+fn all_unhealthy_registry(cluster: &str, endpoints: &[&str]) -> HealthRegistry {
+    let entry: ClusterHealthState = Arc::new(ClusterHealthEntry::new(
+        endpoints.iter().map(|_| EndpointHealth::new()).collect(),
+        endpoints.iter().map(|s| Arc::from(*s)).collect(),
+        None,
+        None,
+    ));
+    for ep in entry.endpoints() {
+        ep.mark_unhealthy();
+    }
+    Arc::new(HashMap::from([(Arc::from(cluster), entry)]))
 }
 
 /// Build a [`Cluster`] with a specific load balancer strategy.

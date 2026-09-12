@@ -22,7 +22,7 @@ use crate::{
     FilterError, IterationState,
     body::BodyMode,
     condition::{ConditionError, HeaderSource},
-    extensions::RequestExtensions,
+    extensions::{RequestExtensions, SelectedClusterApplication},
     pipeline::body::merge_body_mode,
     results::FilterResultSet,
 };
@@ -495,6 +495,51 @@ impl HttpFilterContext<'_> {
     /// Upstream peer address, if selected.
     pub fn upstream_addr(&self) -> Option<&str> {
         self.upstream.as_ref().map(|u| &*u.address)
+    }
+
+    /// Opaque application protocol of the cluster selected for this exchange.
+    ///
+    /// Published by the load balancer after a successful upstream selection
+    /// and stable for the life of the exchange, so every phase (request,
+    /// response, response-body, logging) observes the same value. `None`
+    /// when no cluster was selected or the selected cluster declared no
+    /// `application_protocol`. The value is opaque to Praxis core; consuming
+    /// filters interpret it.
+    pub fn selected_application_protocol(&self) -> Option<&str> {
+        self.extensions
+            .get::<SelectedClusterApplication>()
+            .and_then(SelectedClusterApplication::protocol)
+    }
+
+    /// Opaque application provider of the cluster selected for this exchange.
+    ///
+    /// Companion to [`selected_application_protocol`]; identical lifecycle
+    /// and opacity, reflecting the selected cluster's `application_provider`.
+    ///
+    /// [`selected_application_protocol`]: Self::selected_application_protocol
+    pub fn selected_application_provider(&self) -> Option<&str> {
+        self.extensions
+            .get::<SelectedClusterApplication>()
+            .and_then(SelectedClusterApplication::provider)
+    }
+
+    /// Publish the selected cluster's opaque application metadata into the
+    /// request-scoped extensions.
+    ///
+    /// Called by the trusted built-in load balancer after a successful upstream
+    /// selection. Publication is authoritative: a tagged cluster replaces any
+    /// prior value, and an untagged cluster removes it. This matters because a
+    /// single [`RequestExtensions`] is threaded across `iterative_request_router`
+    /// steps; without the removal, a later step selecting an untagged cluster
+    /// would leave the previous step's protocol/provider visible and a consuming
+    /// filter could apply the wrong transformation.
+    pub(crate) fn publish_selected_application(&mut self, protocol: Option<Arc<str>>, provider: Option<Arc<str>>) {
+        match SelectedClusterApplication::new(protocol, provider) {
+            Some(app) => self.extensions.insert(app),
+            None => {
+                self.extensions.remove::<SelectedClusterApplication>();
+            },
+        }
     }
 
     /// Shared sub-request client, if set.
@@ -2230,6 +2275,130 @@ mod tests {
         assert!(
             ctx.stream_termination().is_some_and(StreamTermination::is_handled),
             "handled state should persist for the session"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // Selected Cluster Application Tests
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn selected_application_absent_by_default() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let ctx = crate::test_utils::make_filter_context(&req);
+        assert!(
+            ctx.selected_application_protocol().is_none(),
+            "protocol should be absent before any selection"
+        );
+        assert!(
+            ctx.selected_application_provider().is_none(),
+            "provider should be absent before any selection"
+        );
+    }
+
+    #[test]
+    fn publish_selected_application_exposes_both_fields() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.publish_selected_application(Some(Arc::from("openai_chat_completions")), Some(Arc::from("vllm")));
+        assert_eq!(
+            ctx.selected_application_protocol(),
+            Some("openai_chat_completions"),
+            "published protocol should be readable"
+        );
+        assert_eq!(
+            ctx.selected_application_provider(),
+            Some("vllm"),
+            "published provider should be readable"
+        );
+    }
+
+    #[test]
+    fn publish_selected_application_protocol_only() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.publish_selected_application(Some(Arc::from("openai_responses")), None);
+        assert_eq!(
+            ctx.selected_application_protocol(),
+            Some("openai_responses"),
+            "published protocol should be readable"
+        );
+        assert!(
+            ctx.selected_application_provider().is_none(),
+            "an unpublished provider should stay absent"
+        );
+    }
+
+    #[test]
+    fn publish_selected_application_provider_only() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.publish_selected_application(None, Some(Arc::from("openai")));
+        assert!(
+            ctx.selected_application_protocol().is_none(),
+            "an unpublished protocol should stay absent"
+        );
+        assert_eq!(
+            ctx.selected_application_provider(),
+            Some("openai"),
+            "published provider should be readable"
+        );
+    }
+
+    #[test]
+    fn publish_selected_application_is_noop_when_both_absent() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.publish_selected_application(None, None);
+        assert!(
+            ctx.selected_application_protocol().is_none(),
+            "publishing nothing must leave the protocol absent"
+        );
+        assert!(
+            ctx.selected_application_provider().is_none(),
+            "publishing nothing must leave the provider absent"
+        );
+        assert!(
+            ctx.extensions.get::<SelectedClusterApplication>().is_none(),
+            "an untagged cluster must not insert an extension value"
+        );
+    }
+
+    #[test]
+    fn publish_selected_application_untagged_clears_prior_selection() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.publish_selected_application(Some(Arc::from("openai_chat_completions")), Some(Arc::from("vllm")));
+        ctx.publish_selected_application(None, None);
+        assert!(
+            ctx.selected_application_protocol().is_none(),
+            "a later untagged selection must clear the prior protocol so a reused context cannot leak stale metadata"
+        );
+        assert!(
+            ctx.selected_application_provider().is_none(),
+            "a later untagged selection must clear the prior provider so a reused context cannot leak stale metadata"
+        );
+        assert!(
+            ctx.extensions.get::<SelectedClusterApplication>().is_none(),
+            "an untagged re-selection must remove the extension value entirely"
+        );
+    }
+
+    #[test]
+    fn publish_selected_application_replaces_prior_selection() {
+        let req = crate::test_utils::make_request(Method::GET, "/");
+        let mut ctx = crate::test_utils::make_filter_context(&req);
+        ctx.publish_selected_application(Some(Arc::from("openai_chat_completions")), Some(Arc::from("vllm")));
+        ctx.publish_selected_application(Some(Arc::from("anthropic_messages")), Some(Arc::from("bedrock")));
+        assert_eq!(
+            ctx.selected_application_protocol(),
+            Some("anthropic_messages"),
+            "a later tagged selection must overwrite the prior protocol"
+        );
+        assert_eq!(
+            ctx.selected_application_provider(),
+            Some("bedrock"),
+            "a later tagged selection must overwrite the prior provider"
         );
     }
 }
