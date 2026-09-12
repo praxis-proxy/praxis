@@ -264,6 +264,26 @@ impl FilterPipeline {
         &self.body_capabilities
     }
 
+    /// Clear the request-body `body_done` marks so a replayed upstream
+    /// attempt runs the request-body hooks over it again.
+    ///
+    /// `body_done` means "this filter is finished with *this* body", and a
+    /// retry re-delivers the same body from the start. Carrying the marks
+    /// into the next attempt skips the hooks, so a `ReadWrite` filter's
+    /// rewrite is applied on one attempt and not the next — while
+    /// `apply_mutated_content_length` keeps framing every attempt with the
+    /// rewritten length. Retries are per-attempt, so the marks must be too.
+    ///
+    /// Response-body marks are left alone: they belong to the response the
+    /// retried attempt has not produced yet.
+    pub fn clear_request_body_done(&self, body_done_indices: &mut [bool]) {
+        for &idx in &self.request_body_filter_indices {
+            if let Some(done) = body_done_indices.get_mut(idx) {
+                *done = false;
+            }
+        }
+    }
+
     /// Whether any filter in the pipeline needs body access.
     pub fn needs_body_filters(&self) -> bool {
         self.body_capabilities.needs_request_body || self.body_capabilities.needs_response_body

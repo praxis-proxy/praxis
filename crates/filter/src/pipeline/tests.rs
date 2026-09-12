@@ -558,6 +558,38 @@ fn body_capabilities_detects_request_body_writer() {
 }
 
 #[test]
+fn clear_request_body_done_clears_only_request_body_filters() {
+    let chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
+    // 0: no body access, 1: request body, 2: response body.
+    let pipeline = make_pipeline(vec![
+        Box::new(PassthroughFilter),
+        Box::new(BodyUppercaseFilter),
+        Box::new(ResponseBodyInspectorFilter { chunks }),
+    ]);
+
+    let mut marks = vec![true, true, true];
+    pipeline.clear_request_body_done(&mut marks);
+
+    assert_eq!(
+        marks,
+        vec![true, false, true],
+        "only the request-body filter's mark should be cleared for the next attempt"
+    );
+}
+
+#[test]
+fn clear_request_body_done_tolerates_a_shorter_mark_vector() {
+    let pipeline = make_pipeline(vec![Box::new(PassthroughFilter), Box::new(BodyUppercaseFilter)]);
+
+    // A context whose marks were never sized to the pipeline (no body phase
+    // has run yet) must not panic on the per-attempt reset.
+    let mut marks: Vec<bool> = Vec::new();
+    pipeline.clear_request_body_done(&mut marks);
+
+    assert!(marks.is_empty(), "an unsized mark vector is left untouched");
+}
+
+#[test]
 fn body_capabilities_detects_response_body() {
     let chunks = Arc::new(std::sync::Mutex::new(Vec::new()));
     let pipeline = make_pipeline(vec![Box::new(ResponseBodyInspectorFilter { chunks })]);

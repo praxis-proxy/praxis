@@ -345,6 +345,19 @@ impl ProxyHttp for PingoraHttpHandler {
     {
         let span = ctx.request_span.clone();
         let _entered = span.enter();
+        // Runs once per upstream attempt, before the body is forwarded. A retry
+        // replays the request body from the start, so the request-body hooks
+        // must see it from the start too: a filter that signalled `BodyDone` on
+        // the previous attempt would otherwise be skipped, and the replayed
+        // body would go upstream unfiltered under a Content-Length that still
+        // describes the filtered one.
+        //
+        // Deliberately paired with `apply_mutated_content_length` below. Both
+        // read state a body filter produced on an earlier attempt, so they have
+        // to run on the same attempts — an attempt that re-stamps the mutated
+        // length must also re-run the filter that produced it.
+        let pipeline = ctx.pipeline(&self.pipeline);
+        pipeline.clear_request_body_done(&mut ctx.cached_body_done_indices);
         let is_upgrade = session.is_upgrade_req();
         upstream_request::strip_hop_by_hop(upstream_request, is_upgrade);
         upstream_request.strip_reserved_internal();
