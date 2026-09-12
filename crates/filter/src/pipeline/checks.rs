@@ -102,6 +102,11 @@ pub(super) fn check_unconditional_static_response(
 }
 
 /// Security filters with request conditions (bypass risk).
+///
+/// Branch sub-chains are checked recursively: the branch executor honors
+/// each branch filter's conditions, so a conditional security filter
+/// nested in a branch is bypassed for non-matching requests exactly as a
+/// top-level one would be.
 pub(super) fn check_conditional_security(names: &[&str], filters: &[PipelineFilter], errors: &mut Vec<String>) {
     for (i, (name, pf)) in names.iter().zip(filters).enumerate() {
         if pf.is_security && !pf.conditions.is_empty() {
@@ -112,13 +117,36 @@ pub(super) fn check_conditional_security(names: &[&str], filters: &[PipelineFilt
             ));
         }
     }
+    for pf in filters {
+        for branch in &pf.branches {
+            collect_branch_conditional_security_errors(&branch.name, &branch.filters, errors);
+        }
+    }
+}
+
+/// Recursively collect conditional-security violations inside one branch
+/// sub-chain.
+fn collect_branch_conditional_security_errors(branch_name: &str, filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for pf in filters {
+        let name = pf.filter.name();
+        if pf.is_security && !pf.conditions.is_empty() {
+            errors.push(format!(
+                "security filter '{name}' in branch '{branch_name}' has \
+                 request conditions; it will be bypassed for \
+                 non-matching requests"
+            ));
+        }
+        for branch in &pf.branches {
+            collect_branch_conditional_security_errors(&branch.name, &branch.filters, errors);
+        }
+    }
 }
 
 /// Security filters with `failure_mode: open` (bypass risk on error).
 ///
 /// When `allow` is `true`, the error is demoted to a warning. Walks branch
 /// sub-chains recursively, so a security filter buried inside a branch is held
-/// to the same guardrail as a top-level one rather than silently escaping it —
+/// to the same guardrail as a top-level one rather than silently escaping it,
 /// matching [`check_skip_to_bypasses_security`] and
 /// [`check_terminal_rejoin_bypasses_security`].
 pub(super) fn check_open_security_filters(
@@ -544,6 +572,61 @@ pub(super) fn check_all_routers_conditional(names: &[&str], filters: &[PipelineF
              not matching any condition will have no route"
                 .to_owned(),
         );
+    }
+}
+
+/// Security filters reachable only through a conditional gate.
+///
+/// A security filter inside a branch is skipped whenever the gate above it does
+/// not match. Two gates count: the branch's own `on_result` condition, and the
+/// request conditions on the filter that owns the branch (if that parent filter
+/// is skipped, its whole branch, a fail-closed security filter included, is
+/// skipped with it). Either way the observable outcome matches the case
+/// [`check_conditional_security`] rejects outright, but gating a security filter
+/// this way is frequently deliberate (the gate is the operator's admission
+/// decision, as in `examples/configs/branching/nested-branches.yaml`), so this
+/// is an advisory rather than an error.
+///
+/// The gate is inherited: a filter nested deeper is still only reached when the
+/// outermost gate matches, and the warning names that outermost gate.
+pub(super) fn check_security_filter_in_conditional_branch(filters: &[PipelineFilter], warnings: &mut Vec<String>) {
+    collect_conditional_branch_security_warnings(None, filters, warnings);
+}
+
+/// Walk `filters` and their branches, warning about security filters reached
+/// only through the conditional branch named by `gate`.
+fn collect_conditional_branch_security_warnings(
+    gate: Option<&str>,
+    filters: &[PipelineFilter],
+    warnings: &mut Vec<String>,
+) {
+    for pf in filters {
+        let name = pf.filter.name();
+        if let Some(gate) = gate
+            && pf.is_security
+        {
+            warnings.push(format!(
+                "security filter '{name}' is reached only through {gate}; \
+                 it runs only for matching requests"
+            ));
+        }
+        for branch in &pf.branches {
+            // A branch is conditionally reached when the branch itself carries an
+            // on_result gate, OR when the filter that owns it carries its own
+            // request conditions: if that parent filter is skipped, its whole
+            // branch is skipped too, including a fail-closed security filter
+            // inside it. The outermost gate is the one named.
+            let inherited = gate.map(str::to_owned).or_else(|| {
+                if !pf.conditions.is_empty() {
+                    Some(format!("filter '{name}' request conditions"))
+                } else if branch.condition.is_some() {
+                    Some(format!("conditional branch '{}'", branch.name))
+                } else {
+                    None
+                }
+            });
+            collect_conditional_branch_security_warnings(inherited.as_deref(), &branch.filters, warnings);
+        }
     }
 }
 
@@ -1005,7 +1088,6 @@ mod tests {
 
     #[test]
     fn open_filter_named_like_builtin_without_class_no_error() {
-        // Classification is the registry SecurityClass stamp, not the type name.
         let names = vec!["ip_acl"];
         let mut pf = named_noop_filter("ip_acl", vec![]);
         pf.failure_mode = FailureMode::Open;
@@ -1045,6 +1127,188 @@ mod tests {
             errors[0].contains("my_auth"),
             "error should name the custom security filter: {}",
             errors[0]
+        );
+    }
+
+    #[test]
+    fn conditional_security_filter_in_branch_errors() {
+        let names = vec!["headers"];
+        let filters = vec![host_with_branch(vec![security_noop_filter(
+            "ip_acl",
+            vec![make_condition()],
+        )])];
+        let mut errors = Vec::new();
+        check_conditional_security(&names, &filters, &mut errors);
+        assert_eq!(errors.len(), 1, "should produce exactly one error: {errors:?}");
+        assert!(
+            errors[0].contains("ip_acl") && errors[0].contains("branch 'br'") && errors[0].contains("conditions"),
+            "a conditional security filter in a branch is bypassed like a top-level one, so it must error: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn conditional_security_filter_in_nested_branch_errors() {
+        let names = vec!["headers"];
+        let inner = host_with_named_branch("inner", vec![security_noop_filter("ip_acl", vec![make_condition()])]);
+        let filters = vec![host_with_branch(vec![inner])];
+        let mut errors = Vec::new();
+        check_conditional_security(&names, &filters, &mut errors);
+        assert_eq!(errors.len(), 1, "should produce exactly one error: {errors:?}");
+        assert!(
+            errors[0].contains("ip_acl") && errors[0].contains("branch 'inner'"),
+            "recursion should reach nested branches: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn unconditional_security_filter_in_branch_no_error() {
+        let names = vec!["headers"];
+        let filters = vec![host_with_branch(vec![security_noop_filter("ip_acl", vec![])])];
+        let mut errors = Vec::new();
+        check_conditional_security(&names, &filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "unconditional security filter in a branch should not error: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn conditional_security_filter_in_each_sibling_branch_errors() {
+        let names = vec!["headers"];
+        let filters = vec![host_with_two_named_branches(
+            ("left", vec![security_noop_filter("ip_acl", vec![make_condition()])]),
+            (
+                "right",
+                vec![security_noop_filter("rate_limit", vec![make_condition()])],
+            ),
+        )];
+        let mut errors = Vec::new();
+        check_conditional_security(&names, &filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            2,
+            "every violating filter in every sibling branch is reported, nothing short-circuits: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("ip_acl") && e.contains("branch 'left'")),
+            "left branch violation missing: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("rate_limit") && e.contains("branch 'right'")),
+            "right branch violation missing: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn security_filter_in_conditional_branch_warns_but_does_not_error() {
+        let names = vec!["headers"];
+        let filters = vec![host_with_conditional_branch(vec![security_noop_filter(
+            "ip_acl",
+            vec![],
+        )])];
+
+        let mut errors = Vec::new();
+        check_conditional_security(&names, &filters, &mut errors);
+        check_open_security_filters(&names, &filters, false, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "a branch-level gate alone must not be a build error: {errors:?}"
+        );
+
+        let mut warnings = Vec::new();
+        check_security_filter_in_conditional_branch(&filters, &mut warnings);
+        assert_eq!(warnings.len(), 1, "should produce exactly one warning: {warnings:?}");
+        assert!(
+            warnings[0].contains("ip_acl") && warnings[0].contains("conditional branch 'cond_br'"),
+            "warning should name the filter and the gating branch: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn security_filter_in_unconditional_branch_no_warning() {
+        let filters = vec![host_with_branch(vec![security_noop_filter("guardrails", vec![])])];
+        let mut warnings = Vec::new();
+        check_security_filter_in_conditional_branch(&filters, &mut warnings);
+        assert!(
+            warnings.is_empty(),
+            "an unconditional branch under an unconditional parent always runs, so no advisory is due: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn non_security_filter_in_conditional_branch_no_warning() {
+        let filters = vec![host_with_conditional_branch(vec![named_noop_filter("headers", vec![])])];
+        let mut warnings = Vec::new();
+        check_security_filter_in_conditional_branch(&filters, &mut warnings);
+        assert!(
+            warnings.is_empty(),
+            "non-security filters are not gated-branch advisories: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn security_filter_in_branch_of_conditional_parent_warns() {
+        let filters = vec![conditional_host_with_branch(
+            vec![make_condition()],
+            vec![security_noop_filter("ip_acl", vec![])],
+        )];
+        let mut warnings = Vec::new();
+        check_security_filter_in_conditional_branch(&filters, &mut warnings);
+        assert_eq!(
+            warnings.len(),
+            1,
+            "a fail-closed security filter is skipped along with its conditionally-gated parent, so it must warn: {warnings:?}"
+        );
+        assert!(
+            warnings[0].contains("ip_acl") && warnings[0].contains("request conditions"),
+            "advisory should name the security filter and the parent's request-condition gate: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn security_filter_in_branch_nested_under_conditional_branch_warns() {
+        let inner = host_with_named_branch("inner", vec![security_noop_filter("ip_acl", vec![])]);
+        let filters = vec![host_with_conditional_branch(vec![inner])];
+        let mut warnings = Vec::new();
+        check_security_filter_in_conditional_branch(&filters, &mut warnings);
+        assert_eq!(warnings.len(), 1, "should produce exactly one warning: {warnings:?}");
+        assert!(
+            warnings[0].contains("ip_acl") && warnings[0].contains("conditional branch 'cond_br'"),
+            "advisory should name the outermost gating branch: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn security_filter_in_conditional_branch_nested_under_unconditional_branch_warns() {
+        let inner = host_with_named_conditional_branch("inner_cond", vec![security_noop_filter("rate_limit", vec![])]);
+        let filters = vec![host_with_branch(vec![inner])];
+        let mut warnings = Vec::new();
+        check_security_filter_in_conditional_branch(&filters, &mut warnings);
+        assert_eq!(warnings.len(), 1, "should produce exactly one warning: {warnings:?}");
+        assert!(
+            warnings[0].contains("rate_limit") && warnings[0].contains("conditional branch 'inner_cond'"),
+            "advisory should name the gating branch: {}",
+            warnings[0]
+        );
+    }
+
+    #[test]
+    fn top_level_security_filter_no_conditional_branch_warning() {
+        let filters = vec![security_noop_filter("ip_acl", vec![make_condition()])];
+        let mut warnings = Vec::new();
+        check_security_filter_in_conditional_branch(&filters, &mut warnings);
+        assert!(
+            warnings.is_empty(),
+            "a top-level filter is not inside any branch: {warnings:?}"
         );
     }
 
@@ -1151,7 +1415,31 @@ mod tests {
     /// Next-rejoin branch with `filters`. Such a branch always runs and shares
     /// `ctx`, so its load balancers are reachable for the enclosing scope.
     fn host_with_branch(branch_filters: Vec<PipelineFilter>) -> PipelineFilter {
+        host_with_named_branch("br", branch_filters)
+    }
+
+    /// Like [`host_with_branch`], but with an explicit branch name so nested
+    /// branches can be told apart in error messages.
+    fn host_with_named_branch(branch_name: &str, branch_filters: Vec<PipelineFilter>) -> PipelineFilter {
         let mut host = noop_filter_with_conditions("headers", vec![]);
+        host.branches = vec![ResolvedBranch {
+            condition: None,
+            filters: branch_filters,
+            max_iterations: None,
+            name: Arc::from(branch_name),
+            rejoin: RejoinTarget::Next,
+        }];
+        host
+    }
+
+    /// A host filter carrying its own request conditions and owning one
+    /// unconditional Next-rejoin branch, so contents gated only by the parent
+    /// filter's conditions can be observed.
+    fn conditional_host_with_branch(
+        host_conditions: Vec<Condition>,
+        branch_filters: Vec<PipelineFilter>,
+    ) -> PipelineFilter {
+        let mut host = noop_filter_with_conditions("headers", host_conditions);
         host.branches = vec![ResolvedBranch {
             condition: None,
             filters: branch_filters,
@@ -1162,10 +1450,27 @@ mod tests {
         host
     }
 
+    /// Build an unconditional host filter carrying two unconditional
+    /// Next-rejoin branches, so per-branch reporting can be observed.
+    fn host_with_two_named_branches(
+        left: (&str, Vec<PipelineFilter>),
+        right: (&str, Vec<PipelineFilter>),
+    ) -> PipelineFilter {
+        let mut host = host_with_named_branch(left.0, left.1);
+        host.branches.extend(host_with_named_branch(right.0, right.1).branches);
+        host
+    }
+
     /// Build an unconditional host filter carrying one *conditional*
     /// Next-rejoin branch with `filters`. A conditional branch may not fire, so
     /// its load balancers cannot be relied on to serve an enclosing selection.
     fn host_with_conditional_branch(branch_filters: Vec<PipelineFilter>) -> PipelineFilter {
+        host_with_named_conditional_branch("cond_br", branch_filters)
+    }
+
+    /// Like [`host_with_conditional_branch`], but with an explicit branch name
+    /// so nested conditional branches can be told apart in advisories.
+    fn host_with_named_conditional_branch(branch_name: &str, branch_filters: Vec<PipelineFilter>) -> PipelineFilter {
         let mut host = noop_filter_with_conditions("headers", vec![]);
         host.branches = vec![ResolvedBranch {
             condition: Some(crate::pipeline::branch::ResolvedBranchCondition {
@@ -1175,7 +1480,7 @@ mod tests {
             }),
             filters: branch_filters,
             max_iterations: None,
-            name: Arc::from("cond_br"),
+            name: Arc::from(branch_name),
             rejoin: RejoinTarget::Next,
         }];
         host

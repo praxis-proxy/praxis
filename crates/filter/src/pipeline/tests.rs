@@ -1246,6 +1246,176 @@ fn allow_open_forwarded_headers_with_insecure_flag() {
 }
 
 #[test]
+fn errors_conditional_security_filter_in_branch_chain() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![host_entry_with_branch(
+        "sec",
+        None,
+        vec![ip_acl_entry(vec![when_path("/admin")], FailureMode::default())],
+    )];
+    let pipeline = FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &HashMap::new(),
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .unwrap();
+    let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("ip_acl") && e.contains("branch 'sec'") && e.contains("request conditions")),
+        "conditional security filter in a branch chain should error: {errors:?}"
+    );
+}
+
+#[test]
+fn errors_open_security_filter_in_branch_chain() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![host_entry_with_branch(
+        "sec",
+        None,
+        vec![ip_acl_entry(vec![], FailureMode::Open)],
+    )];
+    let pipeline = FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &HashMap::new(),
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .unwrap();
+    let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("ip_acl") && e.contains("branch 'sec'") && e.contains("failure_mode: open")),
+        "fail-open security filter in a branch chain should error: {errors:?}"
+    );
+}
+
+#[test]
+fn errors_open_security_filter_in_nested_branch_chain() {
+    let registry = FilterRegistry::with_builtins();
+    let inner = host_entry_with_branch("inner", None, vec![ip_acl_entry(vec![], FailureMode::Open)]);
+    let mut entries = vec![host_entry_with_branch("outer", None, vec![inner])];
+    let pipeline = FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &HashMap::new(),
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .unwrap();
+    let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
+    assert!(
+        errors
+            .iter()
+            .any(|e| e.contains("ip_acl") && e.contains("branch 'inner'") && e.contains("failure_mode: open")),
+        "nested branch chains should be walked: {errors:?}"
+    );
+}
+
+#[test]
+fn allow_open_security_filter_in_branch_chain_with_insecure_flag() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![host_entry_with_branch(
+        "sec",
+        None,
+        vec![ip_acl_entry(vec![], FailureMode::Open)],
+    )];
+    let pipeline = FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &HashMap::new(),
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .unwrap();
+    let errors = pipeline.ordering_errors(&entries, true, &SkipPipelineChecks::default());
+    assert!(
+        !errors.iter().any(|e| e.contains("failure_mode: open")),
+        "insecure flag should demote the branch-level open error to a warning: {errors:?}"
+    );
+}
+
+#[test]
+fn skip_conditional_security_suppresses_branch_chain_error() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![host_entry_with_branch(
+        "sec",
+        None,
+        vec![ip_acl_entry(vec![when_path("/admin")], FailureMode::default())],
+    )];
+    let pipeline = FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &HashMap::new(),
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .unwrap();
+    let skip = SkipPipelineChecks {
+        conditional_security: true,
+        ..SkipPipelineChecks::default()
+    };
+    let errors = pipeline.ordering_errors(&entries, false, &skip);
+    assert!(
+        !errors.iter().any(|e| e.contains("request conditions")),
+        "conditional_security skip should also cover branch chains: {errors:?}"
+    );
+}
+
+#[test]
+fn warns_but_does_not_error_on_security_filter_in_conditional_branch_chain() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![host_entry_with_branch(
+        "gated",
+        Some("suspect"),
+        vec![ip_acl_entry(vec![], FailureMode::default())],
+    )];
+    let pipeline = FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &HashMap::new(),
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .unwrap();
+
+    let errors = pipeline.ordering_errors(&entries, false, &SkipPipelineChecks::default());
+    assert!(
+        !errors.iter().any(|e| e.contains("ip_acl")),
+        "a branch-level gate alone must not fail the build: {errors:?}"
+    );
+
+    let warnings = pipeline.ordering_warnings();
+    assert!(
+        warnings
+            .iter()
+            .any(|w| w.contains("ip_acl") && w.contains("conditional branch 'gated'")),
+        "gated security filter should be reported as an advisory: {warnings:?}"
+    );
+}
+
+#[test]
+fn no_conditional_branch_advisory_for_unconditional_branch_chain() {
+    let registry = FilterRegistry::with_builtins();
+    let mut entries = vec![host_entry_with_branch(
+        "always",
+        None,
+        vec![ip_acl_entry(vec![], FailureMode::default())],
+    )];
+    let pipeline = FilterPipeline::build_with_chains(
+        &mut entries,
+        &registry,
+        &HashMap::new(),
+        &praxis_core::config::InsecureOptions::default(),
+    )
+    .unwrap();
+    let warnings = pipeline.ordering_warnings();
+    assert!(
+        !warnings.iter().any(|w| w.contains("ip_acl")),
+        "an unconditional branch always runs, so no advisory is due: {warnings:?}"
+    );
+}
+
+#[test]
 fn build_stamps_is_security_from_registry_class() {
     let mut registry = FilterRegistry::with_builtins();
     register_named_filter(&mut registry, "my_auth", SecurityClass::Security);
@@ -2273,6 +2443,96 @@ async fn all_executed_filters_run_on_response() {
 }
 
 #[tokio::test]
+async fn branch_filter_conditions_skip_it_for_non_matching_requests() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let pipeline = pipeline_with_branch(vec![PipelineFilter::new(
+        100,
+        AnyFilter::Http(Box::new(CountingFilter {
+            counter: Arc::clone(&counter),
+        })),
+        vec![when_path("/api")],
+        vec![],
+    )]);
+
+    let req = crate::test_utils::make_request(Method::GET, "/other");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        0,
+        "a branch filter whose conditions do not match must be skipped"
+    );
+
+    let req = crate::test_utils::make_request(Method::GET, "/api");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    drop(pipeline.execute_http_request(&mut ctx).await.unwrap());
+    assert_eq!(
+        counter.load(Ordering::SeqCst),
+        1,
+        "a branch filter whose conditions match must run"
+    );
+}
+
+#[tokio::test]
+async fn branch_filter_failure_mode_open_swallows_its_error() {
+    let after = Arc::new(AtomicUsize::new(0));
+    let mut failing = PipelineFilter::new(100, AnyFilter::Http(Box::new(ErrorFilter)), vec![], vec![]);
+    failing.failure_mode = FailureMode::Open;
+    let pipeline = pipeline_with_branch(vec![
+        failing,
+        PipelineFilter::new(
+            101,
+            AnyFilter::Http(Box::new(CountingFilter {
+                counter: Arc::clone(&after),
+            })),
+            vec![],
+            vec![],
+        ),
+    ]);
+
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let result = pipeline.execute_http_request(&mut ctx).await;
+    assert!(result.is_ok(), "failure_mode: open must swallow a branch filter error");
+    assert_eq!(
+        after.load(Ordering::SeqCst),
+        1,
+        "the branch must continue past a swallowed error"
+    );
+}
+
+#[tokio::test]
+async fn branch_filter_failure_mode_closed_propagates_its_error() {
+    let after = Arc::new(AtomicUsize::new(0));
+    let mut failing = PipelineFilter::new(100, AnyFilter::Http(Box::new(ErrorFilter)), vec![], vec![]);
+    failing.failure_mode = FailureMode::Closed;
+    let pipeline = pipeline_with_branch(vec![
+        failing,
+        PipelineFilter::new(
+            101,
+            AnyFilter::Http(Box::new(CountingFilter {
+                counter: Arc::clone(&after),
+            })),
+            vec![],
+            vec![],
+        ),
+    ]);
+
+    let req = crate::test_utils::make_request(Method::GET, "/");
+    let mut ctx = crate::test_utils::make_filter_context(&req);
+    let result = pipeline.execute_http_request(&mut ctx).await;
+    assert!(
+        result.is_err(),
+        "the default closed failure mode must propagate a branch filter error"
+    );
+    assert_eq!(
+        after.load(Ordering::SeqCst),
+        0,
+        "the branch must stop at a propagated error"
+    );
+}
+
+#[tokio::test]
 async fn skipped_filter_skips_its_branches() {
     let counter = Arc::new(AtomicUsize::new(0));
 
@@ -2958,6 +3218,73 @@ fn referenced_files_keeps_duplicates_for_the_caller_to_dedupe() {
 // -----------------------------------------------------------------------------
 // Test Utilities
 // -----------------------------------------------------------------------------
+
+/// Build a [`FilterEntry`] carrying one branch chain named `branch_name`
+/// whose inline sub-chain holds `inner`.
+///
+/// Goes through the same `branch_chains` -> [`ResolvedBranch`] resolution the
+/// server uses, so the branch filter's `conditions` and `failure_mode` are
+/// carried by [`build_filters`], not injected by the test.
+///
+/// [`build_filters`]: super::build_branch
+fn host_entry_with_branch(branch_name: &str, on_result: Option<&str>, inner: Vec<FilterEntry>) -> FilterEntry {
+    FilterEntry {
+        branch_chains: Some(vec![BranchChainConfig {
+            name: branch_name.to_owned(),
+            chains: vec![ChainRef::Inline {
+                name: format!("{branch_name}_chain"),
+                filters: inner,
+            }],
+            max_iterations: None,
+            on_result: on_result.map(|value| praxis_core::config::BranchCondition {
+                filter: "headers".to_owned(),
+                key: "status".to_owned(),
+                value: value.to_owned(),
+            }),
+            rejoin: "next".to_owned(),
+        }]),
+        conditions: vec![],
+        filter_type: "headers".into(),
+        config: serde_yaml::from_str("request_add:\n  - name: X-Host\n    value: \"1\"").unwrap(),
+        name: None,
+        response_conditions: vec![],
+        failure_mode: FailureMode::default(),
+    }
+}
+
+/// Build an `ip_acl` [`FilterEntry`] with the given conditions and failure mode.
+fn ip_acl_entry(conditions: Vec<praxis_core::config::Condition>, failure_mode: FailureMode) -> FilterEntry {
+    FilterEntry {
+        branch_chains: None,
+        conditions,
+        filter_type: "ip_acl".into(),
+        config: serde_yaml::from_str("allow: [\"10.0.0.0/8\"]").unwrap(),
+        name: None,
+        response_conditions: vec![],
+        failure_mode,
+    }
+}
+
+/// Build a pipeline whose single unconditional host filter carries one
+/// unconditional Next-rejoin branch holding `branch_filters`.
+fn pipeline_with_branch(branch_filters: Vec<PipelineFilter>) -> FilterPipeline {
+    let mut parent = PipelineFilter::new(
+        0,
+        AnyFilter::Http(Box::new(CountingFilter {
+            counter: Arc::new(AtomicUsize::new(0)),
+        })),
+        vec![],
+        vec![],
+    );
+    parent.branches = vec![ResolvedBranch {
+        condition: None,
+        filters: branch_filters,
+        max_iterations: None,
+        name: Arc::from("br"),
+        rejoin: RejoinTarget::Next,
+    }];
+    test_pipeline(BodyCapabilities::default(), vec![parent])
+}
 
 /// A filter that reads config from external documents.
 struct ReferencingFilter {

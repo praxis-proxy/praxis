@@ -339,6 +339,41 @@ chain is rejected as a pipeline ordering error, and
 body access declared by branch filters never enables
 pipeline-wide body buffering.
 
+**Security filters** inside branch sub-chains are held
+to the same rules as at top level: a security-critical
+filter (for example `ip_acl` or `rate_limit`) that
+carries request `conditions` or sets
+`failure_mode: open` is rejected at build time,
+however deeply it is nested. The branch executor
+honours both, so such a filter would otherwise be
+silently skipped for non-matching requests or have
+its errors swallowed. The same overrides apply:
+`insecure_options.skip_pipeline_checks.conditional_security`
+and `insecure_options.allow_open_security_filters`.
+
+The branch's *own* `on_result` gate is a separate
+matter. A conditional branch runs only when its
+condition matches, so a security filter inside one is
+skipped for every other request, even when the filter
+itself is unconditional and fail-closed. That is
+frequently deliberate (the branch is the operator's
+admission decision, as in
+`examples/configs/branching/nested-branches.yaml`), so
+it is reported as a startup **advisory**, not an error:
+
+```text
+security filter 'ip_acl' is reached only through
+conditional branch 'gated'; it runs only for matching
+requests
+```
+
+The gate is inherited, so the advisory also fires for a
+security filter in an unconditional branch nested inside
+a conditional one, naming the outermost gating branch.
+Put the filter on the main pipeline path, or in an
+unconditional branch, when it must apply to every
+request.
+
 **Nested control flow**: `SkipTo` and `ReEnter` from
 nested branches (branches within branches) are
 discarded. Only `Terminal` and `Reject` propagate
