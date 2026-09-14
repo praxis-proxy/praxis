@@ -8,7 +8,9 @@ readme = "../../README.md"
 publish = false
 
 [features]
-default = []
+# Matches the praxis-filter default so a single-test run exercises the
+# configuration the default build ships.
+default = ["policy-engine"]
 policy-engine = ["praxis-filter/policy-engine"]
 basic-auth-filter = ["praxis-filter/basic-auth-filter"]
 no-mac-cert-rotation-tests = []

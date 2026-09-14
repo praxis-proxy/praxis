@@ -9,9 +9,9 @@
 //! `body_access: read_write`) request / response body rewriting.
 //! Everything runs as linked Rust crates — no sidecar, no FFI.
 //!
-//! **Experimental.** Feature-gated behind `policy-engine`, which is
-//! off by default. Build with `--features policy-engine` to compile
-//! and register the filter (registered under the YAML name `policy`).
+//! Compiled in and registered under the YAML name `policy` by default.
+//! Build with `--no-default-features` to leave the filter and the policy
+//! engine's dependency tree out.
 //!
 //! # Why this filter
 //!
@@ -139,12 +139,10 @@ mod error;
 mod filter;
 mod host_plugins;
 mod json_rpc;
-mod shared_connector;
 mod transport;
 
 pub use filter::PolicyFilter;
 pub use host_plugins::{PolicyPluginFactoryFn, register_policy_plugin_factory};
-pub use shared_connector::set_policy_subrequest_connector;
 
 #[cfg(test)]
 #[expect(

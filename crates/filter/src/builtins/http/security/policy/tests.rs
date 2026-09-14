@@ -3072,7 +3072,7 @@ fn try_build_filter_allowing_private(
     config_path: String,
     allow_private_idp: bool,
 ) -> Result<PolicyFilter, crate::FilterError> {
-    super::set_policy_subrequest_connector(&praxis_core::subrequest::SubRequestConnector::new(
+    crate::set_policy_subrequest_connector(&praxis_core::subrequest::SubRequestConnector::new(
         praxis_core::config::DEFAULT_SUBREQUEST_POOL_SIZE,
         None,
     ));

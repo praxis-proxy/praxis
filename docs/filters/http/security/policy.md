@@ -9,7 +9,7 @@ Requires Cargo feature: `policy-engine`.
 
 ## Configuration Notes
 
-Experimental: requires the `policy-engine` cargo feature, which is off by default. Registered under the YAML filter name `policy`.
+Registered under the YAML filter name `policy`. The `policy-engine` cargo feature is on by default; `--no-default-features` leaves the filter out.
 
 A single request can carry multiple identity sources — user JWT in `Authorization`, agent JWT in `X-Agent-Token`, workload JWT in `X-Workload-Token`, etc. Each registered identity plugin reads its own configured header and contributes to a typed `Extensions` context.
 

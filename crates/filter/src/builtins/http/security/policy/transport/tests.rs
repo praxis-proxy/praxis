@@ -747,16 +747,37 @@ async fn a_transport_that_was_never_handed_a_client_builds_its_own_and_dispatche
     assert_eq!(backend.heads().len(), 1);
 }
 
+/// Serializes the tests that touch the process-wide registration, so one
+/// test's `set_policy_subrequest_connector` cannot land between another's
+/// registration and its read.
+static REGISTRATION: Mutex<()> = Mutex::new(());
+
 #[test]
 fn a_transport_keeps_the_connector_it_was_built_with() {
+    let _guard = REGISTRATION.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let own = SubRequestConnector::new(8, None);
     let transport = PolicyHttpTransport::with_connector(Some(own.clone()), true);
 
-    super::super::set_policy_subrequest_connector(&SubRequestConnector::new(1, None));
+    crate::set_policy_subrequest_connector(&SubRequestConnector::new(1, None));
 
     assert!(
         std::ptr::eq(transport.client().connector().connector(), own.connector()),
         "the pool must be the one captured at construction, not the newest registration"
+    );
+}
+
+#[test]
+fn a_transport_built_after_registration_uses_the_registered_pool() {
+    let _guard = REGISTRATION.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let shared = SubRequestConnector::new(16, None);
+    crate::set_policy_subrequest_connector(&shared);
+
+    let transport = PolicyHttpTransport::new(true);
+
+    assert!(
+        std::ptr::eq(transport.client().connector().connector(), shared.connector()),
+        "a transport built the way the filter builds it must pick up the host's registration \
+         instead of opening a private pool"
     );
 }
 

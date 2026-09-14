@@ -11,6 +11,8 @@ Most features are on by default. Build the standard binary with:
 cargo build -p praxis-proxy --release
 ```
 
+which includes hot-reload, the admin surface, and the `policy` filter.
+
 Build the leanest possible binary (every optional subsystem off) with:
 
 ```console
@@ -23,6 +25,20 @@ and add back individual features as needed:
 cargo build -p praxis-proxy --release --no-default-features --features admin-api
 ```
 
+For a policy-free build that keeps everything else, name the features you want
+instead:
+
+```console
+cargo build -p praxis-proxy --release --no-default-features \
+    --features config-reload,admin-api
+```
+
+The server depends on `praxis-proxy-filter` without dependency defaults, so
+dropping the server's `policy-engine` feature really does leave the filter and
+the policy engine's dependency tree out of the build. Library embedders get the
+same result by depending on `praxis-proxy-filter` with
+`default-features = false`.
+
 ## Feature summary
 
 | Feature | Default | Enables | Turn it off / on when |
@@ -30,7 +46,7 @@ cargo build -p praxis-proxy --release --no-default-features --features admin-api
 | `config-reload` | on | Config-file and TLS-certificate hot-reload (filesystem watching). | Off for a static-config deployment: drops both watchers and the `notify`, `arc-swap`, and `tokio` dependencies they pull into the TLS crate. |
 | `admin-api` | on | The admin HTTP service: management API (`/api/*`), Prometheus `/metrics`, and `/healthy` + `/ready`. | Off when the proxy exposes no monitoring or management surface. The data path and background health checks are unaffected; only the HTTP endpoints go away. |
 | `otel` | off | OpenTelemetry / OTLP span export for traces. | On for distributed tracing. Pulls in a heavy `opentelemetry` + `tonic` dependency graph. |
-| `policy-engine` | off | The `policy` filter (Praxis Policy Engine: OPA-style route policy, JWT identity, token exchange). | On for policy-based authorization. Heaviest optional dependency. |
+| `policy-engine` | on | The `policy` filter (Praxis Policy Engine: OPA-style route policy, JWT identity, token exchange). | Off for a deployment that does no policy-based authorization: it is the heaviest optional dependency, so dropping it is the largest single saving in build time and binary size. |
 | `basic-auth-filter` | off | The experimental `basic_auth` filter. | Dev and testing only. Slated for removal in favor of the policy engine ([praxis-proxy/policy]); prefer that for authentication. |
 | `dev` | off | Developer convenience bundle (currently enables `basic-auth-filter`). | Local development builds. |
 | `experimental` | off | Marker feature set transitively by experimental features; drives a startup warning. | Not selected directly; it lights up when an experimental feature is enabled. |
@@ -44,10 +60,11 @@ cargo build -p praxis-proxy --release --no-default-features --features admin-api
   and a startup warning is logged.
 - **The memory allocator is not a feature.** Praxis targets Linux and always
   uses `tikv-jemallocator`; there is no build toggle for it.
-- **Where the savings are.** Dropping `config-reload`, `admin-api`, `otel`,
-  `policy-engine`, and `basic-auth-filter` is what trims the dependency tree
-  and binary size. Most filters are always compiled in and share dependencies
-  with the core proxy, so gating them individually would not remove a crate.
+- **Where the savings are.** Dropping `policy-engine`, `config-reload`,
+  `admin-api`, and `otel` is what trims the dependency tree and binary size,
+  `policy-engine` by the widest margin. Most filters are always compiled in and
+  share dependencies with the core proxy, so gating them individually would not
+  remove a crate.
 
 ## See also
 

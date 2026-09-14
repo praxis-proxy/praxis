@@ -126,6 +126,7 @@ release:
 check:
 	cargo check --workspace
 	cargo check -p praxis-proxy --no-default-features
+	cargo check -p praxis-proxy-filter --no-default-features
 
 clean:
 	cargo clean
@@ -316,6 +317,7 @@ bench: $(VEGETA) $(FORTIO_DEP)
 lint:
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cargo clippy -p praxis-proxy --no-default-features --all-targets -- -D warnings
+	cargo clippy -p praxis-proxy-filter --no-default-features --all-targets -- -D warnings
 	cargo +$(NIGHTLY_VERSION) fmt --all -- --check
 	cargo machete
 	cargo xtask lint-deps

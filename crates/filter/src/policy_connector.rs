@@ -5,6 +5,12 @@
 //!
 //! This is needed because filter factories cannot receive a sub-request
 //! client directly.
+//!
+//! Compiled unconditionally so a host can register the connector without
+//! knowing whether `policy-engine` ended up enabled: a dependency feature
+//! turned on elsewhere through Cargo feature unification is invisible to the
+//! host's own `cfg`. Only the reader is gated, so with `policy-engine` off the
+//! registration is accepted and nothing ever reads it.
 
 use std::sync::{Arc, OnceLock};
 
@@ -22,6 +28,7 @@ impl ConnectorHolder {
     }
 
     /// The held connector, if one was stored.
+    #[cfg(any(feature = "policy-engine", test))]
     fn get(&self) -> Option<SubRequestConnector> {
         self.0.load_full().map(|held| held.as_ref().clone())
     }
@@ -38,6 +45,9 @@ fn policy_connector() -> &'static ConnectorHolder {
 /// Registration is process-wide and last-wins. Call immediately before
 /// building pipelines.
 ///
+/// Always available. Without the `policy-engine` feature nothing reads the
+/// registration, so the call is accepted and has no effect.
+///
 /// Because it is process-wide, two runtimes building pipelines *concurrently*
 /// in one process can cross-wire their pools: each registers, and whichever
 /// registered last is what the other's filters capture. Build them one at a
@@ -47,7 +57,8 @@ pub fn set_policy_subrequest_connector(connector: &SubRequestConnector) {
 }
 
 /// Clone the registered connector handle, if any.
-pub(super) fn shared_policy_connector() -> Option<SubRequestConnector> {
+#[cfg(feature = "policy-engine")]
+pub(crate) fn shared_policy_connector() -> Option<SubRequestConnector> {
     policy_connector().get()
 }
 

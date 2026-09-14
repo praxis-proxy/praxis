@@ -79,8 +79,9 @@ enum GatedIdentity {
 /// scanning, audit emission, and (under `body_access: read_write`)
 /// request / response body rewriting.
 ///
-/// Experimental: requires the `policy-engine` cargo feature, which
-/// is off by default. Registered under the YAML filter name `policy`.
+/// Registered under the YAML filter name `policy`. The `policy-engine`
+/// cargo feature is on by default; `--no-default-features` leaves the
+/// filter out.
 ///
 /// A single request can carry multiple identity sources — user JWT in
 /// `Authorization`, agent JWT in `X-Agent-Token`, workload JWT in

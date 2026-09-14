@@ -69,7 +69,7 @@ proptest = "1.11.0"
 quote = "1.0.47"
 praxis = { path = "crates/server", package = "praxis-proxy" }
 praxis-core = { version = "0.5.4", path = "crates/core", package = "praxis-proxy-core" }
-praxis-filter = { version = "0.5.4", path = "crates/filter", package = "praxis-proxy-filter" }
+praxis-filter = { version = "0.5.4", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
 praxis-protocol = { version = "0.5.4", path = "crates/protocol", package = "praxis-proxy-protocol" }
 praxis-tls = { version = "0.5.4", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
