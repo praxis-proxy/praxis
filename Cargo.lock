@@ -3357,6 +3357,7 @@ dependencies = [
  "praxis-proxy-filter",
  "praxis-proxy-protocol",
  "praxis-test-utils",
+ "quixotic-plecostomus-core",
  "rustls",
  "serde",
  "serde_json",

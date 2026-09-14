@@ -181,6 +181,46 @@ impl TestCertificates {
         }
     }
 
+    /// Generate a self-signed CA and server certificate with ONLY a DNS SAN and
+    /// NO loopback IP SAN, so IP-literal SNI validation fails against it.
+    ///
+    /// # Panics
+    ///
+    /// Panics if certificate generation or file I/O fails.
+    pub fn generate_dns_only(san: &str) -> Self {
+        let (ca_key, ca_params, ca_cert) = generate_ca(&format!("Praxis Test CA (dns-only {san})"));
+        let issuer = Issuer::from_params(&ca_params, &ca_key);
+
+        let server_key = KeyPair::generate().expect("server key generation");
+        let mut server_params = CertificateParams::new(vec![san.to_owned()]).expect("server params");
+        server_params.distinguished_name.push(DnType::CommonName, san);
+        // Deliberately NO IP SAN.
+        let server_cert = server_params.signed_by(&server_key, &issuer).expect("server cert sign");
+
+        let temp_dir = TempDir::new().expect("tempdir creation");
+        let cert_path = temp_dir.path().join("server.pem");
+        let key_path = temp_dir.path().join("server-key.pem");
+        let ca_cert_path = temp_dir.path().join("ca.pem");
+
+        std::fs::write(&cert_path, server_cert.pem()).expect("write cert PEM");
+        std::fs::write(&key_path, server_key.serialize_pem()).expect("write key PEM");
+        std::fs::write(&ca_cert_path, ca_cert.pem()).expect("write CA PEM");
+
+        let server_cert_der = server_cert.der().to_vec();
+
+        Self {
+            cert_path,
+            key_path,
+            ca_cert_path,
+            ca_cert_der: ca_cert.der().to_vec(),
+            server_cert_der,
+            ca_params,
+            ca_key,
+            client_cert_counter: AtomicUsize::new(0),
+            temp_dir,
+        }
+    }
+
     /// Build a [`rustls::ClientConfig`] that trusts this test CA.
     ///
     /// # Panics
