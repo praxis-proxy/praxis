@@ -53,6 +53,7 @@ mod body_pipeline;
 mod compression;
 mod conditions;
 mod cors;
+mod credential_store_parity;
 mod csrf;
 mod downstream_read_timeout;
 mod error_response;
