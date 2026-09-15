@@ -747,14 +747,11 @@ async fn a_transport_that_was_never_handed_a_client_builds_its_own_and_dispatche
     assert_eq!(backend.heads().len(), 1);
 }
 
-/// Serializes the tests that touch the process-wide registration, so one
-/// test's `set_policy_subrequest_connector` cannot land between another's
-/// registration and its read.
-static REGISTRATION: Mutex<()> = Mutex::new(());
-
 #[test]
 fn a_transport_keeps_the_connector_it_was_built_with() {
-    let _guard = REGISTRATION.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = crate::policy_connector::REGISTRATION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let own = SubRequestConnector::new(8, None);
     let transport = PolicyHttpTransport::with_connector(Some(own.clone()), true);
 
@@ -768,7 +765,9 @@ fn a_transport_keeps_the_connector_it_was_built_with() {
 
 #[test]
 fn a_transport_built_after_registration_uses_the_registered_pool() {
-    let _guard = REGISTRATION.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let _guard = crate::policy_connector::REGISTRATION_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let shared = SubRequestConnector::new(16, None);
     crate::set_policy_subrequest_connector(&shared);
 
