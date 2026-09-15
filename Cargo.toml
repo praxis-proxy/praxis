@@ -27,7 +27,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.5.4"
+version = "0.5.5"
 edition = "2024"
 rust-version = "1.96"
 authors = ["Shane Utt <shaneutt@linux.com>"]
@@ -68,10 +68,10 @@ ppe = { version = "0.2.0", package = "praxis-policy", features = ["builtins"] }
 proptest = "1.11.0"
 quote = "1.0.47"
 praxis = { path = "crates/server", package = "praxis-proxy" }
-praxis-core = { version = "0.5.4", path = "crates/core", package = "praxis-proxy-core" }
-praxis-filter = { version = "0.5.4", path = "crates/filter", package = "praxis-proxy-filter", default-features = false }
-praxis-protocol = { version = "0.5.4", path = "crates/protocol", package = "praxis-proxy-protocol" }
-praxis-tls = { version = "0.5.4", path = "crates/tls", package = "praxis-proxy-tls" }
+praxis-core = { version = "0.5.5", path = "crates/core", package = "praxis-proxy-core" }
+praxis-filter = { version = "0.5.5", path = "crates/filter", package = "praxis-proxy-filter" }
+praxis-protocol = { version = "0.5.5", path = "crates/protocol", package = "praxis-proxy-protocol" }
+praxis-tls = { version = "0.5.5", path = "crates/tls", package = "praxis-proxy-tls" }
 praxis-test-utils = { path = "tests/utils" }
 secrecy = { version = "0.10.3", features = ["serde"] }
 serde = { version = "1.0.229", features = ["derive", "rc"] }
