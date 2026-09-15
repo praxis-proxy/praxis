@@ -156,6 +156,10 @@ pub struct FilterPipeline {
     /// Indices into `filters` of filters declaring response-body access.
     response_body_filter_indices: Vec<usize>,
 
+    /// Indices into `filters` of filters declaring selected-upstream
+    /// request-body access.
+    selected_upstream_request_body_filter_indices: Vec<usize>,
+
     /// Whether upstream hostnames may resolve to private or reserved IPs.
     ///
     /// Mirrors `insecure_options.allow_private_upstreams`; consumed by the

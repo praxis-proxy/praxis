@@ -16,7 +16,7 @@
 //! [`BodyCapabilities`]: crate::body::BodyCapabilities
 //! [`FilterPipeline::from_filters`]: super::FilterPipeline
 
-use praxis_core::config::ResponseCondition;
+use praxis_core::config::{ABSOLUTE_MAX_BODY_BYTES, ResponseCondition};
 
 use super::filter::PipelineFilter;
 use crate::{
@@ -100,6 +100,26 @@ pub(super) fn body_filter_indices(filters: &[PipelineFilter]) -> (Vec<usize>, Ve
     (request, response)
 }
 
+/// Precompute the pipeline indices of filters that declared
+/// selected-upstream request-body access.
+///
+/// Like [`body_filter_indices`], but for the selected-upstream phase:
+/// walking only these indices lets that phase skip every non-participant
+/// without per-filter predicate checks. Top-level only — branch filters
+/// never run body hooks, so a selected-upstream declaration inside a
+/// branch is rejected at build time rather than collected here.
+pub(super) fn selected_upstream_request_body_indices(filters: &[PipelineFilter]) -> Vec<usize> {
+    let mut indices = Vec::new();
+    for (idx, pf) in filters.iter().enumerate() {
+        if let AnyFilter::Http(f) = &pf.filter
+            && f.selected_upstream_request_body_access() != BodyAccess::None
+        {
+            indices.push(idx);
+        }
+    }
+    indices
+}
+
 /// Recursively accumulate body capabilities from a slice of pipeline filters.
 pub(super) fn accumulate_caps(caps: &mut BodyCapabilities, filters: &[PipelineFilter]) {
     accumulate_caps_inner(caps, filters, false);
@@ -120,6 +140,7 @@ fn accumulate_caps_inner(caps: &mut BodyCapabilities, filters: &[PipelineFilter]
 
         if !in_branch {
             accumulate_request_body(caps, http_filter);
+            accumulate_selected_upstream_request_body(caps, http_filter);
             accumulate_response_body(caps, http_filter, &pf.response_conditions);
             if !caps.any_response_condition_uses_headers {
                 caps.any_response_condition_uses_headers = resp_conditions_use_headers(&pf.response_conditions);
@@ -145,6 +166,53 @@ fn accumulate_request_body(caps: &mut BodyCapabilities, filter: &dyn crate::filt
             caps.any_request_body_writer = true;
         }
         merge_body_mode(&mut caps.request_body_mode, filter.request_body_mode());
+    }
+}
+
+/// Accumulate selected-upstream request body capabilities from a single filter.
+///
+/// A participating filter contributes to the *global* request-body
+/// capabilities — `needs_request_body`, the request-body writer flag, and
+/// the effective `request_body_mode` — because the selected-upstream phase
+/// operates on the same buffered request body: the pipeline must buffer it
+/// (a bounded `StreamBuffer`) for the phase to have anything to run on. It
+/// also sets selected-specific flags so downstream layers can skip the
+/// phase entirely when no filter participates.
+///
+/// The contributed mode is promoted defensively: a participant that
+/// declared a non-buffering `request_body_mode` (rejected by validation,
+/// but not relied on here) still forces a bounded `StreamBuffer` capped at
+/// [`ABSOLUTE_MAX_BODY_BYTES`] so the phase never runs against an
+/// unbuffered or unbounded body.
+///
+/// [`ABSOLUTE_MAX_BODY_BYTES`]: praxis_core::config::ABSOLUTE_MAX_BODY_BYTES
+fn accumulate_selected_upstream_request_body(caps: &mut BodyCapabilities, filter: &dyn crate::filter::HttpFilter) {
+    let access = filter.selected_upstream_request_body_access();
+    if access == BodyAccess::None {
+        return;
+    }
+    caps.needs_selected_upstream_request_body = true;
+    caps.needs_request_body = true;
+    if access == BodyAccess::ReadWrite {
+        caps.any_selected_upstream_request_body_writer = true;
+        caps.any_request_body_writer = true;
+    }
+    merge_body_mode(&mut caps.request_body_mode, selected_upstream_body_mode(filter));
+}
+
+/// The buffered body mode a selected-upstream participant contributes.
+///
+/// The phase needs the complete body, so any declaration that is not
+/// already a bounded `StreamBuffer` is promoted to one capped at the
+/// absolute ceiling. Validation rejects such declarations, but the
+/// capability computation stays safe on its own — it never yields an
+/// unbuffered or unbounded mode for a selected-upstream participant.
+fn selected_upstream_body_mode(filter: &dyn crate::filter::HttpFilter) -> BodyMode {
+    match filter.request_body_mode() {
+        BodyMode::StreamBuffer { max_bytes: Some(limit) } => BodyMode::StreamBuffer { max_bytes: Some(limit) },
+        _ => BodyMode::StreamBuffer {
+            max_bytes: Some(ABSOLUTE_MAX_BODY_BYTES),
+        },
     }
 }
 
@@ -552,6 +620,146 @@ mod tests {
         );
     }
 
+    #[test]
+    fn body_caps_selected_upstream_read_write_participation() {
+        let filter = PipelineFilter::new(
+            0,
+            AnyFilter::Http(Box::new(SelectedUpstreamCapFilter {
+                access: BodyAccess::ReadWrite,
+                mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
+            })),
+            vec![],
+            vec![],
+        );
+        let caps = compute_body_capabilities(&[filter]);
+
+        assert!(
+            caps.needs_selected_upstream_request_body,
+            "selected participant should set needs_selected_upstream_request_body"
+        );
+        assert!(
+            caps.needs_request_body,
+            "selected participant must contribute to the global request-body need"
+        );
+        assert!(
+            caps.any_selected_upstream_request_body_writer,
+            "ReadWrite selected participant should set the selected writer flag"
+        );
+        assert!(
+            caps.any_request_body_writer,
+            "ReadWrite selected participant must contribute to the global writer flag"
+        );
+        assert_eq!(
+            caps.request_body_mode,
+            BodyMode::StreamBuffer { max_bytes: Some(4096) },
+            "selected participant's bounded StreamBuffer should drive the effective mode"
+        );
+    }
+
+    #[test]
+    fn body_caps_selected_upstream_read_only_is_not_writer() {
+        let filter = PipelineFilter::new(
+            0,
+            AnyFilter::Http(Box::new(SelectedUpstreamCapFilter {
+                access: BodyAccess::ReadOnly,
+                mode: BodyMode::StreamBuffer { max_bytes: Some(2048) },
+            })),
+            vec![],
+            vec![],
+        );
+        let caps = compute_body_capabilities(&[filter]);
+
+        assert!(
+            caps.needs_selected_upstream_request_body,
+            "read-only selected participant should still need the phase"
+        );
+        assert!(
+            caps.needs_request_body,
+            "read-only selected participant needs request body"
+        );
+        assert!(
+            !caps.any_selected_upstream_request_body_writer,
+            "read-only selected participant must not set the selected writer flag"
+        );
+        assert!(
+            !caps.any_request_body_writer,
+            "read-only selected participant must not set the global writer flag"
+        );
+    }
+
+    #[test]
+    fn body_caps_selected_upstream_defensive_ceiling() {
+        // A participant whose declared mode is not a bounded StreamBuffer is
+        // rejected by validation, but capability accumulation still promotes
+        // to the finite absolute ceiling rather than an unbounded buffer.
+        let filter = PipelineFilter::new(
+            0,
+            AnyFilter::Http(Box::new(SelectedUpstreamCapFilter {
+                access: BodyAccess::ReadOnly,
+                mode: BodyMode::Stream,
+            })),
+            vec![],
+            vec![],
+        );
+        let caps = compute_body_capabilities(&[filter]);
+
+        assert_eq!(
+            caps.request_body_mode,
+            BodyMode::StreamBuffer {
+                max_bytes: Some(ABSOLUTE_MAX_BODY_BYTES),
+            },
+            "a non-bounded selected participant must fall back to the finite absolute ceiling"
+        );
+    }
+
+    #[test]
+    fn body_caps_ignore_branch_selected_upstream_filters() {
+        use std::sync::Arc;
+
+        use crate::pipeline::branch::{RejoinTarget, ResolvedBranch};
+
+        let branch = ResolvedBranch {
+            condition: None,
+            filters: vec![PipelineFilter::new(
+                100,
+                AnyFilter::Http(Box::new(SelectedUpstreamCapFilter {
+                    access: BodyAccess::ReadWrite,
+                    mode: BodyMode::StreamBuffer { max_bytes: Some(4096) },
+                })),
+                vec![],
+                vec![],
+            )],
+            max_iterations: None,
+            name: Arc::from("selected_branch"),
+            rejoin: RejoinTarget::Next,
+        };
+        let parent = PipelineFilter {
+            filter_id: 0,
+            is_security: false,
+            branches: vec![branch],
+            conditions: vec![],
+            failure_mode: FailureMode::default(),
+            filter: AnyFilter::Http(Box::new(NoopHttpFilter)),
+            name: None,
+            response_conditions: vec![],
+        };
+        let caps = compute_body_capabilities(&[parent]);
+
+        assert!(
+            !caps.needs_selected_upstream_request_body,
+            "selected participant inside a branch must not enable the phase"
+        );
+        assert!(
+            !caps.needs_request_body,
+            "branch selected participant must not enable request buffering"
+        );
+        assert_eq!(
+            caps.request_body_mode,
+            BodyMode::Stream,
+            "StreamBuffer mode from a branch selected participant must not propagate"
+        );
+    }
+
     // -------------------------------------------------------------------------
     // Test Utilities
     // -------------------------------------------------------------------------
@@ -570,6 +778,35 @@ mod tests {
             _ctx: &mut crate::HttpFilterContext<'_>,
         ) -> Result<crate::FilterAction, crate::FilterError> {
             Ok(crate::FilterAction::Continue)
+        }
+    }
+
+    /// Selected-upstream request-body participant for capability tests, with
+    /// a configurable declared access and body mode.
+    struct SelectedUpstreamCapFilter {
+        access: BodyAccess,
+        mode: BodyMode,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::filter::HttpFilter for SelectedUpstreamCapFilter {
+        fn name(&self) -> &'static str {
+            "selected_upstream_cap"
+        }
+
+        async fn on_request(
+            &self,
+            _ctx: &mut crate::HttpFilterContext<'_>,
+        ) -> Result<crate::FilterAction, crate::FilterError> {
+            Ok(crate::FilterAction::Continue)
+        }
+
+        fn selected_upstream_request_body_access(&self) -> BodyAccess {
+            self.access
+        }
+
+        fn request_body_mode(&self) -> BodyMode {
+            self.mode
         }
     }
 }

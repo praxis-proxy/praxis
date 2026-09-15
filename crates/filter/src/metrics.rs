@@ -24,6 +24,14 @@ pub(crate) const PHASE_REQUEST: &str = "request";
 /// Response direction label value.
 pub(crate) const PHASE_RESPONSE: &str = "response";
 
+/// Selected-upstream direction label value (`on_selected_upstream_request_body`).
+///
+/// A distinct phase from [`PHASE_REQUEST`] so the post-selection body pass
+/// is separable in dashboards: a filter active in both the normal
+/// request-body phase and the selected-upstream phase would otherwise
+/// produce indistinguishable histogram entries.
+pub(crate) const PHASE_SELECTED_UPSTREAM: &str = "selected_upstream";
+
 /// Header hook label value (`on_request`, `on_response`).
 pub(crate) const STREAM_HEADERS: &str = "headers";
 
@@ -107,9 +115,25 @@ mod tests {
     }
 
     #[test]
+    fn record_distinguishes_request_and_selected_upstream_phases() {
+        crate::test_utils::install_metrics_recorder();
+
+        record_filter_duration("sel_phase_test", PHASE_REQUEST, STREAM_BODY, 0.001);
+        record_filter_duration("sel_phase_test", PHASE_SELECTED_UPSTREAM, STREAM_BODY, 0.002);
+
+        let rendered = crate::test_utils::render_metrics();
+        assert_metric_labels(&rendered, "sel_phase_test", "request", "body");
+        assert_metric_labels(&rendered, "sel_phase_test", "selected_upstream", "body");
+    }
+
+    #[test]
     fn phase_constants_have_expected_values() {
         assert_eq!(PHASE_REQUEST, "request", "PHASE_REQUEST label value");
         assert_eq!(PHASE_RESPONSE, "response", "PHASE_RESPONSE label value");
+        assert_eq!(
+            PHASE_SELECTED_UPSTREAM, "selected_upstream",
+            "PHASE_SELECTED_UPSTREAM label value"
+        );
     }
 
     #[test]

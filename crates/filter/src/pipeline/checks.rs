@@ -20,7 +20,10 @@ use praxis_core::config::{Condition, FailureMode, FilterEntry};
 use tracing::warn;
 
 use super::{branch::RejoinTarget, filter::PipelineFilter};
-use crate::{any_filter::AnyFilter, body::BodyAccess};
+use crate::{
+    any_filter::AnyFilter,
+    body::{BodyAccess, BodyMode},
+};
 
 // -----------------------------------------------------------------------------
 // Constants
@@ -501,6 +504,88 @@ fn collect_branch_body_errors(branch_name: &str, filters: &[PipelineFilter], err
         }
         for branch in &pf.branches {
             collect_branch_body_errors(&branch.name, &branch.filters, errors);
+        }
+    }
+}
+
+/// Selected-upstream body-access filters inside branch chains.
+///
+/// The selected-upstream request-body phase, like the request- and
+/// response-body phases, only runs top-level filters: branch sub-chains
+/// run `on_request` only, so a filter declaring
+/// [`selected_upstream_request_body_access`] inside a branch would
+/// silently enable buffering for a hook that never runs. The existing
+/// [`check_branch_body_filters`] does not catch it — a filter can declare
+/// selected-upstream access with no request/response body access — so this
+/// is a distinct check. Move such a filter to the main pipeline path or
+/// gate it with filter conditions.
+///
+/// [`selected_upstream_request_body_access`]: crate::HttpFilter::selected_upstream_request_body_access
+pub(super) fn check_branch_selected_upstream_body_filters(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for pf in filters {
+        for branch in &pf.branches {
+            collect_branch_selected_upstream_body_errors(&branch.name, &branch.filters, errors);
+        }
+    }
+}
+
+/// Recursively collect selected-upstream body-access violations inside one
+/// branch sub-chain.
+fn collect_branch_selected_upstream_body_errors(
+    branch_name: &str,
+    filters: &[PipelineFilter],
+    errors: &mut Vec<String>,
+) {
+    for pf in filters {
+        if let AnyFilter::Http(filter) = &pf.filter
+            && filter.selected_upstream_request_body_access() != BodyAccess::None
+        {
+            errors.push(format!(
+                "filter '{name}' in branch '{branch_name}' declares \
+                 selected-upstream request body access, but branch filters \
+                 only run on_request and body hooks never execute; move it \
+                 to the main pipeline or gate it with filter conditions",
+                name = filter.name(),
+            ));
+        }
+        for branch in &pf.branches {
+            collect_branch_selected_upstream_body_errors(&branch.name, &branch.filters, errors);
+        }
+    }
+}
+
+/// Selected-upstream body participants must buffer the full body.
+///
+/// A filter that participates in the selected-upstream request-body phase
+/// runs against the complete request body, which requires a bounded
+/// [`BodyMode::StreamBuffer`] delivery mode. Reject a participant whose
+/// [`request_body_mode`] is `Stream`, `SizeLimit`, or an unbounded
+/// `StreamBuffer`: an unbuffered mode would starve the phase and an
+/// unbounded buffer is an unbounded-memory footgun. Capability computation
+/// defensively promotes such declarations to a bounded buffer, but the
+/// operator's intent is still a misconfiguration worth surfacing.
+///
+/// [`BodyMode::StreamBuffer`]: crate::BodyMode::StreamBuffer
+/// [`request_body_mode`]: crate::HttpFilter::request_body_mode
+pub(super) fn check_selected_upstream_body_mode(filters: &[PipelineFilter], errors: &mut Vec<String>) {
+    for pf in filters {
+        let AnyFilter::Http(filter) = &pf.filter else {
+            continue;
+        };
+        if filter.selected_upstream_request_body_access() == BodyAccess::None {
+            continue;
+        }
+        if !matches!(
+            filter.request_body_mode(),
+            BodyMode::StreamBuffer { max_bytes: Some(_) }
+        ) {
+            errors.push(format!(
+                "filter '{name}' participates in the selected-upstream request \
+                 body phase but its request_body_mode is not a bounded \
+                 StreamBuffer; declare request_body_mode = StreamBuffer with a \
+                 max_bytes limit",
+                name = filter.name(),
+            ));
         }
     }
 }
@@ -1940,6 +2025,154 @@ mod tests {
     }
 
     #[test]
+    fn branch_selected_upstream_body_filter_errors() {
+        let mut parent = named_noop_filter("headers", vec![]);
+        parent.branches = vec![make_branch_with_filters(
+            "sel_branch",
+            vec![selected_upstream_filter(
+                BodyAccess::ReadWrite,
+                BodyMode::StreamBuffer { max_bytes: Some(4096) },
+            )],
+        )];
+        let filters = vec![parent];
+        let mut errors = Vec::new();
+        check_branch_selected_upstream_body_filters(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "selected-upstream body filter in branch should error");
+        assert!(
+            errors[0].contains("sel_branch") && errors[0].contains("selected_body"),
+            "error should name the branch and the filter: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn nested_branch_selected_upstream_body_filter_errors() {
+        let mut inner_parent = named_noop_filter("classifier", vec![]);
+        inner_parent.branches = vec![make_branch_with_filters(
+            "inner",
+            vec![selected_upstream_filter(
+                BodyAccess::ReadOnly,
+                BodyMode::StreamBuffer { max_bytes: Some(4096) },
+            )],
+        )];
+        let mut parent = named_noop_filter("headers", vec![]);
+        parent.branches = vec![make_branch_with_filters("outer", vec![inner_parent])];
+        let filters = vec![parent];
+        let mut errors = Vec::new();
+        check_branch_selected_upstream_body_filters(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "nested branch selected-upstream body filter should error"
+        );
+        assert!(
+            errors[0].contains("inner"),
+            "error should name the innermost branch: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn branch_without_selected_upstream_body_filters_no_error() {
+        let mut parent = named_noop_filter("headers", vec![]);
+        parent.branches = vec![make_branch_with_filters(
+            "noop_branch",
+            vec![named_noop_filter("request_id", vec![])],
+        )];
+        let filters = vec![parent];
+        let mut errors = Vec::new();
+        check_branch_selected_upstream_body_filters(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "branch without selected-upstream body filters should not error"
+        );
+    }
+
+    #[test]
+    fn top_level_selected_upstream_body_filter_no_branch_error() {
+        let filters = vec![selected_upstream_filter(
+            BodyAccess::ReadWrite,
+            BodyMode::StreamBuffer { max_bytes: Some(4096) },
+        )];
+        let mut errors = Vec::new();
+        check_branch_selected_upstream_body_filters(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "top-level selected-upstream body filters are legitimate"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_body_mode_rejects_stream() {
+        let filters = vec![selected_upstream_filter(BodyAccess::ReadOnly, BodyMode::Stream)];
+        let mut errors = Vec::new();
+        check_selected_upstream_body_mode(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "Stream mode should be rejected for a selected participant"
+        );
+        assert!(
+            errors[0].contains("selected_body") && errors[0].contains("bounded"),
+            "error should name the filter and require a bounded buffer: {}",
+            errors[0]
+        );
+    }
+
+    #[test]
+    fn selected_upstream_body_mode_rejects_unbounded_stream_buffer() {
+        let filters = vec![selected_upstream_filter(
+            BodyAccess::ReadOnly,
+            BodyMode::StreamBuffer { max_bytes: None },
+        )];
+        let mut errors = Vec::new();
+        check_selected_upstream_body_mode(&filters, &mut errors);
+        assert_eq!(errors.len(), 1, "unbounded StreamBuffer should be rejected");
+    }
+
+    #[test]
+    fn selected_upstream_body_mode_rejects_size_limit() {
+        let filters = vec![selected_upstream_filter(
+            BodyAccess::ReadOnly,
+            BodyMode::SizeLimit { max_bytes: 4096 },
+        )];
+        let mut errors = Vec::new();
+        check_selected_upstream_body_mode(&filters, &mut errors);
+        assert_eq!(
+            errors.len(),
+            1,
+            "SizeLimit mode should be rejected for a selected participant"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_body_mode_accepts_bounded_stream_buffer() {
+        let filters = vec![selected_upstream_filter(
+            BodyAccess::ReadWrite,
+            BodyMode::StreamBuffer { max_bytes: Some(4096) },
+        )];
+        let mut errors = Vec::new();
+        check_selected_upstream_body_mode(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "bounded StreamBuffer is the required mode: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn selected_upstream_body_mode_ignores_non_participants() {
+        // A filter with no selected-upstream access is not subject to the
+        // bounded-buffer requirement, whatever its request_body_mode.
+        let filters = vec![body_filter()];
+        let mut errors = Vec::new();
+        check_selected_upstream_body_mode(&filters, &mut errors);
+        assert!(
+            errors.is_empty(),
+            "non-participants must not be checked for the bounded buffer requirement"
+        );
+    }
+
+    #[test]
     fn irr_with_router_errors() {
         let names = vec!["iterative_request_router", "router"];
         let mut errors = Vec::new();
@@ -2087,6 +2320,45 @@ mod tests {
         }
 
         PipelineFilter::new(0, AnyFilter::Http(Box::new(BranchBodyFilter)), vec![], vec![])
+    }
+
+    /// Build a [`PipelineFilter`] whose filter participates in the
+    /// selected-upstream request-body phase with the given access and mode.
+    fn selected_upstream_filter(access: BodyAccess, mode: BodyMode) -> PipelineFilter {
+        /// Minimal filter declaring selected-upstream request body access.
+        struct SelectedBodyFilter {
+            access: BodyAccess,
+            mode: BodyMode,
+        }
+
+        #[async_trait::async_trait]
+        impl crate::filter::HttpFilter for SelectedBodyFilter {
+            fn name(&self) -> &'static str {
+                "selected_body"
+            }
+
+            async fn on_request(
+                &self,
+                _ctx: &mut crate::HttpFilterContext<'_>,
+            ) -> Result<crate::FilterAction, crate::FilterError> {
+                Ok(crate::FilterAction::Continue)
+            }
+
+            fn selected_upstream_request_body_access(&self) -> BodyAccess {
+                self.access
+            }
+
+            fn request_body_mode(&self) -> BodyMode {
+                self.mode
+            }
+        }
+
+        PipelineFilter::new(
+            0,
+            AnyFilter::Http(Box::new(SelectedBodyFilter { access, mode })),
+            vec![],
+            vec![],
+        )
     }
 
     /// Build a [`PipelineFilter`] whose filter selects a cluster.

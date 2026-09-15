@@ -24,12 +24,12 @@ use super::{
     http_utils::{
         BodyFilterOutcome, HeaderFilterOutcome, accumulate_body_bytes, as_request_body_filter, as_response_body_filter,
         released_or_continue, run_request_body_filter, run_request_filter, run_response_body_filter,
-        run_response_filter, skip_by_response_conditions,
+        run_response_filter, run_selected_upstream_request_body_filter, skip_by_response_conditions,
     },
 };
 use crate::{
     FilterError,
-    actions::{FilterAction, Rejection},
+    actions::{FilterAction, Rejection, SelectedUpstreamBodyOutcome},
     any_filter::AnyFilter,
     condition::should_execute,
     context::HttpFilterContext,
@@ -254,6 +254,72 @@ impl FilterPipeline {
             }
         }
         Ok(released_or_continue(released))
+    }
+
+    /// Run all selected-upstream request body filters in pipeline order.
+    ///
+    /// Runs after the request phase has selected an upstream cluster, over
+    /// the fully buffered request body (`body`). Only filters that
+    /// executed during the request phase participate: one that branch
+    /// control flow skipped over — via `SkipTo` or a terminal branch — is
+    /// skipped here too, mirroring the request- and response-body phases.
+    /// Conditions are not re-evaluated; this phase reuses the request
+    /// phase's [`executed_filter_indices`] gating. Short-circuits on the
+    /// first [`SelectedUpstreamBodyOutcome::Reject`].
+    ///
+    /// Unlike [`execute_http_request_body`], `body` is a working value
+    /// distinct from the pipeline's canonical request body: participants
+    /// may rewrite it for the selected upstream without disturbing the
+    /// buffered body the request phase produced.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`FilterError`] if a selected-upstream body filter fails
+    /// with a closed `failure_mode`.
+    ///
+    /// [`executed_filter_indices`]: HttpFilterContext::executed_filter_indices
+    /// [`execute_http_request_body`]: FilterPipeline::execute_http_request_body
+    /// [`SelectedUpstreamBodyOutcome::Reject`]: crate::SelectedUpstreamBodyOutcome::Reject
+    #[expect(clippy::too_many_lines, reason = "body hook loop with per-filter skip checks")]
+    pub async fn execute_http_selected_upstream_request_body(
+        &self,
+        ctx: &mut HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+    ) -> Result<FilterAction, FilterError> {
+        let request_phase_tracked = request_phase_tracked(ctx, self.filters.len());
+        // Walk only filters that declared selected-upstream request-body
+        // access; declared access is a per-filter constant, so other
+        // filters cost nothing.
+        for &idx in &self.selected_upstream_request_body_filter_indices {
+            let Some(pf) = self.filters.get(idx) else {
+                continue;
+            };
+            if skipped_in_request_phase(ctx, request_phase_tracked, idx) {
+                trace!(
+                    filter = pf.filter.name(),
+                    "skipped selected-upstream request body (not executed in request phase)"
+                );
+                continue;
+            }
+            let AnyFilter::Http(http_filter) = &pf.filter else {
+                continue;
+            };
+            ctx.current_filter_id = Some(pf.filter_id);
+            let outcome = run_selected_upstream_request_body_filter(
+                http_filter.as_ref(),
+                ctx,
+                body,
+                pf.failure_mode,
+                self.record_filter_duration_metrics,
+            )
+            .await;
+            ctx.current_filter_id = None;
+            match outcome? {
+                SelectedUpstreamBodyOutcome::Continue => {},
+                SelectedUpstreamBodyOutcome::Reject(rejection) => return Ok(FilterAction::Reject(rejection)),
+            }
+        }
+        Ok(FilterAction::Continue)
     }
 
     /// Run all HTTP response body filters in reverse order.
