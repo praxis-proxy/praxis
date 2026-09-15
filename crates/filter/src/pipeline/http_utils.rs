@@ -22,7 +22,9 @@ use crate::{
     any_filter::AnyFilter,
     condition::{should_execute_from, should_execute_response_ref},
     context::{EffectiveHeaders, HttpFilterContext, Response},
-    metrics::{PHASE_REQUEST, PHASE_RESPONSE, STREAM_BODY, STREAM_HEADERS, record_filter_duration},
+    metrics::{
+        PHASE_REQUEST, PHASE_RESPONSE, PHASE_SELECTED_UPSTREAM, STREAM_BODY, STREAM_HEADERS, record_filter_duration,
+    },
 };
 
 // -----------------------------------------------------------------------------
@@ -386,7 +388,7 @@ pub(super) async fn run_selected_upstream_request_body_filter(
             let result = http_filter.on_selected_upstream_request_body(ctx, body).await;
             record_filter_duration(
                 http_filter.name(),
-                PHASE_REQUEST,
+                PHASE_SELECTED_UPSTREAM,
                 STREAM_BODY,
                 start.elapsed().as_secs_f64(),
             );
