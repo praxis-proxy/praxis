@@ -3862,6 +3862,50 @@ routes:
     (dir, cfg_path.to_str().expect("utf8 path").to_owned())
 }
 
+/// Write a policy document with response-phase inference policy: the
+/// catch-all `llm:` route admits the request and denies on the way back
+/// when the completion reports more than 100 total tokens.
+#[expect(
+    clippy::too_many_lines,
+    reason = "test fixture — the YAML literal is the bulk; splitting helpers would obscure the shape under test"
+)]
+fn write_llm_post_config() -> (TempDir, String) {
+    let dir = TempDir::new().expect("create tempdir");
+    let cfg_path = dir.path().join("cpex.yaml");
+    let yaml = format!(
+        r#"plugins:
+  - name: jwt-user
+    kind: identity/jwt
+    hooks:
+      - identity.resolve
+    on_error: fail
+    config:
+      header: Authorization
+      trusted_issuers:
+        - issuer: "{TEST_ISSUER}"
+          audiences: ["{TEST_AUDIENCE}"]
+          algorithms: ["HS256"]
+          decoding_key:
+            kind: secret
+            secret: "{TEST_SECRET}"
+          leeway_seconds: 60
+      claim_mapper: standard
+global:
+  authentication:
+    - jwt-user
+routes:
+  - llm: "*"
+    authorization:
+      pre_invocation:
+        - "require(authenticated)"
+      post_invocation:
+        - "completion.tokens.total > 100: deny('completion too long', 'completion_too_long')"
+"#
+    );
+    std::fs::write(&cfg_path, yaml).expect("write cpex.yaml");
+    (dir, cfg_path.to_str().expect("utf8 path").to_owned())
+}
+
 /// Build a `PolicyFilter` with inference options the caller chooses.
 fn build_filter_with_llm(config_path: String, llm: super::config::LlmOptions) -> PolicyFilter {
     PolicyFilter::new(PolicyFilterConfig {
@@ -3905,10 +3949,19 @@ fn derives_the_inference_shape_for_an_llm_only_policy() {
         (false, true),
         "`llm:` routes are entity routes: authorization belongs at the body phase",
     );
-    assert!(
-        filter.derived_llm_routes(),
-        "and it reports the inference half, so the body is buffered and the model read from it",
+    assert_eq!(
+        filter.derived_llm_shape(),
+        (true, false),
+        "a pre-invocation-only inference policy declares no response half",
     );
+}
+
+/// A policy declaring `post_invocation` on an `llm:` route opens the
+/// inference response half.
+#[test]
+fn derives_the_inference_response_half_when_the_policy_declares_one() {
+    let (_dir, path) = write_llm_post_config();
+    assert_eq!(build_filter(path).derived_llm_shape(), (true, true));
 }
 
 /// An inference policy needs no protocol classifier: with
@@ -4108,5 +4161,201 @@ async fn inference_request_without_a_token_is_rejected_by_identity() {
     assert!(
         matches!(&action, FilterAction::Reject(rejection) if rejection.status == 401),
         "an unauthenticated inference call is an identity failure, not a policy deny; got {action:?}",
+    );
+}
+
+/// Build a `read_write` filter, the tier that buffers the response body
+/// and so is the one the inference response half rides.
+fn build_read_write_filter(config_path: String) -> PolicyFilter {
+    PolicyFilter::new(PolicyFilterConfig {
+        config_path,
+        allow_private_idp: false,
+        body_access: super::config::BodyAccessMode::ReadWrite,
+        require_protocol_metadata: true,
+        init_timeout_secs: 30,
+        max_buffer_bytes: 10_485_760,
+        llm: super::config::LlmOptions::default(),
+    })
+    .expect("filter should construct")
+}
+
+/// A completion inside the policy's token budget.
+const WITHIN_BUDGET_RESPONSE: &str = r#"{"model":"gpt-4o","usage":{"prompt_tokens":5,"completion_tokens":5,"total_tokens":10},"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}]}"#;
+
+/// A completion over it.
+const OVER_BUDGET_RESPONSE: &str = r#"{"usage":{"total_tokens":9999}}"#;
+
+/// A response body that is not a JSON document at all.
+const NON_JSON_RESPONSE: &str = "upstream failure, not JSON";
+
+/// A JSON-RPC tool result, long enough to survive the MCP post path's
+/// length-fitting round-trip.
+const MCP_RESPONSE: &str = r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"ok, with enough room for the round-trip"}]}}"#;
+
+/// Run an inference request and then its response through `filter`,
+/// returning the body the client would receive.
+async fn inference_round_trip(
+    filter: &PolicyFilter,
+    request_body: &'static str,
+    response_body: &'static str,
+    content_type: &'static str,
+) -> bytes::Bytes {
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    let mut request = Some(bytes::Bytes::from_static(request_body.as_bytes()));
+    let action = filter
+        .on_request_body(&mut ctx, &mut request, true)
+        .await
+        .expect("request phase ran");
+    assert!(
+        matches!(action, FilterAction::BodyDone),
+        "the request half must admit before the response half is meaningful; got {action:?}",
+    );
+
+    let mut response = crate::test_utils::make_response();
+    response
+        .headers
+        .insert("content-type", HeaderValue::from_static(content_type));
+    ctx.response_header = Some(&mut response);
+
+    let mut body = Some(bytes::Bytes::from_static(response_body.as_bytes()));
+    drop(
+        filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("response phase ran"),
+    );
+    body.expect("response body")
+}
+
+/// The response half evaluates the policy's `post_invocation` rules
+/// against the completion the upstream reported: an over-budget
+/// completion is replaced with the provider error envelope.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_over_budget_completion_is_replaced_with_a_provider_error() {
+    let (_dir, path) = write_llm_post_config();
+    let filter = build_read_write_filter(path);
+
+    let body = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+        r#"{"model":"gpt-4o","usage":{"prompt_tokens":100,"completion_tokens":100,"total_tokens":200},
+            "choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"a long answer"}}]}"#,
+        "application/json",
+    )
+    .await;
+
+    let parsed: serde_json::Value = serde_json::from_slice(&body).expect("deny body is JSON");
+    assert_eq!(
+        parsed["error"]["code"], "completion_too_long",
+        "the post-phase deny must replace the upstream payload; got {body:?}",
+    );
+}
+
+/// A completion inside the budget reaches the client untouched.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_completion_within_budget_reaches_the_client_unchanged() {
+    let (_dir, path) = write_llm_post_config();
+    let filter = build_read_write_filter(path);
+
+    let body = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+        WITHIN_BUDGET_RESPONSE,
+        "application/json",
+    )
+    .await;
+
+    assert_eq!(body, bytes::Bytes::from_static(WITHIN_BUDGET_RESPONSE.as_bytes()));
+}
+
+/// A streamed response carries no single completion to evaluate, so the
+/// response half stands aside rather than buffering SSE frames waiting
+/// for one. The client gets the upstream bytes.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_streamed_response_skips_the_response_half() {
+    let (_dir, path) = write_llm_post_config();
+    let filter = build_read_write_filter(path);
+
+    let requested = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","stream":true,"messages":[{"role":"user","content":"hi"}]}"#,
+        OVER_BUDGET_RESPONSE,
+        "application/json",
+    )
+    .await;
+    assert_eq!(
+        requested,
+        bytes::Bytes::from_static(OVER_BUDGET_RESPONSE.as_bytes()),
+        "a caller that asked for a stream must not be denied on a completion the filter never \
+         saw; this is the same over-budget usage the deny case uses, so only the streaming flag \
+         accounts for the pass-through",
+    );
+
+    let sse = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+        OVER_BUDGET_RESPONSE,
+        "text/event-stream",
+    )
+    .await;
+    assert_eq!(
+        sse,
+        bytes::Bytes::from_static(OVER_BUDGET_RESPONSE.as_bytes()),
+        "nor must a response the upstream chose to stream, whatever the request asked for",
+    );
+}
+
+/// A response body the filter cannot read as a JSON document carries no
+/// completion to evaluate; it passes through rather than denying on
+/// attributes that are simply absent.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_non_json_response_body_passes_through() {
+    let (_dir, path) = write_llm_post_config();
+    let filter = build_read_write_filter(path);
+
+    let body = inference_round_trip(
+        &filter,
+        r#"{"model":"gpt-4o","messages":[{"role":"user","content":"hi"}]}"#,
+        NON_JSON_RESPONSE,
+        "application/json",
+    )
+    .await;
+    assert_eq!(body, bytes::Bytes::from_static(NON_JSON_RESPONSE.as_bytes()));
+}
+
+/// An MCP response still takes the JSON-RPC post path when the same
+/// policy declares both families — the inference half only claims
+/// responses to requests it authorized.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_inference_response_half_does_not_claim_mcp_responses() {
+    let (_dir, path) = write_llm_and_tool_config();
+    let filter = build_read_write_filter(path);
+
+    let req = request_for_alice();
+    let mut ctx = make_filter_context(&req);
+    ctx.set_metadata("mcp.method", "tools/call");
+    ctx.set_metadata("mcp.name", "echo");
+    let request_body =
+        bytes::Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"echo"}}"#);
+    drop(
+        filter
+            .on_request_body(&mut ctx, &mut Some(request_body), true)
+            .await
+            .expect("request phase ran"),
+    );
+
+    let mut body = Some(bytes::Bytes::from_static(MCP_RESPONSE.as_bytes()));
+    drop(
+        filter
+            .on_response_body(&mut ctx, &mut body, true)
+            .expect("response phase ran"),
+    );
+
+    let served = body.expect("response body");
+    assert!(
+        served.starts_with(br#"{"jsonrpc""#),
+        "an MCP response must stay on the JSON-RPC post path — whatever that path does to the \
+         body, the shape stays JSON-RPC rather than the provider envelope an inference deny \
+         would produce; got {served:?}",
     );
 }

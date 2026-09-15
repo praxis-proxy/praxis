@@ -15,7 +15,7 @@ use ppe::praxis_policy_core::{
     cmf::{
         CmfHook, Message, MessagePayload, Role,
         constants::{
-            ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_LLM_INPUT, HOOK_CMF_PROMPT_PRE_INVOKE,
+            ENTITY_HTTP, ENTITY_NAME_GLOBAL, HOOK_CMF_LLM_INPUT, HOOK_CMF_LLM_OUTPUT, HOOK_CMF_PROMPT_PRE_INVOKE,
             HOOK_CMF_RESOURCE_PRE_FETCH, HOOK_CMF_TOOL_PRE_INVOKE,
         },
     },
@@ -32,16 +32,19 @@ use super::{
         GovernedNames, apply_request_assertions, apply_response_assertions, snapshot_response_headers,
         unreachable_response_levels,
     },
-    common_message_format::{entity_for_protocol_method, entity_for_protocol_method_post, llm_entity_pre},
+    common_message_format::{
+        entity_for_protocol_method, entity_for_protocol_method_post, llm_entity_post, llm_entity_pre,
+    },
     config::{BodyAccessMode, PolicyFilterConfig},
     error::{
         VIOLATION_HEADER, auth_rejection, json_rpc_error_envelope_bytes, json_rpc_error_rejection, llm_deny_rejection,
+        llm_error_envelope_bytes,
     },
     json_rpc::{
         ParsedEnvelope, build_content_for_method, build_response_content_for_method, reserialize_json_rpc_body,
         reserialize_json_rpc_response_body,
     },
-    llm::{ParsedLlmRequest, request_message},
+    llm::{ParsedLlmRequest, ParsedLlmResponse, request_message, response_message},
 };
 use crate::{
     AuthenticatedIdentity, FilterAction, FilterError, Rejection,
@@ -107,7 +110,10 @@ enum GatedIdentity {
 ///
 /// `body_access: read_write` enables the JSON-RPC re-serialization
 /// round-trip so APL field mutators (`redact()`, `assign()`) rewrite
-/// the upstream request body and the downstream response.
+/// the upstream request body and the downstream response. It also opens
+/// the inference response half (`cmf.llm_output`), which evaluates
+/// `completion.*` over a non-streamed completion; APL field mutators do
+/// not rewrite inference bodies.
 ///
 /// Outbound policy calls share the proxy's sub-request limits and circuit
 /// breaker, use HTTP/1.1, and keep a separate 1 MiB response ceiling. TLS
@@ -166,6 +172,9 @@ pub struct PolicyFilter {
     /// Derived from the loaded policy: it declares `llm:` routes, so the
     /// request body is buffered and the model read out of it.
     llm_routes: bool,
+    /// Derived from the loaded policy: it declares response-phase `llm:`
+    /// policy (`cmf.llm_output`).
+    llm_post: bool,
     /// Header names governed by request assertions.
     request_assertions: GovernedNames,
     /// Header names governed by response assertions.
@@ -304,6 +313,7 @@ impl PolicyFilter {
             || mgr.has_hooks_for(HOOK_CMF_PROMPT_PRE_INVOKE)
             || mgr.has_hooks_for(HOOK_CMF_RESOURCE_PRE_FETCH);
         let llm_routes = mgr.has_hooks_for(HOOK_CMF_LLM_INPUT);
+        let llm_post = mgr.has_hooks_for(HOOK_CMF_LLM_OUTPUT);
         let entity_routes = mcp_routes || llm_routes;
 
         // Fail-silent guard. A policy with both a `global` HTTP policy and
@@ -365,6 +375,7 @@ impl PolicyFilter {
             entity_routes,
             mcp_routes,
             llm_routes,
+            llm_post,
             request_assertions,
             response_assertions,
             response_hook,
@@ -384,10 +395,11 @@ impl PolicyFilter {
         (self.http_global, self.entity_routes)
     }
 
-    /// Test accessor for whether the policy declares `llm:` routes.
+    /// Test accessor for the inference half of the derived shape:
+    /// `(llm_routes, llm_post)`.
     #[cfg(test)]
-    pub(super) fn derived_llm_routes(&self) -> bool {
-        self.llm_routes
+    pub(super) fn derived_llm_shape(&self) -> (bool, bool) {
+        (self.llm_routes, self.llm_post)
     }
 
     /// Warn about the two inference shapes that silently under-enforce.
@@ -757,6 +769,10 @@ impl PolicyFilter {
         Self::attach_http_attributes(ctx, &mut extensions, headers);
         self.attach_llm_attributes(&mut extensions, parsed, &model);
         ctx.extensions.insert(ResolvedIdentity(identity));
+        ctx.extensions.insert(InferenceRequest {
+            model: model.clone(),
+            streaming: parsed.is_streaming(),
+        });
 
         let payload = MessagePayload {
             message: request_message(parsed),
@@ -838,6 +854,146 @@ impl PolicyFilter {
         let mut custom = ext.custom.as_ref().map(|arc| (**arc).clone()).unwrap_or_default();
         custom.insert("llm".to_owned(), serde_json::Value::Object(promoted));
         ext.custom = Some(Arc::new(custom));
+    }
+
+    /// Evaluate the policy's response-phase `llm:` rules over a buffered
+    /// inference response (`cmf.llm_output`).
+    ///
+    /// Reuses the model and identity the request phase recorded, and adds
+    /// the `completion.*` attributes the response reports. A deny can
+    /// only replace the body — status and headers are already sent.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "linear response-phase flow (skip checks, rebuild identity, dispatch, deny); splitting obscures it"
+    )]
+    fn dispatch_llm_response(
+        &self,
+        ctx: &HttpFilterContext<'_>,
+        body: &mut Option<Bytes>,
+    ) -> Result<FilterAction, FilterError> {
+        let Some(model) = Self::llm_response_model(ctx) else {
+            return Ok(FilterAction::Continue);
+        };
+
+        let body_bytes = body.as_ref().cloned().unwrap_or_else(Bytes::new);
+        let parsed = ParsedLlmResponse::parse(&body_bytes);
+        if !parsed.is_object() {
+            tracing::debug!(
+                target: "policy.filter",
+                model = %model,
+                "inference response body is not a JSON object; skipping the response-phase policy",
+            );
+            return Ok(FilterAction::Continue);
+        }
+
+        let (entity_type, hook_name) = llm_entity_post();
+        let headers = Self::snapshot_headers(ctx);
+        let Some(ResolvedIdentity(identity)) = ctx.extensions.get::<ResolvedIdentity>() else {
+            // Fail closed, as the MCP post path does: a response that can no
+            // longer be attributed to a request-phase identity would skip
+            // whatever response-side policy the operator configured.
+            tracing::error!(
+                target: "policy.filter",
+                model = %model,
+                "no request-phase identity stashed; failing closed \
+                 (replacing inference response body with deny envelope)",
+            );
+            let violation = PluginViolation::new(
+                "identity.post_phase_unavailable",
+                "no request-phase identity available for response processing",
+            );
+            *body = Some(fit_to_original_length(
+                llm_error_envelope_bytes(Some(&violation)),
+                body_bytes.len(),
+                "llm",
+                "post-phase identity failure",
+            ));
+            return Ok(FilterAction::Continue);
+        };
+
+        let mut extensions = Self::extensions_from_identity(&headers, identity, entity_type, &model);
+        extensions.llm = Some(Arc::new(LLMExtension {
+            model_id: Some(model.clone()),
+            provider: self.cfg.llm.provider.clone(),
+            capabilities: Vec::new(),
+        }));
+        extensions.completion = Some(Arc::new(parsed.completion()));
+
+        let payload = MessagePayload {
+            message: response_message(&parsed),
+        };
+        let mgr = Arc::clone(&self.mgr);
+        let handle = tokio::runtime::Handle::current();
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        tokio::task::spawn_blocking(move || {
+            let result = handle.block_on(async move {
+                let (r, _bg) = mgr.invoke_named::<CmfHook>(hook_name, payload, extensions, None).await;
+                r
+            });
+            drop(tx.send(result));
+        });
+        let cmf_result = rx.recv().map_err(|_recv| -> FilterError {
+            "policy: inference response-phase dispatch failed (spawn_blocking channel closed)".into()
+        })?;
+
+        if !cmf_result.continue_processing {
+            tracing::warn!(
+                target: "policy.filter",
+                model = %model,
+                violation = ?cmf_result.violation,
+                "inference post-phase deny — replacing response body with the provider error envelope",
+            );
+            *body = Some(fit_to_original_length(
+                llm_error_envelope_bytes(cmf_result.violation.as_ref()),
+                body_bytes.len(),
+                "llm",
+                "inference post-phase deny",
+            ));
+            return Ok(FilterAction::Continue);
+        }
+
+        // Response-body rewriting is the twin of the request-side limit: the
+        // projection reaches one text part, so a multi-choice completion
+        // cannot round-trip. Ship the upstream body rather than a partial
+        // redaction.
+        if cmf_result.modified_payload.is_some() {
+            tracing::warn!(
+                target: "policy.filter",
+                model = %model,
+                "policy mutated the inference response payload, but response-body rewriting is not \
+                 supported on the inference path; the client receives the upstream body",
+            );
+        }
+        Ok(FilterAction::Continue)
+    }
+
+    /// The model to evaluate this response against, or `None` when there
+    /// is no response-phase work.
+    ///
+    /// A streamed response is `None`: SSE frames are not one JSON
+    /// document, so there is no completion to evaluate, and waiting for
+    /// one would defeat streaming. A policy needing post-invocation
+    /// enforcement denies `custom.llm.stream` on the way in.
+    fn llm_response_model(ctx: &HttpFilterContext<'_>) -> Option<String> {
+        let inference = ctx.extensions.get::<InferenceRequest>()?;
+        if inference.streaming || Self::response_is_event_stream(ctx) {
+            tracing::debug!(
+                target: "policy.filter",
+                model = %inference.model,
+                "streamed inference response; skipping the response-phase policy",
+            );
+            return None;
+        }
+        Some(inference.model.clone())
+    }
+
+    /// Whether the upstream is streaming this response as server-sent events.
+    fn response_is_event_stream(ctx: &HttpFilterContext<'_>) -> bool {
+        ctx.response_header
+            .as_ref()
+            .and_then(|response| response.headers.get(http::header::CONTENT_TYPE))
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.to_ascii_lowercase().starts_with("text/event-stream"))
     }
 
     /// Generic-HTTP (L7) authorization: resolve identity, populate the
@@ -1048,8 +1204,18 @@ fn flatten_claim(value: &serde_json::Value) -> String {
 /// Typed storage avoids serializing credentials and revalidating expired tokens.
 pub(super) struct ResolvedIdentity(pub(super) IdentityPayload);
 
-/// Stand-in for a body-less request, so the inference parser can be
-/// handed a `&Bytes` without allocating per request.
+/// What the request phase learned about an inference call, for the
+/// response half — which must not re-derive it: the model policy
+/// authorized is the one the request carried.
+struct InferenceRequest {
+    /// The model parsed from the request body.
+    model: String,
+    /// Whether the caller asked for a streamed response.
+    streaming: bool,
+}
+
+/// Stand-in for a body-less request, so the parser can be handed a
+/// `&Bytes` without allocating per request.
 static EMPTY_BODY: Bytes = Bytes::new();
 
 /// The violation reported when a policy declares `llm:` routes and the
@@ -1441,9 +1607,15 @@ impl HttpFilter for PolicyFilter {
             return Ok(FilterAction::Continue);
         }
         // No point doing anything if the operator hasn't opted into
-        // response rewriting.
+        // response rewriting. The inference post hook rides the same opt-in:
+        // `read_write` is what puts the response body in a buffer for it to
+        // read, and the default streaming posture stays untouched.
         if !matches!(self.cfg.body_access, BodyAccessMode::ReadWrite) {
             return Ok(FilterAction::Continue);
+        }
+
+        if self.llm_post && ctx.extensions.get::<InferenceRequest>().is_some() {
+            return self.dispatch_llm_response(ctx, body);
         }
 
         // The protocol classifier filter stashes method/name during the request

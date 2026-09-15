@@ -79,10 +79,16 @@
 //! MCP entity, so a crafted `model` field cannot move an MCP call onto the
 //! inference path. See `examples/configs/security/policy-llm.yaml`.
 //!
-//! APL field mutators do not rewrite an inference request body: a CMF message
-//! carries one text slot per part, so a multi-turn chat cannot round-trip
-//! losslessly; the filter warns and ships the original bytes rather than a
-//! partial redaction.
+//! Under `body_access: read_write` the response half evaluates the policy's
+//! `post_invocation` rules over the completion the upstream reported
+//! (`completion.model`, `completion.tokens.*`, `completion.stop_reason`). A
+//! streamed response carries no single completion to evaluate, so it is passed
+//! through untouched; a policy that needs post-invocation enforcement denies
+//! `custom.llm.stream` on the way in. APL field mutators do not rewrite
+//! inference bodies in either direction — a CMF message carries one text slot
+//! per part, so a multi-turn chat or a multi-choice completion cannot
+//! round-trip losslessly; the filter warns and ships the original bytes rather
+//! than a partial redaction.
 //!
 //! # The policy document
 //!

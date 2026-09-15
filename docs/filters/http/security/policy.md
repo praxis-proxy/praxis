@@ -17,7 +17,7 @@ On the body phase, the filter consumes protocol classifier filter metadata (from
 
 A policy declaring `llm:` routes authorizes inference calls instead, and needs no classifier: the filter buffers the request body, reads the top-level `model`, and evaluates it as the `llm` entity via `cmf.llm_input`. A model no route selects reaches no policy at all, so such a document needs a catch-all `llm: "*"` route that denies.
 
-`body_access: read_write` enables the JSON-RPC re-serialization round-trip so APL field mutators (`redact()`, `assign()`) rewrite the upstream request body and the downstream response.
+`body_access: read_write` enables the JSON-RPC re-serialization round-trip so APL field mutators (`redact()`, `assign()`) rewrite the upstream request body and the downstream response. It also opens the inference response half (`cmf.llm_output`), which evaluates `completion.*` over a non-streamed completion; APL field mutators do not rewrite inference bodies.
 
 Outbound policy calls share the proxy's sub-request limits and circuit breaker, use HTTP/1.1, and keep a separate 1 MiB response ceiling. TLS uses the platform trust store; cluster private CAs and client certificates do not apply. Private destinations require `allow_private_idp`.
 
